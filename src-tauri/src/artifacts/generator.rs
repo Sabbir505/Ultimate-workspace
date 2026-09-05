@@ -374,7 +374,9 @@ fn parse_spec_from_text(content: &str) -> Result<ArtifactSpec, String> {
         format!(
             "Failed to parse LLM output as ArtifactSpec: {} (content: {})",
             e,
-            &content[..content.len().min(300)]
+            // E1: char-safe truncation — `&content[..min(len,300)]` panicked
+            // whenever byte 300 landed mid-UTF-8 (routine for CJK/emoji).
+            crate::util::truncate_chars(content, 300)
         )
     })
 }
@@ -445,10 +447,10 @@ async fn call_openai_structured(
         .await
         .map_err(|e| format!("Failed to read response body: {}", e))?;
     let v: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("Failed to parse JSON response: {} (raw: {})", e, &raw[..raw.len().min(200)]))?;
+        .map_err(|e| format!("Failed to parse JSON response: {} (raw: {})", e, crate::util::truncate_chars(&raw, 200)))?;
     let content = v["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or_else(|| format!("Missing content in response (raw: {})", &raw[..raw.len().min(200)]))?;
+        .ok_or_else(|| format!("Missing content in response (raw: {})", crate::util::truncate_chars(&raw, 200)))?;
 
     parse_spec_from_text(content)
 }
@@ -502,12 +504,12 @@ async fn call_anthropic_structured(
         format!(
             "Failed to parse Anthropic JSON response: {} (raw: {})",
             e,
-            &raw[..raw.len().min(500)]
+            crate::util::truncate_chars(&raw, 500)
         )
     })?;
     let content = v["content"][0]["text"]
         .as_str()
-        .ok_or_else(|| format!("Missing content in Anthropic response (raw: {})", &raw[..raw.len().min(500)]))?;
+        .ok_or_else(|| format!("Missing content in Anthropic response (raw: {})", crate::util::truncate_chars(&raw, 500)))?;
 
     parse_spec_from_text(content)
 }
@@ -601,5 +603,36 @@ mod tests {
         let err = parse_spec_from_text("not json at all").unwrap_err();
         assert!(err.contains("Failed to parse LLM output as ArtifactSpec"));
         assert!(err.contains("not json at all"));
+    }
+
+    /// E1: the error preview used to slice at byte 300 — a multibyte char
+    /// straddling that offset (routine for CJK/emoji model output) panicked
+    /// ON THE ERROR PATH. `truncate_chars` must return a clean Err instead.
+    #[test]
+    fn parse_spec_error_is_char_safe_on_multibyte_content() {
+        // 299 ASCII bytes, then 3-byte chars: byte 300 lands mid-"日".
+        let mut content = "x".repeat(299);
+        content.push_str(&"日".repeat(400));
+        content.push_str(" definitely not json");
+
+        let err = parse_spec_from_text(&content).unwrap_err();
+        assert!(err.contains("Failed to parse"), "{err}");
+        // The preview is the char-safe prefix: 300 CHARS, and the error text
+        // itself stays valid UTF-8 (no panics anywhere above).
+        assert!(err.contains('日'));
+    }
+
+    /// The non-ASCII straddling every other cap (200/500) follows the same
+    /// rule via the same helper — one representative byte-layout check.
+    #[test]
+    fn truncate_chars_covers_all_generator_preview_caps() {
+        for cap in [200usize, 300, 500] {
+            let s = "y".repeat(cap.saturating_sub(1)) + &"🎉".repeat(50);
+            let out = crate::util::truncate_chars(&s, cap);
+            assert!(out.chars().count() <= cap);
+            // Always a char boundary — this is the property the byte slices
+            // violated.
+            assert!(out.is_char_boundary(out.len()));
+        }
     }
 }

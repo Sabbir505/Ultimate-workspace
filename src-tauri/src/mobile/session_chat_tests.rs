@@ -85,6 +85,62 @@ fn history_pagination_query() {
     assert!(!has_more);
 }
 
+/// F7 regression: the phone-controlled `limit` used to overflow `limit + 1`
+/// (u32::MAX + 1) before being handed to the SQL LIMIT. It must be clamped to
+/// a bounded page instead of panicking/wrapping.
+#[test]
+fn fetch_page_clamps_phone_controlled_limit() {
+    let conn = db::mem();
+    let cs = db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+    session_chat::ensure_chat_session_owner_column(&conn).unwrap();
+    conn.execute(
+        "UPDATE chat_sessions SET owner_session_id = ?1 WHERE id = ?2",
+        rusqlite::params!["s1", &cs.id],
+    )
+    .unwrap();
+
+    // Seed 201 messages: clamping to 200 must keep has_more correct.
+    for i in 1..=201 {
+        db::add_chat_message(
+            &conn,
+            &cs.id,
+            "user",
+            &format!("msg {i}"),
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        )
+        .unwrap();
+    }
+
+    // u32::MAX previously overflowed `limit + 1`.
+    let (msgs, has_more) = session_chat::fetch_page(&conn, "s1", None, u32::MAX).unwrap();
+    assert_eq!(msgs.len(), 200, "page must be clamped to 200 rows");
+    assert!(has_more);
+    assert_eq!(msgs[0].id, 201);
+
+    // A handful of messages still comes back whole, has_more=false.
+    let conn2 = db::mem();
+    let cs2 = db::create_chat_session(&conn2, "anthropic", "claude-sonnet-4-5", None).unwrap();
+    session_chat::ensure_chat_session_owner_column(&conn2).unwrap();
+    conn2.execute(
+        "UPDATE chat_sessions SET owner_session_id = ?1 WHERE id = ?2",
+        rusqlite::params!["s2", &cs2.id],
+    )
+    .unwrap();
+    for i in 1..=3 {
+        db::add_chat_message(
+            &conn2,
+            &cs2.id,
+            "user",
+            &format!("msg {i}"),
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        )
+        .unwrap();
+    }
+    let (msgs, has_more) = session_chat::fetch_page(&conn2, "s2", None, u32::MAX).unwrap();
+    assert_eq!(msgs.len(), 3);
+    assert!(!has_more);
+}
+
 #[test]
 fn dispatch_get_session_messages_calls_session_chat_manager() {
     // `dispatch_mobile` routes `GetSessionMessages` to

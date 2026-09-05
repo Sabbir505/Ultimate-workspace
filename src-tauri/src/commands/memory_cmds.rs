@@ -41,23 +41,38 @@ pub async fn memory_update(
         return Err("content must not be empty".into());
     }
     let conn = db.0.lock();
-    db::update_memory_content(&conn, &memory_id, &content, &[], 1.0).map_err(|e| e.to_string())?;
+    apply_memory_user_edit(&conn, &memory_id, &content, importance)?;
+    invalidate_document(&conn);
+    Ok(())
+}
+
+/// The two dependent writes of a user edit (content, then origin/importance)
+/// as ONE transaction (E6): the second UPDATE failing used to leave a
+/// half-applied edit — new content with the old origin/importance. Mirrors
+/// `delete_chat_message`'s unchecked_transaction pattern (B-29/B-31).
+fn apply_memory_user_edit(
+    conn: &rusqlite::Connection,
+    memory_id: &str,
+    content: &str,
+    importance: Option<i64>,
+) -> CmdResult<()> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    db::update_memory_content(&tx, memory_id, content, &[], 1.0).map_err(|e| e.to_string())?;
     if let Some(imp) = importance {
-        conn.execute(
+        tx.execute(
             "UPDATE memories SET importance = ?2, origin = ?3 WHERE id = ?1",
             rusqlite::params![memory_id, imp.clamp(1, 9), origin::USER_CREATED],
         )
         .map_err(|e| e.to_string())?;
     } else {
-        conn.execute(
+        tx.execute(
             "UPDATE memories SET origin = ?2 WHERE id = ?1",
             rusqlite::params![memory_id, origin::USER_CREATED],
         )
         .map_err(|e| e.to_string())?;
     }
-    let _ = db::log_memory_op(&conn, "user", None, &content, "EDIT", &[memory_id], "");
-    invalidate_document(&conn);
-    Ok(())
+    let _ = db::log_memory_op(&tx, "user", None, content, "EDIT", &[memory_id.to_string()], "");
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// Soft-delete from the browser (retire — history preserved). Same operation
@@ -256,5 +271,62 @@ fn invalidate_document(conn: &rusqlite::Connection) {
         let _ = crate::memory::document::set_document(conn, None, "");
         let _ = db::log_memory_op(conn, "user", None, "", "DOC_INVALIDATE", &[],
                                   "record store changed — document regenerated from records");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_memory(conn: &rusqlite::Connection, content: &str, importance: i64) -> MemoryRecord {
+        let rec = MemoryRecord::new_extracted(
+            &new_id(),
+            "fact",
+            None,
+            "user",
+            content,
+            importance,
+            None,
+        );
+        db::insert_memory(conn, &rec).unwrap();
+        rec
+    }
+
+    #[test]
+    fn memory_user_edit_is_transactional() {
+        // E6: the content update and the origin/importance update are one
+        // logical edit. A forced failure in the SECOND update must roll the
+        // FIRST back — the old two-bare-UPDATEs form left new content with
+        // stale origin/importance.
+        let conn = crate::db::mem();
+        let rec = seed_memory(&conn, "deploys happen on Tuesdays", 5);
+
+        // Any importance change aborts (trigger) → the whole edit fails.
+        conn.execute(
+            "CREATE TRIGGER e6_force_fail BEFORE UPDATE ON memories
+             WHEN NEW.importance <> OLD.importance
+             BEGIN SELECT RAISE(ABORT, 'forced e6 failure'); END",
+            [],
+        )
+        .unwrap();
+
+        let err = apply_memory_user_edit(&conn, &rec.id, "edited content", Some(7));
+        assert!(err.is_err(), "forced importance failure must propagate");
+
+        // Rolled back: content is the ORIGINAL, origin/importance untouched.
+        let after = db::list_memories(&conn, "default", true).unwrap();
+        let row = after.iter().find(|m| m.id == rec.id).unwrap();
+        assert_eq!(row.content, "deploys happen on Tuesdays");
+        assert_eq!(row.importance, 5);
+        assert_ne!(row.origin, origin::USER_CREATED);
+
+        // Without the failing path the same edit applies cleanly.
+        conn.execute("DROP TRIGGER e6_force_fail", []).unwrap();
+        apply_memory_user_edit(&conn, &rec.id, "edited content", Some(8)).unwrap();
+        let after = db::list_memories(&conn, "default", true).unwrap();
+        let row = after.iter().find(|m| m.id == rec.id).unwrap();
+        assert_eq!(row.content, "edited content");
+        assert_eq!(row.importance, 8);
+        assert_eq!(row.origin, origin::USER_CREATED);
     }
 }

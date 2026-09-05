@@ -53,14 +53,23 @@ const LIVE_VIZ_DEFAULT_H = 300;
 const LIVE_VIZ_MIN_H = 120;
 const LIVE_VIZ_MAX_H = 520;
 
+/** Per-instance handshake token: injected into the frame's reporter script and
+ *  verified on every inbound message, so a sibling InlineDiagram's frame (or
+ *  any other same-window poster) can't resize this frame. */
+let liveVizSeq = 0;
+
 /** Injected into a live visual's iframe document: reports the content height
  *  to the parent whenever it changes (load + any resize), driving the
  *  clamped auto-height. Appended before </body> (or prepended) so it runs
- *  after the page's own markup. */
-function withLiveResizeScript(html: string): string {
+ *  after the page's own markup. The report carries this instance's token so
+ *  the parent can tell the message came from THIS frame's script. */
+function withLiveResizeScript(html: string, token: string): string {
   const script =
     '<script>(function(){function r(){parent.postMessage(' +
-    "{__relayInlineVizHeight:Math.ceil(document.documentElement.scrollHeight)},'*')}" +
+    "{__relayInlineVizHeight:Math.ceil(document.documentElement.scrollHeight)," +
+    "__relayInlineVizToken:" +
+    JSON.stringify(token) +
+    "},'*')}" +
     "window.addEventListener('load',r);" +
     "try{new ResizeObserver(r).observe(document.documentElement)}catch(e){}" +
     "r()})()</script>";
@@ -109,15 +118,25 @@ export function InlineDiagram({
 
   // Live inline visuals: the sandboxed frame can't be measured (no
   // allow-same-origin), so the injected reporter posts its content height up.
-  // Only messages carrying the marker key are trusted — the frame has no
-  // access to this window beyond postMessage.
+  // Only messages from THIS frame's contentWindow AND carrying this
+  // instance's handshake token are trusted — the frame has no access to this
+  // window beyond postMessage, and a foreign window (or a sibling diagram's
+  // frame) must never be able to resize it.
   const [liveH, setLiveH] = useState<number | null>(null);
+  const liveFrameRef = useRef<HTMLIFrameElement>(null);
+  const liveVizTokenRef = useRef(`viz-${++liveVizSeq}`);
   useEffect(() => {
     function onMsg(e: MessageEvent) {
-      const d = e.data as { __relayInlineVizHeight?: unknown } | null;
+      // Source check first: the report must come from THIS instance's frame.
+      if (e.source !== liveFrameRef.current?.contentWindow) return;
+      const d = e.data as {
+        __relayInlineVizHeight?: unknown;
+        __relayInlineVizToken?: unknown;
+      } | null;
       if (
         d &&
         typeof d === "object" &&
+        d.__relayInlineVizToken === liveVizTokenRef.current &&
         typeof d.__relayInlineVizHeight === "number" &&
         Number.isFinite(d.__relayInlineVizHeight)
       ) {
@@ -220,7 +239,7 @@ export function InlineDiagram({
   // — a changed attribute RELOADS the iframe, which flashed every interactive
   // visual on each streaming update.
   const liveSrcDoc = useMemo(
-    () => (preview?.text != null ? withLiveResizeScript(preview.text) : ""),
+    () => (preview?.text != null ? withLiveResizeScript(preview.text, liveVizTokenRef.current) : ""),
     [preview],
   );
 
@@ -299,6 +318,7 @@ export function InlineDiagram({
     return (
       <div className="chat-diagram-block chat-live-viz" ref={blockRef}>
         <iframe
+          ref={liveFrameRef}
           className="chat-diagram-frame chat-live-viz-frame"
           title={artifact.filename}
           sandbox="allow-scripts allow-forms allow-modals allow-popups"

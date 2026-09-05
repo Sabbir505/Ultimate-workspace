@@ -134,6 +134,9 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
   const [findTerm, setFindTerm] = useState("");
   const [findIndex, setFindIndex] = useState(0);
   const [copied, setCopied] = useState(false);
+  // Export failure has its OWN flag — reusing the copied flash showed the
+  // success label "Exported" for a failed export.
+  const [exportError, setExportError] = useState(false);
   const feedEndRef = useRef<HTMLDivElement>(null);
 
   // --- Per-pane activity parsing from PTY output ---
@@ -489,10 +492,21 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
   }, [paneId]);
 
   // Follow app theme changes live (light theme needs dark terminal text).
+  // When following "system", also track OS appearance changes via the
+  // prefers-color-scheme media query — the store's `theme` string never
+  // changes when the OS flips, so without this the terminal kept the stale
+  // scheme until a settings visit.
   const appTheme = useSettingsStore((s) => s.theme);
   useEffect(() => {
-    const term = termRef.current;
-    if (term) term.options.theme = xtermTheme(resolvedAppTheme(appTheme));
+    const apply = () => {
+      const term = termRef.current;
+      if (term) term.options.theme = xtermTheme(resolvedAppTheme(appTheme));
+    };
+    apply();
+    if (appTheme !== "system" || typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
   }, [appTheme]);
 
   // Re-fit when a hidden (display:none) terminal becomes visible again —
@@ -573,8 +587,8 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
         setTimeout(() => setCopied(false), 1800);
       }
     } catch {
-      setCopied(true); // surface failure via the same copied flash is imperfect
-      setTimeout(() => setCopied(false), 1800);
+      setExportError(true);
+      setTimeout(() => setExportError(false), 1800);
     }
   };
 
@@ -596,7 +610,7 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
           <button className="ghost" onClick={() => runFind(1)} title="Next match">↓</button>
           <span className="terminal-find-count">{findIndex >= 0 && findTerm ? "match" : ""}</span>
           <button className="ghost" onClick={() => void runExport()} disabled={!sessionId} title="Export scrollback as Markdown">
-            {copied ? "Exported" : "Export"}
+            {exportError ? "Export failed" : copied ? "Exported" : "Export"}
           </button>
           <button className="ghost" onClick={() => setFindOpen(false)} title="Close (Esc)">✕</button>
         </div>

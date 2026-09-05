@@ -620,10 +620,14 @@ async fn anthropic_stream_round(
                                     emit_marker(app, sid, "</think>", full);
                                     in_think = false;
                                 }
+                                // D6: sanitize like the OpenAI main round —
+                                // the raw delta must not reach the UI or the
+                                // persisted message with control chars.
+                                let clean = sanitize_stream_text(t);
                                 if let Some(b) = blocks.get_mut(idx) {
-                                    b.text.push_str(t);
+                                    b.text.push_str(&clean);
                                 }
-                                emit_token(app, sid, t, full);
+                                emit_token(app, sid, &clean, full);
                             }
                         }
                         "input_json_delta" => {
@@ -646,10 +650,14 @@ async fn anthropic_stream_round(
                                 // Accumulate as well as stream: with extended
                                 // thinking + tool use, Anthropic requires the
                                 // full thinking block echoed back next round.
+                                // b.text stays RAW (verbatim echo + signature
+                                // are protocol-checked), but what reaches the
+                                // UI / persisted message is sanitized — same
+                                // B-11 split the subagent loop uses (D6).
                                 if let Some(b) = blocks.get_mut(idx) {
                                     b.text.push_str(t);
                                 }
-                                emit_token(app, sid, t, full);
+                                emit_token(app, sid, &sanitize_stream_text(t), full);
                             }
                         }
                         "signature_delta" => {
@@ -1822,5 +1830,19 @@ mod tests {
         assert_eq!(body["reasoning_effort"], "low");
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn sanitize_stream_text_strips_controls_from_spec_chunk() {
+        // D6: the audit's spec chunk — NUL and 0x1F must vanish, printable
+        // text survives. This is the exact filter now applied on all four
+        // delta emit paths (Anthropic text/thinking main round + both
+        // subagent text branches), matching the OpenAI main round.
+        assert_eq!(sanitize_stream_text("\u{0}abc\u{1f}def"), "abcdef");
+        // Whitespace the bubbles use for layout is preserved.
+        assert_eq!(sanitize_stream_text("a\nb\tc\r\nd"), "a\nb\tc\r\nd");
+        // Other C0 controls and DEL go; multibyte text passes through whole.
+        assert_eq!(sanitize_stream_text("x\u{7}\u{7f}日🎉y"), "x日🎉y");
+        assert_eq!(sanitize_stream_text(""), "");
     }
 }

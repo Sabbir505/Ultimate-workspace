@@ -94,41 +94,8 @@ pub async fn set_chat_db_dir(
     let target2 = target.clone();
     let target_dir2 = target_dir.clone();
     let setting_value2 = setting_value.clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        // 1. Checkpoint the WAL so the main .db file holds every committed
-        //    row — the copy must be a complete snapshot, not a WAL-less stub.
-        {
-            let conn = db_arc.lock();
-            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-                .map_err(|e| format!("checkpoint failed: {e}"))?;
-        }
-
-        // 2. Copy ALL of the SQLite files (main + WAL + SHM) so the moved DB
-        //    is complete even if a write lands between checkpoint and copy.
-        std::fs::create_dir_all(&target_dir2)
-            .map_err(|e| format!("failed to create directory: {e}"))?;
-        for suffix in ["", "-wal", "-shm"] {
-            let src = std::path::PathBuf::from(format!("{}{}", current2.display(), suffix));
-            if src.exists() {
-                let dst = std::path::PathBuf::from(format!("{}{}", target2.display(), suffix));
-                std::fs::copy(&src, &dst)
-                    .map_err(|e| format!("failed to copy {suffix}: {e}"))?;
-            }
-        }
-
-        // 3. Reopen the copy (runs migrations on it) and swap it into the
-        //    shared connection. Consumers lock per-use, so replacing the
-        //    Connection inside the Arc is safe — the next lock sees the new
-        //    location. The setting is written on the NEW connection so the
-        //    moved DB records its own location (the old file is stale after
-        //    the swap).
-        let new_conn = crate::db::open(&target2).map_err(|e| e.to_string())?;
-        {
-            let mut conn = db_arc.lock();
-            let _ = db::set_setting(&conn, CHAT_DB_DIR_SETTING_KEY, &setting_value2);
-            *conn = new_conn;
-        }
-        Ok(())
+    tauri::async_runtime::spawn_blocking(move || {
+        swap_chat_db_files(&db_arc, &current2, &target2, &target_dir2, &setting_value2)
     })
     .await
     .map_err(|e| format!("database move task failed: {e}"))?
@@ -139,6 +106,54 @@ pub async fn set_chat_db_dir(
     // artifacts against the (new) DB so retention runs on the moved file.
     crate::chat::commands::sweep_expired_artifacts(&db.0);
 
+    Ok(())
+}
+
+/// The move itself (E2): checkpoint → copy → reopen → swap, all under ONE
+/// hold of the shared DB lock. The lock used to be RELEASED between the WAL
+/// checkpoint and the file copy, so a concurrent write could land in the WAL
+/// after the checkpoint but before the copy — tearing the snapshot (missing
+/// recent commits, or a `-wal`/`-shm` mismatch that fails integrity checks).
+/// Holding the lock across the whole sequence makes the copy atomic with
+/// respect to every DB consumer (they all go through this same mutex). The
+/// critical section is bounded — one checkpoint, one small-file copy — and
+/// runs on the blocking pool, never the main thread.
+fn swap_chat_db_files(
+    db_arc: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    current: &Path,
+    target: &Path,
+    target_dir: &Path,
+    setting_value: &str,
+) -> CmdResult<()> {
+    let mut conn = db_arc.lock();
+    // 1. Checkpoint the WAL so the main .db file holds every committed
+    //    row — the copy must be a complete snapshot, not a WAL-less stub.
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|e| format!("checkpoint failed: {e}"))?;
+
+    // 2. Copy ALL of the SQLite files (main + WAL + SHM). Under the lock the
+    //    WAL is truncated-empty, but copy the sidecars anyway for parity with
+    //    any journal mode the connection was opened with.
+    std::fs::create_dir_all(target_dir)
+        .map_err(|e| format!("failed to create directory: {e}"))?;
+    for suffix in ["", "-wal", "-shm"] {
+        let src = std::path::PathBuf::from(format!("{}{}", current.display(), suffix));
+        if src.exists() {
+            let dst = std::path::PathBuf::from(format!("{}{}", target.display(), suffix));
+            std::fs::copy(&src, &dst)
+                .map_err(|e| format!("failed to copy {suffix}: {e}"))?;
+        }
+    }
+
+    // 3. Reopen the copy (runs migrations on it) and swap it into the
+    //    shared connection. Consumers lock per-use, so replacing the
+    //    Connection inside the Arc is safe — the next lock sees the new
+    //    location. The setting is written on the NEW connection so the
+    //    moved DB records its own location (the old file is stale after
+    //    the swap).
+    let new_conn = crate::db::open(target).map_err(|e| e.to_string())?;
+    let _ = db::set_setting(&conn, CHAT_DB_DIR_SETTING_KEY, setting_value);
+    *conn = new_conn;
     Ok(())
 }
 
@@ -521,6 +536,68 @@ pub fn save_workspace(
 pub fn delete_workspace(id: String, db: State<DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::delete_workspace(&conn, &id).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn db_move_is_consistent_under_concurrent_writes() {
+        // E2: the move must stay a complete, consistent snapshot even while a
+        // writer thread is committing rows through the same shared
+        // connection — the lock now spans checkpoint → copy → swap, so the
+        // writer can never land a WAL frame between checkpoint and copy.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("relay.db");
+        let conn = crate::db::open(&src).unwrap();
+        let db_arc = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer_db = std::sync::Arc::clone(&db_arc);
+        let stop2 = std::sync::Arc::clone(&stop);
+        let writer = std::thread::spawn(move || -> u64 {
+            let mut i = 0u64;
+            while !stop2.load(Ordering::Relaxed) {
+                let conn = writer_db.lock();
+                let _ = db::set_setting(&conn, &format!("e2key{i:06}"), "v");
+                i += 1;
+                std::thread::yield_now();
+            }
+            i
+        });
+
+        let dest_dir = dir.path().join("moved");
+        let target = crate::db::db_file_in(&dest_dir);
+        swap_chat_db_files(&db_arc, &src, &target, &dest_dir, "e2dir")
+            .expect("swap succeeds");
+
+        stop.store(true, Ordering::Relaxed);
+        let written = writer.join().unwrap();
+        assert!(written > 0, "writer must have committed rows during the move");
+
+        // The moved copy must be a complete, consistent DB.
+        let moved = crate::db::open(&target).unwrap();
+        let ok: String = moved
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ok, "ok", "moved DB must pass integrity_check");
+
+        // Every commit — pre-swap (copied) and post-swap (written into the
+        // swapped connection) — must be present in the moved file.
+        let count: i64 = moved
+            .query_row(
+                "SELECT COUNT(*) FROM app_settings WHERE key LIKE 'e2key%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, written as i64,
+            "no commits may be lost across the move"
+        );
+    }
 }
 
 /// Pop a chat session out into its own OS window (roadmap #17). The new

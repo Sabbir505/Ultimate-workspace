@@ -707,35 +707,42 @@ pub fn delete_chat_messages_after(
     chat_session_id: &str,
     after_id: Option<i64>,
 ) -> DbResult<i64> {
+    // E4: the four statements are one logical rollback — they used to run
+    // bare with the artifacts UPDATE's error SWALLOWED, so a failure midway
+    // left a half-applied state (evidence deleted / artifacts detached while
+    // the messages themselves survived). One unchecked_transaction with `?`
+    // propagation, mirroring `delete_chat_message` (B-29/B-31).
+    let tx = conn.unchecked_transaction()?;
     // Detach artifacts BEFORE deleting so the subquery still sees the rows.
-    let _ = conn.execute(
+    tx.execute(
         "UPDATE artifacts SET chat_message_id = NULL
          WHERE chat_message_id IN (
              SELECT id FROM chat_messages
              WHERE chat_session_id = ?1 AND (?2 IS NULL OR id > ?2)
          )",
         params![chat_session_id, after_id],
-    );
+    )?;
     // Memory evidence for the doomed messages (§13.5) — same subquery.
-    let _ = conn.execute(
+    tx.execute(
         "DELETE FROM memory_evidence
          WHERE chat_session_id = ?1 AND chat_message_id IN (
              SELECT id FROM chat_messages
              WHERE chat_session_id = ?1 AND (?2 IS NULL OR id > ?2)
          )",
         params![chat_session_id, after_id],
-    );
-    let _ = crate::db::memory::flag_unbacked_memories(conn);
+    )?;
+    crate::db::memory::flag_unbacked_memories(&tx)?;
     let changed = match after_id {
-        Some(after) => conn.execute(
+        Some(after) => tx.execute(
             "DELETE FROM chat_messages WHERE chat_session_id = ?1 AND id > ?2",
             params![chat_session_id, after],
         )?,
-        None => conn.execute(
+        None => tx.execute(
             "DELETE FROM chat_messages WHERE chat_session_id = ?1",
             params![chat_session_id],
         )?,
     };
+    tx.commit()?;
     Ok(changed as i64)
 }
 
@@ -1236,6 +1243,29 @@ mod tests {
         // None wipes the whole conversation (restore to the pre-chat baseline).
         assert_eq!(delete_chat_messages_after(&conn, &cs.id, None).unwrap(), 2);
         assert!(list_chat_messages(&conn, &cs.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_chat_messages_after_is_transactional() {
+        // E4: the artifacts-UPDATE error used to be SWALLOWED and the DELETE
+        // still ran — a half-applied rollback (messages gone, artifacts left
+        // linked). Now any statement failing aborts the whole transaction.
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        add_chat_message(&conn, &cs.id, "user", "keep", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        add_chat_message(&conn, &cs.id, "assistant", "drop", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+
+        // Force the FIRST statement (artifact detach) to fail: the table it
+        // writes no longer exists.
+        conn.execute("DROP TABLE artifacts", []).unwrap();
+        assert!(
+            delete_chat_messages_after(&conn, &cs.id, None).is_err(),
+            "the failing UPDATE must propagate, not be swallowed"
+        );
+
+        // The transaction rolled back: NO rows were deleted.
+        let rest = list_chat_messages(&conn, &cs.id).unwrap();
+        assert_eq!(rest.len(), 2, "no message may be deleted when the UPDATE fails");
     }
 
     // Insert a plain message with only the fields FTS tests care about.

@@ -36,13 +36,21 @@ export function PeekPanel() {
 
   useEffect(() => {
     if (!peek.open) return;
+    // Stale-guard: the async reads below are not serialized. Rapid target
+    // switches (click file A, then B) used to let a SLOW earlier read resolve
+    // last and overwrite the newer target's content. The cleanup marks this
+    // pass superseded before the next one starts, so only the latest read
+    // may write state.
+    let stale = false;
     // M26: clear the previous target's content FIRST — until the new read
     // resolves, the panel must show nothing (loading), not the stale file
     // or diff from the last peek target.
     setFileText(null);
     setDiffText(null);
     if (peek.mode === "file" && peek.filePath) {
-      void readFileText(peek.filePath).then((t) => setFileText(t ?? "(unable to read file)"));
+      void readFileText(peek.filePath).then((t) => {
+        if (!stale) setFileText(t ?? "(unable to read file)");
+      });
     } else if (peek.mode === "diff" && project) {
       // Per-pane entry points (the Changes panel) carry an explicit
       // `cwd` so a worktree-scoped session can show its own diff, not the
@@ -52,13 +60,20 @@ export function PeekPanel() {
         // File-scoped peek: the user clicked a file row in the right-side
         // Files panel. Show ONLY that file's diff (newly-created files are
         // handled by `get_git_file_diff`'s untracked fallback).
-        void getGitFileDiff(target, peek.filePath).then((d) => setDiffText(d ?? ""));
+        void getGitFileDiff(target, peek.filePath).then((d) => {
+          if (!stale) setDiffText(d ?? "");
+        });
       } else {
         // Project-wide peek: the entire working-tree diff against HEAD
         // (still truncated at 200KB by the backend).
-        void getGitDiff(target).then((d) => setDiffText(d ?? ""));
+        void getGitDiff(target).then((d) => {
+          if (!stale) setDiffText(d ?? "");
+        });
       }
     }
+    return () => {
+      stale = true;
+    };
   }, [peek.open, peek.mode, peek.filePath, peek.cwd, project]);
 
   if (!render) return null;

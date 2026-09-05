@@ -16,6 +16,7 @@
 import { execSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  createReadStream,
   createWriteStream,
   existsSync,
   mkdirSync,
@@ -35,14 +36,29 @@ const REPO = path.resolve(__dirname, "..");
 const DEST = path.join(REPO, "src-tauri", "resources", "python");
 
 // python-build-standalone release tag. Pinned for reproducibility — bump
-// deliberately. See https://github.com/indygreg/python-build-standalone/releases
+// deliberately. See https://github.com/astral-sh/python-build-standalone/releases
+// (formerly indygreg/python-build-standalone — the old URLs redirect).
 const PBS_TAG = "20240726";
 const PBS_PY = "3.12.4";
 
 // The four libraries generate_document depends on. Kept in sync with the
 // GENERATE_DOCUMENT_DESC tool description in src-tauri/src/chat/tools.rs and
 // the test fixtures in src-tauri/src/chat/pygen.rs.
-const LIBS = ["python-docx", "python-pptx", "openpyxl", "reportlab"];
+//
+// Pinned to exact versions for supply-chain reproducibility (audit H2) — an
+// unpinned `pip install` re-resolves whatever is latest at build time, so two
+// release builds can ship different library code. Bump deliberately.
+// NOTE (follow-up): `pip --require-hashes` is deliberately NOT enabled yet —
+// hashing wheels here is a bigger follow-up (needs per-platform wheel
+// digests); exact pins already pin the version, which is the main win.
+const LIBS = [
+  "python-docx==1.2.0",
+  "python-pptx==1.0.2",
+  "openpyxl==3.1.5",
+  // Held on the 4.x line: the staged tree + generate_document fixtures were
+  // built and verified against reportlab 4.x. Re-validate before jumping to 5.x.
+  "reportlab==4.5.1",
+];
 
 // One entry per build target we ship. `archive` is the python-build-standalone
 // tarball filename; `exe`/`pip` are the interpreter path RELATIVE to DEST after
@@ -104,6 +120,72 @@ function spawnCurl(bin, url, dest) {
   });
 }
 
+/// Fail closed under STRICT_CHECKSUM=1 when the official checksum can't be
+/// fetched; otherwise warn and continue unverified (so local/CI builds that
+/// hit a flaky endpoint aren't hard-broken).
+const STRICT_CHECKSUM = process.env.STRICT_CHECKSUM === "1";
+
+/// Stream `file` through SHA-256 (1MB+ chunks — never loads the archive into
+/// memory). Resolves the hex digest.
+function sha256File(file) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(file, { highWaterMark: 1024 * 1024 });
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+/// Fetch a small text file with curl (no content-type assumptions) and return
+/// its body as a string. Throws on non-zero exit / empty body.
+function fetchText(url) {
+  const bin = process.platform === "win32" ? "curl.exe" : "curl";
+  const r = spawnSync(bin, ["-fsSL", "--retry", "3", url], {
+    encoding: "utf8",
+    windowsHide: true,
+    maxBuffer: 1024 * 1024,
+  });
+  if (r.status !== 0 || !r.stdout) {
+    throw new Error(`curl exited ${r.status} for ${url}`);
+  }
+  return r.stdout;
+}
+
+/// Fetch the OFFICIAL SHA-256 for `archiveName` from the python-build-standalone
+/// GitHub release (the primary trusted origin — same release as the tarball,
+/// which itself redirects to a CDN). Each release publishes a per-asset
+/// `<archive>.sha256` containing the bare hex digest. Returns null when the
+/// checksum can't be fetched (and STRICT_CHECKSUM isn't set).
+async function fetchOfficialSha256(archiveName) {
+  const url = `https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${archiveName}.sha256`;
+  try {
+    const body = fetchText(url);
+    const digest = body.trim().split(/\s+/)[0];
+    if (!/^[0-9a-fA-F]{64}$/.test(digest)) throw new Error(`unexpected digest format: ${body.slice(0, 80)}`);
+    return digest;
+  } catch (e) {
+    if (STRICT_CHECKSUM) {
+      throw new Error(`STRICT_CHECKSUM=1: could not fetch official checksum for ${archiveName}: ${e.message}`);
+    }
+    console.warn(`  ⚠ could not fetch official checksum (${e.message}) — skipping verification`);
+    return null;
+  }
+}
+
+/// Compare the archive on disk against the official digest; on mismatch,
+/// delete the archive so a corrupt copy is never extracted or reused.
+async function verifySha256(archivePath, expectedDigest, label) {
+  const actual = await sha256File(archivePath);
+  if (actual !== expectedDigest.toLowerCase()) {
+    rmSync(archivePath, { force: true });
+    throw new Error(
+      `SHA-256 mismatch for ${label}: expected ${expectedDigest}, got ${actual} — corrupt/truncated download deleted`,
+    );
+  }
+  console.log(`  ✓ SHA-256 verified: ${actual}`);
+}
+
 function run(cmd, args, opts = {}) {
   // spawnSync with an argv array (not a shell string) so paths/args containing
   // spaces ("D:\Projects\Main project\...") are handled correctly on Windows.
@@ -138,9 +220,14 @@ async function stage(target) {
   console.log(`Staging bundled Python (${target}) → ${path.relative(REPO, DEST)}`);
   mkdirSync(DEST, { recursive: true });
 
-  const url = `https://github.com/indygreg/python-build-standalone/releases/download/${PBS_TAG}/${spec.archive}`;
+  const url = `https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${spec.archive}`;
   const tgz = path.join(tmpdir(), spec.archive);
   await download(url, tgz);
+
+  // Integrity gate (audit H2): verify the archive against the official
+  // release checksum BEFORE it is extracted or pip-installed from.
+  const official = await fetchOfficialSha256(spec.archive);
+  if (official) await verifySha256(tgz, official, spec.archive);
 
   // Extract into DEST, stripping the tarball's leading `python/` dir so the
   // interpreter lands at <DEST>/python.exe (matching python_runtime.rs).

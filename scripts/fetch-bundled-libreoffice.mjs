@@ -15,8 +15,10 @@
 // Only Windows x64 is staged today — extend the TARGETS map for macOS/Linux.
 
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFileSync,
+  createReadStream,
   existsSync,
   mkdirSync,
   rmSync,
@@ -62,6 +64,8 @@ function download(url, dest) {
   console.log(`  ↓ ${url}`);
   return new Promise((resolve, reject) => {
     // Use curl (available on Windows 10+ and Unices) so we don't add an npm dep.
+    // -L follows the TDF redirect to a load-balancing mirror — fine for the
+    // PAYLOAD because the hash below was fetched from the canonical host.
     const bin = process.platform === "win32" ? "curl.exe" : "curl";
     const child = spawn(bin, ["-fL", "--retry", "3", "-o", dest, url], {
       stdio: ["ignore", "ignore", "inherit"],
@@ -72,6 +76,57 @@ function download(url, dest) {
       else reject(new Error(`curl exited ${code} for ${url}`));
     });
   });
+}
+
+/// Fail closed under STRICT_CHECKSUM=1 when the official checksum can't be
+/// fetched; otherwise warn and continue unverified (so local/CI builds that
+/// hit a flaky endpoint aren't hard-broken).
+const STRICT_CHECKSUM = process.env.STRICT_CHECKSUM === "1";
+
+/// Stream `file` through SHA-256 without loading the (3.5 GB!) MSI into memory.
+function sha256File(file) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(file, { highWaterMark: 1024 * 1024 });
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+/// Fetch the OFFICIAL `.sha256` sidecar for the pinned MSI from the CANONICAL
+/// documentfoundation.org host — deliberately WITHOUT -L so no mirror is
+/// involved in the trust decision (TDF publishes
+/// <artifact>.sha256 next to the MSI; the payload download itself may redirect
+/// to mirrors, and mirrors are only trusted after verification against this).
+/// Returns the hex digest, or null when unavailable (and STRICT_CHECKSUM=1
+/// isn't set).
+function fetchOfficialSha256(shaUrl, archiveName) {
+  const bin = process.platform === "win32" ? "curl.exe" : "curl";
+  try {
+    const r = spawnSync(bin, ["-fs", "--retry", "3", shaUrl], {
+      encoding: "utf8",
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+    });
+    if (r.status !== 0 || !r.stdout) throw new Error(`curl exited ${r.status} for ${shaUrl}`);
+    const digest = r.stdout.trim().split(/\s+/)[0];
+    if (!/^[0-9a-fA-F]{64}$/.test(digest)) throw new Error(`unexpected digest format: ${r.stdout.slice(0, 80)}`);
+    return digest;
+  } catch (e) {
+    if (STRICT_CHECKSUM) {
+      throw new Error(`STRICT_CHECKSUM=1: could not fetch official checksum for ${archiveName}: ${e.message}`);
+    }
+    console.warn(`  ⚠ could not fetch official checksum (${e.message}) — skipping verification`);
+    return null;
+  }
+}
+
+/// Compare the MSI on disk against the official digest; resolves true on
+/// match, false on mismatch (caller decides whether to redownload).
+async function sha256Matches(archivePath, expectedDigest) {
+  const actual = await sha256File(archivePath);
+  return actual === expectedDigest.toLowerCase();
 }
 
 function run(cmd, args, opts = {}) {
@@ -159,10 +214,29 @@ async function stage(target) {
   console.log(`Staging bundled LibreOffice ${LO_VERSION} (${target}) → ${path.relative(REPO, DEST)}`);
 
   const msi = path.join(tmpdir(), spec.archive);
+  // The trust anchor: the official digest, fetched from the canonical TDF
+  // host (no redirect) before any mirror payload is downloaded.
+  const official = fetchOfficialSha256(`${spec.url}.sha256`, spec.archive);
   if (!existsSync(msi) || statSync(msi).size === 0) {
     await download(spec.url, msi);
   } else {
     console.log(`  ↓ reusing cached ${spec.archive}`);
+  }
+
+  // Integrity gate (audit H2): the temp cache is as untrusted as a mirror —
+  // verify whichever MSI we're about to extract, and redownload once if a
+  // cached copy fails the check.
+  if (official) {
+    if (!(await sha256Matches(msi, official))) {
+      console.warn(`  ⚠ cached ${spec.archive} failed SHA-256 — deleting and redownloading`);
+      rmSync(msi, { force: true });
+      await download(spec.url, msi);
+    }
+    if (!(await sha256Matches(msi, official))) {
+      rmSync(msi, { force: true });
+      throw new Error(`SHA-256 mismatch for ${spec.archive}: expected ${official} — corrupt/truncated download deleted`);
+    }
+    console.log(`  ✓ SHA-256 verified: ${official}`);
   }
 
   // Administrative install straight into DEST: extracts the MSI payload as a

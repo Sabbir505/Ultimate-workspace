@@ -241,12 +241,18 @@ export function PdfViewer({
     el?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, []);
 
-  // Search: full-document text scan, hits jump between pages.
+  // Search: full-document text scan, hits jump between pages. A generation
+  // counter serializes overlapping runs: pressing Enter while a slow scan is
+  // in flight starts a newer run, and the stale run's results (which resolve
+  // LAST, pages being scanned sequentially) must never overwrite them.
+  const searchGenRef = useRef(0);
   const runSearch = useCallback(async () => {
     if (!pdf || !query.trim()) {
+      searchGenRef.current++;
       setHits(null);
       return;
     }
+    const gen = ++searchGenRef.current;
     setSearching(true);
     try {
       const needle = query.trim().toLowerCase();
@@ -264,11 +270,12 @@ export function PdfViewer({
           idx = text.indexOf(needle, idx + needle.length);
         }
       }
+      if (gen !== searchGenRef.current) return; // superseded by a newer search
       setHits(found);
       setHitIdx(0);
       if (found.length > 0) jumpToPage(found[0].page);
     } finally {
-      setSearching(false);
+      if (gen === searchGenRef.current) setSearching(false);
     }
   }, [pdf, query, jumpToPage]);
 

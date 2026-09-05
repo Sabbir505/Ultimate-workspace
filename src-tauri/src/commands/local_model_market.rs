@@ -798,7 +798,15 @@ fn urlencoding_lite(s: &str) -> String {
             c if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') => {
                 out.push(c);
             }
-            c => out.push_str(&format!("%{:02X}", c as u32)),
+            c => {
+                // E7: percent-encode per UTF-8 BYTE. The old `c as u32`
+                // emitted 3+ hex digits for chars ≥ U+0100 (日 → "%65E5"),
+                // producing malformed URLs HF would reject or mis-route.
+                let mut buf = [0u8; 4];
+                for byte in c.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("%{byte:02X}"));
+                }
+            }
         }
     }
     out
@@ -1054,6 +1062,26 @@ impl<E: std::fmt::Display> From<E> for DownloadAbort {
     }
 }
 
+/// Prime a SHA-256 hasher from an existing partial file, reading in 1 MiB
+/// chunks (E3). `tokio::fs::read` used to load the WHOLE partial into RAM
+/// just to hash the prefix — for multi-GB model weights that's a transient
+/// multi-GB allocation on every resume. `None` when the file can't be read
+/// (rare: partial vanished mid-resume) — the caller skips hash verification.
+async fn prime_hasher_from_file(path: &Path) -> Option<Sha256> {
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut buf).await.ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(hasher)
+}
+
 async fn run_download(
     app: &AppHandle,
     id: &str,
@@ -1182,14 +1210,9 @@ async fn run_download(
     let mut hasher = if resuming && expected_sha.is_some() {
         // Re-read the prefix to prime the hasher. We know the partial
         // exists and was identity-verified above.
-        match tokio::fs::read(partial_path).await {
-            Ok(prefix) => {
-                let mut h = Sha256::new();
-                h.update(&prefix);
-                Some(h)
-            }
-            _ => None, // fallback: skip hash (rare; partial vanished mid-resume)
-        }
+        // E3: stream the prefix in 1 MiB chunks — `tokio::fs::read` pulled
+        // the WHOLE partial (GBs for model weights) into RAM just to hash it.
+        prime_hasher_from_file(partial_path).await
     } else if !resuming {
         expected_sha.map(|_| Sha256::new())
     } else {
@@ -1527,6 +1550,53 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+
+    // ---- E7: urlencoding_lite ----
+
+    #[test]
+    fn urlencoding_lite_encodes_per_utf8_byte() {
+        // E7: chars ≥ U+0100 used to emit `%{:02X}` of the CODE POINT
+        // (3+ hex digits — invalid). Must be per UTF-8 byte instead.
+        assert_eq!(urlencoding_lite("日本"), "%E6%97%A5%E6%9C%AC");
+        assert_eq!(urlencoding_lite("é"), "%C3%A9");
+        assert_eq!(
+            urlencoding_lite("a b&c=d+e#f?g"),
+            "a%20b%26c%3Dd%2Be%23f%3Fg"
+        );
+        // Unreserved characters pass through.
+        assert_eq!(urlencoding_lite("llama-3.1_8B~q"), "llama-3.1_8B~q");
+        assert_eq!(urlencoding_lite(""), "");
+    }
+
+    // ---- E3: streaming hasher prime ----
+
+    #[test]
+    fn prime_hasher_matches_whole_blob_hash() {
+        // The chunked prime must produce EXACTLY the hash of the full
+        // content, including a final partial chunk (size not a multiple of
+        // 1 MiB). Memory boundedness is by construction (fixed 1 MiB buffer).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.bin");
+        let blob: Vec<u8> = (0..(3 * 1024 * 1024 + 12345usize)).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &blob).unwrap();
+
+        let streamed = tauri::async_runtime::block_on(prime_hasher_from_file(&path))
+            .expect("partial readable");
+        let mut whole = Sha256::new();
+        whole.update(&blob);
+        assert_eq!(streamed.finalize(), whole.finalize());
+    }
+
+    #[test]
+    fn prime_hasher_degrades_to_none_on_missing_file() {
+        // Parity with the old `tokio::fs::read` fallback: unreadable partial
+        // → None (caller skips hash verification) — never a panic.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone.bin");
+        assert!(
+            tauri::async_runtime::block_on(prime_hasher_from_file(&missing)).is_none()
+        );
+    }
 
     // ---- estimate_gpu_power_watts ----
 

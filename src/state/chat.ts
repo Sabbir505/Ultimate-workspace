@@ -78,7 +78,7 @@ import {
 export type { ArtifactProposal, PlanTodo } from "../lib/ipc";
 import type { ArtifactProposal } from "../lib/ipc";
 import { generateSessionTitle } from "../lib/sessionTitle";
-import { tailCodePoints } from "../lib/safeSlice";
+import { tailCodePointsHysteresis } from "../lib/safeSlice";
 import { openArtifactInBrowserPane } from "../lib/sessionLauncher";
 import { useArtifactsStore } from "./artifacts";
 import { useProjectsStore } from "./projects";
@@ -116,6 +116,13 @@ function isCliAgent(agent: string | null | undefined): agent is string {
 function cliAgentId(agent: string): string {
   return agent.startsWith("acp:") ? agent.slice("acp:".length) : agent.slice("harness:".length);
 }
+
+/** Streaming-buffer tail cap (code points) with hysteresis (audit A5): the
+ *  buffer grows to cap+margin (210K) and is then trimmed ONCE back to
+ *  cap−margin (190K), instead of re-slicing the ~200K-char buffer on every
+ *  token once the cap was reached. Worst case stays bounded at cap+margin. */
+const STREAM_TAIL_CAP = 200_000;
+const STREAM_TAIL_MARGIN = 10_000;
 
 /** Worktree-per-session default (roadmap P0 §3.1.1): give a fresh chat on a
  *  git project its own isolated worktree, and patch the session row when the
@@ -603,6 +610,14 @@ function clearSessionState(s: ChatState, chatSessionId: string): Partial<ChatSta
   delete cwdOverrides[chatSessionId];
   const ownerSessionByChatId = { ...s.ownerSessionByChatId };
   delete ownerSessionByChatId[chatSessionId];
+  const artifactProposals = { ...s.artifactProposals };
+  delete artifactProposals[chatSessionId];
+  const lastTurnPerf = { ...s.lastTurnPerf };
+  delete lastTurnPerf[chatSessionId];
+  const stoppedPartial = { ...s.stoppedPartial };
+  delete stoppedPartial[chatSessionId];
+  const citationReports = { ...s.citationReports };
+  delete citationReports[chatSessionId];
   let artifactsByMessage = s.artifactsByMessage;
   let checkpointsByMessage = s.checkpointsByMessage;
   if (s.messagesSessionId === chatSessionId) {
@@ -634,6 +649,10 @@ function clearSessionState(s: ChatState, chatSessionId: string): Partial<ChatSta
     sessionMetrics,
     cwdOverrides,
     ownerSessionByChatId,
+    artifactProposals,
+    lastTurnPerf,
+    stoppedPartial,
+    citationReports,
     artifactsByMessage,
     checkpointsByMessage,
     streamingChatSessionId:
@@ -1135,7 +1154,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
 
   unbindProject: (chatSessionId) => {
-    void setChatSessionProject(chatSessionId, null);
+    void setChatSessionProject(chatSessionId, null).catch(() => {});
     set((s) => {
       const sessionProjects = { ...s.sessionProjects };
       delete sessionProjects[chatSessionId];
@@ -1472,7 +1491,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sess.id === chatSessionId && sess.unread ? { ...sess, unread: false } : sess,
       ),
     }));
-    if (wasUnread) void setChatSessionUnread(chatSessionId, false);
+    if (wasUnread) void setChatSessionUnread(chatSessionId, false).catch(() => {});
     // Record the switch in the ui store's browser-style nav timeline so
     // Back/Forward return to the chat the user was reading, not just the
     // view. Restore-driven switches (nav Back/Forward) skip recording.
@@ -1757,6 +1776,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       livePerf: {},
       lastTurnPerf: {},
       sessionMetrics: {},
+      artifactProposals: {},
+      stoppedPartial: {},
+      citationReports: {},
     }));
     return count;
   },
@@ -2569,6 +2591,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // exactly the text the user already saw. Best-effort — a cancel with no
       // streamed tokens writes nothing (the backend no-ops on empty).
       const partial = get().streaming[streamingChatSessionId] ?? "";
+      // Tear down the per-session streaming state SYNCHRONOUSLY, before any
+      // await (audit A2): the harness cancel emits a terminal chat:error while
+      // the persist/cancel round-trips below are still in flight, and with the
+      // entry still present onError passed its "still streaming" guard and
+      // persisted the SAME partial again — duplicate assistant rows after
+      // every reload. With the keys already gone, the late chat:error no-ops
+      // the persist (same straggler guard shape as onToken/onPerf). This is
+      // also the builtin path's ONLY cleanup: its cancel is handle.abort(), so
+      // no terminal chat:done/chat:error ever arrives to clear these keys.
+      set((s) => {
+        const nextStreaming = { ...s.streaming };
+        delete nextStreaming[streamingChatSessionId];
+        const nextStatus = { ...s.chatStatus };
+        delete nextStatus[streamingChatSessionId];
+        // Also clear livePerf so the next turn starts its timer from 0, not
+        // the cancelled turn's elapsed time (regression: stale timer).
+        const nextLivePerf = { ...s.livePerf };
+        delete nextLivePerf[streamingChatSessionId];
+        return {
+          streaming: nextStreaming,
+          chatStatus: nextStatus,
+          livePerf: nextLivePerf,
+          streamingChatSessionId: null,
+        };
+      });
       if (partial.trim().length > 0) {
         try {
           await persistPartialChatMessage(streamingChatSessionId, partial);
@@ -2581,37 +2628,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else {
         await cancelChatMessage(streamingChatSessionId);
       }
-      // The backend's builtin-stream cancel is `handle.abort()` — the
-      // chat:done / chat:error emits live INSIDE the aborted task, so no
-      // terminal event ever arrives for this session. Clear the per-session
-      // streaming state here (not just the scalar), or the sidebar "working"
-      // dot sticks forever. (Harness cancels DO emit terminal events, but
-      // clearing early is harmless: onDone tolerates a missing key.)
-      // Also clear livePerf so the next turn starts its timer from 0, not
-      // the cancelled turn's elapsed time (regression: stale timer).
+      // Remember WHAT the stopped turn had produced (matches the persisted
+      // partial row's content) so that bubble keeps its process section
+      // expanded instead of collapsing to an empty "Worked" row. Re-asserted
+      // AFTER the awaits: a terminal chat:error landing mid-cancel runs
+      // onError first, and its !hadPartial branch deletes the key.
       set((s) => {
-        const nextStreaming = { ...s.streaming };
-        delete nextStreaming[streamingChatSessionId];
-        const nextStatus = { ...s.chatStatus };
-        delete nextStatus[streamingChatSessionId];
-        const nextLivePerf = { ...s.livePerf };
-        delete nextLivePerf[streamingChatSessionId];
-        // Remember WHAT the stopped turn had produced (matches the persisted
-        // partial row's content) so that bubble keeps its process section
-        // expanded instead of collapsing to an empty "Worked" row.
         const nextStopped = { ...s.stoppedPartial };
         if (partial.trim().length > 0) {
           nextStopped[streamingChatSessionId] = partial.trim();
         } else {
           delete nextStopped[streamingChatSessionId];
         }
-        return {
-          streamingChatSessionId: null,
-          streaming: nextStreaming,
-          chatStatus: nextStatus,
-          livePerf: nextLivePerf,
-          stoppedPartial: nextStopped,
-        };
+        return { stoppedPartial: nextStopped };
       });
       // A cancelled turn frees the queue too — send the next stacked message.
       get().drainQueue(streamingChatSessionId);
@@ -2731,12 +2760,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const nextStatus = { ...s.chatStatus };
       delete nextStatus[chatSessionId];
       const prev = s.streaming[chatSessionId] ?? "";
-      // Cap the streaming buffer to 200KB per session to avoid OOM on
-      // extremely long streaming turns (hundreds of thousands of tokens).
-      // The tail is what matters for rendering; anything beyond ~50K chars
-      // is scrolled out of view already. Code-point-safe: a raw slice can
-      // split an emoji surrogate pair at the cap boundary.
-      const next = tailCodePoints(prev + token, 200_000);
+      // Cap the streaming buffer per session to avoid OOM on extremely long
+      // streaming turns (hundreds of thousands of tokens). The tail is what
+      // matters for rendering; anything beyond ~50K chars is scrolled out of
+      // view already. Code-point-safe: a raw slice can split an emoji
+      // surrogate pair at the cap boundary. Hysteresis (audit A5): re-slicing
+      // 200K chars on EVERY token past the cap made each token an O(buffer)
+      // copy — the buffer now trims once per 20K chars of growth instead.
+      const next = tailCodePointsHysteresis(prev + token, STREAM_TAIL_CAP, STREAM_TAIL_MARGIN);
       return {
         streaming: {
           ...s.streaming,
@@ -2935,7 +2966,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // guard), and never fires while THIS session already has another turn
     // running (per-session check — a background chat streaming elsewhere
     // must not stall the loop).
-    if (get().activeChatSessionId === chatSessionId && !(chatSessionId in get().streaming)) {
+    // A failed refetch leaves `messages` null and the in-store buffer holding
+    // the PREVIOUS turn's reply — advancing on it would feed a stale
+    // (already-processed) sentinel back to the model, so skip the advance
+    // until a turn whose reply we actually have (audit A4).
+    if (
+      messages !== null &&
+      get().activeChatSessionId === chatSessionId && !(chatSessionId in get().streaming)
+    ) {
       const loop = get().loopState[chatSessionId];
       if (loop && loop.active) {
         const lastReply = [...(get().messages ?? [])]
@@ -3373,9 +3411,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const sessionSubagents = s.subagents[payload.chatSessionId];
       const sub = sessionSubagents?.[payload.subagentId];
       if (!sessionSubagents || !sub) return {};
-      // Same 200k code-point cap as the main token stream (onToken) — an
-      // uncapped subagent output grows memory without bound (audit H3).
-      const output = tailCodePoints(sub.output + payload.chunk, 200_000);
+      // Same capped tail as the main token stream (onToken) — an uncapped
+      // subagent output grows memory without bound (audit H3); same hysteresis
+      // so per-chunk cost stays O(chunk) past the cap (audit A5).
+      const output = tailCodePointsHysteresis(sub.output + payload.chunk, STREAM_TAIL_CAP, STREAM_TAIL_MARGIN);
       const updated = { ...sessionSubagents, [payload.subagentId]: { ...sub, output } };
       return { subagents: { ...s.subagents, [payload.chatSessionId]: updated } };
     });

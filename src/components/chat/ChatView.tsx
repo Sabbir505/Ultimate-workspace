@@ -1482,7 +1482,13 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       if (enterTimerRef.current != null) window.clearTimeout(enterTimerRef.current);
     };
   }, []);
-  const items: TimelineItem[] = useMemo(() => {
+  // PERF: the PERSISTED rows (messages + anchored proposal cards) are built
+  // in a memo that does NOT depend on the streaming text. It used to share a
+  // memo with the live row, so every token flush re-created every item object
+  // (and its onDelete/onEdit closures) — churning the whole visible list's
+  // identities on each of dozens of flushes per second. Live/typing rows are
+  // appended in a second memo below; only THOSE rebuild per token.
+  const persistedItems: TimelineItem[] = useMemo(() => {
     const proposals = activeChatSessionId
       ? artifactProposalsBySession[activeChatSessionId] ?? []
       : [];
@@ -1527,6 +1533,14 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         });
       }
     });
+    return list;
+    // enterEpoch: the 350ms revoke timer below bumps it; the identity change
+    // re-runs the grant/revoke pass in the combined memo (the `enter` flags
+    // live there, over the full list).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, activeChatSessionId, artifactProposalsBySession, enterEpoch, handleDelete, handleSubmitEdit]);
+  const items: TimelineItem[] = useMemo(() => {
+    const list = persistedItems.slice();
     // If streaming, append the live assistant bubble (no action bar while live).
     // Rendered from TURN START — not from the first token — so the
     // "Working for Xs" header is visible during the pre-token wait (prompt
@@ -1543,9 +1557,9 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         key: `streaming-${activeChatSessionId ?? "none"}-${messages.length}`,
         live: true,
         // The live row receives the current perf snapshot at render time
-        // below. Keeping it out of this memo prevents a 500ms perf heartbeat
-        // from rebuilding every persisted row (and invalidating their diagram
-        // subtrees) while the turn streams.
+        // below. Keeping it out of the persisted memo prevents a 500ms perf
+        // heartbeat from rebuilding every persisted row (and invalidating
+        // their diagram subtrees) while the turn streams.
         livePerf: null,
       });
     }
@@ -1607,11 +1621,12 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       }
     }
     return list;
-    // enterEpoch: revoking the entrance flag mutates refs the memo reads, so
-    // the epoch bump must force this recompute (and drop the class post-
-    // animation, so virtualizer remounts don't replay the pop-in).
+    // Deps mirror the fields the appended live/typing rows read; the
+    // persisted rows arrive via persistedItems (identity changes on
+    // messages/session/proposal/epoch/callback changes, which re-runs the
+    // grant/revoke pass above).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, activeChatSessionId, artifactProposalsBySession, activeIsStreaming, activeStream, waitingForFirstToken, handleDelete, handleSubmitEdit, enterEpoch]);
+  }, [persistedItems, activeChatSessionId, messages.length, activeIsStreaming, activeStream, waitingForFirstToken]);
   // PERF (PERFORMANCE_AUDIT.md F5): virtualize the message list — long
   // conversations used to mount EVERY MessageBubble (each re-parsing markdown
   // + katex), which made scroll janky and session-switch slow past a few
@@ -1643,9 +1658,16 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   // (`msg-N`). Instead, synchronously re-measure ONLY the mounted rows via
   // measureElement(el): fresh offsetHeight per visible row, off-screen cached
   // sizes preserved.
-  const structureSig = items
-    .map((i) => i.key + (i.proposalEntry ? `:${i.proposalEntry.state}` : ""))
-    .join("|");
+  // Wrapped in a memo on [items]: the join() used to run inline on every
+  // render — per streaming token — to produce a string that (unchanged) never
+  // re-triggered the effect below anyway.
+  const structureSig = useMemo(
+    () =>
+      items
+        .map((i) => i.key + (i.proposalEntry ? `:${i.proposalEntry.state}` : ""))
+        .join("|"),
+    [items],
+  );
   useEffect(() => {
     // Reconcile mounted rows whose real DOM height drifted from the
     // virtualizer's cached size. The dangerous case: a row that mounts ALREADY

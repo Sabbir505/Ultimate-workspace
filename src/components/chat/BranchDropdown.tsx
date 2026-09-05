@@ -97,7 +97,10 @@ export function BranchDropdown({
         void fetchAll();
       }
     }).then((u) => {
-      if (!cancelled) unlisten = u;
+      // Unmount won the race: the subscription resolved after cleanup — call
+      // the unlisten NOW, or this listener leaks for the app's lifetime.
+      if (cancelled) u();
+      else unlisten = u;
     });
     return () => {
       cancelled = true;

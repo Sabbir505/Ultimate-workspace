@@ -52,6 +52,27 @@ function classifyByName(name: string): 'image' | 'doc' | 'text' {
   return 'text';
 }
 
+// Extension → MIME map for image attachments. The desktop builds a
+// `data:<media_type>;base64,…` URI from this value, so it MUST be a real
+// MIME type — a bare extension like "png" yields `data:png;base64,…` which
+// vision endpoints reject.
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+};
+
+function imageMediaType(name: string, assetMimeType?: string): string {
+  // Prefer the MIME type reported by the picker (authoritative); fall back
+  // to the extension map when absent (some Android pickers) or not image/*.
+  if (assetMimeType && assetMimeType.startsWith('image/')) return assetMimeType;
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  return IMAGE_MIME_BY_EXT[ext] ?? 'image/png';
+}
+
 interface ChatComposerProps {
   onSend: (text: string, attachments?: SessionChatAttachment[]) => void;
   onCancel?: () => void;
@@ -59,6 +80,9 @@ interface ChatComposerProps {
   placeholder?: string;
   /** Subtle hint line above the input ("Claude 3.5 · claude-sonnet-4-5"). */
   modelHint?: string;
+  /** Hard-disable the composer entirely (e.g. relay disconnected) — the
+   *  send path would just drop the frame, so there's nothing to send into. */
+  disabled?: boolean;
 }
 
 export default function ChatComposer({
@@ -67,11 +91,12 @@ export default function ChatComposer({
   streaming = false,
   placeholder = 'Message…',
   modelHint,
+  disabled = false,
 }: ChatComposerProps) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<SessionChatAttachment[]>([]);
 
-  const canSend = (text.trim().length > 0 || attachments.length > 0) && !streaming;
+  const canSend = !disabled && (text.trim().length > 0 || attachments.length > 0) && !streaming;
 
   const handleSend = () => {
     if (!canSend) return;
@@ -110,7 +135,7 @@ export default function ChatComposer({
             name,
             kind: 'image',
             data,
-            media_type: name.split('.').pop()?.toLowerCase() ?? 'image/png',
+            media_type: imageMediaType(name, asset.mimeType),
           });
         } else if (kind === 'doc') {
           const ext = name.split('.').pop()?.toLowerCase() ?? '';
@@ -179,7 +204,7 @@ export default function ChatComposer({
         <TouchableOpacity
           style={[styles.attachBtn, { borderColor: theme.colors.border }]}
           onPress={handleAttach}
-          disabled={streaming}
+          disabled={streaming || disabled}
           activeOpacity={0.7}
           accessibilityLabel="Attach file"
         >
@@ -201,7 +226,7 @@ export default function ChatComposer({
           placeholder={placeholder}
           placeholderTextColor={theme.colors.textSecondary}
           multiline
-          editable={!streaming}
+          editable={!streaming && !disabled}
           onSubmitEditing={handleSend}
           blurOnSubmit={false}
           returnKeyType="default"

@@ -343,22 +343,28 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     };
   }, [bindKey, cwd, projectPath, refreshNonce]);
 
-  // Prune cached file lists whose pane closed or whose fallback project was
-  // removed, so we don't leak. This is rare (panes close infrequently) so a
-  // periodic sweep would be overkill; do it on the focused-pane effect instead.
+  // Prune cached file lists whose pane closed, whose fallback project was
+  // removed, or whose bound chat no longer exists, so we don't leak. This is
+  // rare (panes close infrequently) so a periodic sweep would be overkill;
+  // do it on the focused-pane effect instead. `chat:` keys stay alive while
+  // their session still exists — without this branch, every pane-store tick
+  // wiped the embedded Files tab's chat-bound list (the bindKey fallback for
+  // a chat with no focused terminal pane matches neither the pane ids nor
+  // the `project:` keys).
   useEffect(() => {
     setFilesByPane((prev) => {
       const live = new Set(panes.map((p) => p.paneId));
       const liveProjects = new Set(projects.map((p) => `project:${p.id}`));
+      const liveChats = new Set(chatSessions.map((s) => `chat:${s.id}`));
       let changed = false;
       const next: Record<string, ChangedFile[]> = {};
       for (const [k, v] of Object.entries(prev)) {
-        if (live.has(k) || liveProjects.has(k)) next[k] = v;
+        if (live.has(k) || liveProjects.has(k) || liveChats.has(k)) next[k] = v;
         else changed = true;
       }
       return changed ? next : prev;
     });
-  }, [panes, projects]);
+  }, [panes, projects, chatSessions]);
 
   // Drag-to-resize: a left-edge grab zone. Dragging the splitter widens /
   // narrows the panel — the same UX as the ToolPanel's own splitter.
@@ -675,6 +681,58 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     };
   }, [bindKey, cwd]);
 
+  // The list of files for the bound key (pane id or chat fallback). Computed
+  // unconditionally — everything below feeds hooks that MUST run on every
+  // render (see the hook-order notes above).
+  const files = bindKey ? filesByPane[bindKey] ?? [] : [];
+  // The list the current scope filter shows. Unstaged/staged classify the
+  // porcelain status of the merged pane+project poll client-side; branch and
+  // last-turn have their own sources (fetched on filter enter / refresh).
+  // MUST stay above the early returns below — hooks after a conditional
+  // return change the hook order between renders and crash React ("rendered
+  // fewer hooks than during the previous render") the moment the panel
+  // transitions to the unbound/collapsed empty state.
+  const visibleFiles = useMemo(() => {
+    if (filter === "staged") return files.filter(isStagedFile);
+    if (filter === "branch") return branchChanges?.files ?? [];
+    if (filter === "lastturn") return lastTurnFiles ?? [];
+    return files.filter(isUnstagedFile);
+  }, [filter, files, branchChanges, lastTurnFiles]);
+
+  // Whole-tree review state (the "Review all" header action) is declared with
+  // the other per-scope state above; only the callback lives here — hooks all
+  // run unconditionally, above the early returns below.
+  const reviewWholeTree = useCallback(async () => {
+    if (!cwd || files.length === 0) return;
+    setWholeTreeReviewLoading(true);
+    try {
+      const chat = useChatStore.getState();
+      const chatId = chat.focusedChatSessionId ?? chat.activeChatSessionId ?? undefined;
+      const text = await generateDiffReview(cwd, chatId, undefined);
+      if (!text) {
+        // The backend returns null when no provider is usable (no stored API
+        // key and no local model) — surface that instead of silently spinning
+        // to nothing.
+        useUiStore
+          .getState()
+          .pushToast("error", "No AI provider available for review — configure a chat API key or local model");
+        return;
+      }
+      setWholeTreeReview(text);
+    } catch (e) {
+      useUiStore.getState().pushToast("error", "Diff review failed", String(e));
+    } finally {
+      setWholeTreeReviewLoading(false);
+    }
+  }, [cwd, files.length]);
+
+  // Clicking a row toggles its inline diff (accordion). The diff machinery
+  // (diffText/diffFiles) is keyed to selectedFile, so "expanded" is simply
+  // "this row's path is the selected file".
+  const toggleFile = useCallback((file: ChangedFile) => {
+    setSelectedFile((prev) => (prev === file.path ? null : file.path));
+  }, []);
+
   // Hide the panel when nothing binds: standalone mode needs a focused
   // terminal pane; embedded mode falls back to the selected project but
   // still needs SOME diff root. In embedded mode the host keeps us mounted,
@@ -714,16 +772,6 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     );
   }
 
-  const files = filesByPane[bindKey] ?? [];
-  // The list the current scope filter shows. Unstaged/staged classify the
-  // porcelain status of the merged pane+project poll client-side; branch and
-  // last-turn have their own sources (fetched on filter enter / refresh).
-  const visibleFiles = useMemo(() => {
-    if (filter === "staged") return files.filter(isStagedFile);
-    if (filter === "branch") return branchChanges?.files ?? [];
-    if (filter === "lastturn") return lastTurnFiles ?? [];
-    return files.filter(isUnstagedFile);
-  }, [filter, files, branchChanges, lastTurnFiles]);
   // "Project extras": files surfaced by the project-root fetch that the
   // focused pane's cwd (typically a worktree) doesn't see. Render a tiny
   // hint in the header so the user knows these are coming from a wider
@@ -776,37 +824,6 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
       .sendMessage(SEND_PR_PROMPT, undefined, undefined, targetSession);
     useUiStore.getState().pushToast("success", "PR request sent to the focused chat");
   };
-
-  const reviewWholeTree = useCallback(async () => {
-    if (!cwd || files.length === 0) return;
-    setWholeTreeReviewLoading(true);
-    try {
-      const chat = useChatStore.getState();
-      const chatId = chat.focusedChatSessionId ?? chat.activeChatSessionId ?? undefined;
-      const text = await generateDiffReview(cwd, chatId, undefined);
-      if (!text) {
-        // The backend returns null when no provider is usable (no stored API
-        // key and no local model) — surface that instead of silently spinning
-        // to nothing.
-        useUiStore
-          .getState()
-          .pushToast("error", "No AI provider available for review — configure a chat API key or local model");
-        return;
-      }
-      setWholeTreeReview(text);
-    } catch (e) {
-      useUiStore.getState().pushToast("error", "Diff review failed", String(e));
-    } finally {
-      setWholeTreeReviewLoading(false);
-    }
-  }, [cwd, files.length]);
-
-  // Clicking a row toggles its inline diff (accordion). The diff machinery
-  // (diffText/diffFiles) is keyed to selectedFile, so "expanded" is simply
-  // "this row's path is the selected file".
-  const toggleFile = useCallback((file: ChangedFile) => {
-    setSelectedFile((prev) => (prev === file.path ? null : file.path));
-  }, []);
 
   // The expanded row's inline diff body — shared by the accordion below.
   const diffBody = diffLoading ? (

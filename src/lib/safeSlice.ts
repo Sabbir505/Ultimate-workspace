@@ -31,3 +31,22 @@ export function tailCodePoints(s: string, max: number): string {
   if (first >= 0xdc00 && first <= 0xdfff) out = out.slice(1);
   return out;
 }
+
+/** Tail cap with hysteresis for per-token streaming buffers. Unlike
+ *  `tailCodePoints` — which re-slices the whole buffer on EVERY call once
+ *  `max` is reached — this variant only slices when the string exceeds
+ *  `max + margin`, trimming back to `max - margin`. A caller appending tokens
+ *  therefore pays O(token) while inside the band instead of copying the full
+ *  ~200K-char buffer on every event, while the buffer stays bounded at
+ *  `max + margin` UTF-16 units (never splitting a surrogate pair, like the
+ *  plain variant). `margin <= 0` degrades to the plain tail cap. */
+export function tailCodePointsHysteresis(s: string, max: number, margin: number): string {
+  if (max <= 0) return "";
+  if (margin <= 0) return tailCodePoints(s, max);
+  if (s.length <= max + margin) return s;
+  let out = s.slice(s.length - (max - margin));
+  // A leading low surrogate means the cut split a pair — drop it.
+  const first = out.charCodeAt(0);
+  if (first >= 0xdc00 && first <= 0xdfff) out = out.slice(1);
+  return out;
+}

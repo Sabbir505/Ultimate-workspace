@@ -94,6 +94,81 @@ impl SseLineBuffer {
     }
 }
 
+/// Chunk-fed bounded tail (D1/D5): keeps the LAST `cap` bytes pushed, so a
+/// chatty child process can no longer grow its drain buffer without bound —
+/// the old `read_to_string` / `wait_with_output` drains accumulated GBs of
+/// output inside a single tool call's window before the small result cap was
+/// applied. Chunks are appended and dropped WHOLE from the front (O(1)
+/// amortized per chunk); the retained tail may therefore split a multi-byte
+/// UTF-8 sequence at the cut, which `into_lossy` degrades to a single U+FFFD
+/// — harmless for model-facing text that is tail-capped again downstream.
+pub struct BoundedTail {
+    cap: usize,
+    total: usize,
+    chunks: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl BoundedTail {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            total: 0,
+            chunks: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Append one read chunk, trimming whole chunks from the front while over
+    /// the cap (the newest chunk is partially trimmed only at the front edge).
+    pub fn push(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.chunks.push_back(chunk.to_vec());
+        self.total += chunk.len();
+        while self.total > self.cap {
+            let excess = self.total - self.cap;
+            match self.chunks.front_mut() {
+                Some(front) if front.len() > excess => {
+                    front.drain(..excess);
+                    self.total = self.cap;
+                }
+                Some(_) => {
+                    if let Some(front) = self.chunks.pop_front() {
+                        self.total -= front.len();
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Bytes currently retained (always ≤ cap once a full chunk has been
+    /// trimmed). Used by tests; kept `pub` alongside the collector.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.total
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+
+    /// The retained tail as lossy UTF-8.
+    pub fn into_lossy(self) -> String {
+        String::from_utf8_lossy(&self.into_bytes()).into_owned()
+    }
+
+    /// The retained tail as raw bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.total);
+        for chunk in &self.chunks {
+            out.extend_from_slice(chunk);
+        }
+        out
+    }
+}
+
 /// Containment check: is `path` equal to or nested under `prefix`?
 ///
 /// Component-wise (via `Path::starts_with`) and case-insensitive on Windows.
@@ -199,5 +274,37 @@ mod tests {
         assert!(out.ends_with('語'));
         // At/below the cap: verbatim.
         assert_eq!(tail_chars("short", 10), "short");
+    }
+
+    #[test]
+    fn bounded_tail_keeps_only_the_last_bytes() {
+        let mut t = BoundedTail::new(16);
+        t.push(b"0123456789");
+        t.push(b"ABCDEFGHIJ");
+        // 20 bytes pushed, cap 16 → the HEAD is what's dropped.
+        assert!(t.len() <= 16, "bounded at cap, got {}", t.len());
+        assert_eq!(t.into_lossy(), "456789ABCDEFGHIJ");
+    }
+
+    #[test]
+    fn bounded_tail_handles_oversized_single_chunk() {
+        let mut t = BoundedTail::new(8);
+        t.push(b"aaabbbcccdddeee");
+        assert_eq!(t.into_lossy(), "ccdddeee");
+        // And keeps working after a trim.
+        let mut t = BoundedTail::new(8);
+        t.push(b"1111111111");
+        t.push(b"2222");
+        assert_eq!(t.into_lossy(), "11112222");
+    }
+
+    #[test]
+    fn bounded_tail_bytes_and_empty_pushes() {
+        let mut t = BoundedTail::new(10);
+        t.push(b"");
+        assert!(t.is_empty());
+        t.push(b"abcdefghij");
+        t.push(b"K");
+        assert_eq!(t.into_bytes(), b"bcdefghijK".to_vec());
     }
 }

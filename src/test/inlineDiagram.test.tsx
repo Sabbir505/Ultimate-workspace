@@ -92,16 +92,25 @@ describe("InlineDiagram", () => {
     await waitFor(() => {
       expect(container.querySelector("iframe.chat-live-viz-frame")).not.toBeNull();
     });
+    const frame = container.querySelector("iframe.chat-live-viz-frame") as HTMLIFrameElement;
+    // The handshake now requires the report to come from the frame's own
+    // contentWindow and carry the per-instance token embedded in the srcdoc
+    // script (B4) — simulate exactly what the injected reporter posts.
+    const fakeWin = {} as Window;
+    Object.defineProperty(frame, "contentWindow", { value: fakeWin });
+    const token = /__relayInlineVizToken:"([^"]+)"/.exec(
+      frame.getAttribute("srcdoc") ?? "",
+    )?.[1];
 
     // A runaway page reports a huge height — the frame clamps at 520px.
-    fireEvent(window, new MessageEvent("message", { data: { __relayInlineVizHeight: 9000 } }));
+    fireEvent(window, new MessageEvent("message", { source: fakeWin, data: { __relayInlineVizHeight: 9000, __relayInlineVizToken: token } }));
     await waitFor(() => {
       const h = (container.querySelector("iframe.chat-live-viz-frame") as HTMLElement).style.height;
       expect(h).toBe("520px");
     });
 
     // Below the floor clamps up to 120px.
-    fireEvent(window, new MessageEvent("message", { data: { __relayInlineVizHeight: 20 } }));
+    fireEvent(window, new MessageEvent("message", { source: fakeWin, data: { __relayInlineVizHeight: 20, __relayInlineVizToken: token } }));
     await waitFor(() => {
       const h = (container.querySelector("iframe.chat-live-viz-frame") as HTMLElement).style.height;
       expect(h).toBe("120px");

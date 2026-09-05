@@ -91,6 +91,33 @@ fn create_checkpoint(
     Ok(ckpt)
 }
 
+/// Gates only (the caller has already resolved the repo dir): feature on +
+/// git repo + NO checkpoints yet (checkpoint 0 = pre-chat state).
+fn baseline_eligible(conn: &Connection, chat_session_id: &str, dir: &Path) -> bool {
+    checkpointable(conn, dir).is_some()
+        && db::count_chat_checkpoints(conn, chat_session_id).unwrap_or(0) == 0
+}
+
+/// Insert half of a turn-START baseline. The count gate is RE-CHECKED here:
+/// in the detached path ([`maybe_baseline_detached`]) the git snapshot ran
+/// without the DB lock, so a racing turn may have baselined first — without
+/// this two first-turns could both insert a baseline row.
+fn insert_baseline(
+    app: Option<&AppHandle>,
+    conn: &Connection,
+    chat_session_id: &str,
+    dir: &Path,
+    snapshot: git::CheckpointSnapshot,
+) {
+    if db::count_chat_checkpoints(conn, chat_session_id).unwrap_or(0) > 0 {
+        return;
+    }
+    match create_checkpoint(conn, app, chat_session_id, None, dir, snapshot) {
+        Ok(_) => {}
+        Err(e) => eprintln!("[checkpoints] baseline failed for {chat_session_id}: {e:?}"),
+    }
+}
+
 /// Turn-START baseline: only when the session has NO checkpoints yet, so
 /// checkpoint 0 = pre-chat state and even the first turn is undoable.
 pub fn maybe_baseline(
@@ -99,18 +126,53 @@ pub fn maybe_baseline(
     chat_session_id: &str,
     dir: &Path,
 ) {
-    let Some(dir) = checkpointable(conn, dir) else { return };
-    if db::count_chat_checkpoints(conn, chat_session_id).unwrap_or(0) > 0 {
+    if !baseline_eligible(conn, chat_session_id, dir) {
         return;
     }
-    match git::snapshot_working_tree(&dir) {
-        Ok(snap) => {
-            if let Err(e) = create_checkpoint(conn, app, chat_session_id, None, &dir, snap) {
-                eprintln!("[checkpoints] baseline failed for {chat_session_id}: {e:?}");
-            }
-        }
+    match git::snapshot_working_tree(dir) {
+        Ok(snap) => insert_baseline(app, conn, chat_session_id, dir, snap),
         Err(e) => eprintln!("[checkpoints] baseline snapshot failed for {chat_session_id}: {e}"),
     }
+}
+
+/// Repo dir + eligibility for a turn-START baseline, evaluated under the
+/// CALLER'S (short) DB lock: feature enabled + git repo + no checkpoints
+/// yet. `None` = skip silently. Used by [`maybe_baseline_detached`] so the
+/// mutex is never held across the slow git snapshot.
+fn baseline_target(conn: &Connection, chat_session_id: &str) -> Option<PathBuf> {
+    let dir = db::chat_session_repo_path(conn, chat_session_id)?;
+    if !baseline_eligible(conn, chat_session_id, Path::new(&dir)) {
+        return None;
+    }
+    Some(PathBuf::from(dir))
+}
+
+/// D3: turn-START baseline WITHOUT pinning the global DB mutex across the
+/// git snapshot. The inline path used to run `git add -A` + commit with the
+/// shared connection locked, stalling every other DB consumer for the whole
+/// snapshot. Three phases instead:
+///   1. short lock — resolve repo path + eligibility gates;
+///   2. NO lock — snapshot the working tree (the slow part);
+///   3. short lock — re-check the gate and insert the row.
+pub fn maybe_baseline_detached(
+    app: Option<&AppHandle>,
+    db_conn: &std::sync::Arc<parking_lot::Mutex<Connection>>,
+    chat_session_id: &str,
+) {
+    let dir = {
+        let conn = db_conn.lock();
+        baseline_target(&conn, chat_session_id)
+    };
+    let Some(dir) = dir else { return };
+    let snap = match git::snapshot_working_tree(&dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[checkpoints] baseline snapshot failed for {chat_session_id}: {e}");
+            return;
+        }
+    };
+    let conn = db_conn.lock();
+    insert_baseline(app, &conn, chat_session_id, &dir, snap);
 }
 
 /// Turn-END checkpoint: skipped when the working tree is identical to the
@@ -328,5 +390,163 @@ mod tests {
         let baseline = ChatCheckpoint { message_id: None, ..ckpt };
         assert_eq!(rollback_conversation(&conn, &baseline).unwrap(), 2);
         assert!(db::list_chat_messages(&conn, &cs.id).unwrap().is_empty());
+    }
+
+    // ---- D3: detached turn-start baseline (DB lock not held across git) ----
+
+    /// A shared-connection handle shaped like DbState.0, for the detached path.
+    fn shared_conn(conn: Connection) -> std::sync::Arc<parking_lot::Mutex<Connection>> {
+        std::sync::Arc::new(parking_lot::Mutex::new(conn))
+    }
+
+    #[test]
+    fn baseline_target_gates_match_maybe_baseline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        git::init_test_repo(path);
+
+        let conn = db::mem();
+        let pid = db::new_id();
+        conn.execute(
+            "INSERT INTO projects (id, path, name, created_at) VALUES (?1, ?2, 'p', 0)",
+            rusqlite::params![pid, path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        let cs = chat_db::create_chat_session(&conn, "anthropic", "m", Some(&pid)).unwrap();
+
+        // First turn: eligible.
+        let target = baseline_target(&conn, &cs.id).expect("first turn is baseline-eligible");
+        assert_eq!(target, path.to_path_buf());
+
+        // After a baseline exists: not eligible anymore.
+        insert_baseline(None, &conn, &cs.id, path, git::snapshot_working_tree(path).unwrap());
+        assert!(
+            baseline_target(&conn, &cs.id).is_none(),
+            "existing checkpoint must gate the baseline"
+        );
+
+        // Feature disabled: not eligible even for a fresh session.
+        db::set_setting(&conn, "checkpoints.enabled", "false").unwrap();
+        let cs2 = chat_db::create_chat_session(&conn, "anthropic", "m", Some(&pid)).unwrap();
+        assert!(baseline_target(&conn, &cs2.id).is_none());
+
+        // Unbound session (no repo): not eligible.
+        db::set_setting(&conn, "checkpoints.enabled", "true").unwrap();
+        let loose = chat_db::create_chat_session(&conn, "anthropic", "m", None).unwrap();
+        assert!(baseline_target(&conn, &loose.id).is_none());
+    }
+
+    #[test]
+    fn detached_baseline_leaves_the_db_lock_free_during_snapshot() {
+        // The D3 regression: the inline path held the shared DB mutex for the
+        // WHOLE git snapshot. The detached path must let another consumer
+        // acquire the mutex while the snapshot is still running — so the
+        // fixture repo is seeded with enough files that `git add -A` takes
+        // measurable time, and the test thread repeatedly try-locks while the
+        // detached baseline is in flight.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        git::init_test_repo(path);
+        for i in 0..2000 {
+            std::fs::write(path.join(format!("f{i:05}.txt")), "x".repeat(512)).unwrap();
+        }
+
+        let conn = shared_conn(db::mem());
+        let pid = db::new_id();
+        {
+            let c = conn.lock();
+            c.execute(
+                "INSERT INTO projects (id, path, name, created_at) VALUES (?1, ?2, 'p', 0)",
+                rusqlite::params![pid, path.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        }
+        let cs = {
+            let c = conn.lock();
+            chat_db::create_chat_session(&c, "anthropic", "m", Some(&pid)).unwrap()
+        };
+
+        let worker = {
+            let conn = std::sync::Arc::clone(&conn);
+            let sid = cs.id.clone();
+            std::thread::spawn(move || {
+                maybe_baseline_detached(None, &conn, &sid);
+            })
+        };
+
+        // While the worker is (at some point) inside the lock-free snapshot
+        // phase, THIS thread must be able to take the mutex.
+        let mut acquired_while_running = false;
+        let mut joined = false;
+        for _ in 0..20_000 {
+            if worker.is_finished() {
+                joined = true;
+                break;
+            }
+            if conn.try_lock().is_some() {
+                acquired_while_running = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        worker.join().unwrap();
+        assert!(
+            acquired_while_running,
+            "DB mutex must be acquirable while the detached baseline runs"
+        );
+        let _ = joined;
+
+        // And the baseline itself landed exactly once.
+        let c = conn.lock();
+        assert_eq!(
+            db::count_chat_checkpoints(&c, &cs.id).unwrap(),
+            1,
+            "detached baseline records exactly one checkpoint"
+        );
+    }
+
+    #[test]
+    fn racing_detached_baselines_cannot_double_insert() {
+        // The insert-phase re-check: two concurrent first-turn baselines must
+        // produce ONE row, not two.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        git::init_test_repo(path);
+        for i in 0..300 {
+            std::fs::write(path.join(format!("g{i:04}.txt")), "y".repeat(256)).unwrap();
+        }
+
+        let conn = shared_conn(db::mem());
+        let pid = db::new_id();
+        {
+            let c = conn.lock();
+            c.execute(
+                "INSERT INTO projects (id, path, name, created_at) VALUES (?1, ?2, 'p', 0)",
+                rusqlite::params![pid, path.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        }
+        let cs = {
+            let c = conn.lock();
+            chat_db::create_chat_session(&c, "anthropic", "m", Some(&pid)).unwrap()
+        };
+
+        let mut workers = Vec::new();
+        for _ in 0..3 {
+            let conn = std::sync::Arc::clone(&conn);
+            let sid = cs.id.clone();
+            workers.push(std::thread::spawn(move || {
+                maybe_baseline_detached(None, &conn, &sid);
+            }));
+        }
+        for w in workers {
+            w.join().unwrap();
+        }
+        let c = conn.lock();
+        assert_eq!(
+            db::count_chat_checkpoints(&c, &cs.id).unwrap(),
+            1,
+            "racing baselines must collapse to a single checkpoint row"
+        );
     }
 }

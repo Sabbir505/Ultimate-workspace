@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, RefreshControl, TouchableOpacity,
 } from 'react-native';
@@ -67,13 +67,31 @@ export default function HomeScreen() {
     setCollapsed(prev => ({ ...prev, [key]: !prev[key] }));
   }, []);
 
+  // Pending "create session" listener lifecycle. The unsubscribe is kept in a
+  // ref so a re-click drops the previous subscription (no listener pile-up),
+  // unmount clears everything, and a 15s timeout fallback removes it when the
+  // desktop never answers (createSession is fire-and-forget on the relay
+  // socket — an offline desktop produces no SessionCreated event at all).
+  const createUnsubRef = useRef<(() => void) | null>(null);
+  const createTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearCreateListener = useCallback(() => {
+    createUnsubRef.current?.();
+    createUnsubRef.current = null;
+    if (createTimeoutRef.current) { clearTimeout(createTimeoutRef.current); createTimeoutRef.current = null; }
+  }, []);
+
+  useEffect(() => clearCreateListener, [clearCreateListener]);
+
   const handleCreate = useCallback((projectName: string, projectId: string) => {
     const harness = selectedHarness[projectName] || 'claude_code';
+    // A previous create is still pending — drop its subscription first.
+    clearCreateListener();
     createSession(projectId, harness);
     // Listen for the SessionCreated event and navigate to it.
-    const unsub = onSessionCreated.on((s) => {
+    createUnsubRef.current = onSessionCreated.on((s) => {
       if (s.projectId === projectId && s.provider === harness) {
-        unsub();
+        clearCreateListener();
         // The desktop auto-opens + spawns the session when it's created, but
         // nudge a spawn too in case that event was missed — then open the
         // screen in live mode so it polls for terminal output right away
@@ -82,7 +100,9 @@ export default function HomeScreen() {
         navigation.navigate('SessionDetail', { session: { ...s, isLive: true } });
       }
     });
-  }, [createSession, spawnSession, selectedHarness, navigation]);
+    // Timeout fallback: nothing arrived within 15s → stop listening.
+    createTimeoutRef.current = setTimeout(clearCreateListener, 15_000);
+  }, [createSession, spawnSession, selectedHarness, navigation, clearCreateListener]);
 
   const handleTapSession = useCallback((session: Session) => {
     if (session.isLive) {

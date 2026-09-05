@@ -76,9 +76,11 @@ export function BranchPanel() {
   useEffect(() => {
     setLoading(true);
     void fetchLog();
-    let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    void safeListen<string>("project:fs-changed", (changedPath) => {
+    // Hold the listen() promise: if the component unmounts before it
+    // resolves, the real unlisten arrives AFTER cleanup ran — dropping it
+    // would leak the handler (and its closure) for the app's lifetime.
+    // Resolve it here and unsubscribe late (DevDiffPanel pattern).
+    const listenReady = safeListen<string>("project:fs-changed", (changedPath) => {
       if (
         path &&
         (changedPath === path ||
@@ -87,12 +89,9 @@ export function BranchPanel() {
       ) {
         void fetchLog();
       }
-    }).then((u) => {
-      if (!cancelled) unlisten = u;
     });
     return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
+      void listenReady.then((u) => u());
     };
   }, [fetchLog, path]);
 

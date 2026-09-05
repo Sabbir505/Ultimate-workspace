@@ -42,33 +42,41 @@ interface Block {
  * Pre-parse the content into a list of blocks. Fenced code blocks become
  * a single "code" block; <think>…</think> spans become a "think" block;
  * everything else is paragraph text rendered as inline markdown.
+ *
+ * Single-pass tokenizer: a combined regex scans for both block forms at
+ * once, so blocks emit in SOURCE order. (The old two-pass version pulled
+ * every <think> span out first, hoisting them above paragraphs/code that
+ * followed them and scrambling mixed messages.) Alternation order also
+ * gives the right atomicity: whichever construct starts first in the text
+ * wins — a `<think>` inside a code fence stays part of the code block, a
+ * code fence inside a think span stays part of the think text, and a
+ * trailing UNCLOSED `<think>` (model still streaming reasoning / cut off)
+ * is treated as think-to-end.
  */
-function parseBlocks(raw: string): Block[] {
+export function parseBlocks(raw: string): Block[] {
   const blocks: Block[] = [];
-  let text = raw;
-
-  // Pull out <think>…</think> first so subsequent parsing isn't confused
-  // by the angle brackets in the body.
-  const thinkRe = /<think>([\s\S]*?)<\/think>/g;
-  let m: RegExpExecArray | null;
-  while ((m = thinkRe.exec(text)) !== null) {
-    blocks.push({ kind: 'think', text: m[1]!.trim() });
-  }
-  text = text.replace(thinkRe, '');
-
-  // Then fenced code blocks.
-  const fenceRe = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g;
+  // 1: closed think span · 2: trailing unclosed think-to-end ·
+  // 3: code fence language · 4: code fence body.
+  const blockRe = /<think>([\s\S]*?)<\/think>|<think>([\s\S]*)$|```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g;
   let lastIndex = 0;
-  while ((m = fenceRe.exec(text)) !== null) {
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(raw)) !== null) {
     if (m.index > lastIndex) {
-      const between = text.slice(lastIndex, m.index);
+      const between = raw.slice(lastIndex, m.index);
       if (between.trim()) blocks.push({ kind: 'p', text: between });
     }
-    blocks.push({ kind: 'code', lang: m[1] || undefined, text: m[2]! });
+    if (m[1] !== undefined) {
+      blocks.push({ kind: 'think', text: m[1].trim() });
+    } else if (m[2] !== undefined) {
+      // Trailing unmatched <think> — everything to the end is thinking.
+      blocks.push({ kind: 'think', text: m[2].trim() });
+    } else {
+      blocks.push({ kind: 'code', lang: m[3] || undefined, text: m[4] ?? '' });
+    }
     lastIndex = m.index + m[0].length;
   }
-  if (lastIndex < text.length) {
-    const tail = text.slice(lastIndex);
+  if (lastIndex < raw.length) {
+    const tail = raw.slice(lastIndex);
     if (tail.trim()) blocks.push({ kind: 'p', text: tail });
   }
   return blocks;

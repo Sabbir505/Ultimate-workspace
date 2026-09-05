@@ -683,6 +683,7 @@ function LocalModelsPanel() {
   };
 
   const newChat = useChatStore((s) => s.newChat);
+  const selectSession = useChatStore((s) => s.selectSession);
   const setActiveView = useUiStore((s) => s.setActiveView);
   const sessions = useChatStore((s) => s.sessions);
   const loadConfig = useChatStore((s) => s.loadConfig);
@@ -704,10 +705,13 @@ function LocalModelsPanel() {
   // Rescan and replace the model list. The backend's bare scan_local_models
   // already merges default locations with every persisted user-added folder
   // (localModels.folders), so the frontend just asks for the full set.
-  const runScan = async () => {
+  // Memoized so the ModelMarket's onDownloadComplete callback (below) is
+  // stable — a fresh identity re-subscribed the download-progress listener
+  // on every parent render.
+  const runScan = useCallback(async () => {
     const list = await scanLocalModels();
     setModels(list ?? []);
-  };
+  }, []);
 
   // Auto-scan default locations + any previously-added folders on mount.
   useEffect(() => {
@@ -782,6 +786,16 @@ function LocalModelsPanel() {
     }
   };
 
+  // Stable across renders (useCallback + memoized runScan): ModelMarket keys
+  // its download-progress subscription on this identity, so a fresh arrow
+  // function per render re-subscribed the backend listener every time.
+  const handleDownloadComplete = useCallback(() => {
+    void runScan();
+    // First successful download marks local-model onboarding as
+    // seen so the nudge banner never returns.
+    void setSetting("localModels.onboarded", "1").catch(() => {});
+  }, [runScan]);
+
   const handleUseModel = async (m: GgufModel) => {
     setErrors((prev) => {
       const next = { ...prev };
@@ -812,7 +826,11 @@ function LocalModelsPanel() {
         (s) => s.provider === "local_gguf" && s.model === modelName,
       );
       if (existing) {
-        // navigate there (the store handles it via selectSession)
+        // Reuse the matching session instead of spawning a duplicate one
+        // (selectSession loads its history; the view switches to chat).
+        await selectSession(existing.id);
+        setActiveView("chat");
+        return;
       }
       const session = await newChat("local_gguf", modelName);
       if (session) {
@@ -1215,12 +1233,7 @@ function LocalModelsPanel() {
       {tab === "speech" && <SttPanel />}
       {tab === "market" && (
         <ModelMarket
-          onDownloadComplete={() => {
-            void runScan();
-            // First successful download marks local-model onboarding as
-            // seen so the nudge banner never returns.
-            void setSetting("localModels.onboarded", "1").catch(() => {});
-          }}
+          onDownloadComplete={handleDownloadComplete}
           localModels={models}
         />
       )}
@@ -1642,6 +1655,16 @@ function WebSearchPanel() {
   const [provider, setProvider] = useState("");
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [loaded, setLoaded] = useState(false);
+  // Debounced persists for the key inputs: they fire per keystroke, and
+  // out-of-order backend writes could persist an intermediate (shorter)
+  // value over the final one.
+  const keyPersistTimers = useRef<Record<string, number>>({});
+  useEffect(
+    () => () => {
+      for (const t of Object.values(keyPersistTimers.current)) window.clearTimeout(t);
+    },
+    [],
+  );
 
   useEffect(() => {
     let stale = false;
@@ -1668,7 +1691,11 @@ function WebSearchPanel() {
 
   const setKey = (id: string, value: string) => {
     setKeys((k) => ({ ...k, [id]: value }));
-    void setSetting(`search.${id}_key`, value);
+    if (keyPersistTimers.current[id] !== undefined) window.clearTimeout(keyPersistTimers.current[id]);
+    keyPersistTimers.current[id] = window.setTimeout(() => {
+      delete keyPersistTimers.current[id];
+      void setSetting(`search.${id}_key`, value);
+    }, 400);
   };
 
   return (
@@ -1901,6 +1928,11 @@ function ApiKeysPanel() {
   const loadConfigFn = useChatStore((s) => s.loadConfig);
 
   const [provider, setProvider] = useState<ChatProvider>("anthropic");
+  // Latest selected provider for async closures (see handleFetchModels).
+  const providerRef = useRef<ChatProvider>(provider);
+  providerRef.current = provider;
+  // Monotonic ticket for in-flight fetches (see handleFetchModels).
+  const fetchTicketRef = useRef(0);
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
@@ -2033,24 +2065,39 @@ function ApiKeysPanel() {
 
   const handleFetchModels = async () => {
     if (!canFetchModels) return;
+    // Capture the provider at fetch start: the user can switch providers
+    // while the request is in flight, and a late resolution must not land
+    // another provider's models in the current panel (same stale-resolution
+    // guard as the cancelled flag in the curated-list effect above).
+    const reqProvider = provider;
+    const ticket = ++fetchTicketRef.current;
     setFetchingModels(true);
     setFetchError(null);
     setFetchedModels([]);
+    let stale = false;
     try {
       const models = await listChatModels(
         provider,
         baseUrl.trim() || undefined,
         apiKey.trim() || undefined,
       );
-      if (models && models.length > 0) {
+      if (providerRef.current !== reqProvider) {
+        stale = true;
+      } else if (models && models.length > 0) {
         setFetchedModels(models);
       } else {
         setFetchError("No models returned. The provider may not support model listing.");
       }
     } catch (e: any) {
-      setFetchError(e?.message || String(e));
+      if (providerRef.current !== reqProvider) {
+        stale = true;
+      } else {
+        setFetchError(e?.message || String(e));
+      }
     }
-    setFetchingModels(false);
+    // A stale fetch still releases the spinner — unless a newer fetch has
+    // started, whose own resolution owns the flag now.
+    if (!stale || fetchTicketRef.current === ticket) setFetchingModels(false);
   };
 
   const handleSave = async () => {

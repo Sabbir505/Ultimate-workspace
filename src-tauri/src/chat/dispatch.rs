@@ -1153,9 +1153,14 @@ async fn run_subagent_loop(
                                         emit("</think>");
                                         in_think = false;
                                     }
+                                    // D6: same hygiene as the reasoning branch
+                                    // — raw `c` feeds the round echo, the UI /
+                                    // persisted output gets the sanitized text.
                                     round_text.push_str(c);
-                                    output.push_str(c);
-                                    emit(c);
+                                    let clean =
+                                        crate::chat::streaming::sanitize_stream_text(c);
+                                    output.push_str(&clean);
+                                    emit(&clean);
                                 }
                             }
                             if dtype == Some("input_json_delta")
@@ -1233,9 +1238,12 @@ async fn run_subagent_loop(
                                 emit("</think>");
                                 in_think = false;
                             }
+                            // D6: sanitize like the reasoning branch above —
+                            // the OpenAI main round applies the same filter.
                             round_text.push_str(c);
-                            output.push_str(c);
-                            emit(c);
+                            let clean = crate::chat::streaming::sanitize_stream_text(c);
+                            output.push_str(&clean);
+                            emit(&clean);
                         }
                     }
                     if let Some(tcs) =

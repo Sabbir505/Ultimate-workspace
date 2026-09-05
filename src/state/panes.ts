@@ -15,6 +15,7 @@ import { create } from "zustand";
 import { uuid } from "../lib/id";
 import { browserClosePane, browserCloseTab, killPty, registerBrowserPaneProject, unregisterBrowserPaneProject } from "../lib/ipc";
 import { DEFAULT_BROWSER_URL } from "../lib/browserHistory";
+import { useSettingsStore } from "./settings";
 import type { HarnessId, PaneState } from "../types";
 
 export const MAX_PANES = 6;
@@ -217,13 +218,16 @@ export function activeTabId(pane: Pane): string {
  */
 function disposePaneResources(pane: Pane): void {
   if (pane.data.kind === "terminal") {
-    void killPty(pane.paneId);
+    void killPty(pane.paneId).catch(() => {});
   } else {
     // Browser panes: close ALL tab webviews + unregister from the
     // backend's project-pane registry so the MCP dispatch doesn't
-    // try to target a dead pane.
-    void browserClosePane(pane.paneId);
+    // try to target a dead pane. Also drop the pane's persisted tab
+    // state — paneIds are fresh UUIDs, so a closed pane's entry would
+    // otherwise sit in the persisted settings blob forever (audit A3).
+    void browserClosePane(pane.paneId).catch(() => {});
     void unregisterBrowserPaneProject(pane.paneId).catch(() => {});
+    useSettingsStore.getState().forgetBrowserPaneTabs(pane.paneId);
   }
 }
 

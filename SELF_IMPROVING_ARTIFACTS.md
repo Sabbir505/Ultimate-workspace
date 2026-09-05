@@ -1,13 +1,15 @@
 # Self-Improving Artifacts — Design
 
-Status: proposal · 2026-09-04
+Status: design — P0 (registry) + P1 (engine) implemented · 2026-09-04, updated 2026-09-05
 Scope: Skills, Loops, Prompt Templates, Automations
+
+> **Implementation status (2026-09-05):** the observe/propose/evaluate/promote loop described in §6–§8 ships as `src-tauri/src/improve_engine.rs` + `src-tauri/src/commands/improve_cmds.rs` (20 commands) + `src-tauri/src/db/improve.rs` (improve_* tables + `loop_sessions`), with the Settings → Improvements panel (`src/components/settings/ImprovementsPanel.tsx`). Later phases remain as designed below.
 
 ---
 
 ## 1. Summary
 
-Conduit already ships four kinds of behavioral artifacts — **Skills**, **Loops**,
+Relay already ships four kinds of behavioral artifacts — **Skills**, **Loops**,
 **Prompt Templates**, and **Automations** — and already has a unified artifact
 proposal system (`src-tauri/src/artifacts/`, type =
 `"skill" | "loop" | "prompt_template" | "automation"`) where the model proposes

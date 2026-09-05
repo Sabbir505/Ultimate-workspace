@@ -2,6 +2,8 @@
 
 *Research date: 2026-09-03. Sources: codebase audit (frontend + Rust backend) + web research across Playwright MCP, chrome-devtools-mcp, Browser Use, Stagehand, Anthropic browser/computer-use toolsets, OpenAI Operator/Atlas, Claude in Chrome, Edge Copilot Actions, Brave, Comet, Dia, Fellou, Opera, plus 2025–26 papers and the WebView2 API surface. Full source links in the Appendix.*
 
+> **Update (2026-09-05):** two drift items since this research — the relay sidecar binary is now `src-tauri/src/bin/relay_browser_mcp.rs` (Conduit→Relay rename, `7f6952b1`), and the §4 P0 "screenshot tool exists server-side but is unreachable from the relay binary" gap is **closed**: `screenshot` is advertised in the binary's `tools/list` (`relay_browser_mcp.rs`) with a drift-regression test in `src-tauri/src/chat/tools/specs.rs`.
+
 ---
 
 ## 1. Executive summary

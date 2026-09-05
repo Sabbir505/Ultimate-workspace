@@ -295,18 +295,36 @@
      scrolls, instead of height:auto hugging ~1 row once search + endpoint +
      effort chrome eat the budget. Still never overflows the window. */
   height: min(300px, calc(100vh - 32px));
-  width: 300px;
-  /* Never overflow the window on narrow layouts; the panes shrink inside. */
-  max-width: min(240px, calc(100vw - 24px));
+  width: 284px;
+  /* Full width on normal windows (the model rows + sliders need it); the
+     100vw guard only kicks in on genuinely narrow layouts. */
+  max-width: min(300px, calc(100vw - 24px));
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  box-shadow: var(--glass-rim), var(--glass-drop-lg);
+  border-radius: 16px;
+  /* Liquid glass, same recipe as the composer card: TRUE transparent body
+     (the app behind reads as blurred shapes, not flat paint) + heavy frost.
+     A touch more body than the composer card so model rows stay readable
+     over arbitrary backdrops. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 35%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), var(--glass-drop);
   /* Above ALL composer chrome — same rule as the popups it replaced. */
   z-index: 2100;
   overflow: hidden;
+}
+/* Light theme: a touch more body so model rows keep contrast on bright
+   backdrops (mirrors the composer card's light override). */
+:root[data-theme="light"] .agent-model-popup {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 78%, transparent),
+    color-mix(in srgb, var(--surface-glass) 62%, transparent)
+  );
 }
 /* Icon-only rail (~50px). Tooltips/aria-labels carry the names; sections are
    separated by hairline dividers instead of text labels. */
@@ -417,49 +435,144 @@
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 4px 8px 6px;
+  padding: 4px 6px 6px;
   flex-shrink: 0;
 }
-/* Two rows: High/Low/Medium first, Default full-width second. Every option
-   has the SAME fixed height so the rows read as one consistent grid. */
-.agent-model-effort-row {
-  display: flex;
-  gap: 3px;
+/* Codex-style animated slider (reasoning-effort + Auto-bias footers): a pill
+   track with an accent fill up to the active stop, a white knob that glides
+   between dot-marked stops, labels aligned under the stops. Fill and knob
+   move via CSS transitions; the knob uses `left` (a tiny absolutely-
+   positioned element, so the layout cost is nil). */
+.seg-slider-wrap {
+  /* Edge labels are clamped (first left-aligned, last right-aligned), so the
+     wrap only needs a whisker of breathing room — the rail spans the pane. */
+  padding: 2px 4px 0;
+  flex-shrink: 0;
 }
-.agent-model-effort-opt {
-  flex: 1 1 0;
-  min-width: 0;
+.seg-slider {
+  position: relative;
   height: 24px;
-  padding: 0;
-  font-size: 10.5px;
-  line-height: 1;
-  text-align: center;
+  border-radius: 999px;
+  background: var(--surface-1);
   border: 1px solid var(--border);
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text-dim);
   cursor: pointer;
+  outline: none;
+  overflow: hidden;
+}
+.seg-slider:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.seg-slider-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  /* Per-level color arrives inline via --seg-color; the color crossfades as
+     the level changes. */
+  background: var(--seg-color, var(--accent));
+  transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.3s ease;
+  overflow: hidden;
+}
+/* Max-tier shimmer: a soft highlight sweeps the fill (only on .max). */
+.seg-slider.max .seg-slider-fill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    110deg,
+    transparent 25%,
+    rgba(255, 255, 255, 0.4) 50%,
+    transparent 75%
+  );
+  background-size: 220% 100%;
+  animation: seg-shimmer 1.5s linear infinite;
+}
+@keyframes seg-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.seg-slider-dot {
+  position: absolute;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  /* Visible on both the colored fill and the unfilled rail, in both themes. */
+  background: color-mix(in srgb, var(--text) 40%, transparent);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.seg-slider-knob {
+  position: absolute;
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+  transition: left 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+/* Max-tier pulse: the knob breathes a ring in the active level's color. */
+.seg-slider.max .seg-slider-knob {
+  animation: seg-pulse 1.6s ease-out infinite;
+}
+@keyframes seg-pulse {
+  0% {
+    box-shadow:
+      0 1px 4px rgba(0, 0, 0, 0.35),
+      0 0 0 0 var(--seg-color, var(--accent));
+  }
+  100% {
+    box-shadow:
+      0 1px 4px rgba(0, 0, 0, 0.35),
+      0 0 0 10px transparent;
+  }
+}
+/* Respect the OS reduce-motion setting — no pulse, no shimmer. */
+@media (prefers-reduced-motion: reduce) {
+  .seg-slider.max .seg-slider-knob {
+    animation: none;
+  }
+  .seg-slider.max .seg-slider-fill::after {
+    animation: none;
+    opacity: 0;
+  }
+}
+.seg-slider-labels {
+  position: relative;
+  height: 15px;
+  margin-top: 2px;
+  pointer-events: none;
+}
+.seg-slider-label {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: 9.5px;
+  line-height: 15px;
+  color: var(--text-dim);
   white-space: nowrap;
+  transition: color 0.18s ease;
 }
-.agent-model-effort-opt:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-.agent-model-effort-opt.selected {
-  border-color: var(--accent);
-  background: var(--accent-soft);
+.seg-slider-label.selected {
   color: var(--text);
   font-weight: 600;
 }
-.agent-model-effort-opt:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-.agent-model-effort-opt.selected {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--text);
-  font-weight: 600;
+/* Auto pane: centered, non-interactive explainer (the rail click commits the
+   pick directly — there is no model row to click here). */
+.agent-model-auto-info {
+  margin: 14px 10px;
+  padding: 10px 12px;
+  text-align: center;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-xs);
 }
 /* Retry link inside the pane error state. */
 .model-effort-retry {

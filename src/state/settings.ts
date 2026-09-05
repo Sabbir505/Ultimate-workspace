@@ -52,6 +52,8 @@ export const DEFAULT_CLOUD_PIN_EXCHANGES = 6;
 // than the model id suggests). 0 = auto (the model's own window). Mirrors
 // chat/context_windows.rs::load_context_limit_override.
 const K_CLOUD_CONTEXT_LIMIT = "chat.cloud.context_limit";
+// Auto model routing cost/quality preference (chat/auto_router.rs reads it).
+const K_AUTO_BIAS = "chat.auto.bias";
 
 // Chat text zoom. A multiplier on the chat message/composer/code font sizes
 // via the --chat-zoom CSS var. (The Ctrl +/-/0 shortcuts now drive the
@@ -157,6 +159,9 @@ interface SettingsState {
    *  (the model's own — dynamic where the API publishes it, registry else).
    *  A cap only SHRINKS; it never raises a model above its real window. */
   cloudContextLimit: number;
+  /** Auto model routing cost/quality preference: "quality" | "balanced"
+   *  | "economy" (the Auto pane footer in the composer picker). */
+  autoBias: "quality" | "balanced" | "economy";
   /** Per-provider curated model lists with per-model window pins. */
   providerModels: Record<string, ProviderModelEntry[]>;
   /** Chat text zoom multiplier (0.7–1.6). Scales chat message text, the
@@ -195,6 +200,8 @@ interface SettingsState {
   setLocalCompactionThreshold: (threshold: number) => void;
   setLocalPinExchanges: (exchanges: number) => void;
   setCloudCompactionEnabled: (enabled: boolean) => void;
+  /** Set the Auto routing bias (persisted as chat.auto.bias). */
+  setAutoBias: (bias: "quality" | "balanced" | "economy") => void;
   setCloudCompactionThreshold: (threshold: number) => void;
   setCloudPinExchanges: (exchanges: number) => void;
   setCloudContextLimit: (limit: number) => void;
@@ -249,6 +256,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   cloudCompactionThreshold: DEFAULT_CLOUD_COMPACTION_THRESHOLD,
   cloudPinExchanges: DEFAULT_CLOUD_PIN_EXCHANGES,
   cloudContextLimit: 0,
+  autoBias: "balanced",
   providerModels: {},
   localCompactionSummarizer: "sidecar",
   localCompactionRebuildFromRaw: true,
@@ -258,7 +266,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   monoFont: DEFAULT_MONO_FONT,
 
   load: async () => {
-    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, chatZoomRaw, appZoomRaw, uiFontRaw, monoFontRaw] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, autoBiasRaw, chatZoomRaw, appZoomRaw, uiFontRaw, monoFontRaw] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
       getSetting(K_NOTIFY_SOUND),
@@ -278,6 +286,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       getSetting(K_LOCAL_COMPACTION_SUMMARIZER),
       getSetting(K_LOCAL_COMPACTION_REBUILD_FROM_RAW),
       getSetting(K_CLOUD_CONTEXT_LIMIT),
+      getSetting(K_AUTO_BIAS),
       getSetting(K_CHAT_ZOOM),
       getSetting(K_APP_ZOOM),
       getSetting(K_UI_FONT),
@@ -395,6 +404,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       if (cloudPin) {
         const v = Number(cloudPin);
         if (Number.isInteger(v) && v >= 1 && v <= 50) next.cloudPinExchanges = v;
+      }
+      if (autoBiasRaw === "economy" || autoBiasRaw === "quality" || autoBiasRaw === "balanced") {
+        next.autoBias = autoBiasRaw;
       }
       if (chatZoomRaw) {
         const v = Number(chatZoomRaw);
@@ -536,6 +548,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setCloudCompactionEnabled: (enabled) => {
     set({ cloudCompactionEnabled: enabled });
     persistSetting(K_CLOUD_COMPACTION_ENABLED, String(enabled));
+  },
+
+  setAutoBias: (bias) => {
+    set({ autoBias: bias });
+    persistSetting(K_AUTO_BIAS, bias);
   },
 
   setCloudCompactionThreshold: (threshold) => {

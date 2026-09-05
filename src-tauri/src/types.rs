@@ -329,6 +329,14 @@ pub struct ChatSession {
     /// sessions default to `on_request`.
     #[serde(default = "default_approval_policy")]
     pub approval_policy: String,
+    /// Auto model routing (AUTO_MODEL_ROUTING_RESEARCH.md). `true` = every
+    /// send re-resolves the provider+model through the auto router (cloud
+    /// providers only — local/CLI models are never auto candidates). The
+    /// row's `provider`/`model` fields hold the LAST resolution so the
+    /// context meter, cost attribution, and next-turn stickiness work
+    /// unchanged; manual picks clear this flag.
+    #[serde(default)]
+    pub auto_model: bool,
 }
 
 fn default_permission_mode() -> String {

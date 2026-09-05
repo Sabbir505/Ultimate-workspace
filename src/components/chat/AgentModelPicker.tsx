@@ -28,6 +28,7 @@ import { fuzzyFilter, type FuzzyResult } from "../../lib/fuzzy";
 import { shortModelName } from "../../lib/modelLabel";
 import { useSettingsStore } from "../../state/settings";
 import { harnessModelCatalog } from "../../lib/harnessModels";
+import { SegmentedSlider } from "./SegmentedSlider";
 import { LlamaAdvancedFields } from "./LlamaAdvancedFields";
 import {
   ClaudeIcon,
@@ -42,6 +43,7 @@ import {
   ZedIcon,
   LocalModelIcon,
   MonogramIcon,
+  AutoRouteIcon,
 } from "./agentIcons";
 
 /** Effort options in display order — High first, Default last (the footer
@@ -74,7 +76,8 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
 
 /** What a committed pick looks like — ChatView turns this into the session's
  *  agent/provider/model (spawning the local sidecar when provider is
- *  local_gguf). `model: ""` means "the agent decides" (ACP). */
+ *  local_gguf; flipping the session to Auto routing when provider is
+ *  "auto"). `model: ""` means "the agent decides" (ACP). */
 export interface AgentModelSelection {
   agent: string;
   provider: string | null;
@@ -103,6 +106,10 @@ interface Props {
   // --- Effort (harness + cloud panes) ---
   effort?: string;
   onEffortChange?: (effort: string) => void;
+  // --- Auto routing bias (Auto pane): Quality / Balanced / Economy, the
+  // cost-vs-quality dial the backend resolver ranks with. ---
+  autoBias?: string;
+  onAutoBiasChange?: (bias: string) => void;
   // --- Local-model runtime controls (Local pane; wired only when a local
   //     runtime is possible) ---
   onEjectLocalModel?: () => void;
@@ -243,6 +250,7 @@ interface RailEntry {
  *  tooltip/aria-label (the agent name) and, for the rare agents without a
  *  freely-licensed mark, by a monogram of the display name. */
 function railIcon(key: string, label: string): JSX.Element {
+  if (key === "auto") return <AutoRouteIcon />;
   if (key === "harness:claude_code") {
     return (
       <span className="agent-icon-tint-claude">
@@ -283,6 +291,8 @@ export function AgentModelPickerInner({
   onPick,
   effort,
   onEffortChange,
+  onAutoBiasChange,
+  autoBias,
   onEjectLocalModel,
   localModelActive,
   localOverridesMap,
@@ -402,7 +412,8 @@ export function AgentModelPickerInner({
           }),
         );
     } else {
-      // ACP panes are static (the agent decides) — nothing to fetch.
+      // ACP and Auto panes are static (the agent/resolver decides) —
+      // nothing to fetch.
       paneInFlight.delete(key);
     }
   }, []);
@@ -483,6 +494,10 @@ export function AgentModelPickerInner({
   // machine can actually run). Local is always present (built-in).
   const railSections = useMemo(() => {
     const sections: RailEntry[][] = [];
+    // Auto leads the rail in its own section — it's not a place a model
+    // lives (like a CLI or provider) but a routing mode over all keyed
+    // cloud providers, so it's always present and always first.
+    sections.push([{ key: "auto", label: "Auto", enabled: true }]);
     const cli = harnesses
       .filter((h) => h.installed)
       .map((h) => ({
@@ -518,6 +533,7 @@ export function AgentModelPickerInner({
   /** Which rail entry the session is currently running on — highlighted when
    *  the popup opens, and the ✓-carrier in the right pane. */
   const sessionRailKey = useMemo(() => {
+    if (agent === "builtin" && provider === "auto") return "auto";
     const h = harnessIdOf(agent);
     if (h) return `harness:${h}`;
     const a = acpIdOf(agent);
@@ -576,6 +592,7 @@ export function AgentModelPickerInner({
   // ---- ranked rows (fuzzy search) -------------------------------------------
 
   const isAcpPane = railKey.startsWith("acp:");
+  const isAutoPane = railKey === "auto";
   const paneRows = useMemo(() => {
     const rows = pane?.rows ?? [];
     // Parity with the old selector: the session's current cloud model is
@@ -601,7 +618,7 @@ export function AgentModelPickerInner({
     : (pane?.endpoint ?? null);
 
   const ranked = useMemo(() => {
-    if (isAcpPane) return [];
+    if (isAcpPane || isAutoPane) return [];
     if (query.trim().length === 0) {
       return paneRows.map((r) => ({ ...r, matches: [] as number[], score: 0 }));
     }
@@ -624,11 +641,28 @@ export function AgentModelPickerInner({
 
   // ---- commit ---------------------------------------------------------------
 
-  const pickRailEntry = (entry: RailEntry) => setRailKey(entry.key);
+  const pickRailEntry = (entry: RailEntry) => {
+    // Auto commits STRAIGHT from the rail — there is nothing to choose in
+    // its pane (no model rows), so an extra click would be dead weight. The
+    // pane only opens when the session is ALREADY auto (rail click then just
+    // views it) so the bias slider stays reachable without re-committing.
+    // Committed here directly (NOT via pickModel, which keys off the
+    // currently-displayed pane and would commit the wrong provider).
+    if (entry.key === "auto" && sessionRailKey !== "auto") {
+      setOpen(false);
+      onPick({ agent: "builtin", provider: "auto", model: "auto" });
+      return;
+    }
+    setRailKey(entry.key);
+  };
 
   const pickModel = (id: string) => {
     setOpen(false);
-    if (railKey.startsWith("harness:")) {
+    if (railKey === "auto") {
+      // Auto routing: ChatView flips the session to backend-resolved
+      // provider+model per send (cloud providers only).
+      onPick({ agent: "builtin", provider: "auto", model: "auto" });
+    } else if (railKey.startsWith("harness:")) {
       onPick({ agent: railKey, provider: null, model: id });
     } else if (railKey.startsWith("acp:")) {
       onPick({ agent: railKey, provider: null, model: "" });
@@ -676,6 +710,7 @@ export function AgentModelPickerInner({
     if (agent === "local") {
       return model ? shortModelName(model) : "Local model";
     }
+    if (agent === "builtin" && provider === "auto") return "Auto";
     if (agent === "builtin") {
       const p = (provider ?? "") as ProviderId;
       return model ? (modelLabels?.[model] ?? model) : (PROVIDER_LABELS[p] ?? "API");
@@ -697,6 +732,11 @@ export function AgentModelPickerInner({
     if (agent === "local") {
       return model ? `Local · ${shortModelName(model)}` : "Local model";
     }
+    if (agent === "builtin" && provider === "auto") {
+      return model && model !== "auto"
+        ? `Auto · ${modelLabels?.[model] ?? model} (resolved this chat)`
+        : "Auto — Relay picks an available cloud model";
+    }
     if (agent === "builtin") {
       const p = (provider ?? "") as ProviderId;
       const name = PROVIDER_LABELS[p] ?? "API";
@@ -714,6 +754,7 @@ export function AgentModelPickerInner({
     const a = acpIdOf(agent);
     if (a) return railIcon(`acp:${a}`, a);
     if (agent === "local") return railIcon("local", "Local");
+    if (agent === "builtin" && provider === "auto") return railIcon("auto", "Auto");
     if (agent === "builtin") {
       const p = (provider ?? "") as ProviderId;
       return railIcon(`provider:${p}`, PROVIDER_LABELS[p] ?? "API");
@@ -801,18 +842,28 @@ export function AgentModelPickerInner({
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={onSearchKeyDown}
                 placeholder={
-                  isAcpPane
-                    ? "Agent decides its model"
-                    : pane?.status === "loading"
-                      ? "Loading models…"
-                      : `Search ${pane?.rows.length ?? 0} models…`
+                  isAutoPane
+                    ? "Relay picks the model per message"
+                    : isAcpPane
+                      ? "Agent decides its model"
+                      : pane?.status === "loading"
+                        ? "Loading models…"
+                        : `Search ${pane?.rows.length ?? 0} models…`
                 }
                 spellCheck={false}
                 autoComplete="off"
               />
             </div>
             <div className="agent-model-list">
-              {isAcpPane ? (
+              {isAutoPane ? (
+                // Informational only — the rail click already committed the
+                // pick; this pane carries the bias slider below.
+                <div className="agent-model-auto-info">
+                  Auto — Relay picks the best available cloud model for each
+                  message. It skips providers whose key is rejected or out of
+                  credit and fails over when one is down.
+                </div>
+              ) : isAcpPane ? (
                 <button
                   type="button"
                   role="menuitemradio"
@@ -933,6 +984,41 @@ export function AgentModelPickerInner({
               )}
             </div>
 
+            {/* ---- Auto bias footer (Auto pane): Quality/Balanced/Economy
+                 as an animated slider. ---- */}
+            {isAutoPane && onAutoBiasChange && (
+              <>
+                <div className="model-effort-divider" />
+                <div className="agent-model-effort">
+                  <SegmentedSlider
+                    ariaLabel="Auto routing bias"
+                    value={(autoBias ?? "balanced") as "quality" | "balanced" | "economy"}
+                    onChange={(v) => onAutoBiasChange(v)}
+                    options={[
+                      {
+                        value: "economy",
+                        label: "Economy",
+                        title: "Prefer free and cheap models when they fit",
+                        color: "#22c55e",
+                      },
+                      {
+                        value: "balanced",
+                        label: "Balanced",
+                        title: "Provider preference, cost as a tiebreaker",
+                        color: "#3b82f6",
+                      },
+                      {
+                        value: "quality",
+                        label: "Quality",
+                        title: "Prefer the strongest model per provider",
+                        color: "#a78bfa",
+                      },
+                    ]}
+                  />
+                </div>
+              </>
+            )}
+
             {/* Endpoint footnote — PINNED under the list (not inside the
                 scroll area) so the relay/endpoint is visible without
                 scrolling past every model. Host only; full URL in title. */}
@@ -942,40 +1028,43 @@ export function AgentModelPickerInner({
               </div>
             )}
 
-            {/* ---- effort footer (CLI + cloud panes): High/Low/Medium on the
-                 first row, Default full-width on the second, same heights ---- */}
+            {/* ---- effort footer (CLI + cloud panes): reasoning effort as an
+                 animated slider, strongest → provider default ---- */}
             {showEffort && (
               <>
                 <div className="model-effort-divider" />
                 <div className="agent-model-effort">
-                  <div className="agent-model-effort-row">
-                    {(["high", "low", "medium"] as const).map((value) => (
-                      <button
-                        key={value}
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked={value === effort}
-                        className={`agent-model-effort-opt${value === effort ? " selected" : ""}`}
-                        onClick={() => onEffortChange!(value)}
-                        title={`Prefer ${EFFORT_LABELS[value].toLowerCase()} reasoning effort`}
-                      >
-                        {EFFORT_LABELS[value]}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="agent-model-effort-row">
-                    <button
-                      key="default"
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={"" === effort}
-                      className={`agent-model-effort-opt${"" === effort ? " selected" : ""}`}
-                      onClick={() => onEffortChange!("")}
-                      title="Provider default reasoning effort"
-                    >
-                      {EFFORT_LABELS[""]}
-                    </button>
-                  </div>
+                  <SegmentedSlider
+                    ariaLabel="Reasoning effort"
+                    value={(effort ?? "") as string}
+                    onChange={(v) => onEffortChange!(v)}
+                    options={[
+                      {
+                        value: "",
+                        label: EFFORT_LABELS[""],
+                        title: "Provider default reasoning effort",
+                        color: "var(--text-dim)",
+                      },
+                      {
+                        value: "low",
+                        label: EFFORT_LABELS.low,
+                        title: "Prefer low reasoning effort",
+                        color: "#22c55e",
+                      },
+                      {
+                        value: "medium",
+                        label: EFFORT_LABELS.medium,
+                        title: "Prefer medium reasoning effort",
+                        color: "#f59e0b",
+                      },
+                      {
+                        value: "high",
+                        label: EFFORT_LABELS.high,
+                        title: "Prefer high reasoning effort",
+                        color: "#ef4444",
+                      },
+                    ]}
+                  />
                 </div>
               </>
             )}

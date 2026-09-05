@@ -43,6 +43,7 @@ import {
   resolveAgentQuestion,
   setChatSessionPlanMode,
   setChatSessionPermissionMode,
+  setChatSessionAuto,
   type ChatPlanAcceptedPayload,
   type ChatPlanRecord,
   ensureChatSessionWorktree,
@@ -80,6 +81,7 @@ import type { ArtifactProposal } from "../lib/ipc";
 import { generateSessionTitle } from "../lib/sessionTitle";
 import { tailCodePointsHysteresis } from "../lib/safeSlice";
 import { openArtifactInBrowserPane } from "../lib/sessionLauncher";
+import { loadLastSelection, saveLastSelection, type LastSelection } from "../lib/lastSelection";
 import { useArtifactsStore } from "./artifacts";
 import { useProjectsStore } from "./projects";
 import { useUiStore } from "./ui";
@@ -682,6 +684,11 @@ export interface ChatState {
    *  token / done / error. */
   chatStatus: Record<string, { reason: string; message: string }>;
   config: ChatConfigPayload | null;
+  /** Last committed composer pick (every selection kind — builtin, harness,
+   *  ACP, local). Loaded with the config; new chats seed from it so reopening
+   *  the app lands ready-to-send on what the user last used. Null until the
+   *  first pick (or when the stored blob is corrupt). */
+  lastSelection: LastSelection | null;
   error: string | null;
   /** Machine-readable classification of the last chat:error for the active
    *  session ("context_overflow", …) — null when unclassified. Cleared with
@@ -846,14 +853,25 @@ export interface ChatState {
    *  pane's session, nothing otherwise. */
   reloadFor: (chatSessionId: string) => Promise<void>;
   loadConfig: (provider?: string) => Promise<void>;
+  /** Record a committed composer pick as the last selection (state + the
+   *  persisted `chat.last_selection` blob). Fire-and-forget persist: the
+   *  in-memory value still seeds this run's new chats if the write fails. */
+  rememberSelection: (sel: LastSelection) => void;
   loadSessionMetrics: (chatSessionId: string) => Promise<void>;
   /** Open a chat. Records the switch in the ui store's nav timeline unless
    *  `recordNav: false` (nav Back/Forward restores use that). */
   selectSession: (chatSessionId: string, opts?: { recordNav?: boolean }) => Promise<void>;
   /** Start a new chat. When `projectId` is omitted, the new chat inherits
    *  the previously active chat's project binding (independent when that
-   *  chat has none); an explicit projectId (project-row "+") wins. */
-  newChat: (provider: string, model: string, projectId?: string | null) => Promise<ChatSession | null>;
+   *  chat has none); an explicit projectId (project-row "+") wins. `agent`
+   *  (from the persisted last selection) is applied after create so fresh
+   *  chats open on a harness/ACP/local agent without a second pick. */
+  newChat: (
+    provider: string,
+    model: string,
+    projectId?: string | null,
+    agent?: string | null,
+  ) => Promise<ChatSession | null>;
   deleteChat: (chatSessionId: string) => Promise<void>;
   /** Delete EVERY chat session + message (Settings → Data). Uses the backend
    *  bulk command, then wipes all in-memory chat state so the sidebar and
@@ -882,6 +900,10 @@ export interface ChatState {
   /** Switch a session's provider (e.g. to "local_gguf" when a local model is
    *  picked from the selector in a cloud session, or back again). */
   setSessionProvider: (chatSessionId: string, provider: string) => Promise<void>;
+  /** Flip the session between Auto model routing and a pinned pick. `true`
+   *  resets provider/model to "auto" placeholders (resolved per send by the
+   *  backend); `false` clears the flag ahead of a manual pick. */
+  setSessionAuto: (chatSessionId: string, auto: boolean) => Promise<void>;
   /** Set a session's agent selection ("builtin" | "local" | "harness:<id>" |
    *  null). Persisted per chat session; drives the composer's locked/unlocked
    *  model chip. */
@@ -1099,6 +1121,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streamingChatSessionId: null,
   chatStatus: {},
   config: null,
+  lastSelection: null,
   error: null,
   errorCode: null,
   effort: "",
@@ -1448,8 +1471,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   loadConfig: async (provider?: string) => {
-    const config = await getChatConfig(provider);
-    set({ config });
+    const [config, lastSelection] = await Promise.all([
+      getChatConfig(provider),
+      loadLastSelection(),
+    ]);
+    set({ config, lastSelection });
+  },
+
+  rememberSelection: (sel) => {
+    set({ lastSelection: sel });
+    void saveLastSelection(sel).catch(() => {
+      /* best-effort — the in-memory value still seeds this run's new chats */
+    });
   },
 
   loadSessionMetrics: async (chatSessionId) => {
@@ -1590,7 +1623,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     void get().loadSessionMetrics(chatSessionId);
   },
 
-  newChat: async (provider, model, projectId) => {
+  newChat: async (provider, model, projectId, agent) => {
     // Reuse the active session when it already has no turns — clicking "New
     // Chat" while sitting in a fresh empty chat should not spawn yet another
     // empty session. If the caller wants a different provider/model than the
@@ -1605,6 +1638,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // the buffer can still show the previous chat's (empty) page, and
     // reusing based on that would silently hijack a chat with history.
     if (active && messagesSessionId === active.id && messages.length === 0) {
+      // Agent first (same order as handleAgentModelPick): re-targeting the
+      // empty chat to the seeded agent goes through the full store action so
+      // harness picks get their permission-mode init. The session is empty —
+      // there is no CLI process to kill and no turns to disturb.
+      if (agent && active.agent !== agent) {
+        await get().setSessionAgent(active.id, agent);
+      }
       if (provider && active.provider !== provider) {
         await updateChatSessionProvider(active.id, provider);
       }
@@ -1657,13 +1697,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const session = await createChatSession(provider, model, inheritedProjectId);
     if (session) {
-      // Record the new chat in the nav timeline: Back should return to the
-      // chat the user came from.
+      // Insert FIRST, synchronously after create, with a same-id guard. The
+      // seeded-agent apply below is an awaited IPC round-trip; a background
+      // relist (loadSessions after the empty-chat sweep, onDone's
+      // touch-then-relist) can land inside it and already include the new
+      // row — prepending then produced TWO copies of the session in this
+      // array (React duplicate-key warning in the sidebar, and sessions.find
+      // returning the STALE copy first, which made the composer chip show a
+      // previous model instead of Auto). Filtering same-id rows makes the
+      // insert idempotent; applying the agent after the insert means its
+      // store patch updates the one row in place.
       useUiStore.getState().recordChatNav(session.id);
-      // Insert at the top so it appears immediately in the sidebar (below
-      // any starred chats).
       set((s) => ({
-        sessions: sortSessions([session, ...s.sessions]),
+        sessions: sortSessions([session, ...s.sessions.filter((x) => x.id !== session.id)]),
         activeChatSessionId: session.id,
         messages: [],
         messagesSessionId: session.id,
@@ -1676,6 +1722,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ? { ...s.sessionProjects, [session.id]: session.projectId }
             : s.sessionProjects,
       }));
+      // Apply the seeded agent (harness/ACP/local picks) through the full
+      // store action — same post-pick state as a manual pick on a fresh
+      // chat, including the harness permission-mode init. The session is
+      // already in the list, so the action's store patch lands on it.
+      if (agent) {
+        try {
+          await get().setSessionAgent(session.id, agent);
+          session.agent = agent;
+        } catch {
+          /* best-effort — the chat still opens, just without the agent */
+        }
+      }
       // Worktree-per-session default: isolate the new chat, fire-and-forget.
       void maybeEnsureWorktree(session);
     }
@@ -1858,6 +1916,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((sess) =>
         sess.id === chatSessionId ? { ...sess, provider } : sess,
+      ),
+    }));
+  },
+
+  setSessionAuto: async (chatSessionId, auto) => {
+    await setChatSessionAuto(chatSessionId, auto);
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId
+          ? auto
+            ? // Placeholders — the first send resolves the concrete pick and
+              // the row (and this mirror) get the real values back.
+              { ...sess, autoModel: true, provider: "auto", model: "auto" }
+            : { ...sess, autoModel: false }
+          : sess,
       ),
     }));
   },
@@ -2786,6 +2859,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   onStatus: (chatSessionId, reason, message) => {
+    // Routine Auto resolution notices ("Auto → Provider · model (why)") are
+    // deliberately NOT displayed — a pill on every Auto turn read as noise.
+    // The resolution is still visible where it matters: the composer chip
+    // stays "Auto" and its tooltip picks up the resolved model from the
+    // post-turn session relist. Fail-over hand-offs use "auto_failover" and
+    // DO render (rare, and the user should know the model switched).
+    if (reason === "auto_route") return;
     set((s) => {
       // An empty reason is the backend's "clear this notice" signal — used
       // when compaction was a no-op or errored so the "Compacting earlier

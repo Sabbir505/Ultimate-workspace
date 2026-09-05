@@ -1552,8 +1552,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // (e.g. the auto-started default chat) should not leave an empty session
     // row behind in the sidebar. deleteChat() tombstones it, so the relist
     // above can't resurrect it.
+    // Harness/ACP sessions are exempt: every automation run log is agent-
+    // tagged, often still empty when first opened (the run hasn't written
+    // yet), and deleting it here tombstones the id for the whole app run —
+    // after which every artifact / Open button pointing at it silently
+    // no-ops in this guard below and the previous chat appears stuck. The
+    // backend sweeper already protects run-log sessions for the same reason.
     if (outgoingId && outgoingId !== chatSessionId && outgoingEmpty) {
-      void get().deleteChat(outgoingId);
+      const outgoingSession = get().sessions.find((s) => s.id === outgoingId);
+      if (!isCliAgent(outgoingSession?.agent)) {
+        void get().deleteChat(outgoingId);
+      }
     }
     // Opening a session that has messages stacked in its queue (queued while
     // it was in the background) starts draining them now that it's active.

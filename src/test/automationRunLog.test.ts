@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const listChatSessionsMock = vi.fn();
 const getChatMessagesMock = vi.fn();
+const deleteChatSessionMock = vi.fn();
 
 vi.mock("../lib/ipc", () => ({
   listChatSessions: (...a: unknown[]) => listChatSessionsMock(...a),
@@ -21,7 +22,7 @@ vi.mock("../lib/ipc", () => ({
   getChatSessionMetrics: vi.fn().mockResolvedValue(null),
   touchChatSession: vi.fn().mockResolvedValue(undefined),
   setChatSessionUnread: vi.fn().mockResolvedValue(undefined),
-  deleteChatSession: vi.fn().mockResolvedValue(undefined),
+  deleteChatSession: (...a: unknown[]) => deleteChatSessionMock(...a),
 }));
 
 import { useChatStore } from "../state/chat";
@@ -35,13 +36,27 @@ const RUN_SESSION = {
   createdAt: 0,
   lastActiveAt: 0,
 };
+const RUN_SESSION_B = {
+  id: "run-log-2",
+  title: "⚙ weekly",
+  provider: "claude_code",
+  model: "",
+  createdAt: 0,
+  lastActiveAt: 0,
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
-  listChatSessionsMock.mockResolvedValue([RUN_SESSION]);
-  getChatMessagesMock.mockResolvedValue([
-    { id: 1, chatSessionId: "run-log-1", role: "user", content: "automation prompt" },
-  ]);
+  listChatSessionsMock.mockResolvedValue([RUN_SESSION, RUN_SESSION_B]);
+  // run-log-2 is the "empty run log" fixture; scratch-chat the "empty
+  // builtin chat" one — neither has messages written yet.
+  getChatMessagesMock.mockImplementation((id: string) =>
+    Promise.resolve(
+      id === "run-log-2" || id === "scratch-chat"
+        ? []
+        : [{ id: 1, chatSessionId: id, role: "user", content: `prompt for ${id}` }],
+    ),
+  );
   useChatStore.setState({
     sessions: [],
     activeChatSessionId: null,
@@ -69,6 +84,26 @@ describe("open run log from the Automations view", () => {
 
     expect(useChatStore.getState().activeChatSessionId).toBe("run-log-1");
     expect(useChatStore.getState().messages).toHaveLength(1);
+    expect(useUiStore.getState().activeView).toBe("chat");
+  });
+
+  it("opening a SECOND automation's log switches to that session", async () => {
+    await useChatStore.getState().loadSessions();
+
+    // First open: automations → chat A.
+    await useChatStore.getState().selectSession("run-log-1");
+    useUiStore.getState().setActiveView("chat");
+    expect(useChatStore.getState().activeChatSessionId).toBe("run-log-1");
+
+    // Back to the Automations view, open the other automation's log.
+    useUiStore.getState().setActiveView("automations");
+    await useChatStore.getState().selectSession("run-log-2");
+    useUiStore.getState().setActiveView("chat");
+
+    expect(useChatStore.getState().activeChatSessionId).toBe("run-log-2");
+    // run-log-2's run hasn't written yet — an empty page is expected.
+    expect(useChatStore.getState().messages).toHaveLength(0);
+    expect(useChatStore.getState().messagesSessionId).toBe("run-log-2");
     expect(useUiStore.getState().activeView).toBe("chat");
   });
 });
@@ -116,5 +151,53 @@ describe("backend-initiated run streaming", () => {
     await useChatStore.getState().endRemoteTurn("run-log-1");
     expect(getChatMessagesMock).not.toHaveBeenCalled();
     expect(useChatStore.getState().streaming["run-log-1"]).toBeUndefined();
+  });
+});
+
+describe("empty run-log chats survive switch-away", () => {
+  it("an empty harness session is not deleted on leave, so gallery/open clicks keep working", async () => {
+    // Run-log chats are agent-tagged and often still empty when first opened.
+    const emptyRunLog = { ...RUN_SESSION_B, agent: "harness:claude_code" };
+    listChatSessionsMock.mockResolvedValue([RUN_SESSION, emptyRunLog]);
+    await useChatStore.getState().loadSessions();
+
+    // Open the empty run log, then switch away to the other chat.
+    await useChatStore.getState().selectSession("run-log-2");
+    await useChatStore.getState().selectSession("run-log-1");
+    // Flush microtasks so the fire-and-forget empty-outgoing cleanup (a
+    // void deleteChat) would have landed here if it were still firing.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Pre-fix, the empty-outgoing cleanup deleteChat()ed run-log-2 and
+    // tombstoned it — this second open silently no-op'ed and the chat
+    // view kept showing run-log-1 (the artifact-gallery bug report).
+    await useChatStore.getState().selectSession("run-log-2");
+    expect(useChatStore.getState().activeChatSessionId).toBe("run-log-2");
+    expect(
+      useChatStore.getState().sessions.some((s) => s.id === "run-log-2"),
+    ).toBe(true);
+  });
+
+  it("an empty builtin chat is still cleaned up on switch-away", async () => {
+    const emptyBuiltin = {
+      id: "scratch-chat",
+      title: null,
+      provider: "openai",
+      model: "gpt",
+      createdAt: 0,
+      lastActiveAt: 0,
+    };
+    listChatSessionsMock.mockResolvedValue([RUN_SESSION, emptyBuiltin]);
+    await useChatStore.getState().loadSessions();
+
+    await useChatStore.getState().selectSession("scratch-chat");
+    await useChatStore.getState().selectSession("run-log-1");
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Original purpose preserved: no empty builtin row left behind.
+    expect(deleteChatSessionMock).toHaveBeenCalledWith("scratch-chat");
+    expect(
+      useChatStore.getState().sessions.some((s) => s.id === "scratch-chat"),
+    ).toBe(false);
   });
 });

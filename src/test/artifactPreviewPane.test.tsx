@@ -178,4 +178,34 @@ describe("ArtifactPreviewPane kind routing", () => {
       vi.useRealTimers();
     }
   });
+
+  it("renders an inline mermaid SVG inside the zoom/pan canvas", () => {
+    // "Open in tab" on a ```mermaid fence passes the diagram inline (no file
+    // on disk). It must flow through the canvas path (wheel zoom + drag pan
+    // machinery) — the old inline branch rendered a bare static div with no
+    // zooming at all.
+    const { container } = render(
+      <ArtifactPreviewPane
+        artifact={{
+          path: "flow.svg",
+          filename: "flow.svg",
+          inline: { kind: "svg", code: "<svg width='120' height='80'><rect width='120' height='80' /></svg>" },
+        }}
+        onClose={() => {}}
+      />,
+    );
+
+    const canvas = container.querySelector(".artifact-canvas");
+    expect(canvas).not.toBeNull();
+    // The sanitized diagram itself renders inside the canvas…
+    const svg = canvas!.querySelector(".chat-mermaid-svg svg");
+    expect(svg).not.toBeNull();
+    // …on the pannable content (gestures attached), with the canvas
+    // transform applied at the initial zoom.
+    expect(container.querySelector(".artifact-preview-content.pannable")).not.toBeNull();
+    expect((canvas as HTMLElement).style.transform).toContain("scale(1)");
+    // No header for inline artifacts: download/open-in-app would hit a path
+    // that has no file on disk.
+    expect(container.querySelector(".artifact-preview-header")).toBeNull();
+  });
 });

@@ -566,6 +566,25 @@ export function ArtifactPreviewPaneInner({
   const paneRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const inline = artifact.inline;
+  // Inline mermaid SVG ("Open in tab" on a ```mermaid fence): no file exists
+  // on disk, so the preview-load effect below is skipped. Synthesize the
+  // preview the canvas path needs so the diagram gets the same wheel zoom +
+  // drag pan as file-based diagrams — the old inline branch rendered a bare
+  // static div with no zooming at all.
+  const inlineSvgPreview: ArtifactPreview | null =
+    inline?.kind === "svg"
+      ? {
+          path: artifact.path,
+          filename: artifact.filename,
+          ext: "svg",
+          kind: "diagram",
+          text: inline.code,
+          dataUri: null,
+          size: inline.code.length,
+          truncated: false,
+        }
+      : null;
+  const effectivePreview = inlineSvgPreview ?? preview;
 
   // Canvas gestures (scroll-wheel zoom + left-drag pan) apply to visual
   // artifacts — diagrams and images — and use a transform-based canvas
@@ -574,10 +593,15 @@ export function ArtifactPreviewPaneInner({
   // Text-like previews keep normal scroll and the CSS-zoom reflow.
   // INTERACTIVE diagrams are excluded: their live iframe needs the pointer
   // events the gesture layer would swallow.
-  const liveDiagram = !!preview && preview.kind === "diagram" && preview.text != null && isInteractiveHtml(preview.text);
+  const liveDiagram =
+    !!effectivePreview &&
+    effectivePreview.kind === "diagram" &&
+    effectivePreview.text != null &&
+    isInteractiveHtml(effectivePreview.text);
   const pannable =
-    !!preview &&
-    (preview.kind === "image" || (preview.kind === "diagram" && !liveDiagram));
+    !!effectivePreview &&
+    (effectivePreview.kind === "image" ||
+      (effectivePreview.kind === "diagram" && !liveDiagram));
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const zoomRef = useRef(1);
   zoomRef.current = zoom;
@@ -760,27 +784,12 @@ export function ArtifactPreviewPaneInner({
     };
   }, [fileMtime, artifact.path, inline]);
 
-  if (inline) {
-    // Inline mermaid SVG (```mermaid "Open in tab"): sanitized at render time
-    // by MermaidDiagram, so direct injection is safe. No header — the pane
-    // tabs above already show the filename + close.
-    if (inline.kind === "svg") {
-      return (
-        <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
-          {resizer}
-          <div className="artifact-preview-content artifact-preview-content-svg">
-            <div
-              className="chat-mermaid-svg"
-              style={{ padding: "20px" }}
-              dangerouslySetInnerHTML={{ __html: inline.code }}
-            />
-          </div>
-        </div>
-      );
-    }
+  if (inline && inline.kind !== "svg") {
     // Inline JSX/TSX: no extra header — the pane tabs above already show the
     // filename + close, and JsxPreview brings its own Preview/Code toggle.
     // Zoom controls are omitted for JSX (they don't apply to live React).
+    // (Inline SVG flows through the normal canvas path below — it is the
+    // pannable diagram branch via inlineSvgPreview.)
     return (
       <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
         {resizer}
@@ -796,20 +805,29 @@ export function ArtifactPreviewPaneInner({
   // the JsxPreview/HtmlPreview component. Only show the "open in default app" + a
   // download button for non-JSX/HTML.
   const isJsxOrHtml =
-    preview?.kind === "jsx" ||
-    preview?.kind === "html" ||
-    preview?.kind === "mermaid" ||
-    (preview?.kind === "diagram" && preview.text != null && isInteractiveHtml(preview.text));
+    effectivePreview?.kind === "jsx" ||
+    effectivePreview?.kind === "html" ||
+    effectivePreview?.kind === "mermaid" ||
+    (effectivePreview?.kind === "diagram" &&
+      effectivePreview.text != null &&
+      isInteractiveHtml(effectivePreview.text));
 
   return (
     <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
       {resizer}
-      {!isJsxOrHtml && (
+      {/* Inline artifacts keep the header hidden (the pane tab above already
+          carries the filename + close, and download/open-in-app would hit a
+          path that has no file on disk). */}
+      {!isJsxOrHtml && !inline && (
         <div className="artifact-preview-header">
           <div className="artifact-preview-header-actions">
-            {preview && (preview.kind === "diagram" || preview.kind === "html" || preview.kind === "image") ? (
+            {pannable && <ZoomControls zoom={zoom} setZoom={setZoom} />}
+            {effectivePreview &&
+            (effectivePreview.kind === "diagram" ||
+              effectivePreview.kind === "html" ||
+              effectivePreview.kind === "image") ? (
               <ArtifactExportMenu
-                preview={preview}
+                preview={effectivePreview}
                 path={artifact.path}
                 filename={artifact.filename}
               />
@@ -865,24 +883,36 @@ export function ArtifactPreviewPaneInner({
               <>Could not open preview: {error}</>
             )}
           </div>
-        ) : !preview ? (
+        ) : !effectivePreview ? (
           <div className="artifact-preview-loading">Loading preview…</div>
         ) : pannable ? (
           <div
             className="artifact-canvas"
             style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
           >
-            <PreviewBody preview={preview} />
+            {inlineSvgPreview && inline ? (
+              // The raw (already-sanitized) mermaid SVG renders exactly like
+              // the inline chat version; the <img> path file-based SVGs use
+              // would re-frame it and lose the transparent chat surface.
+              <div
+                className="chat-mermaid-svg"
+                style={{ padding: "20px" }}
+                dangerouslySetInnerHTML={{ __html: inline.code }}
+              />
+            ) : (
+              <PreviewBody preview={effectivePreview} />
+            )}
             {/* Iframe-rendered diagrams (HTML kind) swallow pointer/wheel
                 events — this layer catches them for the pan/zoom handlers. */}
-            {preview.kind === "diagram" && preview.ext.toLowerCase() !== "svg" && (
-              <div className="artifact-preview-gesture-layer" aria-hidden="true" />
-            )}
+            {effectivePreview.kind === "diagram" &&
+              effectivePreview.ext.toLowerCase() !== "svg" && (
+                <div className="artifact-preview-gesture-layer" aria-hidden="true" />
+              )}
           </div>
         ) : (
           <div className="artifact-preview-zoom" style={zoomStyle}>
             <DocQaStrip artifactPath={artifact.path} />
-            <PreviewBody preview={preview} />
+            <PreviewBody preview={effectivePreview} />
           </div>
         )}
       </div>

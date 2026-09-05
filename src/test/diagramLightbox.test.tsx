@@ -28,7 +28,7 @@ vi.mock("mermaid", () => ({
 }));
 vi.mock("@mermaid-js/layout-elk", () => ({ default: {} }));
 
-import { DiagramLightbox } from "../components/chat/DiagramLightbox";
+import { DiagramLightbox, clampPanToView, type StageGeometry } from "../components/chat/DiagramLightbox";
 import { MermaidDiagram } from "../components/chat/MermaidDiagram";
 
 afterEach(() => {
@@ -78,6 +78,23 @@ describe("DiagramLightbox", () => {
     expect(document.body.querySelector(".diagram-lightbox-doc")).not.toBeNull();
     expect(document.body.querySelector(".diagram-lightbox-stage")).toBeNull();
   });
+
+  it("injects a viewBox into svg files that lack one so the full drawing stays reachable", () => {
+    // A root svg without a viewBox crops its drawing to the svg viewport
+    // (the paper) — only the top-left slice renders, and no amount of
+    // panning or zooming can reach the rest. The lightbox must derive the
+    // missing box (from the explicit size here) on measure.
+    render(
+      <DiagramLightbox
+        html="<svg width='2400' height='1800'><rect width='2400' height='1800' /></svg>"
+        filename="no-viewbox.svg"
+        onClose={() => {}}
+      />,
+    );
+    const svg = document.body.querySelector(".diagram-lightbox-svgfill svg");
+    expect(svg).not.toBeNull();
+    expect(svg!.getAttribute("viewBox")).toBe("0 0 2400 1800");
+  });
 });
 
 describe("MermaidDiagram render fallback", () => {
@@ -125,5 +142,43 @@ describe("MermaidDiagram render fallback", () => {
     expect(menu?.textContent).toContain("Download as PNG");
     expect(menu?.textContent).toContain("Download as JPG");
     expect(menu?.textContent).toContain("Open in tab");
+  });
+});
+
+describe("clampPanToView (edge-shake regression)", () => {
+  // 1000×800 stage laid out centered at (500, 400) inside an 800×600 view.
+  const geo: StageGeometry = {
+    cx: 500,
+    cy: 400,
+    view: { left: 0, right: 800, top: 0, bottom: 600 },
+    w: 1000,
+    h: 800,
+  };
+
+  it("keeps cover-mode panning free so a screen-filling diagram stays draggable", () => {
+    // Zoomed past fit (2× → 2000×1600 stage in an 800×600 view): the pan
+    // range is the slack (scaled − view = 1200×1000). Interior pans pass
+    // through untouched…
+    expect(clampPanToView({ x: -300, y: -400 }, 2, geo)).toEqual({ x: -300, y: -400 });
+    // …and the extremes stop exactly where a stage edge would come inside
+    // the view. (The old min(scaled, view) clamp collapsed this interval to
+    // a point, pinning the diagram to the center — dragging did nothing.)
+    expect(clampPanToView({ x: -5000, y: -9000 }, 2, geo)).toEqual({ x: -700, y: -600 });
+    expect(clampPanToView({ x: 4000, y: 6000 }, 2, geo)).toEqual({ x: 500, y: 400 });
+  });
+
+  it("is idempotent — clamping an already-clamped pan is a no-op", () => {
+    const once = clampPanToView({ x: -999, y: 123 }, 2, geo);
+    const twice = clampPanToView(once, 2, geo);
+    expect(twice).toEqual(once);
+  });
+
+  it("leaves interior pans untouched while the stage fits the view", () => {
+    // At 0.5× (500×400) the stage fits: pan is free within the slack
+    // (x ∈ [-250, 50], y ∈ [-200, 200] for this geometry).
+    const p = { x: 40, y: -80 };
+    expect(clampPanToView(p, 0.5, geo)).toEqual(p);
+    // …bounded by keeping the stage fully visible at the extremes.
+    expect(clampPanToView({ x: 900, y: 0 }, 0.5, geo).x).toBe(50);
   });
 });

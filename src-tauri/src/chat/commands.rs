@@ -3459,12 +3459,14 @@ pub fn set_chat_session_permission_mode(
     Ok(())
 }
 
-/// Answer a pending harness question (a Claude Code `AskUserQuestion` that
-/// arrived over the can_use_tool control protocol). `answers` maps question
-/// text → chosen option label (string, or an array for multiSelect);
-/// `response` is an optional free-text reply that replaces the structured
-/// answers. Same pause/resume contract as `resolve_tool_action` — unknown /
-/// already-resolved ids are a no-op.
+/// Answer a pending harness question. Two producers share this command:
+/// a Claude Code `AskUserQuestion` (can_use_tool control protocol — the
+/// answer resolves the oneshot the blocked reader thread awaits), and a
+/// RELAY_ASK marker question from the no-native-protocol harnesses
+/// (kimi/opencode/pi/omp/commandcode — the answer dispatches a follow-up
+/// turn on the harness's resumed session). `answers` maps question text →
+/// chosen option label (string, or an array for multiSelect); `response` is
+/// an optional free-text reply. Unknown / already-resolved ids are a no-op.
 #[tauri::command]
 pub fn resolve_agent_question(
     chat_session_id: String,
@@ -3472,14 +3474,72 @@ pub fn resolve_agent_question(
     answers: serde_json::Value,
     response: Option<String>,
     chat_state: State<'_, crate::ChatState>,
+    app: AppHandle,
+    db: State<'_, DbState>,
+    agent_state: State<'_, crate::agent_sessions::AgentSessionState>,
 ) -> CmdResult<()> {
     let _ = &chat_session_id; // registry is keyed by pending id; kept for UI symmetry
+    let answers_for_ask = answers.clone();
+    let response_for_ask = response.clone();
     if let Some(pending) = chat_state.0.take_pending_question(&pending_id) {
         let answers = if answers.is_object() { answers } else { serde_json::json!({}) };
         let _ = pending.response_tx.send(crate::chat::QuestionReply {
             answers,
             response: response.filter(|s| !s.trim().is_empty()),
         });
+    }
+    // Relay_ASK + native-question path: nothing blocks on a oneshot — route
+    // the answer by producer. Off this thread: a turn can run for minutes
+    // and sync commands run on the blocking pool.
+    if let Some(pending) = agent_state.0.take_pending_ask(&chat_session_id) {
+        if pending.pending_id == pending_id {
+            let answers = if answers_for_ask.is_object() { answers_for_ask } else { serde_json::json!({}) };
+            let free = response_for_ask.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let skipped = free.is_none()
+                && answers
+                    .as_object()
+                    .map(|o| o.is_empty())
+                    .unwrap_or(true);
+            match pending.route {
+                crate::agent_sessions::PendingAskRoute::OpenCode { base_url, oc_session_id, request_id } => {
+                    // Native opencode `question` tool: POST the answer (or
+                    // the reject on skip) to the parked request. The turn is
+                    // still in flight server-side and completes on its own.
+                    let body = crate::agent_sessions::build_opencode_reply_answers(
+                        &pending.questions,
+                        &answers,
+                        free,
+                    );
+                    std::thread::spawn(move || {
+                        if let Err(e) = crate::agent_sessions::opencode_answer_question(
+                            &base_url,
+                            &oc_session_id,
+                            &request_id,
+                            skipped,
+                            &body,
+                        ) {
+                            eprintln!("[agent] opencode question answer failed: {e}");
+                        }
+                    });
+                }
+                crate::agent_sessions::PendingAskRoute::FollowUpTurn => {
+                    let content = crate::agent_sessions::compose_ask_follow_up(
+                        &pending.questions,
+                        &answers,
+                        free,
+                        skipped,
+                    );
+                    let manager = std::sync::Arc::clone(&agent_state.0);
+                    let db2 = DbState(std::sync::Arc::clone(&db.0));
+                    let sid = chat_session_id.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = manager.dispatch_ask_follow_up(&app, &db2, &sid, &content) {
+                            eprintln!("[agent] question follow-up failed: {e}");
+                        }
+                    });
+                }
+            }
+        }
     }
     Ok(())
 }

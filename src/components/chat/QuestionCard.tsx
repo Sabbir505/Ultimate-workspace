@@ -1,10 +1,12 @@
 // The harness question card. Claude Code's AskUserQuestion arrives over the
 // can_use_tool control protocol and pauses the harness turn until the user
-// answers — rendered here, in the same composer slot as the approval and
-// plan-proposal cards. Single-select questions pick one option; multi-select
-// questions toggle; an optional free-text field sends the protocol's
-// top-level `response` (a freeform reply that replaces the structured
-// answers). Skip resolves as "dismissed" so the model proceeds on its own.
+// answers; the no-protocol harnesses (kimi/opencode/pi/omp/commandcode) ask
+// via the RELAY_ASK marker and get the answer as a follow-up turn. Either
+// way it renders here — a lean notched glass card docked on the composer.
+// Single-select questions pick one option; multi-select questions toggle; a
+// free-text field sends the protocol's top-level `response`. Skip resolves
+// as "dismissed" so the model proceeds on its own. Option descriptions (the
+// protocol carries them) show as hover tooltips to keep the card lean.
 import { useMemo, useState } from "react";
 import type { ChatQuestionInput } from "../../lib/ipc";
 import type { PendingQuestion } from "../../state/chat";
@@ -64,47 +66,37 @@ export function QuestionCard({
   };
 
   return (
-    <div className="approval-card approval-card-question" role="dialog" aria-label="Agent question">
-      <span className="approval-badge">QUESTION</span>
-      <span className="approval-card-title">
-        The agent needs your input before it can continue
-      </span>
-      {questions.map((q) => {
-        const selected = selections[q.question];
-        return (
-          <div className="question-block" key={q.question}>
-            <div className="question-header">
-              {q.header && <span className="question-chip">{q.header}</span>}
-              <span className="question-text">{q.question}</span>
-            </div>
-            {Array.isArray(q.options) && q.options.length > 0 && (
-              <div className={`question-options${q.multiSelect ? " multi" : ""}`}>
-                {q.options.map((opt) => {
-                  const isPicked = q.multiSelect
-                    ? Array.isArray(selected) && (selected as string[]).includes(opt.label)
-                    : selected === opt.label;
-                  return (
-                    <button
-                      key={opt.label}
-                      type="button"
-                      className={`question-option${isPicked ? " picked" : ""}`}
-                      title={opt.description}
-                      onClick={() =>
-                        q.multiSelect ? toggleMulti(q, opt.label) : pickSingle(q, opt.label)
-                      }
-                    >
-                      <span className="question-option-label">{opt.label}</span>
-                      {opt.description && (
-                        <span className="question-option-desc">{opt.description}</span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+    <div className="question-card" role="dialog" aria-label="Agent question">
+      <div className="question-card-head">
+        <span className="question-card-badge">QUESTION</span>
+        <span className="question-card-title">The agent needs your input</span>
+      </div>
+      {questions.map((q) => (
+        <div className="question-block" key={q.question}>
+          <div className="question-text">{q.question}</div>
+          <div className="question-options">
+            {(q.options ?? []).map((opt) => {
+              const isPicked = q.multiSelect
+                ? Array.isArray(selections[q.question]) &&
+                  (selections[q.question] as string[]).includes(opt.label)
+                : selections[q.question] === opt.label;
+              return (
+                <button
+                  key={opt.label}
+                  type="button"
+                  className={`question-option${isPicked ? " picked" : ""}`}
+                  title={[opt.label, opt.description].filter(Boolean).join(" — ")}
+                  onClick={() =>
+                    q.multiSelect ? toggleMulti(q, opt.label) : pickSingle(q, opt.label)
+                  }
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
           </div>
-        );
-      })}
+        </div>
+      ))}
       <input
         type="text"
         className="question-free-text"
@@ -115,17 +107,17 @@ export function QuestionCard({
           if (e.key === "Enter" && canSubmit) submit();
         }}
       />
-      <div className="approval-card-actions">
+      <div className="question-card-actions">
         <button
           type="button"
-          className="approval-btn deny"
+          className="question-btn"
           onClick={() => onResolve({}, undefined, true)}
         >
           Skip
         </button>
         <button
           type="button"
-          className="approval-btn approve"
+          className="question-btn primary"
           disabled={!canSubmit}
           onClick={submit}
         >

@@ -2185,9 +2185,11 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       )}
 
       {/* Harness question (Claude Code AskUserQuestion) — the CLI is PAUSED
-          on stdin until this is answered or skipped. */}
+          on stdin until this is answered or skipped. Docked as a fused notch
+          on the composer (same container as the plan proposal): flat bottom
+          melts into the composer card's top border. */}
       {activeChatSessionId && pendingQuestions[activeChatSessionId] && (
-        <div className="composer-approval-wrap">
+        <div className="plan-preview">
           <QuestionCard
             question={pendingQuestions[activeChatSessionId]}
             onResolve={(answers, response, skipped) =>

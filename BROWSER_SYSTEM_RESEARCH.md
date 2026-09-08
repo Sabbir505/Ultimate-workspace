@@ -6,6 +6,8 @@
 
 > **Update (2026-09-06): the entire §4 P0 list is closed** — all five verified in code: (1) `screenshot` advertised (above); (2) the circular CapturePreview fallback deleted (the HWND capture path replaced the COM roundtrip) and `browser_capture.rs` removed; (3) tab titles/favicons populate from the `browser:navigated` payload (`BrowserPane.tsx:544`); (4) fixed port 7681 replaced by an OS-assigned ephemeral port published via `browser_mcp::bound_port` + handshake file (`lib.rs:211`); (5) back/forward buttons render their disabled state from `canGoBack`/`canGoForward` (`BrowserPane.tsx:908`). **The P1 agent-capability gaps and the P2 trust layer remain the open roadmap.**
 
+> **Update (2026-09-06, verified in code): the header above is STALE — the P1/P2 trust layer SHIPPED.** `browser_mcp.rs` now carries `fill_form`, `press_key`, `read_console`/`read_network`, `wait_for: "stable"`, and `include_snapshot` a11y-tree options, plus the autonomy dial with a per-session timeline and hard gates (`browser_mcp.rs:355-396`); the trust-confirm surface lives in `state/browserTrust.ts`. What actually remains open from this research: the §5 Phase-3 differentiators (performance trace / CPU-network emulation, `relay-browser` CLI verbs for harness panes, structured `extract(prompt, schema)`, `upload_file`, WebMCP watch, macOS/Linux parity) and the §P3 hygiene list (Linux pane drift, renderer-crash affordance, centralizing occlusion state).
+
 ---
 
 ## 1. Executive summary

@@ -432,11 +432,44 @@
     color-mix(in srgb, var(--surface-glass) 38%, transparent)
   );
 }
-/* Collapsed: a compact SQUARE chip (48×48) holding just the header icon —
+/* Collapsed: a compact SQUARE chip holding just the header icon —
    the fixed header height keeps the chip's shape consistent. The body is
-   height-collapsed (below), so the shell sizes to the header. */
+   height-collapsed (below), so the shell sizes to the header. A touch
+   smaller than the old 48×48, and borderless: the bare git icon floats on
+   the glass (keep only the soft drop shadow, not the rim ring). */
 .git-sidebar.git-sidebar-collapsed {
-  width: 48px;
+  width: 42px;
+  border-color: transparent;
+  /* No tile at all when collapsed: no border, no fill, no frost, no shadow —
+     just the git icon floating on the app background. */
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+.git-sidebar.git-sidebar-collapsed .git-sidebar-header {
+  height: 42px;
+}
+/* Collapsed WITH live status (running goal / in-progress plan step / changes):
+   the chip widens into a pill so the status line fits beside the git icon.
+   Still borderless; the icon stays anchored top-right (the collapse toggle),
+   the status line fills the remaining width, ellipsized, full text on hover. */
+.git-sidebar.git-sidebar-collapsed.git-sidebar-with-status {
+  width: 190px;
+}
+.git-sidebar-status {
+  position: absolute;
+  left: 12px;
+  right: 38px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
 }
 @keyframes git-sidebar-slide {
   from { opacity: 0; transform: translateX(12px); }
@@ -661,6 +694,93 @@ button.git-sidebar-section-header:hover {
   .git-sidebar-section-caret {
     transition: none;
   }
+}
+
+/* Goal loop status card — live /goal · /loop status above the Plans section:
+   GOAL label + iteration fraction + ticking timer + stop button, goal text
+   below. Flat like every other sidebar section — no boxed tint of its own;
+   it uses the same standard text colors as the rows around it. */
+.git-goal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 6px;
+  padding: 5px 6px 6px;
+  border: none;
+  background: transparent;
+}
+.git-goal-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.git-goal-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.git-goal-iter {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.git-goal-sep {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.git-goal-timer {
+  /* Fixed-width, right-aligned: digit-count changes ("9s" → "10s" → "1m 05s")
+     never shift the neighbouring iteration count or the stop button. */
+  min-width: 42px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+button.git-goal-stop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+button.git-goal-stop:hover {
+  background: var(--surface-3, rgba(255, 255, 255, 0.07));
+  color: var(--text);
+  border-color: transparent;
+}
+.git-goal-text {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.git-goal-icon {
+  flex: none;
+  /* No accent highlight — the goal glyph stays in the quiet text register. */
+  color: var(--text-dim);
+}
+.git-goal-text-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Rows (changes / branch / commit) */

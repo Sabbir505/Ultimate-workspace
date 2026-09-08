@@ -16,6 +16,7 @@ import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { parseSegments, ThinkingBlock } from "../chat/MessageBubble";
 import { DiffCard, type EditPayload } from "../chat/DiffCard";
+import { mdLinkComponents } from "../chat/MdLink";
 
 /** The marker payload the backend embeds in <tool>{json}</tool> (see
  *  tool_meta_generic) — the same shape the chat view's ToolData carries. */
@@ -243,7 +244,7 @@ export function SubagentPanel() {
           <div className="subagent-bubble subagent-prompt-bubble">
             <div className="subagent-bubble-label">Prompt</div>
             <div className="subagent-bubble-content">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
                 {selectedSub.prompt}
               </ReactMarkdown>
             </div>
@@ -258,7 +259,9 @@ export function SubagentPanel() {
                 if (seg.type === "text") {
                   return seg.text.trim().length > 0 ? (
                     <div className="subagent-seg-text" key={`t:${i}`}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{seg.text}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
+                        {seg.text}
+                      </ReactMarkdown>
                     </div>
                   ) : null;
                 }

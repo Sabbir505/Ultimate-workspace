@@ -143,7 +143,7 @@ export function ChatSelectionToolbar() {
         {copied ? "Copied" : "Copy"}
       </button>
       <span className="chat-selection-sep" aria-hidden="true" />
-      <button type="button" className="chat-selection-btn chat-selection-ask" onClick={ask} title="Prefill the composer with this selection as a quoted follow-up">
+      <button type="button" className="chat-selection-btn chat-selection-ask" onClick={ask} title="Add this selection above the composer as a quoted follow-up">
         <SendIcon />
         Ask
       </button>

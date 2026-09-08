@@ -26,7 +26,7 @@ import { liveAttachmentsForMessage, useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { useProjectsStore } from "../../state/projects";
 import { parseUnifiedDiff } from "../../lib/diff";
-import { openInBrowserPane } from "../../lib/openBrowserPane";
+import { MdLink } from "./MdLink";
 import { DiffCard, editLineStats, type EditPayload } from "./DiffCard";
 import { sameTurnFile, TurnChangesRow } from "./TurnChangesRow";
 // InlineDiagram (vector diagrams) and MermaidDiagram (mermaid + its
@@ -259,17 +259,24 @@ function MessageArtifacts({
 
 /** Per-message action bar (Claude-style icons): copy for every message, edit
  *  for user messages, regenerate for assistant messages, delete for any
- *  persisted message. Appears on hover under the bubble. */
+ *  persisted message. Appears on hover under the bubble. The message's
+ *  end-of-turn timestamp rides INSIDE the bar (leading slot) so it uses the
+ *  same hover reveal as the buttons. */
 function MessageActions({
   content,
   onEdit,
   onRepeat,
   onDelete,
+  timestamp,
+  timestampTitle,
 }: {
   content: string;
   onEdit?: (content: string) => void;
   onRepeat?: () => void;
   onDelete?: () => void;
+  /** Preformatted end-of-turn time ("14:32") — rendered beside the buttons. */
+  timestamp?: string | null;
+  timestampTitle?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const copy = useCallback(
@@ -290,6 +297,11 @@ function MessageActions({
 
   return (
     <div className="chat-msg-actions">
+      {timestamp && (
+        <span className="chat-msg-time" title={timestampTitle}>
+          {timestamp}
+        </span>
+      )}
       <button
         className="chat-msg-action"
         onClick={copy}
@@ -1140,6 +1152,25 @@ function formatDuration(sec: number): string {
   return s ? `${m}m ${s}s` : `${m}m`;
 }
 
+/** The bubble's end-of-turn timestamp: "14:32" today, "Sep 7, 14:32" older.
+ *  Persisted rows carry Unix SECONDS while the optimistic just-sent message
+ *  carries Date.now() ms — normalize via the 1e12 µs/ms threshold. Returns
+ *  null when absent or unparseable (legacy rows render without a stamp). */
+function formatMessageTimestamp(ts?: number): string | null {
+  if (ts == null || !Number.isFinite(ts) || ts <= 0) return null;
+  const d = new Date(ts > 1e12 ? ts : ts * 1000);
+  if (Number.isNaN(d.getTime())) return null;
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  return sameDay
+    ? time
+    : `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })}, ${time}`;
+}
+
 /** Live whole-seconds elapsed for the "Working for Xs" header. Reading the
  *  latest `chat:perf` snapshot directly made the timer feel sluggish: the
  *  backend heartbeat emits every ~500ms through a throttle shared with
@@ -1545,30 +1576,7 @@ function Markdown({
               const citation = <ChatCitation nums={nums} sources={sources!} />;
               if (citation) return citation;
             }
-            const isHttp = !!href && /^https?:\/\//i.test(href);
-            return (
-              <a
-                href={href}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="chat-md-link"
-                // No `title` attribute: the native tooltip is OS-positioned
-                // and paints over the surrounding text with no way to place
-                // or style it (user-reported overlap). Links open in the
-                // browser pane on click; citation chips carry their own
-                // rendered preview cards instead.
-                onClick={
-                  isHttp
-                    ? (e) => {
-                        e.preventDefault();
-                        openInBrowserPane(href!);
-                      }
-                    : undefined
-                }
-              >
-                {children}
-              </a>
-            );
+            return <MdLink href={href}>{children}</MdLink>;
           },
         }}
       >
@@ -2148,12 +2156,21 @@ function MessageBubbleInner({
           />
         )}
       </div>
+      {/* Hover action bar; the end-of-turn timestamp rides inside it so it
+          appears beside the buttons with the same hover reveal. Absent on the
+          live streaming bubble — the stamp shows once the turn ends. */}
       {!live && (
         <MessageActions
           content={plainText || message.content}
           onEdit={isUser ? openEditor : undefined}
           onRepeat={onRepeat}
           onDelete={onDelete}
+          timestamp={formatMessageTimestamp(message.createdAt)}
+          timestampTitle={
+            message.createdAt != null
+              ? new Date(message.createdAt > 1e12 ? message.createdAt : message.createdAt * 1000).toLocaleString()
+              : undefined
+          }
         />
       )}
     </div>
@@ -2283,6 +2300,7 @@ export const MessageBubble = memo(
     a.message.content === b.message.content &&
     a.message.role === b.message.role &&
     a.message.durationSec === b.message.durationSec &&
+    a.message.createdAt === b.message.createdAt &&
     (a.message.attachments ?? null) === (b.message.attachments ?? null) &&
     a.live === b.live &&
     a.superseded === b.superseded &&

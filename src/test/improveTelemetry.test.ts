@@ -56,7 +56,7 @@ import { GOAL_LOOP_MAX, useChatStore } from "../state/chat";
 function armLoop(sessionId = "s1") {
   useChatStore.setState({
     activeChatSessionId: sessionId,
-    loopState: { [sessionId]: { goal: "fix tests", iteration: 0, max: GOAL_LOOP_MAX, active: true, backendId: "loop-1" } },
+    loopState: { [sessionId]: { goal: "fix tests", iteration: 0, max: GOAL_LOOP_MAX, active: true, startedAt: Date.now(), backendId: "loop-1" } },
   });
 }
 
@@ -114,7 +114,7 @@ describe("loop backend persistence", () => {
 
   it("cap reached finishes with maxed", () => {
     useChatStore.setState({
-      loopState: { s1: { goal: "g", iteration: GOAL_LOOP_MAX - 1, max: GOAL_LOOP_MAX, active: true, backendId: "loop-1" } },
+      loopState: { s1: { goal: "g", iteration: GOAL_LOOP_MAX - 1, max: GOAL_LOOP_MAX, active: true, startedAt: Date.now(), backendId: "loop-1" } },
     });
     const decision = useChatStore.getState().advanceLoop("s1", "LOOP_STATUS: continue");
     expect(decision).toBe("stop");

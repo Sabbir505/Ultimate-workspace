@@ -9,6 +9,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { PendingPlanProposal } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
+import { mdLinkComponents } from "./MdLink";
 
 export function PlanProposalCard({
   proposal,
@@ -60,7 +61,9 @@ export function PlanProposalCard({
         will be tracked in Progress.
       </div>
       <div className="plan-proposal-body">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{proposal.plan}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
+          {proposal.plan}
+        </ReactMarkdown>
       </div>
       {feedbackOpen && (
         <textarea

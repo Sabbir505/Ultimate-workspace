@@ -529,6 +529,44 @@ function QueuedMessageRow({
   );
 }
 
+/** One quoted selection stacked above the textarea (the selection toolbar's
+ *  "Ask"): a quiet strip — no bordered box, no hover effects, no tooltips —
+ *  visually distinct from the send queue above it. Click expands a long
+ *  quote; × drops it. The quoted text is prepended to the NEXT message the
+ *  user sends; their typed draft is never overwritten. */
+function QuotedSelectionRow({
+  quote,
+  onRemove,
+}: {
+  quote: { id: number; text: string };
+  onRemove: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const label = quote.text.trim() || "Empty selection";
+  return (
+    <div className="composer-quote-row">
+      <span className="composer-quote-mark" aria-hidden="true">
+        ❝
+      </span>
+      <button
+        type="button"
+        className={`composer-quote-text${expanded ? " expanded" : ""}`}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        {label}
+      </button>
+      <button
+        type="button"
+        className="composer-quote-remove"
+        aria-label="Remove quoted selection"
+        onClick={onRemove}
+      >
+        <X size={13} strokeWidth={2} />
+      </button>
+    </div>
+  );
+}
+
 /** Notch chip beside the agent selector showing the directory the chat is
  *  working in: the custom folder chosen via the "+" picker when set, else the
  *  chat's isolated worktree (roadmap P0 §3.1.1), else the selected project's
@@ -886,6 +924,14 @@ interface Props {
   /** Prefill the textarea (e.g. editing a prior message). Bumping `nonce`
    *  re-applies `text` even if the text is unchanged. */
   draft?: { text: string; nonce: number };
+  /** Quoted selections stacked by the selection toolbar's "Ask" — rendered as
+   *  removable rows above the textarea (queue-row visual language) and
+   *  prepended to the next sent message. The user's typed draft is untouched. */
+  quotedSelections?: Array<{ id: number; text: string }>;
+  /** Drop one quoted selection from the stack (row's × button). */
+  onRemoveQuotedSelection?: (id: number) => void;
+  /** Clear the whole quote stack — called after a successful send. */
+  onClearQuotedSelections?: () => void;
   /** Combined agent+model selector state — the chip is hidden when model is
    *  undefined (no active session). */
   model?: string;
@@ -968,6 +1014,9 @@ export function ChatComposer({
   streaming,
   disabled,
   draft,
+  quotedSelections,
+  onRemoveQuotedSelection,
+  onClearQuotedSelections,
   model,
   modelLabels,
   agent,
@@ -2218,7 +2267,17 @@ export function ChatComposer({
     // The command pill contributes its `/slug` token to the message text so
     // every downstream parser (invoked skills, /create routing) sees the same
     // content it would have seen with a plain-text token.
-    const trimmed = (commandPill ? `/${commandPill.slug} ${content}` : content).trim();
+    // Quoted selections (the selection toolbar's "Ask") ride ABOVE the
+    // composer and prepend to the outgoing message — the typed draft is never
+    // touched. A quote keeps the composed text from leading with a slash
+    // token, so quoting text before "/compact" or "/create" stays a normal
+    // quoted turn rather than invoking the command.
+    const base = (commandPill ? `/${commandPill.slug} ${content}` : content).trim();
+    const quoted = (quotedSelections ?? [])
+      .map((q) => q.text.trim())
+      .filter(Boolean)
+      .join("\n\n");
+    const trimmed = quoted ? (base ? `${quoted}\n\n${base}` : quoted) : base;
     if (!trimmed && attachments.length === 0) return;
 
     // --- /compact: universal context compaction, routed by engine ---
@@ -2291,6 +2350,7 @@ export function ChatComposer({
     }
 
     onSend(trimmed, attachments, forceResearch || undefined);
+    onClearQuotedSelections?.();
     setContent("");
     setCommandPill(null);
     setAttachments([]);
@@ -2302,7 +2362,7 @@ export function ChatComposer({
     if (ta) {
       ta.style.height = "auto";
     }
-  }, [content, commandPill, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration, isHarnessSession, effectiveSessionId]);
+  }, [content, commandPill, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration, isHarnessSession, effectiveSessionId, quotedSelections, onClearQuotedSelections]);
 
   // Handle ArtifactTypeSelector selection
   const handleCreateTypeSelect = useCallback((type: ArtifactType, instruction?: string) => {
@@ -2381,7 +2441,10 @@ export function ChatComposer({
     [disabled, needsModel, agentLocked, handleSend, slashOpen, slashFiltered, slashIndex, applySlashItem, atOpen, atFiltered, atIndex, applyAttachSource, content, commandPill, slashToken, atToken, dismissKey],
   );
 
-  const isEmpty = !content.trim() && attachments.length === 0;
+  // Quotes stacked above the composer count as sendable content: with a quote
+  // present, Send/Enter works even with an empty textarea.
+  const isEmpty =
+    !content.trim() && attachments.length === 0 && !(quotedSelections && quotedSelections.length > 0);
   // The combined agent/model chip shows whenever there's an active session
   // (agent !== undefined), including the no-agent-picked state.
   const showAgentSelector = agent !== undefined && !!onAgentModelPick;
@@ -2589,6 +2652,17 @@ export function ChatComposer({
           ))}
         </div>
       )}
+      {quotedSelections && quotedSelections.length > 0 && (
+        <div className="composer-quotes" aria-label="Quoted selections">
+          {quotedSelections.map((q) => (
+            <QuotedSelectionRow
+              key={q.id}
+              quote={q}
+              onRemove={() => onRemoveQuotedSelection?.(q.id)}
+            />
+          ))}
+        </div>
+      )}
       <div className={`chat-composer-card${modeGlowClass}`}>
         {attachments.length > 0 && (
           <div className="composer-attachments">
@@ -2647,60 +2721,9 @@ export function ChatComposer({
               })}
             </span>
           )}
-          {slashOpen && slashFiltered.length > 0 && (
-            <div className="composer-slash-menu" role="listbox" aria-label="Commands">
-              {slashFiltered.map((item, i) => {
-                const key = item.kind === "template" ? item.trigger : item.slug;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    role="option"
-                    aria-selected={i === slashIndex}
-                    ref={i === slashIndex ? slashActiveRef : undefined}
-                    className={`composer-slash-item${i === slashIndex ? " active" : ""}`}
-                    // onMouseDown + preventDefault keeps textarea focus.
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      applySlashItem(item);
-                    }}
-                    onMouseEnter={() => setSlashIndex(i)}
-                  >
-                    <span className="composer-slash-cmd">
-                      {item.kind === "template" ? `/${item.trigger}` : `/${item.slug}`}
-                    </span>
-                    <span className="composer-slash-name">{item.name}</span>
-                    {item.description && (
-                      <span className="composer-slash-desc">{item.description}</span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {atOpen && atFiltered.length > 0 && (
-            <div className="composer-slash-menu" role="listbox" aria-label="Connectors">
-              {atFiltered.map((src, i) => (
-                <button
-                  key={src.rowId}
-                  type="button"
-                  role="option"
-                  aria-selected={i === atIndex}
-                  ref={i === atIndex ? atActiveRef : undefined}
-                  className={`composer-slash-item${i === atIndex ? " active" : ""}`}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    applyAttachSource(src);
-                  }}
-                  onMouseEnter={() => setAtIndex(i)}
-                >
-                  <span className="composer-slash-cmd">@{src.id}</span>
-                  <span className="composer-slash-name">{src.name}</span>
-                  <span className="composer-slash-desc">{src.description}</span>
-                </button>
-              ))}
-            </div>
-          )}
+          {/* The command/@ decks are rendered at .chat-composer level (see
+              below) — inside the card their backdrop blur was dead, and a
+              document.body portal broke under the chat zoom scale. */}
           <textarea
             ref={textareaRef}
             className="chat-composer-textarea"
@@ -2767,33 +2790,6 @@ export function ChatComposer({
                 >
                   <AttachmentIcon />
                   <span>Add files or photos</span>
-                </button>
-                <button
-                  type="button"
-                  className="composer-attach-menu-item"
-                  role="menuitem"
-                  onClick={() => {
-                    setAttachMenuOpen(false);
-                    void listPromptTemplates().then((t) => {
-                      setPromptTemplates(t);
-                      setTemplatePickerOpen(true);
-                    });
-                  }}
-                >
-                  <span className="composer-attach-menu-icon">𝈟</span>
-                  <span>Insert prompt template…</span>
-                </button>
-                <button
-                  type="button"
-                  className="composer-attach-menu-item"
-                  role="menuitem"
-                  onClick={() => {
-                    setAttachMenuOpen(false);
-                    setBroadcastOpen(true);
-                  }}
-                >
-                  <span className="composer-attach-menu-icon">⇶</span>
-                  <span>Broadcast to chats…</span>
                 </button>
                 <button
                   type="button"
@@ -2932,6 +2928,65 @@ export function ChatComposer({
           contextMeter={contextMeterProps}
         />
       </div>
+      {/* Command (@/slash) decks — children of .chat-composer, NOT the card:
+          inside .chat-composer-card they were trapped in its backdrop-filter
+          root (blur silently dead), and a document.body portal broke under
+          the chat zoom scale. From here they anchor to the card with plain
+          CSS (see .chat-composer > .composer-slash-menu) and blur for real. */}
+      {slashOpen && slashFiltered.length > 0 && (
+        <div className="composer-slash-menu" role="listbox" aria-label="Commands">
+          {slashFiltered.map((item, i) => {
+            const key = item.kind === "template" ? item.trigger : item.slug;
+            return (
+              <button
+                key={key}
+                type="button"
+                role="option"
+                aria-selected={i === slashIndex}
+                ref={i === slashIndex ? slashActiveRef : undefined}
+                className={`composer-slash-item${i === slashIndex ? " active" : ""}`}
+                // onMouseDown + preventDefault keeps textarea focus.
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  applySlashItem(item);
+                }}
+                onMouseEnter={() => setSlashIndex(i)}
+              >
+                <span className="composer-slash-cmd">
+                  {item.kind === "template" ? `/${item.trigger}` : `/${item.slug}`}
+                </span>
+                <span className="composer-slash-name">{item.name}</span>
+                {item.description && (
+                  <span className="composer-slash-desc">{item.description}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {atOpen && atFiltered.length > 0 && (
+        <div className="composer-slash-menu" role="listbox" aria-label="Connectors">
+          {atFiltered.map((src, i) => (
+            <button
+              key={src.rowId}
+              type="button"
+              role="option"
+              aria-selected={i === atIndex}
+              ref={i === atIndex ? atActiveRef : undefined}
+              className={`composer-slash-item${i === atIndex ? " active" : ""}`}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                applyAttachSource(src);
+              }}
+              onMouseEnter={() => setAtIndex(i)}
+            >
+              <span className="composer-slash-cmd">@{src.id}</span>
+              <span className="composer-slash-name">{src.name}</span>
+              <span className="composer-slash-desc">{src.description}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {createTypeOpen && (
         <ArtifactTypeSelector
           onSelect={handleCreateTypeSelect}

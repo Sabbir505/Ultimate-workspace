@@ -45,6 +45,7 @@ import {
   LocalModelIcon,
   MonogramIcon,
   AutoRouteIcon,
+  railIcon,
 } from "./agentIcons";
 
 /** Effort options in display order — High first, Default last (the footer
@@ -249,38 +250,9 @@ interface RailEntry {
 
 /** The 50px icon rail carries no text — the icon is identified by its
  *  tooltip/aria-label (the agent name) and, for the rare agents without a
- *  freely-licensed mark, by a monogram of the display name. */
-function railIcon(key: string, label: string): JSX.Element {
-  if (key === "auto") return <AutoRouteIcon />;
-  if (key === "harness:claude_code") {
-    return (
-      <span className="agent-icon-tint-claude">
-        <ClaudeIcon />
-      </span>
-    );
-  }
-  if (key === "harness:opencode") return <OpenCodeIcon />;
-  if (key === "harness:kimi_code") return <KimiIcon />;
-  if (key === "harness:pi") return <PiIcon />;
-  if (key === "harness:omp") return <OmpIcon />;
-  if (key === "harness:commandcode") return <CommandCodeIcon />;
-  if (key === "acp:zed") return <ZedIcon />;
-  if (key === "local") return <LocalModelIcon />;
-  if (key === "provider:anthropic" || key === "provider:anthropic_compatible") {
-    return (
-      <span className="agent-icon-tint-claude">
-        <AnthropicIcon />
-      </span>
-    );
-  }
-  if (key === "provider:openai" || key === "provider:openai_compatible") {
-    return <OpenAiIcon />;
-  }
-  if (key === "provider:openrouter") return <OpenRouterIcon />;
-  // Devin and user-defined ACP agents — monogram fallback.
-  return <MonogramIcon letter={label} />;
-}
-
+ *  freely-licensed mark, by a monogram of the display name. The mapping
+ *  itself lives in agentIcons.tsx (railIcon) so lightweight consumers like
+ *  the sidebar inbox rows share it without importing the picker. */
 // ---- component -------------------------------------------------------------
 
 export function AgentModelPickerInner({

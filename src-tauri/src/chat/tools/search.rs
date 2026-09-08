@@ -12,6 +12,13 @@
 //! `web_search` merges results from DuckDuckGo's HTML SERP, Mojeek, and
 //! Wikipedia, tolerating any single engine failing, and reports per-engine
 //! health so "no results" vs "engine down" stays distinguishable.
+//!
+//! Anti-bot walls: DDG and Mojeek increasingly answer scraper-shaped traffic
+//! with CAPTCHA/403 pages. A blocked page is detected (marker heuristics) and
+//! reported as an ENGINE FAILURE, never as "ok (0 results)" — that keeps the
+//! caller's fallback chain honest. The caller (dispatch) escalates to the
+//! in-app browser pane ([`super::serp_browser`], a real WebView with a real
+//! fingerprint) and then to the Jina Reader SERP before giving up.
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
@@ -511,10 +518,14 @@ fn remove_blocks(html: &str, tags: &[&str]) -> String {
 }
 
 
-struct SearchHit {
-    title: String,
-    url: String,
-    snippet: String,
+/// One organic search result. `pub(crate)` so the fallback engines (the
+/// in-app browser SERP in `serp_browser.rs`) can produce hits and the
+/// dispatch layer can merge engines' outputs.
+#[derive(Debug, Clone)]
+pub(crate) struct SearchHit {
+    pub(crate) title: String,
+    pub(crate) url: String,
+    pub(crate) snippet: String,
 }
 
 /// A BYO-key search provider the user configured in Settings. When set, it
@@ -568,33 +579,143 @@ pub(crate) fn configured_provider(conn: &rusqlite::Connection) -> Option<SearchP
 pub(super) async fn web_search(client: &reqwest::Client, query: &str) -> Result<String, String> {
     web_search_with_status(client, query, None)
         .await
-        .map(|(text, _)| text)
+        .map(|outcome| outcome.text)
 }
 
-/// Same as [`web_search`] but also returns a machine-readable per-engine
-/// status tag (`"duckduckgo:ok,mojeek:fail,wikipedia:ok"`) that the caching
-/// layer uses to decide whether the payload may be persisted (Brave/other
-/// engines with storage restrictions are excluded by tag, not by name
-/// guessing after the fact).
+/// Full outcome of one `web_search` execution. Carries the rendered text and
+/// engine-health tag the tool always produced, PLUS the raw hits and the
+/// per-engine status lines so the dispatch layer can escalate degraded
+/// searches (bot-walled SERPs) to the in-app-browser / reader fallbacks and
+/// re-render with the merged engine list.
+#[derive(Debug, Clone)]
+pub(crate) struct SearchOutcome {
+    pub(crate) text: String,
+    /// Machine-readable per-engine tag ("duckduckgo:ok,mojeek:fail") used by
+    /// the cache layer's storage-restriction decisions.
+    pub(crate) tag: String,
+    pub(crate) hits: Vec<SearchHit>,
+    pub(crate) engine_status: Vec<String>,
+    pub(crate) engine_tag: Vec<String>,
+    /// True when the SERP-grade engines produced NO organic web results —
+    /// every keyless engine failed (bot wall / network) or returned zero
+    /// hits. Wikipedia-only output counts: the caller should escalate rather
+    /// than hand the model an encyclopedia-only answer as if it were "the
+    /// web's results".
+    pub(crate) serp_degraded: bool,
+}
+
+/// True when `url` is one of the SERP hosts themselves (or an in-site path of
+/// one) rather than an organic result. Used to compute `serp_degraded` and to
+/// filter browser-side extraction.
+pub(crate) fn is_serp_host(url: &str) -> bool {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    let host = host.to_ascii_lowercase();
+    host == "duckduckgo.com"
+        || host.ends_with(".duckduckgo.com")
+        || host == "mojeek.com"
+        || host.ends_with(".mojeek.com")
+}
+
+/// True when `url` is one of the free encyclopedic *supplement* engines.
+/// Wikipedia hits are useful but never proof that general web search worked —
+/// a wikipedia-only result set is a degraded SERP.
+fn is_supplement_host(url: &str) -> bool {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    let host = host.to_ascii_lowercase();
+    host == "wikipedia.org" || host.ends_with(".wikipedia.org")
+}
+
+/// Render a merged result set + engine health list into the tool text.
+/// Shared by `web_search_with_status` and the dispatch-layer fallbacks so
+/// every path produces the same envelope ("Search results for …", health
+/// footer) with a fetched-today date line that grounds the model's recency
+/// reasoning AFTER it sees the data, not just in the system prompt.
+pub(crate) fn render_search_results(
+    query: &str,
+    mut hits: Vec<SearchHit>,
+    engine_status: Vec<String>,
+    engine_tag: Vec<String>,
+) -> SearchOutcome {
+    // De-duplicate by URL, preserving order.
+    let mut seen = std::collections::HashSet::new();
+    hits.retain(|h| !h.url.is_empty() && seen.insert(h.url.clone()));
+
+    let engines_ok = engine_tag.iter().filter(|t| t.ends_with(":ok")).count() as u32;
+    let engines_tried = engine_tag.len() as u32;
+    let serp_degraded = !hits
+        .iter()
+        .any(|h| !is_serp_host(&h.url) && !is_supplement_host(&h.url));
+
+    let text = if hits.is_empty() {
+        if engines_ok == 0 {
+            // Every engine failed with a network/HTTP error — NOT "no
+            // results"; the caller surfaces this as an error so the model
+            // reports an outage instead of claiming the query has no results.
+            return SearchOutcome {
+                text: String::new(),
+                tag: engine_tag.join(","),
+                hits,
+                engine_status,
+                engine_tag,
+                serp_degraded: true,
+            };
+        }
+        format!(
+            "No results found for \"{query}\". Engines: {}. Try rephrasing the query.",
+            engine_status.join(", ")
+        )
+    } else {
+        let today = chrono::Local::now().format("%Y-%m-%d");
+        let mut out = format!("Live web results for \"{query}\" (fetched {today}):\n\n");
+        for (i, h) in hits.iter().take(8).enumerate() {
+            out.push_str(&format!("{}. {} — {}\n", i + 1, h.title, h.url));
+            if !h.snippet.is_empty() {
+                out.push_str(&format!("   {}\n", h.snippet));
+            }
+        }
+        if engines_ok < engines_tried {
+            out.push_str(&format!(
+                "\n(engine health: {} — degraded results, treat coverage as partial)\n",
+                engine_status.join(", ")
+            ));
+        }
+        out
+    };
+
+    SearchOutcome {
+        text,
+        tag: engine_tag.join(","),
+        hits,
+        engine_status,
+        engine_tag,
+        serp_degraded,
+    }
+}
+
+/// Same as [`web_search`] but also returns the full [`SearchOutcome`] (raw
+/// hits + per-engine status) so the caching layer can persist the payload and
+/// the dispatch layer can escalate bot-walled searches.
 pub(crate) async fn web_search_with_status(
     client: &reqwest::Client,
     query: &str,
     provider: Option<&SearchProvider>,
-) -> Result<(String, String), String> {
+) -> Result<SearchOutcome, String> {
     let mut hits: Vec<SearchHit> = Vec::new();
     let mut engine_status: Vec<String> = Vec::new();
     let mut engine_tag: Vec<String> = Vec::new();
-    let mut engines_ok = 0u32;
-    let mut engines_tried = 0u32;
 
     macro_rules! run_engine {
         ($name:literal, $fut:expr) => {{
-            engines_tried += 1;
             match $fut.await {
                 Ok(mut v) => {
                     let n = v.len();
                     hits.append(&mut v);
-                    engines_ok += 1;
                     engine_status.push(format!("{} ok ({n})", $name));
                     engine_tag.push(format!("{}:ok", $name));
                 }
@@ -621,46 +742,122 @@ pub(crate) async fn web_search_with_status(
     }
     run_engine!("wikipedia", wikipedia_search(client, query));
 
-    let engines_tag = engine_tag.join(",");
+    let outcome = render_search_results(query, hits, engine_status, engine_tag);
+    if outcome.text.is_empty() {
+        // The "every engine failed" sentinel from the renderer.
+        return Err(format!(
+            "all search engines failed: {}",
+            outcome.engine_status.join("; ")
+        ));
+    }
+    Ok(outcome)
+}
 
-    // De-duplicate by URL, preserving order.
-    let mut seen = std::collections::HashSet::new();
-    hits.retain(|h| !h.url.is_empty() && seen.insert(h.url.clone()));
+/// Percent-encode a query string for use as a single URL query value
+/// (RFC 3986 unreserved characters pass through, everything else is %XX'd).
+/// Used to build SERP URLs for the reader/browser fallbacks.
+pub(crate) fn percent_encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
 
+/// Keyless SERP fallback through the Jina Reader (`r.jina.ai`): the reader
+/// fetches the DuckDuckGo HTML SERP from its own infrastructure with a real
+/// headless browser, so a local IP that's bot-walled still gets results. The
+/// reader emits markdown; organic links survive as `[title](url)` pairs (URLs
+/// still DDG-wrapped, unwrapped by [`unwrap_ddg_redirect`]). Reuses the same
+/// 20 RPM keyless budget as `fetch_url`'s reader fallback.
+pub(crate) async fn serp_via_reader(
+    client: &reqwest::Client,
+    query: &str,
+) -> Result<Vec<SearchHit>, String> {
+    if !jina_rate_limit_ok() {
+        return Err(
+            "jina reader rate limit reached (20 req/min keyless); retry in a minute."
+                .to_string(),
+        );
+    }
+    let target = format!(
+        "https://html.duckduckgo.com/html/?q={}",
+        percent_encode_query(query)
+    );
+    let reader_url = format!("https://r.jina.ai/{target}");
+    let resp = client
+        .get(&reader_url)
+        .header("User-Agent", BROWSER_UA)
+        .header("Accept", "text/plain")
+        .timeout(Duration::from_secs(45))
+        .send()
+        .await
+        .map_err(|e| format!("jina reader request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("jina reader returned HTTP {status}"));
+    }
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+    if body.trim().is_empty() {
+        return Err("jina reader returned an empty document".to_string());
+    }
+    let hits = parse_markdown_links(&body);
     if hits.is_empty() {
-        // If every engine failed with a network/HTTP error, that is NOT "no
-        // results" — it is "search is unreachable". Surface it as an error so
-        // the model tells the user the backend is down instead of claiming the
-        // query has no results (which it would otherwise parrot).
-        if engines_ok == 0 {
-            return Err(format!(
-                "all search engines failed: {}",
-                engine_status.join("; ")
-            ));
-        }
-        return Ok((
-            format!(
-                "No results found for \"{query}\". Engines: {}. Try rephrasing the query.",
-                engine_status.join(", ")
-            ),
-            engines_tag,
-        ));
+        return Err("jina reader SERP yielded no organic links".to_string());
     }
+    Ok(hits)
+}
 
-    let mut out = format!("Search results for \"{query}\":\n\n");
-    for (i, h) in hits.iter().take(8).enumerate() {
-        out.push_str(&format!("{}. {} — {}\n", i + 1, h.title, h.url));
-        if !h.snippet.is_empty() {
-            out.push_str(&format!("   {}\n", h.snippet));
+/// Extract organic hits from the reader's markdown output: a scan for
+/// `[title](url)` pairs, keeping http(s) targets that resolve to a non-SERP
+/// URL after DDG-redirect unwrapping. Image links (`![alt](src)`) are skipped.
+fn parse_markdown_links(body: &str) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = body[i..].find("](") {
+        let url_start = i + rel + 2;
+        let Some(url_end_rel) = body[url_start..].find(')') else {
+            i = url_start;
+            continue;
+        };
+        let url_end = url_start + url_end_rel;
+        // Title: walk back from `](` to the matching opening `[`.
+        let Some(title_rel) = body[..i + rel].rfind('[') else {
+            i = url_end;
+            continue;
+        };
+        let title = strip_html(&body[title_rel + 1..i + rel]);
+        // A `)` inside the URL would have ended the scan earlier; images
+        // `![alt](src)` carry a `!` prefix — skip those.
+        let is_image = title_rel > 0 && bytes[title_rel - 1] == b'!';
+        let raw_url = body[url_start..url_end].trim();
+        i = url_end;
+        if is_image || title.trim().is_empty() {
+            continue;
+        }
+        let url = unwrap_ddg_redirect(raw_url);
+        if !(url.starts_with("http://") || url.starts_with("https://")) || is_serp_host(&url) {
+            continue;
+        }
+        if seen.insert(url.clone()) {
+            hits.push(SearchHit {
+                title: title.trim().to_string(),
+                url,
+                snippet: String::new(),
+            });
+        }
+        if hits.len() >= 8 {
+            break;
         }
     }
-    if engines_ok < engines_tried {
-        out.push_str(&format!(
-            "\n(engine health: {} — degraded results, treat coverage as partial)\n",
-            engine_status.join(", ")
-        ));
-    }
-    Ok((out, engines_tag))
+    hits
 }
 
 // ---------------------------------------------------------------------------
@@ -804,21 +1001,49 @@ async fn brave_search(
     Ok(hits)
 }
 
+/// Marker heuristics for "this HTTP-200 SERP body is actually an anti-bot
+/// block page": CAPTCHA challenges, Cloudflare interstitials, anomaly
+/// warnings. Only consulted when the parser found ZERO results — a genuine
+/// SERP *about* captchas must not be misread as a block page, but a blocked
+/// page has no result anchors to parse, so the empty-parse guard keeps this
+/// precise. Reporting the block as an engine FAILURE (instead of the
+/// `ok (0 results)` the empty parse used to produce) is what lets the caller
+/// distinguish "no public results" from "we're being bot-walled" and engage
+/// the browser/reader fallbacks.
+fn serp_page_blocked(body: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "captcha",
+        "anomaly", // DuckDuckGo's block page wording
+        "unusual traffic",
+        "are you a robot",
+        "verify you are human",
+        "just a moment", // Cloudflare JS challenge
+        "cf-challenge",
+        "attention required",           // Cloudflare block
+        "enable javascript and cookies", // Cloudflare / PerimeterX wording
+    ];
+    let lower = body.to_ascii_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m))
+}
+
 /// The DuckDuckGo **HTML** results endpoint (`html.duckduckgo.com/html/`) is a
 /// real search-engine results page — unlike the Instant Answer API, it returns
-/// organic web results for *any* query, not just known entities. We GET it with
-/// a browser User-Agent and parse the result anchors out of the (small, stable)
-/// HTML the lite endpoint emits. This is the keyless primary search source.
+/// organic web results for *any* query, not just known entities. We POST the
+/// query (the form's own method — GETs on this endpoint are the first thing
+/// its rate limiter throttles) with a browser User-Agent and parse the result
+/// anchors out of the (small, stable) HTML the endpoint emits. This is the
+/// keyless primary search source.
 async fn duckduckgo_html(
     client: &reqwest::Client,
     query: &str,
 ) -> Result<Vec<SearchHit>, String> {
     let url = "https://html.duckduckgo.com/html/";
     let resp = client
-        .get(url)
+        .post(url)
         .header("User-Agent", BROWSER_UA)
+        .header("Accept-Language", "en-US,en;q=0.9")
         .timeout(std::time::Duration::from_secs(10))
-        .query(&[("q", query)])
+        .form(&[("q", query)])
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -827,7 +1052,21 @@ async fn duckduckgo_html(
         return Err(format!("HTTP {status}"));
     }
     let body = resp.text().await.map_err(|e| e.to_string())?;
-    Ok(parse_duckduckgo_html(&body))
+    finish_serp_parse(parse_duckduckgo_html(&body), &body)
+}
+
+/// Shared tail of the keyless SERP fetchers: convert a parsed result set into
+/// the engine outcome, flagging anti-bot block pages as failures. See
+/// [`serp_page_blocked`] for why the check only fires on an empty parse.
+fn finish_serp_parse(hits: Vec<SearchHit>, body: &str) -> Result<Vec<SearchHit>, String> {
+    if hits.is_empty() && serp_page_blocked(body) {
+        return Err(
+            "blocked by an anti-bot challenge (CAPTCHA/anomaly page) — this is an \
+             engine block, not an empty result set"
+                .to_string(),
+        );
+    }
+    Ok(hits)
 }
 
 /// Parse the DuckDuckGo lite/HTML results page. Result links live in
@@ -932,8 +1171,9 @@ fn decode_html_entities(s: &str) -> String {
 
 /// DDG result hrefs are sometimes wrapped as
 /// `//duckduckgo.com/l/?uddg=<percent-encoded real url>&...`. Unwrap to the
-/// real URL; otherwise return the href unchanged.
-fn unwrap_ddg_redirect(href: &str) -> String {
+/// real URL; otherwise return the href unchanged. `pub(crate)`: the
+/// browser-pane SERP fallback extracts wrapped anchors too.
+pub(crate) fn unwrap_ddg_redirect(href: &str) -> String {
     let h = href.trim();
     if !h.contains("uddg=") {
         return h.to_string();
@@ -954,6 +1194,7 @@ async fn mojeek_html(client: &reqwest::Client, query: &str) -> Result<Vec<Search
     let resp = client
         .get(url)
         .header("User-Agent", BROWSER_UA)
+        .header("Accept-Language", "en-US,en;q=0.9")
         .timeout(std::time::Duration::from_secs(10))
         .query(&[("q", query)])
         .send()
@@ -964,7 +1205,7 @@ async fn mojeek_html(client: &reqwest::Client, query: &str) -> Result<Vec<Search
         return Err(format!("HTTP {status}"));
     }
     let body = resp.text().await.map_err(|e| e.to_string())?;
-    Ok(parse_mojeek_html(&body))
+    finish_serp_parse(parse_mojeek_html(&body), &body)
 }
 
 /// Parse the Mojeek results page. Results are `<li>` blocks whose title link
@@ -1177,6 +1418,87 @@ fn strip_html(input: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn serp_block_pages_are_detected_only_on_empty_parses() {
+        // A challenge page with no result anchors reads as blocked...
+        let wall = "<html><body>Unfortunately, our systems detected an anomaly. \
+                    Please verify you are human to continue.</body></html>";
+        assert!(serp_page_blocked(wall));
+        assert!(finish_serp_parse(Vec::new(), wall).is_err());
+        // ...while a genuine SERP that happens to DISCUSS captchas (and
+        // therefore parses to hits) must never be misread as a block page.
+        let legit = concat!(
+            r#"<a class="result__a" href="https://example.org/captcha-guide">"#,
+            r#"How CAPTCHAs work</a>"#
+        );
+        let hits = parse_duckduckgo_html(legit);
+        assert_eq!(hits.len(), 1);
+        assert!(finish_serp_parse(hits, legit).is_ok());
+        // A genuinely empty, non-blocked page stays "ok (0 results)".
+        assert!(finish_serp_parse(Vec::new(), "<html><body></body></html>").is_ok());
+    }
+
+    #[test]
+    fn percent_encode_query_keeps_unreserved_and_escapes_the_rest() {
+        assert_eq!(percent_encode_query("rust 2026 &async?"), "rust%202026%20%26async%3F");
+        assert_eq!(percent_encode_query("plain-words_1.0~a"), "plain-words_1.0~a");
+    }
+
+    #[test]
+    fn render_results_flags_serp_degraded_on_wikipedia_only_output() {
+        let wiki_only = vec![SearchHit {
+            title: "Rust (programming language)".into(),
+            url: "https://en.wikipedia.org/wiki/Rust_(programming_language)".into(),
+            snippet: String::new(),
+        }];
+        let status = vec!["duckduckgo FAILED: HTTP 403".to_string()];
+        let tag = vec!["duckduckgo:fail".to_string()];
+        let outcome = render_search_results("rust", wiki_only, status, tag);
+        assert!(outcome.serp_degraded, "wikipedia-only output is degraded");
+        assert!(outcome.text.contains("Live web results"));
+        assert!(outcome.text.contains("(fetched "), "date line present");
+        assert!(outcome.text.contains("engine health"));
+    }
+
+    #[test]
+    fn render_results_not_degraded_when_organic_hits_exist() {
+        let hits = vec![SearchHit {
+            title: "Rust".into(),
+            url: "https://www.rust-lang.org/".into(),
+            snippet: String::new(),
+        }];
+        let status = vec!["duckduckgo ok (1)".to_string()];
+        let tag = vec!["duckduckgo:ok".to_string()];
+        let outcome = render_search_results("rust", hits, status, tag);
+        assert!(!outcome.serp_degraded);
+        assert_eq!(outcome.tag, "duckduckgo:ok");
+    }
+
+    #[test]
+    fn parse_markdown_links_extracts_reader_serp_hits() {
+        let md = concat!(
+            "Title: rust\n\n",
+            "Markdown Content:\n\n",
+            "- [Rust Programming Language](https://www.rust-lang.org/)\n",
+            "- [wrapped result](//duckduckgo.com/l/?uddg=https%3A%2F%2Fdoc.rust-lang.org%2F&q=1)\n",
+            "- [DDG home](https://duckduckgo.com/about) — SERP host, skipped\n",
+            "![banner](https://img.example.org/banner.png) image, skipped\n",
+            "- [relative](/only/relative) skipped\n",
+        );
+        let hits = parse_markdown_links(md);
+        assert_eq!(hits.len(), 2, "organic + wrapped kept; host/image/relative skipped");
+        assert_eq!(hits[0].url, "https://www.rust-lang.org/");
+        assert_eq!(hits[1].url, "https://doc.rust-lang.org/", "uddg unwrapped");
+    }
+
+    #[test]
+    fn serp_host_detection_covers_ddg_and_mojeek() {
+        assert!(is_serp_host("https://duckduckgo.com/l/?uddg=x"));
+        assert!(is_serp_host("https://html.duckduckgo.com/html/"));
+        assert!(is_serp_host("https://www.mojeek.com/search?q=x"));
+        assert!(!is_serp_host("https://www.rust-lang.org/"));
+    }
 
     #[test]
     fn host_blocked_always_blocks_literal_private_and_loopback_ips() {

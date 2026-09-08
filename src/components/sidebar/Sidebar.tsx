@@ -1,8 +1,10 @@
-﻿// Sidebar (Â§5): unified single-mode layout â€” New Chat, Artifacts, Connectors,
-// Automations (stub), Projects, Chat history, then footer links to Settings /
-// Skills Library / Cost Dashboard. Handles the "Add Project" first-launch flow
-// (Â§4.1) â€” the not-a-git-repo prompt itself renders at the App top level
-// (App.tsx) so it centers on screen like the other modals.
+﻿// Sidebar (Â§5): inbox-style layout â€” brand/search header, Artifacts,
+// Automations, then the Chat History inbox (every chat in one flat list,
+// two lines per row: title + working-spinner/relative time, then the
+// project Â· branch context and the provider/harness/local-model brand icon)
+// and footer links to Settings / Skills Library / Cost Dashboard. The old
+// Projects tree is retired: project + branch live on each chat's second
+// row instead of a nested tree.
 //
 // Visual style: white / frosted glass (light) with a matching dark variant.
 // The <aside> shell is bg-white/95 in light, bg-slate-900/60 in dark, both
@@ -11,7 +13,6 @@
 // darker bg + border. Text uses gray-700/gray-900 (light) and slate-200/
 // white (dark). All Tailwind classes use dark: variants keyed to
 // [data-theme="dark"] so a single source of truth covers both themes.
-import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -21,11 +22,9 @@ import {
   ArrowLeft,
   ArrowRight,
   DollarSign,
-  Folder,
   Library,
   MessageCirclePlus,
   MessageSquare,
-  Plus,
   Search,
   Settings,
   CalendarClock,
@@ -37,28 +36,17 @@ import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { useArtifactsStore } from "../../state/artifacts";
 import { useNewChatAction } from "../../hooks/useNewChatAction";
-import { seedSelectionFrom } from "../../lib/lastSelection";
 import { useViewNav } from "../../hooks/useViewNav";
 import { ArtifactLibrary } from "./ArtifactLibrary";
 import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
-import { relativeTime, shortRelativeTime } from "../../lib/relativeTime";
 import { UpdateButton } from "./UpdateButton";
 import { seedFakeUpdate, SHOW_FAKE_UPDATE } from "../../state/updater";
 
 export function Sidebar() {
-  const [projectsCollapsed, setProjectsCollapsed] = useState(true);
-  // Quiet projects list: show a capped set and reveal the rest on demand.
-  const visibleProjectCount = 6;
-  const [showAllProjects, setShowAllProjects] = useState(false);
   const projects = useProjectsStore((s) => s.projects);
-  const loaded = useProjectsStore((s) => s.loaded);
-  const addProjectAtPath = useProjectsStore((s) => s.addProjectAtPath);
-  const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
-  const selectProject = useProjectsStore((s) => s.selectProject);
-  const expanded = useProjectsStore((s) => s.expanded);
-  const toggleExpanded = useProjectsStore((s) => s.toggleExpanded);
-  const setExpanded = useProjectsStore((s) => s.setExpanded);
-  const removeProjectById = useProjectsStore((s) => s.removeProjectById);
+  // Per-project git status (branch) — polled by the projects store; rows
+  // fall back to the project name alone when a branch isn't known yet.
+  const gitStatuses = useProjectsStore((s) => s.gitStatuses);
   const activeView = useUiStore((s) => s.activeView);
   const setActiveView = useUiStore((s) => s.setActiveView);
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
@@ -71,6 +59,12 @@ export function Sidebar() {
   // Chat store
   const chatSessions = useChatStore((s) => s.sessions);
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  // Per-chat project binding (newer of the two binding paths: DB column via
+  // s.projectId, or the newer sessionProjects map).
+  const sessionProjects = useChatStore((s) => s.sessionProjects);
+  // Chats pointed at an arbitrary folder via the composer's folder notch —
+  // shown on the inbox row's second line when there's no bound project.
+  const cwdOverrides = useChatStore((s) => s.cwdOverrides);
   // Every session id currently streaming — the sidebar row needs the spinner
   // even for background sessions (a user working in chat A must still see
   // chat B is responding). The old selector filtered to the active session
@@ -150,46 +144,6 @@ export function Sidebar() {
 
   const handleNewChat = useNewChatAction();
 
-  const handleProjectClick = useCallback(
-    (projectId: string) => {
-      // Only toggle expansion â€” do NOT select the project here.
-      // Selecting triggers the project-store subscription which rebinds
-      // the active chat to this project, stealing it from its original
-      // project. Project selection happens implicitly when the user clicks
-      // a nested chat or uses the "New chat for project" button.
-      toggleExpanded(projectId);
-    },
-    [toggleExpanded],
-  );
-
-  // Start a brand-new chat explicitly bound to this project, and expand the
-  // project so the new chat is visible under it. Seeded from the last
-  // committed pick, same as every other new-chat entry point.
-  const handleNewChatForProject = useCallback(
-    (projectId: string) => {
-      selectProject(projectId);
-      setExpanded(projectId, true);
-      const seed = seedSelectionFrom(lastSelection, chatConfig);
-      void newChat(seed.provider, seed.model, projectId, seed.agent).then((session) => {
-        if (session) setActiveView("chat");
-      });
-    },
-    [selectProject, setExpanded, newChat, lastSelection, chatConfig, setActiveView],
-  );
-
-  // Remove a project from the sidebar. The backend cascade also deletes every
-  // chat nested under it, so confirm first â€” this is destructive.
-  const handleRemoveProject = useCallback(
-    (projectId: string, projectName: string) => {
-      const ok = window.confirm(
-        `Remove project "${projectName}"?\n\nThis also deletes all chats nested under it. This cannot be undone.`,
-      );
-      if (!ok) return;
-      void removeProjectById(projectId);
-    },
-    [removeProjectById],
-  );
-
   const handleSelectChat = useCallback(
     (id: string) => {
       void selectSession(id).catch((err) => toastError("Couldn't open that chat", err));
@@ -252,57 +206,46 @@ export function Sidebar() {
     }
   }, [chatLoaded, loadSessions, loadConfig]);
 
-  const addProject = async () => {
-    try {
-      const picked = await open({ directory: true, multiple: false, title: "Add Project" });
-      if (typeof picked !== "string") return;
-      const project = await addProjectAtPath(picked);
-      if (project && !project.isGitRepo) setGitPromptProjectId(project.id);
-    } catch (err) {
-      console.warn("folder picker failed", err);
-    }
-  };
-
-  // Flat "Chat History" list shows only chats NOT bound to a project. Chats
-  // bound to a project render nested under that project's expandable row.
+  // Inbox list: EVERY chat in one flat list — project-bound chats included
+  // (their project/branch now live on the row's second line instead of a
+  // nested tree). Starred chats float to the top, then most-recent.
   const chatRowData: ChatSessionRowData[] = useMemo(
     () =>
       chatSessions
-        .filter((s) => s.projectId == null)
-        .map((s) => ({
-          id: s.id,
-          title: s.title ?? "Untitled Chat",
-          lastActiveAt: s.lastActiveAt,
-          lastMessage: undefined,
-          starred: s.starred ?? false,
-          unread: s.unread ?? false,
-          worktreePath: s.worktreePath ?? null,
-        })),
-    [chatSessions],
+        .map((s) => {
+          const projectId = s.projectId ?? sessionProjects[s.id] ?? null;
+          const project = projectId
+            ? projects.find((p) => p.id === projectId) ?? null
+            : null;
+          const overridePath = cwdOverrides[s.id] ?? null;
+          const folderName = overridePath
+            ? overridePath.split(/[\/]/).filter(Boolean).pop() ?? null
+            : null;
+          const branchName = s.worktreePath
+            ? `relay/${s.id}` // isolated-worktree branch naming (P0 §3.1.1)
+            : projectId
+              ? gitStatuses[projectId]?.branch ?? null
+              : null;
+          return {
+            id: s.id,
+            title: s.title ?? "Untitled Chat",
+            lastActiveAt: s.lastActiveAt,
+            lastMessage: undefined,
+            starred: s.starred ?? false,
+            unread: s.unread ?? false,
+            worktreePath: s.worktreePath ?? null,
+            projectName: project?.name ?? folderName ?? null,
+            branchName,
+            agent: s.agent ?? null,
+            provider: s.provider ?? null,
+          };
+        })
+        .sort(
+          (a, b) =>
+            Number(b.starred) - Number(a.starred) || b.lastActiveAt - a.lastActiveAt,
+        ),
+    [chatSessions, sessionProjects, projects, gitStatuses],
   );
-
-  // Chats grouped by project id (starred first, then most-recent), for the
-  // nested dropdown rows under each project.
-  const chatsByProject = useMemo(() => {
-    const map = new Map<string, { id: string; title: string; lastActiveAt: number; starred: boolean; unread: boolean; worktreePath: string | null }[]>();
-    for (const s of chatSessions) {
-      if (!s.projectId) continue;
-      const arr = map.get(s.projectId) ?? [];
-      arr.push({
-        id: s.id,
-        title: s.title ?? "Untitled Chat",
-        lastActiveAt: s.lastActiveAt,
-        starred: s.starred ?? false,
-        unread: s.unread ?? false,
-        worktreePath: s.worktreePath ?? null,
-      });
-      map.set(s.projectId, arr);
-    }
-    for (const arr of map.values()) {
-      arr.sort((a, b) => Number(b.starred) - Number(a.starred) || b.lastActiveAt - a.lastActiveAt);
-    }
-    return map;
-  }, [chatSessions]);
 
   // PERF (PERFORMANCE_AUDIT.md mi27/F5): virtualize the flat chat-history
   // list â€” 100+ sessions used to mount 100+ ChatSessionRow subtrees (each
@@ -312,7 +255,7 @@ export function Sidebar() {
   const chatListVirtualizer = useVirtualizer({
     count: chatRowData.length,
     getScrollElement: () => chatListRef.current,
-    estimateSize: () => 60,
+    estimateSize: () => 80,
     overscan: 8,
     // Key cached row measurements by session id, not list index. Switching
     // chats or creating one re-sorts the sessions array; with index-keyed
@@ -322,7 +265,7 @@ export function Sidebar() {
   });
 
   return (
-    <aside className="flex flex-col h-full bg-white/95 dark:bg-[#141414] backdrop-blur-xl border-r border-gray-200 dark:border-white/20 overflow-hidden select-none">
+    <aside className="sidebar-glass flex flex-col h-full overflow-hidden select-none">
       {/* â”€â”€ Consolidated Header: branding + search + collapse in one block â”€â”€ */}
       <div data-tauri-drag-region className="p-3 border-b border-gray-200 dark:border-white/20">
         {/* The brand doubles as the collapse control (no separate panel icon);
@@ -391,188 +334,6 @@ export function Sidebar() {
               <CalendarClock size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
               <span className="artifact-lib-title-label">Automations</span>
             </button>
-          </div>
-        </div>
-
-        {/* Projects — pb matches the pt of the Chat History header below so
-            the header-to-header gap equals the Automations→Projects rhythm
-            (8px). The old py-1.5 stacked the header's mb-1 + 6px block
-            padding + 2px = 12px of dead space above Chat History. */}
-        <div className="px-2 pt-1.5 pb-0.5">
-          {/* Same geometry as the Artifacts/Schedule rows: full-width pill
-              label + trailing "+" so hover/active fills identically. */}
-          <div className="sidebar-section-header flex items-center gap-1 mb-1">
-            <button
-              type="button"
-              onClick={() => setProjectsCollapsed((c) => !c)}
-              className="sidebar-section-label"
-              title={projectsCollapsed ? "Expand projects" : "Collapse projects"}
-              aria-expanded={!projectsCollapsed}
-              aria-controls="projects-list"
-            >
-              <Folder size={14} strokeWidth={1.8} className="sidebar-section-label-icon" />
-              Projects
-            </button>
-            <button
-              onClick={() => void addProject()}
-              className="sidebar-quiet-btn p-2 rounded-md bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white transition-all duration-150 active:scale-95"
-              title="Add Project"
-              aria-label="Add Project"
-            >
-              <Plus size={13} strokeWidth={2} />
-            </button>
-          </div>
-          {/* Always-mounted collapse wrapper: the grid-rows 0frâ†’1fr transition
-              animates smoothly without measuring content height. */}
-          <div
-            className={`sidebar-projects-collapse${projectsCollapsed ? "" : " open"}`}
-            aria-hidden={projectsCollapsed}
-          >
-            <div id="projects-list" className="sidebar-projects-collapse-inner">
-              {loaded && projects.length === 0 ? (
-                <div className="flex flex-col items-center gap-2 py-4 px-2 rounded-lg bg-gray-50 dark:bg-white/10 border border-gray-200 dark:border-white/20">
-                  <Folder size={20} className="text-gray-400 dark:text-slate-300" strokeWidth={1.5} />
-                  <span className="text-xs text-gray-600 dark:text-slate-200">No projects yet</span>
-                  <button
-                    onClick={() => void addProject()}
-                    className="px-3 py-1.5 rounded-md bg-gray-100 dark:bg-white/15 border border-gray-200 dark:border-white/30 text-xs font-medium text-gray-900 dark:text-white hover:bg-gray-200 dark:hover:bg-white/25 transition-all duration-150 active:scale-95"
-                  >
-                    Add Project
-                  </button>
-                </div>
-              ) : (
-                <div className="flex flex-col gap-0.5 sidebar-projects-scroll">
-                  {/* Quiet list, like a launcher: cap the visible projects and
-                      reveal the rest via "Show more" instead of scrolling a
-                      long nested tree. */}
-                  {(showAllProjects || projects.length <= visibleProjectCount
-                    ? projects
-                    : projects.slice(0, visibleProjectCount)
-                  ).map((project) => {
-                    // Default to expanded: a missing key means "expanded".
-                    // Only an explicit `false` collapses the project.
-                    const isExpanded = expanded[project.id] !== false;
-                    const projectChats = chatsByProject.get(project.id) ?? [];
-                    return (
-                      <div key={project.id} className="sidebar-project-node">
-                        <div
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => handleProjectClick(project.id)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              handleProjectClick(project.id);
-                            }
-                          }}
-                          title={project.path}
-                          className={`sidebar-project-row ${project.id === selectedProjectId ? "is-selected" : ""}`}
-                        >
-                          <Folder size={14} strokeWidth={1.7} className="sidebar-project-folder" />
-                          <span className="sidebar-project-name">{project.name}</span>
-                          {/* Hover-only actions: new chat for this project (+)
-                              and remove (x). Both stopPropagation so they don't
-                              toggle/expand the row. */}
-                          <span className="sidebar-project-actions">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleNewChatForProject(project.id);
-                              }}
-                              className="sidebar-project-action-btn"
-                              title="New chat for this project"
-                              aria-label="New chat for this project"
-                            >
-                              <Plus size={14} strokeWidth={2} />
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleRemoveProject(project.id, project.name);
-                              }}
-                              className="sidebar-project-action-btn sidebar-project-action-danger"
-                              title="Remove project"
-                              aria-label="Remove project"
-                            >
-                              <X size={14} strokeWidth={2} />
-                            </button>
-                          </span>
-                        </div>
-                        {isExpanded && projectChats.length > 0 && (
-                          <div className="sidebar-project-chats">
-                            {projectChats.map((c) => {
-                              const active = c.id === activeChatSessionId;
-                              const working = streamingIds.includes(c.id);
-                              return (
-                                <div
-                                  key={c.id}
-                                  role="button"
-                                  tabIndex={0}
-                                  onClick={() => handleSelectChat(c.id)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter" || e.key === " ") {
-                                      e.preventDefault();
-                                      handleSelectChat(c.id);
-                                    }
-                                  }}
-                                  className={`sidebar-project-chat-row ${active ? "is-active" : ""} ${c.unread ? "is-unread" : ""}`}
-                                  title={c.title}
-                                >
-                                  {/* Quiet rows: no icon while idle â€” the
-                                      status slot only appears when there is
-                                      something to say (running/star/unread). */}
-                                  {(working || c.starred || c.unread) && (
-                                    <span className="sidebar-project-chat-status">
-                                      {working ? (
-                                        <span className="sidebar-project-chat-working" />
-                                      ) : c.starred ? (
-                                        <span className="sidebar-project-chat-star">â˜…</span>
-                                      ) : (
-                                        <span className="sidebar-project-chat-unread-dot" />
-                                      )}
-                                    </span>
-                                  )}
-                                  <span className="sidebar-project-chat-title">{c.title}</span>
-                                  <span className="sidebar-project-chat-time">{shortRelativeTime(c.lastActiveAt)}</span>
-                                  {project.isGitRepo && (
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        void toggleSessionWorktree(c.id);
-                                      }}
-                                      className={`sidebar-project-chat-worktree ${c.worktreePath ? "is-active" : ""}`}
-                                      title={
-                                        c.worktreePath
-                                          ? `Isolated worktree (${c.worktreePath}). Click to join the main working tree.`
-                                          : "Isolate this chat in its own git worktree (branch relay/<id>)"
-                                      }
-                                      aria-label={
-                                        c.worktreePath ? "Join main working tree" : "Isolate in worktree"
-                                      }
-                                    >
-                                      {c.worktreePath ? "â›“" : "ðŸªµ"}
-                                    </button>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                  {projects.length > visibleProjectCount && (
-                    <button
-                      type="button"
-                      className="sidebar-projects-more"
-                      onClick={() => setShowAllProjects((v) => !v)}
-                    >
-                      {showAllProjects ? "Show less" : "Show more"}
-                    </button>
-                  )}
-                 </div>
-               )}
-            </div>
           </div>
         </div>
       </div>

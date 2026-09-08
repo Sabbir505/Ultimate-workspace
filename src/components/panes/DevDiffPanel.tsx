@@ -24,6 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { SmoothReveal } from "../common/SmoothReveal";
+import { mdLinkComponents } from "../chat/MdLink";
 import {
   getBranchChangedFiles,
   getChangedFiles,
@@ -1075,7 +1076,9 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
               <button className="dev-diff-review-card-close" onClick={() => setWholeTreeReview(null)} title="Dismiss review">✕</button>
             </div>
             <div className="dev-diff-review-card-body dev-diff-review-md">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{wholeTreeReview}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
+                {wholeTreeReview}
+              </ReactMarkdown>
             </div>
           </div>
         )}

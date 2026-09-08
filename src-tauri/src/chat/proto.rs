@@ -343,10 +343,133 @@ pub(crate) fn tool_block(name: &str, args: &Value) -> String {
             "detail": sanitize(s("memory_id")),
         })
     } else {
-        json!({ "kind": "tool", "title": format!("Running tool {name}") })
+        // Unknown tool (MCP connectors, future additions): never show the raw
+        // snake_case id ("Running tool relay_browser_create_document") —
+        // humanize it into a readable action ("Creating document").
+        json!({ "kind": "tool", "title": humanize_tool_title(name) })
     };
 
     format!("<tool>{meta}</tool>")
+}
+
+/// Progressive verb forms for the leading action word of a tool name. Covers
+/// the verbs MCP/community tools actually use; anything unrecognized falls
+/// through to plain Title Case below.
+const VERB_PROGRESSIVE: &[(&str, &str)] = &[
+    ("create", "Creating"),
+    ("make", "Creating"),
+    ("add", "Adding"),
+    ("insert", "Inserting"),
+    ("read", "Reading"),
+    ("get", "Reading"),
+    ("fetch", "Fetching"),
+    ("load", "Loading"),
+    ("write", "Writing"),
+    ("edit", "Editing"),
+    ("update", "Updating"),
+    ("modify", "Updating"),
+    ("rename", "Renaming"),
+    ("delete", "Deleting"),
+    ("remove", "Deleting"),
+    ("run", "Running"),
+    ("execute", "Executing"),
+    ("list", "Listing"),
+    ("search", "Searching"),
+    ("find", "Searching"),
+    ("query", "Querying"),
+    ("open", "Opening"),
+    ("close", "Closing"),
+    ("navigate", "Navigating"),
+    ("click", "Clicking"),
+    ("type", "Typing"),
+    ("fill", "Filling"),
+    ("submit", "Submitting"),
+    ("select", "Selecting"),
+    ("scroll", "Scrolling"),
+    ("send", "Sending"),
+    ("download", "Downloading"),
+    ("upload", "Uploading"),
+    ("save", "Saving"),
+    ("install", "Installing"),
+    ("generate", "Generating"),
+    ("build", "Building"),
+    ("wait", "Waiting"),
+    ("extract", "Extracting"),
+    ("convert", "Converting"),
+    ("copy", "Copying"),
+    ("move", "Moving"),
+    ("start", "Starting"),
+    ("stop", "Stopping"),
+    ("connect", "Connecting"),
+    ("deploy", "Deploying"),
+    ("test", "Testing"),
+    ("validate", "Validating"),
+    ("analyze", "Analyzing"),
+    ("translate", "Translating"),
+    ("export", "Exporting"),
+    ("import", "Importing"),
+];
+
+/// Words that stay uppercase in the target phrase (they read as acronyms).
+const ACRONYMS: &[&str] = &[
+    "id", "ids", "url", "urls", "api", "pdf", "pdfs", "csv", "json", "html", "css", "sql",
+    "ui", "xls", "xlsx", "docx", "pptx", "db", "http", "https",
+];
+
+/// Humanize a raw tool id into a display title: progressive verb + target
+/// ("relay_browser_create_document" → "Creating document", "search_files" →
+/// "Searching files"). Everything before the first recognized verb is treated
+/// as a product/connector prefix and dropped, acronyms stay uppercase, and a
+/// name with no recognizable verb falls back to Title Case after "Running"
+/// so it still reads as an action.
+fn humanize_tool_title(name: &str) -> String {
+    let tokens: Vec<String> = name
+        .split(|c: char| c == '_' || c == '-' || c == '.')
+        .filter(|t| !t.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if tokens.is_empty() {
+        return "Running tool".to_string();
+    }
+
+    let fmt_word = |w: &str| -> String {
+        if ACRONYMS.contains(&w) {
+            w.to_ascii_uppercase()
+        } else {
+            w.to_string()
+        }
+    };
+
+    let verb_idx = tokens
+        .iter()
+        .position(|t| VERB_PROGRESSIVE.iter().any(|(v, _)| v == t));
+    match verb_idx {
+        Some(i) => {
+            let verb = VERB_PROGRESSIVE
+                .iter()
+                .find(|(v, _)| *v == tokens[i])
+                .map(|(_, p)| *p)
+                .unwrap_or("Running");
+            let target = tokens[i + 1..]
+                .iter()
+                .map(|w| fmt_word(w))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if target.is_empty() {
+                verb.to_string()
+            } else {
+                format!("{verb} {target}")
+            }
+        }
+        None => {
+            let titled = tokens
+                .iter()
+                .map(|w| fmt_word(w))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("Running {}", titled)
+        }
+    }
 }
 
 /// Build an OpenAI-style message object, using a multimodal `content` array
@@ -389,4 +512,25 @@ pub(crate) fn anthropic_message_json(m: &ChatMessage) -> Value {
         }));
     }
     json!({ "role": m.role, "content": blocks })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanize_strips_prefix_and_conjugates_verb() {
+        assert_eq!(humanize_tool_title("relay_browser_create_document"), "Creating document");
+        assert_eq!(humanize_tool_title("mcp_notion_create_page"), "Creating page");
+        assert_eq!(humanize_tool_title("search_files"), "Searching files");
+        assert_eq!(humanize_tool_title("get_weather"), "Reading weather");
+    }
+
+    #[test]
+    fn humanize_keeps_acronyms_and_falls_back_to_running() {
+        assert_eq!(humanize_tool_title("export_pdf_report"), "Exporting PDF report");
+        assert_eq!(humanize_tool_title("fetch_url_snapshot"), "Fetching URL snapshot");
+        // No known verb: still readable, never a raw snake_case id.
+        assert_eq!(humanize_tool_title("zombie_mode"), "Running zombie mode");
+    }
 }

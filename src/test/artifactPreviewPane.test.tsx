@@ -101,8 +101,38 @@ describe("ArtifactPreviewPane kind routing", () => {
     // The mermaid fence carried the diagram source to the stub…
     const stub = container.querySelector('[data-testid="mermaid-stub"]')!;
     expect(stub.getAttribute("data-code")).toContain("sequenceDiagram");
-    // …and the plain code fence still renders as code.
-    expect(container.querySelector("code.language-js")).not.toBeNull();
+    // …and the plain code fence renders as a code block with its language.
+    const langLabel = container.querySelector(".doc-code-block .doc-code-lang");
+    expect(langLabel).not.toBeNull();
+    expect(langLabel!.textContent).toBe("js");
+  });
+
+  it("gives fenced markdown blocks a working Copy button", async () => {
+    // Regression: markdown docs rendered fences as bare <pre> text — a doc
+    // whose content is meant to be copied had no copy affordance at all.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    readMock.mockResolvedValue(
+      basePreview({
+        kind: "markdown",
+        ext: "md",
+        filename: "post.md",
+        text: "# Post\n\n```text\nHello copyable world\n```",
+      }) as never,
+    );
+    const { container } = render(
+      <ArtifactPreviewPane artifact={{ path: "D:/artifacts/post.md", filename: "post.md" }} onClose={() => {}} />,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector(".doc-code-block")).not.toBeNull();
+    });
+    expect(container.querySelector(".doc-code-lang")!.textContent).toBe("text");
+    const copyBtn = container.querySelector(".doc-code-block .copy-code-btn")!;
+    (copyBtn as HTMLElement).click();
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith("Hello copyable world");
+    });
   });
 
   it("renders interactive HTML with the live allow-scripts iframe", async () => {

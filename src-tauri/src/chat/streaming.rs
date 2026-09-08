@@ -27,16 +27,19 @@ use crate::chat::proto::{
 use crate::chat::providers::{ChatProvider, ChatProviderId, ChatRequest, ChatUsage,
     calculate_anthropic_cost, calculate_openai_cost};
 
-/// Max model⇄tool round-trips in a single tool-enabled turn before we stop,
-/// to bound cost and prevent runaway loops.
-const MAX_TOOL_ITERS: usize = 45;
+/// Tool-loop round cap. The model⇄tool round-trip limit was removed by
+/// request: a single turn may now chain as many tool calls as the task needs.
+/// The constant survives as usize::MAX because the loop and the search-nudge
+/// headroom check (`round + 2 < cap`) are written against it — with no cap the
+/// headroom check is always true, which is exactly the unbounded semantic.
+/// The "stopped after reaching the tool-call limit" exit below is therefore
+/// unreachable in practice; per-round safety nets still apply (the SSE stall
+/// detector MAX_PARSE_FAILURES and the provider/socket timeouts).
+const MAX_TOOL_ITERS: usize = usize::MAX;
 
-/// Higher iteration cap for research-mode turns, where a single research task
-/// legitimately chains many tool calls (reset_source_ledger + 2-3 web_search +
-/// 5-8 browser_read + 5-8 add_source_note + get_source_ledger + generate_file).
-/// Only applied when `research_mode` is true; non-research turns stay at
-/// MAX_TOOL_ITERS so everyday Q&A stays tightly bounded.
-const RESEARCH_MAX_TOOL_ITERS: usize = 96;
+/// Research mode shares the same unbounded cap since the limit's removal —
+/// the distinction only mattered when the caps were finite (45 / 96).
+const RESEARCH_MAX_TOOL_ITERS: usize = usize::MAX;
 
 /// Consecutive SSE JSON parse failures before treating the stream as stalled.
 /// A single malformed line is normal (partial chunk); sustained failures mean

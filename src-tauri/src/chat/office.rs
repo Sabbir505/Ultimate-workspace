@@ -754,6 +754,40 @@ font-size:2.2cqw;line-height:1.15}}\
 // XLSX
 // ===========================================================================
 
+/// 1-based spreadsheet column letters ("A", "AA") → 0-based index.
+fn col_index(letters: &str) -> Option<usize> {
+    let mut n: usize = 0;
+    for c in letters.chars() {
+        let c = c.to_ascii_uppercase();
+        if !c.is_ascii_uppercase() {
+            return None;
+        }
+        n = n * 26 + (c as usize - 'A' as usize + 1);
+    }
+    Some(n.checked_sub(1)?)
+}
+
+/// "B3:D8" → (start_col, start_row, end_col, end_row), all 0-based.
+fn parse_merge_range(cell_ref: &str) -> Option<(usize, usize, usize, usize)> {
+    let (a, b) = cell_ref.split_once(':')?;
+    let split = |s: &str| -> Option<(usize, usize)> {
+        let letters: String = s.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        let digits: String = s.chars().skip_while(|c| !c.is_ascii_digit()).collect();
+        Some((col_index(&letters)?, digits.parse::<usize>().ok()?.checked_sub(1)?))
+    };
+    let (c1, r1) = split(a)?;
+    let (c2, r2) = split(b)?;
+    Some((c1.min(c2), r1.min(r2), c1.max(c2), r2.max(r2)))
+}
+
+/// Convert an .xlsx workbook to HTML.
+///
+/// Renders EVERY sheet (named), honouring merged cells (colspan/rowspan) and
+/// column widths — the old single-`sheet1.xml` table squashed multi-sheet
+/// workbooks to one anonymous grid, dropped merges (title rows shattered into
+/// shifted cells) and ignored widths, which read as "broken formatting".
+/// This is a display-oriented tolerant scan, not a full OOXML engine: styles,
+/// number formats and charts are out of scope.
 pub fn xlsx_to_html(bytes: &[u8]) -> Option<String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
 
@@ -767,15 +801,152 @@ pub fn xlsx_to_html(bytes: &[u8]) -> Option<String> {
         }
     }
 
-    let mut xml = String::new();
-    zip.by_name("xl/worksheets/sheet1.xml").ok()?.read_to_string(&mut xml).ok()?;
+    // Sheet name → target path, via workbook.xml + its relationship map.
+    // (Cap the sheet count — a pathological workbook must not stall render.)
+    const MAX_SHEETS: usize = 30;
+    let workbook = {
+        let mut xml = String::new();
+        zip.by_name("xl/workbook.xml").ok()?.read_to_string(&mut xml).ok()?;
+        xml
+    };
+    let mut rels: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Ok(mut f) = zip.by_name("xl/_rels/workbook.xml.rels") {
+        let mut xml = String::new();
+        if f.read_to_string(&mut xml).is_ok() {
+            for rel in elements(&xml, "Relationship") {
+                let open = rel.find('>').map(|i| &rel[..i]).unwrap_or(rel);
+                if let (Some(id), Some(target)) = (attr(open, "Id"), attr(open, "Target")) {
+                    let target = target.trim_start_matches('/');
+                    let target = if target.starts_with("xl/") {
+                        target.to_string()
+                    } else {
+                        format!("xl/{target}")
+                    };
+                    rels.insert(id.to_string(), target);
+                }
+            }
+        }
+    }
+    let mut sheets: Vec<(String, String)> = Vec::new(); // (name, sheet xml path)
+    for sheet in elements(&workbook, "sheet").into_iter().take(MAX_SHEETS) {
+        let open = sheet.find('>').map(|i| &sheet[..i]).unwrap_or(sheet);
+        let name = attr(open, "name").unwrap_or("Sheet").to_string();
+        if let Some(rid) = attr(open, "r:id").and_then(|rid| rels.get(rid).cloned()) {
+            sheets.push((name, rid));
+        }
+    }
+    if sheets.is_empty() {
+        // Tolerant fallback: no workbook map — render the first sheet alone.
+        sheets.push(("Sheet".to_string(), "xl/worksheets/sheet1.xml".to_string()));
+    }
 
-    let mut rows_html = String::new();
-    for (ri, row) in elements(&xml, "row").iter().enumerate().take(500) {
-        let mut cells_html = String::new();
+    let mut body = String::new();
+    let multi = sheets.len() > 1;
+    for (sheet_name, sheet_path) in &sheets {
+        let mut xml = String::new();
+        match zip.by_name(sheet_path) {
+            Ok(mut f) => {
+                if f.read_to_string(&mut xml).is_err() {
+                    continue;
+                }
+            }
+            Err(_) => continue,
+        }
+        if let Some(table) = render_xlsx_sheet(&xml, &shared) {
+            body.push_str("<div class=\"sheet\">");
+            if multi {
+                body.push_str(&format!("<h2>{}</h2>", html_escape(sheet_name)));
+            }
+            body.push_str(&table);
+            body.push_str("</div>");
+        }
+    }
+    if body.is_empty() {
+        return None;
+    }
+
+    let css = "padding:28px";
+    let sheet_css = "\
+.sheet{margin:0 auto 34px;max-width:100%;overflow-x:auto}\
+.sheet h2{font-size:13pt;font-weight:600;color:#334155;margin:0 0 10px}\
+table{border-collapse:collapse;margin:0 auto;background:#fff;font-size:11pt;\
+box-shadow:0 1px 4px rgba(15,23,42,.12)}\
+th,td{border:1px solid #e2e8f0;padding:7px 12px;text-align:left;vertical-align:top}\
+th{background:#2563eb;color:#fff;font-weight:600}\
+tr:nth-child(even) td{background:#f8fafc}";
+    Some(
+        doc_shell(body, css).replace("</style>", &format!("{sheet_css}</style>")),
+    )
+}
+
+/// Render one worksheet's XML into a `<table>` with column widths and merged
+/// cells (colspan/rowspan). Returns `None` when the sheet has no rows.
+fn render_xlsx_sheet(xml: &str, shared: &[String]) -> Option<String> {
+    const MAX_ROWS: usize = 500;
+    const MAX_COLS: usize = 256;
+
+    // Column widths: `<col min max width>` (1-based, inclusive). Excel's
+    // width unit ≈ characters; px ≈ width·7+5 matches default Calibri 11.
+    let mut col_px: Vec<usize> = Vec::new();
+    for cols in elements(xml, "col") {
+        let open = cols.find('>').map(|i| &cols[..i]).unwrap_or(cols);
+        let min = attr(open, "min").and_then(|v| v.parse::<usize>().ok());
+        let max = attr(open, "max").and_then(|v| v.parse::<usize>().ok());
+        let width = attr(open, "width").and_then(|v| v.parse::<f64>().ok());
+        if let (Some(min), Some(width)) = (min, width) {
+            let max = max.unwrap_or(min).min(min + 255);
+            let px = (width * 7.0 + 5.0).round().clamp(20.0, 600.0) as usize;
+            for c in min..=max.min(MAX_COLS) {
+                while col_px.len() < c {
+                    col_px.push(0);
+                }
+                col_px[c - 1] = px;
+            }
+        }
+    }
+
+    // Merged ranges: anchors → (colspan, rowspan); covered → skip.
+    let mut anchors: std::collections::HashMap<(usize, usize), (usize, usize)> =
+        std::collections::HashMap::new();
+    let mut covered: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    for mc in elements(xml, "mergeCell") {
+        let open = mc.find('>').map(|i| &mc[..i]).unwrap_or(mc);
+        if let Some(r) = attr(open, "ref").and_then(parse_merge_range) {
+            let (c1, r1, c2, r2) = r;
+            anchors.insert((r1, c1), (c2 - c1 + 1, r2 - r1 + 1));
+            for rr in r1..=r2 {
+                for cc in c1..=c2 {
+                    covered.insert((rr, cc));
+                }
+            }
+        }
+    }
+
+    // Cell text keyed by (row, col), plus the widest column seen.
+    let mut cells: std::collections::HashMap<(usize, usize), String> =
+        std::collections::HashMap::new();
+    let mut n_rows = 0usize;
+    let mut n_cols = 0usize;
+    for row in elements(xml, "row").into_iter().take(MAX_ROWS) {
+        let open = row.find('>').map(|i| &row[..i]).unwrap_or(row);
+        let row_idx = attr(open, "r")
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|v| v.saturating_sub(1))
+            .unwrap_or(n_rows);
         for cell in elements(row, "c") {
             let open = cell.find('>').map(|i| &cell[..i]).unwrap_or(cell);
+            let col = attr(open, "r")
+                .and_then(|r| {
+                    let letters: String =
+                        r.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+                    col_index(&letters)
+                })
+                .unwrap_or(0);
+            if col >= MAX_COLS {
+                continue;
+            }
             let is_shared = open.contains("t=\"s\"");
+            let is_bool = open.contains("t=\"b\"");
             let raw = collect_text(cell, "v");
             let value = if is_shared {
                 raw.trim()
@@ -783,31 +954,68 @@ pub fn xlsx_to_html(bytes: &[u8]) -> Option<String> {
                     .ok()
                     .and_then(|i| shared.get(i).cloned())
                     .unwrap_or_default()
+            } else if is_bool {
+                match raw.trim() {
+                    "1" => "TRUE".to_string(),
+                    "0" => "FALSE".to_string(),
+                    other => other.to_string(),
+                }
             } else if raw.is_empty() {
-                collect_text(cell, "t")
+                collect_text(cell, "t") // inline strings
             } else {
                 raw
             };
-            let tag = if ri == 0 { "th" } else { "td" };
-            cells_html.push_str(&format!("<{tag}>{}</{tag}>", html_escape(value.trim())));
+            cells.insert((row_idx, col), value);
+            n_cols = n_cols.max(col + 1);
+        }
+        n_rows = n_rows.max(row_idx + 1);
+    }
+    if cells.is_empty() {
+        return None;
+    }
+    n_cols = n_cols.min(MAX_COLS);
+
+    let mut colgroup = String::new();
+    if !col_px.is_empty() {
+        colgroup.push_str("<colgroup>");
+        for c in 0..n_cols {
+            match col_px.get(c).copied().unwrap_or(0) {
+                0 => colgroup.push_str("<col/>"),
+                px => colgroup.push_str(&format!("<col style=\"width:{px}px\"/>")),
+            }
+        }
+        colgroup.push_str("</colgroup>");
+    }
+
+    let mut rows_html = String::new();
+    for r in 0..n_rows {
+        let mut cells_html = String::new();
+        let mut c = 0usize;
+        while c < n_cols {
+            // Spanned-over: the anchor cell (an earlier row/col) already
+            // covers this spot.
+            if covered.contains(&(r, c)) && !anchors.contains_key(&(r, c)) {
+                c += 1;
+                continue;
+            }
+            let span = anchors.get(&(r, c)).copied().unwrap_or((1, 1));
+            let attrs = if span == (1, 1) {
+                String::new()
+            } else {
+                format!(
+                    " colspan=\"{}\" rowspan=\"{}\"",
+                    span.0.min(n_cols - c),
+                    span.1.min(n_rows - r)
+                )
+            };
+            let tag = if r == 0 { "th" } else { "td" };
+            let text = cells.get(&(r, c)).cloned().unwrap_or_default();
+            cells_html.push_str(&format!("<{tag}{attrs}>{}</{tag}>", html_escape(text.trim())));
+            c += span.0;
         }
         rows_html.push_str(&format!("<tr>{cells_html}</tr>"));
     }
-    if rows_html.is_empty() {
-        return None;
-    }
-
-    let css = "padding:28px";
-    let sheet_css = "\
-table{border-collapse:collapse;margin:0 auto;background:#fff;font-size:11pt;\
-box-shadow:0 1px 4px rgba(15,23,42,.12)}\
-th,td{border:1px solid #e2e8f0;padding:7px 12px;text-align:left}\
-th{background:#2563eb;color:#fff;font-weight:600}\
-tr:nth-child(even) td{background:#f8fafc}";
-    Some(
-        doc_shell(format!("<table>{rows_html}</table>"), css)
-            .replace("</style>", &format!("{sheet_css}</style>")),
-    )
+    Some(format!("<table>{colgroup}{rows_html}</table>"))
 }
 
 /// Extract readable plain text from a supported Office file's bytes, so it can
@@ -1178,6 +1386,61 @@ pub fn office_to_pdf(input_path: &Path) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an in-memory xlsx with two sheets: "Summary" (merged title row
+    /// A1:B1 + a column width) and "Data" — the features the old single-sheet
+    /// converter dropped.
+    fn two_sheet_xlsx() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            let mut add = |name: &str, content: &str| {
+                w.start_file(name, opts).unwrap();
+                std::io::Write::write_all(&mut w, content.as_bytes()).unwrap();
+            };
+            add(
+                "xl/sharedStrings.xml",
+                "<sst><si><t>Name</t></si><si><t>Total</t></si></sst>",
+            );
+            add(
+                "xl/workbook.xml",
+                "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Summary\" sheetId=\"1\" r:id=\"rId1\"/><sheet name=\"Data\" sheetId=\"2\" r:id=\"rId2\"/></sheets></workbook>",
+            );
+            add(
+                "xl/_rels/workbook.xml.rels",
+                "<Relationships><Relationship Id=\"rId1\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId2\" Target=\"worksheets/sheet2.xml\"/></Relationships>",
+            );
+            add(
+                "xl/worksheets/sheet1.xml",
+                "<worksheet><cols><col min=\"1\" max=\"1\" width=\"18\"/></cols><mergeCells count=\"1\"><mergeCell ref=\"A1:B1\"/></mergeCells><sheetData><row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c></row><row r=\"2\"><c r=\"A2\" t=\"s\"><v>1</v></c><c r=\"B2\"><v>42</v></c></row></sheetData></worksheet>",
+            );
+            add(
+                "xl/worksheets/sheet2.xml",
+                "<worksheet><sheetData><row r=\"1\"><c r=\"A1\"><v>7</v></c></row></sheetData></worksheet>",
+            );
+            w.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    #[test]
+    fn xlsx_renders_all_sheets_merges_and_widths() {
+        let html = xlsx_to_html(&two_sheet_xlsx()).expect("converter must handle the workbook");
+        // Both sheets render, each labelled.
+        assert!(html.contains(">Summary</h2>"), "missing Summary sheet: {html}");
+        assert!(html.contains(">Data</h2>"), "missing Data sheet: {html}");
+        // The merged title A1:B1 becomes one spanning header, not two cells.
+        assert!(html.contains("colspan=\"2\""), "missing merge: {html}");
+        // Column width from <cols> lands as an inline style (18 * 7 + 5).
+        assert!(html.contains("width:131px"), "missing col width: {html}");
+        // Shared strings resolve and raw numbers pass through.
+        assert!(html.contains("Total"));
+        assert!(html.contains(">42</td>"));
+        // The covered half of the merge (B1) must not duplicate the title.
+        assert_eq!(html.matches(">Name</th>").count(), 1);
+    }
 
     #[test]
     fn soffice_run_dir_is_unique_per_invocation() {

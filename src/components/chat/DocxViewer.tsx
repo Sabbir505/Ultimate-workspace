@@ -26,32 +26,51 @@ export function DocxViewer({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const naturalPageWidth = useRef(0);
+  const naturalPageHeight = useRef(0);
   const [failed, setFailed] = useState(false);
 
   // docx-preview renders pages at the document's real paper size (Letter ≈
   // 816px), and its centered .docx-wrapper overflows BOTH pane edges when the
   // pane is narrower — the left overflow is unreachable via scroll. Scale the
   // wrapper down to fit the pane width (fit-to-width, never above 100%).
-  // CSS zoom rescales layout, so page stacking and vertical scroll stay right.
+  //
+  // The scale is a `transform`, not CSS `zoom`: zoom re-lays-out at a
+  // fractional pixel grid (e.g. 0.63 × a 125% Windows display scale), where
+  // every glyph/edge lands off the device-pixel grid and the document reads
+  // slightly blurry. A static transform is rasterized at its FINAL device
+  // scale, so text stays crisp. Transform doesn't affect layout, so the
+  // wrapper gets an explicit scaled height — otherwise the scroll area keeps
+  // the unscaled size and the page bottom is unreachable blank space.
   const fitToWidth = useCallback(() => {
     const container = containerRef.current;
     const wrapper = container?.querySelector<HTMLElement>(".docx-wrapper");
     if (!container || !wrapper) return;
     if (!naturalPageWidth.current) {
-      wrapper.style.removeProperty("zoom");
+      wrapper.style.transform = "";
+      wrapper.style.height = "";
       naturalPageWidth.current =
         wrapper.querySelector<HTMLElement>("section.docx")?.offsetWidth ?? 0;
+      naturalPageHeight.current = wrapper.scrollHeight;
     }
     if (!naturalPageWidth.current) return;
     const scale = Math.min(1, (container.clientWidth - 12) / naturalPageWidth.current);
-    if (scale < 0.999) wrapper.style.setProperty("zoom", String(scale));
-    else wrapper.style.removeProperty("zoom");
+    if (scale < 0.999) {
+      // Keep the scaled page horizontally centered in the pane.
+      const offsetX = Math.max(0, (container.clientWidth - naturalPageWidth.current * scale) / 2);
+      wrapper.style.transformOrigin = "top left";
+      wrapper.style.transform = `translateX(${offsetX.toFixed(1)}px) scale(${scale.toFixed(4)})`;
+      wrapper.style.height = `${Math.ceil(naturalPageHeight.current * scale)}px`;
+    } else {
+      wrapper.style.transform = "";
+      wrapper.style.height = "";
+    }
   }, []);
 
   const render = useCallback(async () => {
     const container = containerRef.current;
     if (!container) return;
     naturalPageWidth.current = 0;
+    naturalPageHeight.current = 0;
     try {
       container.innerHTML = "";
       await renderAsync(dataUriToBuffer(dataUri), container, container, {

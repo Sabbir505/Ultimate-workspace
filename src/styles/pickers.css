@@ -287,9 +287,12 @@
   white-space: nowrap;
 }
 .agent-model-popup {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
+  /* Viewport-anchored by the component (left/bottom set inline from the
+     chip's rect): the popup is portaled to <body> because a backdrop-filter
+     ancestor (the composer card) acts as a backdrop root — nested frost
+     could only sample the card's own paint, never the transcript, and the
+     popup read as a thin see-through veil. */
+  position: fixed;
   display: flex;
   /* FIXED 300px (user request): the model list gets the remaining space and
      scrolls, instead of height:auto hugging ~1 row once search + endpoint +
@@ -301,14 +304,11 @@
   max-width: min(300px, calc(100vw - 24px));
   border: 1px solid var(--border);
   border-radius: 16px;
-  /* Liquid glass, same recipe as the composer card: TRUE transparent body
-     (the app behind reads as blurred shapes, not flat paint) + heavy frost.
-     A touch more body than the composer card so model rows stay readable
-     over arbitrary backdrops. */
+  /* The composer card's exact liquid-glass recipe. */
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--surface-glass) 55%, transparent),
-    color-mix(in srgb, var(--surface-glass) 35%, transparent)
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
   );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
@@ -322,8 +322,8 @@
 :root[data-theme="light"] .agent-model-popup {
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--surface-glass) 78%, transparent),
-    color-mix(in srgb, var(--surface-glass) 62%, transparent)
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
   );
 }
 /* Icon-only rail (~50px). Tooltips/aria-labels carry the names; sections are

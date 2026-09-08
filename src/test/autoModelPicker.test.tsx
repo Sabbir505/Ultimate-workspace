@@ -37,7 +37,7 @@ afterEach(cleanup);
 describe("AgentModelPicker — Auto routing entry", () => {
   it("lists Auto first in the rail with its own section", () => {
     const { container } = renderPicker();
-    const sections = container.querySelectorAll(".agent-model-rail-section");
+    const sections = document.querySelectorAll(".agent-model-rail-section");
     expect(sections.length).toBeGreaterThan(1);
     const first = sections[0]!.querySelector("button");
     expect(first?.getAttribute("aria-label")).toBe("Auto");
@@ -45,7 +45,7 @@ describe("AgentModelPicker — Auto routing entry", () => {
 
   it("highlights the Auto entry when the session is auto-routed", () => {
     const { container } = renderPicker({ provider: "auto", model: "auto" });
-    const autoBtn = container.querySelector(
+    const autoBtn = document.querySelector(
       '.agent-model-rail button[aria-label="Auto"]',
     );
     expect(autoBtn?.classList.contains("rail-selected")).toBe(true);
@@ -58,7 +58,7 @@ describe("AgentModelPicker — Auto routing entry", () => {
     const { container } = renderPicker({ onPick });
     // No pane row to click — the rail icon itself commits.
     fireEvent.click(
-      container.querySelector<HTMLElement>('.agent-model-rail button[aria-label="Auto"]')!,
+      document.querySelector<HTMLElement>('.agent-model-rail button[aria-label="Auto"]')!,
     );
     expect(onPick).toHaveBeenCalledWith({
       agent: "builtin",
@@ -70,12 +70,12 @@ describe("AgentModelPicker — Auto routing entry", () => {
   it("shows centered info (not a clickable row) when the session is auto-routed", () => {
     const onPick = vi.fn();
     const { container } = renderPicker({ provider: "auto", model: "auto", onPick });
-    const info = container.querySelector(".agent-model-auto-info");
+    const info = document.querySelector(".agent-model-auto-info");
     expect(info).toBeTruthy();
     expect(info?.textContent).toContain("Auto — Relay picks");
     // Re-clicking the rail does NOT re-commit (it just opens the pane).
     fireEvent.click(
-      container.querySelector<HTMLElement>('.agent-model-rail button[aria-label="Auto"]')!,
+      document.querySelector<HTMLElement>('.agent-model-rail button[aria-label="Auto"]')!,
     );
     expect(onPick).not.toHaveBeenCalled();
   });
@@ -86,7 +86,7 @@ describe("AgentModelPicker — Auto bias slider", () => {
     const { container } = renderPicker({ provider: "auto", model: "auto", onAutoBiasChange: () => {} });
     const rail = screen.getByRole("slider", { name: "Auto routing bias" });
     expect(rail.getAttribute("aria-valuetext")).toBe("Balanced");
-    const labels = [...container.querySelectorAll<HTMLElement>(".seg-slider-label")];
+    const labels = [...document.querySelectorAll<HTMLElement>(".seg-slider-label")];
     expect(labels.map((l) => l.textContent)).toEqual(["Economy", "Balanced", "Quality"]);
   });
 

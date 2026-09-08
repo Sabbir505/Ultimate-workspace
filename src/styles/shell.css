@@ -20,8 +20,11 @@
   font-size: 12px;
   font-weight: 500;
   color: var(--text);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
+  /* Composer-chip glass (the same overlays the composer's control chips
+     paint): a translucent veil instead of opaque paint, so the picker reads
+     as part of the liquid-glass family even while closed. */
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-xs);
   box-shadow: var(--glass-rim-soft);
   cursor: pointer;
@@ -29,8 +32,16 @@
     box-shadow 0.15s var(--ease);
 }
 .glass-select-trigger:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-glass-2);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+:root[data-theme="light"] .glass-select-trigger {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+:root[data-theme="light"] .glass-select-trigger:hover {
+  background: rgba(0, 0, 0, 0.07);
+  border-color: rgba(0, 0, 0, 0.18);
 }
 .glass-select.open .glass-select-trigger {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
@@ -64,15 +75,31 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
-  background: var(--surface-glass);
-  backdrop-filter: blur(28px) saturate(150%);
-  -webkit-backdrop-filter: blur(28px) saturate(150%);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  /* The composer card's exact liquid-glass recipe: true-transparent
+     gradient body (content under the list reads as blurred shapes), heavy
+     frost, soft rim + drop shadow. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--glass-rim), var(--glass-drop);
   animation: glass-select-in 0.16s var(--ease);
   max-height: 280px;
   overflow-y: auto;
+}
+/* Light theme: a touch more body so option text keeps contrast on bright
+   backdrops (mirrors the composer card's light override). */
+:root[data-theme="light"] .glass-select-list {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
 }
 @keyframes glass-select-in {
   from { opacity: 0; transform: translateY(-4px) scale(0.99); }

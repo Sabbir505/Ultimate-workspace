@@ -20,7 +20,7 @@
 // drives the right pane; clicking a model row COMMITS the selection
 // (agent + provider + model together), so a pick can never land the session
 // on an agent with another agent's model attached.
-import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { listHarnesses, listAcpAgents, listHarnessModels, listChatModels, scanLocalModels, getChatConfig, type ChatConfigPayload, type GgufModel, type HarnessModelConfig, type LlamaOverrides } from "../../lib/ipc";
 import type { HarnessStatus, AcpAgentStatus } from "../../types";
@@ -28,7 +28,6 @@ import { fuzzyFilter, type FuzzyResult } from "../../lib/fuzzy";
 import { shortModelName } from "../../lib/modelLabel";
 import { useSettingsStore } from "../../state/settings";
 import { harnessModelCatalog } from "../../lib/harnessModels";
-import { effortAppliesTo } from "../../lib/modelCapabilities";
 import { SegmentedSlider } from "./SegmentedSlider";
 import { LlamaAdvancedFields } from "./LlamaAdvancedFields";
 import {
@@ -444,18 +443,51 @@ export function AgentModelPickerInner({
     return () => window.removeEventListener("keydown", onKey);
   }, [gearFor]);
 
-  // Close on outside pointer — EXCEPT inside the gear sub-modal: it's
-  // portaled to <body>, so its inputs are outside rootRef, and closing the
-  // picker here would reset gearFor and kill the modal mid-edit.
+  // Close on outside pointer — EXCEPT inside the portaled popup and the gear
+  // sub-modal: both live outside rootRef (see the portal note below), and
+  // closing the picker here would kill them on their own clicks/edits.
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
       const el = e.target as HTMLElement;
-      if (el.closest?.(".agent-model-gear-modal, .agent-model-gear-scrim")) return;
+      if (el.closest?.(".agent-model-popup, .agent-model-gear-modal, .agent-model-gear-scrim")) return;
       if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
     };
     window.addEventListener("pointerdown", onDown);
     return () => window.removeEventListener("pointerdown", onDown);
+  }, [open]);
+
+  // Viewport anchor for the portaled popup (re-measured while open so the
+  // popup tracks the chip on window resizes and layout scrolls).
+  const [popupPos, setPopupPos] = useState<{ left: number; bottom: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!open) {
+      setPopupPos(null);
+      return;
+    }
+    const measure = () => {
+      const rect = rootRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const next = {
+        left: rect.left,
+        // Open UPWARD from the chip's top edge (same anchor the old absolute
+        // positioning expressed as bottom: calc(100% + 6px)).
+        bottom: Math.max(8, window.innerHeight - rect.top + 6),
+      };
+      // Scroll events fire constantly while the model list scrolls — skip
+      // no-op updates.
+      setPopupPos((prev) =>
+        prev && prev.left === next.left && prev.bottom === next.bottom ? prev : next,
+      );
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    // Capture: the transcript scrolls inside a nested container.
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
   }, [open]);
 
   // ---- rail entries --------------------------------------------------------
@@ -740,24 +772,18 @@ export function AgentModelPickerInner({
 
   // ---- render ----------------------------------------------------------------
 
-  // The effort slider only appears where it has a REAL effect on the model
-  // (see lib/modelCapabilities.ts): builtin sessions on reasoning models
-  // (reasoning_effort param) or Claude (maps to the extended-thinking
-  // budget). Harness/ACP sessions' CLI send path has no effort parameter,
-  // and non-reasoning models silently ignore the field — a visible slider
-  // there would be a lie. Placement stays on the harness/provider panes;
-  // the session gate decides visibility.
-  const sessionEffortApplies =
-    agent != null &&
-    !agent.startsWith("harness:") &&
-    !agent.startsWith("acp:") &&
-    agent !== "local" &&
-    effortAppliesTo(provider, model);
+  // Effort footer: shown on every pane the wire can actually carry it —
+  // provider rails and local (local_gguf rides the OpenAI body, so
+  // reasoning_effort is sent; servers that don't use it ignore the field,
+  // and "" filters to nothing at the send boundary). The Auto pane is bias
+  // slider ONLY — stacking a second slider there read as clutter, and a
+  // manual effort is ambiguous when the model changes per message.
+  // Harness/ACP panes stay slider-free: the CLI/agent owns its own
+  // reasoning config and its send path has no effort channel.
   const showEffort =
     !!onEffortChange &&
     effort !== undefined &&
-    sessionEffortApplies &&
-    (railKey.startsWith("harness:") || railKey.startsWith("provider:") || railKey === "auto");
+    (railKey.startsWith("provider:") || railKey === "local");
 
   return (
     <div className="agent-menu" ref={rootRef}>
@@ -791,8 +817,20 @@ export function AgentModelPickerInner({
         <span className="model-effort-chevron" aria-hidden="true">▾</span>
       </button>
 
-      {open && (
-        <div className="agent-model-popup" role="menu" aria-label="Agent and model">
+      {/* The popup is portaled to <body>: rendered inside the composer card
+          its backdrop-filter could only sample the CARD's paint (a
+          backdrop-filter ancestor is a backdrop root), so the frost never
+          saw the transcript and the popup read as a thin see-through veil.
+          Portaled + viewport-anchored it frosts the real page — the same
+          glass the composer card itself shows. */}
+      {open &&
+        createPortal(
+          <div
+            className="agent-model-popup"
+            role="menu"
+            aria-label="Agent and model"
+            style={popupPos ?? undefined}
+          >
           {/* ---- left rail (icon-only, ~50px; tooltips carry the names) ---- */}
           <div className="agent-model-rail" role="tablist" aria-label="Agents" aria-orientation="vertical">
             {railSections.map((section, si) => (
@@ -1015,7 +1053,7 @@ export function AgentModelPickerInner({
               </div>
             )}
 
-            {/* ---- effort footer (CLI + cloud panes): reasoning effort as an
+            {/* ---- effort footer (provider + local panes): reasoning effort as an
                  animated slider, strongest → provider default ---- */}
             {showEffort && (
               <>
@@ -1056,7 +1094,8 @@ export function AgentModelPickerInner({
               </>
             )}
           </div>
-        </div>
+          </div>,
+          document.body,
       )}
 
       {/* Advanced runtime settings SUB-MODAL — opened by a local row's gear.

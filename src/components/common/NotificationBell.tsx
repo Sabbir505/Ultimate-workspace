@@ -127,6 +127,12 @@ export function NotificationBell() {
         panes.focusPane(n.paneId);
       }
     } else if (n.view) {
+      // A row can preselect the Settings panel it is about (e.g. harness
+      // updates → Agent harnesses); must be set BEFORE the view switch so
+      // SettingsView's mount effect picks it up.
+      if (n.view === "settings" && n.settingsCategory) {
+        useUiStore.getState().setSettingsCategory(n.settingsCategory);
+      }
       useUiStore.getState().setActiveView(n.view);
     }
     markSeen(n.id);

@@ -29,6 +29,16 @@ export interface HarnessStatus {
   installed: boolean;
 }
 
+/** Per-harness update availability (Settings → Agent harnesses + the boot
+ *  notification). Either version is null when its probe failed (missing
+ *  binary, odd --version output, offline). */
+export interface HarnessUpdateStatus {
+  id: HarnessId;
+  installedVersion: string | null;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+}
+
 /** An ACP agent (roadmap #20) shown in the composer's agent menu — static
  *  registry (Zed/Devin) + user-defined entries, with install detection. */
 export interface AcpAgentStatus {

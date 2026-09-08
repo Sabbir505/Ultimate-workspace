@@ -78,6 +78,26 @@ impl HarnessAdapter for OpenCodeAdapter {
         CommandSpec::new("opencode", &["providers"])
     }
 
+    /// Native installs shadow the npm shim on PATH. Winget-managed copies go
+    /// through `winget upgrade`; other native installs use `opencode upgrade`
+    /// (verified 1.18).
+    fn native_update_command(&self, resolved: &std::path::Path) -> Option<CommandSpec> {
+        if let Some(id) = crate::harness_adapters::winget_portable_package_id(resolved) {
+            return Some(CommandSpec::new(
+                "winget",
+                &[
+                    "upgrade",
+                    "--id",
+                    &id,
+                    "-e",
+                    "--accept-source-agreements",
+                    "--accept-package-agreements",
+                ],
+            ));
+        }
+        Some(CommandSpec::new("opencode", &["upgrade"]))
+    }
+
     fn parse_session_id(&self, output: &str) -> Option<String> {
         RE_SESSION_ID
             .captures(output)

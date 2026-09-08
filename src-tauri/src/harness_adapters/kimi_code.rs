@@ -65,6 +65,12 @@ impl HarnessAdapter for KimiCodeAdapter {
         CommandSpec::new("kimi", &[])
     }
 
+    /// The native installer (~/.kimi-code/bin) shadows any npm shim on PATH;
+    /// `kimi upgrade` updates whichever copy PATH resolves (verified 0.31).
+    fn native_update_command(&self, _resolved: &std::path::Path) -> Option<CommandSpec> {
+        Some(CommandSpec::new("kimi", &["upgrade"]))
+    }
+
     fn parse_session_id(&self, output: &str) -> Option<String> {
         RE_RESUME_HINT
             .captures(output)

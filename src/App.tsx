@@ -56,6 +56,7 @@ import { useNewChatAction } from "./hooks/useNewChatAction";
 import { useViewNav } from "./hooks/useViewNav";
 import { useTheme } from "./hooks/useTheme";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
+import { checkAndNotifyHarnessUpdates } from "./lib/harnessUpdates";
 import { initWorkspacePersistence } from "./lib/workspaceRestore";
 import { initAppFocusTracking } from "./lib/appFocus";
 import { monoFontStack, uiFontStack } from "./lib/fonts";
@@ -204,6 +205,10 @@ export default function App() {
       .loadAll()
       .then(() => void initWorkspacePersistence());
     void useSkillsStore.getState().load();
+    // Harness update check (quiet, once per app open): an out-of-date harness
+    // CLI lands a bell-panel row that deep-links to Settings → Agent
+    // harnesses, where the row's Run login button becomes Update.
+    void checkAndNotifyHarnessUpdates();
 
     // Auto-updater: wire download-progress + installed events, then check on
     // startup and every 4 hours. A check is a single HTTP GET + semver compare;

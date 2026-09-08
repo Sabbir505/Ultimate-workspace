@@ -39,6 +39,9 @@ export interface RelayNotification {
   paneId?: string;
   /** Overlay view to open when the row is clicked (e.g. "automations"). */
   view?: "automations" | "cost" | "settings";
+  /** Settings category to preselect when `view` is "settings" (e.g. a
+   *  harness-update row lands on Agent harnesses, not the last-used panel). */
+  settingsCategory?: string;
 }
 
 interface NotificationsState {
@@ -97,6 +100,7 @@ export const useNotificationsStore = create<NotificationsState>((set, get) => ({
       chatSessionId: n.chatSessionId,
       paneId: n.paneId,
       view: n.view,
+      settingsCategory: n.settingsCategory,
     };
     const items = [item, ...get().items].slice(0, MAX_ITEMS);
     set({ items });

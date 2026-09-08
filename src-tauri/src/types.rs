@@ -991,11 +991,21 @@ pub struct ActiveLocalModel {
 pub struct ContextUsagePayload {
     /// Tokens the running sidecar counted for the assembled (system + active
     /// history) conversation. Null when no sidecar is running, the chat
-    /// session can't be found, or the tokenizer errored.
+    /// session can't be found, or the tokenizer errored. This is a FULL
+    /// prompt count — cache-accounted tokens are included and must be
+    /// stripped via `cached_tokens` when the UI wants the uncached slice.
     pub used_tokens: Option<u32>,
     /// The model context window the sidecar was started with (`-c`). The
     /// meter divides `used_tokens` by this to render the ring.
     pub max_tokens: u32,
+    /// Prompt tokens the provider accounted to its prompt cache on the
+    /// session's most recent reported turn (cache_read, plus cache_creation
+    /// on Anthropic-style providers — per `cache_accounted_tokens`).
+    /// Subtracting this from `used_tokens` yields the UNCACHED slice the
+    /// composer's context meter displays. 0 when the provider reports no
+    /// cache fields.
+    #[serde(default)]
+    pub cached_tokens: u32,
 }
 
 /// Per-category context-window breakdown for the rich context-meter tooltip.

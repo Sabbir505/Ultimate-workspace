@@ -1050,7 +1050,17 @@ impl ChatManager {
                             chat_session_id: sid.clone(),
                             input_tokens: usage.as_ref().and_then(|u| {
                                 if u.input_tokens > 0 || u.output_tokens > 0 {
-                                    Some(u.input_tokens)
+                                    // The HUD's IN figure is the UNCACHED
+                                    // prompt slice: OpenAI-style prompt_tokens
+                                    // already embeds the cache read — strip it
+                                    // (Anthropic-style input is exclusive
+                                    // already). The raw figure stays on the DB
+                                    // row for the cost rollups.
+                                    Some(if is_openai {
+                                        (u.input_tokens - u.cache_read_input_tokens).max(0)
+                                    } else {
+                                        u.input_tokens
+                                    })
                                 } else {
                                     None
                                 }

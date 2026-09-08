@@ -36,7 +36,7 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 // edit-tool call. None of these appear on the empty welcome screen.
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
 const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m) => ({ default: m.ArtifactProposalCard })));
-import { listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, warmupLocalPrompt, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel, getResearchCitationReport } from "../../lib/ipc";
+import { listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, warmupLocalPrompt, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel, getResearchCitationReport, PROVIDER_INPUT_INCLUDES_CACHE } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
 import { setChatSelectionPrefill } from "../../lib/chatSelection";
@@ -450,6 +450,13 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     messagesRevision: messages.length,
     compactionRevision,
   });
+  // The meter's total counts UNCACHED prompt tokens only (what the provider
+  // freshly billed — the cached share shows on the HUD's cache chip). The
+  // live poll's figure is a FULL prompt count, so the session's last cache
+  // report (`cachedTokens`, backend-derived from the last assistant row) is
+  // stripped from it. The provider-counted lastInputTokens half gets the
+  // same treatment on inclusive providers (OpenAI-style input embeds the
+  // cache read); Anthropic-style input is reported uncached already.
   // Live count wins for local sessions (exact /tokenize). For cloud and
   // harness sessions the polled backend estimate is live (it includes the
   // just-sent user message and reflects compaction immediately) while the
@@ -457,9 +464,21 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   // larger of the two so neither a stale figure nor an underestimate can
   // hide a filling window. Either way, the meter's percentage is a real
   // number, never fabricated.
+  const cachedTokens = liveUsage.cachedTokens ?? 0;
+  const providerIncludesCache = PROVIDER_INPUT_INCLUDES_CACHE.has(
+    activeSession?.provider ?? "",
+  );
+  const pollUncached =
+    liveUsage.usedTokens != null
+      ? Math.max(0, liveUsage.usedTokens - cachedTokens)
+      : null;
+  const lastUncached =
+    lastInputTokens != null && providerIncludesCache
+      ? Math.max(0, lastInputTokens - cachedTokens)
+      : lastInputTokens;
   const usedTokens = isLocal
-    ? (liveUsage.usedTokens ?? lastInputTokens)
-    : Math.max(liveUsage.usedTokens ?? 0, lastInputTokens ?? 0) || lastInputTokens;
+    ? (pollUncached ?? lastUncached)
+    : Math.max(pollUncached ?? 0, lastUncached ?? 0) || lastUncached;
 
   // Spawn/swap the local-model sidecar for a scanned GGUF record. Returns the
   // error text on failure (surfaced by the callers via the chat error banner)

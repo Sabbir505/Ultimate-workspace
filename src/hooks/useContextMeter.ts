@@ -47,6 +47,10 @@ interface Options {
 export interface ContextUsageState {
   usedTokens: number | null;
   maxTokens: number;
+  /** Prompt tokens the provider cache-accounted on the session's most recent
+   *  reported turn — the slice to strip from `usedTokens` (a FULL prompt
+   *  count) for the uncached figure the meter displays. */
+  cachedTokens: number;
 }
 
 /** Returns the live `used / max` token counts for the meter's ring. The
@@ -63,6 +67,7 @@ export function useContextMeter({
   const [state, setState] = useState<ContextUsageState>({
     usedTokens: null,
     maxTokens: 0,
+    cachedTokens: 0,
   });
   // Reset synchronously when the meter's identity (session / local-ness)
   // changes. Without this, switching between two LOCAL sessions kept the
@@ -74,7 +79,7 @@ export function useContextMeter({
   const [lastMeterKey, setLastMeterKey] = useState(meterKey);
   if (lastMeterKey !== meterKey) {
     setLastMeterKey(meterKey);
-    setState({ usedTokens: null, maxTokens: 0 });
+    setState({ usedTokens: null, maxTokens: 0, cachedTokens: 0 });
   }
   // Keep a ref of the latest streaming flag so the poll loop doesn't have
   // to re-create its interval on every render.
@@ -90,7 +95,7 @@ export function useContextMeter({
     // message or a compaction. ChatView takes the max of the two figures so
     // a provider-counted prompt wins when it is larger.
     if (!chatSessionId) {
-      setState({ usedTokens: null, maxTokens: 0 });
+      setState({ usedTokens: null, maxTokens: 0, cachedTokens: 0 });
       return;
     }
 
@@ -114,6 +119,7 @@ export function useContextMeter({
           setState({
             usedTokens: result.usedTokens,
             maxTokens: result.maxTokens,
+            cachedTokens: result.cachedTokens ?? 0,
           });
         }
       } catch {

@@ -2093,13 +2093,28 @@ export const detectLlamaServerPath = () =>
 /** Live context-window usage for a local-model session, returned by
  *  `count_context_tokens`. `usedTokens` is null when no sidecar is running
  *  or the tokenizer errored; `maxTokens` is the sidecar's `-c` cap (0 for
- *  non-local / no-sidecar). */
+ *  non-local / no-sidecar). `usedTokens` is a FULL prompt count —
+ *  `cachedTokens` (the session's most recent cache report) is the slice to
+ *  strip for the uncached figure the context meter displays. */
 export interface ContextUsage {
   usedTokens: number | null;
   maxTokens: number;
+  cachedTokens: number;
 }
 export const countContextTokens = (chatSessionId: string) =>
   safeInvoke<ContextUsage | null>("count_context_tokens", { chatSessionId });
+
+/** Providers whose reported input_tokens already INCLUDES the cached prompt
+ *  tokens (`prompt_tokens` ⊇ cached) — their raw input must have the
+ *  cache-read slice stripped to get the uncached figure. Anthropic-style
+ *  providers and harnesses report uncached input directly. Mirrors the
+ *  backend's `provider_input_includes_cache` (chat/commands.rs). */
+export const PROVIDER_INPUT_INCLUDES_CACHE = new Set([
+  "openai",
+  "openai_compatible",
+  "openrouter",
+  "local_gguf",
+]);
 
 /** Per-category context-window breakdown for the rich context-meter tooltip. */
 export interface ContextBreakdown {

@@ -1195,7 +1195,19 @@ pub fn get_chat_session_metrics(
                 tok_wout += out;
             }
         }
-        input_sum += m.input_tokens.unwrap_or(0);
+        let raw_input = m.input_tokens.unwrap_or(0);
+        let read = m.cache_read_input_tokens.unwrap_or(0);
+        let creation = m.cache_creation_input_tokens.unwrap_or(0);
+        // The HUD's IN aggregate is the UNCACHED prompt slice: OpenAI-style
+        // rows report input INCLUSIVE of the cache read — strip it
+        // (Anthropic-style input is exclusive already), the same
+        // normalization the live IN figure applies at the turn_perf fold.
+        let uncached_input = if provider_input_includes_cache(m.provider.as_deref()) {
+            (raw_input - read).max(0)
+        } else {
+            raw_input
+        };
+        input_sum += uncached_input;
         output_sum += m.output_tokens.unwrap_or(0);
 
         // Cache-hit corpus: only rows whose provider actually reported cache
@@ -1205,17 +1217,9 @@ pub fn get_chat_session_metrics(
         // so normalize per row to the total billed prompt before summing
         // (same math as `turn_perf::cache_hit_rate`, so a session's
         // aggregate converges on the per-turn values).
-        let read = m.cache_read_input_tokens.unwrap_or(0);
-        let creation = m.cache_creation_input_tokens.unwrap_or(0);
         if read > 0 || creation > 0 {
-            let reported_input = m.input_tokens.unwrap_or(0);
-            let uncached = if provider_input_includes_cache(m.provider.as_deref()) {
-                (reported_input - read).max(0)
-            } else {
-                reported_input
-            };
             cache_read_sum += read;
-            total_prompt_sum += uncached + read + creation;
+            total_prompt_sum += uncached_input + read + creation;
         }
     }
 
@@ -1256,6 +1260,19 @@ fn provider_input_includes_cache(provider: Option<&str>) -> bool {
         provider,
         Some("openai") | Some("openai_compatible") | Some("openrouter") | Some("local_gguf")
     )
+}
+
+/// How many tokens of a prompt were cache-accounted on the reported turn —
+/// the amount to subtract from a FULL prompt count to get the uncached
+/// slice. OpenAI-style full prompts embed only the cache read (there is no
+/// cache-write concept); Anthropic-style prompts EXCLUDE both cache fields,
+/// so both count as cache-accounted.
+fn cache_accounted_tokens(provider: Option<&str>, cache_read: i64, cache_creation: i64) -> i64 {
+    if provider_input_includes_cache(provider) {
+        cache_read
+    } else {
+        cache_read + cache_creation
+    }
 }
 
 #[tauri::command]
@@ -5053,6 +5070,22 @@ pub async fn count_context_tokens(
         };
         let last_id = records.last().map(|r| r.id).unwrap_or(0);
         let n_records = records.len();
+        // The session's most recent cache report (last assistant row): the
+        // cache-accounted slice the meter's total must exclude so it counts
+        // UNCACHED prompt tokens only (see ContextUsagePayload::cached_tokens).
+        let cached_tokens = records
+            .iter()
+            .rev()
+            .find(|r| r.role == "assistant")
+            .map(|r| {
+                cache_accounted_tokens(
+                    Some(provider_str.as_str()),
+                    r.cache_read_input_tokens.unwrap_or(0),
+                    r.cache_creation_input_tokens.unwrap_or(0),
+                )
+            })
+            .unwrap_or(0)
+            .max(0) as u32;
         let messages: Vec<ChatMessage> = records
             .into_iter()
             .map(|r| ChatMessage {
@@ -5148,6 +5181,7 @@ pub async fn count_context_tokens(
             return Ok(crate::types::ContextUsagePayload {
                 used_tokens: estimate_used_tokens(n_records, tokens as u32),
                 max_tokens,
+                cached_tokens,
             });
         }
 
@@ -5157,6 +5191,7 @@ pub async fn count_context_tokens(
         return Ok(crate::types::ContextUsagePayload {
             used_tokens: estimate_used_tokens(n_records, total + tools),
             max_tokens,
+            cached_tokens,
         });
     }
 
@@ -5164,6 +5199,7 @@ pub async fn count_context_tokens(
         return Ok(crate::types::ContextUsagePayload {
             used_tokens: None,
             max_tokens: 0,
+            cached_tokens: 0,
         });
     };
 
@@ -5182,6 +5218,17 @@ pub async fn count_context_tokens(
         db::list_active_chat_messages(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
     };
+
+    // Same cache-accounted figure as the cloud branch (local_gguf is an
+    // inclusive-input provider, so this is the cache-read slice — usually 0;
+    // llama-server doesn't surface a cache split on the usage rows).
+    let cached_tokens = records
+        .iter()
+        .rev()
+        .find(|r| r.role == "assistant")
+        .map(|r| cache_accounted_tokens(Some("local_gguf"), r.cache_read_input_tokens.unwrap_or(0), r.cache_creation_input_tokens.unwrap_or(0)))
+        .unwrap_or(0)
+        .max(0) as u32;
 
     // Use the same system-prompt builder as the send path so the meter's
     // percentage matches the model's view: tools on (the composer default),
@@ -5242,6 +5289,7 @@ pub async fn count_context_tokens(
         return Ok(crate::types::ContextUsagePayload {
             used_tokens: if tokens > 0 || has_messages { Some(tokens) } else { None },
             max_tokens: status.n_ctx,
+            cached_tokens,
         });
     }
 
@@ -5278,6 +5326,7 @@ pub async fn count_context_tokens(
             return Ok(crate::types::ContextUsagePayload {
                 used_tokens: None,
                 max_tokens: status.n_ctx,
+                cached_tokens,
             });
         }
     };
@@ -5290,6 +5339,7 @@ pub async fn count_context_tokens(
     Ok(crate::types::ContextUsagePayload {
         used_tokens: if tokens > 0 || has_messages { Some(tokens) } else { None },
         max_tokens: status.n_ctx,
+        cached_tokens,
     })
 }
 

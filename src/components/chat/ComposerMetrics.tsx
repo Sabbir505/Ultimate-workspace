@@ -96,7 +96,7 @@ const CHIP_ORDER = [
 type ChipKey = (typeof CHIP_ORDER)[number];
 
 const CHIP_HINTS: Record<ChipKey | "turns", string> = {
-  in: "Prompt tokens billed — accumulates at each tool round",
+  in: "Uncached prompt tokens billed — accumulates at each tool round (the cache-hit share shows on the cache chip)",
   out: "Output tokens generated",
   llm: "Model round time (connect + prompt eval + generation)",
   tools: "Tool execution time, excluding approval waits",

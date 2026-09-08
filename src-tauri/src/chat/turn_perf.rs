@@ -28,7 +28,9 @@
 //! A throttled `chat:perf` event (~every 500ms during streaming) carries a
 //! live snapshot so the composer row updates without waiting for `chat:done`.
 //! Round-boundary usage (prompt tokens + cache fields) folds in via
-//! `note_round_usage` so IN/CACHE can render live too.
+//! `note_round_usage` so IN/CACHE can render live too; the live IN figure is
+//! the UNCACHED prompt slice — OpenAI-style inclusive reports are normalized
+//! at the fold, so it converges on the turn-end done value.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -146,7 +148,8 @@ pub fn note_active_round_usage(
 /// Kimi/pi/omp/commandcode/opencode report running totals (not per-round
 /// deltas), so accumulating them would double-count — the latest report wins,
 /// mirroring how the handlers derive the final done values (last report
-/// overwrites). No-op when none is registered.
+/// overwrites). Inclusive input is normalized to the uncached slice, same as
+/// `note_round_usage`. No-op when none is registered.
 pub fn set_active_round_usage(
     session_id: &str,
     input_tokens: i64,
@@ -156,10 +159,9 @@ pub fn set_active_round_usage(
 ) {
     if let Some(p) = ACTIVE.lock().get(session_id) {
         let mut g = p.inner.lock();
-        g.ru_input = input_tokens;
+        g.ru_input = uncached_input(input_tokens, cache_read, input_includes_cache);
         g.ru_cache_read = cache_read;
         g.ru_cache_creation = cache_creation;
-        g.ru_inclusive = input_includes_cache;
         g.ru_seen = true;
     }
 }
@@ -195,6 +197,19 @@ pub fn active_llm_time_ms(session_id: &str) -> Option<i64> {
 }
 
 const PERF_EMIT_INTERVAL_MS: u128 = 500;
+
+/// The UNCACHED slice of a provider's reported prompt input. OpenAI-style
+/// providers report `prompt_tokens` already INCLUSIVE of
+/// `prompt_tokens_details.cached_tokens` — the cached read is stripped here;
+/// Anthropic-style input is reported uncached already and passes through.
+/// The `.max(0)` guards compatible backends reporting cached > prompt.
+fn uncached_input(input_tokens: i64, cache_read: i64, input_includes_cache: bool) -> i64 {
+    if input_includes_cache {
+        (input_tokens - cache_read).max(0)
+    } else {
+        input_tokens
+    }
+}
 
 /// Cache-hit rate helper: `cache_read / total_billed_prompt`.
 ///
@@ -271,12 +286,12 @@ struct Inner {
     /// turn end is authoritative; this is a running estimate.
     output_tokens: i64,
     /// Running totals of the round-boundary usage reported so far via
-    /// `note_round_usage`, for the live IN/CACHE chips. `ru_seen` gates
-    /// "no usage yet" vs zero.
+    /// `note_round_usage`, for the live IN/CACHE chips. `ru_input` is the
+    /// UNCACHED slice (inclusive reports are normalized at the fold).
+    /// `ru_seen` gates "no usage yet" vs zero.
     ru_input: i64,
     ru_cache_read: i64,
     ru_cache_creation: i64,
-    ru_inclusive: bool,
     ru_seen: bool,
 }
 
@@ -298,7 +313,6 @@ impl Inner {
             ru_input: 0,
             ru_cache_read: 0,
             ru_cache_creation: 0,
-            ru_inclusive: false,
             ru_seen: false,
         }
     }
@@ -435,8 +449,9 @@ impl TurnPerf {
     /// at each tool-loop round boundary) so the live IN/CACHE chips can
     /// render before `chat:done`. `input_includes_cache` follows the
     /// provider family (OpenAI-style inclusive, Anthropic-style exclusive) —
-    /// same convention `cache_hit_rate` applies at turn end, so the live
-    /// value converges on the final one.
+    /// inclusive input is normalized to the UNCACHED slice here so both
+    /// conventions converge on the same exclusive figure (matching what the
+    /// turn-end done payload reports and what the IN chip means).
     pub fn note_round_usage(
         &self,
         input_tokens: i64,
@@ -445,10 +460,9 @@ impl TurnPerf {
         input_includes_cache: bool,
     ) {
         let mut g = self.inner.lock();
-        g.ru_input += input_tokens;
+        g.ru_input += uncached_input(input_tokens, cache_read, input_includes_cache);
         g.ru_cache_read += cache_read;
         g.ru_cache_creation += cache_creation;
-        g.ru_inclusive = input_includes_cache;
         g.ru_seen = true;
     }
 
@@ -489,12 +503,14 @@ impl TurnPerf {
 
     fn snapshot_locked(&self) -> ChatPerfPayload {
         let g = self.inner.lock();
+        // `ru_input` is already the uncached slice (normalized at the fold),
+        // so the exclusive total-prompt formula applies for both conventions.
         let cache_hit_rate = if g.ru_seen {
             cache_hit_rate(
                 g.ru_cache_read,
                 g.ru_cache_creation,
                 g.ru_input,
-                g.ru_inclusive,
+                false,
             )
         } else {
             None
@@ -731,14 +747,31 @@ mod tests {
         let snap = p.snapshot();
         assert!(snap.input_tokens.is_none());
         assert!(snap.cache_hit_rate.is_none());
-        // OpenAI-style round: prompt 1000 inclusive of 800 cached.
+        // OpenAI-style round: prompt 1000 inclusive of 800 cached — the
+        // inclusive input is normalized to the 200 uncached at the fold.
         p.note_round_usage(1000, 800, 0, true);
         p.note_round_usage(500, 400, 0, true);
         let snap = p.snapshot();
-        assert_eq!(snap.input_tokens, Some(1500));
-        // (800 + 400) / (1000 + 500) = 0.8.
+        // (1000-800) + (500-400) = 300 uncached.
+        assert_eq!(snap.input_tokens, Some(300));
+        // (800 + 400) / (300 + 800 + 400) = 0.8.
         let r = snap.cache_hit_rate.unwrap();
         assert!((r - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn set_active_round_usage_strips_inclusive_cache() {
+        let sid = format!("test-inclusive-{}", uuid::Uuid::new_v4());
+        let p = register(&sid, TurnPerf::new_headless(&sid));
+        // Running-total reporter with OpenAI-style inclusive input: 1000
+        // prompt of which 800 were cache hits → IN shows 200 uncached.
+        set_active_round_usage(&sid, 1000, 800, 0, true);
+        let snap = p.snapshot();
+        assert_eq!(snap.input_tokens, Some(200));
+        // 800 / (200 + 800) = 0.8.
+        let rate = snap.cache_hit_rate.expect("cache reported");
+        assert!((rate - 0.8).abs() < 1e-9);
+        unregister(&sid);
     }
 
     #[test]

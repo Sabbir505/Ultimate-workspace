@@ -23,7 +23,10 @@
 // The "used" figure combines the backend's live estimate (polled by
 // useContextMeter — fresh after every sent message or compaction) with the
 // input_tokens of the last assistant turn (the full prompt size the
-// provider counted), taking the larger. 0 until the first turn completes.
+// provider counted), taking the larger. Both halves are normalized to the
+// UNCACHED prompt slice by ChatView (the session's last cache report is
+// stripped — the cached share surfaces on the HUD's cache chip instead).
+// 0 until the first turn completes.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {

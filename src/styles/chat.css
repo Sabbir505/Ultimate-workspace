@@ -3304,6 +3304,14 @@ button.chat-mermaid-open {
   line-height: 1.5;
 }
 
+/* Explanatory sub-label under an artifact field heading. */
+.artifact-field-hint {
+  display: block;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
 /* Harness + model dropdowns on automation proposals sit side by side. */
 .artifact-agent-picker {
   display: flex;

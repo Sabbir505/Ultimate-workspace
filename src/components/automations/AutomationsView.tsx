@@ -53,6 +53,7 @@ import type { HarnessId } from "../../types";
 import {
   AUTOMATION_STATE_META,
   automationState,
+  buildAutomationRunPrompt,
   friendlyRunError,
   harnessNeedsInstall,
   isFailureStatus,
@@ -938,12 +939,19 @@ function AutomationForm({
 
   // Set form data — called by conversational artifact creation when "Edit" is clicked
   // on an automation proposal card. The spec provides the artifact name,
-  // description, and trigger/schedule to pre-fill the form.
+  // description, and trigger/schedule to pre-fill the form. The prompt is
+  // compiled from the WHOLE spec (description + steps) — pre-filling with just
+  // the description used to create automations whose runs had no actual
+  // instructions to follow.
   const setAutomationFormData = useCallback((spec: any) => {
-    setName(spec.name || "");
-    setPrompt(spec.description || "");
-    if (spec.trigger?.schedule) {
-      setScheduleChoice(spec.trigger.schedule);
+    // Accept the legacy { type, spec } wrapper some persisted proposals carry.
+    const s = spec && typeof spec.spec === "object" ? { ...spec.spec, type: spec.type } : (spec ?? {});
+    setName(s.name || "");
+    setPrompt(buildAutomationRunPrompt(s));
+    if (s.harness) setAgentId(s.harness);
+    if (s.model) setModel(s.model);
+    if (s.trigger?.schedule) {
+      setScheduleChoice(s.trigger.schedule);
     }
   }, []);
 

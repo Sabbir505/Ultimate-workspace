@@ -204,4 +204,44 @@ describe("ArtifactProposalCard", () => {
     expect(screen.getByRole("button", { name: "Regenerate" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeTruthy();
   });
+
+  it("shows the compiled run prompt (not just the description) on automation cards", () => {
+    // Regression: the card used to only surface description + steps, so users
+    // couldn't see — and Edit used to save — a prompt with no instructions.
+    const automationProposal = {
+      ...baseProposal,
+      artifactType: "automation" as const,
+      spec: {
+        type: "automation" as const,
+        name: "Nightly sync",
+        description: "Keep the two systems in sync.",
+        trigger: { kind: "schedule" as const, schedule: "0 9 * * *" },
+        steps: [
+          { label: "Fetch", action: "Run fetch-sync --since yesterday" },
+          { label: "Report", action: "Write the diff summary to sync-log.md" },
+        ],
+        enabled: true,
+      },
+      missingFields: [],
+    };
+
+    render(
+      <ArtifactProposalCard
+        proposalId="wrap-5"
+        proposal={automationProposal}
+        state="ready"
+        onCreate={vi.fn()}
+        onEdit={vi.fn()}
+        onRegenerate={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Run prompt")).toBeTruthy();
+    // The steps' actions must appear inside the previewed prompt text
+    // (scoping to the Run prompt field — the Steps list shows them too).
+    const promptField = screen.getByText("Run prompt").closest(".artifact-field");
+    expect(promptField?.textContent).toContain("Run fetch-sync --since yesterday");
+    expect(promptField?.textContent).toContain("Write the diff summary to sync-log.md");
+  });
 });

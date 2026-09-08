@@ -1,6 +1,38 @@
 // Shared helpers for the Automations view + Past Runs table (kept here so
 // the lazy-loaded table can import them without a circular dependency).
 
+/** Loosely-typed automation spec — accepts both the artifact generator's
+ *  AutomationSpec and hand-written specs (fields may be absent). */
+export interface AutomationPromptSpec {
+  name?: string;
+  description?: string;
+  steps?: { label?: string; action?: string; description?: string }[];
+  inputs?: { name: string; description?: string }[];
+}
+
+/** Compile an automation spec into the run prompt stored on the automation —
+ *  the exact text every unattended run receives as its instruction. Mirrors
+ *  `format_automation_prompt` in src-tauri/src/artifacts/adapter.rs; keep the
+ *  two in sync. (The runner additionally appends unattended-run behavior
+ *  rules at execution time; those are not part of the stored prompt.) */
+export function buildAutomationRunPrompt(spec: AutomationPromptSpec): string {
+  const lines: string[] = [];
+  if (spec.name) lines.push(`# ${spec.name}`, "");
+  lines.push(`Goal: ${(spec.description ?? "").trim()}`, "");
+  lines.push("Complete each step in order:");
+  (spec.steps ?? []).forEach((step, i) => {
+    lines.push(`${i + 1}. ${step.label ?? ""}: ${step.action ?? ""}`);
+    if (step.description) lines.push(`   ${step.description}`);
+  });
+  if (spec.inputs && spec.inputs.length > 0) {
+    lines.push("", "Inputs:");
+    for (const input of spec.inputs) {
+      lines.push(`- ${input.name}${input.description ? `: ${input.description}` : ""}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 /** A failure is any status that isn't one of the three sentinel values —
  *  everything else is raw error text recorded by the runner. */
 export function isFailureStatus(status: string | null | undefined): boolean {

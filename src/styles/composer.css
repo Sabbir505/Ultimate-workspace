@@ -122,68 +122,49 @@
 }
 
 .composer-slash-menu {
+  /* Child of .chat-composer (NOT the card, NOT a body portal): the card's
+     backdrop-filter would swallow the deck's own blur from inside, and a
+     body portal put it outside the chat zoom's coordinate space (it floated
+     detached). Anchored here it lives in the same scaled subtree as the
+     card, so plain CSS lands it flush and the blur works. */
   position: absolute;
   /* Notch of the composer card: grows straight out of its top edge — flush
-     (the card's 10px top padding), exactly the card's width (cancels the
-     card's 12px side padding), square bottom corners and no bottom border so
-     the card's own top edge reads as the seam. */
-  bottom: calc(100% + 10px);
-  left: -12px;
-  right: -12px;
-  z-index: 20;
+     with the card's outer edges (the composer's side padding + the card's
+     1px border), 1px past the card's top so the card's own top edge reads as
+     the seam; square bottom corners, no bottom border. */
+  left: max(14px, calc((100% - 780px) / 2));
+  right: max(14px, calc((100% - 780px) / 2));
+  bottom: calc(100% - 11px);
+  z-index: 30;
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding: 6px;
   max-height: 240px;
   overflow-y: auto;
-  /* Same liquid glass as the composer card, but with a woven-mesh body: two
-     crossed hairline weaves plus a denser base fill give the frost enough
-     "tooth" that list rows stay legible over busy backdrops (welcome cards
-     used to bleed straight through). Still translucent — the backdrop blur
-     reads through the mesh. */
+  /* EXACTLY the composer card's liquid glass (same gradient, same blur, same
+     shadow) — the deck reads as the card's extension, not a separate
+     surface. (It used a woven-mesh body with a denser fill; that read as a
+     different color from the composer it grows out of.) */
   border: 1px solid var(--border);
   border-bottom: none;
   border-radius: 16px 16px 0 0;
-  background:
-    repeating-linear-gradient(
-      45deg,
-      var(--glass-mesh-line) 0 1px,
-      transparent 1px 4px
-    ),
-    repeating-linear-gradient(
-      -45deg,
-      var(--glass-mesh-line) 0 1px,
-      transparent 1px 4px
-    ),
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-glass) 78%, transparent),
-      color-mix(in srgb, var(--surface-glass) 64%, transparent)
-    );
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
   box-shadow: var(--glass-rim), var(--glass-drop);
 }
-/* Light theme: dark mesh lines on the brighter body (white lines would
-   vanish on the light glass). */
+/* Light theme: the same bump the composer card gets, so both stay matched. */
 :root[data-theme="light"] .composer-slash-menu {
-  background:
-    repeating-linear-gradient(
-      45deg,
-      var(--glass-mesh-line-light) 0 1px,
-      transparent 1px 4px
-    ),
-    repeating-linear-gradient(
-      -45deg,
-      var(--glass-mesh-line-light) 0 1px,
-      transparent 1px 4px
-    ),
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-glass) 86%, transparent),
-      color-mix(in srgb, var(--surface-glass) 74%, transparent)
-    );
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
 }
 .composer-slash-item {
   display: flex;
@@ -1126,6 +1107,93 @@
 }
 .composer-queue-btn:hover {
   filter: brightness(1.12);
+}
+/* Quoted selections (selection toolbar's "Ask") — deliberately QUIETER than
+   the send queue: no bordered glass box, no row hover transitions, no drag
+   grip, no native tooltips. One tinted strip per quote; a long quote still
+   expands on click. */
+.composer-quotes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.composer-quote-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+  border: none;
+  border-radius: 9px;
+}
+.composer-quote-mark {
+  flex: none;
+  color: var(--accent);
+  opacity: 0.8;
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+}
+.composer-quote-text {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  /* tokens.css paints a global button skin (surface fill, 1px border, glass
+     rim shadow) — none of it belongs on a quiet quote strip. */
+  box-shadow: none;
+  transition: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+/* `button:hover` in tokens.css is specificity (0,1,1) — it BEATS a plain
+   class, so the global hover skin (strong border + glass fill) must be
+   explicitly out-ranked here, not just reset at rest. */
+.composer-quotes .composer-quote-text:hover,
+.composer-quotes .composer-quote-text:focus-visible {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: var(--text);
+}
+.composer-quote-text.expanded {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 140px;
+  overflow-y: auto;
+}
+.composer-quote-remove {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  transition: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+/* Same global-skin override: no boxy hover — just a quiet color shift. */
+.composer-quotes .composer-quote-remove:hover,
+.composer-quotes .composer-quote-remove:focus-visible {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: var(--text);
 }
 .composer-context-meter-spacer {
   flex: 1;

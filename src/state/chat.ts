@@ -526,6 +526,9 @@ export interface LoopState {
   /** Whether the loop is still live. Set false when it completes, blocks,
    *  errors, is stopped by the user, or the cap is reached. */
   active: boolean;
+  /** Wall-clock arm time (Date.now()) — drives the sidebar goal card's
+   *  elapsed timer. In-memory only; loops never survive a restart. */
+  startedAt: number;
   /** Backend loop-session id (SELF_IMPROVING_ARTIFACTS.md P0) — set once the
    *  fire-and-forget `loop_session_start` resolves. Telemetry only; the
    *  frontend state machine stays authoritative for loop control. */
@@ -1291,7 +1294,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       loopState: {
         ...s.loopState,
-        [id]: { goal, iteration: 0, max: GOAL_LOOP_MAX, active: true },
+        [id]: { goal, iteration: 0, max: GOAL_LOOP_MAX, active: true, startedAt: Date.now() },
       },
     }));
     // Persist the loop session (run telemetry + survival across restarts).

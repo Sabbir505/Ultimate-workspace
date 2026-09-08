@@ -47,6 +47,16 @@ import { useContextMeter } from "../../hooks/useContextMeter";
 import { useElementHeight } from "../../hooks/useElementHeight";
 import { GitToolsSidebar } from "./GitToolsSidebar";
 
+/** Downward chevron-arrow for the jump-to-latest pill. */
+function ArrowDownIcon() {
+  return (
+    <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <polyline points="19 12 12 19 5 12" />
+    </svg>
+  );
+}
+
 /** Format a backend error message for display. Strips raw JSON blobs,
  *  extracts the human-readable message, and keeps it to one line. */
 function formatChatError(raw: string): string {
@@ -170,9 +180,7 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   const cancelStream = useChatStore((s) => s.cancelStream);
   const deleteMessage = useChatStore((s) => s.deleteMessage);
   const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
-  const loopState = useChatStore((s) => s.loopState);
   const startLoop = useChatStore((s) => s.startLoop);
-  const stopLoop = useChatStore((s) => s.stopLoop);
   const sessions = useChatStore((s) => s.sessions);
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const setSessionProvider = useChatStore((s) => s.setSessionProvider);
@@ -763,6 +771,11 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   const resolveQuestionAction = useChatStore((s) => s.resolveQuestion);
   // Plan mode + proposal cards (present_plan) + the authoritative todo list.
   const pendingPlanProposals = useChatStore((s) => s.pendingPlanProposals);
+  // This session's pending present_plan proposal, if the model is paused on
+  // one — rendered as the transcript's last row (see the items memo below).
+  // Declared here (not next to the memo) because the scroll effects below
+  // key their anchors on it.
+  const pendingPlan = activeChatSessionId ? pendingPlanProposals[activeChatSessionId] : undefined;
   const resolvePlanProposalAction = useChatStore((s) => s.resolvePlanProposal);
   const planModeMap = useChatStore((s) => s.planMode);
   const toolsEnabled = useChatStore((s) => s.toolsEnabled);
@@ -853,14 +866,28 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
 
   // Draft handed to the composer: bumping `nonce` re-prefills the textarea
   // (used by the per-message "Edit" action to load a message for resend, and
-  // by the selection toolbar's "Ask" — selected text quoted as a follow-up).
+  // by the welcome prompts when no model is configured).
   const [draft, setDraft] = useState<{ text: string; nonce: number }>({
     text: "",
     nonce: 0,
   });
+  // Quoted selections from the selection toolbar's "Ask": each click stacks a
+  // removable chip ABOVE the composer (queue-row visual language) instead of
+  // overwriting whatever draft the user already had. The whole stack is
+  // prepended to the next sent message and cleared with it.
+  const [quotedSelections, setQuotedSelections] = useState<Array<{ id: number; text: string }>>([]);
+  const nextQuoteIdRef = useRef(1);
   useEffect(() => {
-    setChatSelectionPrefill((text) => setDraft({ text, nonce: Date.now() }));
+    setChatSelectionPrefill((text) =>
+      setQuotedSelections((qs) => [...qs, { id: nextQuoteIdRef.current++, text }]),
+    );
     return () => setChatSelectionPrefill(null);
+  }, []);
+  const removeQuotedSelection = useCallback((id: number) => {
+    setQuotedSelections((qs) => qs.filter((q) => q.id !== id));
+  }, []);
+  const clearQuotedSelections = useCallback(() => {
+    setQuotedSelections([]);
   }, []);
 
   // Load sessions on mount if not already loaded.
@@ -940,6 +967,13 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   // off, and strand the viewport far from the content the turn ended with.
   const programmaticPinUntilRef = useRef(0);
   const PROGRAMMATIC_PIN_GUARD_MS = 120;
+  // Timestamp until which a jump-to-latest SMOOTH animation owns the scroll.
+  // While hot, patchTailAndPin must not write scrollTop directly — an instant
+  // write would cut the animation to a snap. Cleared when the jump lands.
+  const smoothScrollUntilRef = useRef(0);
+  // True once the user has scrolled far enough above the live edge that the
+  // streaming tail is out of sight — drives the jump-to-latest pill.
+  const [awayFromLive, setAwayFromLive] = useState(false);
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
@@ -949,6 +983,9 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
       container.scrollHeight - container.scrollTop - container.clientHeight;
     const wasStuck = stickToBottomRef.current;
     stickToBottomRef.current = distanceFromBottom < threshold;
+    // Jump-pill visibility: only when the live edge is meaningfully out of
+    // view (>240px below the fold), not for small scroll jitters.
+    setAwayFromLive(distanceFromBottom > 240);
     // Returning to the live edge re-runs the tail-size patch + pin — a
     // session that was stranded with its last turn behind the composer
     // heals the moment the user scrolls back down (the follow effect only
@@ -1019,6 +1056,80 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     return Math.max(0, Math.min(maxScroll, rowBottom + tail - el.clientHeight));
   }, []);
 
+  /** Jump-to-latest pill: glide smoothly down to the live edge instead of
+   *  snapping. The virtualizer makes this more than one scrollTo call:
+   *  rows mount as the viewport approaches them (the measured live edge
+   *  moves), and async content (diagrams, highlighting) can grow the tail
+   *  mid-flight — so a rAF settle loop keeps the animation owned (its own
+   *  scroll events must not read as user intent, and the streaming follower
+   *  must not write over it), re-aims when the edge moved, and finishes with
+   *  one measured instant pin once the glide stops short or lands. */
+  const jumpToLiveEdge = useCallback(() => {
+    const el = messagesContainerRef.current;
+    stickToBottomRef.current = true;
+    setAwayFromLive(false);
+    // Respect the OS reduced-motion preference: no glide, straight pin.
+    if (
+      !el ||
+      (typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches)
+    ) {
+      pinToLiveEdgeRef.current?.();
+      return;
+    }
+
+    // While hot, this guard doubles as the handleScroll suppression (its own
+    // events ignored) and the patchTailAndPin stand-down (no snap writes).
+    const GUARD_MS = PROGRAMMATIC_PIN_GUARD_MS + 60;
+    const ownScroll = () => {
+      const until = performance.now() + GUARD_MS;
+      programmaticPinUntilRef.current = until;
+      smoothScrollUntilRef.current = until;
+    };
+
+    let retries = 3; // re-aim budget: virtualizer mounting + tail growth
+    let stableFrames = 0;
+    let lastTop = el.scrollTop;
+    let raf = 0;
+
+    const done = () => {
+      smoothScrollUntilRef.current = 0;
+      // One final measured patch+pin: lands exactly on the live edge (≤1px
+      // from where the glide left us when nothing moved) and re-runs the
+      // tail-height patch the stand-down skipped.
+      pinToLiveEdgeRef.current?.();
+    };
+
+    const step = () => {
+      const target = pinTargetFor(el);
+      if (Math.abs(el.scrollTop - target) <= 1) {
+        done();
+        return;
+      }
+      ownScroll();
+      if (el.scrollTop !== lastTop) {
+        stableFrames = 0;
+        lastTop = el.scrollTop;
+      } else if (++stableFrames >= 8) {
+        // The glide stopped short of the live edge — the target moved out
+        // from under it (rows mounted / tail grew) or the browser cut the
+        // animation. Re-aim while budget remains, else finish instantly.
+        if (retries-- > 0) {
+          stableFrames = 0;
+          el.scrollTo({ top: pinTargetFor(el), behavior: "smooth" });
+          raf = requestAnimationFrame(step);
+          return;
+        }
+        done();
+        return;
+      }
+      raf = requestAnimationFrame(step);
+    };
+
+    el.scrollTo({ top: pinTargetFor(el), behavior: "smooth" });
+    raf = requestAnimationFrame(step);
+  }, []);
+
   // Follow new messages / streaming tokens only while pinned to the bottom.
   // Writes scrollTop directly instead of scrollIntoView: scrollIntoView also
   // repositions every scrollable ANCESTOR and can be hijacked mid-flight by
@@ -1036,6 +1147,10 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     const patchTailAndPin = () => {
       const el = messagesContainerRef.current;
       if (!el || !stickToBottomRef.current) return;
+      // A jump-to-latest smooth animation owns the scroll while in flight —
+      // the instant write below would cut the glide to a snap. The jump's
+      // settle loop runs this once more itself when it lands.
+      if (performance.now() < smoothScrollUntilRef.current) return;
       // MEASURED ROOT CAUSE (pad-debug overlay, 2026-08-27): the virtualizer's
       // sized wrapper div rendered with a STALE height (inner h=743 while
       // totalSize=3017) — its measurement cache was already correct, but no
@@ -1154,6 +1269,7 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     stickToBottomRef.current = true;
     liveTotalRef.current = 0;
     setLiveTotal(0);
+    setAwayFromLive(false);
   }, [activeChatSessionId]);
 
   // Wheel over the composer dock scrolls the transcript. The dock overlays
@@ -1551,6 +1667,9 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           m.startedAt != null && m.completedAt != null
             ? m.completedAt - m.startedAt
             : undefined,
+        // Unix seconds from the DB (ms on the optimistic bubble) — the bubble
+        // shows it as its end-of-turn timestamp.
+        createdAt: m.createdAt,
         key: `msg-${m.id}`,
         id: m.id,
         superseded: !!m.supersededBy,
@@ -1577,6 +1696,8 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
     // live there, over the full list).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, activeChatSessionId, artifactProposalsBySession, enterEpoch, handleDelete, handleSubmitEdit]);
+  // This session's pending present_plan proposal, if the model is paused on
+  // one — rendered as the transcript's last row (see the items memo below).
   const items: TimelineItem[] = useMemo(() => {
     const list = persistedItems.slice();
     // If streaming, append the live assistant bubble (no action bar while live).
@@ -2020,46 +2141,18 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         </div>
       )}
 
-      {/* Plan preview: appears above composer when the latest assistant message contains a plan */}
-      <PlanPreview
-        messages={messages}
-        activeSessionId={activeChatSessionId}
-        streaming={activeIsStreaming}
-        onSend={handleSend}
-      />
+      {/* Plan preview ("Agree & proceed"): renders INLINE in the transcript,
+          directly after the assistant message it describes — the old dock-
+          adjacent mount sat in normal flow under the messages div and the
+          absolutely-positioned composer dock overlaid it. */}
 
       {/* Composer dock: overlays the transcript (position:absolute) so
           messages scroll BEHIND the glass card — that's what makes the
           transparency read as glass. Queue chip + approval card ride on top
           of it inside the same overlay. */}
       <div className="chat-composer-dock" ref={composerDockRef}>
-      {/* Goal-loop status chip: shows iteration count + Stop while a /goal or
-          /loop is running for THIS session. Sits above the composer so it
-          doesn't push the message list. */}
-      {activeChatSessionId && loopState[activeChatSessionId]?.active && (() => {
-        const loop = loopState[activeChatSessionId];
-        return (
-          <div className="composer-queue" aria-label="Goal loop running">
-            <div className="composer-queue-header" style={{ cursor: "default" }}>
-              <span className="composer-queue-chevron" aria-hidden="true">▾</span>
-              <span className="composer-queue-index" title="Active goal loop">🔁</span>
-              <span className="composer-queue-text" title={loop.goal}>
-                Goal loop — iteration {loop.iteration}/{loop.max}{" "}
-                {loop.goal ? `· ${loop.goal.slice(0, 80)}${loop.goal.length > 80 ? "…" : ""}` : ""}
-              </span>
-              <button
-                type="button"
-                className="composer-queue-remove"
-                title="Stop the goal loop"
-                aria-label="Stop the goal loop"
-                onClick={() => stopLoop(activeChatSessionId ?? undefined)}
-              >
-                ×
-              </button>
-            </div>
-          </div>
-        );
-      })()}
+      {/* Goal-loop status lives in the GitToolsSidebar goal card (iteration +
+          timer + stop), not here — the composer-side chip duplicated it. */}
 
       {activeChatSessionId && pendingApprovals[activeChatSessionId] && (
         <div className="composer-approval-wrap">
@@ -2094,10 +2187,18 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           Renders above the composer so it survives transcript scrolling. */}
       <CitationReportStrip chatSessionId={activeChatSessionId} onFix={(sid) => void handleFixCitations(sid)} />
 
-      {/* present_plan proposal — the model is PAUSED until this is resolved.
-          Approving unlocks mutations; rejecting sends the feedback text back. */}
+      {/* present_plan proposal: renders INLINE in the transcript (as the last
+          timeline row) instead of in this dock — the floating composer made a
+          dock-mounted card overlay the very messages the plan responds to. */}
+
+      {/* present_plan proposal — docked NOTCH on the composer: mounted inside
+          the dock (so the floating composer can never overlay it) and styled
+          as a fused notch — flat bottom onto the composer card's top border.
+          The model is PAUSED until this is resolved; approving unlocks
+          mutations, rejecting sends the feedback text back. Its height rides
+          in composerDockHeight, so the transcript re-pins above it. */}
       {activeChatSessionId && pendingPlanProposals[activeChatSessionId] && (
-        <div className="composer-approval-wrap">
+        <div className="plan-preview">
           <PlanProposalCard
             proposal={pendingPlanProposals[activeChatSessionId]}
             onResolve={(approved, feedback) =>
@@ -2110,6 +2211,9 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       <ChatComposer
         sessionId={activeChatSessionId}
         draft={draft}
+        quotedSelections={quotedSelections}
+        onRemoveQuotedSelection={removeQuotedSelection}
+        onClearQuotedSelections={clearQuotedSelections}
         onSend={handleSend}
         onStop={handleStop}
         streaming={activeIsStreaming}
@@ -2166,6 +2270,21 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         thinkingSupported={thinkingSupported}
       />
       </div>
+      {/* Jump-to-latest pill: floats over the transcript just above the
+          composer dock whenever the user has scrolled far enough up that the
+          live edge is out of view. One click re-pins to the newest turn. */}
+      {hasItems && awayFromLive && (
+        <button
+          type="button"
+          className="chat-jump-live"
+          style={{ bottom: composerDockHeight > 0 ? composerDockHeight + 14 : 234 }}
+          onClick={jumpToLiveEdge}
+          title="Jump to latest"
+          aria-label="Jump to latest message"
+        >
+          <ArrowDownIcon />
+        </button>
+      )}
       {fullAccessConfirmingFor && (
         <FullAutoConfirmModal
           onConfirm={() => void confirmFullAccess(fullAccessConfirmingFor!)}
@@ -2178,131 +2297,3 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   );
 }
 
-// ---- Plan Preview (above composer) ----
-
-// Plan detection: matches common plan/approach headers that models produce.
-// Designed to be inclusive enough for real-world responses (Claude, GPT, etc.)
-// but not so loose it triggers on every bullet list.
-const PLAN_PATTERNS = [
-  // Markdown heading with plan keywords. "Steps" alone is too loose (file
-  // trees, install steps, etc.) — require it to be "Steps to/for/of …".
-  /^#{1,3}\s*(?:Plan|Planning|Approach|Strategy|Implementation|Proposed Solution|Game Plan|Roadmap|To[- ]Do|Action Plan)\b/im,
-  /^#{1,3}\s*Steps\s+(?:to|for|of)\b/im,
-  // Phrasal intros — model says "Here's my plan" or "Let me outline"
-  /(?:^|\n\n)(?:Here(?:'s| is) (?:my |the |a |an )?(?:plan|approach|breakdown|strategy|outline|steps?))/im,
-  /(?:^|\n\n)(?:Let me (?:(?:quickly )?(?:plan|outline|break(?:\s+down)?|sketch|lay out|map out|walk through)|explain (?:my |the )?(?:plan|approach|thinking)))/im,
-  /(?:^|\n\n)(?:I(?:'ll| will) (?:plan|break|outline|do the following|take the following|proceed (?:as follows|in these steps)|tackle this (?:in |with )?steps?|start by))/im,
-  /(?:^|\n\n)(?:My (?:plan|approach|strategy|recommendation|suggestion) (?:is|would be|:))/im,
-  /(?:^|\n\n)(?:Here(?:'s| is) (?:how|what) I(?:'ll| will) (?:do|approach|proceed|tackle|handle|implement))/im,
-  // Numbered plan marker: requires TWO consecutive numbered items (a real
-  // ordered plan), not just one numbered line.
-  /(?:^|\n)(?:\d+[.)]\s+)(?:\*\*[^*]+\*\*\s*)?(?:\d+[.)]\s+)/m,
-];
-
-function detectPlanSection(content: string): { title: string; lines: string[]; full: string } | null {
-  // Strip reasoning blocks first
-  const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
-  if (cleaned.length < 60) return null;
-
-  for (const pattern of PLAN_PATTERNS) {
-    const m = pattern.exec(cleaned);
-    if (m && m.index >= 0) {
-      const start = m.index;
-      const after = cleaned.slice(start);
-      const headerEnd = m[0].length;
-      // Take content from the plan header to the next ## section, or ~500 chars
-      const nextSection = after.slice(headerEnd).search(/^#{1,3}\s+(?!Plan|Step)/m);
-      const full = nextSection !== -1
-        ? after.slice(0, headerEnd + nextSection).trim()
-        : after.slice(0, Math.min(after.length, 600)).trim();
-      // Only count as a plan if there's substantial content after the header
-      const bodyAfterHeader = full.slice(headerEnd).trim();
-      if (bodyAfterHeader.length < 30) continue;
-      const title = m[0]
-        .replace(/^#{1,3}\s*/, "")
-        .replace(/[*_`]/g, "")
-        .trim()
-        .slice(0, 70);
-      const allLines = full.split("\n").filter((l) => l.trim().length > 0);
-      if (allLines.length < 2) continue;
-      return { title, lines: allLines, full };
-    }
-  }
-  return null;
-}
-
-function PlanPreview({
-  messages,
-  activeSessionId,
-  streaming,
-  onSend,
-}: {
-  messages: import("../../lib/ipc").ChatMessageRecord[];
-  activeSessionId: string | null;
-  streaming: boolean;
-  onSend: (content: string, attachments: import("./ChatComposer").ChatAttachment[], forceResearch?: boolean) => void;
-}) {
-  const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
-  const openPlanTab = useUiStore((s) => s.openPlanTab);
-
-  // Only show plan preview when NOT streaming and we have messages
-  if (!activeSessionId || streaming) return null;
-
-  // Find the latest assistant message that contains a plan
-  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-  if (!lastAssistant) return null;
-
-  const plan = detectPlanSection(lastAssistant.content);
-  if (!plan) return null;
-
-  // Show first 4 lines clearly, rest with blur
-  const visibleLines = plan.lines.slice(0, 4);
-  const blurLines = plan.lines.slice(4, 6);
-
-  const handleAgree = () => {
-    onSend("I agree with this plan. Proceed with the implementation.", []);
-  };
-
-  const handleExpand = () => {
-    // Strip the plan's own heading from the body so the plan tab doesn't
-    // double-display it
-    const bodyWithoutHeader = plan.full.replace(/^#{1,3}\s+[^\n]+\n*/, "").trim();
-    setPlanCanvas(bodyWithoutHeader || plan.full, plan.title);
-    openPlanTab();
-  };
-
-  return (
-    <div className="plan-preview">
-      <div className="plan-preview-card">
-        <div className="plan-preview-title">
-          <svg className="plan-preview-icon" width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-            <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
-            <rect x="9" y="3" width="6" height="4" rx="1" />
-            <path d="M9 14l2 2 4-4" />
-          </svg>
-          {plan.title}
-        </div>
-        <div className="plan-preview-lines">
-          {visibleLines.map((line, i) => (
-            <div key={i} className="plan-preview-line">{line}</div>
-          ))}
-          {blurLines.length > 0 && (
-            <div className="plan-preview-blur">
-              {blurLines.map((line, i) => (
-                <div key={i} className="plan-preview-line">{line}</div>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="plan-preview-actions">
-          <button className="plan-preview-btn expand" onClick={handleExpand}>
-            Expand
-          </button>
-          <button className="plan-preview-btn agree" onClick={handleAgree}>
-            Agree &amp; proceed
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}

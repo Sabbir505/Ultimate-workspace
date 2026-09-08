@@ -22,7 +22,7 @@ import {
 } from "../../lib/ipc";
 import { useProjectsStore } from "../../state/projects";
 import { useChatStore, selectContextSessionId } from "../../state/chat";
-import type { ChatTaskProgress, PlanStep } from "../../state/chat";
+import type { ChatTaskProgress, LoopState, PlanStep } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { BranchDropdown } from "./BranchDropdown";
 import { CommitModal } from "./CommitModal";
@@ -124,9 +124,59 @@ function SidebarMoreRow({
   );
 }
 
+/** Live status card for a running /goal or /loop — the sidebar replacement
+ *  for the old composer-side chip. Header: GOAL label, iteration fraction,
+ *  a 1s-ticking wall-clock timer, and a stop button; the goal text below.
+ *  Re-renders once a second via ticker while mounted, and unmounts the
+ *  moment the loop goes inactive. */
+function GoalLoopCard({ loop, onStop }: { loop: LoopState; onStop: () => void }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const iv = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(iv);
+  }, []);
+  const elapsed = Math.max(0, Math.floor((Date.now() - loop.startedAt) / 1000));
+  const timer =
+    elapsed < 60
+      ? `${elapsed}s`
+      : `${Math.floor(elapsed / 60)}m ${String(elapsed % 60).padStart(2, "0")}s`;
+  return (
+    <div className="git-goal-card" role="status" aria-label="Goal loop running">
+      <div className="git-goal-head">
+        <span className="git-goal-label">Goal</span>
+        <span className="git-goal-iter" title="Iterations completed / cap">
+          {loop.iteration}/{loop.max}
+        </span>
+        <span className="git-goal-sep" aria-hidden="true">·</span>
+        <span className="git-goal-timer">{timer}</span>
+        <button
+          type="button"
+          className="git-goal-stop"
+          title="Stop the goal loop"
+          aria-label="Stop the goal loop"
+          onClick={onStop}
+        >
+          <svg width={11} height={11} viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+            <rect x="6" y="4" width="4" height="16" rx="1.2" />
+            <rect x="14" y="4" width="4" height="16" rx="1.2" />
+          </svg>
+        </button>
+      </div>
+      <div className="git-goal-text" title={loop.goal}>
+        <svg className="git-goal-icon" width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <circle cx="12" cy="12" r="4.5" />
+          <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+        </svg>
+        <span className="git-goal-text-label">{loop.goal || "Working toward the goal…"}</span>
+      </div>
+    </div>
+  );
+}
+
 export function GitToolsSidebar() {
-  const activeChatSessionId = useChatStore(selectContextSessionId);
-  const boundProjectId = useChatStore((s) =>
+  const loopState = useChatStore((s) => s.loopState);
+  const activeChatSessionId = useChatStore(selectContextSessionId);  const boundProjectId = useChatStore((s) =>
     activeChatSessionId ? s.sessionProjects[activeChatSessionId] : undefined,
   );
   const projects = useProjectsStore((s) => s.projects);
@@ -145,6 +195,9 @@ export function GitToolsSidebar() {
   const subagents = useChatStore((s) =>
     activeChatSessionId ? (s.subagents[activeChatSessionId] ?? EMPTY_SUBAGENTS) : EMPTY_SUBAGENTS,
   );
+  // Running /goal or /loop for the focused chat — the sidebar goal card.
+  const activeLoop = activeChatSessionId ? loopState[activeChatSessionId] : undefined;
+  const stopLoop = useChatStore((s) => s.stopLoop);
 
   // Activate plan-step parsing and completion tracking
   usePlanTracker();
@@ -343,9 +396,23 @@ export function GitToolsSidebar() {
     setBranchOpen((prev) => !prev);
   }, []);
 
+  // Collapsed-chip status line: what the chat is doing RIGHT NOW, so the
+  // collapsed rail isn't just a mute icon. Priority: the running /goal or
+  // /loop title, else the plan step currently in progress, else the changes
+  // summary (only when something actually changed).
+  const inProgressStep =
+    Object.values(planSteps).find((s) => s.status === "in_progress") ?? null;
+  const collapsedStatus = activeLoop?.active
+    ? activeLoop.goal
+    : inProgressStep
+      ? inProgressStep.label
+      : added + deleted > 0
+        ? `Changes +${added.toLocaleString()} −${deleted.toLocaleString()}`
+        : null;
+
   // ---- Always-mounted shell so the collapse/expand can animate smoothly.
-  // The shell slides between a compact icon chip (48px) and the full panel
-  // (260px). The header row holds the git-branch toggle icon plus the
+  // The shell slides between a compact icon chip and the full panel (260px).
+  // The header row holds the git-branch toggle icon plus the
   // "Git tools" title; the sections live in a body that collapses its
   // max-height and fades. The icon is the same element in both states.
   return (
@@ -356,10 +423,18 @@ export function GitToolsSidebar() {
         the 260px shell (clipped invisible by overflow:hidden). As a
         sibling it anchors to the real viewport again. */}
     <div
-      className={`git-sidebar${gitSidebarCollapsed ? " git-sidebar-collapsed" : ""}`}
+      className={`git-sidebar${gitSidebarCollapsed ? " git-sidebar-collapsed" : ""}${gitSidebarCollapsed && collapsedStatus ? " git-sidebar-with-status" : ""}`}
     >
       <div className="git-sidebar-inner">
         <div className="git-sidebar-header">
+          {/* Collapsed: the chip widens and shows what the chat is doing —
+              goal title / current plan step / changes summary. Full text on
+              hover via title (set on the div below). */}
+          {gitSidebarCollapsed && collapsedStatus && (
+            <div className="git-sidebar-status" title={collapsedStatus}>
+              {collapsedStatus}
+            </div>
+          )}
           {/* Whole-sidebar collapse/expand. Same icon in both states. */}
           <button
             className="git-sidebar-collapse-btn"
@@ -446,6 +521,12 @@ export function GitToolsSidebar() {
           </div>
         </div>
       </div>
+
+      {/* Goal loop — live status for a running /goal or /loop, above the
+          Plans section: iteration count, ticking timer, stop, goal text. */}
+      {activeLoop?.active && (
+        <GoalLoopCard loop={activeLoop} onStop={() => stopLoop(activeChatSessionId ?? undefined)} />
+      )}
 
       {/* Plans section */}
       <div className="git-sidebar-section">

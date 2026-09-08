@@ -36,6 +36,7 @@ import { PullsPanel } from "./PullsPanel";
 import { BranchPanel } from "./BranchPanel";
 import { DormantBrowsers, PaneFrame } from "./PaneFrame";
 import { SubagentPanel } from "./SubagentPanel";
+import { mdLinkComponents } from "../chat/MdLink";
 
 const TABS: { id: ToolPanelTab; label: string; Icon: React.ElementType }[] = [
   { id: "terminal", label: "Terminal", Icon: Terminal },
@@ -106,7 +107,9 @@ const PlanCanvas = memo(function PlanCanvas({
         </button>
       </div>
       <div className="canvas-plan-body">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
+          {content}
+        </ReactMarkdown>
       </div>
     </div>
   );

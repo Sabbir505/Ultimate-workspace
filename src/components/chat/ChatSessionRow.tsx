@@ -1,9 +1,13 @@
-// Chat session row in the sidebar: title, last-active relative time, and a
-// truncated preview of the last message. A vertical three-dot button reveals
-// a context menu (star/pin, rename, mark unread, delete) on hover. Styled to
-// match the existing .session-row and .project-row patterns.
+// Chat session row in the sidebar — inbox style, two lines: (1) title +
+// working-spinner/relative-time, (2) project · branch context on the left
+// and the session's provider/harness/local-model brand icon on the right.
+// A vertical three-dot button reveals a context menu (star/pin, rename, mark
+// unread, delete) on hover. Styled to match the existing .session-row and
+// .project-row patterns.
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Folder, GitBranch } from "lucide-react";
 import { relativeTime } from "../../lib/relativeTime";
+import { sessionModelIcon } from "./agentIcons";
 
 export interface ChatSessionRowData {
   id: string;
@@ -14,6 +18,15 @@ export interface ChatSessionRowData {
   unread?: boolean;
   /** Isolated git worktree path (roadmap P0 §3.1.1); shows a small badge. */
   worktreePath?: string | null;
+  /** Bound project's display name, else the chosen folder's name (inbox
+   *  second row, folder icon). */
+  projectName?: string | null;
+  /** Branch the chat works on: the project repo's branch, or `relay/<id>`
+   *  for isolated-worktree chats. Null when unknown (not a repo / not polled). */
+  branchName?: string | null;
+  /** Session's agent + provider pair — drives the second-row brand icon. */
+  agent?: string | null;
+  provider?: string | null;
 }
 
 interface Props {
@@ -70,13 +83,6 @@ export function ChatSessionRow({
     ro.observe(el);
     return () => ro.disconnect();
   }, [session.title]);
-
-  const truncated =
-    session.lastMessage
-      ? session.lastMessage.length > 60
-        ? session.lastMessage.slice(0, 60) + "…"
-        : session.lastMessage
-      : "";
 
   // Close the menu on any outside click / Escape.
   useEffect(() => {
@@ -161,9 +167,6 @@ export function ChatSessionRow({
       onClick={() => !editing && onSelect(session.id)}
       title={session.title}
     >
-      {working && (
-        <span className="chat-session-working" title="Working…" aria-label="Working" />
-      )}
       {!working && session.starred && (
         <span className="chat-session-star-badge" title="Starred">
           ★
@@ -173,7 +176,7 @@ export function ChatSessionRow({
         <span className="chat-session-unread-dot" aria-label="Unread" />
       )}
       <div className="chat-session-info">
-        {/* Title + timer on the same row */}
+        {/* Title + spinner/timer on the same row */}
         <div className="chat-session-title-row">
           {editing ? (
             <input
@@ -193,11 +196,16 @@ export function ChatSessionRow({
               <span className="chat-session-title-text">{session.title}</span>
             </div>
           )}
-          {/* Time and the ⋮ button share the same right slot: the time shows
-              at rest, the menu button fades in on hover (or while the menu is
-              open) in its place — no layout shift. */}
+          {/* Time slot: the working spinner takes the timer's place while the
+              chat is streaming; the relative time returns once it's done. The
+              ⋮ button shares the slot and fades in on hover (or while the
+              menu is open) — no layout shift. */}
           <div className="chat-session-meta">
-            <span className="chat-session-time">{relativeTime(session.lastActiveAt)}</span>
+            {working ? (
+              <span className="chat-session-working" title="Working…" aria-label="Working" />
+            ) : (
+              <span className="chat-session-time">{relativeTime(session.lastActiveAt)}</span>
+            )}
             {session.worktreePath && (
               <span
                 className="chat-session-worktree-badge"
@@ -219,7 +227,30 @@ export function ChatSessionRow({
             </button>
           </div>
         </div>
-        {truncated && <span className="chat-session-preview">{truncated}</span>}
+        {/* Inbox second row: 📁 project/folder + git branch on the left, the
+            session's provider/harness/local-model brand icon on the right. */}
+        <div className="chat-session-sub-row">
+          {session.projectName && (
+            <span className="chat-session-context" title={session.projectName}>
+              <Folder size={10} strokeWidth={1.8} className="chat-session-context-icon" />
+              <span className="chat-session-context-text">{session.projectName}</span>
+            </span>
+          )}
+          {session.branchName && (
+            <span className="chat-session-branch" title={session.branchName}>
+              <GitBranch size={10} strokeWidth={1.8} className="chat-session-context-icon" />
+              <span className="chat-session-context-text">{session.branchName}</span>
+            </span>
+          )}
+          <span
+            className="chat-session-provider"
+            title={[session.provider, session.agent?.startsWith("harness:") ? session.agent.slice(8) : session.agent]
+              .filter(Boolean)
+              .join(" · ")}
+          >
+            {sessionModelIcon(session.agent, session.provider)}
+          </span>
+        </div>
       </div>
 
       {menuOpen && (

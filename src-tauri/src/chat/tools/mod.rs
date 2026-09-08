@@ -15,12 +15,18 @@ use super::codeexec;
 
 mod search;
 pub(crate) use search::{
-    configured_provider, fetch_url, web_search_with_status,
+    configured_provider, fetch_url, render_search_results, serp_via_reader,
+    web_search_with_status, SearchOutcome,
 };
 use search::web_search;
 /// Re-exported so `download_task` (chat/tasks.rs) can reuse the SSRF guard
 /// (host_blocked / is_blocked_ip) instead of duplicating it.
 pub(crate) use search::{host_blocked, is_blocked_ip};
+
+/// SERP fallback driven through the built-in browser pane (a real WebView —
+/// defeats the CAPTCHA/403 bot walls the plain HTTP scrapers hit).
+mod serp_browser;
+pub(crate) use serp_browser::browser_serp_search;
 
 mod generate;
 use generate::{generate_document, generate_diagram, generate_file};

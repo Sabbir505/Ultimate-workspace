@@ -977,6 +977,12 @@ export interface ChatMessage {
   /** Live perf snapshot (elapsedMs, etc.) from `chat:perf` for the streaming
    *  bubble — used to show "Working for Xs" while the turn is in flight. */
   livePerf?: ChatPerfPayload | null;
+  /** Wall-clock creation time for the bubble's end-of-turn timestamp. Persisted
+   *  rows carry Unix SECONDS (db now_ts()); the optimistic just-sent message
+   *  carries Date.now() MILLISECONDS — consumers normalize via the 1e12
+   *  threshold. Absent on the live streaming bubble, so the stamp appears only
+   *  once the turn ends and the persisted row swaps in. */
+  createdAt?: number;
   /** Live attachment objects (with image base64) for the optimistic just-sent
    *  message, so image cards get a real thumbnail before the backend persists.
    *  Persisted messages carry attachments as text markers inside `content`

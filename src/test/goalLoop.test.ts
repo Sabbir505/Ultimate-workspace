@@ -108,6 +108,7 @@ describe("loop store actions", () => {
       iteration: 0,
       max: GOAL_LOOP_MAX,
       active: true,
+      startedAt: expect.any(Number),
     });
   });
 

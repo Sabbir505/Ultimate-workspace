@@ -41,7 +41,7 @@ import { PdfViewer } from "./PdfViewer";
 import { sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
 import { linkCitations, parseChatSources } from "../../lib/chatCitations";
-import { openInBrowserPane } from "../../lib/openBrowserPane";
+import { MdLink } from "./MdLink";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -94,25 +94,7 @@ function MarkdownDocument({ text }: { text: string }) {
                 .filter((n) => Number.isFinite(n));
               return <ChatCitation nums={nums} sources={sources} />;
             }
-            const isHttp = !!href && /^https?:\/\//i.test(href);
-            return (
-              <a
-                href={href}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="chat-md-link"
-                onClick={
-                  isHttp
-                    ? (e) => {
-                        e.preventDefault();
-                        openInBrowserPane(href!);
-                      }
-                    : undefined
-                }
-              >
-                {children}
-              </a>
-            );
+            return <MdLink href={href}>{children}</MdLink>;
           },
         }}
       >

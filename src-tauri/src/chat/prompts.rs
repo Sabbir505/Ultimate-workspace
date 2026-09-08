@@ -726,6 +726,20 @@ pub fn build_system_prompt(
         }
         parts.push(s);
     }
+    // Freshness tail. The head-of-prompt date segment (see
+    // current_datetime_segment) decays in salience over long sessions, and
+    // the models that most need it are the ones that answer "latest" questions
+    // from training data anyway. The LAST line of the prompt is what the
+    // current turn attends to, so re-anchor there too. Gated on tools: the
+    // instruction is "search", and without tools that's a broken promise.
+    if tools_enabled {
+        let today = chrono::Local::now().format("%a %Y-%m-%d");
+        parts.push(format!(
+            "Reminder: today is {today}. Before answering anything \
+             \"latest\"/\"current\"/time-sensitive from memory, run web_search and \
+             cite the source — never present training-cutoff facts as current."
+        ));
+    }
     if parts.is_empty() {
         None
     } else {

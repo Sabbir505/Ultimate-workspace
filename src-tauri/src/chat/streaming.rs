@@ -51,6 +51,110 @@ pub(crate) const MAX_PARSE_FAILURES: u32 = 50;
 /// rounds use a handful of blocks; 64 is generous.
 const MAX_STREAM_BLOCK_INDEX: usize = 64;
 
+// ---------------------------------------------------------------------------
+// Search-first tripwire
+//
+// The system prompt says MUST `web_search` for anything "latest"/"current",
+// yet models still answer from training data often enough that the user ends
+// up typing "search the internet" by hand. The tripwire automates exactly
+// that correction: when a turn ENDS with a final answer but (a) the user's
+// question turns on changeable facts, (b) no live-web tool ran this turn, and
+// (c) the answer doesn't already decline live data, one synthetic user-role
+// reminder is injected and the loop continues for another round. Invisible in
+// the transcript (`full` only accumulates streamed text + tool markers), at
+// most once per turn, and skipped when the cap has no headroom for a
+// nudge + corrected-answer round.
+// ---------------------------------------------------------------------------
+
+/// True when `name` counts as "the model consulted live web/local-environment
+/// data this turn". Task counts: a delegated subagent may well have searched;
+/// a false negative here would nag the model for work its subagent did.
+fn is_live_web_tool(name: &str) -> bool {
+    matches!(
+        name,
+        tools::WEB_SEARCH | tools::FETCH_URL | tools::OPEN_URL | tools::TASK
+    ) || name.starts_with("browser_")
+}
+
+/// Heuristic: does the user's message turn on information that may have
+/// changed since any model's training cutoff? Deliberately coarse — the trip
+/// consequences are cheap (one reminder round), so recall matters more than
+/// precision.
+fn user_message_is_time_sensitive(text: &str) -> bool {
+    const TRIGGERS: &[&str] = &[
+        "latest", "current", "currently", "today", "now", "recent", "recently",
+        "newest", "this week", "this month", "this year", "so far",
+        "up to date", "up-to-date", "price", "worth", "version",
+        "release", "released", "news", "score", "weather", "stock",
+        "exchange rate", "who won", "standings",
+    ];
+    let lower = text.to_lowercase();
+    // Any recent-ish year: "what happened in 2026" is definitionally a
+    // live-data question, whatever the phrasing.
+    if lower.contains("2024") || lower.contains("2025") || lower.contains("2026") {
+        return true;
+    }
+    TRIGGERS.iter().any(|t| lower.contains(t))
+}
+
+/// Heuristic: the answer already explains it can't/won't access live data.
+/// Re-nudging a model that just said "I can't browse the web" would loop it
+/// into repeating itself.
+fn answer_declines_live_data(answer: &str) -> bool {
+    const HEDGES: &[&str] = &[
+        "knowledge cutoff",
+        "training data",
+        "training cutoff",
+        "cannot browse",
+        "can't browse",
+        "unable to browse",
+        "cannot access the internet",
+        "can't access the internet",
+        "no internet access",
+        "cannot search the web",
+        "can't search the web",
+        "cannot search the internet",
+        "can't search the internet",
+    ];
+    let lower = answer.to_lowercase();
+    HEDGES.iter().any(|h| lower.contains(h))
+}
+
+/// The tripwire decision: `Some(reminder)` when the final answer should be
+/// re-checked against live sources. `user_text` is the turn's user message,
+/// `answer` the accumulated turn text, `live_web_used` whether any live-web
+/// tool already ran this turn.
+fn search_first_tripwire(user_text: &str, answer: &str, live_web_used: bool) -> Option<String> {
+    if live_web_used || answer_declines_live_data(answer) {
+        return None;
+    }
+    if !user_message_is_time_sensitive(user_text) {
+        return None;
+    }
+    let today = chrono::Local::now().format("%a %Y-%m-%d");
+    Some(format!(
+        "[system reminder — not from the user] Today is {today}. The user's question \
+         turns on information that may have changed (latest/current/prices/versions/news), \
+         but this turn has not used any live web tool. If your answer relies on facts that \
+         could differ from your training data, call `web_search` now (one or two targeted \
+         queries) and reply with only what changed or was confirmed — 1-3 sentences, do \
+         not repeat your whole answer. If the answer came from the live environment \
+         (files, shell output, local state) or is fully stable knowledge, reply with the \
+         single line: (no search needed — answer stands)"
+    ))
+}
+
+/// The turn's last user message text (what the tripwire classifies). Empty
+/// when history has no user turn (defensive — can't happen on real sends).
+fn last_user_text(messages: &[crate::chat::providers::ChatMessage]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default()
+}
+
 /// Read the next chunk off an SSE stream with a stall watchdog (B-9).
 ///
 /// reqwest's interactive client has no overall timeout, so a half-open
@@ -1000,6 +1104,9 @@ pub(crate) async fn run_openai_tool_loop(
 
     let mut full = String::new();
     let mut total = RoundUsage::default();
+    // Search-first tripwire state — see the module section above.
+    let mut live_web_used = false;
+    let mut search_nudge_sent = false;
 
     // [prompt-audit]: final wire composition. On local models the --jinja
     // chat template renders the `tools` array into the prompt, so the tools
@@ -1209,6 +1316,10 @@ pub(crate) async fn run_openai_tool_loop(
                     .unwrap_or("{}");
                 let args = parse_tool_args(args_str);
 
+                if is_live_web_tool(&name) {
+                    live_web_used = true;
+                }
+
                 // Two-part emission: open the block BEFORE running the tool so
                 // the frontend sees the step as live (spinner + live action
                 // label) while it executes — the closing tag after completion
@@ -1272,6 +1383,20 @@ pub(crate) async fn run_openai_tool_loop(
 
         // No tool calls → final answer. The text was already streamed live in
         // `openai_stream_round` (Hermes markup, if any, was suppressed there).
+        // Search-first tripwire: one invisible reminder round when a
+        // time-sensitive question was answered with no live-web tool run.
+        if !search_nudge_sent && live_caps.web_search && round + 2 < cap {
+            if let Some(nudge) =
+                search_first_tripwire(&last_user_text(&req.messages), &full, live_web_used)
+            {
+                search_nudge_sent = true;
+                // Rendered markdown hides HTML comments, so this leaves a
+                // trace in the persisted transcript without showing in chat.
+                emit_marker(app, sid, "\n\n<!--search-tripwire-->\n", &mut full);
+                messages.push(json!({ "role": "user", "content": nudge }));
+                continue;
+            }
+        }
         return Ok((full, build_usage(true, total)));
     }
 
@@ -1373,8 +1498,11 @@ pub(crate) async fn run_anthropic_tool_loop(
 
     let mut full = String::new();
     let mut total = RoundUsage::default();
+    // Search-first tripwire state — see the module section above.
+    let mut live_web_used = false;
+    let mut search_nudge_sent = false;
 
-    for _ in 0..cap {
+    for round in 0..cap {
         // Same stale-tool-output shrink as the OpenAI loop (see
         // elide_stale_tool_results).
         elide_stale_tool_results(&mut messages, false);
@@ -1449,6 +1577,10 @@ pub(crate) async fn run_anthropic_tool_loop(
                 let name = tu.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
 
+                if is_live_web_tool(&name) {
+                    live_web_used = true;
+                }
+
                 // Two-part emission — see the OpenAI loop's marker. (Deferred
                 // Task calls opened their marker in the pre-pass above.)
                 if deferred[idx].is_none() {
@@ -1494,7 +1626,21 @@ pub(crate) async fn run_anthropic_tool_loop(
         }
 
         // No tool use → final answer. Text blocks were already streamed live in
-        // `anthropic_stream_round`.
+        // `anthropic_stream_round`. Search-first tripwire: one invisible
+        // reminder round when a time-sensitive question was answered with no
+        // live-web tool run (mirror of the OpenAI loop's exit).
+        if !search_nudge_sent && live_caps.web_search && round + 2 < cap {
+            if let Some(nudge) =
+                search_first_tripwire(&last_user_text(&req.messages), &full, live_web_used)
+            {
+                search_nudge_sent = true;
+                // Rendered markdown hides HTML comments, so this leaves a
+                // trace in the persisted transcript without showing in chat.
+                emit_marker(app, sid, "\n\n<!--search-tripwire-->\n", &mut full);
+                messages.push(json!({ "role": "user", "content": nudge }));
+                continue;
+            }
+        }
         return Ok((full, build_usage(false, total)));
     }
 
@@ -1548,6 +1694,95 @@ pub(crate) fn resolve_provider(id: &ChatProviderId) -> Box<dyn ChatProvider> {
 mod tests {
     use super::*;
     use crate::chat::providers::ChatMessage;
+
+    #[test]
+    fn time_sensitive_heuristic_matches_current_affairs_and_recent_years() {
+        for yes in [
+            "what's the latest version of react?",
+            "who is the current CEO of Vercel",
+            "price of bitcoin today",
+            "what happened in tech news this week",
+            "top standings 2026",
+            "summarize what changed in 2025",
+        ] {
+            assert!(user_message_is_time_sensitive(yes), "should trip: {yes}");
+        }
+        for no in [
+            "fix the failing unit test in src/lib.rs",
+            "explain how quicksort works",
+            "refactor this function for readability",
+            "write me a haiku about the ocean",
+        ] {
+            assert!(!user_message_is_time_sensitive(no), "must not trip: {no}");
+        }
+    }
+
+    #[test]
+    fn decline_heuristic_matches_cutoff_and_no_access_hedges() {
+        for yes in [
+            "As of my knowledge cutoff, the answer is 4.2.",
+            "I can't browse the internet from here.",
+            "My training data does not include that release.",
+            "I cannot search the web, sorry.",
+        ] {
+            assert!(answer_declines_live_data(yes), "should detect: {yes}");
+        }
+        assert!(!answer_declines_live_data(
+            "The latest version is 5.1, released yesterday."
+        ));
+    }
+
+    #[test]
+    fn tripwire_fires_only_on_time_sensitive_answer_without_live_web() {
+        let nudge = search_first_tripwire(
+            "what's the latest version of rust?",
+            "The latest version is 1.80, released in 2024.",
+            false,
+        );
+        assert!(nudge.is_some(), "time-sensitive + no web → nudge");
+        assert!(nudge.unwrap().contains("web_search"));
+
+        assert!(
+            search_first_tripwire("what's the latest version of rust?", "1.80", true).is_none(),
+            "live web already used → no nudge"
+        );
+        assert!(
+            search_first_tripwire(
+                "what's the latest version of rust?",
+                "As of my knowledge cutoff it is 1.80.",
+                false
+            )
+            .is_none(),
+            "answer already declines live data → no nudge"
+        );
+        assert!(
+            search_first_tripwire("fix the failing test", "Fixed the assertion.", false).is_none(),
+            "stable/local question → no nudge"
+        );
+    }
+
+    #[test]
+    fn live_web_tool_names_cover_browser_and_task() {
+        assert!(is_live_web_tool("web_search"));
+        assert!(is_live_web_tool("fetch_url"));
+        assert!(is_live_web_tool("open_url"));
+        assert!(is_live_web_tool("Task"));
+        assert!(is_live_web_tool("browser_read"));
+        assert!(is_live_web_tool("browser_click"));
+        assert!(!is_live_web_tool("read_file"));
+        assert!(!is_live_web_tool("run_shell"));
+        assert!(!is_live_web_tool("search_files"));
+    }
+
+    #[test]
+    fn last_user_text_picks_the_newest_user_turn() {
+        let msgs = vec![
+            ChatMessage { role: "user".into(), content: "first question".into(), images: vec![] },
+            ChatMessage { role: "assistant".into(), content: "answer".into(), images: vec![] },
+            ChatMessage { role: "user".into(), content: "latest news?".into(), images: vec![] },
+        ];
+        assert_eq!(last_user_text(&msgs), "latest news?");
+    }
 
     fn sample_req(system: Option<&str>, thinking: Option<bool>) -> ChatRequest {
         ChatRequest {

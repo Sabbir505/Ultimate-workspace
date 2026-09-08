@@ -2154,6 +2154,60 @@ async fn run_browser_tool(
     })
 }
 
+/// Escalation chain for a degraded `web_search`: the keyless SERP engines are
+/// bot-walled (CAPTCHA/403 — an engine-block, not an empty result set) or all
+/// errored outright. Re-run the query (1) in the app's own browser pane — a
+/// real WebView passes the TLS/header fingerprint checks the plain HTTP
+/// scraper fails — and (2) through the keyless Jina Reader, whose
+/// server-side headless browser fetches the SERP from different IPs. The
+/// merged hits are re-rendered with the escalation engines in the health
+/// footer so the model (and the user, via the audit trail) can see where the
+/// results actually came from.
+async fn escalate_degraded_search(
+    client: &reqwest::Client,
+    app: &AppHandle,
+    query: &str,
+    mut outcome: tools::SearchOutcome,
+) -> tools::SearchOutcome {
+    let mut hits = std::mem::take(&mut outcome.hits);
+    let mut status = std::mem::take(&mut outcome.engine_status);
+    let mut tag = std::mem::take(&mut outcome.engine_tag);
+
+    // 1. The built-in browser pane.
+    let browser_ok = match tools::browser_serp_search(app, query).await {
+        Ok(mut h) => {
+            let n = h.len();
+            hits.append(&mut h);
+            status.push(format!("browser-pane ok ({n})"));
+            tag.push("browser:ok".to_string());
+            true
+        }
+        Err(e) => {
+            status.push(format!("browser-pane FAILED: {e}"));
+            tag.push("browser:fail".to_string());
+            false
+        }
+    };
+
+    // 2. Jina Reader SERP — only when the browser sweep didn't deliver.
+    if !browser_ok {
+        match tools::serp_via_reader(client, query).await {
+            Ok(mut h) => {
+                let n = h.len();
+                hits.append(&mut h);
+                status.push(format!("reader ok ({n})"));
+                tag.push("reader:ok".to_string());
+            }
+            Err(e) => {
+                status.push(format!("reader FAILED: {e}"));
+                tag.push("reader:fail".to_string());
+            }
+        }
+    }
+
+    tools::render_search_results(query, hits, status, tag)
+}
+
 /// Cached dispatch for the two network research tools.
 ///
 /// `web_search`: results are served from the SQLite search cache (12 h TTL)
@@ -2199,11 +2253,37 @@ async fn run_cached_web_tool(
                 let conn = db.0.lock();
                 tools::configured_provider(&conn)
             };
-            let (text, engines_tag) =
-                match tools::web_search_with_status(client, query, provider.as_ref()).await {
-                    Ok(pair) => pair,
-                    Err(e) => return format!("web_search failed: {e}"),
-                };
+            // Degraded searches escalate before the model ever sees them:
+            // when the SERP engines are bot-walled (CAPTCHA/403 — the
+            // anti-bot walls the plain-HTTP scrapers increasingly hit), the
+            // same query is re-run in the app's own browser pane (a real
+            // WebView passes the fingerprint checks) and, failing that,
+            // through the keyless Jina Reader. Escalation re-renders the
+            // result list with the extra engines in the health footer, so
+            // the model sees WHERE the results came from.
+            let outcome = match tools::web_search_with_status(client, query, provider.as_ref())
+                .await
+            {
+                Ok(o) if o.serp_degraded => escalate_degraded_search(client, app, query, o).await,
+                Ok(o) => o,
+                Err(e) => {
+                    // Every engine errored outright — run the fallbacks; if
+                    // they produce nothing either, report the original error.
+                    let empty = tools::SearchOutcome {
+                        text: String::new(),
+                        tag: String::new(),
+                        hits: Vec::new(),
+                        engine_status: vec![format!("(all engines failed: {e})")],
+                        engine_tag: Vec::new(),
+                        serp_degraded: true,
+                    };
+                    match escalate_degraded_search(client, app, query, empty).await {
+                        o if !o.text.is_empty() => o,
+                        _ => return format!("web_search failed: {e}"),
+                    }
+                }
+            };
+            let (text, engines_tag) = (outcome.text.clone(), outcome.tag.clone());
             {
                 let conn = db.0.lock();
                 // Count result lines ("N. title — url") for the audit row.

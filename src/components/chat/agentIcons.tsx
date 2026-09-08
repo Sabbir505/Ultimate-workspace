@@ -211,3 +211,53 @@ export function MonogramIcon({ letter }: { letter: string }): ReactElement {
     </span>
   );
 }
+
+/** Brand icon for a session's agent+provider pair — the same mapping the
+ *  model picker's rail uses (sidebar inbox rows, agent chips). Precedence:
+ *  a local sidecar beats everything, then a harness/ACP agent, then the
+ *  cloud provider; "auto" routing and unknown pairs fall back to the
+ *  auto-route mark. Lives here (not in AgentModelPicker) so lightweight
+ *  consumers like the sidebar don't pull the picker chunk. */
+export function sessionModelIcon(
+  agent?: string | null,
+  provider?: string | null,
+): JSX.Element {
+  if (agent === "local" || provider === "local_gguf") return railIcon("local", "Local");
+  if (agent?.startsWith("harness:")) return railIcon(agent, agent.slice("harness:".length));
+  if (agent?.startsWith("acp:")) return railIcon(agent, agent.slice("acp:".length));
+  if (provider === "auto" || !provider) return railIcon("auto", "Auto");
+  return railIcon(`provider:${provider}`, provider);
+}
+
+/** Shared rail mapping — moved here from AgentModelPicker so
+ *  sessionModelIcon and the picker stay in sync. */
+export function railIcon(key: string, label: string): JSX.Element {
+  if (key === "auto") return <AutoRouteIcon />;
+  if (key === "harness:claude_code") {
+    return (
+      <span className="agent-icon-tint-claude">
+        <ClaudeIcon />
+      </span>
+    );
+  }
+  if (key === "harness:opencode") return <OpenCodeIcon />;
+  if (key === "harness:kimi_code") return <KimiIcon />;
+  if (key === "harness:pi") return <PiIcon />;
+  if (key === "harness:omp") return <OmpIcon />;
+  if (key === "harness:commandcode") return <CommandCodeIcon />;
+  if (key === "acp:zed") return <ZedIcon />;
+  if (key === "local") return <LocalModelIcon />;
+  if (key === "provider:anthropic" || key === "provider:anthropic_compatible") {
+    return (
+      <span className="agent-icon-tint-claude">
+        <AnthropicIcon />
+      </span>
+    );
+  }
+  if (key === "provider:openai" || key === "provider:openai_compatible") {
+    return <OpenAiIcon />;
+  }
+  if (key === "provider:openrouter") return <OpenRouterIcon />;
+  // Devin and user-defined ACP agents — monogram fallback.
+  return <MonogramIcon letter={label} />;
+}

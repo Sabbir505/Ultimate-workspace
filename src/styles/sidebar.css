@@ -1,3 +1,24 @@
+/* Sidebar shell: the same liquid glass as the composer card (same gradient,
+   frost and border token) instead of a near-opaque fill, so both rails read
+   as one material. */
+.sidebar-glass {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border-right: 1px solid var(--border);
+}
+:root[data-theme="light"] .sidebar-glass {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
+}
+
 /* sidebar — Sidebar shell, project tree with nested chats, artifact-library entry, connector grid, plan preview notch.
    Split out of the old monolithic global.css (2026-08-15). Import order in
    global.css preserves the original cascade — do not reorder imports. */

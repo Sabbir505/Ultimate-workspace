@@ -2562,6 +2562,13 @@ location.reload();
         }
     }
 
+    /// Pane id of the globally active browser pane, if any. Used by the SERP
+    /// browser fallback (`chat::tools::serp_browser`), which needs ANY open
+    /// pane to host its throwaway search tab without a frontend roundtrip.
+    pub(crate) fn active_pane_id(&self) -> Option<String> {
+        self.active.lock().as_ref().map(|(p, _)| p.to_string())
+    }
+
     /// Eval a JS action body (an IIFE-able block that `return`s a string) in the
     /// active page and await the string it reports back. Times out so a stuck
     /// or navigating page can't wedge the chat turn.

@@ -794,9 +794,29 @@ function ActivityStepRow({
   // Subagent Task steps render as the agent chip — same visual language as
   // the git sidebar's AGENTS rows: icon + SubAgent + blue role + task, a
   // shimmer sweep while the agent runs, click opens the Agents pane.
-  if (step.data?.kind === "subagent") {
-    const role = step.data.role || "agent";
-    const task = step.data.task || step.data.detail || "";
+  // The chip's `<tool>` marker closes the instant the spawn is parsed, so
+  // `done` alone shows ✓ while the agent is still working. Track the agent's
+  // REAL status from the store instead (hook is unconditional — rules of
+  // hooks); null when this step isn't a subagent or never registered
+  // (persisted messages from before this session's spawns).
+  const isSubagentStep = step.data?.kind === "subagent";
+  const subTask = isSubagentStep ? step.data?.task || step.data?.detail || "" : "";
+  const subRole = isSubagentStep ? step.data?.role || "agent" : "";
+  const liveStatus = useChatStore((s) => {
+    if (!isSubagentStep) return null;
+    const list = s.activeChatSessionId
+      ? s.subagents[s.activeChatSessionId]
+      : undefined;
+    if (!list) return null;
+    const match =
+      Object.values(list).find((x) => x.task === subTask && x.role === subRole) ??
+      Object.values(list).find((x) => x.task === subTask);
+    return match ? match.status : null;
+  });
+  if (isSubagentStep) {
+    const role = subRole;
+    const task = subTask;
+    const settled = liveStatus ? liveStatus !== "running" : done;
     const openAgent = () => {
       const s = useChatStore.getState();
       const list = s.activeChatSessionId
@@ -812,7 +832,7 @@ function ActivityStepRow({
       }
     };
     return (
-      <div className={`chat-agent-chip${done ? "" : " running"}`}>
+      <div className={`chat-agent-chip${settled ? "" : " running"}`}>
         <button
           type="button"
           className="chat-agent-chip-btn"
@@ -829,7 +849,15 @@ function ActivityStepRow({
           <span className="chat-agent-chip-role">{role}</span>
           <span className="chat-agent-chip-sep" aria-hidden="true">·</span>
           <span className="chat-agent-chip-task">{task}</span>
-          {done ? (
+          {liveStatus === "error" ? (
+            <span
+              className="chat-agent-chip-check"
+              aria-hidden="true"
+              style={{ color: "#f85149" }}
+            >
+              ✕
+            </span>
+          ) : settled ? (
             <span className="chat-agent-chip-check" aria-hidden="true">✓</span>
           ) : null}
         </button>

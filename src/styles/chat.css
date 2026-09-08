@@ -2612,45 +2612,72 @@ button.chat-mermaid-open {
 .approval-card-write  { --approval-accent: #e3b341; --approval-accent-contrast: #1b1b1f; }
 .approval-card-edit   { --approval-accent: #5aa7f0; --approval-accent-contrast: #fff; }
 
-/* --- Harness question card (Claude Code AskUserQuestion) ---
- * Reuses the approval-card chrome (badge/title/buttons) but stacks into a
- * column: each question renders its header chip + option buttons; a free-
- * text field carries the protocol's top-level `response`. */
-.approval-card-question {
-  --approval-accent: var(--accent);
-  --approval-accent-contrast: #fff;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-  padding: 10px 12px 12px;
-}
-.approval-card-question .approval-card-title {
-  flex: none;
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
-}
-.question-block {
+/* --- Harness question card (AskUserQuestion + generic harness questions) ---
+ * Docked NOTCH on the composer: the .plan-preview container fuses its flat
+ * bottom onto the composer card's top border (the same -11px overlap the
+ * plan proposal uses), and the body is the composer card's liquid glass —
+ * a true translucent gradient with heavy frost. Deliberately LEAN: badge +
+ * title, one row per option, a free-text line, Skip/Answer. Option
+ * descriptions ride the hover tooltip, not the layout. */
+.question-card {
+  --question-accent: #8b7cf6;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  padding: 10px 14px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px 12px 0 0;
+  border-bottom: none;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: 0 -1px 0 var(--surface);
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+  outline: none;
 }
-.question-header {
+:root[data-theme="light"] .question-card {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
+}
+.question-card:focus-within {
+  border-color: color-mix(in srgb, var(--question-accent) 40%, var(--border));
+  box-shadow: 0 -1px 0 var(--surface), 0 0 24px -4px var(--accent-glow);
+}
+.question-card-head {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
 }
-.question-chip {
+.question-card-badge {
   flex-shrink: 0;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--approval-accent);
-  border: 1px solid color-mix(in srgb, var(--approval-accent) 40%, transparent);
-  background: color-mix(in srgb, var(--approval-accent) 12%, transparent);
+  letter-spacing: 0.08em;
+  color: var(--question-accent);
+  background: color-mix(in srgb, var(--question-accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--question-accent) 35%, transparent);
+}
+.question-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 0;
+}
+.question-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 .question-text {
   font-size: 12.5px;
@@ -2658,60 +2685,83 @@ button.chat-mermaid-open {
   color: var(--text);
   min-width: 0;
 }
+/* ONE OPTION PER ROW, one line each — a plain choice list. */
 .question-options {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.question-options.multi {
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 4px;
 }
 .question-option {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  max-width: 100%;
-  text-align: left;
   padding: 5px 10px;
   border-radius: var(--radius-xs);
   border: 1px solid var(--border);
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--surface-glass) 45%, transparent);
+  box-shadow: var(--glass-rim-soft);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  text-align: left;
+  width: 100%;
+  box-sizing: border-box;
   cursor: pointer;
   transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
 }
 .question-option:hover {
-  border-color: color-mix(in srgb, var(--approval-accent) 55%, transparent);
+  border-color: color-mix(in srgb, var(--question-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--question-accent) 7%, transparent);
 }
 .question-option.picked {
-  border-color: var(--approval-accent);
-  background: color-mix(in srgb, var(--approval-accent) 14%, transparent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--approval-accent) 55%, transparent);
-}
-.question-option-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
-}
-.question-option-desc {
-  font-size: 11px;
-  color: var(--text-dim);
+  border-color: var(--question-accent);
+  background: color-mix(in srgb, var(--question-accent) 14%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--question-accent) 55%, transparent);
 }
 .question-free-text {
   width: 100%;
   padding: 6px 10px;
   font-size: 12px;
   color: var(--text);
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--surface-glass) 45%, transparent);
   border: 1px solid var(--border);
   border-radius: var(--radius-xs);
   outline: none;
 }
 .question-free-text:focus {
-  border-color: color-mix(in srgb, var(--approval-accent) 55%, transparent);
+  border-color: color-mix(in srgb, var(--question-accent) 55%, transparent);
 }
-.approval-card-question .approval-card-actions {
+.question-card-actions {
+  display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 8px;
+}
+.question-btn {
+  padding: 5px 14px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+}
+.question-btn:hover {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+.question-btn.primary {
+  background: var(--question-accent);
+  color: #fff;
+  border-color: var(--question-accent);
+}
+.question-btn.primary:hover {
+  filter: brightness(1.1);
+}
+.question-btn.primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: none;
 }
 .approval-btn.approve:disabled {
   opacity: 0.45;

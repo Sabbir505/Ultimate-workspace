@@ -8,7 +8,7 @@
 // its callers pass a stable `artifact` object (ToolPanel wraps it in a
 // memoized adapter), so the document — including the markdown parse — only
 // re-renders when the actual file content changes.
-import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, memo, isValidElement } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -66,6 +66,26 @@ function citeUrlTransform(url: string): string {
  *  chips (research docs carry their own Sources section), tables with a
  *  Copy/CSV toolbar, links opening in the built-in browser pane, and single-`$`
  *  text left as-is so "$5 and $10" doesn't collapse into KaTeX math. */
+/** Copy affordance for fenced code blocks in the markdown preview — same
+ *  behavior as the chat bubble's CopyButton (clipboard API, transient label). */
+function MdCopyButton({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // Clipboard unavailable — silently ignore.
+    }
+  }, [code]);
+  return (
+    <button type="button" className="ghost copy-code-btn" onClick={() => void handleCopy()}>
+      {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
 function MarkdownDocument({ text }: { text: string }) {
   const rendered = useMemo(() => {
     const sources = parseChatSources(text);
@@ -84,6 +104,37 @@ function MarkdownDocument({ text }: { text: string }) {
               return <MermaidDiagram code={String(children).replace(/\n$/, "")} />;
             }
             return <code className={className} {...props}>{children}</code>;
+          },
+          // Fenced blocks get the chat-style chrome — a language label and a
+          // working Copy button. A generated doc whose content is meant to be
+          // copied ("give me a post I can copy") used to render as bare
+          // <pre> text with no affordance, and long unbroken lines pushed
+          // past the pane edge.
+          pre({ children }) {
+            // react-markdown v9 hands `pre` the UNRESOLVED code-component
+            // element (type = the component fn, not the "code" tag), so the
+            // language/text are read from its props.
+            const child = Array.isArray(children) ? children[0] : children;
+            if (!isValidElement(child)) return <>{children}</>;
+            const { className, children: rawChildren } = (child.props ??
+              {}) as { className?: string; children?: unknown };
+            const lang = /language-([\w-]+)/.exec(className ?? "")?.[1];
+            if (lang === "mermaid") {
+              // Diagrams flow through the code override above — no chrome.
+              return <>{children}</>;
+            }
+            const code = String(
+              Array.isArray(rawChildren) ? rawChildren.join("") : (rawChildren ?? ""),
+            ).replace(/\n$/, "");
+            return (
+              <div className="doc-code-block">
+                <div className="doc-code-header">
+                  <span className="doc-code-lang">{lang ?? "text"}</span>
+                  <MdCopyButton code={code} />
+                </div>
+                <ArtifactCodeBlock code={code} language={lang ?? "text"} />
+              </div>
+            );
           },
           a({ href, children }) {
             if (sources.length > 0 && href?.startsWith("cite:")) {

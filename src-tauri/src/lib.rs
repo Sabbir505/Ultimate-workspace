@@ -448,6 +448,7 @@ pub fn run() {
             commands::chat_cmds::docdesign_qa_complete,
             commands::chat_cmds::get_file_mtime,
             commands::chat_cmds::find_file_by_basename,
+            commands::chat_cmds::open_artifact_external,
             commands::chat_cmds::download_artifact,
             commands::chat_cmds::download_artifacts_zip,
             commands::chat_cmds::list_artifacts,

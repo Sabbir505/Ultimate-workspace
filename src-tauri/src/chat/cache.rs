@@ -2,8 +2,8 @@
 //!
 //! Without an explicit `cache_control` breakpoint the Anthropic API bills the
 //! FULL prefix (tools → system → messages) at base input price on every
-//! request. The agentic tool loop re-sends that prefix up to
-//! `MAX_TOOL_ITERS` (45, or 96 in research mode) times per turn, so an
+//! request. The agentic tool loop re-sends that prefix on every round-trip
+//! (unbounded since the tool-call limit's removal), so an
 //! uncached long session pays the same stable prefix over and over at 10× the
 //! cached rate. Placing breakpoints marks the longest stable content — tools,
 //! system prompt, and everything up to the newest message — so each round

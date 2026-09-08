@@ -294,10 +294,43 @@
   /* Document body text reads at the chat-text level, not the brighter UI
      --text: long generated markdown glared next to chat replies. */
   color: var(--chat-text);
+  /* A broken/unterminated fence leaves raw single-line text; nothing in a
+     generated doc may push the pane wider than the window. */
+  overflow-x: hidden;
+  overflow-wrap: break-word;
   /* body sets user-select: none for chrome — markdown documents must stay
      highlight/drag-selectable so users can copy from a generated doc. */
   user-select: text;
   -webkit-user-select: text;
+}
+/* Fenced code blocks in markdown docs mirror the chat bubble's block:
+   language label + working Copy button, content wrapping instead of
+   extending past the pane. */
+.artifact-preview-md .doc-code-block {
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--surface-solid);
+}
+.artifact-preview-md .doc-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.artifact-preview-md pre {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .artifact-preview-md a,
 .canvas-plan-body a {

@@ -2398,13 +2398,19 @@ export const getFileMtime = (path: string) =>
 export const findFileByBasename = (dir: string, basename: string) =>
   safeInvoke<string | null>("find_file_by_basename", { dir, basename });
 
-/** Open a generated artifact file with the OS default application. */
+/**
+ * Open a generated artifact file with the OS default application.
+ *
+ * Runs through the backend's `open_artifact_external` (not the JS opener
+ * plugin) so failures are visible: this toasts the reason instead of the old
+ * silent `console.warn`, and the backend re-discovers a moved file by
+ * basename before giving up. Never throws — call sites can just `void` it.
+ */
 export async function openArtifact(path: string): Promise<void> {
   try {
-    const { openPath } = await import("@tauri-apps/plugin-opener");
-    await openPath(path);
+    await safeInvoke<string>("open_artifact_external", { path });
   } catch (err) {
-    console.warn("openArtifact failed", err);
+    toastError("Could not open the file in its default app", err);
   }
 }
 

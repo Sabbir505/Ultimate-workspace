@@ -3689,6 +3689,56 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
         }
     }
 
+    // Legacy binary .xls: LibreOffice (when installed) converts the ORIGINAL
+    // workbook to a true-fidelity PDF — same treatment as .pptx above, real
+    // columns/styles instead of "can't preview". Without LibreOffice, fall
+    // back to the legacy text extractor so the content is at least readable.
+    if ext == "xls" && size <= MAX_MEDIA {
+        let path_for_convert = path.clone();
+        let pdf_bytes = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+            crate::chat::office::office_to_pdf(Path::new(&path_for_convert))
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(pdf_bytes) = pdf_bytes {
+            let data_uri = format!("data:application/pdf;base64,{}", base64_encode(&pdf_bytes));
+            return Ok(ArtifactPreview {
+                path,
+                filename,
+                ext,
+                kind: "pdf".to_string(),
+                text: None,
+                data_uri: Some(data_uri),
+                original_bytes: Some(true),
+                size,
+                truncated: false,
+            });
+        }
+        let path_for_read = path.clone();
+        let text = tokio::task::spawn_blocking(move || {
+            std::fs::read(Path::new(&path_for_read))
+                .ok()
+                .and_then(|bytes| crate::chat::office::doc_to_text("xls", &bytes))
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(text) = text {
+            return Ok(ArtifactPreview {
+                path,
+                filename,
+                ext,
+                kind: "text".to_string(),
+                text: Some(text),
+                data_uri: None,
+                original_bytes: None,
+                size,
+                truncated: false,
+            });
+        }
+    }
+
     // Office documents: render to faithful, self-contained HTML (colours,
     // fonts, tables, slide layouts) shown in a sandboxed iframe (kind = office).
     // For docx/pptx, also return the raw bytes as data_uri for client-side
@@ -4030,6 +4080,38 @@ fn find_by_basename_walk(root: &std::path::Path, basename: &str) -> Option<Strin
         }
     }
     best.map(|(_, p)| p.to_string_lossy().into_owned())
+}
+
+// ---- Open in default app ----
+
+/// Open a generated artifact with the OS default application.
+///
+/// Runs through a Rust command (not the JS opener plugin's `openPath`) so a
+/// failure RETURNS as an error the pane can surface — the JS path used to
+/// reject inside a `catch (err) console.warn(...)` and the button silently
+/// did nothing. A path that has vanished since the turn is re-discovered by
+/// basename in its directory before giving up.
+#[tauri::command]
+pub async fn open_artifact_external(path: String) -> CmdResult<String> {
+    let resolved = tokio::task::spawn_blocking(move || -> Option<String> {
+        let p = std::path::Path::new(&path);
+        if p.is_file() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+        // Recover a moved file: same directory (or the artifacts dir root via
+        // the recorded parent), same basename.
+        let dir = p.parent()?;
+        let basename = p.file_name()?.to_string_lossy().into_owned();
+        find_by_basename_walk(dir, &basename)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| {
+        "File not found on disk — it may have been moved or deleted.".to_string()
+    })?;
+    tauri_plugin_opener::open_path(&resolved, None::<&str>)
+        .map(|_| resolved)
+        .map_err(|e| format!("Could not open the file: {e}"))
 }
 
 // ---- Artifact download ----

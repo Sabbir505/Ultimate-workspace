@@ -74,6 +74,47 @@ pub struct AgentSessionManager {
     /// all of that used to freeze cancel / permission-mode / remove for
     /// EVERY session behind one slow send.
     sessions: Mutex<HashMap<String, Arc<Mutex<AgentChild>>>>,
+    /// Live RELAY_ASK questions (harnesses with no native ask protocol):
+    /// chat session id → the question payload plus the pending_id the UI
+    /// answers with. The claude control protocol uses ChatManager's
+    /// oneshot registry instead — these have no reader blocked on stdin;
+    /// the answer dispatches a follow-up turn (see dispatch_ask_follow_up).
+    pending_asks: Mutex<HashMap<String, PendingAsk>>,
+}
+
+/// How an answered question reaches the model. Two producers share the
+/// question card:
+/// - `FollowUpTurn`: the RELAY_ASK marker channel (no native mechanism) —
+///   the answer rides as a follow-up user turn on the resumed session.
+/// - `OpenCode`: opencode's NATIVE `question` tool — the server parks the
+///   turn on the request until we POST the answer to its reply endpoint.
+pub enum PendingAskRoute {
+    FollowUpTurn,
+    OpenCode { base_url: String, oc_session_id: String, request_id: String },
+}
+
+/// One surfaced question awaiting the user's answer.
+pub struct PendingAsk {
+    pub pending_id: String,
+    /// Normalized `questions` array (same shape ChatQuestionRequestPayload
+    /// carries to the UI).
+    pub questions: serde_json::Value,
+    pub route: PendingAskRoute,
+}
+
+/// Everything a follow-up turn needs to run in the SAME workspace as the
+/// turn that asked the question. Snapshotted on every send.
+#[derive(Clone)]
+pub struct SendCtx {
+    cwd: Option<String>,
+    project_id: Option<String>,
+    connectors: Arc<Vec<crate::connectors::HarnessMcpServer>>,
+}
+
+impl Default for SendCtx {
+    fn default() -> Self {
+        Self { cwd: None, project_id: None, connectors: Arc::new(Vec::new()) }
+    }
 }
 
 struct AgentChild {
@@ -127,6 +168,9 @@ struct AgentChild {
     /// ACP: id of the in-flight `session/request`, for a best-effort
     /// `request/cancel` notification before the process tree is killed.
     acp_request_id: Arc<Mutex<Option<u64>>>,
+    /// Workspace snapshot of the LAST send (cwd/project/connectors), so a
+    /// RELAY_ASK follow-up turn can run where the asking turn ran.
+    send_ctx: std::sync::Mutex<Option<SendCtx>>,
     // ---- OpenCode persistent server (`opencode serve`) state ----
     /// Base URL of this chat's server ("http://127.0.0.1:<port>"). Some only
     /// for opencode sessions; cleared whenever the child is killed so the
@@ -151,7 +195,83 @@ impl AgentSessionManager {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            pending_asks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Register a surfaced question: the UI answers via
+    /// `resolve_agent_question`, which routes by `route`. One pending
+    /// question per chat.
+    pub fn register_pending_ask(
+        &self,
+        chat_session_id: &str,
+        questions: serde_json::Value,
+        route: PendingAskRoute,
+    ) -> String {
+        let pending_id = crate::chat::proto::next_synthetic_tool_id();
+        self.pending_asks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(chat_session_id.to_string(), PendingAsk { pending_id: pending_id.clone(), questions, route });
+        pending_id
+    }
+
+    /// Take a pending ask out of the registry (on resolve or cancel).
+    pub fn take_pending_ask(&self, chat_session_id: &str) -> Option<PendingAsk> {
+        self.pending_asks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(chat_session_id)
+    }
+
+    /// Dispatch the follow-up turn for a resolved harness question: the
+    /// answer rides as a normal user message, so the CLI's own session resume
+    /// (kimi `--session`, opencode server session, pi `--session`, omp /
+    /// commandcode `--resume`) carries the conversation forward, and the
+    /// asking turn's workspace snapshot (cwd/project/connectors) keeps the
+    /// follow-up in the same directory.
+    pub fn dispatch_ask_follow_up(
+        &self,
+        app: &AppHandle,
+        db: &DbState,
+        chat_session_id: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        let (harness, model, ctx) = {
+            let entry = {
+                let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                sessions
+                    .get(chat_session_id)
+                    .cloned()
+                    .ok_or_else(|| "no agent session for this chat".to_string())?
+            };
+            let g = entry.lock().unwrap_or_else(|e| e.into_inner());
+            let ctx = g
+                .send_ctx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .unwrap_or_default();
+            (g.harness.clone(), g.model.clone(), ctx)
+        };
+        if ctx.cwd.is_none() {
+            return Err(
+                "no recorded workspace for this session — send a message first".to_string(),
+            );
+        }
+        self.send(
+            app,
+            db,
+            chat_session_id,
+            content,
+            "",
+            &harness,
+            &model,
+            ctx.cwd.as_deref(),
+            ctx.project_id.as_deref(),
+            &ctx.connectors,
+            None,
+        )
     }
 
     /// Send one user turn. The harness id comes from the chat session's
@@ -214,6 +334,7 @@ impl AgentSessionManager {
                         stdin: Arc::new(Mutex::new(None)),
                         acp_pending: Arc::new(Mutex::new(None)),
                         acp_request_id: Arc::new(Mutex::new(None)),
+                        send_ctx: std::sync::Mutex::new(None),
                         oc_base_url: None,
                         oc_full: Arc::new(Mutex::new(String::new())),
                         oc_in_think: Arc::new(Mutex::new(false)),
@@ -246,6 +367,17 @@ impl AgentSessionManager {
             }
         }
         entry.model = model.to_string();
+
+        // Workspace snapshot for RELAY_ASK follow-up turns: the answer turn
+        // must run where the asking turn ran (same cwd/project/connectors).
+        *entry
+            .send_ctx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(SendCtx {
+            cwd: cwd.map(|c| c.to_string()),
+            project_id: project_id.map(|p| p.to_string()),
+            connectors: Arc::new(connectors.to_vec()),
+        });
 
         // Context primer for a fresh CLI session (see the module-level notes):
         // gated on cli_session_id AFTER the harness-switch teardown above — the
@@ -343,6 +475,15 @@ impl AgentSessionManager {
                 format!("{base}{attach_prompt}")
             }
         };
+        // The question channel rides EVERY turn of the no-native-ask
+        // harnesses (not just fresh sessions): bundle instructions only go
+        // out on the first turn, but the model must know the marker exists
+        // whenever it might need a decision.
+        let effective = if harness_question_channel(harness) {
+            format!("{effective}\n\n{RELAY_ASK_DIRECTIVE}")
+        } else {
+            effective
+        };
 
         // Checkpoint baseline: snapshot the spawn dir's working tree once per
         // session before the CLI starts touching files (checkpoint 0 =
@@ -433,6 +574,12 @@ impl AgentSessionManager {
         if let Some(state) = app.try_state::<crate::ChatState>() {
             state.0.drop_pending_for_session(chat_session_id);
         }
+        // Same for a surfaced RELAY_ASK question: the answer would dispatch
+        // a follow-up turn on a session the user just cancelled.
+        self.pending_asks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(chat_session_id);
         emit_done(Some(app), chat_session_id, None, None, None, None, None, None, None, None);
         Ok(())
     }
@@ -519,6 +666,10 @@ impl AgentSessionManager {
         if let Some(state) = app.try_state::<crate::ChatState>() {
             state.0.drop_pending_for_session(chat_session_id);
         }
+        self.pending_asks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(chat_session_id);
     }
 
     /// Kill all children (app shutdown).
@@ -2271,7 +2422,16 @@ fn spawn_claude(
         "default" | "acceptEdits" | "plan" | "bypassPermissions" => Some(harness_mode.clone()),
         _ => None,
     };
-    let gated = approval_str != "full_access" && claude_mode.as_deref() != Some("bypassPermissions");
+    // The stdio control protocol is armed for EVERY posture except the CLI's
+    // own explicit bypassPermissions — not just gated ones. Reason: without
+    // `--permission-prompt-tool stdio` the CLI has no channel for
+    // AskUserQuestion (it removes the tool entirely in full-auto spawns), so
+    // full_access sessions could never be asked anything — the model would
+    // improvise or the turn would wedge. full_access still runs card-free:
+    // handle_can_use_tool AUTO-ALLOWS regular tool prompts for those
+    // sessions and only surfaces questions.
+    let bypass = claude_mode.as_deref() == Some("bypassPermissions");
+    let gated = !bypass;
     let mut args: Vec<String> = vec![
         "-p".into(),
         "--input-format".into(),
@@ -2472,6 +2632,29 @@ fn handle_can_use_tool(
     // or hand the model an empty answer set (approve with unchanged input).
     if tool == "AskUserQuestion" {
         handle_ask_user_question(app, sid, &request_id, &input, shared_stdin);
+        return;
+    }
+    // full_access sessions arm the stdio protocol ONLY so AskUserQuestion has
+    // a channel (see spawn_claude). Their no-cards contract still holds for
+    // regular tool prompts: auto-allow without surfacing anything.
+    let full_auto = {
+        let conn = db.0.lock();
+        crate::db::get_chat_session(&conn, sid)
+            .ok()
+            .flatten()
+            .map(|cs| cs.approval_policy == "full_access")
+            .unwrap_or(false)
+    };
+    if full_auto {
+        let line = can_use_tool_response(&request_id, true, &input).to_string();
+        if let Ok(mut guard) = shared_stdin.lock() {
+            if let Some(stdin) = guard.as_mut() {
+                let _ = stdin
+                    .write_all(line.as_bytes())
+                    .and_then(|_| stdin.write_all(b"\n"))
+                    .and_then(|_| stdin.flush());
+            }
+        }
         return;
     }
     let summary = crate::chat::dispatch::harness_tool_summary(&tool, &input);
@@ -2834,6 +3017,24 @@ fn read_claude_stream(
                         }
                     }
                 }
+                // Subagent-internal message: claude tags every message
+                // produced inside an Agent/Task with `parent_tool_use_id`.
+                // Stream it into THAT agent's panel (text/thinking/tool
+                // markers) and keep it out of the main transcript and the
+                // main tool FIFO — subagent activity entering the queue
+                // desynced it and mis-attributed later results. These
+                // messages are the ONLY live view of a subagent's work: the
+                // CLI streams partial deltas for the main loop only.
+                let parent_id = v
+                    .get("parent_tool_use_id")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("");
+                if !parent_id.is_empty() {
+                    if let Some(blocks) = v.pointer("/message/content").and_then(|c| c.as_array()) {
+                        tools.route_subagent_assistant(app, sid, parent_id, blocks);
+                    }
+                    continue;
+                }
                 if let Some(blocks) = v.pointer("/message/content").and_then(|c| c.as_array()) {
                     // No safety-net relay — CLI is in full-auto mode (no stdin
                     // approval). Just extract tool markers for the UI.
@@ -2863,6 +3064,12 @@ fn read_claude_stream(
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
+                                let cli_tool_use_id =
+                                    b.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                                let background = input
+                                    .get("run_in_background")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
                                 let marker = tools.subagent_use(
                                     &name,
                                     values.into_iter().next().unwrap_or(json!({})),
@@ -2871,6 +3078,8 @@ fn read_claude_stream(
                                     &role,
                                     &task,
                                     &prompt,
+                                    cli_tool_use_id,
+                                    background,
                                 );
                                 full.push_str(&marker);
                                 emit_token(app, sid, &marker);
@@ -2886,7 +3095,15 @@ fn read_claude_stream(
             // Tool results come back as user-role messages whose content is an
             // array of tool_result blocks (in tool_use order). Attach shell
             // output to its step; other tools are tracked only for ordering.
+            // Messages tagged with `parent_tool_use_id` belong to a SUBAGENT's
+            // internal tool loop — their results fold into that agent's panel
+            // and must not pop main-loop FIFO slots (that desync was the
+            // source of garbled/stuck agent panes).
             Some("user") => {
+                let parent_id = v
+                    .get("parent_tool_use_id")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("");
                 if let Some(blocks) = v.pointer("/message/content").and_then(|c| c.as_array()) {
                     for r in blocks
                         .iter()
@@ -2897,7 +3114,14 @@ fn read_claude_stream(
                             .and_then(|e| e.as_bool())
                             .unwrap_or(false);
                         let text = extract_result_text(r.get("content"));
-                        if let Some(marker) = tools.tool_result(&text, is_error, app, sid) {
+                        if !parent_id.is_empty() {
+                            tools.route_subagent_result(app, sid, parent_id, &text, is_error);
+                            continue;
+                        }
+                        let cli_tool_use_id = r.get("tool_use_id").and_then(|x| x.as_str());
+                        if let Some(marker) =
+                            tools.tool_result(&text, is_error, app, sid, cli_tool_use_id)
+                        {
                             full.push_str(&marker);
                             emit_token(app, sid, &marker);
                         }
@@ -3030,6 +3254,14 @@ fn read_claude_stream(
                     let conn = db.0.lock();
                     emit_harness_compact(&conn, app, sid, "Claude Code");
                 }
+                // A background Agent finished (claude): the notification is
+                // correlated to the Agent call via tool_use_id (fallback: the
+                // receipt's agentId), carries a status and the report summary.
+                // This — not the launch receipt — is when the pane flips to
+                // Done.
+                if subtype == "task_notification" {
+                    tools.finish_background(app, sid, &v);
+                }
             }
             // system(init/hooks/status), user (tool results), rate_limit, …
             // — not needed for rendering.
@@ -3051,6 +3283,13 @@ fn read_claude_stream(
     if perf.take().is_some() {
         crate::chat::turn_perf::unregister(sid);
     }
+    // The CLI is gone — any agent still awaiting its completion notification
+    // can never deliver it. Finalize as errors so no pane spins forever.
+    tools.fail_pending(
+        app,
+        sid,
+        "The harness exited before this agent reported completion",
+    );
     persist_cli_session_id(db, "claude_code", sid, session_cell);
     // Stale-resume-id recovery: a process that died with ZERO turn activity
     // while a resume id was in play is the signature of `--resume` failing
@@ -3530,6 +3769,14 @@ fn read_per_turn_stream(
     // conversation. If the turn was cancelled, discard the partial reply —
     // cancel() already emitted `chat:done`.
     persist_cli_session_id(db, kind.harness_id(), sid, session_cell);
+    // RELAY_ASK scan BEFORE the cancelled discard and before finish_turn
+    // persists: a marker question is stripped from the persisted reply and
+    // surfaced as a card once the turn is done.
+    let (mut full, ask) = if cancelled.load(Ordering::SeqCst) {
+        (full, None)
+    } else {
+        split_relay_ask(full)
+    };
     in_flight.store(false, Ordering::SeqCst);
     if cancelled.load(Ordering::SeqCst) {
         full.clear();
@@ -3541,9 +3788,325 @@ fn read_per_turn_stream(
         // events — the cost rollup falls back to the session's model.
         finish_turn(app, db, sid, &mut full, input, output, cost, cache_creation, cache_read, &mut watches, started_at, None);
     }
+    // The card goes out only after chat:done — the turn is complete; the
+    // answer arrives as a follow-up turn.
+    if let Some(questions) = ask {
+        surface_relay_ask(app, sid, questions);
+    }
 }
 
 // ------------------------------------------------- persistent OpenCode server
+
+// ---- RELAY_ASK: the question channel for harnesses with no native ask mechanism ----
+// Claude Code asks over its stdio control protocol; kimi/opencode/pi/omp/
+// commandcode run headless with stdin closed and no question event. Their
+// channel is a MARKER in the reply text: the per-turn prompt carries the
+// directive below, the reader scans the finished reply for the marker,
+// strips it from the persisted message, and surfaces the question card. The
+// user's answer dispatches a follow-up turn on the CLI's resumed session —
+// there is no live process to resume, so "paused mid-turn" is impossible by
+// construction; the answer always arrives as the next user message.
+
+const RELAY_ASK_MARKER: &str = "RELAY_ASK:";
+
+const RELAY_ASK_DIRECTIVE: &str = "[RELAY QUESTION CHANNEL] When — and only when — the user's decision is required before you can proceed, end your reply with ONE final line of exactly this form:\n\
+RELAY_ASK: {\"question\":\"<the question>\",\"header\":\"<2-4 words>\",\"options\":[{\"label\":\"<option>\",\"description\":\"<why pick it>\"}],\"multiSelect\":false}\n\
+Then stop immediately: Relay surfaces it as an answer card and the user's reply arrives as your next user message. The line must be single-line VALID JSON — double every backslash in Windows paths (D:\\\\dir, never D:\\dir). Use it at most once per reply, never for optional confirmations you can decide yourself.";
+
+/// Which harnesses carry the RELAY_ASK directive. claude_code has the stdio
+/// control protocol (AskUserQuestion), ACP agents have their own session
+/// protocol — both must NOT get the text directive.
+fn harness_question_channel(harness: &str) -> bool {
+    matches!(harness, "kimi_code" | "opencode" | "pi" | "omp" | "commandcode")
+}
+
+/// Models keep emitting single backslashes inside JSON strings ("D:\artifact"
+/// — `\a` is not a valid JSON escape), which makes the whole marker line
+/// unparseable. Re-escape any backslash that doesn't already start a valid
+/// JSON escape so the line parses. Already-valid sequences (`\"`, `\\`,
+/// `\n`, `\u00e9`, …) pass through untouched.
+fn repair_json_escapes(s: &str) -> String {
+    const VALID: &[char] = &['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'];
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(n) if VALID.contains(&n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                Some(n) => {
+                    out.push_str("\\\\");
+                    out.push(n);
+                }
+                None => out.push_str("\\\\"),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Scan a finished harness reply for the RELAY_ASK marker. The LAST line
+/// carrying the marker wins (models sometimes add prose after it despite the
+/// directive); the line only counts once its JSON parses — strictly first,
+/// then with invalid escapes repaired — so ordinary text mentioning
+/// "RELAY_ASK:" is never mistaken for a question. Returns the reply with the
+/// marker line stripped (so the internal channel never leaks into the
+/// persisted transcript) plus the normalized questions array for the
+/// question card. `None` questions = no marker (the reply is returned
+/// unchanged).
+fn split_relay_ask(full: String) -> (String, Option<serde_json::Value>) {
+    if full.trim().is_empty() {
+        return (full, None);
+    }
+    let mut lines: Vec<&str> = full.lines().collect();
+    let Some(idx) = lines
+        .iter()
+        .rposition(|l| l.trim_start().starts_with(RELAY_ASK_MARKER))
+    else {
+        return (full, None);
+    };
+    // Tolerate the model wrapping the JSON in backticks.
+    let rest = lines[idx]
+        .trim()
+        .strip_prefix(RELAY_ASK_MARKER)
+        .unwrap_or("")
+        .trim()
+        .trim_matches('`')
+        .trim();
+    let parsed = serde_json::from_str::<serde_json::Value>(rest)
+        .ok()
+        .or_else(|| serde_json::from_str::<serde_json::Value>(&repair_json_escapes(rest)).ok());
+    let Some(v) = parsed else {
+        return (full, None);
+    };
+    let Some(question) = v
+        .get("question")
+        .and_then(|q| q.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+    else {
+        return (full, None);
+    };
+    let mut obj = serde_json::Map::new();
+    obj.insert("question".into(), serde_json::json!(question));
+    if let Some(h) = v
+        .get("header")
+        .and_then(|h| h.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        obj.insert("header".into(), serde_json::json!(h));
+    }
+    if let Some(opts) = v.get("options").and_then(|o| o.as_array()) {
+        let norm: Vec<serde_json::Value> = opts
+            .iter()
+            .filter_map(|o| {
+                let label = o.get("label").and_then(|l| l.as_str())?;
+                let mut m = serde_json::Map::new();
+                m.insert("label".into(), serde_json::json!(label));
+                if let Some(d) = o.get("description").and_then(|d| d.as_str()) {
+                    m.insert("description".into(), serde_json::json!(d));
+                }
+                Some(serde_json::Value::Object(m))
+            })
+            .collect();
+        if !norm.is_empty() {
+            obj.insert("options".into(), serde_json::Value::Array(norm));
+        }
+    }
+    if let Some(ms) = v.get("multiSelect").and_then(|m| m.as_bool()) {
+        obj.insert("multiSelect".into(), serde_json::json!(ms));
+    }
+    lines.remove(idx);
+    let clean = lines.join("\n").trim_end().to_string();
+    (clean, Some(serde_json::Value::Array(vec![serde_json::Value::Object(obj)])))
+}
+
+/// Build the follow-up user message that delivers the card's answer to the
+/// asking harness (its next turn resumes the session, so this reads as the
+/// continuation of the same conversation).
+/// asking turn is already finished and persisted by the time this runs).
+/// Also used by `resolve_agent_question` to build the follow-up content.
+pub(crate) fn compose_ask_follow_up(
+    questions: &serde_json::Value,
+    answers: &serde_json::Value,
+    response: Option<&str>,
+    skipped: bool,
+) -> String {    let q_text = questions
+        .get(0)
+        .and_then(|q| q.get("question"))
+        .and_then(|q| q.as_str())
+        .unwrap_or("your question");
+    if skipped {
+        return format!(
+            "You asked: \u{201c}{q_text}\u{201d}. The user dismissed the question without answering \u{2014} continue with your best judgment and state any assumption you make."
+        );
+    }
+    let mut body = format!("You asked: \u{201c}{q_text}\u{201d}.\n\nThe user's answer:");
+    let mut any = false;
+    if let Some(map) = answers.as_object() {
+        for (q, a) in map {
+            any = true;
+            if let Some(labels) = a.as_array() {
+                let joined: Vec<&str> = labels.iter().filter_map(|l| l.as_str()).collect();
+                body.push_str(&format!("\n- \u{2022} {q}: {}", joined.join(", ")));
+            } else if let Some(label) = a.as_str() {
+                body.push_str(&format!("\n- \u{2022} {q}: {label}"));
+            }
+        }
+    }
+    if let Some(free) = response.map(str::trim).filter(|s| !s.is_empty()) {
+        if any {
+            body.push_str(&format!("\n\nThe user also wrote: \u{201c}{free}\u{201d}"));
+        } else {
+            body.push_str(&format!(" \u{201c}{free}\u{201d}"));
+        }
+    }
+    body.push_str("\n\nContinue the task with these answers.");
+    body
+}
+
+/// Register a surfaced RELAY_ASK question and emit the question card. The
+/// answer comes back through `resolve_agent_question` →
+/// `dispatch_ask_follow_up` (nothing blocks: the asking turn is already
+/// finished and persisted by the time this runs).
+fn surface_relay_ask(app: Option<&AppHandle>, sid: &str, questions: serde_json::Value) {
+    let Some(app) = app else { return };
+    let Some(state) = app.try_state::<AgentSessionState>() else {
+        return;
+    };
+    let pending_id = state.0.register_pending_ask(
+        sid,
+        questions.clone(),
+        PendingAskRoute::FollowUpTurn,
+    );
+    let _ = app.emit(
+        "chat:question-request",
+        crate::types::ChatQuestionRequestPayload {
+            chat_session_id: sid.to_string(),
+            pending_id,
+            questions,
+        },
+    );
+}
+
+/// Surface opencode's NATIVE `question` tool request: the server has parked
+/// the in-flight turn on this request id until we POST an answer (or reject
+/// it). The card goes out immediately; the answer routes straight back to
+/// the server — the turn then completes on its own.
+fn surface_opencode_question(
+    app: Option<&AppHandle>,
+    sid: &str,
+    base_url: &str,
+    oc_session_id: &str,
+    request_id: &str,
+    questions: serde_json::Value,
+) {
+    let Some(app) = app else { return };
+    let Some(state) = app.try_state::<AgentSessionState>() else {
+        return;
+    };
+    let pending_id = state.0.register_pending_ask(
+        sid,
+        questions.clone(),
+        PendingAskRoute::OpenCode {
+            base_url: base_url.to_string(),
+            oc_session_id: oc_session_id.to_string(),
+            request_id: request_id.to_string(),
+        },
+    );
+    let _ = app.emit(
+        "chat:question-request",
+        crate::types::ChatQuestionRequestPayload {
+            chat_session_id: sid.to_string(),
+            pending_id,
+            questions,
+        },
+    );
+}
+
+/// Map the card's answers (`{questionText: label | labels[]}` + optional
+/// free text) onto opencode's reply body: `{answers: [[label,…], …]}` — one
+/// label array PER QUESTION, in question order.
+pub(crate) fn build_opencode_reply_answers(
+    questions: &serde_json::Value,
+    answers: &serde_json::Value,
+    response: Option<&str>,
+) -> serde_json::Value {
+    let free = response.map(str::trim).filter(|s| !s.is_empty());
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for q in questions.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+        let qt = q.get("question").and_then(|v| v.as_str()).unwrap_or("");
+        let mut labels: Vec<String> = match answers.get(qt) {
+            Some(serde_json::Value::String(s)) => vec![s.clone()],
+            Some(serde_json::Value::Array(a)) => a
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+            _ => vec![],
+        };
+        // A free-text reply answers whichever question went unanswered.
+        if labels.is_empty() {
+            if let Some(f) = free {
+                labels.push(f.to_string());
+            }
+        }
+        out.push(serde_json::Value::Array(
+            labels.into_iter().map(serde_json::Value::String).collect(),
+        ));
+    }
+    serde_json::Value::Array(out)
+}
+
+/// Answer (or reject) one opencode native question. `rejected` = the user
+/// skipped; the tool then returns "dismissed" and the model proceeds.
+pub(crate) fn opencode_answer_question(
+    base_url: &str,
+    oc_session_id: &str,
+    request_id: &str,
+    rejected: bool,
+    answers: &serde_json::Value,
+) -> Result<(), String> {
+    if base_url.is_empty() || oc_session_id.is_empty() || request_id.is_empty() {
+        return Err("missing opencode question routing info".to_string());
+    }
+    tauri::async_runtime::block_on(async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("http client: {e}"))?;
+        let url = if rejected {
+            format!("{base_url}/session/{oc_session_id}/question/{request_id}/reject")
+        } else {
+            format!("{base_url}/session/{oc_session_id}/question/{request_id}/reply")
+        };
+        let body = if rejected {
+            json!({})
+        } else {
+            json!({ "answers": answers })
+        };
+        let resp = client
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("question answer post failed: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("question answer HTTP {status}: {}", truncate_output(&text)));
+        }
+        Ok(())
+    })
+}
+
+/// Send one user turn to this chat's persistent `opencode serve` process.
 
 /// Send one user turn to this chat's persistent `opencode serve` process.
 ///
@@ -3689,6 +4252,10 @@ fn send_opencode_turn(
                     persist_actual_model(&db2, "opencode", &sid2, m);
                 }
                 let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+                // RELAY_ASK scan BEFORE persisting: strip the marker question
+                // from the reply, surface it as a card after chat:done.
+                let (clean, ask) = split_relay_ask(std::mem::take(&mut *full));
+                *full = clean;
                 finish_turn(
                     Some(&app2),
                     &db2,
@@ -3703,6 +4270,10 @@ fn send_opencode_turn(
                     started_at,
                     actual.as_deref(),
                 );
+                drop(full);
+                if let Some(questions) = ask {
+                    surface_relay_ask(Some(&app2), &sid2, questions);
+                }
             }
             Err(e) => {
                 // cancel() kills the server → the POST fails too; only the
@@ -4072,6 +4643,7 @@ fn read_opencode_server_events(
                     handle_opencode_sse_data(
                         app,
                         sid,
+                        &base_url,
                         data.trim(),
                         &session_cell,
                         &full_cell,
@@ -4097,6 +4669,7 @@ fn read_opencode_server_events(
 fn handle_opencode_sse_data(
     app: Option<&AppHandle>,
     sid: &str,
+    base_url: &str,
     data: &str,
     session_cell: &Arc<Mutex<Option<String>>>,
     full_cell: &Arc<Mutex<String>>,
@@ -4115,6 +4688,32 @@ fn handle_opencode_sse_data(
         return;
     };
     last_event_ms.store(now_ms_u64(), Ordering::Relaxed);
+
+    // OpenCode's NATIVE `question` tool: the server parks the in-flight turn
+    // on this request until the client POSTs an answer (or a reject) to
+    // `/session/{sid}/question/{requestID}/reply|reject`. Surface the
+    // question card; `resolve_agent_question` routes the answer straight
+    // back to the server and the turn completes on its own.
+    if v.get("type").and_then(|t| t.as_str()) == Some("question.asked") {
+        let request_id = v
+            .pointer("/properties/id")
+            .and_then(|i| i.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !request_id.is_empty() {
+            let questions = v
+                .pointer("/properties/questions")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            let oc_session_id = v
+                .pointer("/properties/sessionID")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            surface_opencode_question(app, sid, base_url, &oc_session_id, &request_id, questions);
+        }
+        return;
+    }
 
     // message.updated announces each message's id + role BEFORE its parts
     // stream — remember it so user-message parts can be filtered below.
@@ -4353,7 +4952,7 @@ fn emit_opencode_tool(
             let role = inp.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent");
             let task = inp.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let prompt = inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-            tools.subagent_use(name, value, app, sid, role, task, prompt)
+            tools.subagent_use(name, value, app, sid, role, task, prompt, "", false)
         } else {
             tools.tool_use(name, vec![value])
         };
@@ -4370,7 +4969,7 @@ fn emit_opencode_tool(
             .and_then(|o| o.as_str())
             .or_else(|| state.get("error").and_then(|e| e.as_str()))
             .unwrap_or(if status == "error" { "tool failed" } else { "" });
-        if let Some(marker) = tools.tool_result(text, status == "error", app, sid) {
+        if let Some(marker) = tools.tool_result(text, status == "error", app, sid, None) {
             let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
             full.push_str(&marker);
             emit_token(app, sid, &marker);
@@ -4426,6 +5025,8 @@ fn handle_kimi_event(
                                 &role,
                                 &task,
                                 &prompt,
+                                "",
+                                false,
                             );
                             full.push_str(&marker);
                             emit_token(app, sid, &marker);
@@ -4451,7 +5052,7 @@ fn handle_kimi_event(
             // streams where the tool_calls frame was missed).
             crate::chat::turn_perf::end_active_gen(sid);
             let text = extract_result_text(v.get("content"));
-            if let Some(marker) = tools.tool_result(&text, false, app, sid) {
+            if let Some(marker) = tools.tool_result(&text, false, app, sid, None) {
                 full.push_str(&marker);
                 emit_token(app, sid, &marker);
             }
@@ -4631,7 +5232,7 @@ fn handle_opencode_event(
                 let role = inp.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent").to_string();
                 let task = inp.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let prompt = inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let marker = tools.subagent_use(name, value, app, sid, &role, &task, &prompt);
+                let marker = tools.subagent_use(name, value, app, sid, &role, &task, &prompt, "", false);
                 full.push_str(&marker);
                 emit_token(app, sid, &marker);
             } else {
@@ -4800,7 +5401,7 @@ fn handle_pi_event(
                 let role = inp.get("subagent_type").and_then(|x| x.as_str()).unwrap_or("agent").to_string();
                 let task = inp.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let prompt = inp.get("prompt").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let marker = tools.subagent_use(name, value, app, sid, &role, &task, &prompt);
+                let marker = tools.subagent_use(name, value, app, sid, &role, &task, &prompt, "", false);
                 full.push_str(&marker);
                 emit_token(app, sid, &marker);
             } else {
@@ -4816,7 +5417,7 @@ fn handle_pi_event(
         Some("tool_execution_end") => {
             let text = extract_result_text(v.get("result"));
             let is_error = v.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
-            if let Some(marker) = tools.tool_result(&text, is_error, app, sid) {
+            if let Some(marker) = tools.tool_result(&text, is_error, app, sid, None) {
                 full.push_str(&marker);
                 emit_token(app, sid, &marker);
             }
@@ -5741,6 +6342,32 @@ fn is_subagent_tool_name(name: &str) -> bool {
     matches!(name.to_lowercase().as_str(), "task" | "agent")
 }
 
+/// True when a tool_result for an Agent/Task call is Claude Code's internal
+/// async-launch receipt ("Async agent launched successfully. (This tool
+/// result is internal metadata …)"). It carries the agentId and the output
+/// file path, NOT the agent's work — forwarding it to the subagent panel
+/// showed internal metadata as the OUTPUT while marking the agent Done while
+/// it was still working. The real outcome arrives later as a
+/// `task_notification` system event.
+fn is_async_launch_receipt(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("Async agent launched successfully")
+        || (t.contains("internal metadata") && t.contains("agentId:") && t.contains("output_file"))
+}
+
+/// Pull the background agent's id out of the launch receipt
+/// ("agentId: a1b3914b301b8a387 (internal ID …)") — the fallback correlation
+/// key when a task_notification lacks the Agent call's tool_use_id.
+fn launch_receipt_agent_id(text: &str) -> Option<String> {
+    let idx = text.find("agentId:")?;
+    let rest = text[idx + "agentId:".len()..].trim_start();
+    let id: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if id.is_empty() { None } else { Some(id) }
+}
+
 /// Cap captured shell output so a huge dump can't bloat the stored message.
 /// Shell output is usually most useful at the tail, so keep the last lines.
 fn truncate_output(s: &str) -> String {
@@ -5795,21 +6422,47 @@ fn extract_result_text(content: Option<&Value>) -> String {
 struct PendingTool {
     id: u64,
     shell: bool,
-    subagent: Option<SubagentMeta>,
+    /// Panel id when this call was a subagent Task/Agent.
+    subagent_id: Option<String>,
+    /// The CLI's tool_use id when the subagent registered one — such slots
+    /// are finalized out-of-band (exact id match or task_notification) and
+    /// are SKIPPED by FIFO pops.
+    sub_tool_use_id: Option<String>,
 }
+/// One live (spawned, not yet finalized) subagent. Looked up by the CLI's own
+/// tool_use id so late events can be attributed exactly.
 struct SubagentMeta {
+    /// Panel id (`sub-<ts>-<n>`).
     id: String,
-    task: String,
+    /// agentId parsed from the async launch receipt (claude background
+    /// agents) — fallback correlation key for task_notification.
+    agent_id: Option<String>,
+    /// run_in_background: true — the CLI answers the call with an internal
+    /// launch receipt and reports the real outcome later via a
+    /// `task_notification` system event.
+    background: bool,
+    /// Whether any subagent-internal message already streamed into the panel
+    /// output, so a completing result doesn't re-append the same text.
+    streamed: bool,
 }
 
 struct ToolTracker {
     seq: u64,
     pending: VecDeque<PendingTool>,
+    /// Live subagents keyed by the CLI's tool_use id. Inserted on spawn,
+    /// removed on finalization. This is what makes background agents (whose
+    /// call slot was long ago consumed by the launch receipt) and
+    /// subagent-internal messages (`parent_tool_use_id`) routable.
+    by_tool_use: std::collections::HashMap<String, SubagentMeta>,
 }
 
 impl ToolTracker {
     fn new() -> Self {
-        Self { seq: 0, pending: VecDeque::new() }
+        Self {
+            seq: 0,
+            pending: VecDeque::new(),
+            by_tool_use: std::collections::HashMap::new(),
+        }
     }
     /// Wrap one tool call's marker Value(s) as `<tool>…</tool>`, injecting an
     /// `id` when the call is a shell command, and record the call's slot.
@@ -5826,12 +6479,28 @@ impl ToolTracker {
             }
             out.push_str(&format!("<tool>{v}</tool>"));
         }
-        self.pending.push_back(PendingTool { id, shell, subagent: None });
+        self.pending.push_back(PendingTool { id, shell, subagent_id: None, sub_tool_use_id: None });
         out
     }
     /// Wrap a subagent Task tool call: emits a `chat:subagent-spawn` event,
-    /// injects an `id` into the marker, and records the slot as a subagent.
-    fn subagent_use(&mut self, _name: &str, value: Value, app: Option<&AppHandle>, sid: &str, role: &str, task: &str, prompt: &str) -> String {
+    /// injects an `id` into the marker, and records the call. When the CLI
+    /// exposes its tool_use id (claude stream-json), the live subagent is also
+    /// registered in `by_tool_use` so late events — the launch receipt, the
+    /// agent's internal messages, its completion notification — attribute to
+    /// this panel entry exactly instead of by queue order.
+    #[allow(clippy::too_many_arguments)]
+    fn subagent_use(
+        &mut self,
+        _name: &str,
+        value: Value,
+        app: Option<&AppHandle>,
+        sid: &str,
+        role: &str,
+        task: &str,
+        prompt: &str,
+        cli_tool_use_id: &str,
+        background: bool,
+    ) -> String {
         let id = self.seq;
         self.seq += 1;
         // Unique across turns: `seq` resets every turn, so a plain `sub-0`
@@ -5857,45 +6526,270 @@ impl ToolTracker {
                 },
             );
         }
+        if !cli_tool_use_id.is_empty() {
+            self.by_tool_use.insert(
+                cli_tool_use_id.to_string(),
+                SubagentMeta {
+                    id: sub_id.clone(),
+                    agent_id: None,
+                    background,
+                    streamed: false,
+                },
+            );
+        }
         self.pending.push_back(PendingTool {
             id,
             shell: false,
-            subagent: Some(SubagentMeta { id: sub_id, task: task.to_string() }),
+            subagent_id: Some(sub_id.clone()),
+            sub_tool_use_id: if cli_tool_use_id.is_empty() {
+                None
+            } else {
+                Some(cli_tool_use_id.to_string())
+            },
         });
         format!("<tool>{v}</tool>")
     }
-    /// Consume the next result slot (in call order). Returns a result marker
-    /// carrying the output text only when that call was a shell command, and
-    /// emits `chat:subagent-tokens` + `chat:subagent-done` when it was a
-    /// subagent Task.
-    fn tool_result(&mut self, text: &str, is_error: bool, app: Option<&AppHandle>, sid: &str) -> Option<String> {
-        let slot = self.pending.pop_front()?;
-        if let Some(meta) = &slot.subagent {
-            if let Some(app) = app {
-                let _ = app.emit(
-                    "chat:subagent-tokens",
-                    crate::types::SubagentTokenPayload {
-                        chat_session_id: sid.to_string(),
-                        subagent_id: meta.id.clone(),
-                        chunk: text.to_string(),
-                    },
-                );
-                let _ = app.emit(
-                    "chat:subagent-done",
-                    crate::types::SubagentDonePayload {
-                        chat_session_id: sid.to_string(),
-                        id: meta.id.clone(),
-                        output: text.to_string(),
-                        error: is_error.then(|| "subagent exited with an error".to_string()),
-                    },
-                );
+    /// Consume the next result slot (in call order, or — when the CLI exposes
+    /// tool_use ids — the EXACT call the result belongs to). Returns a result
+    /// marker carrying the output text only when that call was a shell
+    /// command, and feeds the subagent panel when it was a subagent Task.
+    fn tool_result(
+        &mut self,
+        text: &str,
+        is_error: bool,
+        app: Option<&AppHandle>,
+        sid: &str,
+        cli_tool_use_id: Option<&str>,
+    ) -> Option<String> {
+        // Exact match first (claude). A background agent's launch receipt is
+        // swallowed here: it is internal CLI metadata, NOT the agent's output,
+        // and marking the agent done on it is the "Done ✓ but still working"
+        // bug. The real completion arrives later via task_notification.
+        if let Some(id) = cli_tool_use_id.filter(|s| !s.is_empty()) {
+            if let Some(meta) = self.by_tool_use.get_mut(id) {
+                if is_async_launch_receipt(text) {
+                    meta.background = true;
+                    meta.agent_id = launch_receipt_agent_id(text);
+                    return None;
+                }
             }
+            if let Some(meta) = self.by_tool_use.remove(id) {
+                self.drop_pending_sub(&meta.id);
+                self.finish_subagent(app, sid, &meta, Some(text), is_error);
+                return None;
+            }
+        }
+        // Skip slots for REGISTERED subagents: their results finalize via the
+        // exact tool_use id or a task_notification, never through this queue.
+        // Without the skip, a background agent's receipt-consumed slot would
+        // eat the NEXT tool's result (the FIFO desync that garbled panes).
+        while let Some(front) = self.pending.front() {
+            match &front.sub_tool_use_id {
+                Some(t) if self.by_tool_use.contains_key(t) => {
+                    self.pending.pop_front();
+                }
+                _ => break,
+            }
+        }
+        let slot = self.pending.pop_front()?;
+        if let Some(sub_id) = slot.subagent_id {
+            // Adapters without tool_use ids (kimi/pi/omp): FIFO fallback.
+            let meta = SubagentMeta {
+                id: sub_id,
+                agent_id: None,
+                background: false,
+                streamed: false,
+            };
+            self.finish_subagent(app, sid, &meta, Some(text), is_error);
             return None;
         }
         if !slot.shell {
             return None;
         }
         Some(result_marker_text(slot.id, text, is_error))
+    }
+    /// Emit the final subagent events: stream `text` only when nothing was
+    /// already streamed live from the agent's own messages, then mark done.
+    fn finish_subagent(&self, app: Option<&AppHandle>, sid: &str, meta: &SubagentMeta, text: Option<&str>, is_error: bool) {
+        let Some(app) = app else { return };
+        let text = text.unwrap_or("");
+        if !meta.streamed && !text.is_empty() {
+            let _ = app.emit(
+                "chat:subagent-tokens",
+                crate::types::SubagentTokenPayload {
+                    chat_session_id: sid.to_string(),
+                    subagent_id: meta.id.clone(),
+                    chunk: text.to_string(),
+                },
+            );
+        }
+        let _ = app.emit(
+            "chat:subagent-done",
+            crate::types::SubagentDonePayload {
+                chat_session_id: sid.to_string(),
+                id: meta.id.clone(),
+                // Empty output keeps what already streamed (the frontend's
+                // onSubagentDone falls back to the accumulated output).
+                output: if meta.streamed { String::new() } else { text.to_string() },
+                error: is_error.then(|| "subagent exited with an error".to_string()),
+            },
+        );
+    }
+    /// Remove the queued FIFO slot for a subagent finalized out-of-order (by
+    /// exact tool_use id), so the remaining slots stay aligned with their
+    /// results.
+    fn drop_pending_sub(&mut self, sub_id: &str) {
+        self.pending.retain(|s| s.subagent_id.as_deref() != Some(sub_id));
+    }
+    /// Route ONE subagent-internal assistant message (claude tags every
+    /// message produced inside a Task/Agent with `parent_tool_use_id`) into
+    /// that agent's panel output: text and thinking stream as content, tool
+    /// calls become the same `<tool>` markers the built-in panel parses. Must
+    /// never touch the main transcript or the main tool FIFO — subagent
+    /// activity would otherwise desync the queue and mis-attribute results.
+    fn route_subagent_assistant(&mut self, app: Option<&AppHandle>, sid: &str, parent_tool_use_id: &str, blocks: &[Value]) -> bool {
+        let Some(meta) = self.by_tool_use.get_mut(parent_tool_use_id) else {
+            return false;
+        };
+        let mut chunks = String::new();
+        for b in blocks {
+            match b.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
+                        chunks.push_str(t);
+                    }
+                }
+                Some("thinking") => {
+                    if let Some(t) = b.get("thinking").and_then(|v| v.as_str()) {
+                        if !t.is_empty() {
+                            chunks.push_str("<think>");
+                            chunks.push_str(t);
+                            chunks.push_str("</think>");
+                        }
+                    }
+                }
+                Some("tool_use") => {
+                    if let Some((name, values)) = tool_meta_claude(b) {
+                        let _ = name;
+                        for v in values {
+                            chunks.push_str(&format!("<tool>{v}</tool>"));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if chunks.is_empty() {
+            return true;
+        }
+        meta.streamed = true;
+        if let Some(app) = app {
+            let _ = app.emit(
+                "chat:subagent-tokens",
+                crate::types::SubagentTokenPayload {
+                    chat_session_id: sid.to_string(),
+                    subagent_id: meta.id.clone(),
+                    chunk: chunks,
+                },
+            );
+        }
+        true
+    }
+    /// Route ONE subagent-internal tool result into that agent's panel as a
+    /// result marker (folded onto the most recent tool row by the parser).
+    fn route_subagent_result(&mut self, app: Option<&AppHandle>, sid: &str, parent_tool_use_id: &str, text: &str, is_error: bool) -> bool {
+        let Some(meta) = self.by_tool_use.get_mut(parent_tool_use_id) else {
+            return false;
+        };
+        meta.streamed = true;
+        let sub_id = meta.id.clone();
+        if let Some(app) = app {
+            let marker = json!({
+                "kind": "result",
+                "result": sanitize(truncate_output(text)),
+                "resultError": is_error,
+            });
+            let _ = app.emit(
+                "chat:subagent-tokens",
+                crate::types::SubagentTokenPayload {
+                    chat_session_id: sid.to_string(),
+                    subagent_id: sub_id,
+                    chunk: format!("<tool>{marker}</tool>"),
+                },
+            );
+        }
+        true
+    }
+    /// Finalize a background agent from its `task_notification` system event
+    /// (claude). The notification carries the Agent call's tool_use_id, the
+    /// task's agent task_id, a status, and the report summary — any of the id
+    /// keys may correlate; with none matching, a single awaiting background
+    /// agent is the unambiguous fallback.
+    fn finish_background(&mut self, app: Option<&AppHandle>, sid: &str, v: &Value) {
+        let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("completed");
+        let summary = v.get("summary").and_then(|s| s.as_str()).unwrap_or("");
+        let by_tool = v
+            .get("tool_use_id")
+            .and_then(|t| t.as_str())
+            .filter(|s| !s.is_empty())
+            .filter(|t| self.by_tool_use.contains_key(*t))
+            .map(String::from);
+        let key = by_tool.or_else(|| {
+            let task_id = v.get("task_id").and_then(|t| t.as_str()).unwrap_or("");
+            if !task_id.is_empty() {
+                if let Some((k, m)) = self
+                    .by_tool_use
+                    .iter()
+                    .find(|(_, m)| m.agent_id.as_deref() == Some(task_id))
+                {
+                    let id = k.clone();
+                    let _ = m;
+                    return Some(id);
+                }
+            }
+            // Fallback: with exactly one background agent awaiting, the
+            // notification is unambiguously its completion.
+            let awaiting: Vec<String> = self
+                .by_tool_use
+                .iter()
+                .filter(|(_, m)| m.background)
+                .map(|(k, _)| k.clone())
+                .collect();
+            if awaiting.len() == 1 {
+                return awaiting.into_iter().next();
+            }
+            None
+        });
+        let Some(key) = key else { return };
+        let Some(meta) = self.by_tool_use.remove(&key) else { return };
+        self.drop_pending_sub(&meta.id);
+        self.finish_subagent(
+            app,
+            sid,
+            &meta,
+            Some(summary),
+            status != "completed",
+        );
+    }
+    /// The CLI process ended with agents still awaiting completion (crash,
+    /// cancel, session delete). Finalize them as errors so no panel entry
+    /// spins forever.
+    fn fail_pending(&mut self, app: Option<&AppHandle>, sid: &str, reason: &str) {
+        let drained: Vec<SubagentMeta> = self.by_tool_use.drain().map(|(_, m)| m).collect();
+        for meta in &drained {
+            self.drop_pending_sub(&meta.id);
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "chat:subagent-done",
+                    crate::types::SubagentDonePayload {
+                        chat_session_id: sid.to_string(),
+                        id: meta.id.clone(),
+                        output: String::new(),
+                        error: Some(reason.to_string()),
+                    },
+                );
+            }
+        }
     }
     /// Self-contained variant for CLIs that report a tool's call AND its
     /// completed output in one event (opencode). Assigns an id, emits the
@@ -7212,6 +8106,7 @@ mod tests {
             handle_opencode_sse_data(
                 None,
                 "s",
+                "http://127.0.0.1:1",
                 data,
                 &session_cell,
                 &full_cell,
@@ -7435,5 +8330,271 @@ mod tests {
         let err = parse_oneshot_text("claude_code", &raw).unwrap_err();
         assert!(err.contains("missing `result`"), "{err}");
         assert!(err.contains('日'), "{err}");
+    }
+
+    // ---- subagent tracking (background agents, parent routing) ----
+
+    fn spawn_sub(tools: &mut ToolTracker) -> String {
+        tools.subagent_use(
+            "Agent",
+            json!({"kind": "subagent", "role": "general-purpose", "task": "t"}),
+            None,
+            "s1",
+            "general-purpose",
+            "t",
+            "p",
+            "call_abc",
+            true,
+        )
+    }
+
+    const RECEIPT: &str = "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: a1b3914b301b8a387 (internal ID - do not mention to user.)\nThe agent is working in the background. output_file: C:\\tmp\\tasks\\x.output";
+
+    #[test]
+    fn async_launch_receipt_is_swallowed_not_finalized() {
+        let mut tools = ToolTracker::new();
+        let marker = spawn_sub(&mut tools);
+        assert!(marker.contains("<tool>"), "{marker}");
+        assert_eq!(tools.by_tool_use.len(), 1);
+        // The receipt arrives as the call's tool_result — it must NOT pop the
+        // slot nor finalize the agent (the old "Done ✓ while still working" bug).
+        let out = tools.tool_result(RECEIPT, false, None, "s1", Some("call_abc"));
+        assert!(out.is_none());
+        assert_eq!(tools.by_tool_use.len(), 1, "receipt must keep the agent live");
+        assert_eq!(tools.pending.len(), 1, "receipt must not consume the FIFO slot");
+        assert_eq!(
+            tools.by_tool_use.values().next().unwrap().agent_id.as_deref(),
+            Some("a1b3914b301b8a387")
+        );
+    }
+
+    #[test]
+    fn background_completion_comes_from_task_notification() {
+        let mut tools = ToolTracker::new();
+        spawn_sub(&mut tools);
+        let _ = tools.tool_result(RECEIPT, false, None, "s1", Some("call_abc"));
+        tools.finish_background(
+            None,
+            "s1",
+            &json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": "a35923ae14a875050",
+                "tool_use_id": "call_abc",
+                "status": "completed",
+                "summary": "BACKGROUND_OK"
+            }),
+        );
+        assert!(tools.by_tool_use.is_empty(), "notification finalizes the agent");
+        assert!(tools.pending.is_empty());
+    }
+
+    #[test]
+    fn background_completion_correlates_by_agent_task_id() {
+        let mut tools = ToolTracker::new();
+        spawn_sub(&mut tools); // receipt teaches the agent_id
+        let _ = tools.tool_result(RECEIPT, false, None, "s1", Some("call_abc"));
+        // A notification without tool_use_id still correlates via the
+        // receipt's agentId.
+        tools.finish_background(
+            None,
+            "s1",
+            &json!({"subtype": "task_notification", "task_id": "a1b3914b301b8a387", "status": "failed"}),
+        );
+        assert!(tools.by_tool_use.is_empty());
+    }
+
+    #[test]
+    fn foreground_result_finalizes_by_exact_id() {
+        let mut tools = ToolTracker::new();
+        spawn_sub(&mut tools);
+        // A real (non-receipt) result finalizes the exact agent, dropping its
+        // FIFO slot so later tools stay aligned.
+        let out = tools.tool_result("final report", false, None, "s1", Some("call_abc"));
+        assert!(out.is_none(), "subagent results carry no main marker");
+        assert!(tools.by_tool_use.is_empty());
+        assert!(tools.pending.is_empty());
+    }
+
+    #[test]
+    fn fifo_fallback_for_adapters_without_ids() {
+        let mut tools = ToolTracker::new();
+        tools.subagent_use(
+            "Task",
+            json!({"kind": "subagent"}),
+            None,
+            "s1",
+            "role",
+            "t",
+            "p",
+            "", // no CLI id exposed (kimi/pi/omp)
+            false,
+        );
+        let out = tools.tool_result("report", false, None, "s1", None);
+        assert!(out.is_none());
+        assert!(tools.pending.is_empty());
+    }
+
+    #[test]
+    fn subagent_internal_messages_route_to_their_panel_not_the_fifo() {
+        let mut tools = ToolTracker::new();
+        spawn_sub(&mut tools);
+        // The agent's own assistant message (parent-tagged) routes true but
+        // must NOT push a main FIFO slot…
+        let routed = tools.route_subagent_assistant(
+            None,
+            "s1",
+            "call_abc",
+            &[json!({"type": "text", "text": "BACKGROUND_OK"})],
+        );
+        assert!(routed);
+        // …and its internal tool result must not pop one either.
+        let routed = tools.route_subagent_result(None, "s1", "call_abc", "ls output", false);
+        assert!(routed);
+        assert_eq!(tools.pending.len(), 1, "main FIFO untouched by subagent activity");
+        // Unknown parents (background BASH tasks etc.) don't route.
+        assert!(!tools.route_subagent_assistant(None, "s1", "call_other", &[]));
+        // The foreground completion still lands on the right agent, and the
+        // already-streamed text is not re-appended (finish_subagent skips the
+        // token emission when `streamed`; asserted via state: entry removed).
+        let out = tools.tool_result("BACKGROUND_OK", false, None, "s1", Some("call_abc"));
+        assert!(out.is_none());
+        assert!(tools.by_tool_use.is_empty());
+    }
+
+    #[test]
+    fn receipt_detection_is_tight() {
+        assert!(is_async_launch_receipt(RECEIPT));
+        assert!(!is_async_launch_receipt("regular shell output"));
+        assert!(!is_async_launch_receipt(""));
+        assert_eq!(
+            launch_receipt_agent_id(RECEIPT).as_deref(),
+            Some("a1b3914b301b8a387")
+        );
+        assert_eq!(launch_receipt_agent_id("no id here"), None);
+    }
+
+    #[test]
+    fn shell_result_matching_survives_a_background_agent_in_the_queue() {
+        // Background agent launched, then a shell call: the receipt swallows
+        // the agent's slot consumption, so the shell result must still pair
+        // with the SHELL slot (the old FIFO desync ate it).
+        let mut tools = ToolTracker::new();
+        let _ = spawn_sub(&mut tools);
+        let _ = tools.tool_result(RECEIPT, false, None, "s1", Some("call_abc"));
+        let shell_marker = tools.tool_use("Bash", vec![json!({"kind": "command", "title": "ls"})]);
+        assert!(!shell_marker.is_empty());
+        let out = tools.tool_result("file1\nfile2", false, None, "s1", None);
+        assert!(out.is_some(), "shell output must attach to its step");
+    }
+
+    // ---- RELAY_ASK: the marker question channel for no-protocol harnesses ----
+
+    #[test]
+    fn relay_ask_marker_is_stripped_and_normalized() {
+        let reply = "I can do this two ways.\n\nWhich database should I use?\n\
+            RELAY_ASK: {\"question\":\"Which database?\",\"header\":\"DB\",\"options\":[{\"label\":\"SQLite\",\"description\":\"local\"},{\"label\":\"Postgres\"}],\"multiSelect\":false}\n";
+        let (clean, ask) = split_relay_ask(reply.to_string());
+        assert_eq!(clean, "I can do this two ways.\n\nWhich database should I use?");
+        let qs = ask.expect("marker must parse");
+        let q = &qs[0];
+        assert_eq!(q["question"], "Which database?");
+        assert_eq!(q["header"], "DB");
+        assert_eq!(q["options"][0]["label"], "SQLite");
+        assert_eq!(q["options"][0]["description"], "local");
+        assert!(q["options"][1].get("description").is_none(), "missing description stays absent");
+        assert_eq!(q["options"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn relay_ask_survives_prose_and_repairs_broken_backslashes() {
+        // The exact failure seen live: a Windows path with single backslashes
+        // makes the JSON invalid ("D:\artifact" → \a is not a JSON escape).
+        // The repair pass must rescue it and the marker line must strip.
+        let broken = "RELAY_ASK: {\"question\":\"What would you like me to help you with today?\",\"header\":\"Today's Task\",\"options\":[{\"label\":\"Daily news automation\",\"description\":\"Tweak or debug the 9 a.m. AI/ML news workflow\"},{\"label\":\"New artifact or tool\",\"description\":\"Build something in D:\\artifact\"}],\"multiSelect\":false}";
+        let (clean, ask) = split_relay_ask(broken.to_string());
+        let qs = ask.expect("invalid escapes must be repaired");
+        assert_eq!(clean, "", "a bare marker leaves no prose behind");
+        assert_eq!(qs[0]["question"], "What would you like me to help you with today?");
+        assert_eq!(qs[0]["options"][1]["description"], "Build something in D:\\artifact");
+        // Already-valid double backslashes pass through untouched.
+        let ok = "RELAY_ASK: {\"question\":\"Q?\",\"options\":[{\"label\":\"L\",\"description\":\"D:\\\\dir\"}]}";
+        let (_, ask) = split_relay_ask(ok.to_string());
+        assert_eq!(ask.unwrap()[0]["options"][0]["description"], "D:\\dir");
+        // Prose after the marker is fine — the marker line strips, prose stays.
+        let prose_after = "RELAY_ASK: {\"question\":\"Q?\"}\nPick one to continue.";
+        let (clean, ask) = split_relay_ask(prose_after.to_string());
+        assert!(ask.is_some());
+        assert_eq!(clean, "Pick one to continue.");
+    }
+
+    #[test]
+    fn relay_ask_ignores_buried_or_malformed_markers() {
+        // A line that doesn't PARSE is ordinary text, even mid-reply.
+        let buried = "RELAY_ASK: not json\nThen I picked option A myself.";
+        let (clean, ask) = split_relay_ask(buried.to_string());
+        assert!(ask.is_none());
+        assert_eq!(clean, buried);
+        // A parsed marker without a question text is ignored.
+        let empty = "x\nRELAY_ASK: {\"question\":\"  \"}";
+        assert!(split_relay_ask(empty.to_string()).1.is_none());
+        // Backtick-wrapped JSON still parses.
+        let wrapped = "ok\nRELAY_ASK: `{\"question\":\"Q?\"}`";
+        let (_, ask) = split_relay_ask(wrapped.to_string());
+        assert_eq!(ask.unwrap()[0]["question"], "Q?");
+        // No marker: byte-identical passthrough.
+        let plain = "Just a normal reply.".to_string();
+        let (clean, ask) = split_relay_ask(plain.clone());
+        assert!(ask.is_none());
+        assert_eq!(clean, plain);
+    }
+
+    #[test]
+    fn ask_follow_up_composes_answers_skips_and_free_text() {
+        let qs = serde_json::json!([{"question": "Which database?"}]);
+        let answers = serde_json::json!({"Which database?": "SQLite"});
+        let msg = compose_ask_follow_up(&qs, &answers, None, false);
+        assert!(msg.contains("You asked: \u{201c}Which database?\u{201d}"), "{msg}");
+        assert!(msg.contains("Which database?: SQLite"), "{msg}");
+        assert!(msg.contains("Continue the task"), "{msg}");
+
+        let multi = serde_json::json!({"Which database?": ["SQLite", "Postgres"]});
+        let msg = compose_ask_follow_up(&qs, &multi, None, false);
+        assert!(msg.contains("SQLite, Postgres"), "{msg}");
+
+        let free_only = compose_ask_follow_up(&qs, &serde_json::json!({}), Some("use whatever").as_deref(), false);
+        assert!(free_only.contains("use whatever"), "{free_only}");
+
+        let skipped = compose_ask_follow_up(&qs, &serde_json::json!({}), None, true);
+        assert!(skipped.contains("dismissed"), "{skipped}");
+        assert!(skipped.contains("best judgment"), "{skipped}");
+    }
+
+    #[test]
+    fn question_channel_gates_by_harness() {
+        assert!(harness_question_channel("kimi_code"));
+        assert!(harness_question_channel("opencode"));
+        assert!(harness_question_channel("pi"));
+        assert!(harness_question_channel("omp"));
+        assert!(harness_question_channel("commandcode"));
+        // Real protocols must never get the text directive.
+        assert!(!harness_question_channel("claude_code"));
+        assert!(!harness_question_channel("acp:gemini"));
+        assert!(!harness_question_channel("local_gguf"));
+    }
+
+    #[test]
+    fn opencode_reply_answers_map_in_question_order() {
+        let qs = serde_json::json!([
+            {"question": "Which database?", "options": [{"label": "SQLite"}, {"label": "Postgres"}]},
+            {"question": "Migrate now?", "multiSelect": true}
+        ]);
+        // Single labels, multi labels, and per-question free text fallback.
+        let answers = serde_json::json!({"Which database?": "Postgres", "Migrate now?": ["yes", "also docs"]});
+        let body = build_opencode_reply_answers(&qs, &answers, None);
+        assert_eq!(body, serde_json::json!([["Postgres"], ["yes", "also docs"]]));
+        // Unanswered question + free text: the free text fills THAT slot.
+        let body = build_opencode_reply_answers(&qs, &serde_json::json!({}), Some("up to you"));
+        assert_eq!(body, serde_json::json!([["up to you"], ["up to you"]]));
     }
 }

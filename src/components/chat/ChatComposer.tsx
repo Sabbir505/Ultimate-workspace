@@ -6,9 +6,10 @@
 // Enter sends; Shift+Enter inserts a newline.
 // Attachments: images are sent as vision input, docx/pptx/xlsx/pdf and legacy
 // doc/ppt/xls are extracted to text server-side, and plain-text files are
-// inlined into the message. Files reach those paths via the "+" picker OR by
+// inlined into the message. Files reach those paths via the "+" picker, by
 // pasting straight into the textarea (screenshots, copied images, OS-copied
-// files — anything the clipboard exposes as a file).
+// files — anything the clipboard exposes as a file), or by dragging them from
+// the OS onto the composer card.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowUpToLine, GripVertical, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
@@ -180,11 +181,12 @@ export interface ChatAttachment {
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp"];
 const DOC_EXTS = ["docx", "pptx", "xlsx", "pdf", "doc", "ppt", "xls"];
 
-/** Which attachment bucket a File falls into — shared by the "+" picker and
- *  the paste path so the two can never drift. Images match by extension OR a
- *  non-SVG image MIME (a pasted screenshot carries "image/png" but often only
- *  the generic name "image.png"); docs match by extension; everything else is
- *  read as text (binary content is rejected later by the NUL sniff). */
+/** Which attachment bucket a File falls into — shared by the "+" picker, the
+ *  paste path, and OS drag-and-drop so all three can never drift. Images match
+ *  by extension OR a non-SVG image MIME (a pasted screenshot carries
+ *  "image/png" but often only the generic name "image.png"); docs match by
+ *  extension; everything else is read as text (binary content is rejected
+ *  later by the NUL sniff). */
 export function classifyAttachment(file: { name: string; type: string }): {
   kind: ChatAttachment["kind"];
   ext: string;
@@ -2182,6 +2184,43 @@ export function ChatComposer({
     [handleFiles, attachPastedText],
   );
 
+  // OS drag-and-drop attach: dropping files anywhere on the composer card
+  // routes through the same handleFiles path as the "+" picker and paste.
+  // REQUIRES the Tauri window to run with dragDropEnabled: false
+  // (tauri.conf.json) — with Tauri's own drag-drop interception on, WebView2
+  // swallows file drags and these DOM events never fire. The dragover gate
+  // on the DataTransfer `types` keeps text/URL drags from lighting the card
+  // up or blocking their default (the in-card attachment reorder is
+  // pointer-driven and never fires HTML5 drag events, so it can't collide).
+  // preventDefault on drop matters — the webview's default for a file drop
+  // is to OPEN the file, replacing the app (main.tsx guards the surfaces
+  // outside this card the same way).
+  const [filesDragOver, setFilesDragOver] = useState(false);
+  const composerDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (!Array.from(e.dataTransfer.types).includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    setFilesDragOver(true);
+  }, []);
+  const composerDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    // Crossing child elements fires dragleave per element — only clear the
+    // highlight when the pointer actually left the card (relatedTarget is
+    // null/undefined at the window boundary).
+    const related = e.relatedTarget as Node | null | undefined;
+    if (!related || !e.currentTarget.contains(related)) {
+      setFilesDragOver(false);
+    }
+  }, []);
+  const composerDrop = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      setFilesDragOver(false);
+      if (!e.dataTransfer.files?.length) return;
+      e.preventDefault();
+      void handleFiles(e.dataTransfer.files);
+    },
+    [handleFiles],
+  );
+
   // A model must be explicitly chosen before sending (no default model).
   // ACP agents pick their own model — an empty model must not block Send.
   const needsModel =
@@ -2663,7 +2702,12 @@ export function ChatComposer({
           ))}
         </div>
       )}
-      <div className={`chat-composer-card${modeGlowClass}`}>
+      <div
+        className={`chat-composer-card${modeGlowClass}${filesDragOver ? " is-drop-target" : ""}`}
+        onDragOver={composerDragOver}
+        onDragLeave={composerDragLeave}
+        onDrop={composerDrop}
+      >
         {attachments.length > 0 && (
           <div className="composer-attachments">
             {attachments.map((a) => (

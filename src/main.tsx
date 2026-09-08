@@ -25,6 +25,22 @@ if (import.meta.env.DEV) {
 
 createRoot(document.getElementById("root")!).render(<App />);
 
+// Window-level guard for OS file drags. The Tauri window runs with
+// dragDropEnabled: false, so native WebView2 drag events reach the DOM (the
+// composer's drop zone depends on that) — but the webview's DEFAULT for a
+// file drop outside a handler is to navigate the window to the file,
+// replacing the whole app. Cancel file drags at the document level; the
+// composer's own handlers run first (target phase) and attach the files, so
+// this only guards every surface that ISN'T the composer.
+const dragHasFiles = (e: DragEvent) =>
+  Array.from(e.dataTransfer?.types ?? []).includes("Files");
+document.addEventListener("dragover", (e) => {
+  if (dragHasFiles(e)) e.preventDefault();
+});
+document.addEventListener("drop", (e) => {
+  if (dragHasFiles(e)) e.preventDefault();
+});
+
 // Boot splash (index.html #splash): visible from the first webview paint.
 // Hold it so the entrance animation plays (user-facing target ~2.5s), then
 // fade + remove once React is rendering behind it. `performance.now()` is

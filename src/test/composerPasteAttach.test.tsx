@@ -144,6 +144,55 @@ describe("composer pasted long text", () => {
   });
 });
 
+describe("composer drag-and-drop attach", () => {
+  const composerCard = () =>
+    document.querySelector<HTMLElement>(".chat-composer-card")!;
+
+  const dropFiles = (files: File[]) =>
+    fireEvent.drop(composerCard(), {
+      dataTransfer: { files, types: files.length ? ["Files"] : ["text/plain"] },
+    });
+
+  it("attaches a file dropped onto the composer card", async () => {
+    renderComposer();
+    dropFiles([
+      new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "shot.png", { type: "image/png" }),
+    ]);
+    expect(await screen.findByText("shot.png")).toBeTruthy();
+    expect(attachmentNames()).toEqual(["shot.png"]);
+  });
+
+  it("attaches several files from one drop", async () => {
+    renderComposer();
+    dropFiles([
+      new File(["a, b"], "data.csv", { type: "text/csv" }),
+      new File(["%PDF-1.4"], "report.pdf", { type: "application/pdf" }),
+    ]);
+    await screen.findByText("data.csv");
+    expect(await screen.findByText("report.pdf")).toBeTruthy();
+    expect(attachmentNames()).toHaveLength(2);
+  });
+
+  it("attaches nothing for a drop without files (text drag)", async () => {
+    renderComposer();
+    dropFiles([]);
+    expect(attachmentNames()).toEqual([]);
+  });
+
+  it("lights up the card only for file drags and clears on leave", () => {
+    renderComposer();
+    // A text/URL drag must not light the card up.
+    fireEvent.dragOver(composerCard(), { dataTransfer: { types: ["text/plain"] } });
+    expect(composerCard().className).not.toContain("is-drop-target");
+    // A file drag does…
+    fireEvent.dragOver(composerCard(), { dataTransfer: { types: ["Files"] } });
+    expect(composerCard().className).toContain("is-drop-target");
+    // …and leaving the card clears the highlight again.
+    fireEvent.dragLeave(composerCard(), { relatedTarget: null });
+    expect(composerCard().className).not.toContain("is-drop-target");
+  });
+});
+
 describe("composer slash menu keyboard navigation", () => {
   const typeWithCaret = (textarea: HTMLElement, value: string) => {
     // selectionStart rides along so the caret-token logic sees the caret at

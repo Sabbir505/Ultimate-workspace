@@ -242,6 +242,13 @@
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   box-shadow: var(--glass-rim), var(--glass-drop), 0 0 24px -4px var(--accent-glow);
 }
+/* OS file drag hover: same accent language as focus, slightly hotter so the
+   drop target reads at a glance. Only file drags set the state (the handlers
+   gate on the DataTransfer `types`), so text/URL drags never light it up. */
+.chat-composer-card.is-drop-target {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  box-shadow: var(--glass-rim), var(--glass-drop), 0 0 28px -2px var(--accent-glow);
+}
 @media (prefers-reduced-motion: reduce) {
   .chat-composer-card {
     transition: none;

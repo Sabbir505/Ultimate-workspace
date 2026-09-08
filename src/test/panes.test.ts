@@ -40,6 +40,7 @@ function makePane(paneId: string, lastUsedAt: number, kind: "terminal" | "browse
             spawn: { type: "agent", sessionId: paneId },
             exited: false,
             exitCode: null,
+            crashed: false,
           }
         : {
             kind: "browser",

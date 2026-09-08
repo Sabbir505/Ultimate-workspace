@@ -17,6 +17,7 @@ function term(paneId: string, lastUsedAt: number, lastInputAt = 0): Pane {
       spawn: { type: "agent", sessionId: paneId },
       exited: false,
       exitCode: null,
+      crashed: false,
     },
   };
 }

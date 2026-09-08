@@ -216,6 +216,47 @@ impl TaskEntry {
     }
 }
 
+/// Handle the `Task` tool's background mode holds while its subagent runs.
+/// Owns the registry entry; `finish` / `mark_cancelled` flip the snapshot to
+/// a terminal state and notify the UI (`chat:task-progress`).
+pub(crate) struct SubagentTask {
+    pub task_id: String,
+    /// Fired by `cancel_task` (TaskManager::cancel). The dispatcher selects
+    /// the subagent future against it — the loser arm is dropped, which
+    /// aborts an in-flight streaming request.
+    pub cancel_rx: oneshot::Receiver<()>,
+    entry: Arc<TaskEntry>,
+}
+
+impl SubagentTask {
+    /// Mark the subagent finished. `failed` selects Failed vs Completed;
+    /// `message` is the agent-facing tail of the output (or the error).
+    pub(crate) fn finish<R: tauri::Runtime>(
+        &self,
+        app: Option<&AppHandle<R>>,
+        sid: &str,
+        failed: bool,
+        message: String,
+    ) {
+        {
+            let mut snap = self.entry.snapshot.lock();
+            snap.state = if failed { TaskState::Failed } else { TaskState::Completed };
+            snap.message = message;
+        }
+        TaskManager::emit(app, sid, &self.entry);
+    }
+
+    /// Mark the subagent cancelled (cancel_task won the select).
+    pub(crate) fn mark_cancelled<R: tauri::Runtime>(&self, app: Option<&AppHandle<R>>, sid: &str) {
+        {
+            let mut snap = self.entry.snapshot.lock();
+            snap.state = TaskState::Cancelled;
+            snap.message = "Cancelled before completion.".to_string();
+        }
+        TaskManager::emit(app, sid, &self.entry);
+    }
+}
+
 /// Registry of background tasks, shared across chat sessions. Registered as
 /// Tauri state (`TaskState` in lib.rs); the chat dispatcher resolves it via
 /// `app.state`.
@@ -269,6 +310,25 @@ impl TaskManager {
             tasks.insert(id.clone(), Arc::clone(&entry));
         }
         (id, entry)
+    }
+
+    /// Register a background SUBAGENT — the `Task` tool's non-blocking mode
+    /// (June-2026 Claude Code pattern: the main conversation keeps working
+    /// while the subagent runs, and polls `get_task_status` for the result).
+    /// The dispatcher drives the returned handle to a terminal state with
+    /// [`SubagentTask::finish`] / [`SubagentTask::mark_cancelled`]; the cancel
+    /// oneshot is armed so `cancel_task` reaches the spawned future (dropping
+    /// the subagent future aborts its in-flight model stream).
+    pub(crate) fn register_subagent(&self, description: &str) -> SubagentTask {
+        let (id, entry) = self.register("subagent");
+        entry.snapshot.lock().message = description.to_string();
+        let (tx, rx) = oneshot::channel();
+        *entry.cancel.lock() = Some(tx);
+        SubagentTask {
+            task_id: id,
+            cancel_rx: rx,
+            entry,
+        }
     }
 
     /// Update the snapshot under a short lock and emit a `chat:task-progress`
@@ -1118,6 +1178,33 @@ mod tests {
     fn status_unknown_task_reports_missing() {
         let tm = TaskManager::new();
         assert!(tm.status_json("task-999").contains("No task"));
+    }
+
+    #[test]
+    fn subagent_task_lifecycle_transitions() {
+        // Background `Task` mode: register → running with the description as
+        // the message; finish() flips to Completed/Failed with the output
+        // tail; status_json surfaces all of it to the polling agent.
+        let tm = TaskManager::new();
+        let sub = tm.register_subagent("explore the repo");
+        assert_eq!(sub.task_id, "task-1");
+        let running = tm.status_json(&sub.task_id);
+        assert!(running.contains("running"), "got: {running}");
+        assert!(running.contains("explore the repo"));
+
+        sub.finish(None::<&tauri::AppHandle<tauri::Wry>>, "sess-1", false, "found 3 call sites".to_string());
+        let done = tm.status_json(&sub.task_id);
+        assert!(done.contains("completed"), "got: {done}");
+        assert!(done.contains("found 3 call sites"));
+
+        let sub2 = tm.register_subagent("failing run");
+        sub2.finish(None::<&tauri::AppHandle<tauri::Wry>>, "sess-1", true, "Error: provider 500".to_string());
+        let failed = tm.status_json(&sub2.task_id);
+        assert!(failed.contains("failed"), "got: {failed}");
+
+        let sub3 = tm.register_subagent("cancelled run");
+        sub3.mark_cancelled(None::<&tauri::AppHandle<tauri::Wry>>, "sess-1");
+        assert!(tm.status_json(&sub3.task_id).contains("cancelled"));
     }
 
     // ---- integration: local HTTP server + mock app ----

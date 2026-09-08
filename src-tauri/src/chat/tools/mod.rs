@@ -96,6 +96,12 @@ pub const BROWSER_CLICK: &str = "browser_click";
 pub const BROWSER_TYPE: &str = "browser_type";
 pub const BROWSER_SCROLL: &str = "browser_scroll";
 pub const BROWSER_SCREENSHOT: &str = "browser_screenshot";
+/// Compact "what's actionable here" census (ref/tag/label per interactive
+/// element, no markdown). The cheap decide-then-act read.
+pub const BROWSER_OBSERVE: &str = "browser_observe";
+/// Focused extraction: only the page sections matching a prompt (keyword
+/// scoring over headings), capped — far cheaper than a full read.
+pub const BROWSER_EXTRACT: &str = "browser_extract";
 
 // ---- System tools (background downloads + native shell) ----
 //
@@ -220,6 +226,10 @@ pub const MEMORY_RECALL: &str = "memory_recall";
 /// Retire a memory by id (history is kept; only the user's Settings purge
 /// hard-deletes).
 pub const MEMORY_FORGET: &str = "memory_forget";
+/// Generate the current TOTP (2FA) code for a stored seed. The seed lives in
+/// the project's OS-keychain secret store or the user's password-manager CLI —
+/// only the short-lived code ever reaches the conversation.
+pub const TOTP_CODE: &str = "totp_code";
 
 /// The three memory tools (§12.1). `memory_recall` is read-only; save/forget
 /// mutate the local memory store only (reversible — supersession history).
@@ -399,6 +409,14 @@ Use when the user says a remembered fact is wrong or no longer applies, or asks 
 to forget something. History is preserved — the user can restore/purge from Settings. \
 Prefer memory_save (which supersedes contradictions automatically) when the user \
 STATES a new fact rather than asking to delete.";
+
+const TOTP_CODE_DESC: &str = "Generate the current TOTP (2FA) code for a login. \
+    The seed comes from a project secret (source 'keyring' — default; value is \
+    the Base32 seed or an otpauth:// URI), the Bitwarden CLI (source \
+    'bitwarden'; key = item name, needs bw + BW_SESSION), or the 1Password CLI \
+    (source '1password'; key = full op:// reference). Returns ONLY the code and \
+    its remaining validity — never the seed. The agent itself never types into \
+    credential fields; read the code out or offer it while the user types.";
 
 const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text-based \
     file/artifact and save it to disk. Best for plain formats: txt, md, csv, \
@@ -587,6 +605,13 @@ const BROWSER_SCREENSHOT_DESC: &str = "Take a screenshot of the page currently \
     when you need visual confirmation of the rendered page (layout, dialogs, \
     error states), or whenever the user asks to see the page.";
 
+const BROWSER_OBSERVE_DESC: &str = "List what is actionable on the page currently open in \
+    the browser pane: one line per interactive element — ref, tag, label, and the \
+    input extras (type/placeholder/aria) — with NO page text. The cheap way to \
+    decide what to click or type; use browser_read when you need the content.";
+
+const BROWSER_EXTRACT_DESC: &str = "Pull ONLY the page sections relevant to a     prompt: the page is split at headings, sections scored by keyword overlap,     best ones returned capped at max_chars (default 2500). Deterministic — no     extra model call. Much cheaper than a full browser_read on long pages.";
+
 /// Accept and normalize every URL form `open_url` understands:
 /// http(s):// as-is; `file:///…` as-is; `file://C:/…` (missing slash — a
 /// common model slip, parses with a bogus `c:` host) repaired to
@@ -706,11 +731,7 @@ const TASK_DESC: &str = "Spawn a focused subagent that runs ONE task with its \
     only sequence them when one subtask genuinely depends on another's \
     result.";
 
-const GET_TASK_STATUS_DESC: &str = "Report the status of any background task \
-    (`download_file`, or a background `run_shell`) by its task id: state \
-    (running/completed/failed/cancelled), progress numbers, and the output or \
-    error message. Read-only. Poll this while a background or long-running \
-    task streams — never wait synchronously on it.";
+const GET_TASK_STATUS_DESC: &str = "Report the status of any background task     (`download_file`, a background `run_shell`, or a background `Task`     subagent) by its task id: state (running/completed/failed/cancelled),     progress numbers, and the output or error message. Read-only. Poll this     while a background or long-running task streams — never wait     synchronously on it.";
 
 const CANCEL_TASK_DESC: &str = "Cancel a background task started in this \
     conversation by its task id. For downloads this keeps the .part file so a \

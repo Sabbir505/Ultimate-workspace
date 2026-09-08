@@ -1105,6 +1105,10 @@ export interface ChatState {
 export const selectContextSessionId = (s: ChatState): string | null =>
   s.focusedChatSessionId ?? s.activeChatSessionId;
 
+
+// P-3: per-session cap for the onArtifact tracking map (see onArtifact).
+const MAX_ARTIFACTS_PER_SESSION = 200;
+
 export const useChatStore = create<ChatState>((set, get) => ({
   loaded: false,
   sessions: [],
@@ -3085,10 +3089,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const alreadyTracked = existing.some((a) => a.path === path);
       const pending = s.pendingArtifacts[chatSessionId] ?? [];
       const pendingTracked = pending.some((a) => a.path === path);
+      // P-3: cap per-session growth. The map used to grow unbounded for the
+      // life of the app (entries left only on session delete); the newest
+      // MAX_ARTIFACTS_PER_SESSION artifacts are kept — oldest dropped. Files
+      // on disk are untouched; this is only the session's tracking list.
+      const capped = alreadyTracked
+        ? s.artifacts
+        : {
+            ...s.artifacts,
+            [chatSessionId]: [...existing, artifact].slice(
+              -MAX_ARTIFACTS_PER_SESSION,
+            ),
+          };
       return {
-        artifacts: alreadyTracked
-          ? s.artifacts
-          : { ...s.artifacts, [chatSessionId]: [...existing, artifact] },
+        artifacts: capped,
         pendingArtifacts: pendingTracked
           ? s.pendingArtifacts
           : { ...s.pendingArtifacts, [chatSessionId]: [...pending, artifact] },

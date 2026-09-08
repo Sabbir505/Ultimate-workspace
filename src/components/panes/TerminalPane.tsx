@@ -122,6 +122,7 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
   const paneId = pane.paneId;
   const exited = pane.data.kind === "terminal" ? pane.data.exited : false;
   const exitCode = pane.data.kind === "terminal" ? pane.data.exitCode : null;
+  const crashed = pane.data.kind === "terminal" ? pane.data.crashed : false;
   const sessionId = pane.data.kind === "terminal" ? pane.data.sessionId : null;
 
   // --- Activity feed: detected fenced code blocks from PTY output ---
@@ -627,10 +628,21 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
       )}
       {exited && (
         <div className="pane-exit-overlay">
-          <div>Process exited{exitCode !== null ? ` (code ${exitCode})` : ""}</div>
-          <div className="mono" style={{ fontSize: 12, opacity: 0.8 }}>
-            press R to resume
-          </div>
+          {crashed ? (
+            <>
+              <div>Session crashed</div>
+              <div className="mono" style={{ fontSize: 12, opacity: 0.8 }}>
+                internal error — resume to restart
+              </div>
+            </>
+          ) : (
+            <>
+              <div>Process exited{exitCode !== null ? ` (code ${exitCode})` : ""}</div>
+              <div className="mono" style={{ fontSize: 12, opacity: 0.8 }}>
+                press R to resume
+              </div>
+            </>
+          )}
           <div style={{ display: "flex", gap: 8 }}>
             <button className="primary" onClick={() => void respawnPane(paneId)}>
               Resume (R)

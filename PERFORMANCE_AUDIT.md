@@ -3,7 +3,7 @@
 **Date:** 2026-08-27
 **Scope:** full project (frontend `src/`, Rust backend `src-tauri/src/`, mobile `mobile/`)
 
-> **STATUS: GREEN (2026-09-06).** The 2026-08-27 regressions are fixed: `tsc --noEmit` clean (root + mobile), `npx vitest run` 128 files / 798 tests all passing, `cargo test --lib` 898 passed / 0 failed / 12 ignored, `vite build` passes. The previously-resolved Round 2 findings (PTY batching, react-markdown lazy load, lucide tree-shaking, mobile poll → on-demand, N+1 cost queries, token batching, parallel probes, KaTeX dedup, CSS split) remain resolved. What is *not* green: the entry chunk tripled since the 2026-08-27 audit (459 KB → 1,179 KB raw) and several async chunks remain > 500 KB — see Key Metrics and Remaining Recommendations.
+> **STATUS: GREEN (2026-09-06, updated same day).** The 2026-08-27 regressions are fixed: `tsc --noEmit` clean (root + mobile), `npx vitest run` 128 files / 798 tests all passing, `cargo test --lib` 898 passed / 0 failed / 12 ignored, `vite build` passes. The previously-resolved Round 2 findings (PTY batching, react-markdown lazy load, lucide tree-shaking, mobile poll → on-demand, N+1 cost queries, token batching, parallel probes, KaTeX dedup, CSS split) remain resolved. What is *not* green: the entry chunk tripled since the 2026-08-27 audit (459 KB → 1,179 KB raw) and several async chunks remain > 500 KB — see Key Metrics and Remaining Recommendations.
 
 ---
 
@@ -49,9 +49,9 @@
 
 ## Remaining recommendations (non-blocking)
 
-1. **Shrink the entry chunk (new top item)** — 459 KB → 1,179 KB raw / 141 KB → 357 KB gzip since 2026-08-27 (research-mode, harness-picker, and citation-UI code all landed in the entry graph). Audit `App.tsx`'s static import graph with `rollup-plugin-visualizer`; move feature surfaces behind `React.lazy`. Also reconsider the entry-level `modulepreload` of `babel-*.js` + `syntax-*.js` (~4.5 MB fetched at startup).
+1. ~~**Shrink the entry chunk**~~ **ADDRESSED 2026-09-06** — root causes found and fixed: (a) the `babel`/`syntax` `manualChunks` buckets made Rollup hoist shared module-loader helpers into the `syntax` chunk, so the ENTRY statically imported it (and `syntax → babel`) and index.html modulepreloaded ~4.5 MB at startup — rules removed, default chunking restored, **0 modulepreload tags**; (b) `DocDesignRunner` (statically imported from `App.tsx`) pulled `pdfjs-dist` (~834 KB source) into the entry via `docdesign/rasterize.ts` — the runners are now `React.lazy` and pdf.js is a dynamic import on first probe; (c) KaTeX CSS (~500 KB of fonts) moved from the entry to the lazy `MessageBubble`/`ArtifactPreviewPane` chunks (still one emitted copy). Entry: **1,179 KB → 707 KB raw / 357 KB → 210 KB gzip**. Remaining headroom (optional, next pass): the react-markdown/micromark stack (~450 KB source) rides in the entry via the chat surface's static imports.
 2. **Code-split `babel-standalone` and `flowchart-elk`** — both are > 1 MB async chunks that are only needed on certain artifact paths. A `manualChunks` rule would push them behind the artifact dialog.
-3. **KaTeX font loading** — fonts still eager (≈500 KB). Consider loading via `rel=preload` with `as=font` or lazy loading on first math render.
+3. ~~**KaTeX font loading**~~ **ADDRESSED 2026-09-06** — `katex.min.css` now imports from the lazy `MessageBubble`/`ArtifactPreviewPane` chunks instead of the app entry; the CSS (and the font assets it references) arrives with the first chunk that can render math. Vite dedup keeps a single emitted copy (C8 holds).
 4. **Terminal pane size** — xterm.js still ~200 KB on first use. Currently lazy-loaded via `React.lazy` in `App.tsx`.
 5. **Document embedding** — full-vector search for RAG adds ~1-2 MB per 1k docs. Acceptable for local-first use case.
 6. **Idle DB connection count** — single `Arc<Mutex<Connection>>` is fine for low write volume. Keep under observation if user has 100+ projects with daily activity.

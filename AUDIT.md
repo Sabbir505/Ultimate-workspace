@@ -385,7 +385,7 @@ Severity conventions used below: *Critical* = remotely exploitable or destroys u
 ### [E-2] Compaction bugs: constant "interpolation", wrong truncation unit, missing `max_tokens` on OpenAI wire
 - Severity: Medium
 - Type: Bug
-- Status: Confirmed
+- Status: Confirmed → **Fixed (verified in code 2026-09-06)**: the 0.80→0.85 interpolation ships (`chat/compaction.rs:55-68`, comment cites E-2a), `max_chars = n_ctx * 3` (`compaction.rs:731`), and `max_tokens` is wired into the OpenAI wire body + loop (`providers.rs:210-244`, "E-2c").
 - Location: `src-tauri/src/chat/compaction.rs:64–67` (`0.80_f64.min(0.85)` is always 0.80 — the documented 0.80→0.85 interpolation never happens); `compaction.rs:606` (`max_chars = n_ctx * 3 / 4` but the comment's 4-chars-per-token ratio implies `n_ctx * 3` — summarization input over-truncated ~4×); `providers.rs:175–192` (`OpenAIWireBody` has no `max_tokens`; the tool-loop body `streaming.rs:812–818` omits it too — `ChatRequest.max_tokens = Some(4096)` is silently dropped for every OpenAI-family provider → unbounded generation length/cost; Anthropic honors it at `streaming.rs:1094`)
 - Trigger: any compaction on a >16k context; any long OpenAI-family generation.
 - Impact: over-eager compaction (more tokens spent re-summarizing than necessary), silently discarded history, and unbounded output spend.
@@ -427,7 +427,7 @@ Severity conventions used below: *Critical* = remotely exploitable or destroys u
 ### [E-7] Zombie process trees from bare `child.kill()` on Windows timeout paths
 - Severity: Medium
 - Type: Resource leak
-- Status: Confirmed
+- Status: Confirmed → **Fixed (verified in code 2026-09-06)**: both paths route through `kill_child_tree` (`agent_sessions.rs:5078-5081`, `:5348`; comments cite E-7).
 - Location: `src-tauri/src/agent_sessions.rs` — `harness_oneshot_blocking` 3838–3845 and `run_one_shot` stdin-failure path 3614–3617 (both use `kill()`, which on Windows only kills the `cmd.exe /C` wrapper — the node.exe grandchild survives); `kill_child_tree` exists (450–471) and is used by the deadline path (3684) but not these two
 - Trigger: generation timeout or stdin failure on a Windows harness spawn.
 - Impact: orphaned full-auto CLI processes keep running (and spending).

@@ -78,6 +78,20 @@ pub fn list_secret_keys(conn: &Connection, project_id: &str) -> Result<Vec<Strin
     db::list_secret_keys(conn, project_id).map_err(|e| e.to_string())
 }
 
+/// Load ONE secret by key (keychain-backed, DB-registered). Used by the
+/// `totp_code` tool: the seed is read into the code generator and never
+/// leaves the process — only the derived 6/8-digit code reaches the model.
+pub fn get_secret(conn: &Connection, project_id: &str, key: &str) -> Option<String> {
+    if !db::list_secret_keys(conn, project_id)
+        .ok()?
+        .iter()
+        .any(|k| k == key)
+    {
+        return None;
+    }
+    platform::load(conn, project_id, key)
+}
+
 /// All (key, value) pairs for environment injection. Keys whose value can't be
 /// retrieved (e.g. keychain entry deleted out from under us) are silently
 /// skipped — a missing env var beats a failed spawn.

@@ -246,6 +246,20 @@ pub struct PtyExitEvent {
     pub code: Option<i64>,
 }
 
+/// Round-3 M1: a panic in one of a pane's IO threads (reader/writer/waiter)
+/// used to kill the thread silently — the pane froze with no `pty:exit`, so
+/// the UI showed a live terminal that would never update. Emitted instead so
+/// the frontend can show the "session crashed → restart" affordance.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtyCrashedEvent {
+    pub pane_id: String,
+    /// Which IO thread panicked: "reader" | "writer" | "waiter".
+    pub thread: String,
+    /// The panic message, for logs and the notification body.
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtyStateEvent {

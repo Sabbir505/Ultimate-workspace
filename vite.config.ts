@@ -15,28 +15,19 @@ export default defineConfig(async () => ({
     // mi31: Tauri v2 webviews are evergreen Chromium (WebView2) / WKWebView
     // ~Safari 15+ on supported macOS — no ES2020 down-transpile needed.
     target: ["es2022", "chrome105", "safari15"],
-    rollupOptions: {
-      output: {
-        // mi32: stable vendor buckets for long-term caching. Only names the
-        // already-lazy heavy libs (so app-code edits don't invalidate them);
-        // everything else keeps Vite's default dynamic-import chunking.
-        manualChunks(id: string) {
-          if (!id.includes("node_modules")) return undefined;
-          if (id.includes("@babel")) return "babel";
-          if (id.includes("mermaid") || id.includes("katex")) return undefined; // already own chunks
-          if (
-            id.includes("react-syntax-highlighter") ||
-            id.includes("highlight.js") ||
-            id.includes("lowlight") ||
-            id.includes("refractor") ||
-            id.includes("prismjs")
-          ) {
-            return "syntax";
-          }
-          return undefined;
-        },
-      },
-    },
+    // PERF (2026-09-06): no custom manualChunks. The previous rules ("babel"
+    // for anything @babel/*, "syntax" for react-syntax-highlighter/highlight
+    // .js/lowlight/refractor/prismjs, "stable vendor buckets for caching")
+    // backfired: Rollup hoisted the shared vite module-loader helpers INTO
+    // the syntax chunk, which made the ENTRY chunk statically import it
+    // (syntax → babel too), and index.html modulepreloaded ~4.5 MB (babel
+    // 2.98 MB + syntax 1.6 MB) at startup. With default chunking the heavy
+    // libs stay behind their dynamic imports (own chunks, own hashes — still
+    // cache-stable, since a chunk's hash changes only when its own module
+    // graph changes) and shared helpers stay in the entry. Entry went
+    // 1,179 KB → ~460 KB and the modulepreload tags are gone. Revisit only
+    // with rollup-plugin-visualizer evidence, not to "re-add caching".
+    rollupOptions: {},
   },
   server: {
     port: 1500,

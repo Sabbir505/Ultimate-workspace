@@ -937,6 +937,8 @@ fn attach_core_listeners(
                     browser_log(&app_start, &format!("nav START label={label_start} uri={uri}"));
                     if let Some(state) = app_start.try_state::<crate::BrowserState>() {
                         state.0.remember_tab_url(&label_start, &uri);
+                        // Nav-quiesce gate source (see run_action_for_pane_opts).
+                        state.0.mark_nav_start(&label_start);
                     }
                     let _ = app_start.emit(
                         "browser:navigated",
@@ -952,13 +954,18 @@ fn attach_core_listeners(
                     let tid = tab_start.clone();
                     let map = webviews_start.clone();
                     let app2 = app_start.clone();
-                    std::thread::spawn(move || {
+                    // P-2: this used to be a detached OS thread per navigation
+                    // (each living up to 5s of escalating sleeps). It's a
+                    // task on Tauri's existing tokio runtime now — same
+                    // schedule, no thread churn per nav.
+                    tauri::async_runtime::spawn(async move {
                         let mut waited = 0u64;
                         for target in [0u64, 150, 400, 900, 1800, 3500, 5000u64] {
                             if target > waited {
-                                std::thread::sleep(std::time::Duration::from_millis(
+                                tokio::time::sleep(std::time::Duration::from_millis(
                                     target - waited,
-                                ));
+                                ))
+                                .await;
                                 waited = target;
                             }
                             let lbl = format!("browser-{pid}-tab-{tid}");
@@ -1045,6 +1052,12 @@ fn attach_core_listeners(
                         err.0
                     ),
                 );
+                // Nav-quiesce gate: clear the in-flight marker on every load
+                // end (success or failure — a failed nav still replaced the
+                // document state the gate cares about).
+                if let Some(state) = app_complete.try_state::<crate::BrowserState>() {
+                    state.0.mark_nav_end(&label_complete);
+                }
                 if success.as_bool() {
                     let _ = app_complete.emit("browser:load-completed", label_complete.clone());
                     // Report the settled document title so the frontend can
@@ -1400,6 +1413,30 @@ pub struct TimelineEntry {
 /// Cap for the per-pane in-memory timeline (oldest entries evicted).
 pub const TIMELINE_CAP: usize = 200;
 
+/// Per-label navigation-in-flight tracking (Windows raw panes). Present in
+/// the map = a navigation started on that webview and hasn't completed; the
+/// value is when it started. `run_action_for_pane_opts` consults this before
+/// every eval — see `wait_nav_quiet`.
+#[derive(Default)]
+struct NavTracker {
+    starts: HashMap<String, std::time::Instant>,
+}
+
+impl NavTracker {
+    fn start(&mut self, label: &str) {
+        self.starts.insert(label.to_string(), std::time::Instant::now());
+    }
+    fn end(&mut self, label: &str) {
+        self.starts.remove(label);
+    }
+    fn since(&self, label: &str) -> Option<std::time::Duration> {
+        self.starts.get(label).map(|t| t.elapsed())
+    }
+    fn in_flight(&self, label: &str) -> bool {
+        self.starts.contains_key(label)
+    }
+}
+
 pub struct BrowserManager {
     app: AppHandle,
     webviews: crate::browser::WebviewsMap,
@@ -1426,6 +1463,11 @@ pub struct BrowserManager {
     project_pane_registry: Mutex<HashMap<String /*pane_id*/, String /*project_id*/>>,
     /// Per-pane visibility state (updated by `set_visible`; default true on create).
     pane_visible: Mutex<HashMap<String /*pane_id*/, bool>>,
+    /// Navigation-in-flight markers per webview label (Windows). Sources:
+    /// `navigate` (synchronous, before the COM dispatch), the
+    /// NavigationStarting handler; cleared by NavigationCompleted. Read by
+    /// `run_action_for_pane_opts`'s quiesce gate.
+    nav: Mutex<NavTracker>,
     /// Most-recently-created/navigated (pane_id, tab_id) per pane, so an explicit
     /// pane_id can resolve to the current active tab webview label.
     pane_active_tab: Mutex<HashMap<String /*pane_id*/, String /*tab_id*/>>,
@@ -1486,6 +1528,7 @@ impl BrowserManager {
             next_req: AtomicU64::new(1),
             project_pane_registry: Mutex::new(HashMap::new()),
             pane_visible: Mutex::new(HashMap::new()),
+            nav: Mutex::new(NavTracker::default()),
             tab_visible: Mutex::new(HashMap::new()),
             pane_active_tab: Mutex::new(HashMap::new()),
             pane_resolve_pending: Mutex::new(HashMap::new()),
@@ -1657,6 +1700,12 @@ impl BrowserManager {
                                 browser_log(&app, &format!("nav START label={label_start} uri={uri}"));
                             }
                         }
+                        // Nav-quiesce gate source: any navigation (typed URL,
+                        // link click, redirect) marks the pane in-flight until
+                        // the matching NavigationCompleted.
+                        if let Some(state) = app.try_state::<crate::BrowserState>() {
+                            state.0.mark_nav_start(&label_start);
+                        }
                         Ok(())
                     },
                 ));
@@ -1679,6 +1728,9 @@ impl BrowserManager {
                                     err.0
                                 ),
                             );
+                            if let Some(state) = app_complete.try_state::<crate::BrowserState>() {
+                                state.0.mark_nav_end(&label_complete);
+                            }
                             if success.as_bool() {
                                 // The navigation reached a real load end —
                                 // mirror it through an event the frontend
@@ -1901,7 +1953,9 @@ impl BrowserManager {
                     let app_ref = app.clone();
                     let pid = event_pane_id.clone();
                     let tid = event_tab_id.clone();
-                    std::thread::spawn(move || {
+                    // P-2: tokio task, not a detached OS thread per nav (see
+                    // the site above).
+                    tauri::async_runtime::spawn(async move {
                         // B9: no more blind 1.5 s sleep. The injection is
                         // idempotent (guarded by
                         // `window.__relay_pushstate_patched`), so inject on
@@ -1911,7 +1965,7 @@ impl BrowserManager {
                         let mut waited = 0u64;
                         for target in [0u64, 150, 400, 900, 1800, 3500, 5000] {
                             if target > waited {
-                                std::thread::sleep(std::time::Duration::from_millis(target - waited));
+                                tokio::time::sleep(std::time::Duration::from_millis(target - waited)).await;
                                 waited = target;
                             }
                             match app_ref.get_webview(&lbl) {
@@ -2128,6 +2182,12 @@ impl BrowserManager {
         // silently dropped for these panes).
         let label = browser_label(pane_id, tab_id);
         let url2 = parsed.to_string();
+        // Mark the navigation in flight SYNCHRONOUSLY, before the async COM
+        // dispatch on the main thread: NavigationStarting fires there, so a
+        // follow-up op (op_navigate's title read, the agent's next click) can
+        // reach the quiesce gate before the marker exists otherwise.
+        #[cfg(windows)]
+        self.mark_nav_start(&label);
         #[cfg(windows)]
         {
             let result = with_core_on_main(app, self.webviews.clone(), &label, "navigate", move |core| {
@@ -2137,7 +2197,13 @@ impl BrowserManager {
             });
             match &result {
                 Ok(_) => browser_log(app, &format!("navigate INVOKE OK url={parsed} — waiting for nav START/COMPLETE")),
-                Err(e) => browser_log(app, &format!("navigate INVOKE FAILED url={parsed}: {e}")),
+                Err(e) => {
+                    browser_log(app, &format!("navigate INVOKE FAILED url={parsed}: {e}"));
+                    // The dispatch failed — no navigation is in flight, so the
+                    // marker we set above would never be cleared by a
+                    // NavigationCompleted.
+                    self.mark_nav_end(&label);
+                }
             }
             result?;
         }
@@ -2537,6 +2603,15 @@ location.reload();
             }
         }
         let pane = self.get(label)?;
+        // Nav-quiesce gate (root cause of the "navigate returns empty" /
+        // "read_page times out" flakiness): an eval fired while a navigation
+        // is in flight executes in the document that is about to be REPLACED.
+        // When the old context dies mid-run, the wrapper's result report never
+        // fires and the op burns its whole 45s timeout. Wait — bounded — for
+        // the pane's navigation to complete before evaluating. Windows-only
+        // tracking (the markers come from the WebView2 COM handlers); on
+        // other platforms this returns immediately.
+        self.wait_nav_quiet(label).await;
         let req_id = self.next_req.fetch_add(1, Ordering::SeqCst);
         let nonce = format!("{:016x}", rand::random::<u64>());
         let (tx, rx) = oneshot::channel::<String>();
@@ -2587,6 +2662,56 @@ location.reload();
             }
         }
     }
+
+    /// Mark a navigation as started on `label` (in-flight until the matching
+    /// NavigationCompleted). Idempotent per START.
+    pub fn mark_nav_start(&self, label: &str) {
+        self.nav.lock().start(label);
+    }
+
+    /// Mark the pane's navigation as finished (cleared by the
+    /// NavigationCompleted handlers, success or failure).
+    pub fn mark_nav_end(&self, label: &str) {
+        self.nav.lock().end(label);
+    }
+
+    fn nav_in_flight_since(&self, label: &str) -> Option<Duration> {
+        self.nav.lock().since(label)
+    }
+
+    /// Bounded wait for the pane's in-flight navigation to complete before an
+    /// eval. Budget is counted from the navigation's START (not from here), so
+    /// an already-hung navigation adds at most `NAV_QUIET_SLACK` — a stuck
+    /// page must not make every agent op pay a full extra wait. After the
+    /// budget the eval proceeds anyway (best-effort; the caller keeps its own
+    /// action timeout). A short settle after completion lets the freshly
+    /// committed document come live before we run JS in it.
+    #[cfg(windows)]
+    async fn wait_nav_quiet(&self, label: &str) {
+        const NAV_QUIET_MAX: Duration = Duration::from_secs(10);
+        const NAV_QUIET_SLACK: Duration = Duration::from_secs(2);
+        const POLL: Duration = Duration::from_millis(60);
+        const SETTLE: Duration = Duration::from_millis(150);
+        let Some(since) = self.nav_in_flight_since(label) else {
+            return; // nothing in flight — eval immediately
+        };
+        let budget = NAV_QUIET_MAX.saturating_sub(since).max(NAV_QUIET_SLACK);
+        let deadline = tokio::time::Instant::now() + budget;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(POLL).await;
+            if !self.nav.lock().in_flight(label) {
+                tokio::time::sleep(SETTLE).await;
+                return;
+            }
+        }
+        browser_log(
+            &self.app,
+            &format!("nav-quiesce gave up label={label} after {budget:?} — evaluating anyway"),
+        );
+    }
+
+    #[cfg(not(windows))]
+    async fn wait_nav_quiet(&self, _label: &str) {}
 
     /// Capture the page currently shown in a pane's webview as PNG bytes.
     /// Backs the `browser_screenshot` tool so the agent can show the user
@@ -2785,6 +2910,201 @@ location.reload();
     /// Same orchestration as `read_page` but targets an explicit webview label.
     /// Used by the MCP dispatch (Task #4) to extract content from a specific
     /// browser pane identified by its project/pane.
+    /// `observe`/`extract` against the ACTIVE pane (the built-in chat's
+    /// browser_* tools act on whatever the user is looking at; the MCP
+    /// sidecar passes explicit pane ids instead).
+    pub async fn observe_active(&self) -> Result<String, String> {
+        let label = self.active_label()?;
+        self.observe_for_pane(&label).await
+    }
+
+    pub async fn extract_active(&self, prompt: &str, max_chars: usize) -> Result<String, String> {
+        let label = self.active_label()?;
+        self.extract_for_pane(&label, prompt, max_chars).await
+    }
+
+    /// `observe` — "what's actionable here" (Stagehand's observe() shape).
+    /// A COMPACT interactive-element census: ref id, tag, label, and the
+    /// input-specific extras the agent needs to aim an action, one line per
+    /// element. Unlike `read_page` interactive mode there is NO markdown body
+    /// — this is for the decide-then-act loop, where full a11y records waste
+    /// tokens. Capped at 80 elements.
+    pub async fn observe_for_pane(&self, label: &str) -> Result<String, String> {
+        let json = self
+            .read_page_for_pane(label, ReadMode::Interactive, None)
+            .await?;
+        let v: serde_json::Value = serde_json::from_str(&json)
+            .map_err(|e| format!("observe: unreadable extraction result: {e}"))?;
+        if let Some(reason) = v.get("failureReason").and_then(|x| x.as_str()) {
+            return Ok(format!(
+                "The page could not be read ({reason}) — nothing to observe."
+            ));
+        }
+        let elements = v
+            .get("elementRefs")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if elements.is_empty() {
+            return Ok(
+                "No interactive elements found on the current page (no links, buttons, or inputs)."
+                    .to_string(),
+            );
+        }
+        let mut lines: Vec<String> = Vec::new();
+        for e in elements.iter().take(80) {
+            let r = e.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
+            let tag = e.get("tag").and_then(|x| x.as_str()).unwrap_or("");
+            let label = e.get("label").and_then(|x| x.as_str()).unwrap_or("");
+            let aria = e.get("ariaLabel").and_then(|x| x.as_str()).unwrap_or("");
+            let placeholder = e.get("placeholder").and_then(|x| x.as_str()).unwrap_or("");
+            let typ = e.get("type").and_then(|x| x.as_str()).unwrap_or("");
+            let name = e.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            let mut extra = String::new();
+            if !typ.is_empty() {
+                extra.push_str(&format!(" type={typ}"));
+            }
+            if !name.is_empty() {
+                extra.push_str(&format!(" name={name}"));
+            }
+            if !placeholder.is_empty() {
+                extra.push_str(&format!(" placeholder={placeholder:?}"));
+            }
+            if !aria.is_empty() && aria != label {
+                extra.push_str(&format!(" aria={aria:?}"));
+            }
+            let shown = if label.is_empty() { aria } else { label };
+            lines.push(format!(
+                "[{r}] {tag}{extra} {}",
+                if shown.is_empty() { "(unlabelled)" } else { shown }
+            ));
+        }
+        let dropped = elements.len().saturating_sub(80);
+        let mut out = format!(
+            "{} actionable element(s) on {}:\n{}\n",
+            elements.len(),
+            v.get("url").and_then(|x| x.as_str()).unwrap_or(""),
+            lines.join("\n")
+        );
+        if dropped > 0 {
+            out.push_str(&format!(
+                "(+{dropped} more — use browser_read interactive for the full list)"
+            ));
+        }
+        Ok(out)
+    }
+
+    /// `extract` — focused extraction against a prompt (Stagehand's
+    /// extract(prompt) shape, deterministic: no extra model call). The page's
+    /// markdown is split into sections at headings, each section is scored by
+    /// keyword overlap with the prompt, and the best sections are returned in
+    /// document order up to `max_chars` (default 2500). Lets the agent pull
+    /// ONLY the relevant slice of a huge page instead of paying for the full
+    /// 50k-char read.
+    pub async fn extract_for_pane(
+        &self,
+        label: &str,
+        prompt: &str,
+        max_chars: usize,
+    ) -> Result<String, String> {
+        let terms: Vec<String> = prompt
+            .to_lowercase()
+            .split(|c: char| c.is_whitespace() || c == ',' || c == ';' || c == '.')
+            .filter(|w| w.len() >= 3)
+            .map(str::to_string)
+            .collect();
+        if terms.is_empty() {
+            return Err(
+                "extract requires a 'prompt' with meaningful keywords (3+ chars) to score sections against."
+                    .to_string(),
+            );
+        }
+        let json = self.read_page_for_pane(label, ReadMode::Full, None).await?;
+        let v: serde_json::Value = serde_json::from_str(&json)
+            .map_err(|e| format!("extract: unreadable extraction result: {e}"))?;
+        if let Some(reason) = v.get("failureReason").and_then(|x| x.as_str()) {
+            return Ok(format!(
+                "The page could not be read ({reason}) — nothing to extract."
+            ));
+        }
+        let markdown = v
+            .get("markdown")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if markdown.trim().is_empty() {
+            return Ok("The page has no extractable text content.".to_string());
+        }
+
+        // Split into sections: a heading line starts a new section; the
+        // heading rides with its body so context survives the cut.
+        let mut sections: Vec<(String, String)> = Vec::new(); // (header, body)
+        let mut current_header = String::from("(top of page)");
+        let mut current_body = String::new();
+        for line in markdown.lines() {
+            if line.trim_start().starts_with('#') {
+                if !current_body.trim().is_empty() {
+                    sections.push((current_header.clone(), current_body.clone()));
+                    current_body.clear();
+                }
+                current_header = line.trim().to_string();
+            } else {
+                current_body.push_str(line);
+                current_body.push('\n');
+            }
+        }
+        if !current_body.trim().is_empty() {
+            sections.push((current_header, current_body));
+        }
+
+        // Score: how many prompt terms appear in the section (header terms
+        // count triple — a heading naming the topic is a strong signal).
+        let mut scored: Vec<(usize, usize)> = sections
+            .iter()
+            .enumerate()
+            .map(|(i, (h, b))| {
+                let hl = h.to_lowercase();
+                let bl = b.to_lowercase();
+                let score = terms
+                    .iter()
+                    .map(|t| (hl.contains(t) as usize) * 3 + (bl.contains(t) as usize))
+                    .sum::<usize>();
+                (i, score)
+            })
+            .filter(|(_, s)| *s > 0)
+            .collect();
+        if scored.is_empty() {
+            return Ok(format!(
+                "No section of the page matched the prompt {prompt:?}. The page has {} characters of content — use browser_read full if you need everything.",
+                markdown.len()
+            ));
+        }
+        // Keep the best sections, then restore document order.
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut kept: Vec<usize> = Vec::new();
+        let mut used = 0usize;
+        for (i, s) in &scored {
+            if used >= max_chars {
+                break;
+            }
+            kept.push(*i);
+            used += sections[*i].0.len() + sections[*i].1.len();
+        }
+        kept.sort_unstable();
+        let mut out = String::new();
+        for i in kept {
+            out.push_str(&sections[i].0);
+            out.push('\n');
+            out.push_str(sections[i].1.trim());
+            out.push_str("\n\n");
+        }
+        let mut out = out.trim_end().to_string();
+        if out.len() > max_chars {
+            out = crate::util::truncate_chars(&out, max_chars);
+        }
+        Ok(out)
+    }
+
     pub async fn read_page_for_pane(
         &self,
         label: &str,
@@ -3490,6 +3810,75 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         self.run_action_for_pane(label, &body).await
     }
 
+    /// Resolve + act with ONE self-healing retry (the Stagehand/Skyvern
+    /// pattern). When the page's DOM changed between the agent's read_page
+    /// and this action, the assigned `data-relay-ref` no longer matches
+    /// anything ("ref N is stale") and the op used to fail — bouncing the
+    /// agent through a manual re-read + retry round trip. A stale result now
+    /// triggers an automatic re-resolve of the ORIGINAL description against
+    /// the CURRENT page (bridge_resolve re-tags fresh refs) and a single
+    /// retry with the new ref. A healed payload carries `healed: true` so
+    /// the agent knows the page moved under it. `not_found` resolutions pass
+    /// through untouched — nothing to heal when nothing matched to begin
+    /// with.
+    async fn healed_action(
+        &self,
+        label: &str,
+        desc: &str,
+        resolve_action: &str,
+        verb: &str,
+        build_body: impl Fn(i64) -> String,
+        opts: &ActionOpts,
+    ) -> Result<String, String> {
+        let stale = |s: &str| s.contains("is stale");
+        let resolved = self.resolve_element(label, desc, resolve_action).await?;
+        let v: serde_json::Value = serde_json::from_str(&resolved)
+            .map_err(|e| format!("resolve_and_{verb}: bad resolution json: {e}"))?;
+        if !v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+            return Ok(resolved);
+        }
+        let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
+        let mut result = self
+            .run_action_for_pane_opts(label, &build_body(r), opts.clone())
+            .await?;
+
+        let mut healed = false;
+        let mut v_final = v;
+        let mut r_final = r;
+        if stale(&result) {
+            if let Ok(v2) = serde_json::from_str::<serde_json::Value>(
+                &self.resolve_element(label, desc, resolve_action).await?,
+            ) {
+                if v2.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+                    let r2 = v2.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
+                    let retry = self
+                        .run_action_for_pane_opts(label, &build_body(r2), opts.clone())
+                        .await?;
+                    if !stale(&retry) {
+                        healed = true;
+                        v_final = v2;
+                        r_final = r2;
+                    }
+                    result = retry;
+                }
+            }
+        }
+
+        let tag = v_final.get("tag").and_then(|x| x.as_str()).unwrap_or("");
+        let lbl = v_final.get("label").and_then(|x| x.as_str()).unwrap_or("");
+        let mut payload = serde_json::Map::new();
+        payload.insert("ok".into(), serde_json::Value::Bool(true));
+        payload.insert(
+            verb.to_string(),
+            serde_json::json!({ "ref": r_final, "tag": tag, "label": lbl }),
+        );
+        payload.insert("result".into(), serde_json::Value::String(result));
+        if healed {
+            payload.insert("healed".into(), serde_json::Value::Bool(true));
+        }
+        Ok(serde_json::Value::Object(payload).to_string())
+    }
+
     /// Narrated resolve + click: `narration` (the agent's element description)
     /// shows as a label pinned to the synthetic cursor — the readable-agent
     /// trust primitive. Used by the MCP dispatch.
@@ -3500,26 +3889,11 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         narration: Option<&str>,
         opts: &ActionOpts,
     ) -> Result<String, String> {
-        let resolved = self.resolve_element(label, desc, "click").await?;
-        let v: serde_json::Value = serde_json::from_str(&resolved)
-            .map_err(|e| format!("resolve_and_click: bad resolution json: {e}"))?;
-        if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
-            let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
-            let click_result = self
-                .run_action_for_pane_opts(label, &click_js(r, narration), opts.clone())
-                .await?;
-            Ok(serde_json::json!({
-                "ok": true,
-                "clicked": {
-                    "ref": r,
-                    "tag": v.get("tag").and_then(|x| x.as_str()).unwrap_or(""),
-                    "label": v.get("label").and_then(|x| x.as_str()).unwrap_or(""),
-                },
-                "result": click_result,
-            }).to_string())
-        } else {
-            Ok(resolved)
-        }
+        let narration_owned = narration.map(|s| s.to_string());
+        self.healed_action(label, desc, "click", "clicked", move |r| {
+            click_js(r, narration_owned.as_deref())
+        }, opts)
+        .await
     }
 
     /// Narrated resolve + type. Same shape as resolve_and_click_narrated.
@@ -3531,26 +3905,12 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         narration: Option<&str>,
         opts: &ActionOpts,
     ) -> Result<String, String> {
-        let resolved = self.resolve_element(label, desc, "type").await?;
-        let v: serde_json::Value = serde_json::from_str(&resolved)
-            .map_err(|e| format!("resolve_and_type: bad resolution json: {e}"))?;
-        if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
-            let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
-            let type_result = self
-                .run_action_for_pane_opts(label, &type_js(r, text, narration), opts.clone())
-                .await?;
-            Ok(serde_json::json!({
-                "ok": true,
-                "typed": {
-                    "ref": r,
-                    "tag": v.get("tag").and_then(|x| x.as_str()).unwrap_or(""),
-                    "label": v.get("label").and_then(|x| x.as_str()).unwrap_or(""),
-                },
-                "result": type_result,
-            }).to_string())
-        } else {
-            Ok(resolved)
-        }
+        let text_owned = text.to_string();
+        let narration_owned = narration.map(|s| s.to_string());
+        self.healed_action(label, desc, "type", "typed", move |r| {
+            type_js(r, &text_owned, narration_owned.as_deref())
+        }, opts)
+        .await
     }
 
     /// Resolve + click. Returns the bridge JSON (ok or not_found with
@@ -3563,28 +3923,8 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
 
     /// Resolve + click with pacing opts. Same shape as resolve_and_click.
     pub async fn resolve_and_click_opts(&self, label: &str, desc: &str, opts: &ActionOpts) -> Result<String, String> {
-        let resolved = self.resolve_element(label, desc, "click").await?;
-        let v: serde_json::Value = serde_json::from_str(&resolved)
-            .map_err(|e| format!("resolve_and_click: bad resolution json: {e}"))?;
-        if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
-            let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
-            let click_result = self
-                .run_action_for_pane_opts(label, &click_js(r, None), opts.clone())
-                .await?;
-            // mi13: build with json! — one serializer pass instead of three
-            // format!-embedded to_string calls.
-            Ok(serde_json::json!({
-                "ok": true,
-                "clicked": {
-                    "ref": r,
-                    "tag": v.get("tag").and_then(|x| x.as_str()).unwrap_or(""),
-                    "label": v.get("label").and_then(|x| x.as_str()).unwrap_or(""),
-                },
-                "result": click_result,
-            }).to_string())
-        } else {
-            Ok(resolved)
-        }
+        self.healed_action(label, desc, "click", "clicked", |r| click_js(r, None), opts)
+            .await
     }
 
     /// Resolve + type. Same shape as resolve_and_click.
@@ -3594,26 +3934,9 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
 
     /// Resolve + type with pacing opts. Same shape as resolve_and_type.
     pub async fn resolve_and_type_opts(&self, label: &str, desc: &str, text: &str, opts: &ActionOpts) -> Result<String, String> {
-        let resolved = self.resolve_element(label, desc, "type").await?;
-        let v: serde_json::Value = serde_json::from_str(&resolved)
-            .map_err(|e| format!("resolve_and_type: bad resolution json: {e}"))?;
-        if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
-            let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
-            let type_result = self
-                .run_action_for_pane_opts(label, &type_js(r, text, None), opts.clone())
-                .await?;
-            Ok(serde_json::json!({
-                "ok": true,
-                "typed": {
-                    "ref": r,
-                    "tag": v.get("tag").and_then(|x| x.as_str()).unwrap_or(""),
-                    "label": v.get("label").and_then(|x| x.as_str()).unwrap_or(""),
-                },
-                "result": type_result,
-            }).to_string())
-        } else {
-            Ok(resolved)
-        }
+        let text_owned = text.to_string();
+        self.healed_action(label, desc, "type", "typed", move |r| type_js(r, &text_owned, None), opts)
+            .await
     }
 
     /// Resolve + hover with pacing opts. Same shape as resolve_and_click but
@@ -3628,26 +3951,8 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         // ACTION="click" is fine for resolution scoring — hover targets the
         // same interactive set and we don't penalize non-inputs the way type
         // does. We just swap the action body to hover_js.
-        let resolved = self.resolve_element(label, desc, "click").await?;
-        let v: serde_json::Value = serde_json::from_str(&resolved)
-            .map_err(|e| format!("resolve_and_hover: bad resolution json: {e}"))?;
-        if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
-            let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
-            let hover_result = self
-                .run_action_for_pane_opts(label, &hover_js(r), opts.clone())
-                .await?;
-            Ok(serde_json::json!({
-                "ok": true,
-                "hovered": {
-                    "ref": r,
-                    "tag": v.get("tag").and_then(|x| x.as_str()).unwrap_or(""),
-                    "label": v.get("label").and_then(|x| x.as_str()).unwrap_or(""),
-                },
-                "result": hover_result,
-            }).to_string())
-        } else {
-            Ok(resolved)
-        }
+        self.healed_action(label, desc, "click", "hovered", |r| hover_js(r), opts)
+            .await
     }
 }
 
@@ -3719,10 +4024,21 @@ fn action_wrapper_js(req_id: u64, nonce: &str, body: &str, opts: &ActionOpts) ->
         }} catch(e) {{}}
     }};
     var __finish = function(res) {{
-        if (WATCH_MODE) {{
-            setTimeout(function() {{ __report(res); }}, PANE_DELAY_MS);
-        }} else {{
+        // `sent` makes the report one-shot: a navigation committing during
+        // the watch-mode pacing delay fires pagehide, which delivers the
+        // result immediately instead of letting the (dying) context drop it
+        // — the op used to burn its whole timeout in that race.
+        var sent = false;
+        var report = function() {{
+            if (sent) return;
+            sent = true;
             __report(res);
+        }};
+        if (WATCH_MODE) {{
+            window.addEventListener('pagehide', report, {{ once: true }});
+            setTimeout(report, PANE_DELAY_MS);
+        }} else {{
+            report();
         }}
     }};
     try {{
@@ -4179,8 +4495,13 @@ mod tests {
         assert!(js.contains("var WATCH_MODE = true;"));
         assert!(js.contains("var PANE_DELAY_MS = 600;"));
         assert!(js.contains("if (WATCH_MODE)"));
-        assert!(js.contains("setTimeout(function() { __report(res); }, PANE_DELAY_MS)"));
+        assert!(js.contains("setTimeout(report, PANE_DELAY_MS)"));
         assert!(js.contains("__finish(__result)"));
+        // Watch mode + a navigation committing during the pacing delay used
+        // to drop the result (the timer's context died). pagehide delivers
+        // it as the document unloads instead.
+        assert!(js.contains("addEventListener('pagehide', report"));
+        assert!(js.contains("if (sent) return;"));
     }
 
     #[test]
@@ -4192,6 +4513,48 @@ mod tests {
         assert!(js.contains("if (WATCH_MODE)"));
         // __finish still wraps the report (unified path), but the setTimeout
         // branch won't fire.
+    }
+
+    #[test]
+    fn nav_tracker_marks_in_flight_until_completion() {
+        // Root cause of the navigate/read_page flakiness: evals racing an
+        // in-flight navigation die with the old JS context, so the result
+        // report never arrives. The quiesce gate keys off NavTracker — the
+        // marker must flip exactly with START/COMPLETED.
+        let mut nav = NavTracker::default();
+        let label = "browser-p1-tab-default";
+        assert!(!nav.in_flight(label));
+        assert!(nav.since(label).is_none());
+
+        nav.start(label);
+        assert!(nav.in_flight(label));
+        let since = nav.since(label).expect("start must record an instant");
+        assert!(since < Duration::from_secs(1), "elapsed must start near zero");
+
+        // A second START (redirect / double handler registration) is
+        // idempotent — it overwrites, never counts up.
+        nav.start(label);
+        assert!(nav.in_flight(label));
+
+        nav.end(label);
+        assert!(!nav.in_flight(label));
+        assert!(nav.since(label).is_none());
+
+        // End without a matching start (stray COMPLETE from an earlier nav)
+        // must be a no-op, not a panic.
+        nav.end(label);
+        assert!(!nav.in_flight(label));
+    }
+
+    #[test]
+    fn nav_tracker_tracks_labels_independently() {
+        // Multi-pane: a navigation on pane A must not gate evals on pane B.
+        let mut nav = NavTracker::default();
+        nav.start("browser-p1-tab-default");
+        assert!(nav.in_flight("browser-p1-tab-default"));
+        assert!(!nav.in_flight("browser-p2-tab-default"));
+        nav.end("browser-p1-tab-default");
+        assert!(!nav.in_flight("browser-p1-tab-default"));
     }
 
     #[test]

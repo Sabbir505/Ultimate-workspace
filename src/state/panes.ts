@@ -33,6 +33,9 @@ export interface TerminalPaneData {
   spawn: TerminalSpawnSpec;
   exited: boolean;
   exitCode: number | null;
+  /** Set when a backend IO thread panicked (`pty:crashed`): the process may
+   *  still be alive, but output/writes are dead until the pane is resumed. */
+  crashed: boolean;
 }
 
 /** Per-tab data stored inside BrowserPaneData.tabs[]. */
@@ -77,7 +80,7 @@ export interface Pane {
 }
 
 export type PaneDescriptor =
-  | ({ kind: "terminal" } & Omit<TerminalPaneData, "kind" | "exited" | "exitCode">)
+  | ({ kind: "terminal" } & Omit<TerminalPaneData, "kind" | "exited" | "exitCode" | "crashed">)
   | ({ kind: "browser" } & Omit<BrowserPaneData, "kind" | "tabs" | "activeTabIndex">);
 
 interface BroadcastState {
@@ -114,6 +117,10 @@ interface PanesState {
   cycleFocus: () => void;
   setPaneState: (paneId: string, state: PaneState) => void;
   markPaneExited: (paneId: string, code: number | null) => void;
+  /** Marks a pane whose backend IO thread panicked (`pty:crashed`): shows the
+   *  crash overlay (the process itself may still be running, but output and
+   *  writes are dead until the pane is resumed). */
+  markPaneCrashed: (paneId: string) => void;
   markPaneRespawned: (paneId: string) => void;
   /** Updates the active tab's url (and the derived url field). */
   setBrowserUrl: (paneId: string, url: string, tabId?: string) => void;
@@ -273,7 +280,7 @@ function makePane(desc: PaneDescriptor, lastUsedAt: number): Pane {
     const { kind: _kind, ...rest } = desc;
     return {
       ...base,
-      data: { kind: "terminal", ...rest, exited: false, exitCode: null },
+      data: { kind: "terminal", ...rest, exited: false, exitCode: null, crashed: false },
     };
   }
   return {
@@ -421,7 +428,24 @@ export const usePanesStore = create<PanesState>((set, get) => ({
     set((s) => ({
       panes: s.panes.map((p) =>
         p.paneId === paneId && p.data.kind === "terminal"
-          ? { ...p, state: "idle" as PaneState, data: { ...p.data, exited: true, exitCode: code } }
+          ? {
+              ...p,
+              state: "idle" as PaneState,
+              data: { ...p.data, exited: true, exitCode: code, crashed: false },
+            }
+          : p,
+      ),
+    })),
+
+  markPaneCrashed: (paneId) =>
+    set((s) => ({
+      panes: s.panes.map((p) =>
+        p.paneId === paneId && p.data.kind === "terminal"
+          ? {
+              ...p,
+              state: "idle" as PaneState,
+              data: { ...p.data, exited: true, exitCode: null, crashed: true },
+            }
           : p,
       ),
     })),
@@ -430,7 +454,11 @@ export const usePanesStore = create<PanesState>((set, get) => ({
     set((s) => ({
       panes: s.panes.map((p) =>
         p.paneId === paneId && p.data.kind === "terminal"
-          ? { ...p, state: "idle" as PaneState, data: { ...p.data, exited: false, exitCode: null } }
+          ? {
+              ...p,
+              state: "idle" as PaneState,
+              data: { ...p.data, exited: false, exitCode: null, crashed: false },
+            }
           : p,
       ),
     })),

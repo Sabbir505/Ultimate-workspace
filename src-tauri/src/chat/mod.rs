@@ -34,6 +34,7 @@ pub mod python_runtime;
 pub mod stream_events;
 pub mod streaming;
 pub mod tasks;
+pub mod totp;
 pub mod tools;
 pub mod turn_perf;
 
@@ -1802,8 +1803,12 @@ mod tests {
         // that in — a change that re-bloats the fixed per-turn cost fails
         // here instead of shipping a permanent tax on every request.
         // Headroom covers the per-turn date anchor, whose rendered length
-        // varies with the weekday/UTC-offset strings.
-        assert!(total < 52_000, "fresh-turn baseline over fixed-cost budget: {total} chars");
+        // varies with the weekday/UTC-offset strings. Re-baselined
+        // 2026-09-06 (52.0k -> 55.5k) for three shipped capabilities joining
+        // the registry: totp_code (2FA), browser_observe, browser_extract,
+        // plus the Task tool's background param — each reviewed for length
+        // before landing.
+        assert!(total < 55_500, "fresh-turn baseline over fixed-cost budget: {total} chars");
     }
 
     #[test]

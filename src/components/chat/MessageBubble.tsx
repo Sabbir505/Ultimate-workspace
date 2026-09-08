@@ -14,9 +14,11 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-// NOTE: katex.min.css is imported at app entry (src/main.tsx) so this file
-// does NOT re-import it — see PERFORMANCE_AUDIT.md C8. Doing it twice would
-// ship two copies in the lazy MessageBubble chunk.
+import "katex/dist/katex.min.css";
+// PERF rec #3 (2026-09-06): this chunk imports katex.min.css — math can
+// only render inside MessageBubble, so the stylesheet (and the fonts it
+// references) arrives with this lazy chunk instead of eagerly at boot.
+// Vite dedupes the module across chunks (single emitted copy — C8 holds).
 import type { ChatMessage, ChatMessageRecord, ChatPerfPayload } from "../../lib/ipc";
 import { listCompactedMessages, readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";

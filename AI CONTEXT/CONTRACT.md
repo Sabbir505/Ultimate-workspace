@@ -181,6 +181,7 @@ Event:
 
 - `pty:output` — payload `{ paneId: string, data: string }` (UTF-8 lossy terminal output chunk)
 - `pty:exit` — payload `{ paneId: string, code: number | null }`
+- `pty:crashed` — payload `{ paneId: string, thread: string, reason: string }`; a pane IO thread (reader/writer/waiter) panicked. The frontend marks the pane crashed: exit overlay shows "Session crashed" and Resume respawns the pane
 - `pty:state` — payload `{ paneId: string, state: PaneState }` (backend heuristic: output activity → `working`; ~1.5s of silence after output → `waiting`; fresh spawn with no output → `idle`; harness diff-approval prompt pattern → `diff_ready`, best-effort)
 - `session:harness-id` — payload `{ sessionId: string, harnessSessionId: string }` (when adapter detects the harness's own session id in output)
 - `cost:updated` — payload `{ sessionId: string, version: 1 | 2 }` (after a parsed usage event is written; frontend refetches; version 2 = current shape)

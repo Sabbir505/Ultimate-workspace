@@ -49,6 +49,31 @@ static RUNNING: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::
 /// it silently stopped firing until the app restarted.
 const MAX_RUN_SECS: u64 = 2 * 60 * 60;
 
+/// Behavior rules appended to every automation prompt before a run. The turn
+/// executes as ONE headless, full-auto shot — there is no user to answer a
+/// clarifying question, and prompts that read as ambiguous used to make the
+/// agent ask for input and stall instead of working.
+const UNATTENDED_RUN_RULES: &str = "## Unattended run rules
+
+- This run fires on a schedule: no user is present. Do NOT ask questions and do NOT wait for confirmation or clarification.
+- Make reasonable assumptions, note them in your summary, and proceed with the task.
+- If a step cannot be completed, record why and continue with the remaining work where possible.
+- Finish with a short summary: what was done, what was produced, and any problems encountered.
+
+";
+
+/// `true` marker looked for so a prompt is only wrapped once (idempotent
+/// across re-saves and pre-wrapped prompts).
+const UNATTENDED_RULES_MARKER: &str = "## Unattended run rules";
+
+fn ensure_unattended_rules(prompt: &str) -> String {
+    if prompt.contains(UNATTENDED_RULES_MARKER) {
+        prompt.to_string()
+    } else {
+        format!("{}\n{}", prompt.trim_end(), UNATTENDED_RUN_RULES)
+    }
+}
+
 /// Start the background tick loop (called once from the app setup hook).
 pub fn start(app: AppHandle, db: Arc<Mutex<Connection>>) {
     tauri::async_runtime::spawn(async move {
@@ -473,13 +498,14 @@ fn execute(
     // Route based on agent type:
     // - CLI harnesses (claude_code, opencode) → spawn CLI process
     // - API providers and local_gguf → chat HTTP API
+    let prompt = ensure_unattended_rules(&automation.prompt);
     match automation.harness.as_str() {
         "claude_code" | "opencode" => {
             agent_sessions::run_one_shot(
                 app,
                 db,
                 &prepared.chat_session_id,
-                &automation.prompt,
+                &prompt,
                 &automation.harness,
                 &automation.model,
                 if automation.cwd.is_empty() { None } else { Some(automation.cwd.as_str()) },
@@ -490,7 +516,7 @@ fn execute(
             crate::chat::run_one_shot_chat(
                 db,
                 &prepared.chat_session_id,
-                &automation.prompt,
+                &prompt,
                 &automation.harness,
                 &automation.model,
             )
@@ -786,6 +812,15 @@ fn summarize(status: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unattended_rules_are_appended_once() {
+        let wrapped = ensure_unattended_rules("Do the thing.");
+        assert!(wrapped.starts_with("Do the thing."));
+        assert!(wrapped.contains(UNATTENDED_RULES_MARKER));
+        // Idempotent: an already-wrapped prompt is not wrapped again.
+        assert_eq!(ensure_unattended_rules(&wrapped), wrapped);
+    }
 
     #[cfg(windows)]
     #[test]

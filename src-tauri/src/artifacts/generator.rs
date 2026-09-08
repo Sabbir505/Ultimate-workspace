@@ -129,6 +129,7 @@ Template should use {{variable}} syntax for placeholders."#,
 Required fields: name, description, trigger{type, schedule?}, steps[], inputs?, outputs?, permissions?, enabled
 Trigger types: "schedule" (needs 5-field cron), "event", "webhook"
 Steps: label, description?, action, parameters?
+The run prompt is compiled VERBATIM from the description and steps, and each run is unattended (no user available to answer questions). Every step's action must therefore be a concrete, self-contained instruction: name the exact files, paths, commands, queries, or tool calls to use — never a vague verb like "handle" or "process the data". The description must state what a successful run produces.
 enabled defaults to true — the automation is active right after the user presses Create. Set it to false ONLY if the user explicitly asked to create it paused/off. Always provide a concrete 5-field cron for schedule triggers."#,
     };
 

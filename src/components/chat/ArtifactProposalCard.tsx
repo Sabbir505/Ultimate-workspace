@@ -8,6 +8,7 @@ import type { ArtifactProposal, ArtifactSpec, SkillSpec, LoopSpec, PromptTemplat
 import { listHarnessModels, listChatModels } from "../../lib/ipc";
 import { MissingFieldsPrompt } from "./MissingFieldsPrompt";
 import { GlassSelect } from "../common/GlassSelect";
+import { buildAutomationRunPrompt } from "../automations/shared";
 
 type ProposalState = "generating" | "ready" | "editing" | "created" | "rejected";
 
@@ -342,6 +343,15 @@ function ArtifactDetails({
                   </li>
                 ))}
               </ol>
+            </div>
+          )}
+          {spec.steps && spec.steps.length > 0 && (
+            <div className="artifact-field">
+              <span className="artifact-field-label">Run prompt</span>
+              <span className="artifact-field-hint">
+                Sent to the agent on every run — runs unattended, so it must be self-sufficient.
+              </span>
+              <pre className="artifact-template">{buildAutomationRunPrompt(spec)}</pre>
             </div>
           )}
           {spec.permissions && (

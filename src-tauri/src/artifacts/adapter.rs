@@ -235,20 +235,25 @@ fn format_loop_markdown(spec: &LoopSpec) -> String {
     md
 }
 
+/// Compile an automation spec into the prompt each unattended run receives.
+/// The runner (automations.rs) appends the unattended-run rules itself, so
+/// this only describes WHAT to do. Mirrored in TypeScript by
+/// `buildAutomationRunPrompt` in src/components/automations/shared.ts —
+/// keep the two in sync.
 fn format_automation_prompt(spec: &AutomationSpec) -> String {
     let mut prompt = String::new();
     prompt.push_str(&format!("# {}\n\n", spec.name));
-    prompt.push_str(&format!("{}\n\n", spec.description));
-    prompt.push_str("## Steps\n\n");
+    prompt.push_str(&format!("Goal: {}\n\n", spec.description.trim()));
+    prompt.push_str("Complete each step in order:\n");
     for (i, step) in spec.steps.iter().enumerate() {
-        prompt.push_str(&format!("{}. {} ({})\n", i + 1, step.label, step.action));
+        prompt.push_str(&format!("{}. {}: {}\n", i + 1, step.label, step.action));
         if let Some(desc) = &step.description {
             prompt.push_str(&format!("   {}\n", desc));
         }
     }
     if let Some(inputs) = &spec.inputs {
         if !inputs.is_empty() {
-            prompt.push_str("\n## Inputs\n\n");
+            prompt.push_str("\nInputs:\n");
             for input in inputs {
                 prompt.push_str(&format!("- {}", input.name));
                 if let Some(desc) = &input.description {
@@ -259,4 +264,50 @@ fn format_automation_prompt(spec: &AutomationSpec) -> String {
         }
     }
     prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn automation_spec() -> AutomationSpec {
+        AutomationSpec {
+            name: "Nightly report".to_string(),
+            description: "  Compile the daily status report.  ".to_string(),
+            trigger: crate::artifacts::schemas::AutomationTrigger {
+                kind: "schedule".to_string(),
+                schedule: Some("0 9 * * *".to_string()),
+            },
+            steps: vec![
+                crate::artifacts::schemas::WorkflowStep {
+                    label: "Gather".to_string(),
+                    description: Some("Read the last 24h of commits.".to_string()),
+                    action: "Run git log --since=yesterday".to_string(),
+                    parameters: None,
+                },
+                crate::artifacts::schemas::WorkflowStep {
+                    label: "Send".to_string(),
+                    description: None,
+                    action: "Post the report to the team channel".to_string(),
+                    parameters: None,
+                },
+            ],
+            harness: None,
+            model: None,
+            inputs: None,
+            outputs: None,
+            permissions: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn prompt_includes_goal_and_step_actions() {
+        let prompt = format_automation_prompt(&automation_spec());
+        assert!(prompt.contains("# Nightly report"));
+        assert!(prompt.contains("Goal: Compile the daily status report."));
+        assert!(prompt.contains("1. Gather: Run git log --since=yesterday"));
+        assert!(prompt.contains("   Read the last 24h of commits."));
+        assert!(prompt.contains("2. Send: Post the report to the team channel"));
+    }
 }

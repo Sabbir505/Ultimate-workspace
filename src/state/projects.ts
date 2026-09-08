@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import {
   addProject,
+  checkHarnessUpdates,
   createSession,
   deleteSession,
   getGitStatus,
@@ -14,7 +15,7 @@ import {
   renameProject,
   updateSessionTitle,
 } from "../lib/ipc";
-import type { GitStatusInfo, HarnessId, HarnessStatus, Project, SessionRecord } from "../types";
+import type { GitStatusInfo, HarnessId, HarnessStatus, HarnessUpdateStatus, Project, SessionRecord } from "../types";
 
 interface ProjectsState {
   loaded: boolean;
@@ -22,6 +23,9 @@ interface ProjectsState {
   sessions: SessionRecord[];
   gitStatuses: Record<string, GitStatusInfo>; // keyed by project id
   harnesses: HarnessStatus[];
+  /** Update availability per harness id (Settings "Update" button + the
+   *  boot notification). Empty until the first check resolves. */
+  harnessUpdates: Record<string, HarnessUpdateStatus>;
   expanded: Record<string, boolean>; // projectId -> expanded in sidebar
   selectedProjectId: string | null;
 
@@ -30,6 +34,12 @@ interface ProjectsState {
    *  cache — used by the Settings "Re-check" button so an out-of-band
    *  install/uninstall shows up immediately. */
   refreshHarnesses: (force?: boolean) => Promise<void>;
+  /** Installed-vs-registry-latest check. `force` bypasses the backend's 1h
+   *  cache (Settings "Re-check", post-install refresh). */
+  refreshHarnessUpdates: (force?: boolean) => Promise<void>;
+  /** Immediate optimistic flip of one harness's row to "current" after a
+   *  successful install/update (see the implementation comment). */
+  markHarnessUpdated: (id: HarnessId) => void;
   refreshSessions: () => Promise<void>;
   addProjectAtPath: (path: string) => Promise<Project | null>;
   removeProjectById: (projectId: string) => Promise<void>;
@@ -56,6 +66,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
   sessions: [],
   gitStatuses: {},
   harnesses: [],
+  harnessUpdates: {},
   expanded: {},
   selectedProjectId: null,
 
@@ -78,6 +89,29 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     const harnesses = await listHarnesses(force);
     if (harnesses) set({ harnesses });
   },
+
+  refreshHarnessUpdates: async (force = false) => {
+    const updates = await checkHarnessUpdates(force);
+    if (updates) {
+      set({ harnessUpdates: Object.fromEntries(updates.map((u) => [u.id, u])) });
+    }
+  },
+
+  /** Optimistic post-install patch: the backend verified the install and
+   *  cleared its caches, so this harness is at (or past) the registry latest
+   *  already. Flip the row to "current" immediately — waiting for the forced
+   *  re-probe (a `--version` spawn + registry GET per harness, sequential)
+   *  left the Update button visible for several seconds after the toast. */
+  markHarnessUpdated: (id) =>
+    set((s) => {
+      const u = s.harnessUpdates[id];
+      if (!u || !u.updateAvailable) return s; // nothing to flip — keep state
+      const harnessUpdates = {
+        ...s.harnessUpdates,
+        [id]: { ...u, installedVersion: u.latestVersion ?? u.installedVersion, updateAvailable: false },
+      };
+      return { harnessUpdates };
+    }),
 
   refreshSessions: async () => {
     const sessions = await listSessions();

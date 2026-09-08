@@ -39,6 +39,19 @@ pub struct HarnessStatus {
     pub installed: bool,
 }
 
+/// Per-harness update availability (Settings → Agent harnesses "Update"
+/// button + the boot-time bell notification). Versions are the CLI's own
+/// `--version` output vs the npm registry's `latest` dist-tag; either side
+/// can be None when the probe failed (odd output, offline, no npm package).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessUpdateStatus {
+    pub id: String,
+    pub installed_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+}
+
 /// An ACP agent (roadmap #20) exposed to the composer's agent menu — static
 /// registry + user-defined entries, with install detection.
 #[derive(Debug, Clone, Serialize)]

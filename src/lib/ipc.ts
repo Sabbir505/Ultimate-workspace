@@ -23,6 +23,7 @@ import type {
   GitStatusInfo,
   HarnessId,
   HarnessStatus,
+  HarnessUpdateStatus,
   InstalledSkill,
   Project,
   QuickAction,
@@ -339,11 +340,18 @@ export const listenBrowserTimelineEntry = (
  *  uninstall is picked up immediately. */
 export const listHarnesses = (force = false) =>
 safeInvoke<HarnessStatus[] | null>("list_harnesses", { force });
+/** Installed-vs-registry-latest version check per harness (Settings "Update"
+ *  button + boot notification). Cached server-side for 1h unless `force` —
+ *  the Settings "Re-check" button and the post-install refresh pass true.
+ *  One HTTP GET + one `--version` spawn per installed harness. */
+export const checkHarnessUpdates = (force = false) =>
+safeInvoke<HarnessUpdateStatus[] | null>("check_harness_updates", { force });
 export const runHarnessLogin = (paneId: string, harnessId: HarnessId, cwd: string) =>
 safeInvoke<void>("run_harness_login", { paneId, harnessId, cwd });
-/** One-click global npm install of a harness CLI (Harnesses settings panel).
- *  Long-running — resolves with a confirmation line or rejects with the
- *  npm stderr tail. Re-probe via listHarnesses() afterwards. */
+/** One-click global npm install of a harness CLI (Harnesses settings panel;
+ *  the Update button reuses it — plain `npm install -g` always resolves the
+ *  latest dist-tag). Long-running — resolves with a confirmation line or
+ *  rejects with the npm stderr tail. Re-probe via listHarnesses() afterwards. */
 export const installHarness = (harnessId: HarnessId) =>
 safeInvoke<string>("install_harness", { harnessId });
 

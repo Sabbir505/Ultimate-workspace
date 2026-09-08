@@ -69,6 +69,16 @@ pub trait HarnessAdapter: Send + Sync {
     fn spawn_resume_command(&self, session_id: &str) -> CommandSpec;
     /// Interactive login flow command (spawned in a temporary pane, PRD §9).
     fn login_command(&self) -> CommandSpec;
+    /// Self-update command for installs NOT managed by npm (a winget /
+    /// vendor-installer copy can shadow the npm shim on PATH, in which case
+    /// `npm install -g` silently updates the wrong copy). Receives the
+    /// resolved binary path so adapters can pick the right updater (e.g.
+    /// winget-managed copies must go through `winget upgrade`). None = no
+    /// verified updater for this install kind.
+    fn native_update_command(&self, resolved: &std::path::Path) -> Option<CommandSpec> {
+        let _ = resolved;
+        None
+    }
     /// Scrape the harness's own session id from stripped pty output.
     fn parse_session_id(&self, output: &str) -> Option<String>;
     /// On-disk usage/cost totals for a session (PRD §7.12 prefers harness
@@ -519,6 +529,126 @@ pub fn binary_on_path(binary: &str) -> bool {
     false
 }
 
+/// Full path of the file the spawn machinery would execute for `binary`:
+/// walks the process PATH in order (the same env our Command spawns see) and,
+/// on Windows, tries the PATHEXT candidates cmd.exe would — the bare name is
+/// checked only after them, since cmd can't execute an extensionless sh file.
+/// None when nothing on PATH matches (harness not installed).
+pub fn resolve_binary_on_path(binary: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+
+    let path_var = std::env::var_os("PATH")?;
+    // PATHEXT order (".COM;.EXE;.BAT;.CMD;…") decides precedence on Windows.
+    let exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+            .split(';')
+            .filter_map(|e| {
+                let e = e.trim().trim_start_matches('.');
+                (!e.is_empty()).then(|| e.to_string())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for dir in std::env::split_paths(&path_var) {
+        if cfg!(windows) {
+            for ext in &exts {
+                let candidate: PathBuf = dir.join(format!("{binary}.{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+            // A binary given WITH its extension ("claude.exe") resolves exact.
+            if Path::new(binary).extension().is_some() {
+                let candidate = dir.join(binary);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        } else {
+            let candidate = dir.join(binary);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Package id of a winget-portable install, e.g. "Anthropic.ClaudeCode" from
+/// `…\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_…\claude.exe`.
+/// Winget portables always live under that layout (the id is the directory
+/// name up to the first `_`); None for any other install kind. Needed because
+/// winget-managed CLIs refuse their own `update` subcommand and defer to
+/// `winget upgrade`.
+pub fn winget_portable_package_id(resolved: &std::path::Path) -> Option<String> {
+    let comps: Vec<std::string::String> = resolved
+        .iter()
+        .map(|c| c.to_string_lossy().to_string())
+        .collect();
+    for i in 1..comps.len() {
+        if comps[i - 1].eq_ignore_ascii_case("WinGet")
+            && comps[i].eq_ignore_ascii_case("Packages")
+            && i + 1 < comps.len()
+        {
+            return comps[i + 1].split('_').next().map(str::to_string);
+        }
+    }
+    None
+}
+
+/// First `x.y[.z…]` version-looking token in `<binary> --version` output, or
+/// None when the binary is missing/fails/hung. Only used by the update
+/// checker (1h-cached), so the extra output capture costs nothing on the
+/// hot `is_installed` path, which stays on the null-stdio `binary_on_path`.
+pub fn installed_cli_version(binary: &str) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    let spec = resolve_for_spawn(&CommandSpec::new(binary, &["--version"]));
+    let mut cmd = Command::new(&spec.program);
+    cmd.args(&spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().ok()?;
+    // Same poll-then-kill budget as binary_on_path; version output is a few
+    // bytes so the pipes can't fill while we wait. A hung child is killed
+    // BEFORE the pipe reads — reading a live child's stdout would block on
+    // EOF that never comes.
+    let status = (0..50)
+        .find_map(|attempt| {
+            let done = child.try_wait().ok().flatten();
+            if done.is_none() && attempt < 49 {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            done
+        });
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let mut output = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut output);
+    }
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut output);
+    }
+    status.map(|s| s.success()).unwrap_or(false).then_some(())?;
+    static VERSION_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\d+(\.\d+)+").unwrap());
+    VERSION_RE
+        .find(&output)
+        .map(|m| m.as_str().to_string())
+}
+
 // ---- Shared conservative usage scraping -------------------------------------
 
 fn parse_num(s: &str) -> Option<i64> {
@@ -594,6 +724,31 @@ pub fn ensure_cmd_safe_model(model: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn winget_portable_id_extracted_from_install_layout() {
+        let p = std::path::Path::new(
+            "C:\\Users\\u\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Anthropic.ClaudeCode_\
+             Microsoft.Winget.Source_8wekyb3d8bbwe\\claude.exe",
+        );
+        assert_eq!(
+            winget_portable_package_id(p).as_deref(),
+            Some("Anthropic.ClaudeCode")
+        );
+        // npm shim and vendor-installer layouts are not winget portables.
+        assert_eq!(
+            winget_portable_package_id(std::path::Path::new(
+                "C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd"
+            )),
+            None
+        );
+        assert_eq!(
+            winget_portable_package_id(std::path::Path::new(
+                "C:\\Users\\u\\.kimi-code\\bin\\kimi.exe"
+            )),
+            None
+        );
+    }
 
     #[test]
     fn canonical_model_key_matches_log_ids() {

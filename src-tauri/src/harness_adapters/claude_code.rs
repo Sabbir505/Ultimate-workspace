@@ -74,6 +74,26 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         CommandSpec::new("claude", &["auth", "login"])
     }
 
+    /// Native installs shadow the npm shim on PATH. Winget-managed copies
+    /// REFUSE `claude update` ("managed by winget") and defer to
+    /// `winget upgrade`; other native installs (curl script) self-update.
+    fn native_update_command(&self, resolved: &std::path::Path) -> Option<CommandSpec> {
+        if let Some(id) = crate::harness_adapters::winget_portable_package_id(resolved) {
+            return Some(CommandSpec::new(
+                "winget",
+                &[
+                    "upgrade",
+                    "--id",
+                    &id,
+                    "-e",
+                    "--accept-source-agreements",
+                    "--accept-package-agreements",
+                ],
+            ));
+        }
+        Some(CommandSpec::new("claude", &["update"]))
+    }
+
     fn parse_session_id(&self, output: &str) -> Option<String> {
         if let Some(c) = RE_RESUME_HINT.captures(output) {
             return Some(c[1].to_string());

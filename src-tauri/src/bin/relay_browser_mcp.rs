@@ -35,7 +35,115 @@ fn main() {
         .enable_all()
         .build()
         .expect("failed to build tokio runtime");
+    // CLI verbs (Browser Phase 3): `relay-browser navigate <url>` etc. run
+    // ONE op, print the text result, and exit — no JSON-RPC envelope. Inside
+    // a harness shell the RELAY_WS_PORT / RELAY_MCP_AUTH_TOKEN env vars are
+    // already set by the .mcp.json registration, so agents can drive the
+    // visible browser with short shell commands (the 114K-vs-27K-token
+    // lesson: compact CLI output beats full MCP snapshot payloads).
+    let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    if !cli_args.is_empty() {
+        rt.block_on(cli_run(cli_args));
+        return;
+    }
     rt.block_on(run());
+}
+
+const CLI_USAGE: &str = "relay-browser — drive the visible Relay browser pane from a shell\n\n\
+    Usage: relay-browser <verb> [args...]\n\n\
+    Verbs:\n\
+      navigate <url>              Open a URL in the pane\n\
+      read [mode]                 Read the page (mode: content | summary | interactive | section)\n\
+      observe                     Compact list of what's actionable (ref, tag, label)\n\
+      extract <prompt>            Only the page sections matching the prompt\n\
+      click <description>         Click by description or CSS selector\n\
+      type <description> <text>   Type into a field by description\n\
+      find <query>                Find elements matching a query\n\
+      screenshot                  Capture the pane as a PNG (saves to artifacts)\n\n\
+    Connects to the Relay app over loopback; RELAY_WS_PORT and\n\
+    RELAY_MCP_AUTH_TOKEN come from the environment (set automatically inside\n\
+    agent sessions registered with the relay-browser MCP server).";
+
+/// Parse `relay-browser <verb> [args...]` into an MCP (tool, arguments) pair.
+fn parse_cli_verb(args: &[String]) -> Result<(&str, serde_json::Value), String> {
+    use serde_json::json;
+    let verb = args[0].as_str();
+    let rest = &args[1..];
+    let joined = |from: usize| rest.get(from..).map(|s| s.join(" ")).unwrap_or_default().trim().to_string();
+    match verb {
+        "navigate" => {
+            let url = joined(0);
+            if url.is_empty() {
+                return Err("navigate requires a URL".into());
+            }
+            Ok(("navigate", json!({ "url": url })))
+        }
+        "read" => {
+            let mode = rest.first().map(String::as_str).unwrap_or("content");
+            Ok(("read_page", json!({ "mode": mode })))
+        }
+        "observe" => Ok(("observe", json!({}))),
+        "extract" => {
+            let prompt = joined(0);
+            if prompt.is_empty() {
+                return Err("extract requires a prompt (what to look for)".into());
+            }
+            Ok(("extract", json!({ "prompt": prompt })))
+        }
+        "click" => {
+            let desc = joined(0);
+            if desc.is_empty() {
+                return Err("click requires a description or CSS selector".into());
+            }
+            Ok(("click", json!({ "selector_or_description": desc })))
+        }
+        "type" => {
+            let desc = rest.first().cloned().unwrap_or_default();
+            let text = joined(1);
+            if desc.is_empty() || text.is_empty() {
+                return Err("type requires <description> <text>".into());
+            }
+            Ok(("type_text", json!({ "selector_or_description": desc, "text": text })))
+        }
+        "find" => {
+            let query = joined(0);
+            if query.is_empty() {
+                return Err("find requires a query".into());
+            }
+            Ok(("find", json!({ "query": query })))
+        }
+        "screenshot" => Ok(("screenshot", json!({}))),
+        "help" | "--help" | "-h" => Err(CLI_USAGE.to_string()),
+        other => Err(format!("unknown verb {other:?}\n\n{CLI_USAGE}")),
+    }
+}
+
+/// One-shot CLI mode: connect, run one op, print the text result, exit.
+async fn cli_run(args: Vec<String>) {
+    let (tool, cli_args) = match parse_cli_verb(&args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    let port: u16 = std::env::var("RELAY_WS_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_WS_PORT);
+    let url = format!("ws://127.0.0.1:{port}/");
+    let project_id = std::env::var("RELAY_PROJECT_ID").ok();
+    let mut ws: Option<WsConn> = None;
+    let params = serde_json::json!({ "name": tool, "arguments": cli_args });
+    match handle_tool_call(params, &url, &project_id, &mut ws).await {
+        Ok(text) => {
+            println!("{text}");
+        }
+        Err((code, message)) => {
+            eprintln!("error [{code}]: {message}");
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn run() {
@@ -221,7 +329,9 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         | "history" | "hover" | "evaluate" | "click_and_wait" | "screenshot"
         | "find" | "fill_form" | "select_option" | "press_key" | "batch"
         | "read_console" | "read_network" | "list_tabs" | "switch_tab"
-        | "new_tab" | "close_tab" | "zoom" | "print_to_pdf" => Ok(tool.to_string()),
+        | "new_tab" | "close_tab" | "zoom" | "print_to_pdf" | "observe" | "extract" => {
+            Ok(tool.to_string())
+        }
         "generate_document" | "generate_diagram" | "generate_file"
         | "plan_document" | "revise_document"
         | "get_skill" | "list_skills" | "list_artifacts" | "search_docs" | "get_capabilities" => Ok(format!("relay_tools:{tool}")),
@@ -333,6 +443,32 @@ fn tool_schemas() -> Vec<Value> {
                     "selector": { "type": "string", "description": "CSS selector (section mode) or anchor description." },
                     "pane_id": { "type": "string" }
                 }
+            }
+        }),
+        json!({
+            "name": "observe",
+            "annotations": { "readOnlyHint": true },
+            "description": "Compact census of what is actionable on the current page: one line per interactive element (ref, tag, label, type/placeholder/aria). No markdown body — the cheap decide-then-act read. Use read_page for full content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pane_id": { "type": "string" }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "extract",
+            "annotations": { "readOnlyHint": true },
+            "description": "Focused extraction: returns ONLY the page sections matching the prompt (deterministic keyword scoring over headings, no extra model call), capped at max_chars. Far cheaper than a full read on huge pages.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "What to look for, e.g. 'pricing tiers', 'return policy', 'API rate limits'. Keywords score the page's sections." },
+                    "max_chars": { "type": "integer", "description": "Cap on returned text (default 2500, max 20000)." },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["prompt"]
             }
         }),
         json!({

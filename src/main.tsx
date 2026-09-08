@@ -2,14 +2,12 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import "./styles/global.css";
-// KaTeX is the math renderer used by MessageBubble (markdown) and
-// ArtifactPreviewPane. Both are lazy-loaded so the CSS only matters once
-// a math block actually renders, but the @import itself is eager at
-// module-evaluation time. Importing it ONCE at the app entry and removing
-// the per-component imports deduplicates it (vite produces one copy of the
-// stylesheet instead of two for the entry + each lazy chunk that also
-// requests it). See PERFORMANCE_AUDIT.md C8.
-import "katex/dist/katex.min.css";
+// KaTeX CSS (PERF rec #3) is NOT imported here anymore: it only matters once
+// a math block renders, which happens exclusively inside the lazy-loaded
+// MessageBubble / ArtifactPreviewPane chunks — those now import it, so the
+// stylesheet (and the ~500 KB of font assets it references) arrives with the
+// first lazy chunk that can render math instead of eagerly at boot. Vite
+// still emits exactly ONE copy (module dedup), preserving the C8 fix.
 
 // Dev-only debugging handle: lets Playwright/manual console inspection drive
 // the stores (e.g. seeding panes to exercise the split layout) without a

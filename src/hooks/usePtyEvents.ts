@@ -15,6 +15,7 @@ import type {
   BrowserUrlDetectedPayload,
   CostUpdatedPayload,
   HarnessIdPayload,
+  PtyCrashedPayload,
   PtyExitPayload,
   PtyStatePayload,
 } from "../types";
@@ -170,6 +171,31 @@ export function usePtyEvents(): void {
             sound: "alert",
           });
         }
+      }),
+    );
+
+    // Round-3 M1: a backend IO-thread panic (reader/writer/waiter) used to
+    // freeze the pane silently — no `pty:exit`, no overlay, a terminal that
+    // looks alive but never updates. Show the crash overlay + a toast; the
+    // Resume button respawns the pane.
+    unlistens.push(
+      safeListen<PtyCrashedPayload>("pty:crashed", ({ paneId, thread, reason }) => {
+        usePanesStore.getState().markPaneCrashed(paneId);
+        workingSince.delete(paneId);
+        const pane = usePanesStore.getState().panes.find((p) => p.paneId === paneId);
+        if (pane && pane.data.kind === "terminal") {
+          relayNotify({
+            kind: "crash",
+            title: "Session crashed",
+            body: `${pane.data.label} crashed (internal ${thread} error). Resume to restart it.`,
+            paneId,
+            chatSessionId: pane.data.sessionId ?? undefined,
+            osToast: !isAppFocused(),
+            inAppToast: true,
+            sound: "alert",
+          });
+        }
+        console.error(`pty:crashed [${thread}] ${paneId}: ${reason}`);
       }),
     );
 

@@ -672,6 +672,8 @@ async fn dispatch_inner(
     match req.op.as_str() {
         "navigate" => op_navigate(req, browser, app).await,
         "read_page" => op_read_page(req, browser, app).await,
+        "observe" => op_observe(req, browser, app).await,
+        "extract" => op_extract(req, browser, app).await,
         "click" => op_click(req, browser, app).await,
         "type_text" => op_type_text(req, browser, app).await,
         "scroll" => op_scroll(req, browser, app).await,
@@ -829,6 +831,56 @@ async fn op_read_page(
     // read_page returns a fenced string; pass it through as the text payload.
     // The MCP binary wraps it as a tool result content block.
     Ok(serde_json::json!({ "content": result }))
+}
+
+/// `observe` — the compact "what's actionable here" census (Stagehand's
+/// observe() shape): one line per interactive element (ref, tag, label,
+/// type/placeholder/aria), no markdown body. The decide-then-act read.
+async fn op_observe(
+    req: &Request,
+    browser: &BrowserManager,
+    _app: &AppHandle,
+) -> Result<Value, McpError> {
+    let label = resolve_or_open(req, browser, _app).await?;
+    let result = browser
+        .observe_for_pane(&label)
+        .await
+        .map_err(McpError::from_action_err)?;
+    Ok(serde_json::json!({ "content": result }))
+}
+
+/// `extract` — focused extraction: returns only the sections of the page
+/// that score against `prompt` (deterministic keyword scoring over headings,
+/// no extra model call), capped at `max_chars` (default 2500).
+async fn op_extract(
+    req: &Request,
+    browser: &BrowserManager,
+    _app: &AppHandle,
+) -> Result<Value, McpError> {
+    let prompt = req
+        .args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if prompt.is_empty() {
+        return Err(McpError::invalid_args(
+            "extract requires 'prompt' (what to look for on the page)",
+        ));
+    }
+    let max_chars = req
+        .args
+        .get("max_chars")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2500)
+        .clamp(200, 20_000) as usize;
+    let label = resolve_or_open(req, browser, _app).await?;
+    let result = browser
+        .extract_for_pane(&label, &prompt, max_chars)
+        .await
+        .map_err(McpError::from_action_err)?;
+    Ok(serde_json::json!({ "content": result, "prompt": prompt }))
 }
 
 async fn op_click(

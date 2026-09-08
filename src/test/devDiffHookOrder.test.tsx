@@ -40,7 +40,7 @@ const terminalPane = {
   lastUsedAt: 1,
   lastInputAt: 0,
   activity: null,
-  data: { kind: "terminal", sessionId: "relay-1", harness: null, label: "sh", spawn: { type: "shell", cwd: "D:/proj/p1", command: "sh" }, exited: false, exitCode: null },
+  data: { kind: "terminal", sessionId: "relay-1", harness: null, label: "sh", spawn: { type: "shell", cwd: "D:/proj/p1", command: "sh" }, exited: false, exitCode: null, crashed: false },
 };
 
 beforeEach(() => {

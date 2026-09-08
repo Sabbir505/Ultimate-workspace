@@ -79,6 +79,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 base64 = "0.22"
 # SHA-256 for OAuth PKCE code_challenge (S256) in the Connectors OAuth flow.
 sha2 = "0.10"
+# SHA-1 for RFC 6238 TOTP (the default algorithm for authenticator 2FA seeds).
+sha1 = "0.10"
 # Random bytes for PKCE code_verifier generation (Connectors OAuth flow).
 rand = "0.8"
 # Percent-encoding of OAuth authorize-URL query parameters.
@@ -184,3 +186,8 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+# B-28: `kill(pid, 0)` liveness probe for automation lock files on
+# Unix (Windows uses OpenProcess/GetExitCodeProcess directly).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

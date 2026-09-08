@@ -295,10 +295,19 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(windows))]
-fn pid_alive(_pid: u32) -> bool {
-    // No cheap liveness probe wired up for non-Windows; the age fallback
-    // covers it.
-    true
+fn pid_alive(pid: u32) -> bool {
+    // B-28 closed: `kill(pid, 0)` performs a real liveness check on Unix —
+    // signal 0 is delivered to nothing, it only validates the process
+    // exists. EPERM means the process exists but is owned by another user
+    // (pid recycling across a user switch) — counted as alive, which only
+    // errs on the cautious side (we then wait for the age heuristic).
+    // Safety: signal 0 kills nothing; the syscall is pure probing.
+    let r = unsafe { libc::kill(pid as i32, 0) };
+    if r == 0 {
+        return true;
+    }
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    errno == libc::EPERM
 }
 
 /// Inner recursion with a depth limit to prevent unbounded recursion

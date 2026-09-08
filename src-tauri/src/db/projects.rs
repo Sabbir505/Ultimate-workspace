@@ -46,18 +46,25 @@ pub fn add_project(conn: &Connection, path: &str, name: &str, is_git_repo: bool)
 /// secret key rows, workspaces (CONTRACT.md), and chat sessions nested under
 /// the project in the sidebar. Foreign keys have no ON DELETE CASCADE in the
 /// PRD schema, so the cleanup is explicit here.
+///
+/// B-29: one transaction — these seven statements are one logical delete, and
+/// a crash between them used to orphan sessions, cost events, or chat rows
+/// pointing at a project that no longer exists. The chat-session cleanup
+/// error propagates too (it used to be swallowed with `let _ =`).
 pub fn remove_project(conn: &Connection, project_id: &str) -> DbResult<()> {
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "DELETE FROM cost_events WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?1)",
         params![project_id],
     )?;
-    conn.execute("DELETE FROM sessions WHERE project_id = ?1", params![project_id])?;
-    conn.execute("DELETE FROM quick_actions WHERE project_id = ?1", params![project_id])?;
-    conn.execute("DELETE FROM project_secrets WHERE project_id = ?1", params![project_id])?;
-    conn.execute("DELETE FROM workspaces WHERE project_id = ?1", params![project_id])?;
+    tx.execute("DELETE FROM sessions WHERE project_id = ?1", params![project_id])?;
+    tx.execute("DELETE FROM quick_actions WHERE project_id = ?1", params![project_id])?;
+    tx.execute("DELETE FROM project_secrets WHERE project_id = ?1", params![project_id])?;
+    tx.execute("DELETE FROM workspaces WHERE project_id = ?1", params![project_id])?;
     // Chat messages cascade off chat_sessions via FK ON DELETE CASCADE.
-    let _ = super::chat::delete_chat_sessions_for_project(conn, project_id);
-    conn.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
+    super::chat::delete_chat_sessions_for_project(&tx, project_id)?;
+    tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -233,6 +240,53 @@ mod tests {
         assert!(super::super::get_cost_events(&conn, None, None, None).unwrap().is_empty());
         assert!(super::super::list_quick_actions(&conn, &p.id).unwrap().is_empty());
         assert!(super::super::list_secret_keys(&conn, &p.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_project_is_transactional() {
+        // B-29: the chat-session cleanup error used to be swallowed with
+        // `let _ =`, so a failure midway left a half-applied delete (sessions
+        // gone / cost events gone while the project or chats survived). Any
+        // statement failing must abort the whole transaction.
+        let conn = super::super::mem();
+        let p = add_project(&conn, "/tmp/tx", "tx", false).unwrap();
+        let s = create_session(&conn, &p.id, "claude_code").unwrap();
+        super::super::insert_cost_event(
+            &conn,
+            &s.id,
+            &UsageInfo {
+                input_tokens: Some(1),
+                output_tokens: None,
+                cost_usd: Some(0.01), ..Default::default()
+            },
+            "claude_code", "pty", Some(0.01),
+        )
+        .unwrap();
+        super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", Some(&p.id))
+            .unwrap();
+
+        // Force the chat-session cleanup (statement 6 of 7) to fail: the
+        // table it unbinds automations against no longer exists.
+        conn.execute("DROP TABLE automations", []).unwrap();
+        assert!(
+            remove_project(&conn, &p.id).is_err(),
+            "the failing chat-session delete must propagate, not be swallowed"
+        );
+
+        // The transaction rolled back: NOTHING was deleted.
+        assert!(get_project(&conn, &p.id).unwrap().is_some(), "project must survive");
+        assert!(get_session(&conn, &s.id).unwrap().is_some(), "sessions must survive");
+        assert!(
+            !super::super::get_cost_events(&conn, None, None, None)
+                .unwrap()
+                .is_empty(),
+            "cost events must survive"
+        );
+        assert_eq!(
+            super::super::list_chat_sessions(&conn).unwrap().len(),
+            1,
+            "chat sessions must survive"
+        );
     }
 
     #[test]

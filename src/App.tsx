@@ -32,8 +32,12 @@ import { ChatView } from "./components/chat/ChatView";
 import { ChatSelectionToolbar } from "./components/chat/ChatSelectionToolbar";
 // In-app JS document engine (generate_document language:"javascript"): must
 // be mounted wherever a chat can run, including the pop-out chat window.
-import { DocCodeRunner } from "./components/chat/DocCodeRunner";
-import { DocDesignRunner } from "./components/chat/DocDesignRunner";
+// PERF (2026-09-06): the document-generation runners are only needed while a
+// docgen/plan_document turn is executing — lazily loaded so their import
+// graph (docdesign helpers, previously pdf.js via rasterize.ts) stays out of
+// the entry chunk.
+const DocCodeRunner = lazy(() => import("./components/chat/DocCodeRunner").then((m) => ({ default: m.DocCodeRunner })));
+const DocDesignRunner = lazy(() => import("./components/chat/DocDesignRunner").then((m) => ({ default: m.DocDesignRunner })));
 import { FolderNotch, GitHubNotch } from "./components/chat/ChatComposer";
 import { useChatStore } from "./state/chat";
 import { GitToolsSidebar } from "./components/chat/GitToolsSidebar";
@@ -279,8 +283,10 @@ export default function App() {
   if (popout?.kind === "chat") {
     return (
       <div className="popout-chat-root">
-        <DocCodeRunner />
-        <DocDesignRunner />
+        <Suspense fallback={null}>
+          <DocCodeRunner />
+          <DocDesignRunner />
+        </Suspense>
         <ChatSelectionToolbar />
         <ChatView popoutSessionId={popout.session ?? undefined} />
       </div>
@@ -289,8 +295,10 @@ export default function App() {
 
   return (
     <div className="app">
-      <DocCodeRunner />
-      <DocDesignRunner />
+      <Suspense fallback={null}>
+        <DocCodeRunner />
+        <DocDesignRunner />
+      </Suspense>
       <ChatSelectionToolbar />
       <ToastHost />
       {/* Kept mounted so collapse/expand animates as a width slide instead

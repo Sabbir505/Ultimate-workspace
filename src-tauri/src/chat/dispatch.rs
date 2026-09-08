@@ -664,11 +664,50 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
             .unwrap_or_else(|e| format!("shell task failed: {e}"))
         }
         TASK => {
-            // Spawn a streaming sub-turn using the SAME provider+model as this
-            // session. The subagent's prompt is its only input; its output is
-            // streamed token-by-token to the Agents panel via chat:subagent-tokens,
-            // and the full text is returned as the tool result.
-            run_task_subagent(app, sid, args, &tasks).await
+            // Two modes (June-2026 Claude Code pattern). Foreground (default):
+            // the subagent runs to completion inside this tool call and the
+            // full text is the tool result — the turn waits. Background
+            // (`background: true`): a task id returns immediately; the
+            // subagent still streams to the Agents panel via
+            // chat:subagent-tokens, the main conversation keeps working, and
+            // the result lands in get_task_status (pollable) with the entry
+            // finalized to Completed/Failed/Cancelled.
+            let background = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !background {
+                return run_task_subagent(app, sid, args, &tasks).await;
+            }
+            let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if prompt.is_empty() {
+                "Error: Task requires a non-empty \"prompt\".".to_string()
+            } else {
+                let description = args
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("subagent")
+                    .trim()
+                    .to_string();
+                let mut sub = tasks.0.register_subagent(&description);
+                let task_id = sub.task_id.clone();
+                let app2 = app.clone();
+                let sid2 = sid.to_string();
+                let args2 = args.clone();
+                tauri::async_runtime::spawn(async move {
+                    let tasks_state = app2.state::<crate::TaskState>();
+                    tokio::select! {
+                        out = run_task_subagent(&app2, &sid2, &args2, &tasks_state) => {
+                            let failed = out.starts_with("Error");
+                            let tail = crate::util::truncate_chars(&out, 400);
+                            sub.finish(Some(&app2), &sid2, failed, tail);
+                        }
+                        _ = &mut sub.cancel_rx => {
+                            sub.mark_cancelled(Some(&app2), &sid2);
+                        }
+                    }
+                });
+                format!(
+                    "Started background subagent (task {task_id}). Continue the main conversation now;                      poll get_task_status with task_id=\"{task_id}\" (state: running → completed/failed),                      and surface the final message to the user when it finishes. cancel_task aborts it."
+                )
+            }
         }
         other => format!("Error: unknown system tool \"{other}\"."),
     }
@@ -1593,6 +1632,17 @@ async fn run_attach_tool(
         if let Some(slot) = mgr.late_attach_slot(sid) {
             slot.lock().mcp.extend(entries);
         }
+        // E-9a: paired clear for the status above — an attach-only tool round
+        // streams no model tokens, so the first-token clear never fires and
+        // the pill used to stick until the turn ended.
+        let _ = app.emit(
+            "chat:status",
+            crate::types::ChatStatusPayload {
+                chat_session_id: sid.to_string(),
+                reason: String::new(),
+                message: String::new(),
+            },
+        );
         // No DB row: the attach lives only in this turn's late-attach slot,
         // so tool discovery never leaks into the session's pinned set.
         format!("Attached {display} ({n} tools): {listing}")
@@ -1621,6 +1671,15 @@ async fn run_attach_tool(
         if let Some(slot) = mgr.late_attach_slot(sid) {
             slot.lock().connectors.push(att);
         }
+        // E-9a: paired clear (see the MCP branch).
+        let _ = app.emit(
+            "chat:status",
+            crate::types::ChatStatusPayload {
+                chat_session_id: sid.to_string(),
+                reason: String::new(),
+                message: String::new(),
+            },
+        );
         // No DB row — same turn-scoping as the MCP branch above: discovery
         // attaches must not pin chips into the composer.
         format!("Attached {display} ({n} tools): {listing}")
@@ -1768,6 +1827,12 @@ pub(crate) async fn run_tool(
     // the schema; a disabled feature returns a clear error to the model.
     if tools::is_memory_tool(name) {
         return run_memory_tool(app, sid, name, args).await;
+    }
+
+    // TOTP (2FA) code generation: the seed stays in the keychain / password
+    // manager — this handler returns only the current code. Read-only.
+    if name == tools::TOTP_CODE {
+        return run_totp_tool(app, sid, args).await;
     }
 
     // Connector-originated tools (OAuth-backed remote MCP tools, e.g. Notion).
@@ -1975,8 +2040,12 @@ async fn run_browser_tool(
     artifacts_dir: &std::path::Path,
     sid: &str,
 ) -> Option<String> {
-    use tools::{BROWSER_CLICK, BROWSER_READ, BROWSER_SCREENSHOT, BROWSER_SCROLL, BROWSER_TYPE};
-    if !matches!(name, BROWSER_READ | BROWSER_CLICK | BROWSER_TYPE | BROWSER_SCROLL | BROWSER_SCREENSHOT) {
+    use tools::{BROWSER_CLICK, BROWSER_EXTRACT, BROWSER_OBSERVE, BROWSER_READ, BROWSER_SCREENSHOT, BROWSER_SCROLL, BROWSER_TYPE};
+    if !matches!(
+        name,
+        BROWSER_READ | BROWSER_CLICK | BROWSER_TYPE | BROWSER_SCROLL | BROWSER_SCREENSHOT
+            | BROWSER_OBSERVE | BROWSER_EXTRACT
+    ) {
         return None;
     }
     // Surface the Browser tab so the user can watch the agent work (same
@@ -2057,6 +2126,25 @@ async fn run_browser_tool(
         BROWSER_SCROLL => {
             let dy = args.get("amount").and_then(|v| v.as_i64()).unwrap_or(600);
             mgr.scroll_by(dy).await
+        }
+        BROWSER_OBSERVE => mgr.observe_active().await,
+        BROWSER_EXTRACT => {
+            let prompt = args
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if prompt.is_empty() {
+                Err("browser_extract requires a non-empty \"prompt\" (what to look for).".to_string())
+            } else {
+                let max_chars = args
+                    .get("max_chars")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2500)
+                    .clamp(200, 20_000) as usize;
+                mgr.extract_active(&prompt, max_chars).await
+            }
         }
         _ => unreachable!("guarded by matches! above"),
     };
@@ -2552,5 +2640,135 @@ async fn run_memory_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
         tools::MEMORY_RECALL => crate::memory::tools_impl::memory_recall(app, args),
         tools::MEMORY_FORGET => crate::memory::tools_impl::memory_forget(app, args),
         _ => format!("Error: unknown memory tool {name}"),
+    }
+}
+
+/// `totp_code` — RFC 6238 code generation for 2FA flows (chat/totp.rs).
+/// Three seed sources, keyed by `args.source`:
+/// - `keyring` (default): the project's OS-keychain secret store. Requires a
+///   project-bound session (the store is per-project) and a key the user
+///   saved via Settings → project → Secrets holding the Base32 seed or a full
+///   `otpauth://` URI.
+/// - `bitwarden`: shells `bw get totp <item>` with the user's own environment
+///   (their BW_SESSION unlocks the vault — no secret transits Relay).
+/// - `1password`: shells `op read <op://reference>` likewise.
+///
+/// The tool result contains ONLY the code + its remaining validity. Errors
+/// are agent-actionable (which setting is missing) and never echo the seed.
+async fn run_totp_tool(app: &AppHandle, sid: &str, args: &Value) -> String {
+    let key = args
+        .get("key")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    if key.is_empty() {
+        return "Error: totp_code requires 'key' (the stored seed's key or the password-manager item/reference).".to_string();
+    }
+    let source = args
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("keyring");
+
+    match source {
+        "keyring" => {
+            let project_id = {
+                let db = app.state::<crate::DbState>();
+                let conn = db.0.lock();
+                crate::db::get_chat_session(&conn, sid)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.project_id)
+            };
+            let Some(project_id) = project_id else {
+                return "Error: this chat has no project bound, and keyring seeds are stored per project. Ask the user to open the chat inside its project (or store the seed and re-bind).".to_string();
+            };
+            let seed = {
+                let db = app.state::<crate::DbState>();
+                let conn = db.0.lock();
+                crate::secrets::get_secret(&conn, &project_id, key)
+            };
+            let Some(seed) = seed else {
+                return format!(
+                    "Error: no project secret keyed {key:?}. The user can add it in the project's settings (Secrets) — the value should be the TOTP Base32 seed or the full otpauth:// URI from the 2FA QR code."
+                );
+            };
+            let digits = args.get("digits").and_then(|v| v.as_u64()).unwrap_or(6) as u32;
+            let period = args.get("period").and_then(|v| v.as_u64()).unwrap_or(30);
+            let cfg = match crate::chat::totp::TotpConfig::from_seed(&seed, digits, period) {
+                Ok(c) => c,
+                Err(e) => return format!("Error: stored seed for {key:?} is not usable: {e}"),
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            match crate::chat::totp::generate(&cfg, now) {
+                Ok(code) => format!(
+                    "{} (valid for ~{}s, rotates every {}s)",
+                    code,
+                    crate::chat::totp::valid_for(&cfg, now),
+                    cfg.period
+                ),
+                Err(e) => format!("Error: {e}"),
+            }
+        }
+        "bitwarden" => {
+            // `bw get totp <item>` prints the current code. The user's own
+            // environment (BW_SESSION) unlocks the vault; without a session
+            // bw fails with its own message, surfaced verbatim.
+            match tokio::process::Command::new("bw")
+                .args(["get", "totp", key])
+                .output()
+                .await
+            {
+                Ok(out) if out.status.success() => {
+                    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if code.is_empty() {
+                        format!("Error: bw returned an empty code for {key:?}.")
+                    } else {
+                        code
+                    }
+                }
+                Ok(out) => {
+                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    format!(
+                        "Error: Bitwarden CLI failed for {key:?}: {}. Is the bw CLI installed and the vault unlocked (BW_SESSION)?",
+                        if err.is_empty() { "unknown error" } else { &err }
+                    )
+                }
+                Err(e) => format!(
+                    "Error: could not run the Bitwarden CLI (`bw`): {e}. Install it or use source 'keyring'."
+                ),
+            }
+        }
+        "1password" => {
+            // `op read <op://...>` with a one-time-code reference prints the
+            // current code, e.g. op://Private/GitHub/one-time-code?attribute=totp
+            if !key.starts_with("op://") {
+                return "Error: for source '1password', 'key' must be a full op:// secret reference (e.g. op://Private/GitHub/one-time-code).".to_string();
+            }
+            match tokio::process::Command::new("op").args(["read", key]).output().await {
+                Ok(out) if out.status.success() => {
+                    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if code.is_empty() {
+                        format!("Error: op returned an empty code for {key:?}.")
+                    } else {
+                        code
+                    }
+                }
+                Ok(out) => {
+                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    format!(
+                        "Error: 1Password CLI failed: {}. Is the op CLI installed and signed in?",
+                        if err.is_empty() { "unknown error" } else { &err }
+                    )
+                }
+                Err(e) => format!(
+                    "Error: could not run the 1Password CLI (`op`): {e}. Install it or use source 'keyring'."
+                ),
+            }
+        }
+        other => format!("Error: unknown totp_code source {other:?} — use 'keyring', 'bitwarden', or '1password'."),
     }
 }

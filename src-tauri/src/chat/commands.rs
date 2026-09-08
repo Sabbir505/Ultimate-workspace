@@ -1878,7 +1878,8 @@ pub async fn send_chat_message(
     // folders, find the file whose name/filename matches the session's model,
     // and (re)spawn llama-server so the send proceeds against a live endpoint.
     // A chat:status notice keeps the "Loading local model…" indicator up while
-    // the sidecar warms; it clears on the first token / done / error.
+    // the sidecar warms; it clears on the first token / done / error, and
+    // (E-9a) when the warmup itself finishes — whichever comes first.
     if provider_str == "local_gguf" {
         let local_state = app
             .try_state::<crate::chat::local_models::LocalModelState>()
@@ -2041,6 +2042,18 @@ pub async fn send_chat_message(
                             }
                             Err(e) => {
                                 eprintln!("[local-warmup] start FAILED: {e}");
+            // E-9a: paired clear for the "local_model_loading" status — the
+            // warmup finished (one way or another) and the first token may be
+            // seconds away or never come if the turn fails elsewhere; the
+            // pill must not outlive this block.
+            let _ = app.emit(
+                "chat:status",
+                crate::types::ChatStatusPayload {
+                    chat_session_id: chat_session_id.clone(),
+                    reason: String::new(),
+                    message: String::new(),
+                },
+            );
                                 return Err(format!(
                                     "The local model \"{want}\" could not be started after restart: {e}"
                                 ));
@@ -2051,6 +2064,18 @@ pub async fn send_chat_message(
                     }
                 }
             }
+            // E-9a: paired clear for the "local_model_loading" status — the
+            // warmup finished (one way or another) and the first token may be
+            // seconds away or never come if the turn fails elsewhere; the
+            // pill must not outlive this block.
+            let _ = app.emit(
+                "chat:status",
+                crate::types::ChatStatusPayload {
+                    chat_session_id: chat_session_id.clone(),
+                    reason: String::new(),
+                    message: String::new(),
+                },
+            );
         }
     }
 

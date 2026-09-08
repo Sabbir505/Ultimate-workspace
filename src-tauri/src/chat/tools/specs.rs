@@ -46,6 +46,8 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         // the model can't call what it can't see). No params: it shoots the
         // pane's current page and returns the artifact path.
         openai_fn(BROWSER_SCREENSHOT, BROWSER_SCREENSHOT_DESC, no_parameters()),
+        openai_fn(BROWSER_OBSERVE, BROWSER_OBSERVE_DESC, no_parameters()),
+        openai_fn(BROWSER_EXTRACT, BROWSER_EXTRACT_DESC, browser_extract_parameters()),
         // Research source ledger — always on (state tools, not gated by permission mode).
         openai_fn(ADD_SOURCE_NOTE, ADD_SOURCE_NOTE_DESC, add_source_note_parameters()),
         openai_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, get_source_ledger_parameters()),
@@ -72,6 +74,9 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         openai_fn(MEMORY_RECALL, MEMORY_RECALL_DESC, memory_recall_parameters()),
         openai_fn(MEMORY_FORGET, MEMORY_FORGET_DESC, memory_forget_parameters()),
     ]);
+    // TOTP 2FA codes — read-only (the seed stays in the keychain / password
+    // manager; only the code is returned), always registered.
+    specs.push(openai_fn(TOTP_CODE, TOTP_CODE_DESC, totp_code_parameters()));
     // Local-docs search — only exposed when the embedding sidecar is up and at
     // least one corpus is indexed (computed per turn into ToolCaps.local_docs).
     if caps.local_docs {
@@ -218,6 +223,8 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         anthropic_fn(BROWSER_SCROLL, BROWSER_SCROLL_DESC, browser_scroll_parameters()),
         // Mirror of the OpenAI block's screenshot fix (schema drift).
         anthropic_fn(BROWSER_SCREENSHOT, BROWSER_SCREENSHOT_DESC, no_parameters()),
+        anthropic_fn(BROWSER_OBSERVE, BROWSER_OBSERVE_DESC, no_parameters()),
+        anthropic_fn(BROWSER_EXTRACT, BROWSER_EXTRACT_DESC, browser_extract_parameters()),
         // Research source ledger — always on (state tools, not gated by permission mode).
         anthropic_fn(ADD_SOURCE_NOTE, ADD_SOURCE_NOTE_DESC, add_source_note_parameters()),
         anthropic_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, get_source_ledger_parameters()),
@@ -240,6 +247,7 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         anthropic_fn(MEMORY_RECALL, MEMORY_RECALL_DESC, memory_recall_parameters()),
         anthropic_fn(MEMORY_FORGET, MEMORY_FORGET_DESC, memory_forget_parameters()),
     ]);
+    specs.push(anthropic_fn(TOTP_CODE, TOTP_CODE_DESC, totp_code_parameters()));
     if caps.local_docs {
         specs.push(anthropic_fn(SEARCH_DOCS, SEARCH_DOCS_DESC, search_docs_parameters()));
     }
@@ -532,6 +540,33 @@ fn memory_save_parameters() -> Value {
     })
 }
 
+fn totp_code_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["key"],
+        "properties": {
+            "key": {
+                "type": "string",
+                "description": "Which seed to use: the project secret key                     (source 'keyring', default), a Bitwarden item name/id                     (source 'bitwarden'), or a full op:// secret reference                     (source '1password')."
+            },
+            "source": {
+                "type": "string",
+                "enum": ["keyring", "bitwarden", "1password"],
+                "description": "Where the seed lives. Default 'keyring'                     (project secrets). 'bitwarden' shells to `bw get totp`;                     '1password' shells to `op read`."
+            },
+            "digits": {
+                "type": "integer",
+                "enum": [6, 8],
+                "description": "Code length for keyring seeds. Default 6;                     ignored for CLI sources (they return the code directly)."
+            },
+            "period": {
+                "type": "integer",
+                "description": "Rotation period in seconds for keyring seeds.                     Default 30."
+            },
+        },
+    })
+}
+
 fn memory_recall_parameters() -> Value {
     json!({
         "type": "object",
@@ -565,6 +600,23 @@ fn memory_forget_parameters() -> Value {
             "memory_id": {
                 "type": "string",
                 "description": "The memory id (from memory_recall) to retire."
+            },
+        },
+    })
+}
+
+fn browser_extract_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["prompt"],
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "What to look for on the page. Keywords score the page's sections (e.g. 'pricing tiers', 'return policy', 'rate limits')."
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "Cap on returned text. Default 2500, max 20000.",
             },
         },
     })
@@ -828,6 +880,10 @@ fn task_parameters() -> Value {
                 "type": "string",
                 "description": "Role label for the panel. Use 'explore' for codebase browsing, 'edit' for generating code changes, or any other concise label.",
                 "enum": ["explore", "edit", "analyze", "research", "write", "test", "refactor"],
+            },
+            "background": {
+                "type": "boolean",
+                "description": "Run WITHOUT blocking the main conversation.                     Returns a task id immediately; poll get_task_status with it                     (the result message lands there when the subagent finishes)                     and cancel_task to abort. Prefer this for anything long                     (deep research, big explorations) so the main turn keeps                     making progress — Claude-Code-style background delegation."
             },
         },
         "required": ["description", "prompt", "subagent_type"],

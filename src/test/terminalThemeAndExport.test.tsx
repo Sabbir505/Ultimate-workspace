@@ -117,6 +117,7 @@ const PANE: Pane = {
     spawn: { type: "agent", sessionId: "sess-1" },
     exited: false,
     exitCode: null,
+    crashed: false,
   },
 };
 

@@ -4,11 +4,27 @@
 //   - text-outside-page (real overflow, measured against the rendered page box)
 //   - blank / near-empty pages (widow content, broken pagination)
 //   - page count (compared against expectations by the caller)
-import * as pdfjs from "pdfjs-dist";
-import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import type { Issue } from "./ir";
 
-pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+// PERF (2026-09-06): pdf.js is ~830 KB of source and was a STATIC import here,
+// which pulled it through DocDesignRunner into the app ENTRY chunk (the single
+// biggest cause of the 459 KB -> 1,179 KB entry regression). It is now loaded
+// on first probe — the only consumer — and cached for the session.
+type PdfJs = typeof import("pdfjs-dist");
+let pdfjsPromise: Promise<PdfJs> | null = null;
+
+async function loadPdfjs(): Promise<PdfJs> {
+  if (!pdfjsPromise) {
+    pdfjsPromise = Promise.all([
+      import("pdfjs-dist"),
+      import("pdfjs-dist/build/pdf.worker.min.mjs?url"),
+    ]).then(([mod, worker]) => {
+      mod.GlobalWorkerOptions.workerSrc = worker.default;
+      return mod;
+    });
+  }
+  return pdfjsPromise;
+}
 
 export interface ProbeResult {
   issues: Issue[];
@@ -22,6 +38,7 @@ const OUTSIDE_TOLERANCE_PX = 4;
  *  failure degrades to a single warning issue, never an error. */
 export async function probePdf(data: Uint8Array, kind: "doc" | "deck"): Promise<ProbeResult> {
   try {
+    const pdfjs = await loadPdfjs();
     const pdf = await pdfjs.getDocument({ data: sliceCopy(data) }).promise;
     const issues: Issue[] = [];
     const pageCount = pdf.numPages;

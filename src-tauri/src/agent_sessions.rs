@@ -67,7 +67,13 @@ use crate::DbState;
 pub struct AgentSessionState(pub Arc<AgentSessionManager>);
 
 pub struct AgentSessionManager {
-    sessions: Mutex<HashMap<String, AgentChild>>,
+    /// B-8: the OUTER map lock is held only for map insert/remove/lookup;
+    /// each entry's INNER lock covers that session's (potentially slow) turn
+    /// setup — primer build, DB writes, bundle file I/O, checkpoint git
+    /// snapshot, process spawn/wait-ready. Holding the global lock across
+    /// all of that used to freeze cancel / permission-mode / remove for
+    /// EVERY session behind one slow send.
+    sessions: Mutex<HashMap<String, Arc<Mutex<AgentChild>>>>,
 }
 
 struct AgentChild {
@@ -175,39 +181,48 @@ impl AgentSessionManager {
     ) -> Result<(), String> {
         // Poison-recoverable: a panic in a prior send must not wedge every
         // future send behind a permanently-poisoned lock.
-        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = sessions
-            .entry(chat_session_id.to_string())
-            .or_insert_with(|| {
-                // Restore a previously captured CLI session id (persisted by
-                // the reader thread at end of turn) so conversation context
-                // survives app restarts, not just cancels.
-                let stored = {
-                    let conn = db.0.lock();
-                    crate::db::get_setting(&conn, &cli_session_key(harness, chat_session_id))
-                        .ok()
-                        .flatten()
-                };
-                AgentChild {
-                    harness: harness.to_string(),
-                    model: model.to_string(),
-                    child: None,
-                    spawned_model: None,
-                    spawned_mode: None,
-                    cli_session_id: Arc::new(Mutex::new(stored)),
-                    turn_in_flight: Arc::new(AtomicBool::new(false)),
-                    reader_alive: Arc::new(AtomicBool::new(false)),
-                    proc_generation: Arc::new(AtomicU64::new(0)),
-                    cancelled: Arc::new(AtomicBool::new(false)),
-                    stdin: Arc::new(Mutex::new(None)),
-                    acp_pending: Arc::new(Mutex::new(None)),
-                    acp_request_id: Arc::new(Mutex::new(None)),
-                    oc_base_url: None,
-                    oc_full: Arc::new(Mutex::new(String::new())),
-                    oc_in_think: Arc::new(Mutex::new(false)),
-                    oc_last_event_ms: Arc::new(AtomicU64::new(0)),
-                }
-            });
+        // B-8: the global map lock is held ONLY for the lookup/insert below;
+        // everything after runs under the PER-SESSION lock, so a slow setup
+        // (git snapshot, harness spawn, wait-ready) for one chat no longer
+        // blocks cancel/remove/permission-mode for every other chat.
+        let entry = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::clone(
+                sessions
+                    .entry(chat_session_id.to_string())
+                    .or_insert_with(|| {
+                    // Restore a previously captured CLI session id (persisted by
+                    // the reader thread at end of turn) so conversation context
+                    // survives app restarts, not just cancels.
+                    let stored = {
+                        let conn = db.0.lock();
+                        crate::db::get_setting(&conn, &cli_session_key(harness, chat_session_id))
+                            .ok()
+                            .flatten()
+                    };
+                    Arc::new(Mutex::new(AgentChild {
+                        harness: harness.to_string(),
+                        model: model.to_string(),
+                        child: None,
+                        spawned_model: None,
+                        spawned_mode: None,
+                        cli_session_id: Arc::new(Mutex::new(stored)),
+                        turn_in_flight: Arc::new(AtomicBool::new(false)),
+                        reader_alive: Arc::new(AtomicBool::new(false)),
+                        proc_generation: Arc::new(AtomicU64::new(0)),
+                        cancelled: Arc::new(AtomicBool::new(false)),
+                        stdin: Arc::new(Mutex::new(None)),
+                        acp_pending: Arc::new(Mutex::new(None)),
+                        acp_request_id: Arc::new(Mutex::new(None)),
+                        oc_base_url: None,
+                        oc_full: Arc::new(Mutex::new(String::new())),
+                        oc_in_think: Arc::new(Mutex::new(false)),
+                        oc_last_event_ms: Arc::new(AtomicU64::new(0)),
+                    }))
+                    }),
+            )
+        };
+        let mut entry = entry.lock().unwrap_or_else(|e| e.into_inner());
         // Check turn-in-flight BEFORE persisting the user message, so a
         // rejected send doesn't leave an orphan user message in the DB
         // with no assistant reply (which would survive restarts). (E-4:
@@ -337,6 +352,9 @@ impl AgentSessionManager {
             crate::checkpoints::maybe_baseline(Some(app), &conn, chat_session_id, &dir);
         }
 
+        // `entry` is now a MutexGuard (per-session lock — B-8); the turn
+        // helpers take `&mut AgentChild`.
+        let entry = &mut *entry;
         match harness {
             "claude_code" => send_claude_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, connectors),
             "kimi_code" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Kimi, connectors),
@@ -366,8 +384,15 @@ impl AgentSessionManager {
         // E-6: poison recovery like `send` — the panic that poisoned the lock
         // is exactly when children most need to be killed, so teardown must
         // not silently no-op behind `if let Ok(...)`.
-        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = sessions.get_mut(chat_session_id) {
+        // B-8: clone the entry Arc out, drop the global map lock, then take
+        // the per-session lock — teardown for one session must not queue
+        // behind the global map while another chat's send runs its setup.
+        let entry = {
+            let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sessions.get(chat_session_id).cloned()
+        };
+        if let Some(entry) = entry {
+            let mut entry = entry.lock().unwrap_or_else(|e| e.into_inner());
             entry.cancelled.store(true, Ordering::SeqCst);
             // ACP: best-effort graceful cancel — notify the agent which
             // request is being cancelled, then kill the tree. The next send
@@ -426,16 +451,22 @@ impl AgentSessionManager {
         if !WIRE_MODES.contains(&mode_label) {
             return false;
         }
-        // Best-effort live-apply — NEVER wait on the global `sessions` mutex
-        // here. This runs from sync commands on the MAIN thread; a send
-        // holds `sessions` for its whole (potentially slow) setup, and a
-        // blocking wait froze the entire window (audit B-8 class). Contended
-        // → false: the deterministic mode-mismatch respawn in
-        // `send_claude_turn` applies the change on the next send anyway.
-        let Ok(sessions) = self.sessions.try_lock() else {
+        // Best-effort live-apply — NEVER block the calling thread. This runs
+        // from sync commands on the MAIN thread; contended locks → false: the
+        // deterministic mode-mismatch respawn in `send_claude_turn` applies
+        // the change on the next send anyway. B-8 moved a send's slow setup
+        // under the PER-SESSION lock, so a miss here now only means "that
+        // one session is mid-turn" (the global map lock is map-ops only).
+        let entry = {
+            let Ok(sessions) = self.sessions.try_lock() else {
+                return false;
+            };
+            sessions.get(chat_session_id).cloned()
+        };
+        let Some(entry) = entry else {
             return false;
         };
-        let Some(entry) = sessions.get(chat_session_id) else {
+        let Ok(entry) = entry.try_lock() else {
             return false;
         };
         if entry.harness != "claude_code" || entry.child.is_none() {
@@ -466,8 +497,13 @@ impl AgentSessionManager {
     pub fn remove_session(&self, chat_session_id: &str) {
         // E-6: poison recovery, same as send/cancel — the child tree must be
         // killed even (especially) after a panic poisoned the lock.
-        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(mut entry) = sessions.remove(chat_session_id) {
+        // B-8: map lock for the remove, per-session lock for the teardown.
+        let entry = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sessions.remove(chat_session_id)
+        };
+        if let Some(entry) = entry {
+            let mut entry = entry.lock().unwrap_or_else(|e| e.into_inner());
             entry.cancelled.store(true, Ordering::SeqCst);
             if let Some(mut child) = entry.child.take() {
                 kill_child_tree(&mut child);
@@ -489,8 +525,15 @@ impl AgentSessionManager {
     pub fn kill_all(&self) {
         // E-6: poison recovery, same as send/cancel — shutdown must kill
         // every child even when a panic poisoned the lock.
-        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        for (_, mut c) in sessions.drain() {
+        // B-8: drain under the map lock, then take each entry's per-session
+        // lock for the kill. A session whose send is mid-setup delays only
+        // its own kill (bounded by that setup), not every other session's.
+        let drained: Vec<Arc<Mutex<AgentChild>>> = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sessions.drain().map(|(_, entry)| entry).collect()
+        };
+        for entry in drained {
+            let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(mut child) = c.child.take() {
                 kill_child_tree(&mut child);
             }
@@ -517,6 +560,22 @@ fn register_one_shot_child(child: &Arc<Mutex<Child>>) -> Option<u32> {
 fn unregister_one_shot_child(pid: u32) {
     if let Ok(mut map) = ONE_SHOT_CHILDREN.lock() {
         map.remove(&pid);
+    }
+}
+
+/// M2 (Round 3): RAII counterpart to `register_one_shot_child`. `run_one_shot`
+/// used to unregister at exactly ONE success point, so any early `?` (stdout
+/// lock, missing stdout pipe) or unwind between registration and reap leaked
+/// the map entry — the Arc pinned the child's OS handle for the app's
+/// lifetime and the exit-handler kill map grew monotonically. Holding the
+/// pid in this guard makes every exit path unregister.
+struct OneShotGuard(Option<u32>);
+
+impl Drop for OneShotGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            unregister_one_shot_child(pid);
+        }
     }
 }
 
@@ -5086,7 +5145,7 @@ pub fn run_one_shot(
     // an automation child is a full skip-permissions CLI tree that would
     // otherwise keep running after the app quits.
     let child = Arc::new(Mutex::new(child));
-    let one_shot_pid = register_one_shot_child(&child);
+    let one_shot_guard = OneShotGuard(register_one_shot_child(&child));
     let stdout = {
         let mut guard = child.lock().map_err(|e| e.to_string())?;
         guard
@@ -5168,9 +5227,7 @@ pub fn run_one_shot(
         std::thread::sleep(Duration::from_millis(100));
     };
     let _ = reader.join();
-    if let Some(pid) = one_shot_pid {
-        unregister_one_shot_child(pid);
-    }
+    // M2: `one_shot_guard` unregisters on drop — this return included.
     match wait {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(format!("{} exited with {status}", spec.program)),

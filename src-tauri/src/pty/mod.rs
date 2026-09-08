@@ -29,7 +29,34 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db;
 use crate::harness_adapters::{CommandSpec, HarnessAdapter, UsageInfo};
-use crate::types::{BrowserUrlDetectedEvent, CostUpdatedEvent, PtyExitEvent, PtyOutputEvent, PtyStateEvent, SessionHarnessIdEvent};
+use crate::types::{BrowserUrlDetectedEvent, CostUpdatedEvent, PtyCrashedEvent, PtyExitEvent, PtyOutputEvent, PtyStateEvent, SessionHarnessIdEvent};
+
+/// Downcast a panic payload to its message. Panics carry `&str` or `String`;
+/// anything else (e.g. a custom payload) gets a generic description.
+fn panic_payload_message(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = panic.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+/// Report a pane IO-thread panic to the frontend (`pty:crashed`) and the log.
+/// The pane's process itself is untouched — Resume on the crashed pane
+/// respawns it — but until then every IO path for the pane is dead.
+fn emit_pane_crashed(app: &AppHandle, pane_id: &str, thread: &str, reason: &str) {
+    eprintln!("pty pane {pane_id} {thread} thread panicked: {reason}");
+    let _ = app.emit(
+        "pty:crashed",
+        PtyCrashedEvent {
+            pane_id: pane_id.to_string(),
+            thread: thread.to_string(),
+            reason: reason.to_string(),
+        },
+    );
+}
 
 /// True only for URLs that point at a local dev server / preview, which are the
 /// only URLs allowed to auto-navigate the built-in browser pane. This keeps
@@ -720,14 +747,31 @@ impl PtyManager {
         // Writer thread: write_pty commands land on this channel.
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         *pane.writer_tx.lock() = Some(tx);
-        thread::spawn(move || {
-            let mut writer = writer;
-            while let Ok(data) = rx.recv() {
-                if writer.write_all(&data).and_then(|_| writer.flush()).is_err() {
-                    break; // pty gone; thread exits when the pane is dropped
+        // Round-3 M1: an unwound panic here used to kill the thread silently —
+        // the pane kept looking alive while every write vanished into a closed
+        // channel. Catch the unwind and surface `pty:crashed` instead.
+        {
+            let pane = Arc::clone(&pane);
+            let app = self.app.clone();
+            thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    let mut writer = writer;
+                    while let Ok(data) = rx.recv() {
+                        if writer.write_all(&data).and_then(|_| writer.flush()).is_err() {
+                            break; // pty gone; thread exits when the pane is dropped
+                        }
+                    }
+                }));
+                if let Err(panic) = result {
+                    emit_pane_crashed(
+                        &app,
+                        &pane.id,
+                        "writer",
+                        &panic_payload_message(panic.as_ref()),
+                    );
                 }
-            }
-        });
+            });
+        }
 
         // Reader thread: raw bytes -> frontend (coalesced); stripped bytes ->
         // transcript and scraping. Two key perf fixes vs the naive read loop:
@@ -754,7 +798,17 @@ impl PtyManager {
                 r#"https?://[^\s<>"'()\]]+"#
             ).ok();
             thread::spawn(move || {
-                let mut buf = [0u8; 8192];
+                // Round-3 M1: the flush path locks several mutexes per frame
+                // (output_channel, screen, transcript); a poison panic in any
+                // of them used to kill this thread silently and the pane froze
+                // with no exit event. Surface it via `pty:crashed` instead.
+                // Clones for the crash reporter — the body below moves the
+                // originals into the catch_unwind closure.
+                let crash_pane = Arc::clone(&pane);
+                let crash_app = app.clone();
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                        let mut buf = [0u8; 8192];
                 let mut tail = String::new();
                 // Insertion-ordered seen-URL list: pruning must drop the
                 // OLDEST entries — a HashSet iterates in arbitrary order, so
@@ -938,6 +992,15 @@ impl PtyManager {
                             }
                         }
                     }
+                    }
+                }));
+                if let Err(panic) = result {
+                    emit_pane_crashed(
+                        &crash_app,
+                        &crash_pane.id,
+                        "reader",
+                        &panic_payload_message(panic.as_ref()),
+                    );
                 }
             });
         }
@@ -950,6 +1013,12 @@ impl PtyManager {
             let session_to_pane = Arc::clone(&self.session_to_pane);
             let panes = Arc::clone(&self.panes);
             thread::spawn(move || {
+                // Round-3 M1: this is the ONLY thread that emits `pty:exit`;
+                // if it panics the pane looks alive forever. Catch + surface.
+                let crash_pane = Arc::clone(&pane);
+                let crash_app = app.clone();
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 // Poll try_wait rather than a blocking wait: a blocking wait
                 // would hold the child lock and prevent kill_pty from getting
                 // in to terminate the process.
@@ -994,6 +1063,15 @@ impl PtyManager {
                             pane_id: pane.id.clone(),
                             code,
                         },
+                    );
+                }
+                }));
+                if let Err(panic) = result {
+                    emit_pane_crashed(
+                        &crash_app,
+                        &crash_pane.id,
+                        "waiter",
+                        &panic_payload_message(panic.as_ref()),
                     );
                 }
             });

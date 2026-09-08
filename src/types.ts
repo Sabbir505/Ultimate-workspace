@@ -184,6 +184,11 @@ export interface PtyExitPayload {
   paneId: string;
   code: number | null;
 }
+export interface PtyCrashedPayload {
+  paneId: string;
+  thread: string;
+  reason: string;
+}
 export interface PtyStatePayload {
   paneId: string;
   state: PaneState;

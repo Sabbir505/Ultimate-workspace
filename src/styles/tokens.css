@@ -21,8 +21,14 @@
    Switching data-theme on <html> swaps the entire palette in one frame. */
 
 :root {
-  --font-ui: "Space Grotesk", -apple-system, "Segoe UI", system-ui, sans-serif;
-  --font-mono: "Space Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  /* Script fallbacks after the Latin display fonts: Space Grotesk / Space
+     Mono carry no Bengali, Arabic, Thai or CJK glyphs, so without these the
+     webview picks an arbitrary per-character fallback and mixed-language
+     text renders with mismatched faces and broken line heights. Nirmala UI
+     covers Indic scripts (Bengali, Devanagari, Tamil…), Leelawadee UI Thai,
+     Segoe UI Arabic/Hebrew, and the YaHei/Yu Gothic/Malgun trio CJK. */
+  --font-ui: "Space Grotesk", -apple-system, "Segoe UI", "Nirmala UI", "Leelawadee UI", "Microsoft YaHei", "Yu Gothic UI", "Malgun Gothic", system-ui, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, "Nirmala UI", "Microsoft YaHei", "Yu Gothic UI", "Malgun Gothic", monospace;
 
   /* Pane state colors (Â§7.3 / legend Â§12.4) â€” neutral, no blue/purple.
      working = Cursor green, waiting = Cursor warm gold, idle/diff = neutral

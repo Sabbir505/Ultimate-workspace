@@ -12,7 +12,7 @@ import { useArtifactsStore } from "../../state/artifacts";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { Modal } from "../common/Modal";
-import { readArtifactPreview, type ArtifactPreview, type ArtifactRecord } from "../../lib/ipc";
+import { readArtifactPreview, toastInfo, type ArtifactPreview, type ArtifactRecord } from "../../lib/ipc";
 import { relativeTime } from "../../lib/relativeTime";
 
 /** Kinds (the normalized preview kind returned by readArtifactPreview) whose
@@ -260,14 +260,31 @@ export function ArtifactLibrary({
   }, [open, setModalOpen]);
 
   // Open the artifact in the preview pane of the chat that produced it: switch
-  // to that session first so the pane belongs to the right conversation.
-  // useCallback so the memoized cards don't re-render on every parent render.
+  // to that session first and WAIT for the switch so the tab opens on top of
+  // the right conversation (the old fire-and-forget switch raced the tab and,
+  // when the source chat was deleted this run, silently did nothing — a dead
+  // click). useCallback so the memoized cards don't re-render on every parent
+  // render.
   const openArtifact = useCallback((a: ArtifactRecord) => {
-    if (a.chatSessionId) void selectSession(a.chatSessionId).catch(() => {});
-    setPreviewArtifact({ path: a.path, filename: a.filename });
     setActiveView("chat");
     setOpen(false);
     onClose?.();
+    void (async () => {
+      if (a.chatSessionId) {
+        try {
+          await selectSession(a.chatSessionId);
+        } catch {
+          /* fall through — the file itself is still viewable */
+        }
+        // selectSession returns silently for chats deleted this run; the
+        // active-session check catches that (and any IPC rejection) and says
+        // why no switch happened instead of leaving a dead click.
+        if (useChatStore.getState().activeChatSessionId !== a.chatSessionId) {
+          toastInfo("The chat that created this file no longer exists");
+        }
+      }
+      setPreviewArtifact({ path: a.path, filename: a.filename });
+    })();
   }, [selectSession, setPreviewArtifact, setActiveView, setOpen, onClose]);
 
   // Newest first — feels like a document recents list.

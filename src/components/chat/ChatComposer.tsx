@@ -1047,7 +1047,6 @@ export function ChatComposer({
   thinkingSupported,
   chatSessionId,
 }: Props) {
-  const [content, setContent] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   // Whether the next send should force research mode (set via the "+"
@@ -1069,6 +1068,25 @@ export function ChatComposer({
   // pane's session, not the globally active one. The prop wins — same
   // precedence the send path uses.
   const effectiveSessionId = sessionIdProp ?? activeChatSessionId;
+  // Per-session draft: each conversation keeps its own unsent text. The
+  // composer instance survives session switches (same tree position), so the
+  // old component-local useState smeared the half-written prompt into every
+  // chat you switched to. Null session (no chat yet — the first send creates
+  // one) falls back to local state; it migrates into the store on the first
+  // keystroke after the session exists.
+  const composerDraft = useChatStore((s) =>
+    effectiveSessionId ? (s.composerDrafts[effectiveSessionId] ?? "") : "",
+  );
+  const [noSessionDraft, setNoSessionDraft] = useState("");
+  const setComposerDraft = useChatStore((s) => s.setComposerDraft);
+  const content = effectiveSessionId ? composerDraft : noSessionDraft;
+  const setContent = useCallback(
+    (value: string | ((prev: string) => string)) => {
+      if (effectiveSessionId) setComposerDraft(effectiveSessionId, value);
+      else setNoSessionDraft(value);
+    },
+    [effectiveSessionId, setComposerDraft],
+  );
   // Team broadcast (roadmap #18): the broadcast action. The session LIST is
   // resolved lazily next to broadcastOpen below — PERF: a live subscription
   // to `s.sessions` re-rendered the whole composer (textarea included) on
@@ -2771,6 +2789,7 @@ export function ChatComposer({
           <textarea
             ref={textareaRef}
             className="chat-composer-textarea"
+            dir="auto"
             placeholder={
               streaming
                 ? "keep typing to queue follow-up changes"

@@ -346,7 +346,9 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
   }
   if (kind === "markdown" && text != null) {
     return (
-      <div className="chat-markdown artifact-preview-md">
+      // dir=auto — .md documents written in RTL scripts (Arabic, Hebrew…)
+      // pick their base direction from the content; Latin files unchanged.
+      <div className="chat-markdown artifact-preview-md" dir="auto">
         <MarkdownDocument text={text} />
       </div>
     );

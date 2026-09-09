@@ -151,8 +151,10 @@
   color: var(--text-dim);
 }
 .chat-session-provider svg {
-  width: 13px;
-  height: 13px;
+  /* !important beats the brand glyphs' inline width/height (16px hardcodes
+     for the picker rail) — the sidebar row wants a quieter mark. */
+  width: 12px !important;
+  height: 12px !important;
 }
 @keyframes chat-session-spin {
   to {
@@ -667,8 +669,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
   font-size: calc(13px * var(--chat-zoom, 1));
   line-height: 1.6;
   color: var(--chat-text);
-  overflow-wrap: break-word;
-  word-break: break-word;
+  /* anywhere (not the deprecated word-break: break-word): long URLs AND
+     unspaced CJK/Thai runs both wrap instead of blowing out the bubble. */
+  overflow-wrap: anywhere;
   /* body sets user-select: none to keep chrome/buttons non-selectable; let
      users highlight the actual message text with left-click-drag. */
   user-select: text;
@@ -1457,7 +1460,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-bubble-inner ul,
 .chat-bubble-inner ol {
   margin: 4px 0;
-  padding-left: 20px;
+  /* logical: the indent follows the text direction (left for LTR scripts,
+     right for RTL), so an Arabic list indents on the correct side. */
+  padding-inline-start: 20px;
 }
 .chat-bubble-inner li {
   margin-bottom: 3px;
@@ -1475,7 +1480,8 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-bubble-inner blockquote {
   margin: 8px 0;
   padding: 6px 12px;
-  border-left: 3px solid var(--accent);
+  /* logical: the quote bar sits on the reading side in RTL too. */
+  border-inline-start: 3px solid var(--accent);
   background: var(--surface-2);
   border-radius: var(--radius-xs);
   color: var(--text-dim);
@@ -1487,7 +1493,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-bubble.user .chat-bubble-inner blockquote {
   margin: 2px 0 10px;
   padding: 7px 12px;
-  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-inline-start: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
   background: color-mix(in srgb, var(--surface-2) 65%, transparent);
   border-radius: 8px;
   color: var(--text-dim);
@@ -1507,6 +1513,40 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-markdown {
   user-select: text;
   -webkit-user-select: text;
+}
+
+/* ---------- Markdown languages: RTL & mixed-direction text ----------
+   The bubble container carries dir=auto (MessageBubble/ArtifactPreviewPane),
+   which fixes the BASE direction for the whole message. Per-block
+   `unicode-bidi: plaintext` lets each paragraph/list item/table cell take
+   the direction of its OWN first strong character — so an English answer
+   with one Arabic paragraph (or an Arabic answer quoting English code) lays
+   out both correctly, and `text-align: start` puts each block on its
+   reading side. Without this, RTL text renders hard-left with scrambled
+   punctuation and stray Latin tokens jumping to the wrong edge. */
+.chat-markdown p,
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3,
+.chat-markdown h4,
+.chat-markdown h5,
+.chat-markdown h6,
+.chat-markdown li,
+.chat-markdown blockquote,
+.chat-markdown th,
+.chat-markdown td {
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+/* Code is the exception: an RTL base direction scrambles operator/bracket
+   order even when the code itself is Latin, so code blocks stay LTR. */
+.chat-code-block,
+.chat-code-block pre,
+.chat-code-block code,
+.chat-markdown pre,
+.chat-markdown-mermaid-fallback {
+  direction: ltr;
+  text-align: left;
 }
 
 /* Markdown links: --link is a dedicated high-contrast token (the gray

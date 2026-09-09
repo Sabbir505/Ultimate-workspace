@@ -1219,6 +1219,21 @@ async fn run_download(
     let mut downloaded: u64 = resume_from;
     let started = Instant::now();
     let mut last_emit = Instant::now();
+    // Tell the UI the transfer has STARTED (headers + file ready) even before
+    // the first byte lands — a slow CDN first-byte used to leave the card on
+    // "Starting…" with no progress bar at all.
+    let _ = app.emit(
+        "local-model:download:progress",
+        &DownloadProgress {
+            id: id.to_string(),
+            downloaded_bytes: downloaded,
+            total_bytes: total,
+            state: DownloadState::Downloading,
+            bytes_per_second: 0.0,
+            final_path: None,
+            error: None,
+        },
+    );
     // If we have an expected SHA, we need to verify the final blob.
     // When resuming, the hasher is primed by re-reading the prefix
     // from the partial file (identity-verified via the sidecar .meta
@@ -1236,12 +1251,24 @@ async fn run_download(
     };
 
     loop {
+        // Body-stall watchdog: headers can succeed and then the CDN can go
+        // quiet (dropped connection, hung proxy). Without this the stream
+        // future just parks forever — 0-byte .partial, no terminal event,
+        // and the UI card sits in the active state for hours.
+        let stall = tokio::time::sleep(std::time::Duration::from_secs(60));
+        tokio::pin!(stall);
         tokio::select! {
             biased;
             _ = &mut cancel_rx => {
                 drop(file);
                 let _ = fs::remove_file(partial_path).await;
                 return Err(DownloadAbort::Cancelled);
+            }
+            _ = &mut stall => {
+                drop(file);
+                return Err(DownloadAbort::Failed(
+                    "download stalled — no data received for 60s".to_string(),
+                ));
             }
             next = stream.next() => {
                 let Some(chunk) = next else { break };

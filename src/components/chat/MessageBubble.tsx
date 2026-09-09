@@ -12,6 +12,7 @@ import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef
 import { Pencil } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkBreaks from "remark-breaks";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
@@ -1503,7 +1504,11 @@ function Markdown({
         // singleDollarTextMath: false — a lone `$` pair must NOT open math:
         // "$5 and $10" used to render as KaTeX, which collapses the spaces
         // ("5and10"). `$$…$$` display math still works.
-        remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
+        remarkPlugins={[remarkGfm, remarkBreaks, [remarkMath, { singleDollarTextMath: false }]]}
+        // remarkBreaks: chat convention (ChatGPT/Discord/Slack) — a model
+        // answer written with single newlines renders those breaks instead of
+        // collapsing into one run-on paragraph. The .md FILE preview
+        // (ArtifactPreviewPane) deliberately stays standard-markdown.
         rehypePlugins={[rehypeKatex]}
         urlTransform={citeUrlTransform}
         components={{
@@ -2057,7 +2062,9 @@ function MessageBubbleInner({
           <span className="superseded-tag">previous version</span>
         )}
         {msgAttachments.length > 0 && <MessageAttachments attachments={msgAttachments} />}
-        <div className="chat-bubble-inner">
+        {/* dir=auto: an Arabic/Hebrew/Urdu answer lays out RTL and right-aligned
+            from its own first strong character; Latin text is unchanged. */}
+        <div className="chat-bubble-inner" dir="auto">
           {planSection && (
             <PlanBanner title={planSection.title} summary={planSection.summary} full={planSection.full} />
           )}
@@ -2076,6 +2083,7 @@ function MessageBubbleInner({
             <div className="message-edit-editor">
               <textarea
                 value={draftText}
+                dir="auto"
                 onChange={(e) => setDraftText(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Escape") setEditing(false);

@@ -629,7 +629,14 @@ export const useUiStore = create<UiState>((set, get) => ({
         activeTabId = next?.instanceId ?? null;
         toolPanelTab = next?.kind ?? "terminal";
       }
-      return { openTabs, activeTabId, toolPanelTab };
+      // Last tab closed → auto-collapse the pane. It used to stay open on
+      // the empty picker grid, a shell the user had to dismiss by hand.
+      return {
+        openTabs,
+        activeTabId,
+        toolPanelTab,
+        toolPanelCollapsed: openTabs.length === 0 ? true : s.toolPanelCollapsed,
+      };
     }),
   // Activate (focus) an existing tab instance.
   activateTab: (instanceId) =>

@@ -11,6 +11,7 @@ import {
   downloadArtifact,
   downloadArtifactsZip,
   readArtifactPreview,
+  toastInfo,
   type ArtifactPreview,
   type ArtifactRecord,
 } from "../../lib/ipc";
@@ -164,10 +165,25 @@ export function DocumentsLibrary() {
     );
   }, [sorted, query]);
 
+  // Same contract as the sidebar ArtifactLibrary: switch to the owning chat
+  // and WAIT for it, then open the preview — the file opens on top of the
+  // conversation that produced it, and a deleted source chat explains itself
+  // instead of looking like a dead click.
   const openArtifact = (a: ArtifactRecord) => {
-    if (a.chatSessionId) void selectSession(a.chatSessionId).catch(() => {});
-    setPreviewArtifact({ path: a.path, filename: a.filename });
     setActiveView("chat");
+    void (async () => {
+      if (a.chatSessionId) {
+        try {
+          await selectSession(a.chatSessionId);
+        } catch {
+          /* fall through — the file itself is still viewable */
+        }
+        if (useChatStore.getState().activeChatSessionId !== a.chatSessionId) {
+          toastInfo("The chat that created this file no longer exists");
+        }
+      }
+      setPreviewArtifact({ path: a.path, filename: a.filename });
+    })();
   };
 
   // Bulk export — the sidebar's small Artifacts modal has no room for this,

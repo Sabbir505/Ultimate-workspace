@@ -576,45 +576,107 @@
   justify-content: space-between;
   gap: 8px;
   flex: 0 0 auto;
-  padding: 3px 10px;
+  padding: 4px 10px;
   font-size: 11px;
   color: var(--text-dim);
   background: var(--surface-2);
   border-bottom: 1px solid var(--border);
 }
 .browser-trust-strip.active {
-  color: var(--accent, #c15f3c);
-  background: linear-gradient(90deg, rgba(193, 95, 60, 0.14), transparent 65%);
+  color: var(--text);
+  background: linear-gradient(90deg, rgba(193, 95, 60, 0.16), transparent 60%);
 }
 .browser-trust-strip.paused {
   color: #d9a13c;
 }
 .browser-trust-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+/* Status dot: neutral when idle, accent + pulse while the agent works,
+   amber while paused. Replaces the ⏸/⏺ text glyphs. */
+.trust-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  opacity: 0.55;
+  transition: background 0.2s var(--ease), opacity 0.2s var(--ease);
+}
+.browser-trust-strip.active .trust-dot {
+  background: var(--accent, #c15f3c);
+  opacity: 1;
+  animation: trust-dot-pulse 1.6s var(--ease) infinite;
+}
+.browser-trust-strip.paused .trust-dot {
+  background: #d9a13c;
+  opacity: 1;
+}
+@keyframes trust-dot-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(193, 95, 60, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(193, 95, 60, 0);
+  }
 }
 .browser-trust-controls {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   flex: none;
+}
+/* Icon buttons in the strip: uniform compact squares so the mixed lucide
+   glyphs align (they replaced bare emoji/text glyphs of differing widths). */
+.browser-trust-controls .trust-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--text-dim);
+}
+.browser-trust-controls .trust-btn:hover {
+  color: var(--text);
+  background: var(--surface-glass-2);
+}
+.browser-trust-controls .trust-btn.active {
+  color: var(--accent, #c15f3c);
+  background: rgba(193, 95, 60, 0.14);
 }
 .browser-autonomy {
   display: inline-flex;
+  gap: 2px;
+  padding: 2px;
   border: 1px solid var(--border);
   border-radius: 99px;
-  overflow: hidden;
-  margin-right: 4px;
+  background: var(--surface);
+  margin-right: 5px;
 }
 .browser-autonomy .seg {
-  padding: 1px 8px;
+  padding: 1px 9px;
   font-size: 10.5px;
+  font-weight: 600;
   border: none;
+  border-radius: 99px;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+.browser-autonomy .seg:hover {
+  color: var(--text);
 }
 .browser-autonomy .seg.active {
   background: var(--accent, #c15f3c);
@@ -725,8 +787,12 @@
   align-items: center;
   gap: 6px;
   padding: 5px 10px;
-  min-width: 0;
-  max-width: 180px;
+  /* Few tabs share the bar width (grow from a 120px basis, capped at 200px);
+     many tabs shrink but never below 56px — below that the bar scrolls.
+     min-width: 0 used to let flexbox crush tabs to a bare favicon row. */
+  flex: 1 1 120px;
+  min-width: 56px;
+  max-width: 200px;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   border: 1px solid var(--border);
   border-bottom: none;

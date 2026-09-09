@@ -115,13 +115,22 @@ const PlanCanvas = memo(function PlanCanvas({
   );
 });
 
-/** Build a display label for a tab instance. For kinds that may have multiple
- *  instances open (terminal/browser/agents), append the instance's short id so
- *  the user can tell them apart. For artifact tabs, show the filename
- *  (e.g. "component.tsx"). For singletons (files/plan) just the kind. */
-function tabLabel(inst: ToolPanelTabInstance, fallback: string): string {
+/** Build a display label for a tab instance. Artifact tabs show the filename
+ *  (e.g. "component.tsx"). Browser chips show the bound pane's active page
+ *  title so two panes are distinguishable at a glance; other kinds just use
+ *  the kind label. */
+function tabLabel(inst: ToolPanelTabInstance, fallback: string, panes: Pane[]): string {
   if (inst.kind === "artifact") {
     return inst.artifactFilename ?? "Preview";
+  }
+  if (inst.kind === "browser" && inst.paneId) {
+    const pane = panes.find((p) => p.paneId === inst.paneId);
+    if (pane && pane.data.kind === "browser") {
+      const tab = pane.data.tabs[pane.data.activeTabIndex];
+      const title = tab?.title?.trim();
+      // Long pages make the strip unreadable — cap the label; CSS ellipsizes.
+      if (title) return title.length > 24 ? `${title.slice(0, 23)}…` : title;
+    }
   }
   return fallback;
 }
@@ -181,15 +190,20 @@ export function ToolPanel() {
   // terminal slot; the rest stay mounted-but-hidden.
   const activeTerminalId =
     terminals.length > 0 ? activeTerminalPair(panes, spotlightOverride)[0] : null;
-  // Most recently used browser gets the visible browser slot.
-  const activeBrowserId =
-    browsers.length > 0
-      ? browsers.reduce((a, b) => (a.lastUsedAt > b.lastUsedAt ? a : b)).paneId
-      : null;
-
   // The active tab instance (the one whose body content is shown).
   const activeInstance = openTabs.find((t) => t.instanceId === activeTabId) ?? null;
   const activeKind: ToolPanelTab = activeInstance?.kind ?? "terminal";
+  // Most recently used browser gets the visible browser slot — UNLESS the
+  // active Browser chip is bound to a specific pane (every chip created via
+  // surfaceBrowserTab / openBrowserPane is). Binding is what makes a second
+  // "Browser" chip show ITS OWN pane instead of re-revealing the first pane
+  // with all of its tabs.
+  const activeBrowserId = useMemo(() => {
+    if (browsers.length === 0) return null;
+    const boundPaneId = activeInstance?.kind === "browser" ? activeInstance.paneId : undefined;
+    if (boundPaneId && browsers.some((b) => b.paneId === boundPaneId)) return boundPaneId;
+    return browsers.reduce((a, b) => (a.lastUsedAt > b.lastUsedAt ? a : b)).paneId;
+  }, [browsers, activeInstance]);
   // Browser panes render in their OWN always-mounted slot below (never inside
   // the per-tab body) so switching to Terminal/Files/Browser — or closing every
   // tab — keeps the native webviews alive (§6.5 never kill on blur). The old
@@ -227,6 +241,19 @@ export function ToolPanel() {
       }, 0);
     }
   }, [activeKind, activeInstance, collapsed, terminals.length, browsers.length, minimizedBrowsers.length]);
+
+  // Drop Browser chips whose pane is gone (closing a pane's last tab closes
+  // the whole pane). Without this, the chip dangles and — via the MRU
+  // fallback above — keeps showing a DIFFERENT pane than it claims.
+  useEffect(() => {
+    const ui = useUiStore.getState();
+    const alive = new Set(panes.map((p) => p.paneId));
+    for (const t of openTabs) {
+      if (t.kind === "browser" && t.paneId && !alive.has(t.paneId)) {
+        ui.closeTab(t.instanceId);
+      }
+    }
+  }, [panes, openTabs]);
 
   // Drag-to-resize: left-edge grab zone. The panel is docked right, so the
   // width grows as the pointer moves left. Doubles as the chat|panel splitter.
@@ -372,7 +399,7 @@ export function ToolPanel() {
             <div className="tool-panel-tabbar-chips" ref={chipsRef} onWheel={onChipsWheel}>
               {openTabs.map((inst, index) => {
                 const tabDef = TABS.find((tb) => tb.id === inst.kind);
-                const label = tabLabel(inst, tabDef?.label ?? inst.kind);
+                const label = tabLabel(inst, tabDef?.label ?? inst.kind, panes);
                 const TabIcon = tabDef?.Icon;
                 const isActive = activeTabId === inst.instanceId;
                 const isDragging = index === dragIndex;
@@ -416,7 +443,14 @@ export function ToolPanel() {
                       <button
                         key={t.id}
                         className="tool-panel-picker-item"
-                        onClick={() => { addTab(t.id); setTabPickerOpen(false); }}
+                        onClick={() => {
+                          // Browser is pane-backed: "+" must spawn a fresh pane
+                          // (or adopt an unclaimed one) with its own bound chip
+                          // — a bare addTab showed the existing pane's tabs.
+                          if (t.id === "browser") openBrowserPane();
+                          else addTab(t.id);
+                          setTabPickerOpen(false);
+                        }}
                         role="menuitem"
                       >
                         <t.Icon size={13} className="tool-panel-picker-item-icon" aria-hidden />

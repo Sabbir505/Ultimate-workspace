@@ -28,6 +28,7 @@ import { useUiStore } from "../../state/ui";
 import { useProjectsStore } from "../../state/projects";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { formatDuration } from "../../lib/format";
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { MdLink } from "./MdLink";
 import { DiffCard, editLineStats, type EditPayload } from "./DiffCard";
 import { parseSegments, type Segment, type ToolData } from "../../lib/segments";
@@ -281,21 +282,15 @@ function MessageActions({
   timestamp?: string | null;
   timestampTitle?: string;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, copyToClipboard] = useCopyToClipboard(1800);
   const copy = useCallback(
     async (e: React.MouseEvent<HTMLButtonElement>) => {
       // Drop focus so the hover-only action bar doesn't stay pinned open
       // after a mouse click.
       e.currentTarget.blur();
-      try {
-        await navigator.clipboard.writeText(content);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1800);
-      } catch {
-        // Clipboard unavailable — silently ignore.
-      }
+      await copyToClipboard(content);
     },
-    [content],
+    [content, copyToClipboard],
   );
 
   return (
@@ -1228,17 +1223,11 @@ function cachedMarkdown(key: string, build: () => ReactNode): ReactNode {
 }
 
 function CopyButton({ code }: { code: string }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, copyToClipboard] = useCopyToClipboard(1800);
 
   const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    } catch {
-      // Clipboard unavailable — silently ignore.
-    }
-  }, [code]);
+    await copyToClipboard(code);
+  }, [code, copyToClipboard]);
 
   return (
     <button className="ghost copy-code-btn" onClick={handleCopy}>

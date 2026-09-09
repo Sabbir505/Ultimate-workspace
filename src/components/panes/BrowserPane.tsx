@@ -30,6 +30,7 @@ import {
   type BrowserHistory,
 } from "../../lib/browserHistory";
 import { browserOccluded } from "../../lib/browserOcclusion";
+import { useEventSubscription } from "../../hooks/useTauriEvent";
 import {
   browserCreateTab,
   browserNavigateTab,
@@ -486,12 +487,9 @@ export function BrowserPane({ pane, visible = true }: Props) {
 
   // --- Native navigation events: keep the address bar + history truthful
   // for in-page navigations (link clicks, redirects). ---
-  useEffect(() => {
-    // Hold the listen() promise: cleanup may run before it resolves (pane
-    // closed quickly, StrictMode double-mount), and dropping the real
-    // unlisten would leak this handler — and its paneId closure — for the
-    // app's lifetime. Resolve the promise in cleanup and unsubscribe late.
-    const listenReady = listenBrowserNavigatedTab((payload: BrowserNavigatedPayload) => {
+  useEventSubscription<BrowserNavigatedPayload>(
+    listenBrowserNavigatedTab,
+    (payload) => {
       if (payload.paneId !== paneId) return;
       const tabId = payload.tabId;
       const url = payload.url;
@@ -528,18 +526,17 @@ export function BrowserPane({ pane, visible = true }: Props) {
 
       // Persist per-project URL.
       useSettingsStore.getState().rememberBrowserUrl(projectId, url);
-    });
-    return () => {
-      void listenReady.then((u) => u());
-    };
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paneId, projectId]);
+    [paneId, projectId],
+  );
 
   // --- Injected-bridge title reports: label the tab + derive a favicon. ---
   // The backend emits `browser:title` on every post-nav injection pass and on
   // WebView2 NavigationCompleted, so a slow page's title lands within ~5 s.
-  useEffect(() => {
-    const listenReady = listenBrowserTitle((payload) => {
+  useEventSubscription(
+    listenBrowserTitle,
+    (payload) => {
       if (payload.paneId !== paneId) return;
       const title = payload.title.trim();
       if (title) setBrowserTabTitle(paneId, payload.tabId, title);
@@ -568,18 +565,17 @@ export function BrowserPane({ pane, visible = true }: Props) {
           /* non-parseable URL — skip favicon */
         }
       }
-    });
-    return () => {
-      void listenReady.then((u) => u());
-    };
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paneId, setBrowserTabTitle, setBrowserTabFavicon]);
+    [paneId, setBrowserTabTitle, setBrowserTabFavicon],
+  );
 
   // --- WebView2 NavigationCompleted (ground truth) — clear the loading flag
   // when a load REALLY finished, even if the navigation-start event never
   // surfaced (the stuck-loading bug: spinner forever, black pane). ---
-  useEffect(() => {
-    const listenReady = listenBrowserLoadCompleted((label: string) => {
+  useEventSubscription<string>(
+    listenBrowserLoadCompleted,
+    (label) => {
       // label = "browser-{paneId}-tab-{tabId}" (browser_label format).
       const m = /^browser-(.+)-tab-(.+)$/.exec(label);
       if (!m || m[1] !== paneId) return;
@@ -591,11 +587,9 @@ export function BrowserPane({ pane, visible = true }: Props) {
         next.set(tabId, { ...existing, loading: false, loadFailed: false });
         return next;
       });
-    });
-    return () => {
-      void listenReady.then((u) => u());
-    };
-  }, [paneId]);
+    },
+    [paneId],
+  );
 
   // Trust layer: hydrate the timeline snapshot once per pane (live entries
   // stream in via browser:timeline-entry -> store).

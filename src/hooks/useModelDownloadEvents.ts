@@ -6,19 +6,17 @@
 // Terminal states (done / error) also land in the notification center — a
 // multi-GB download finishing (or failing) while the user is elsewhere in the
 // app is exactly the kind of thing they want to find in the bell.
-import { useEffect } from "react";
-import { onModelDownloadProgress } from "../lib/ipc";
+import { onModelDownloadProgress, type DownloadProgress } from "../lib/ipc";
 import { relayNotify } from "../lib/notifyCenter";
+import { useEventSubscription } from "./useTauriEvent";
 import { useUiStore } from "../state/ui";
 
 export function useModelDownloadEvents() {
   const updateModelDownload = useUiStore((s) => s.updateModelDownload);
 
-  useEffect(() => {
-    let stale = false;
-    let unlisten: (() => void) | null = null;
-    void onModelDownloadProgress((p) => {
-      if (stale) return;
+  useEventSubscription<DownloadProgress>(
+    onModelDownloadProgress,
+    (p) => {
       updateModelDownload({
         id: p.id,
         state: p.state,
@@ -48,16 +46,7 @@ export function useModelDownloadEvents() {
           soundOnlyUnfocused: false,
         });
       }
-    }).then((u) => {
-      if (stale) {
-        u();
-      } else {
-        unlisten = u;
-      }
-    });
-    return () => {
-      stale = true;
-      unlisten?.();
-    };
-  }, [updateModelDownload]);
+    },
+    [updateModelDownload],
+  );
 }

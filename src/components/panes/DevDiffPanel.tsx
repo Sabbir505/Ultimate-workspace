@@ -36,6 +36,7 @@ import {
   type BranchChanges,
 } from "../../lib/ipc";
 import { parseUnifiedDiff } from "../../lib/diff";
+import { pathUnderChanged } from "../../lib/paths";
 import { useChatStore, selectContextSessionId } from "../../state/chat";
 import { usePanesStore } from "../../state/panes";
 import { useProjectsStore } from "../../state/projects";
@@ -328,12 +329,8 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     // fire on every mount in dev). Resolve it here and unsubscribe late.
     const listenReady = safeListen<string>("project:fs-changed", (changedPath) => {
       if (
-        changedPath === cwd ||
-        (projectPath && changedPath === projectPath) ||
-        changedPath.startsWith(cwd + "\\") ||
-        changedPath.startsWith(cwd + "/") ||
-        (projectPath && changedPath.startsWith(projectPath + "\\")) ||
-        (projectPath && changedPath.startsWith(projectPath + "/"))
+        pathUnderChanged(cwd, changedPath) ||
+        (projectPath && pathUnderChanged(projectPath, changedPath))
       ) {
         tick();
       }
@@ -641,11 +638,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     // Promise-holding pattern — see the file-list effect above: call the
     // unlisten even if it resolves after this component already unmounted.
     const listenReady = safeListen<string>("project:fs-changed", (changedPath) => {
-      if (
-        changedPath === cwd ||
-        changedPath.startsWith(cwd + "\\") ||
-        changedPath.startsWith(cwd + "/")
-      ) {
+      if (pathUnderChanged(cwd, changedPath)) {
         tick();
       }
     });

@@ -41,6 +41,7 @@ import { PdfViewer } from "./PdfViewer";
 import { sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
 import { linkCitations, parseChatSources } from "../../lib/chatCitations";
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { MdLink } from "./MdLink";
 
 function formatSize(bytes: number): string {
@@ -69,16 +70,10 @@ function citeUrlTransform(url: string): string {
 /** Copy affordance for fenced code blocks in the markdown preview — same
  *  behavior as the chat bubble's CopyButton (clipboard API, transient label). */
 function MdCopyButton({ code }: { code: string }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, copyToClipboard] = useCopyToClipboard(1800);
   const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    } catch {
-      // Clipboard unavailable — silently ignore.
-    }
-  }, [code]);
+    await copyToClipboard(code);
+  }, [code, copyToClipboard]);
   return (
     <button type="button" className="ghost copy-code-btn" onClick={() => void handleCopy()}>
       {copied ? "Copied" : "Copy"}

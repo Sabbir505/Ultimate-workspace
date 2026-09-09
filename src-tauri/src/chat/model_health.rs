@@ -71,7 +71,12 @@ pub fn provider_excluded(conn: &Connection, provider: &str, now: i64) -> Option<
 }
 
 /// Cooldown remaining (secs) for one model, if any.
-pub fn model_cooldown_remaining(conn: &Connection, provider: &str, model: &str, now: i64) -> Option<i64> {
+pub fn model_cooldown_remaining(
+    conn: &Connection,
+    provider: &str,
+    model: &str,
+    now: i64,
+) -> Option<i64> {
     let blob = load(conn);
     blob.models
         .get(&model_key(provider, model))
@@ -81,7 +86,13 @@ pub fn model_cooldown_remaining(conn: &Connection, provider: &str, model: &str, 
 }
 
 /// Record a classified pre-stream failure.
-pub fn record_failure(conn: &Connection, provider: &str, model: &str, failure: &PreStreamFailure, now: i64) {
+pub fn record_failure(
+    conn: &Connection,
+    provider: &str,
+    model: &str,
+    failure: &PreStreamFailure,
+    now: i64,
+) {
     let mut blob = load(conn);
     let flags = blob.providers.entry(provider.to_string()).or_default();
     match &failure.kind {
@@ -101,7 +112,8 @@ pub fn record_failure(conn: &Connection, provider: &str, model: &str, failure: &
         // a longer cooldown keeps the dead id out of auto without blocking
         // the provider's other models.
         FailureKind::ModelNotFound => {
-            blob.models.insert(model_key(provider, model), now + PROVIDER_TTL_SECS);
+            blob.models
+                .insert(model_key(provider, model), now + PROVIDER_TTL_SECS);
         }
     }
     save(conn, &blob);
@@ -199,7 +211,13 @@ mod tests {
     fn payment_and_rate_limit_are_distinct() {
         let conn = mem_conn();
         let now = now();
-        record_failure(&conn, "openai", "gpt-x", &failure(FailureKind::Payment), now);
+        record_failure(
+            &conn,
+            "openai",
+            "gpt-x",
+            &failure(FailureKind::Payment),
+            now,
+        );
         let reason = provider_excluded(&conn, "openai", now + 10).unwrap();
         assert!(reason.contains("credit"), "got: {reason}");
         // Provider-level payment exclusion doesn't touch other providers.
@@ -214,21 +232,34 @@ mod tests {
             &conn,
             "openrouter",
             "a/model",
-            &failure(FailureKind::RateLimit { retry_after_secs: Some(30) }),
+            &failure(FailureKind::RateLimit {
+                retry_after_secs: Some(30),
+            }),
             now,
         );
-        assert_eq!(model_cooldown_remaining(&conn, "openrouter", "a/model", now + 5), Some(25));
+        assert_eq!(
+            model_cooldown_remaining(&conn, "openrouter", "a/model", now + 5),
+            Some(25)
+        );
         // Another model from the same provider is untouched.
-        assert_eq!(model_cooldown_remaining(&conn, "openrouter", "b/model", now + 5), None);
+        assert_eq!(
+            model_cooldown_remaining(&conn, "openrouter", "b/model", now + 5),
+            None
+        );
         // retry-after is honored, capped.
         record_failure(
             &conn,
             "openrouter",
             "c/model",
-            &failure(FailureKind::RateLimit { retry_after_secs: Some(100_000) }),
+            &failure(FailureKind::RateLimit {
+                retry_after_secs: Some(100_000),
+            }),
             now,
         );
-        assert!(model_cooldown_remaining(&conn, "openrouter", "c/model", now + 1).unwrap() <= MAX_COOLDOWN_SECS);
+        assert!(
+            model_cooldown_remaining(&conn, "openrouter", "c/model", now + 1).unwrap()
+                <= MAX_COOLDOWN_SECS
+        );
     }
 
     #[test]
@@ -239,7 +270,10 @@ mod tests {
         record_failure(&conn, "anthropic", "m2", &failure(FailureKind::Server), now);
         record_success(&conn, "anthropic", now + 1);
         assert!(provider_excluded(&conn, "anthropic", now + 2).is_none());
-        assert_eq!(model_cooldown_remaining(&conn, "anthropic", "m2", now + 2), None);
+        assert_eq!(
+            model_cooldown_remaining(&conn, "anthropic", "m2", now + 2),
+            None
+        );
         // Other providers' state survives.
         record_failure(&conn, "openai", "g", &failure(FailureKind::Auth), now + 1);
         assert!(provider_excluded(&conn, "openai", now + 2).is_some());
@@ -270,10 +304,19 @@ mod tests {
     fn expired_entries_are_pruned_on_write() {
         let conn = mem_conn();
         let now = now();
-        record_failure(&conn, "old", "m", &failure(FailureKind::Server), now - SERVER_COOLDOWN_SECS - 10);
+        record_failure(
+            &conn,
+            "old",
+            "m",
+            &failure(FailureKind::Server),
+            now - SERVER_COOLDOWN_SECS - 10,
+        );
         // A write for another provider prunes the expired one.
         record_failure(&conn, "new", "m", &failure(FailureKind::Server), now);
         let raw = crate::db::get_setting(&conn, KEY).unwrap().unwrap();
-        assert!(!raw.contains("old"), "expired provider survived pruning: {raw}");
+        assert!(
+            !raw.contains("old"),
+            "expired provider survived pruning: {raw}"
+        );
     }
 }

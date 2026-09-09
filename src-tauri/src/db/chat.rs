@@ -622,6 +622,48 @@ pub fn add_chat_message(
     })
 }
 
+/// Insert a command-only timeline row (`kind` set — currently
+/// `'artifact_command'` for /create rows). These are real display events with
+/// NO LLM turn behind them: `list_active_chat_messages` excludes them so no
+/// context builder re-presents the command as an open task to the model.
+pub fn add_command_chat_message(
+    conn: &Connection,
+    chat_session_id: &str,
+    content: &str,
+    kind: &str,
+) -> DbResult<ChatMessageRecord> {
+    let now = now_ts();
+    conn.execute(
+        "INSERT INTO chat_messages (chat_session_id, role, content, created_at, kind)
+         VALUES (?1, 'user', ?2, ?3, ?4)",
+        params![chat_session_id, content, now, kind],
+    )?;
+    let id = conn.last_insert_rowid();
+    Ok(ChatMessageRecord {
+        id,
+        chat_session_id: chat_session_id.to_string(),
+        role: "user".to_string(),
+        content: content.to_string(),
+        input_tokens: None,
+        output_tokens: None,
+        cost_usd: None,
+        created_at: now,
+        superseded_by: None,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        reasoning_output_tokens: None,
+        provider: None,
+        model_key: None,
+        pricing_estimated_usd: None,
+        started_at: None,
+        completed_at: None,
+        llm_time_ms: None,
+        tool_time_ms: None,
+        ttft_ms: None,
+        tokens_per_second: None,
+    })
+}
+
 /// Ordered by insertion id so the chat timeline is chronological.
 pub fn list_chat_messages(
     conn: &Connection,
@@ -657,15 +699,22 @@ pub fn list_chat_messages_page(
 }
 
 /// The subset of messages the send path feeds to the model: every row NOT
-/// folded into a `[compacted context]` summary (i.e. `superseded_by IS NULL`).
-/// The compaction framework soft-deletes summarized turns by setting
-/// `superseded_by`; the full `list_chat_messages` still returns them for the UI.
+/// folded into a `[compacted context]` summary (i.e. `superseded_by IS NULL`)
+/// and NOT a command-only timeline row (`kind = 'artifact_command'` — the
+/// /create flow persists those as proposal-card anchors while the actual
+/// work runs out-of-band; if the model saw them it would re-execute the
+/// stale instruction on the next send). The full `list_chat_messages` still
+/// returns them for the UI.
 pub fn list_active_chat_messages(
     conn: &Connection,
     chat_session_id: &str,
 ) -> DbResult<Vec<ChatMessageRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM chat_messages WHERE chat_session_id = ?1 AND superseded_by IS NULL ORDER BY id",
+        "SELECT * FROM chat_messages
+          WHERE chat_session_id = ?1
+            AND superseded_by IS NULL
+            AND (kind IS NULL OR kind != 'artifact_command')
+          ORDER BY id",
     )?;
     let rows = stmt.query_map(params![chat_session_id], map_chat_message)?;
     rows.collect()
@@ -1488,5 +1537,61 @@ summary");
         assert_eq!(all[0].superseded_by, Some(summary.id));
         assert_eq!(all[1].superseded_by, None); // summary stays active
         assert_eq!(all[2].superseded_by, Some(m3.id));
+    }
+
+    #[test]
+    fn command_only_rows_are_excluded_from_the_model_context() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let m1 = add_msg(&conn, &cs.id, "user", "hello");
+        let cmd = add_command_chat_message(
+            &conn,
+            &cs.id,
+            "/create automation daily digest",
+            "artifact_command",
+        )
+        .unwrap();
+        let m2 = add_msg(&conn, &cs.id, "assistant", "earlier reply");
+
+        // The LLM view (send payload, harness primer, compaction, context
+        // meter) skips the command row: its work ran out-of-band, and
+        // re-presenting it made the model re-execute the /create task on
+        // every later send.
+        let active = list_active_chat_messages(&conn, &cs.id).unwrap();
+        let ids: Vec<i64> = active.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![m1.id, m2.id]);
+        assert!(!ids.contains(&cmd.id));
+
+        // The UI timeline still shows it (the proposal card anchors to it).
+        let all = list_chat_messages(&conn, &cs.id).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[1].id, cmd.id);
+    }
+
+    #[test]
+    fn migration_backfills_legacy_create_rows() {
+        // Rows persisted before the `kind` column existed are command-only
+        // by their '/create ' content prefix (the artifact flow is the only
+        // writer of command-only rows). The backfill must catch them, while
+        // a normal message that merely mentions /create stays in context.
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        conn.execute(
+            "INSERT INTO chat_messages (chat_session_id, role, content, created_at)
+             VALUES (?1, 'user', '/create skill greeter', 1)",
+            params![cs.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chat_messages (chat_session_id, role, content, created_at)
+             VALUES (?1, 'user', 'how does /create work exactly?', 2)",
+            params![cs.id],
+        )
+        .unwrap();
+        super::super::migrate_chat_message_kind(&conn).unwrap();
+
+        let active = list_active_chat_messages(&conn, &cs.id).unwrap();
+        assert_eq!(active.len(), 1);
+        assert!(active[0].content.starts_with("how does"));
     }
 }

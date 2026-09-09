@@ -69,8 +69,12 @@ pub fn list_chat_sessions(db: State<DbState>) -> CmdResult<Vec<ChatSession>> {
 ///
 /// Artifact commands are real timeline events, but they must not be sent
 /// through `send_chat_message` (which would create an unwanted assistant
-/// response). Returning the inserted row gives the frontend a stable message
-/// id to anchor the proposal card to.
+/// response). The row is kind-marked (`artifact_command`) so every LLM
+/// context builder (`list_active_chat_messages` consumers: the send payload,
+/// the harness primer, compaction, the context meter) skips it — the work
+/// happens out-of-band, and a stale "/create …" in the model's view made it
+/// re-execute the command on every later send. Returning the inserted row
+/// gives the frontend a stable message id to anchor the proposal card to.
 #[tauri::command]
 pub fn persist_chat_command_message(
     chat_session_id: String,
@@ -78,28 +82,8 @@ pub fn persist_chat_command_message(
     db: State<DbState>,
 ) -> CmdResult<ChatMessageRecord> {
     let conn = db.0.lock();
-    db::add_chat_message(
-        &conn,
-        &chat_session_id,
-        "user",
-        &content,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .map_err(|e| e.to_string())
+    db::add_command_chat_message(&conn, &chat_session_id, &content, "artifact_command")
+        .map_err(|e| e.to_string())
 }
 
 /// Full-text search across chat message content + session titles (powers the

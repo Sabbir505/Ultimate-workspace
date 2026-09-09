@@ -198,7 +198,33 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_automation_runs_improve_link(conn)?;
     migrate_chat_fts(conn)?;
     migrate_memory_reflected(conn)?;
+    migrate_chat_message_kind(conn)?;
     migrate_unc_paths(conn)
+}
+
+/// Add the `kind` column to `chat_messages` and backfill legacy command-only
+/// rows. `kind = 'artifact_command'` marks the timeline rows the /create
+/// artifact flow persists as proposal-card anchors: real display events whose
+/// work runs OUT-OF-BAND (through the artifact generator, not an LLM chat
+/// turn). `list_active_chat_messages` — the rows every context builder feeds
+/// to the model — must exclude them, or the model keeps seeing an
+/// unfulfilled "create X" instruction and re-executes it on the next send.
+/// Rows created before the column existed are backfilled by their
+/// `/create ` content prefix (the artifact flow is the only writer of
+/// command-only rows).
+fn migrate_chat_message_kind(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_messages ADD COLUMN kind TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    conn.execute(
+        "UPDATE chat_messages SET kind = 'artifact_command'
+          WHERE kind IS NULL AND role = 'user' AND content LIKE '/create %'",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Add the `starred` / `unread` columns to `chat_sessions` on databases created
@@ -1244,7 +1270,8 @@ pub use cost_v2::{get_cost_rollups_v2, read_rate_overrides};
 
 // chat
 pub use chat::{
-    add_chat_message, add_chat_session_connector, create_chat_session, delete_chat_message,
+    add_chat_message, add_chat_session_connector, add_command_chat_message, create_chat_session,
+    delete_chat_message,
     delete_chat_messages_after,
     delete_chat_session, delete_chat_sessions_for_project, delete_empty_chat_sessions,
     get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_messages_page,
@@ -1354,6 +1381,7 @@ pub(crate) fn mem() -> Connection {
     migrate_chat_messages_v2(&conn).unwrap();
     migrate_chat_messages_started_completed(&conn).unwrap();
     migrate_chat_messages_perf(&conn).unwrap();
+    migrate_chat_message_kind(&conn).unwrap();
     migrate_unc_paths(&conn).unwrap();
     conn
 }

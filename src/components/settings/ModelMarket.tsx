@@ -32,6 +32,7 @@ import {
   type MarketSettings,
   type ModelSort,
 } from "../../lib/ipc";
+import { formatBytes, formatRate } from "../../lib/format";
 import { Modal } from "../common/Modal";
 
 type SortKey = ModelSort;
@@ -54,23 +55,6 @@ const SORT_LABELS: Record<SortKey, string> = {
   likes: "Most liked",
   modified: "Recently updated",
 };
-
-function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
-}
-
-function formatRate(bps: number): string {
-  if (!Number.isFinite(bps) || bps <= 0) return "—";
-  return `${formatBytes(bps)}/s`;
-}
 
 interface PerDownload {
   state: DownloadProgress["state"];
@@ -749,7 +733,7 @@ export function ModelCard({ entry, downloads, checkDownloaded, totalRam, vramByt
             <div className="model-card-progress-bar"><div className="model-card-progress-fill" style={{ width: `${pct ?? 0}%` }} /></div>
             <div className="model-card-progress-info">
               <span>{pct !== null ? `${pct}% · ` : ""}{formatBytes(download?.downloaded ?? 0)}{download?.total ? ` / ${formatBytes(download.total)}` : ""}</span>
-              <span>{formatRate(download?.bps ?? 0)}</span>
+              <span>{formatRate(download?.bps ?? 0) || "—"}</span>
             </div>
           </div>
         )}

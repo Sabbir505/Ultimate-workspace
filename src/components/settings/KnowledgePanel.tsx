@@ -38,6 +38,7 @@ import {
   type DocsIndexProgressPayload,
   type DownloadProgress,
 } from "../../lib/ipc";
+import { formatBytes, formatDateTime, shortName } from "../../lib/format";
 import { Modal } from "../common/Modal";
 
 /** Recommended Hugging Face embedding GGUFs — the small set the backend's
@@ -62,28 +63,6 @@ const EMBEDDING_SUGGESTIONS: { repo: string; label: string; note: string }[] = [
   },
 ];
 
-function formatDate(ts: number | null): string {
-  if (!ts) return "—";
-  return new Date(ts * 1000).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
-}
-
 function fitClass(sizeBytes: number, budget: number): "fits" | "tight" | "too_large" {
   if (!budget) return "tight";
   const r = sizeBytes / budget;
@@ -96,15 +75,6 @@ interface PerDownloadState {
   state: DownloadProgress["state"];
   downloaded: number;
   total: number | null;
-}
-
-function shortName(path: string): string {
-  // Show the last path segment only if the full path is too long; otherwise
-  // keep the full path so users can disambiguate sibling corpora.
-  if (path.length <= 56) return path;
-  const parts = path.split(/[/\\]/).filter(Boolean);
-  if (parts.length <= 2) return path;
-  return `…/${parts.slice(-2).join("/")}`;
 }
 
 interface PerCorpusProgress {
@@ -548,7 +518,7 @@ export function KnowledgePanel() {
                     <span>·</span>
                     <span>{c.chunkCount} chunks</span>
                     <span>·</span>
-                    <span>indexed {formatDate(c.lastIndexedAt)}</span>
+                    <span>indexed {formatDateTime(c.lastIndexedAt)}</span>
                   </div>
                 )}
               </div>

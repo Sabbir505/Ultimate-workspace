@@ -207,9 +207,6 @@ export interface HarnessIdPayload {
   sessionId: string;
   harnessSessionId: string;
 }
-export interface CostUpdatedPayload {
-  sessionId: string;
-}
 
 // Emitted when a URL is detected in a terminal pane's output (e.g. a CLI
 // agent printed a preview URL). The frontend opens it in the built-in browser.

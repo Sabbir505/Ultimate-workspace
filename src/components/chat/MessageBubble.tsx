@@ -27,6 +27,7 @@ import { liveAttachmentsForMessage, useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { useProjectsStore } from "../../state/projects";
 import { parseUnifiedDiff } from "../../lib/diff";
+import { formatDuration } from "../../lib/format";
 import { MdLink } from "./MdLink";
 import { DiffCard, editLineStats, type EditPayload } from "./DiffCard";
 import { sameTurnFile, TurnChangesRow } from "./TurnChangesRow";
@@ -1170,15 +1171,6 @@ function EditFileRow({ step }: { step: ActivityStep }) {
       )}
     </div>
   );
-}
-
-/** Format a worked-duration (seconds) as "1s", "8s", or "2m 13s". */
-function formatDuration(sec: number): string {
-  if (sec < 1) return "1s";
-  if (sec < 60) return `${sec}s`;
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return s ? `${m}m ${s}s` : `${m}m`;
 }
 
 /** The bubble's end-of-turn timestamp: "14:32" today, "Sep 7, 14:32" older.

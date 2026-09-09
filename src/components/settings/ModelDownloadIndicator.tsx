@@ -2,21 +2,8 @@
 // Shows a spinner + progress when any download is active; clickable tooltip
 // with per-model details. Terminal states (done/error/cancelled) are auto-
 // removed after 3s by the UI store.
+import { formatBytes, formatRate } from "../../lib/format";
 import { useUiStore } from "../../state/ui";
-
-function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
-}
-
-function formatRate(bps: number): string {
-  if (!Number.isFinite(bps) || bps <= 0) return "";
-  return `${formatBytes(bps)}/s`;
-}
 
 export function ModelDownloadIndicator() {
   const downloads = useUiStore((s) => s.modelDownloads);

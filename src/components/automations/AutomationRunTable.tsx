@@ -9,26 +9,15 @@ import {
   Zap,
 } from "lucide-react";
 import type { AutomationRun } from "../../lib/ipc";
+import { formatDateTime, formatDuration } from "../../lib/format";
 import { friendlyRunError, isFailureStatus } from "./shared";
 
-function formatDuration(startSec: number, endSec: number | null): string {
+function runDuration(startSec: number, endSec: number | null): string {
   if (!endSec) return "—";
   const diff = endSec - startSec;
   // Failures can finish in well under a second; "0s" reads as broken.
   if (diff < 1) return "<1s";
-  if (diff < 60) return `${Math.floor(diff)}s`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ${Math.floor(diff % 60)}s`;
-  return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m`;
-}
-
-function formatStartedAt(ts: number): string {
-  const d = new Date(ts * 1000);
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatDuration(diff);
 }
 
 function statusBadge(status: string): {
@@ -152,10 +141,10 @@ export function AutomationRunTable({
                     </span>
                   </td>
                   <td className="px-3 py-2 text-gray-700 dark:text-slate-200 whitespace-nowrap">
-                    {formatStartedAt(r.startedAt)}
+                    {formatDateTime(r.startedAt)}
                   </td>
                   <td className="px-3 py-2 text-gray-700 dark:text-slate-200 whitespace-nowrap font-mono text-xs">
-                    {formatDuration(r.startedAt, r.finishedAt)}
+                    {runDuration(r.startedAt, r.finishedAt)}
                   </td>
                   <td className="px-3 py-2 text-gray-500 dark:text-slate-400 text-xs">
                     {r.source === "manual" ? "Manual" : "Scheduled"}

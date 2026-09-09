@@ -30,6 +30,7 @@ import { AcpAgentsPanel } from "./AcpAgentsPanel";
 import { McpGalleryPanel } from "./McpGalleryPanel";
 import { RemotePanel } from "./RemotePanel";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
+import { formatBytes } from "../../lib/format";
 import { Modal } from "../common/Modal";
 import {
   Database,
@@ -608,17 +609,6 @@ export function SettingsView() {
   );
 }
 
-/** Human-readable file size string. */
-function humanSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const kb = bytes / 1024;
-  if (kb < 1024) return `${kb.toFixed(1)} KB`;
-  const mb = kb / 1024;
-  if (mb < 1024) return `${mb.toFixed(1)} MB`;
-  const gb = mb / 1024;
-  return `${gb.toFixed(1)} GB`;
-}
-
 const MEMORY_LABELS: Record<string, { color: string; text: string }> = {
   fits: { color: "#4caf50", text: "Fits comfortably" },
   tight: { color: "#ff9800", text: "Fits tightly" },
@@ -1170,7 +1160,7 @@ function LocalModelsPanel() {
                 <div className="local-model-row-main">
                   <div className="local-model-row-name" title={m.filename}>{displayName}</div>
                   <div className="local-model-row-meta">
-                    <span>{humanSize(m.sizeBytes)}</span>
+                    <span>{formatBytes(m.sizeBytes)}</span>
                     {m.quantization && <span className="model-tag">{m.quantization}</span>}
                     {m.paramCountLabel && <span>{m.paramCountLabel}</span>}
                     {m.hasVision && <span className="model-tag vision">Vision</span>}
@@ -2825,13 +2815,6 @@ function ConnectorsPanel() {
 /** Numeric input bound to an app_settings key; loads on mount, saves on blur. */
 // ---- Data (chat DB + artifacts storage + delete) ----
 
-function fmtSize(bytes: number): string {
-  if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(1)} GB`;
-  if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} MB`;
-  if (bytes >= 1 << 10) return `${(bytes / (1 << 10)).toFixed(1)} KB`;
-  return `${bytes} B`;
-}
-
 function DataPanel() {
   const [paths, setPaths] = useState<DataPaths | null>(null);
   const [busy, setBusy] = useState(false);
@@ -3009,7 +2992,7 @@ function DataPanel() {
             <div className="data-path-name">Chats (database)</div>
             <div className="data-path-value mono">
               {paths?.chatDbPath ?? "…"}
-              {paths ? ` · ${fmtSize(paths.chatDbSize)}` : ""}
+              {paths ? ` · ${formatBytes(paths.chatDbSize)}` : ""}
             </div>
           </div>
           <div className="data-path-actions">
@@ -3026,7 +3009,7 @@ function DataPanel() {
             <div className="data-path-name">Artifacts</div>
             <div className="data-path-value mono">
               {paths?.artifactsDir ?? "…"}
-              {paths ? ` · ${fmtSize(paths.artifactsSize)}` : ""}
+              {paths ? ` · ${formatBytes(paths.artifactsSize)}` : ""}
             </div>
           </div>
           <div className="data-path-actions">

@@ -3,7 +3,8 @@
 // 30-day retention). The sidebar's "Artifacts" button opens a modal with the
 // same content; this is the always-one-click-away version, like the Browser
 // MCP pane or the Skills Library.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useArtifactsStore, type ArtifactsState } from "../../state/artifacts";
 import { useChatStore, type ChatState } from "../../state/chat";
 import { useUiStore, type UiState } from "../../state/ui";
@@ -135,6 +136,16 @@ function displayTitle(filename: string): string {
   return dot > 0 ? filename.slice(0, dot) : filename;
 }
 
+/** The grid is 3 lanes ≥721px viewport, 2 ≤720px, 1 ≤480px (same
+ *  .doc-card-grid media queries the sidebar's ArtifactLibrary uses) — the
+ *  virtualizer chunks documents into rows of this many cards. */
+function laneCount(): number {
+  if (typeof window === "undefined") return 3;
+  if (window.innerWidth <= 480) return 1;
+  if (window.innerWidth <= 720) return 2;
+  return 3;
+}
+
 export function DocumentsLibrary() {
   const items = useArtifactsStore((s: ArtifactsState) => s.items);
   const loaded = useArtifactsStore((s: ArtifactsState) => s.loaded);
@@ -164,6 +175,31 @@ export function DocumentsLibrary() {
         a.kind.toLowerCase().includes(q),
     );
   }, [sorted, query]);
+
+  // PERF (PERFORMANCE_AUDIT.md #70): virtualize the card grid — every card
+  // mounts a preview-fetching thumbnail (one IPC round-trip each), so
+  // rendering ALL documents at once made the full page expensive. Same
+  // row-chunked useVirtualizer pattern as the sidebar's ArtifactLibrary.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [lanes, setLanes] = useState(laneCount);
+  useEffect(() => {
+    const onResize = () => setLanes(laneCount());
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const rows = useMemo(() => {
+    const out: ArtifactRecord[][] = [];
+    for (let i = 0; i < filtered.length; i += lanes) {
+      out.push(filtered.slice(i, i + lanes));
+    }
+    return out;
+  }, [filtered, lanes]);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 240,
+    overscan: 3,
+  });
 
   // Same contract as the sidebar ArtifactLibrary: switch to the owning chat
   // and WAIT for it, then open the preview — the file opens on top of the
@@ -226,7 +262,7 @@ export function DocumentsLibrary() {
             </button>
           </div>
         </div>
-        <div className="view-body">
+        <div className="view-body" ref={scrollRef}>
           <div className="documents-toolbar">
             <input
               type="search"
@@ -252,59 +288,80 @@ export function DocumentsLibrary() {
               </span>
             </div>
           ) : (
-            <div className="doc-card-grid documents-grid">
-              {filtered.map((a) => (
+            <div
+              style={{
+                height: virtualizer.getTotalSize(),
+                position: "relative",
+              }}
+            >
+              {virtualizer.getVirtualItems().map((vrow) => (
                 <div
-                  key={a.id}
-                  className="doc-card"
-                  role="button"
-                  tabIndex={0}
-                  title={a.filename}
-                  onClick={() => openArtifact(a)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") openArtifact(a);
+                  key={vrow.key}
+                  data-index={vrow.index}
+                  ref={virtualizer.measureElement}
+                  className="doc-card-grid documents-grid"
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${vrow.start}px)`,
                   }}
                 >
-                  <div className="doc-card-actions">
-                    <button
-                      className="doc-card-action"
-                      title="Download"
-                      aria-label="Download"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // M24: pass the FILENAME as the suggested save name —
-                        // the full path pre-filled the dialog with the
-                        // artifact's own location (overwrite-in-place). The
-                        // anchor hack below did nothing in the Tauri webview
-                        // and is gone.
-                        void downloadArtifact(a.path, a.filename).catch(() => {});
+                  {rows[vrow.index].map((a) => (
+                    <div
+                      key={a.id}
+                      className="doc-card"
+                      role="button"
+                      tabIndex={0}
+                      title={a.filename}
+                      onClick={() => openArtifact(a)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") openArtifact(a);
                       }}
                     >
-                      ⬇
-                    </button>
-                    <button
-                      className="doc-card-del"
-                      title="Delete document"
-                      aria-label="Delete document"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void remove(a.id);
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                  <div className="doc-card-thumb">
-                    <DocumentCardThumb artifact={a} />
-                  </div>
-                  <div className="doc-card-body">
-                    <div className="doc-card-title">{displayTitle(a.filename)}</div>
-                    <div className="doc-card-divider" />
-                    <div className="doc-card-meta">
-                      <OutlineIcon kind={a.kind} />
-                      <span>• Edited {relativeTime(a.createdAt)}</span>
+                      <div className="doc-card-actions">
+                        <button
+                          className="doc-card-action"
+                          title="Download"
+                          aria-label="Download"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            // M24: pass the FILENAME as the suggested save name —
+                            // the full path pre-filled the dialog with the
+                            // artifact's own location (overwrite-in-place). The
+                            // anchor hack below did nothing in the Tauri webview
+                            // and is gone.
+                            void downloadArtifact(a.path, a.filename).catch(() => {});
+                          }}
+                        >
+                          ⬇
+                        </button>
+                        <button
+                          className="doc-card-del"
+                          title="Delete document"
+                          aria-label="Delete document"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void remove(a.id);
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="doc-card-thumb">
+                        <DocumentCardThumb artifact={a} />
+                      </div>
+                      <div className="doc-card-body">
+                        <div className="doc-card-title">{displayTitle(a.filename)}</div>
+                        <div className="doc-card-divider" />
+                        <div className="doc-card-meta">
+                          <OutlineIcon kind={a.kind} />
+                          <span>• Edited {relativeTime(a.createdAt)}</span>
+                        </div>
+                      </div>
                     </div>
-                  </div>
+                  ))}
                 </div>
               ))}
             </div>

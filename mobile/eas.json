@@ -1,0 +1,26 @@
+{
+  "_comments": "Scaffold only — no projectId yet. After creating an Expo account, run `npx eas init` in this directory: it fills cli.projectId below and writes extra.eas.projectId into app.json. Profiles: `staging` builds installable artifacts for internal testing (Android APK, iOS simulator); `production` builds store artifacts (Android AAB, iOS IPA).",
+  "cli": {
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "staging": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "ios": {
+        "simulator": true
+      }
+    },
+    "production": {
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "ios": {}
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

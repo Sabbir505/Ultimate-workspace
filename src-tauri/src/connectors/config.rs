@@ -599,7 +599,11 @@ pub const GITHUB: Connector = Connector {
 ///   (no org/service account) — the OAuth consent screen does this.
 /// - The `generate-design` tool can take ~60 s; MCP tool calls must not time
 ///   out below that (see the MCP call timeout note in mcp.rs).
-pub const CANVA_CALLBACK_PORT: u16 = 45134;
+/// 45135: must differ from YOUTUBE_CALLBACK_PORT (45134) — both flows bind a
+/// fixed loopback port, and the per-flow pending guard only dedups
+/// SAME-connector flows, so a shared port would make the second connector's
+/// Connect fail to bind.
+pub const CANVA_CALLBACK_PORT: u16 = 45135;
 
 pub const CANVA: Connector = Connector {
     id: "canva",
@@ -614,7 +618,7 @@ pub const CANVA: Connector = Connector {
     // credentials needed (PKCE S256, no secret).
     client_id: "",
     client_secret: "",
-    redirect_uri: "http://localhost:45134/oauth/callback",
+    redirect_uri: "http://localhost:45135/oauth/callback",
     // The write-capable set covering design create/edit, folders, assets,
     // comments, brand templates, and brand kits (see the resource metadata's
     // scopes_supported). `help:*` is intentionally excluded.

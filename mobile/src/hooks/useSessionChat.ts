@@ -4,8 +4,8 @@
  * Each mobile session is a chat. The hook keeps a per-session ordered
  * list of `SessionMessageRecord` (the desktop persists these keyed by
  * `owner_session_id`), the streaming assistant buffer (the most recent
- * in-flight tokens before the chat is "done"), pending approvals, the
- * streaming status, the latest artifact, and pagination state.
+ * in-flight tokens before the chat is "done"), pending approvals, plan
+ * proposals, the session's model meta, artifacts, and pagination state.
  *
  * Architecture
  * ------------
@@ -17,8 +17,11 @@
  *   reply. `SessionChatDone` finalizes it as a real `assistant` message
  *   in the list.
  * - Approvals arrive via `SessionApprovalRequest` and are resolved by
- *   the caller calling `resolveApproval(pendingId, decision)`, which
- *   sends `ResolveSessionApproval` and removes the pending entry.
+ *   the caller calling `resolveApproval(pendingId, decision, alwaysAllow)`.
+ *   They are dismissed from ANY surface via `SessionApprovalResolved`
+ *   (e.g. the user approved on the desktop while the phone showed the card).
+ * - Plan proposals (`present_plan`) arrive via `SessionPlanProposal` and are
+ *   answered with `resolvePlan(approved, feedback)`.
  * - Status messages (`SessionChatStatus`) show transient banners
  *   ("Compacting…", "Reading file…") without adding to the message list.
  *
@@ -34,6 +37,12 @@ import {
   onSessionChatToken,
   onSessionMessages,
   onSessionApprovalRequest,
+  onSessionApprovalResolved,
+  onSessionPlanProposal,
+  onSessionModelSet,
+  onSessionDeleted,
+  onSessionMeta,
+  onSessionArtifacts,
   onSessionArtifact,
   useRelay,
   type SessionMessageRecord,
@@ -46,7 +55,27 @@ export interface PendingApproval {
   tool: string;
   summary: string;
   args: unknown;
+  /** True when the Always-Allow button should be offered (FS mutators only —
+   *  the desktop rules engine governs exactly these). */
+  canAlwaysAllow: boolean;
 }
+
+export interface PendingPlan {
+  pendingId: string;
+  title: string;
+  plan: string;
+}
+
+export interface SessionMetaInfo {
+  provider: string;
+  model: string;
+  title?: string;
+}
+
+/** Filesystem mutators the desktop approval-rules engine can auto-allow. */
+const ALWAYS_ALLOWABLE_TOOLS = new Set([
+  'write_file', 'edit_file', 'delete_file', 'move_file', 'copy_file',
+]);
 
 export interface SessionChatState {
   /** Newest-first, in render order. The latest user + assistant turn are at the top. */
@@ -61,8 +90,14 @@ export interface SessionChatState {
   status: string | null;
   /** Approvals awaiting the user's decision. */
   pendingApprovals: PendingApproval[];
-  /** Latest artifact attached to a message in this session, if any. */
-  lastArtifact: SessionArtifact | null;
+  /** Live plan-proposal card, when the agent is presenting a plan. */
+  planProposal: PendingPlan | null;
+  /** Session meta (provider/model/title) for the header + model sheet. */
+  meta: SessionMetaInfo | null;
+  /** Artifacts produced in this session (timeline order). */
+  artifacts: SessionArtifact[];
+  /** True when this session was just deleted on the desktop (or via `remove`). */
+  deleted: boolean;
   /** Older pages exist; call `loadMore` to fetch them. */
   hasMore: boolean;
   /** Last error surfaced from the chat pipeline. */
@@ -78,7 +113,10 @@ const INITIAL: SessionChatState = {
   streamingContent: '',
   status: null,
   pendingApprovals: [],
-  lastArtifact: null,
+  planProposal: null,
+  meta: null,
+  artifacts: [],
+  deleted: false,
   hasMore: false,
   error: null,
   lastUsage: null,
@@ -124,6 +162,11 @@ export function useSessionChat(sessionId: string | null) {
     cancelSessionStream,
     resolveSessionApproval,
     renameSession,
+    setSessionModel,
+    deleteSession,
+    getSessionMeta,
+    listSessionArtifacts,
+    resolvePlanProposal,
   } = useRelay();
 
   // Subscribe to event buses exactly once for the lifetime of the hook.
@@ -190,12 +233,48 @@ export function useSessionChat(sessionId: string | null) {
       if (sid !== currentSessionId.current) return;
       setState((s) => ({
         ...s,
-        pendingApprovals: [...s.pendingApprovals, { pendingId, tool, summary, args }],
+        pendingApprovals: [...s.pendingApprovals, {
+          pendingId, tool, summary, args,
+          canAlwaysAllow: ALWAYS_ALLOWABLE_TOOLS.has(tool),
+        }],
       }));
+    });
+    const offApprovalResolved = onSessionApprovalResolved.on(({ sessionId: sid, pendingId }) => {
+      if (sid !== currentSessionId.current) return;
+      // Dismiss from ANY surface — desktop card, another phone, our own
+      // optimistic removal is a no-op when the entry is already gone.
+      setState((s) => ({
+        ...s,
+        pendingApprovals: s.pendingApprovals.filter((a) => a.pendingId !== pendingId),
+      }));
+    });
+    const offPlan = onSessionPlanProposal.on(({ sessionId: sid, pendingId, title, plan }) => {
+      if (sid !== currentSessionId.current) return;
+      setState((s) => ({ ...s, planProposal: { pendingId, title, plan } }));
+    });
+    const offModelSet = onSessionModelSet.on(({ sessionId: sid, providerId, model }) => {
+      if (sid !== currentSessionId.current) return;
+      setState((s) => ({ ...s, meta: { provider: providerId, model, title: s.meta?.title } }));
+    });
+    const offMeta = onSessionMeta.on(({ sessionId: sid, provider, model, title }) => {
+      if (sid !== currentSessionId.current) return;
+      setState((s) => ({ ...s, meta: { provider, model, title } }));
+    });
+    const offArtifacts = onSessionArtifacts.on(({ sessionId: sid, artifacts }) => {
+      if (sid !== currentSessionId.current) return;
+      setState((s) => ({ ...s, artifacts }));
     });
     const offArtifact = onSessionArtifact.on(({ sessionId: sid, artifact }) => {
       if (sid !== currentSessionId.current) return;
-      setState((s) => ({ ...s, lastArtifact: artifact }));
+      // Live artifact during a turn — merge by path, newest wins.
+      setState((s) => {
+        const rest = s.artifacts.filter((a) => a.path !== artifact.path);
+        return { ...s, artifacts: [...rest, artifact] };
+      });
+    });
+    const offDeleted = onSessionDeleted.on(({ sessionId: sid }) => {
+      if (sid !== currentSessionId.current) return;
+      setState((s) => ({ ...s, deleted: true }));
     });
     return () => {
       offMessages();
@@ -204,7 +283,13 @@ export function useSessionChat(sessionId: string | null) {
       offError();
       offStatus();
       offApproval();
+      offApprovalResolved();
+      offPlan();
+      offModelSet();
+      offMeta();
+      offArtifacts();
       offArtifact();
+      offDeleted();
       stopFlushTimer();
     };
   }, [flushTokens, endStream, stopFlushTimer]);
@@ -222,7 +307,10 @@ export function useSessionChat(sessionId: string | null) {
     }
     setState((s) => ({ ...INITIAL, loading: true }));
     getSessionMessages(sessionId, undefined, 50);
-  }, [sessionId, getSessionMessages, stopFlushTimer]);
+    // Header (model chip) + artifacts gallery state for this chat.
+    getSessionMeta(sessionId);
+    listSessionArtifacts(sessionId);
+  }, [sessionId, getSessionMessages, stopFlushTimer, getSessionMeta, listSessionArtifacts]);
 
   // --- actions ---
 
@@ -263,9 +351,9 @@ export function useSessionChat(sessionId: string | null) {
   }, [sessionId, cancelSessionStream, stopFlushTimer]);
 
   const approve = useCallback(
-    (pendingId: string) => {
+    (pendingId: string, alwaysAllow = false) => {
       if (!sessionId) return;
-      resolveSessionApproval(sessionId, pendingId, 'approve');
+      resolveSessionApproval(sessionId, pendingId, 'approve', alwaysAllow);
       setState((s) => ({
         ...s,
         pendingApprovals: s.pendingApprovals.filter((a) => a.pendingId !== pendingId),
@@ -284,6 +372,35 @@ export function useSessionChat(sessionId: string | null) {
       }));
     },
     [sessionId, resolveSessionApproval],
+  );
+
+  const resolvePlan = useCallback(
+    (pendingId: string, approved: boolean, feedback?: string) => {
+      if (!sessionId) return;
+      resolvePlanProposal(sessionId, pendingId, approved, feedback);
+      setState((s) => (s.planProposal?.pendingId === pendingId ? { ...s, planProposal: null } : s));
+    },
+    [sessionId, resolvePlanProposal],
+  );
+
+  const setModel = useCallback(
+    (providerId: string, model: string) => {
+      if (!sessionId) return;
+      setSessionModel(sessionId, providerId, model);
+      // Optimistic header update; SessionModelSet confirms.
+      setState((s) => ({ ...s, meta: { provider: providerId, model, title: s.meta?.title } }));
+    },
+    [sessionId, setSessionModel],
+  );
+
+  const remove = useCallback(
+    (onGone?: () => void) => {
+      if (!sessionId) return;
+      deleteSession(sessionId);
+      setState((s) => ({ ...s, deleted: true }));
+      if (onGone) onGone();
+    },
+    [sessionId, deleteSession],
   );
 
   const loadMore = useCallback(() => {
@@ -320,6 +437,9 @@ export function useSessionChat(sessionId: string | null) {
     cancel,
     approve,
     deny,
+    resolvePlan,
+    setModel,
+    remove,
     loadMore,
     refresh,
     rename,

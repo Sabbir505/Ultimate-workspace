@@ -16,6 +16,7 @@ import { uuid } from "../lib/id";
 import { browserClosePane, browserCloseTab, killPty, registerBrowserPaneProject, unregisterBrowserPaneProject } from "../lib/ipc";
 import { DEFAULT_BROWSER_URL } from "../lib/browserHistory";
 import { useSettingsStore } from "./settings";
+import { useBrowserTrustStore } from "./browserTrust";
 import type { HarnessId, PaneState } from "../types";
 
 export const MAX_PANES = 6;
@@ -224,6 +225,11 @@ export function activeTabId(pane: Pane): string {
  * layering-purity win for an orphaned-process correctness risk — not worth it.
  */
 function disposePaneResources(pane: Pane): void {
+  // Drop the trust layer's per-pane entries (timeline/paused/timelineOpen/
+  // lastAgentActivity). Pane ids are fresh UUIDs, so without this a closed
+  // pane's rows would sit in those maps forever (audit #20). No-op for
+  // pane ids with no entries.
+  useBrowserTrustStore.getState().clearPane(pane.paneId);
   if (pane.data.kind === "terminal") {
     void killPty(pane.paneId).catch(() => {});
   } else {

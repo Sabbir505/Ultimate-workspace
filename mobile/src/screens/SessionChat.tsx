@@ -1,27 +1,23 @@
 /**
- * SessionChat — the cursor-style chat UI for a single mobile session.
- *
- * Wired to:
- *  - useSessionChat (history + streaming state + actions)
- *  - useRelay (model/provider list for the composer hint + relay lifecycle)
+ * SessionChat — the ChatGPT-app-style conversation screen for one session.
  *
  * Layout (top to bottom):
- *   Header       — back button, session title, harness label, overflow
- *                  (rename) menu
- *   Messages     — FlatList of MessageBubble rows (newest first) plus
- *                  pending approval cards inserted where they arrived,
- *                  and a live "streaming" bubble that takes the top slot
- *                  while a turn is in-flight
- *   Load more    — small footer button that paginates older history
- *                  (hidden on the first page)
- *   StatusBanner — transient line ("Compacting…") above the composer
- *   Composer     — ChatComposer (send while idle, stop while streaming)
+ *   Header      back · centered title (long-press to rename) · model chip
+ *               (opens ModelSheet) · drawer menu button (AppDrawer)
+ *   Messages    INVERTED FlatList — newest turn at the bottom, older pages
+ *               paginate in at the top (onEndReached → loadMore), pull to
+ *               refresh. User turns render as right-aligned bubbles;
+ *               assistant turns render full-width as plain text with
+ *               think/tool segments (MessageBubble). The live streaming
+ *               turn sits at the very bottom of the list.
+ *   Approvals   pending ApprovalCards between the list and the composer.
+ *   Plan card   live plan proposal pinned above the composer.
+ *   Status      transient status pill (StatusBanner) + error banner.
+ *   Composer    ChatComposer pill (send / stop / voice / attachments).
  *
- * Pull-to-refresh re-fetches the latest page; the FlatList auto-scrolls
- * to the top on new content (cursor-style — newest at the top, you read
- * downward as the conversation grows).
+ * `deleted` flips to a full-screen "This conversation was cleared" state.
  */
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -34,6 +30,7 @@ import {
   TextInput,
   Modal,
   ActivityIndicator,
+  RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute } from '@react-navigation/native';
@@ -42,45 +39,48 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 // bundle of every icon); Ionicons is a glyph font already bundled with the
 // app. These wrappers preserve the lucide call-sites' (size, color) props.
 const ArrowLeft = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="arrow-back" size={size} color={color} />;
-const Edit3 = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="create-outline" size={size} color={color} />;
-const MoreVertical = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="ellipsis-vertical" size={size} color={color} />;
-const RefreshCcw = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="refresh" size={size} color={color} />;
-import { useTheme, theme as themeMod } from '../theme';
-import { useRelay, type Session } from '../hooks/useRelay';
+const ChevronDown = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="chevron-down" size={size} color={color} />;
+const MenuIcon = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="menu" size={size} color={color} />;
+import { theme as themeMod } from '../theme';
+import { useRelay } from '../hooks/useRelay';
 import { useSessionChat } from '../hooks/useSessionChat';
 import MessageBubble from '../components/chat/MessageBubble';
 import ChatComposer from '../components/chat/ChatComposer';
 import ApprovalCard from '../components/chat/ApprovalCard';
 import StatusBanner from '../components/chat/StatusBanner';
-import ArtifactChip from '../components/chat/ArtifactChip';
+import PlanCard from '../components/chat/PlanCard';
+import ModelSheet from '../components/chat/ModelSheet';
+// Drawer contract (parallel build): `export function useDrawer():
+// { open: () => void; close: () => void; isOpen: boolean }` from AppDrawer.
+import { useDrawer } from '../components/AppDrawer';
 
 export default function SessionChat() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
-  const session: Session | undefined = route.params?.session;
-  const sessionId = session?.id ?? null;
+  const session = route.params?.session as { id: string; title?: string } | undefined;
+  const sessionId: string | null = (route.params?.sessionId as string | undefined) ?? session?.id ?? null;
 
-  useTheme();
   const c = themeMod.colors;
-
-  const { providers, connected } = useRelay();
+  const { providers, connected, transcribeAudio, startLocalModel } = useRelay();
+  const drawer = useDrawer();
   const chat = useSessionChat(sessionId);
 
+  const [modelSheetOpen, setModelSheetOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
-  const [renameValue, setRenameValue] = useState(session?.title ?? '');
+  const [renameValue, setRenameValue] = useState('');
 
   const listRef = useRef<FlatList>(null);
   const lastAutoScrollRef = useRef(0);
 
-  // Auto-scroll to top on new content (newest-first).
-  // M5 (PERFORMANCE_AUDIT.md): throttled to one scroll per 100 ms — streaming
-  // tokens previously re-ran scrollToOffset on EVERY length change, fighting
-  // the layout engine for the whole turn.
+  const title = chat.meta?.title ?? session?.title ?? 'Chat';
+
+  // Auto-scroll to the newest content (inverted list → offset 0 = bottom).
+  // Throttled to one scroll per 100 ms so streaming tokens don't fight the
+  // layout engine for the whole turn (PERFORMANCE_AUDIT.md M5).
   useEffect(() => {
     if (chat.messages.length === 0 && chat.streamingContent.length === 0) return;
     const scroll = () => {
       lastAutoScrollRef.current = Date.now();
-      // Defer to next frame so the new row is mounted first.
       requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: 0, animated: true }));
     };
     const elapsed = Date.now() - lastAutoScrollRef.current;
@@ -92,70 +92,100 @@ export default function SessionChat() {
     return () => clearTimeout(t);
   }, [chat.messages.length, chat.streamingContent]);
 
-  // M5: memoize the header — it used to be a fresh inline JSX tree on every
-  // render, forcing FlatList to diff/re-render the streaming bubble,
-  // approvals and artifact chip on each streaming token.
+  const openRename = useCallback(() => {
+    setRenameValue(title);
+    setRenameOpen(true);
+  }, [title]);
+
+  const handleRename = useCallback(() => {
+    const next = renameValue.trim();
+    setRenameOpen(false);
+    if (next.length === 0 || next === title) return;
+    chat.rename(next);
+  }, [chat, renameValue, title]);
+
+  // --- List chrome (memoized so streaming tokens don't rebuild it) ---
+
   const listHeader = useMemo(() => (
-    <>
-      {/* Live streaming bubble — appears above the persisted messages. */}
-      {chat.streaming ? (
+    // Visual BOTTOM of the inverted list: the live streaming turn.
+    // (Every row is counter-flipped — `inverted` mirrors the content.)
+    chat.streaming ? (
+      <View style={styles.flipRow}>
         <MessageBubble
           role="assistant"
           content={chat.streamingContent}
           streaming
-          createdAt={Math.floor(Date.now() / 1000)}
         />
-      ) : null}
+      </View>
+    ) : null
+  ), [chat.streaming, chat.streamingContent]);
 
-      {/* Pending approvals at the very top of the stream. */}
-      {chat.pendingApprovals.map((a) => (
-        <ApprovalCard
-          key={a.pendingId}
-          tool={a.tool}
-          summary={a.summary}
-          args={a.args}
-          onApprove={() => chat.approve(a.pendingId)}
-          onDeny={() => chat.deny(a.pendingId)}
-        />
-      ))}
-
-      {/* Latest artifact chip (only when not streaming). */}
-      {chat.lastArtifact && !chat.streaming ? (
-        <View style={styles.artifactRow}>
-          <ArtifactChip artifact={chat.lastArtifact} />
-        </View>
-      ) : null}
-
-      {/* Initial loading state. */}
+  const listFooter = useMemo(() => (
+    // Visual TOP of the inverted list: pagination + first-load states.
+    <View style={styles.flipRow}>
       {chat.loading && chat.messages.length === 0 ? (
         <View style={styles.loadingRow}>
           <ActivityIndicator size="small" color={c.textSecondary} />
         </View>
+      ) : chat.hasMore ? (
+        <TouchableOpacity
+          onPress={chat.loadMore}
+          disabled={chat.loading}
+          style={[styles.loadMoreBtn, { backgroundColor: c.surface2, borderColor: c.border }]}
+        >
+          {chat.loading ? (
+            <ActivityIndicator size="small" color={c.textSecondary} />
+          ) : (
+            <Text style={[styles.loadMoreText, { color: c.text }]}>Load older messages</Text>
+          )}
+        </TouchableOpacity>
       ) : null}
-    </>
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [chat.streaming, chat.streamingContent, chat.pendingApprovals, chat.lastArtifact, chat.loading, chat.messages.length, chat.approve, chat.deny, c.textSecondary]);
+    </View>
+  ), [chat.loading, chat.hasMore, chat.messages.length, chat.loadMore, c.textSecondary, c.surface2, c.border, c.text]);
 
-  const handleRename = useCallback(() => {
-    if (renameValue.trim().length === 0) return;
-    chat.rename(renameValue.trim());
-    setRenameOpen(false);
-  }, [chat, renameValue]);
+  const listEmpty = useMemo(() => (
+    !chat.loading && !chat.streaming ? (
+      <View style={[styles.emptyRow, styles.flipRow]}>
+        <Text style={[styles.emptyText, { color: c.textSecondary }]}>
+          Ask anything
+        </Text>
+      </View>
+    ) : null
+  ), [chat.loading, chat.streaming, c.textSecondary]);
 
-  // Resolve a model hint string from the active provider (best-effort).
-  const modelHint = (() => {
-    if (!session?.provider) return undefined;
-    const p = providers.find((x) => x.id === session.provider);
-    if (!p) return undefined;
-    return `${p.display_name}${p.models[0] ? ' · ' + p.models[0] : ''}`;
-  })();
+  const renderItem = useCallback(({ item }: { item: { id: number; role: string; content: string } }) => (
+    <View style={styles.flipRow}>
+      <MessageBubble
+        role={item.role as 'user' | 'assistant' | 'system'}
+        content={item.content}
+      />
+    </View>
+  ), []);
+
+  // --- Deleted: full-screen cleared state ---
 
   if (!sessionId) {
     return (
-      <SafeAreaView style={[styles.container, { backgroundColor: c.background }]}>
-        <Text style={{ color: c.textSecondary, textAlign: 'center', marginTop: 32 }}>
-          No session selected.
+      <SafeAreaView style={[styles.container, styles.center, { backgroundColor: c.background }]} edges={['top']}>
+        <Text style={{ color: c.textSecondary }}>No session selected.</Text>
+      </SafeAreaView>
+    );
+  }
+
+  if (chat.deleted) {
+    return (
+      <SafeAreaView style={[styles.container, styles.center, { backgroundColor: c.background }]} edges={['top']}>
+        <Text style={[styles.deletedText, { color: c.textSecondary }]}>
+          This conversation was cleared
         </Text>
+        <TouchableOpacity
+          style={[styles.backBtn, { backgroundColor: c.surface2, borderColor: c.border }]}
+          onPress={() => navigation.goBack()}
+          activeOpacity={0.8}
+        >
+          <ArrowLeft size={18} color={c.text} />
+          <Text style={[styles.backBtnText, { color: c.text }]}>Go back</Text>
+        </TouchableOpacity>
       </SafeAreaView>
     );
   }
@@ -168,125 +198,149 @@ export default function SessionChat() {
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
       >
         {/* Header */}
-        <View style={[styles.header, { backgroundColor: c.surface, borderBottomColor: c.border }]}>
+        <View style={[styles.header, { backgroundColor: c.background, borderBottomColor: c.border }]}>
           <TouchableOpacity
             onPress={() => navigation.goBack()}
             style={styles.headerBtn}
             hitSlop={{ top: 10, left: 10, right: 10, bottom: 10 }}
+            accessibilityLabel="Back"
           >
             <ArrowLeft size={22} color={c.text} />
           </TouchableOpacity>
-          <View style={styles.headerCenter}>
+
+          <TouchableOpacity
+            style={styles.headerCenter}
+            onLongPress={openRename}
+            delayLongPress={400}
+            activeOpacity={0.8}
+            accessibilityLabel="Session title — long-press to rename"
+          >
             <Text style={[styles.headerTitle, { color: c.text }]} numberOfLines={1}>
-              {session?.title || 'Session'}
+              {title}
             </Text>
-            {session?.provider ? (
-              <Text style={[styles.headerSub, { color: c.textSecondary }]} numberOfLines={1}>
-                {session.provider}
-              </Text>
-            ) : null}
-          </View>
-          <TouchableOpacity
-            onPress={() => {
-              setRenameValue(session?.title ?? '');
-              setRenameOpen(true);
-            }}
-            style={styles.headerBtn}
-            hitSlop={{ top: 10, left: 10, right: 10, bottom: 10 }}
-          >
-            <Edit3 size={18} color={c.textSecondary} />
           </TouchableOpacity>
+
+          {/* Model chip → ModelSheet */}
           <TouchableOpacity
+            style={[styles.modelChip, { backgroundColor: c.surface2, borderColor: c.border }]}
             onPress={() => {
-              Alert.alert('Session', undefined, [
-                { text: 'Refresh', onPress: () => chat.loadMore() },
-                { text: 'Cancel', style: 'cancel' },
-              ]);
+              setModelSheetOpen(true);
             }}
+            activeOpacity={0.7}
+            accessibilityLabel={`Model: ${chat.meta?.model ?? 'select'} — open picker`}
+          >
+            <Text style={[styles.modelChipText, { color: c.text }]} numberOfLines={1}>
+              {chat.meta?.model ?? 'Model'}
+            </Text>            <ChevronDown size={13} color={c.textSecondary} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={() => drawer.open()}
             style={styles.headerBtn}
             hitSlop={{ top: 10, left: 10, right: 10, bottom: 10 }}
+            accessibilityLabel="Open menu"
           >
-            <MoreVertical size={20} color={c.textSecondary} />
+            <MenuIcon size={20} color={c.text} />
           </TouchableOpacity>
         </View>
 
-        {/* Error chip */}
-        {chat.error ? (
-          <TouchableOpacity
-            onPress={chat.clearError}
-            style={[styles.errorChip, { backgroundColor: c.error }]}
-          >
-            <Text style={styles.errorText}>{chat.error}  (tap to dismiss)</Text>
-          </TouchableOpacity>
-        ) : null}
-
-        {/* Messages */}
+        {/* Messages — inverted: newest at the bottom, ChatGPT style. */}
         <FlatList
           ref={listRef}
           data={chat.messages}
           keyExtractor={(item) => String(item.id)}
-          inverted={false}
+          inverted
           contentContainerStyle={styles.listContent}
-          // M3 (PERFORMANCE_AUDIT.md): window the list. No getItemLayout —
-          // message heights are variable (markdown/code blocks), so a fixed
-          // layout would misplace rows; the batching props below are the
-          // safe subset for variable-height lists.
+          // Variable-height rows (markdown/code blocks) — no getItemLayout;
+          // the batching props are the safe subset (PERFORMANCE_AUDIT.md M3).
           initialNumToRender={12}
           maxToRenderPerBatch={5}
           windowSize={7}
-          removeClippedSubviews={true}
           ListHeaderComponent={listHeader}
-          renderItem={({ item }) => (
-            <View>
-              <MessageBubble
-                role={item.role as 'user' | 'assistant' | 'system'}
-                content={item.content}
-                createdAt={item.created_at}
-                usage={
-                  item.role === 'assistant' && (item.input_tokens != null || item.output_tokens != null)
-                    ? { inputTokens: item.input_tokens ?? 0, outputTokens: item.output_tokens ?? 0, costUsd: item.cost_usd ?? undefined }
-                    : undefined
-                }
-              />
-            </View>
-          )}
-          ListFooterComponent={
-            chat.hasMore ? (
-              <TouchableOpacity
-                onPress={chat.loadMore}
-                disabled={chat.loading}
-                style={[styles.loadMoreBtn, { backgroundColor: c.surface2, borderColor: c.border }]}
-              >
-                {chat.loading ? (
-                  <ActivityIndicator size="small" color={c.textSecondary} />
-                ) : (
-                  <Text style={[styles.loadMoreText, { color: c.text }]}>
-                    Load older messages
-                  </Text>
-                )}
-              </TouchableOpacity>
-            ) : null
+          ListFooterComponent={listFooter}
+          ListEmptyComponent={listEmpty}
+          renderItem={renderItem}
+          onEndReachedThreshold={0.6}
+          onEndReached={() => {
+            if (chat.hasMore && !chat.loading) chat.loadMore();
+          }}
+          refreshControl={
+            <RefreshControl
+              refreshing={chat.loading && chat.messages.length > 0}
+              onRefresh={chat.refresh}
+              tintColor={c.textSecondary}
+              colors={[c.accent]}
+            />
           }
-          // Refresh = re-fetch the first page from the top (M10).
-          refreshing={chat.loading && chat.messages.length > 0}
-          onRefresh={chat.refresh}
         />
 
-        {/* Transient status banner. */}
+        {/* Pending approvals — between the list and the composer. */}
+        {chat.pendingApprovals.map((a) => (
+          <ApprovalCard
+            key={a.pendingId}
+            approval={{
+              pendingId: a.pendingId,
+              tool: a.tool,
+              summary: a.summary,
+              args: a.args,
+              canAlwaysAllow: a.canAlwaysAllow,
+            }}
+            onApprove={(alwaysAllow) => chat.approve(a.pendingId, alwaysAllow)}
+            onDeny={() => chat.deny(a.pendingId)}
+          />
+        ))}
+
+        {/* Live plan proposal — pinned above the composer. */}
+        {chat.planProposal ? (
+          <PlanCard
+            pendingId={chat.planProposal.pendingId}
+            title={chat.planProposal.title}
+            plan={chat.planProposal.plan}
+            onApprove={() => chat.resolvePlan(chat.planProposal!.pendingId, true)}
+            onRevise={(feedback) => chat.resolvePlan(chat.planProposal!.pendingId, false, feedback)}
+          />
+        ) : null}
+
+        {/* Error banner with retry + dismiss. */}
+        {chat.error ? (
+          <View style={[styles.errorBanner, { backgroundColor: c.surface2, borderColor: c.border }]}>
+            <View style={[styles.errorDot, { backgroundColor: c.error }]} />
+            <Text style={[styles.errorText, { color: c.error }]} numberOfLines={2}>
+              {chat.error}
+            </Text>
+            <TouchableOpacity
+              onPress={() => {
+                chat.clearError();
+                chat.refresh();
+              }}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={[styles.errorAction, { color: c.text }]}>Retry</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={chat.clearError}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Ionicons name="close" size={16} color={c.textSecondary} />
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
+        {/* Transient status banner ("Compacting…"). */}
         {chat.status ? <StatusBanner message={chat.status} /> : null}
 
-        {/* Composer — hard-gated on the relay connection: sending while
-            disconnected would only surface an error, so disable up front. */}
+        {/* Composer — send while idle, stop while streaming. Send gating
+            lives in useSessionChat.send (not-connected error surfaced there). */}
         <ChatComposer
           onSend={chat.send}
+          onTranscribe={transcribeAudio}
           onCancel={chat.cancel}
           streaming={chat.streaming}
           disabled={!connected}
-          modelHint={modelHint}
-          placeholder={connected ? 'Send a message…' : 'Not connected to desktop…'}
+          placeholder={connected ? 'Message' : 'Not connected to desktop'}
         />
 
-        {/* Rename modal. */}
+        {/* Rename modal (long-press the header title). */}
         <Modal
           visible={renameOpen}
           animationType="fade"
@@ -295,29 +349,38 @@ export default function SessionChat() {
         >
           <View style={styles.modalBackdrop}>
             <View style={[styles.modalCard, { backgroundColor: c.surface, borderColor: c.border }]}>
-              <Text style={[styles.modalTitle, { color: c.text }]}>Rename session</Text>
+              <Text style={[styles.modalTitle, { color: c.text }]}>Rename chat</Text>
               <TextInput
                 value={renameValue}
                 onChangeText={setRenameValue}
                 placeholder="Title"
                 placeholderTextColor={c.textSecondary}
-                style={[
-                  styles.modalInput,
-                  { color: c.text, borderColor: c.border, backgroundColor: c.surface2 },
-                ]}
+                style={[styles.modalInput, { color: c.text, borderColor: c.border, backgroundColor: c.surface2 }]}
                 autoFocus
+                onSubmitEditing={handleRename}
               />
               <View style={styles.modalActions}>
-                <TouchableOpacity onPress={() => setRenameOpen(false)} style={styles.modalBtn}>
+                <TouchableOpacity onPress={() => setRenameOpen(false)} style={styles.modalBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                   <Text style={{ color: c.textSecondary }}>Cancel</Text>
                 </TouchableOpacity>
-                <TouchableOpacity onPress={handleRename} style={styles.modalBtn}>
-                  <Text style={{ color: c.primary, fontWeight: '600' }}>Save</Text>
+                <TouchableOpacity onPress={handleRename} style={styles.modalBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={{ color: c.accent, fontWeight: '600' }}>Save</Text>
                 </TouchableOpacity>
               </View>
             </View>
           </View>
         </Modal>
+
+        {/* Model picker bottom sheet. */}
+        <ModelSheet
+          visible={modelSheetOpen}
+          onClose={() => setModelSheetOpen(false)}
+          providers={providers}
+          currentProvider={chat.meta?.provider ?? null}
+          currentModel={chat.meta?.model ?? null}
+          onSelect={chat.setModel}
+          onStartLocal={startLocalModel}
+        />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -325,33 +388,98 @@ export default function SessionChat() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  center: { alignItems: 'center', justifyContent: 'center' },
+  // `inverted` mirrors the list content vertically — every row, the header
+  // (streaming turn), footer and empty state are counter-flipped so their
+  // contents render upright.
+  flipRow: { transform: [{ scaleY: -1 }] },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 8,
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: 4,
   },
   headerBtn: { padding: 6 },
-  headerCenter: { flex: 1, paddingHorizontal: 8 },
-  headerTitle: { fontSize: 15, fontWeight: '600' },
-  headerSub: { fontSize: 11, marginTop: 1 },
-  listContent: { paddingTop: 8, paddingBottom: 12 },
+  headerCenter: {
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 4,
+  },
+  headerTitle: {
+    fontSize: 16,
+    lineHeight: 21,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  modelChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    borderRadius: themeMod.radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    maxWidth: 150,
+  },
+  modelChipText: {
+    fontSize: 12,
+    lineHeight: 16,
+    flexShrink: 1,
+  },
+  listContent: {
+    paddingTop: 8,
+    paddingBottom: 12,
+  },
   loadingRow: { padding: 24, alignItems: 'center' },
+  emptyRow: { paddingVertical: 48, alignItems: 'center' },
+  emptyText: { fontSize: 15 },
   loadMoreBtn: {
     margin: 16,
     paddingVertical: 10,
-    borderRadius: 8,
+    borderRadius: themeMod.radius.sm,
     borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
   },
   loadMoreText: { fontSize: 13, fontWeight: '500' },
-  artifactRow: { paddingHorizontal: 12, paddingBottom: 4 },
-  errorChip: { paddingHorizontal: 12, paddingVertical: 8 },
-  errorText: { color: '#fff', fontSize: 13, fontWeight: '500' },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: themeMod.radius.sm,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginHorizontal: themeMod.spacing.md,
+    marginTop: 4,
+  },
+  errorDot: { width: 7, height: 7, borderRadius: 4 },
+  errorText: {
+    ...themeMod.type.secondary,
+    flex: 1,
+  },
+  errorAction: {
+    ...themeMod.type.secondary,
+    fontWeight: '600',
+  },
+  deletedText: {
+    fontSize: 16,
+    marginBottom: 16,
+  },
+  backBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: themeMod.radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+  },
+  backBtnText: { fontSize: 14, fontWeight: '600' },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: themeMod.colors.scrim,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
@@ -359,13 +487,13 @@ const styles = StyleSheet.create({
   modalCard: {
     width: '100%',
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 12,
+    borderRadius: themeMod.radius.md,
     padding: 16,
   },
   modalTitle: { fontSize: 15, fontWeight: '600', marginBottom: 12 },
   modalInput: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
+    borderRadius: themeMod.radius.sm,
     paddingHorizontal: 12,
     paddingVertical: 8,
     fontSize: 14,

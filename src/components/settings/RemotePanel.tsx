@@ -34,11 +34,19 @@ export function RemotePanel() {
   // Guard: only auto-start/auto-serve once per panel open (not on every refresh).
   const didAutoStart = useRef(false);
 
-  const refresh = useCallback(async () => {
-    const data = await getMobilePairingInfo();
-    setInfo(data);
-    setLoading(false);
-    return data;
+  const refresh = useCallback(async (): Promise<MobilePairingInfo | null> => {
+    // This polls every 5 s — a rejected getMobilePairingInfo (backend busy,
+    // relay restarting) must stay benign: keep the last known state and
+    // never throw into the interval/await chains above.
+    try {
+      const data = await getMobilePairingInfo();
+      setInfo(data);
+      return data;
+    } catch {
+      return null;
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {

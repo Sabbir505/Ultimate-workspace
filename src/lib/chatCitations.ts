@@ -11,6 +11,7 @@
 // Only markers whose numbers ALL resolve to a parsed source are rewritten —
 // prose enumerations like "step (3)" never become fake links, and content with
 // no Sources section is left byte-identical.
+import { sliceCodePoints } from "./safeSlice";
 
 export interface ChatSource {
   /** The number the model cites, e.g. 2 for `[2]`. */
@@ -84,7 +85,9 @@ export function parseChatSources(content: string): ChatSource[] {
         title = url;
       }
     }
-    if (title.length > 120) title = `${title.slice(0, 117)}…`;
+    // sliceCodePoints (not String.slice): a raw UTF-16 cut can split a
+    // surrogate pair, rendering the orphaned half as U+FFFD (audit #25).
+    if (title.length > 120) title = `${sliceCodePoints(title, 117)}…`;
     seen.add(n);
     sources.push({ n, title, url });
   }

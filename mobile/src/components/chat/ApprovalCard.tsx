@@ -1,91 +1,161 @@
 /**
- * ApprovalCard — an inline tool-approval prompt embedded in the chat stream.
+ * ApprovalCard — an inline tool-approval prompt rendered above the composer.
  *
  * When the agent's tool loop hits a `NeedsApproval` action (write_file,
- * run_code, etc.) the desktop emits `SessionApprovalRequest`. The phone
- * renders this card so the user can approve or deny without touching
- * the desktop.
+ * run_code, …) the desktop emits `SessionApprovalRequest`; the phone renders
+ * this card so the user can approve or deny without touching the desktop.
  *
- * While a decision is pending the buttons disable; resolving the card
- * removes it from the stream (handled by the caller via useSessionChat's
- * approve/deny, which drops it from `pendingApprovals`).
+ * Permission design: plain "Approve" NEVER grants permanent permission —
+ * "Always allow" is a SECOND, clearly-captioned text button that calls
+ * `onApprove(true)`. The card disables itself once a decision is tapped; the
+ * caller removes it from the stream (useSessionChat's approve/deny drops it
+ * from `pendingApprovals`, and `SessionApprovalResolved` dismisses cards
+ * resolved on any surface).
  */
-import React, { useState } from 'react';
+import { useState, type JSX } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import Ionicons from '@expo/vector-icons/Ionicons';
-// M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
-// bundle of every icon); Ionicons is a glyph font already bundled with the
-// app. These wrappers preserve the lucide call-sites' (size, color) props.
-const ShieldAlert = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="shield" size={size} color={color} />;
-const Check = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="checkmark" size={size} color={color} />;
-const X = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="close" size={size} color={color} />;
 import { theme } from '../../theme';
+import { notifySuccess, notifyError, tapLight } from '../../lib/haptics';
 
 export interface ApprovalCardProps {
-  tool: string;
-  summary: string;
-  /** Raw JSON args from the model — pretty-printed if present. */
-  args?: unknown;
-  onApprove: () => void;
+  approval: {
+    pendingId: string;
+    tool: string;
+    summary: string;
+    args: unknown;
+    /** True when the Always-Allow shortcut should be offered (FS mutators
+     *  only — the desktop's rules engine governs exactly these). */
+    canAlwaysAllow: boolean;
+  };
+  /** `alwaysAllow` is true ONLY from the separate Always-Allow button. */
+  onApprove: (alwaysAllow: boolean) => void;
   onDeny: () => void;
 }
 
-export default function ApprovalCard({ tool, summary, args, onApprove, onDeny }: ApprovalCardProps) {
-  const [resolved, setResolved] = useState(false);
+/** Per-tool glyph (plain text, no icon-font dependency):
+ *  ✎ edit/write · ⌫ delete · ⇄ move/copy · 🔍 read/search · ▸ shell/run default. */
+function toolGlyph(tool: string): string {
+  const t = (tool || '').toLowerCase();
+  if (/(delete|remove|unlink|rmdir)/.test(t)) return '⌫';
+  if (/(move|copy|rename)/.test(t)) return '⇄';
+  if (/(edit|write|create|patch|apply|save)/.test(t)) return '✎';
+  if (/(read|search|grep|glob|find|list|fetch|web|open)/.test(t)) return '🔍';
+  return '▸'; // shell / run_code / everything else
+}
 
-  const handle = (fn: () => void) => () => {
-    setResolved(true);
-    fn();
-  };
+/** Cap pretty-printed args so a giant object can't blow up the card. */
+const ARGS_DISPLAY_CAP = 2000;
+
+export function ApprovalCard({ approval, onApprove, onDeny }: ApprovalCardProps): JSX.Element {
+  const [resolved, setResolved] = useState(false);
+  const [argsOpen, setArgsOpen] = useState(false);
+  const c = theme.colors;
 
   const argsText = (() => {
-    if (!args) return null;
+    const { args } = approval;
+    if (args === undefined || args === null) return null;
     try {
-      return JSON.stringify(args, null, 2);
+      const json = JSON.stringify(args, null, 2);
+      return json.length > ARGS_DISPLAY_CAP ? `${json.slice(0, ARGS_DISPLAY_CAP)}\n…` : json;
     } catch {
-      return null;
+      return null; // circular or otherwise unserializable — hide the section
     }
   })();
 
+  const deny = () => {
+    setResolved(true);
+    notifyError();
+    onDeny();
+  };
+  const approve = (alwaysAllow: boolean) => {
+    setResolved(true);
+    notifySuccess();
+    onApprove(alwaysAllow);
+  };
+
+  const disabledStyle = resolved ? { opacity: 0.5 } : null;
+
   return (
-    <View style={[styles.card, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
+    <View style={[styles.card, { backgroundColor: c.elevated, borderColor: c.border }]}>
+      {/* Header: glyph badge + tool name over a 1-2 line summary. */}
       <View style={styles.header}>
-        <ShieldAlert size={18} color={theme.colors.warning} />
-        <Text style={[styles.title, { color: theme.colors.text }]} numberOfLines={1}>
-          Approval required
-        </Text>
-        <View style={[styles.toolChip, { backgroundColor: theme.colors.surface2 }]}>
-          <Text style={[styles.toolChipText, { color: theme.colors.primary }]} numberOfLines={1}>
-            {tool}
+        <View style={[styles.glyphBadge, { backgroundColor: c.bubble }]}>
+          <Text style={[styles.glyph, { color: c.accent }]}>{toolGlyph(approval.tool)}</Text>
+        </View>
+        <View style={styles.headerText}>
+          <Text style={[styles.toolName, { color: c.textSecondary }]} numberOfLines={1}>
+            {approval.tool}
+          </Text>
+          <Text style={[styles.summary, { color: c.text }]} numberOfLines={2}>
+            {approval.summary}
           </Text>
         </View>
       </View>
-      <Text style={[styles.summary, { color: theme.colors.text }]}>{summary}</Text>
+
+      {/* Args: pretty JSON, collapsed by default. */}
       {argsText ? (
-        <View style={[styles.argsBox, { backgroundColor: theme.colors.background, borderColor: theme.colors.border }]}>
-          <Text style={[styles.argsText, { color: theme.colors.textSecondary }]}>{argsText}</Text>
+        <View>
+          <TouchableOpacity
+            style={styles.argsToggle}
+            onPress={() => {
+              tapLight();
+              setArgsOpen((open) => !open);
+            }}
+            disabled={resolved}
+            activeOpacity={0.6}
+          >
+            <Text style={[styles.argsToggleText, { color: c.textSecondary }]}>
+              Arguments
+            </Text>
+            <Text style={[styles.argsChevron, { color: c.textSecondary }]}>
+              {argsOpen ? '▾' : '▸'}
+            </Text>
+          </TouchableOpacity>
+          {argsOpen ? (
+            <View style={[styles.argsBox, { backgroundColor: c.surface2, borderColor: c.border }]}>
+              <Text style={[styles.argsText, { color: c.text }]} selectable>
+                {argsText}
+              </Text>
+            </View>
+          ) : null}
         </View>
       ) : null}
+
+      {/* Decision row: Deny (quiet destructive) · Always allow (tertiary text)
+          · Approve (accent filled = the primary decision). */}
       <View style={styles.actions}>
         <TouchableOpacity
-          style={[styles.btn, styles.btnDeny, { borderColor: theme.colors.error }]}
-          onPress={handle(onDeny)}
+          style={[styles.btnDeny, { borderColor: c.error }, disabledStyle]}
+          onPress={deny}
           disabled={resolved}
           activeOpacity={0.7}
         >
-          <X size={15} color={theme.colors.error} />
-          <Text style={[styles.btnText, { color: theme.colors.error }]}>Deny</Text>
+          <Text style={[styles.btnDenyText, { color: c.error }]}>Deny</Text>
         </TouchableOpacity>
+        {approval.canAlwaysAllow ? (
+          <TouchableOpacity
+            style={[styles.btnAlways, disabledStyle]}
+            onPress={() => approve(true)}
+            disabled={resolved}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.btnAlwaysText, { color: c.textSecondary }]}>Always allow</Text>
+          </TouchableOpacity>
+        ) : null}
         <TouchableOpacity
-          style={[styles.btn, styles.btnApprove, { backgroundColor: theme.colors.success, opacity: resolved ? 0.5 : 1 }]}
-          onPress={handle(onApprove)}
+          style={[styles.btnApprove, { backgroundColor: c.accent }, disabledStyle]}
+          onPress={() => approve(false)}
           disabled={resolved}
           activeOpacity={0.7}
         >
-          <Check size={15} color="#fff" />
-          <Text style={[styles.btnText, { color: '#fff' }]}>Approve</Text>
+          <Text style={[styles.btnApproveText, { color: c.white }]}>Approve</Text>
         </TouchableOpacity>
       </View>
+      {approval.canAlwaysAllow ? (
+        <Text style={[styles.alwaysCaption, { color: c.textSecondary }]}>
+          Runs this tool without asking from now on
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -93,37 +163,72 @@ export default function ApprovalCard({ tool, summary, args, onApprove, onDeny }:
 const styles = StyleSheet.create({
   card: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 12,
-    padding: 12,
-    marginVertical: 6,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+    marginVertical: theme.spacing.sm,
   },
-  header: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
-  title: { fontSize: 14, fontWeight: '600', flex: 1, marginLeft: 6 },
-  toolChip: {
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    maxWidth: 120,
+  header: { flexDirection: 'row', alignItems: 'flex-start', gap: theme.spacing.sm },
+  glyphBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: theme.radius.sm,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  toolChipText: { fontSize: 11, fontFamily: 'monospace' },
-  summary: { fontSize: 13, lineHeight: 19, marginBottom: 8 },
-  argsBox: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 6,
-    padding: 8,
-    marginBottom: 8,
+  glyph: { fontSize: 15, lineHeight: 19 },
+  headerText: { flex: 1, minWidth: 0 },
+  toolName: {
+    fontSize: theme.fontSize.xs,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
-  argsText: { fontFamily: 'monospace', fontSize: 11, lineHeight: 16 },
-  actions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },
-  btn: {
+  summary: { ...theme.type.body, fontSize: theme.fontSize.md, lineHeight: 19, marginTop: 1 },
+  argsToggle: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    gap: 5,
+    gap: theme.spacing.xs,
+    marginTop: theme.spacing.sm,
+    paddingVertical: 2,
   },
-  btnDeny: { borderWidth: 1 },
-  btnApprove: {},
-  btnText: { fontSize: 13, fontWeight: '600' },
+  argsToggleText: { fontSize: theme.fontSize.sm, fontWeight: '500' },
+  argsChevron: { fontSize: theme.fontSize.sm },
+  argsBox: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: theme.radius.sm,
+    padding: theme.spacing.sm,
+    marginTop: theme.spacing.xs,
+  },
+  argsText: { ...theme.type.mono, fontSize: theme.fontSize.sm, lineHeight: 18 },
+  actions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: theme.spacing.sm,
+    marginTop: theme.spacing.sm,
+  },
+  btnDeny: {
+    borderWidth: 1,
+    borderRadius: theme.radius.sm,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  btnDenyText: { fontSize: theme.fontSize.sm, fontWeight: '600' },
+  btnAlways: { paddingHorizontal: theme.spacing.xs, paddingVertical: 8 },
+  btnAlwaysText: { fontSize: theme.fontSize.sm, fontWeight: '500' },
+  btnApprove: {
+    borderRadius: theme.radius.sm,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  btnApproveText: { fontSize: theme.fontSize.sm, fontWeight: '600' },
+  alwaysCaption: {
+    ...theme.type.secondary,
+    fontSize: theme.fontSize.xs,
+    lineHeight: 15,
+    marginTop: theme.spacing.xs,
+    textAlign: 'right',
+  },
 });
+
+export default ApprovalCard;

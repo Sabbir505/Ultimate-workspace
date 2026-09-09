@@ -476,12 +476,12 @@ const OPENCODE_STDIN_WRAPPER_NAME: &str = "opencode-turn-stdin.cmd";
 /// `(TURN_PROMPT_ENV, prompt)` pair to set on the `Command`. The prompt never
 /// appears in `spec.args` for any Windows path.
 ///
-/// Errors only for the one combination with no safe transport: a KIMI prompt
-/// past cmd.exe's delayed-expansion limit. Kimi's `-p` takes the prompt only
-/// as an argv value (no stdin channel — verified against the installed CLI,
-/// which hangs), so an oversized prompt cannot be carried: the env transport
-/// would silently deliver an EMPTY prompt and the turn would fail with the
-/// CLI's confusing "no message" error instead of this diagnosis.
+/// Errors when no safe transport exists: a KIMI prompt past cmd.exe's
+/// delayed-expansion limit (no stdin channel — the CLI hangs), and — on
+/// Windows only — a turn-wrapper write failure, where the legacy argv
+/// fallback would put the untrusted prompt on the cmd.exe command line
+/// (command-injection exposure). On Unix the argv transport is safe
+/// (plain execve, no shell re-parsing), so that platform never errors.
 pub fn turn_spec(
     kind: TurnHarness,
     prompt: &str,
@@ -511,54 +511,86 @@ pub fn turn_spec(
     }
     #[cfg(windows)]
     {
-        let oversized = !prompt_fits_cmd_expansion(prompt);
-        if oversized && kind == TurnHarness::Kimi {
-            return Err(format!(
-                "This prompt is {} chars long. Past ~8k chars the cmd.exe wrapper \
-                 silently delivers an EMPTY prompt to the kimi CLI, and kimi has no \
-                 stdin prompt channel to fall back to. Shorten the message, or switch \
-                 the chat to a harness that takes the prompt on stdin.",
-                prompt.chars().count()
-            ));
-        }
-        let wrapper_name = if oversized {
-            // OpenCode only — kimi returned above. Flags-only wrapper: the
-            // prompt rides stdin (verified: `opencode run` reads the message
-            // from stdin when no positional message follows).
-            OPENCODE_STDIN_WRAPPER_NAME
-        } else {
-            kind.wrapper_name()
-        };
-        if let Some(wrapper) = ensure_turn_wrappers().map(|d| d.join(wrapper_name)) {
-            let mut args = vec!["/C".to_string(), wrapper.to_string_lossy().into_owned()];
-            args.extend(flags);
-            return Ok((
-                CommandSpec {
-                    program: "cmd.exe".to_string(),
-                    args,
-                },
-                if oversized {
-                    None
-                } else {
-                    Some((TURN_PROMPT_ENV.to_string(), prompt.to_string()))
-                },
-                if oversized {
-                    TurnPromptTransport::Stdin
-                } else {
-                    TurnPromptTransport::EnvOrArgv
-                },
-            ));
-        }
-        // Wrapper write failed — fall through to the legacy argv spec so the
-        // turn still runs (M12 exposure documented in BUG_LIST.md).
+        let wrapper_dir = ensure_turn_wrappers();
+        turn_spec_windows(kind, prompt, flags, wrapper_dir)
     }
-    Ok((
-        resolve_for_spawn(&CommandSpec {
-            program: kind.program().to_string(),
-            args: kind.argv_args(prompt, flags),
-        }),
-        None,
-        TurnPromptTransport::EnvOrArgv,
+    #[cfg(not(windows))]
+    {
+        Ok((
+            resolve_for_spawn(&CommandSpec {
+                program: kind.program().to_string(),
+                args: kind.argv_args(prompt, flags),
+            }),
+            None,
+            TurnPromptTransport::EnvOrArgv,
+        ))
+    }
+}
+
+/// The Windows half of [`turn_spec`], split out so the wrapper-unavailable
+/// path is testable (`wrapper_dir = None`).
+#[cfg(windows)]
+fn turn_spec_windows(
+    kind: TurnHarness,
+    prompt: &str,
+    flags: Vec<String>,
+    wrapper_dir: Option<std::path::PathBuf>,
+) -> Result<
+    (
+        CommandSpec,
+        Option<(String, String)>,
+        TurnPromptTransport,
+    ),
+    String,
+> {
+    let oversized = !prompt_fits_cmd_expansion(prompt);
+    if oversized && kind == TurnHarness::Kimi {
+        return Err(format!(
+            "This prompt is {} chars long. Past ~8k chars the cmd.exe wrapper \
+             silently delivers an EMPTY prompt to the kimi CLI, and kimi has no \
+             stdin prompt channel to fall back to. Shorten the message, or switch \
+             the chat to a harness that takes the prompt on stdin.",
+            prompt.chars().count()
+        ));
+    }
+    let wrapper_name = if oversized {
+        // OpenCode only — kimi returned above. Flags-only wrapper: the
+        // prompt rides stdin (verified: `opencode run` reads the message
+        // from stdin when no positional message follows).
+        OPENCODE_STDIN_WRAPPER_NAME
+    } else {
+        kind.wrapper_name()
+    };
+    if let Some(wrapper) = wrapper_dir.map(|d| d.join(wrapper_name)) {
+        let mut args = vec!["/C".to_string(), wrapper.to_string_lossy().into_owned()];
+        args.extend(flags);
+        return Ok((
+            CommandSpec {
+                program: "cmd.exe".to_string(),
+                args,
+            },
+            if oversized {
+                None
+            } else {
+                Some((TURN_PROMPT_ENV.to_string(), prompt.to_string()))
+            },
+            if oversized {
+                TurnPromptTransport::Stdin
+            } else {
+                TurnPromptTransport::EnvOrArgv
+            },
+        ));
+    }
+    // Wrapper write failed (temp dir unwritable / disk full). The legacy argv
+    // spec would put the untrusted prompt back on the cmd.exe command line —
+    // the M12 injection exposure (`a&b %VAR% | calc` executes) — so fail the
+    // turn with a diagnosis instead of silently degrading to an exploitable
+    // transport.
+    Err(format!(
+        "Could not write the cmd.exe turn-prompt wrapper for {} (temp dir unwritable or \
+         full?). Refusing to run the turn with the prompt on the command line \
+         (command-injection risk). Fix the %TEMP% directory, then retry.",
+        kind.program()
     ))
 }
 
@@ -705,8 +737,11 @@ pub fn installed_cli_version(binary: &str) -> Option<String> {
             done
         });
     if status.is_none() {
-        let _ = child.kill();
-        let _ = child.wait();
+        // Kill the whole tree, not just the direct child: on Windows this is
+        // usually a `cmd.exe /C` wrapper, and a surviving CLI grandchild
+        // would hold the stdout/stderr pipes open — the reads below would
+        // then block on an EOF that never comes, wedging the update checker.
+        crate::agent_sessions::kill_child_tree(&mut child);
     }
     let mut output = String::new();
     if let Some(mut stdout) = child.stdout.take() {
@@ -994,6 +1029,28 @@ mod tests {
         assert_eq!(key, TURN_PROMPT_ENV);
         assert_eq!(val, prompt);
         assert!(spec.args[1].ends_with("opencode-turn.cmd"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn turn_spec_wrapper_unavailable_fails_instead_of_argv_prompt() {
+        // M12: with the turn wrappers unwritable (temp dir gone/full), the
+        // legacy fallback would put the untrusted prompt back on the
+        // cmd.exe command line — a hostile prompt like `a&b %VAR% | calc`
+        // would execute. The spec must fail the turn instead.
+        let hostile = "a&b %PATH% | calc";
+        for kind in [TurnHarness::Kimi, TurnHarness::OpenCode] {
+            let err = turn_spec_windows(kind, hostile, vec!["-m".into(), "m".into()], None)
+                .expect_err("wrapper-unavailable turns must not fall back to argv");
+            assert!(
+                err.contains("command-injection") || err.contains("wrapper"),
+                "unexpected diagnosis: {err}"
+            );
+        }
+        // The oversized-kimi diagnosis still wins for that combination.
+        let prompt = "x".repeat(12_000);
+        let err = turn_spec_windows(TurnHarness::Kimi, &prompt, vec![], None).unwrap_err();
+        assert!(err.contains("EMPTY prompt"), "{err}");
     }
 
     #[test]

@@ -27,6 +27,11 @@ export function DocxViewer({
   const containerRef = useRef<HTMLDivElement>(null);
   const naturalPageWidth = useRef(0);
   const naturalPageHeight = useRef(0);
+  // Render epoch: bumped at the start of every render attempt; after each
+  // await the epoch must still be current or the render is abandoned. Without
+  // this, switching documents quickly lets two overlapping `renderAsync`
+  // calls interleave pages from both files into the same container.
+  const renderEpoch = useRef(0);
   const [failed, setFailed] = useState(false);
 
   // docx-preview renders pages at the document's real paper size (Letter ≈
@@ -69,6 +74,7 @@ export function DocxViewer({
   const render = useCallback(async () => {
     const container = containerRef.current;
     if (!container) return;
+    const epoch = ++renderEpoch.current;
     naturalPageWidth.current = 0;
     naturalPageHeight.current = 0;
     try {
@@ -85,9 +91,13 @@ export function DocxViewer({
         renderEndnotes: true,
         experimental: true,
       });
+      // A newer render took over the container — abandon this stale one
+      // rather than scaling/failing state off mixed content.
+      if (epoch !== renderEpoch.current) return;
       fitToWidth();
       setFailed(false);
     } catch (err) {
+      if (epoch !== renderEpoch.current) return;
       console.warn(`[DocxViewer] docx-preview failed for ${filename}`, err);
       setFailed(true);
     }

@@ -7,8 +7,9 @@
 // A11y: role="dialog" + aria-modal, Escape closes, focus is moved into the
 // dialog on open, Tab/Shift+Tab cycle within it (focus trap), and focus
 // returns to the previously-focused element on close.
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { useUiStore } from "../../state/ui";
 
 interface ModalProps {
   title: string;
@@ -24,6 +25,16 @@ const FOCUSABLE =
 
 export function Modal({ title, children, actions, onClose, className }: ModalProps) {
   const boxRef = useRef<HTMLDivElement>(null);
+  // Occlusion registration (M22): a native child-webview floats ABOVE all
+  // DOM, so while any Modal is up the browser panes must hide at the OS
+  // level. Every Modal registers itself — callers no longer have to remember.
+  const occlusionId = useId();
+  useEffect(() => {
+    useUiStore.getState().setModalOpen(occlusionId, true);
+    return () => {
+      useUiStore.getState().setModalOpen(occlusionId, false);
+    };
+  }, [occlusionId]);
   // Keep the latest onClose in a ref so the effect below mounts ONCE — an
   // inline-arrow onClose prop would otherwise re-run the effect (and steal
   // focus) on every parent render.

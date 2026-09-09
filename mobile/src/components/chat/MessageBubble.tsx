@@ -1,307 +1,237 @@
 /**
- * MessageBubble — renders a single chat message for the SessionChat screen.
+ * MessageBubble — renders one chat turn for the SessionChat screen.
  *
- * The bubble supports three content shapes:
- *  - "user"        — plain user-typed text. Right-aligned, accent-tinted.
- *  - "assistant"   — markdown-rendered, code-fenced, with think-block support.
- *  - "system"      — small grey centered status line.
+ * The ChatGPT-app contrast, which IS the design:
+ *   - "user"      right-aligned rounded bubble (theme.colors.bubble, radius
+ *                 20 with a 6 bottom-right tail, 12/16 padding, body type).
+ *   - "assistant" FULL-WIDTH PLAIN text on the background — no bubble.
+ *                 The content is split into ordered segments: markdown
+ *                 text (MarkdownText), `<think>` reasoning (ThinkingBlock),
+ *                 and `<tool>` activity rows (ActivityRow).
+ *   - "system"    small centered muted notice text.
  *
- * Streaming mode: a live assistant bubble shows a blinking caret at the
- * tail of the text and disables markdown for the duration of the stream
- * (re-renders on every token otherwise thrash the markdown pipeline).
- *
- * Markdown rendering: we use a small purpose-built renderer that handles
- * fenced code blocks, inline code, **bold**, *italic*, line breaks, and
- * a <think>…</think> block (the desktop emits reasoning tokens with a
- * <think> prefix). We intentionally do NOT pull in a heavy markdown lib
- * to keep the bundle small — the desktop composer renders full markdown
- * but the phone shows a lighter subset.
+ * Segment parser: a direct port of the desktop algorithm (src/components/
+ * chat/MessageBubble.tsx `parseSegments`). Markers may arrive UNTERMINATED
+ * mid-stream (`done: false`); parallel subagent fan-out opens several
+ * `<tool>` markers back-to-back, so a repeated opener terminates the
+ * current tool segment instead of being swallowed into its JSON.
  */
-import React, { useMemo } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import React, { useMemo, useRef, useEffect } from 'react';
+import { View, Text, StyleSheet, Animated } from 'react-native';
 import { theme } from '../../theme';
+import MarkdownText from './MarkdownText';
+import ThinkingBlock from './ThinkingBlock';
+import ActivityRow, { type ToolData } from './ActivityRow';
+
+export type { ToolData };
 
 export interface MessageBubbleProps {
   role: 'user' | 'assistant' | 'system';
   content: string;
-  /** True while tokens are still arriving — disables markdown + shows caret. */
+  /** True while tokens are still arriving — shows the live caret indicator. */
   streaming?: boolean;
-  /** Optional timestamp (unix seconds) shown under the bubble. */
-  createdAt?: number;
-  /** Optional cost / token chip rendered under assistant bubbles. */
-  usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
 }
 
-interface Block {
-  kind: 'think' | 'code' | 'p';
-  lang?: string;
-  text: string;
-}
+export type Segment =
+  | { type: 'text'; text: string }
+  | { type: 'think'; text: string; done: boolean }
+  | { type: 'tool'; data: ToolData | null; raw: string; done: boolean };
 
-/**
- * Pre-parse the content into a list of blocks. Fenced code blocks become
- * a single "code" block; <think>…</think> spans become a "think" block;
- * everything else is paragraph text rendered as inline markdown.
- *
- * Single-pass tokenizer: a combined regex scans for both block forms at
- * once, so blocks emit in SOURCE order. (The old two-pass version pulled
- * every <think> span out first, hoisting them above paragraphs/code that
- * followed them and scrambling mixed messages.) Alternation order also
- * gives the right atomicity: whichever construct starts first in the text
- * wins — a `<think>` inside a code fence stays part of the code block, a
- * code fence inside a think span stays part of the think text, and a
- * trailing UNCLOSED `<think>` (model still streaming reasoning / cut off)
- * is treated as think-to-end.
- */
-export function parseBlocks(raw: string): Block[] {
-  const blocks: Block[] = [];
-  // 1: closed think span · 2: trailing unclosed think-to-end ·
-  // 3: code fence language · 4: code fence body.
-  const blockRe = /<think>([\s\S]*?)<\/think>|<think>([\s\S]*)$|```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g;
-  let lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = blockRe.exec(raw)) !== null) {
-    if (m.index > lastIndex) {
-      const between = raw.slice(lastIndex, m.index);
-      if (between.trim()) blocks.push({ kind: 'p', text: between });
+/** Split an assistant message into ordered segments: plain markdown text,
+ *  `<think>` reasoning blocks, and `<tool>` process cards. A block whose
+ *  closing tag hasn't streamed in yet is marked `done: false`. */
+export function parseSegments(content: string): Segment[] {
+  const segs: Segment[] = [];
+  let rest = content;
+  const tagRe = /<(think|tool)>/;
+  for (;;) {
+    const m = tagRe.exec(rest);
+    if (!m) {
+      if (rest) segs.push({ type: 'text', text: rest });
+      break;
     }
-    if (m[1] !== undefined) {
-      blocks.push({ kind: 'think', text: m[1].trim() });
-    } else if (m[2] !== undefined) {
-      // Trailing unmatched <think> — everything to the end is thinking.
-      blocks.push({ kind: 'think', text: m[2].trim() });
+    const before = rest.slice(0, m.index);
+    if (before) segs.push({ type: 'text', text: before });
+
+    const tag = m[1];
+    if (tag === undefined) break;
+    const afterOpen = rest.slice(m.index + m[0].length);
+    const close = `</${tag}>`;
+    const ci = afterOpen.indexOf(close);
+    // Parallel subagent fan-out opens several <tool> markers BACK-TO-BACK
+    // (the pre-pass emits every Task's opener before any tool completes), so
+    // a repeated opener can arrive before the closing tag. Treat the next
+    // opener as the end of THIS segment — still unterminated (done: false) —
+    // instead of swallowing the whole run into one inner blob whose JSON
+    // parse fails and renders a phantom "working…" row. Tool-marker content
+    // is sanitizer-escaped, so a real opener inside `inner` can't false-hit;
+    // `<think>` never stacks, so the split stays tool-only.
+    const ni = tag === 'tool' ? afterOpen.indexOf('<tool>') : -1;
+    const end = ci === -1 ? ni : ni === -1 ? ci : Math.min(ci, ni);
+    const inner = end === -1 ? afterOpen : afterOpen.slice(0, end);
+    const done = end !== -1 && end === ci;
+
+    if (tag === 'think') {
+      segs.push({ type: 'think', text: inner.trim(), done });
     } else {
-      blocks.push({ kind: 'code', lang: m[3] || undefined, text: m[4] ?? '' });
-    }
-    lastIndex = m.index + m[0].length;
-  }
-  if (lastIndex < raw.length) {
-    const tail = raw.slice(lastIndex);
-    if (tail.trim()) blocks.push({ kind: 'p', text: tail });
-  }
-  return blocks;
-}
-
-/** Render a single text run with inline markdown: **bold**, *italic*, `code`. */
-function renderInline(text: string, baseStyle: object) {
-  // Split on inline tokens but keep the delimiter positions so we can
-  // apply the right style. Three separate passes keep the code obvious.
-  const tokens: { kind: 'text' | 'bold' | 'italic' | 'code'; value: string }[] = [];
-  // Order matters: code spans contain backticks so we strip them first.
-  const codeRe = /`([^`\n]+)`/g;
-  let remaining = text;
-  let m: RegExpExecArray | null;
-  let lastIndex = 0;
-  while ((m = codeRe.exec(remaining)) !== null) {
-    if (m.index > lastIndex) {
-      tokens.push({ kind: 'text', value: remaining.slice(lastIndex, m.index) });
-    }
-    tokens.push({ kind: 'code', value: m[1]! });
-    lastIndex = m.index + m[0].length;
-  }
-  if (lastIndex < remaining.length) {
-    const rest = remaining.slice(lastIndex);
-    // Then bold and italic (non-greedy, single-line).
-    const boldRe = /\*\*([^*\n]+)\*\*/g;
-    let bi = 0;
-    let bm: RegExpExecArray | null;
-    let restLast = 0;
-    while ((bm = boldRe.exec(rest)) !== null) {
-      if (bm.index > restLast) {
-        const slice = rest.slice(restLast, bm.index);
-        // Try italic inside the slice.
-        pushItalic(slice, tokens);
+      let data: ToolData | null = null;
+      try {
+        data = JSON.parse(inner) as ToolData;
+      } catch {
+        data = null;
       }
-      tokens.push({ kind: 'bold', value: bm[1]! });
-      restLast = bm.index + bm[0].length;
+      segs.push({ type: 'tool', data, raw: inner, done });
     }
-    if (restLast < rest.length) pushItalic(rest.slice(restLast), tokens);
+
+    if (end === -1) break;
+    rest = end === ci ? afterOpen.slice(ci + close.length) : afterOpen.slice(end);
   }
-  return tokens.map((t, i) => {
-    switch (t.kind) {
-      case 'bold':
-        return (
-          <Text key={i} style={[baseStyle, styles.bold]}>
-            {t.value}
-          </Text>
-        );
-      case 'italic':
-        return (
-          <Text key={i} style={[baseStyle, styles.italic]}>
-            {t.value}
-          </Text>
-        );
-      case 'code':
-        return (
-          <Text key={i} style={[baseStyle, styles.inlineCode]}>
-            {t.value}
-          </Text>
-        );
-      default:
-        return (
-          <Text key={i} style={baseStyle}>
-            {t.value}
-          </Text>
-        );
-    }
-  });
+  return segs;
 }
 
-function pushItalic(s: string, tokens: { kind: 'text' | 'bold' | 'italic' | 'code'; value: string }[]) {
-  const re = /\*([^*\n]+)\*/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(s)) !== null) {
-    if (m.index > last) tokens.push({ kind: 'text', value: s.slice(last, m.index) });
-    tokens.push({ kind: 'italic', value: m[1]! });
-    last = m.index + m[0].length;
-  }
-  if (last < s.length) tokens.push({ kind: 'text', value: s.slice(last) });
+/** Blinking caret — the live "still writing" signal at the stream tail. */
+function Caret() {
+  const opacity = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 0.15, duration: 500, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 1, duration: 500, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [opacity]);
+  return (
+    <Animated.Text style={[styles.caret, { color: theme.colors.accent, opacity }]}>
+      {' ▍'}
+    </Animated.Text>
+  );
 }
 
-function formatTime(unixSec: number): string {
-  const d = new Date(unixSec * 1000);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${hh}:${mm}`;
+/** Subtle "•••" breathing indicator shown before the first token lands. */
+function TypingDots() {
+  const opacity = useRef(new Animated.Value(0.35)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 1, duration: 600, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 0.35, duration: 600, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [opacity]);
+  return (
+    <Animated.Text style={[styles.dots, { color: theme.colors.textSecondary, opacity }]}>
+      {'•••'}
+    </Animated.Text>
+  );
 }
 
-function formatCost(costUsd?: number): string | null {
-  if (costUsd == null) return null;
-  if (costUsd < 0.001) return '<$0.001';
-  if (costUsd < 1) return `$${costUsd.toFixed(3)}`;
-  return `$${costUsd.toFixed(2)}`;
+function AssistantContent({ content, streaming }: { content: string; streaming: boolean }) {
+  const segments = useMemo(() => parseSegments(content), [content]);
+  const empty = content.length === 0;
+
+  if (empty) return streaming ? <TypingDots /> : null;
+
+  return (
+    <View style={styles.assistantBody}>
+      {segments.map((seg, i) => {
+        const isLast = i === segments.length - 1;
+        switch (seg.type) {
+          case 'think':
+            return <ThinkingBlock key={i} thinking={seg.text} done={seg.done} />;
+          case 'tool':
+            return <ActivityRow key={i} data={seg.data} raw={seg.raw} done={seg.done} />;
+          default:
+            return (
+              <View key={i} style={styles.textSeg}>
+                <MarkdownText content={seg.text} />
+                {streaming && isLast ? <Caret /> : null}
+              </View>
+            );
+        }
+      })}
+      {/* Stream ends inside a think/tool block (no trailing text segment) —
+          hang the caret off the row so "still working" stays visible. */}
+      {streaming && segments[segments.length - 1]?.type !== 'text' ? <Caret /> : null}
+    </View>
+  );
 }
 
-export default function MessageBubble({
-  role,
-  content,
-  streaming = false,
-  createdAt,
-  usage,
-}: MessageBubbleProps) {
-  const blocks = useMemo(() => (streaming ? null : parseBlocks(content)), [content, streaming]);
-  const isUser = role === 'user';
-  const isSystem = role === 'system';
+export default function MessageBubble({ role, content, streaming = false }: MessageBubbleProps) {
+  const c = theme.colors;
 
-  if (isSystem) {
+  if (role === 'system') {
     return (
       <View style={styles.systemRow}>
-        <Text style={[styles.systemText, { color: theme.colors.textSecondary }]} numberOfLines={2}>
+        <Text style={[styles.systemText, { color: c.textSecondary }]} numberOfLines={3}>
           {content}
         </Text>
       </View>
     );
   }
 
-  return (
-    <View style={[styles.row, isUser ? styles.rowUser : styles.rowAssistant]}>
-      <View
-        style={[
-          styles.bubble,
-          isUser
-            ? [styles.bubbleUser, { backgroundColor: theme.colors.primary }]
-            : [styles.bubbleAssistant, { backgroundColor: theme.colors.surface2, borderColor: theme.colors.border }],
-        ]}
-      >
-        {streaming ? (
-          <Text style={[styles.body, { color: theme.colors.text }]}>
-            {content}
-            <Text style={[styles.caret, { color: theme.colors.primary }]}>▍</Text>
-          </Text>
-        ) : (
-          blocks!.map((b, i) => {
-            if (b.kind === 'think') {
-              return (
-                <View key={i} style={[styles.thinkBlock, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface }]}>
-                  <Text style={[styles.thinkLabel, { color: theme.colors.textSecondary }]}>Thinking</Text>
-                  <Text style={[styles.thinkText, { color: theme.colors.textSecondary }]}>
-                    {renderInline(b.text, styles.thinkTextRun)}
-                  </Text>
-                </View>
-              );
-            }
-            if (b.kind === 'code') {
-              return (
-                <View key={i} style={[styles.codeBlock, { backgroundColor: theme.colors.background, borderColor: theme.colors.border }]}>
-                  {b.lang ? (
-                    <Text style={[styles.codeLang, { color: theme.colors.textSecondary }]}>{b.lang}</Text>
-                  ) : null}
-                  <Text style={[styles.codeText, { color: theme.colors.text }]}>{b.text}</Text>
-                </View>
-              );
-            }
-            return (
-              <Text key={i} style={[styles.body, { color: isUser ? '#fff' : theme.colors.text }]}>
-                {renderInline(b.text, styles.bodyRun)}
-              </Text>
-            );
-          })
-        )}
-      </View>
-      {(createdAt || usage || streaming) && (
-        <View style={[styles.metaRow, isUser ? styles.metaRowUser : styles.metaRowAssistant]}>
-          {streaming ? (
-            <Text style={[styles.metaText, { color: theme.colors.textSecondary }]}>streaming…</Text>
-          ) : createdAt ? (
-            <Text style={[styles.metaText, { color: theme.colors.textSecondary }]}>{formatTime(createdAt)}</Text>
-          ) : null}
-          {!streaming && usage ? (
-            <Text style={[styles.metaText, { color: theme.colors.textSecondary }]}>
-              {` · ${usage.inputTokens}↓ ${usage.outputTokens}↑`}
-              {formatCost(usage.costUsd) ? ` · ${formatCost(usage.costUsd)}` : ''}
-            </Text>
-          ) : null}
+  if (role === 'user') {
+    return (
+      <View style={styles.userRow}>
+        <View style={[styles.userBubble, { backgroundColor: c.bubble }]}>
+          <Text style={[styles.userText, { color: c.text }]}>{content}</Text>
         </View>
-      )}
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.assistantRow}>
+      <AssistantContent content={content} streaming={streaming} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  row: { marginVertical: 4, paddingHorizontal: 12 },
-  rowUser: { alignItems: 'flex-end' },
-  rowAssistant: { alignItems: 'flex-start' },
-  bubble: {
-    maxWidth: '92%',
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 16,
+  // Generous 20px vertical rhythm BETWEEN turns (10+10 on adjacent rows).
+  userRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginVertical: 10,
+    paddingHorizontal: theme.spacing.md,
   },
-  bubbleUser: { borderBottomRightRadius: 4 },
-  bubbleAssistant: { borderWidth: StyleSheet.hairlineWidth, borderBottomLeftRadius: 4 },
-  body: { fontSize: 15, lineHeight: 22 },
-  bodyRun: { fontSize: 15, lineHeight: 22 },
-  caret: { fontSize: 15, lineHeight: 22 },
-  bold: { fontWeight: '700' },
-  italic: { fontStyle: 'italic' },
-  inlineCode: {
-    fontFamily: 'monospace',
-    fontSize: 13,
-    backgroundColor: 'rgba(0,0,0,0.05)',
+  userBubble: {
+    maxWidth: '85%',
+    borderRadius: theme.radius.lg, // 20
+    borderBottomRightRadius: 6,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
   },
-  thinkBlock: {
-    borderLeftWidth: 3,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    marginVertical: 6,
-    borderRadius: 6,
+  userText: {
+    ...theme.type.body,
   },
-  thinkLabel: { fontSize: 11, fontWeight: '600', marginBottom: 4, textTransform: 'uppercase' },
-  thinkText: { fontSize: 13, lineHeight: 19 },
-  thinkTextRun: { fontSize: 13, lineHeight: 19 },
-  codeBlock: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
-    padding: 10,
-    marginVertical: 6,
+  assistantRow: {
+    marginVertical: 10,
+    paddingHorizontal: theme.spacing.md,
   },
-  codeLang: { fontSize: 11, marginBottom: 6, fontFamily: 'monospace' },
-  codeText: { fontFamily: 'monospace', fontSize: 13, lineHeight: 19 },
-  metaRow: { flexDirection: 'row', marginTop: 2, paddingHorizontal: 4 },
-  metaRowUser: { justifyContent: 'flex-end' },
-  metaRowAssistant: { justifyContent: 'flex-start' },
-  metaText: { fontSize: 11 },
-  systemRow: { alignItems: 'center', marginVertical: 6, paddingHorizontal: 24 },
-  systemText: { fontSize: 12, fontStyle: 'italic', textAlign: 'center' },
+  assistantBody: {
+    gap: 2,
+  },
+  textSeg: {},
+  caret: {
+    ...theme.type.body,
+    fontWeight: '600',
+  },
+  dots: {
+    ...theme.type.body,
+    letterSpacing: 2,
+  },
+  systemRow: {
+    alignItems: 'center',
+    marginVertical: 10,
+    paddingHorizontal: theme.spacing.lg,
+  },
+  systemText: {
+    fontSize: 12,
+    lineHeight: 16,
+    textAlign: 'center',
+  },
 });

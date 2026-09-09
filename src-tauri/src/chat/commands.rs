@@ -123,8 +123,10 @@ pub fn restore_chat_checkpoint(
     app: AppHandle,
     db: State<DbState>,
 ) -> CmdResult<RestoreCheckpointResult> {
-    let conn = db.0.lock();
-    crate::checkpoints::restore(&app, &conn, checkpoint_id, rollback_messages)
+    // Passes the shared handle, not a held guard: checkpoints::restore scopes
+    // the lock itself so the seconds-long git snapshot/restore never pin the
+    // shared DB mutex.
+    crate::checkpoints::restore(&app, &db.0, checkpoint_id, rollback_messages)
         .map_err(|e| e.to_string())
 }
 
@@ -335,25 +337,53 @@ pub fn delete_all_chat_sessions(
         chat_state.0.cancel(id);
         chat_state.0.invalidate_context_tokens(id);
     }
-    // Phase 2 (ONE lock for the whole batch — PERFORMANCE_AUDIT.md B14):
-    // previously this loop re-acquired the DB mutex once per session to
-    // delete 3 settings + the session row, serializing against every other
-    // query in the app for O(sessions) lock cycles.
+    // Phase 2 (ONE lock): the cheap DB reads/writes — CLI session-id
+    // settings, checkpoint ref lists, worktree pointers. The git/FS work
+    // those imply is COLLECTED here and run after the lock drops (phase 3):
+    // worktree removal deletes a whole directory tree and ref pruning shells
+    // out to git per repo — both used to run under this lock, serializing
+    // every DB consumer behind O(sessions × git) filesystem work.
+    let mut ref_groups = std::collections::BTreeMap::<String, Vec<String>>::new();
+    let mut worktrees: Vec<(String, Option<String>, Option<String>)> = Vec::new(); // (session_id, worktree_path, project_path)
+    {
+        let conn = db.0.lock();
+        for sess in &sessions {
+            let id = &sess.id;
+            for harness in ["claude_code", "kimi_code", "opencode"] {
+                let _ = db::delete_setting(
+                    &conn,
+                    &format!("agent.cli_session_id.{harness}.{id}"),
+                );
+            }
+            for (repo, refs) in crate::checkpoints::collect_session_ref_groups(&conn, id) {
+                ref_groups.entry(repo).or_default().extend(refs);
+            }
+            if let Some(wt) = &sess.worktree_path {
+                let proj_path = sess
+                    .project_id
+                    .as_deref()
+                    .and_then(|pid| db::get_project(&conn, pid).ok().flatten())
+                    .map(|p| p.path);
+                worktrees.push((id.clone(), Some(wt.clone()), proj_path));
+            }
+        }
+    }
+    // Phase 3 (no lock): the slow git + filesystem cleanup. Same contract as
+    // remove_worktree_for_session: best-effort removal rooted at the project
+    // (branches stay in the repo if git fails).
+    crate::checkpoints::prune_ref_groups(ref_groups);
+    for (_, worktree_path, proj_path) in &worktrees {
+        if let (Some(wt), Some(proj)) = (worktree_path, proj_path) {
+            let _ = crate::git::remove_worktree(std::path::Path::new(proj), std::path::Path::new(wt));
+        }
+    }
+    // Phase 4 (one lock): clear worktree pointers and delete the rows.
     let conn = db.0.lock();
     for sess in &sessions {
-        let id = &sess.id;
-        for harness in ["claude_code", "kimi_code", "opencode"] {
-            let _ = db::delete_setting(
-                &conn,
-                &format!("agent.cli_session_id.{harness}.{id}"),
-            );
+        if sess.worktree_path.is_some() {
+            let _ = db::set_chat_session_worktree(&conn, &sess.id, None);
         }
-        // Prune git checkpoint refs before the rows cascade away.
-        crate::checkpoints::prune_session_refs(&conn, id);
-        // Best-effort remove each session's isolated worktree before its row
-        // is deleted (roadmap P0 §3.1.1) — branches stay in the repos.
-        crate::commands::worktree_cmds::remove_worktree_for_session(&conn, sess);
-        db::delete_chat_session(&conn, id).map_err(|e| e.to_string())?;
+        db::delete_chat_session(&conn, &sess.id).map_err(|e| e.to_string())?;
     }
     Ok(count)
 }
@@ -3663,6 +3693,52 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
 }
 
 
+// ---- Artifact preview containment ----
+
+/// The filesystem roots the artifact preview/open/download IPC endpoints may
+/// touch. These commands take paths straight from the webview — which renders
+/// model-controlled content — so without containment, any script execution in
+/// the pane becomes an arbitrary-file read primitive (secrets, SSH keys,
+/// other apps' data). The universe mirrors what `dispatch::run_tool` grants
+/// the model: the artifacts dir, every registered project, its chat
+/// worktrees, roots the user granted from approval cards, and the remembered
+/// working folder.
+fn preview_scope_roots(conn: &rusqlite::Connection, app: &AppHandle) -> Vec<String> {
+    let mut roots: Vec<String> = db::list_projects(conn)
+        .map(|ps| ps.into_iter().map(|p| p.path).collect())
+        .unwrap_or_default();
+    roots.extend(db::chat_worktree_paths(conn, None).unwrap_or_default());
+    roots.push(
+        crate::chat::dispatch::artifacts_dir(app)
+            .to_string_lossy()
+            .into_owned(),
+    );
+    if let Some(granted) = db::get_setting(conn, "permissions.grantedRoots")
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+    {
+        roots.extend(granted);
+    }
+    if let Some(dir) = db::get_setting(conn, "chat.local_gguf.last_working_dir")
+        .ok()
+        .flatten()
+        .filter(|d| !d.trim().is_empty())
+    {
+        roots.push(dir);
+    }
+    roots
+}
+
+/// Gate for the artifact IPC endpoints: the same hard scope check the
+/// mutating FS tools answer to (`permission::path_within_scope` — resolves
+/// symlinks/junctions, segment-boundary prefix). `Ok(None)` lets callers
+/// degrade to "file not found" semantics instead of an error toast where the
+/// frontend has no error UI.
+fn path_in_preview_scope(path: &str, roots: &[String]) -> Option<()> {
+    crate::chat::permission::path_within_scope(path, roots).then_some(())
+}
+
 /// Read a generated artifact for in-app preview. Text-like files return their
 /// decoded (and length-capped) text; images and PDFs return a `data:` URI;
 /// Office documents are rendered as: docx → raw bytes for client-side
@@ -3672,11 +3748,31 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
 /// (kind = `office`). Anything else returns metadata only (rendered as a
 /// file card).
 ///
+/// The path must sit inside the artifacts dir, a registered project/worktree,
+/// a user-granted root, or the remembered working folder — see
+/// [`preview_scope_roots`].
+///
 /// `async` because pptx→pdf shells out to LibreOffice for several seconds —
 /// that work runs on `spawn_blocking` so the IPC handler isn't stalled.
 #[tauri::command]
-pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
+pub async fn read_artifact_preview(
+    app: AppHandle,
+    db: State<'_, DbState>,
+    path: String,
+) -> CmdResult<ArtifactPreview> {
     use std::path::Path;
+
+    let roots = {
+        let conn = db.0.lock();
+        preview_scope_roots(&conn, &app)
+    };
+    if path_in_preview_scope(&path, &roots).is_none() {
+        return Err(format!(
+            "Refusing to preview \"{path}\": it is outside the folders Relay can \
+             access (your projects, chat worktrees, the artifacts folder, and \
+             user-granted roots)."
+        ));
+    }
 
     let p = Path::new(&path);
     let filename = p
@@ -3936,7 +4032,7 @@ pub(crate) fn classify_text_ext(ext: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod preview_tests {
-    use super::{classify_text_ext, find_by_basename_walk, get_file_mtime};
+    use super::{classify_text_ext, find_by_basename_walk, get_file_mtime_gated};
 
     #[test]
     fn mermaid_sources_classify_as_mermaid_kind() {
@@ -3961,24 +4057,69 @@ mod preview_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("artifact.html");
         std::fs::write(&file, "<html></html>").expect("write");
+        let roots = vec![dir.path().to_string_lossy().into_owned()];
 
-        let mtime = get_file_mtime(file.to_string_lossy().into_owned())
-            .expect("ipc ok")
+        let mtime = get_file_mtime_gated(&file.to_string_lossy(), &roots)
             .expect("existing file has an mtime");
         assert!(mtime > 0, "mtime is secs-since-epoch, got {mtime}");
 
         // A file written later has a >= mtime (same-second writes allowed).
         std::fs::write(&file, "<html>v2</html>").expect("rewrite");
-        let mtime2 = get_file_mtime(file.to_string_lossy().into_owned())
-            .expect("ipc ok")
+        let mtime2 = get_file_mtime_gated(&file.to_string_lossy(), &roots)
             .expect("still exists");
         assert!(mtime2 >= mtime);
 
         assert_eq!(
-            get_file_mtime(dir.path().join("gone.html").to_string_lossy().into_owned())
-                .expect("ipc ok"),
+            get_file_mtime_gated(&dir.path().join("gone.html").to_string_lossy(), &roots),
             None,
             "missing file → None, not an error (preview keeps last render)"
+        );
+    }
+
+    #[test]
+    fn artifact_scope_gate_blocks_outside_paths() {
+        // The preview-scope gate must allow legitimate in-root files and
+        // refuse everything else — siblings with similar names, `..`
+        // traversal, and arbitrary absolute paths.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let roots = vec![dir.path().to_string_lossy().into_owned()];
+
+        std::fs::write(dir.path().join("in_scope.html"), b"x").expect("write");
+        let inside = dir.path().join("in_scope.html");
+        assert!(
+            get_file_mtime_gated(&inside.to_string_lossy(), &roots).is_some(),
+            "in-scope file is readable"
+        );
+
+        // Sibling dir whose name merely extends the root (`root` vs `root2`):
+        // a raw starts_with would allow it — the segment boundary must not.
+        let sibling = dir
+            .path()
+            .parent()
+            .unwrap()
+            .join(format!("{}2", dir.path().file_name().unwrap().to_string_lossy()));
+        assert!(
+            get_file_mtime_gated(&sibling.join("secret.txt").to_string_lossy(), &roots).is_none(),
+            "sibling-root path must be refused"
+        );
+
+        // `..` traversal escaping the root.
+        let traversal = dir.path().join("..").join("..").join("etc_passwd.txt");
+        assert!(
+            get_file_mtime_gated(&traversal.to_string_lossy(), &roots).is_none(),
+            "traversal escape must be refused"
+        );
+
+        // Arbitrary absolute path (e.g. C:\\Windows\\system32\\config).
+        assert!(
+            get_file_mtime_gated("C:\\Windows\\win.ini", &roots).is_none(),
+            "arbitrary system path must be refused"
+        );
+
+        // Empty roots → nothing is in scope.
+        assert!(
+            get_file_mtime_gated(&inside.to_string_lossy(), &[]).is_none(),
+            "no granted roots → nothing readable"
         );
     }
 
@@ -4112,19 +4253,34 @@ pub fn docdesign_qa_complete(
 /// Last-modified time of a file, in seconds since the Unix epoch. The
 /// artifact preview panes poll this (cheap stat) to hot-reload when the model
 /// edits an open artifact file. `None` when the file is gone (deleted while
-/// previewed) — the caller keeps showing the last good preview.
+/// previewed) — the caller keeps showing the last good preview. Out-of-scope
+/// paths also report `None` (same observable behavior as a vanished file).
 #[tauri::command]
-pub fn get_file_mtime(path: String) -> CmdResult<Option<u64>> {
-    let meta = match std::fs::metadata(&path) {
-        Ok(m) => m,
-        Err(_) => return Ok(None),
+pub fn get_file_mtime(
+    app: AppHandle,
+    db: State<'_, DbState>,
+    path: String,
+) -> CmdResult<Option<u64>> {
+    let roots = {
+        let conn = db.0.lock();
+        preview_scope_roots(&conn, &app)
     };
+    Ok(get_file_mtime_gated(&path, &roots))
+}
+
+/// Scope-gated core of [`get_file_mtime`] — split out so the containment
+/// behavior is unit-testable without a Tauri app/state.
+fn get_file_mtime_gated(path: &str, roots: &[String]) -> Option<u64> {
+    if path_in_preview_scope(path, roots).is_none() {
+        return None;
+    }
+    let meta = std::fs::metadata(path).ok()?;
     let secs = meta
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs());
-    Ok(secs)
+    secs
 }
 
 /// Find a file by basename under `dir` (breadth-first, bounded depth and
@@ -4133,10 +4289,24 @@ pub fn get_file_mtime(path: String) -> CmdResult<Option<u64>> {
 ///
 /// Recovers preview targets for chat file-change rows whose recorded path no
 /// longer exists — models sometimes state a destination they didn't actually
-/// write to, and files can move between the turn and the click.
+/// write to, and files can move between the turn and the click. `dir` must
+/// sit inside the preview scope (see [`preview_scope_roots`]); an
+/// out-of-scope dir reports `None` rather than scanning arbitrary folders.
 #[tauri::command]
-pub async fn find_file_by_basename(dir: String, basename: String) -> CmdResult<Option<String>> {
+pub async fn find_file_by_basename(
+    app: AppHandle,
+    db: State<'_, DbState>,
+    dir: String,
+    basename: String,
+) -> CmdResult<Option<String>> {
     if basename.trim().is_empty() {
+        return Ok(None);
+    }
+    let roots = {
+        let conn = db.0.lock();
+        preview_scope_roots(&conn, &app)
+    };
+    if path_in_preview_scope(&dir, &roots).is_none() {
         return Ok(None);
     }
     tokio::task::spawn_blocking(move || {
@@ -4204,9 +4374,26 @@ fn find_by_basename_walk(root: &std::path::Path, basename: &str) -> Option<Strin
 /// failure RETURNS as an error the pane can surface — the JS path used to
 /// reject inside a `catch (err) console.warn(...)` and the button silently
 /// did nothing. A path that has vanished since the turn is re-discovered by
-/// basename in its directory before giving up.
+/// basename in its directory before giving up. The path (and whatever the
+/// basename recovery finds) must sit inside the preview scope — see
+/// [`preview_scope_roots`].
 #[tauri::command]
-pub async fn open_artifact_external(path: String) -> CmdResult<String> {
+pub async fn open_artifact_external(
+    app: AppHandle,
+    db: State<'_, DbState>,
+    path: String,
+) -> CmdResult<String> {
+    let roots = {
+        let conn = db.0.lock();
+        preview_scope_roots(&conn, &app)
+    };
+    if path_in_preview_scope(&path, &roots).is_none() {
+        return Err(format!(
+            "Refusing to open \"{path}\": it is outside the folders Relay can \
+             access (your projects, chat worktrees, the artifacts folder, and \
+             user-granted roots)."
+        ));
+    }
     let resolved = tokio::task::spawn_blocking(move || -> Option<String> {
         let p = std::path::Path::new(&path);
         if p.is_file() {
@@ -4223,6 +4410,13 @@ pub async fn open_artifact_external(path: String) -> CmdResult<String> {
     .ok_or_else(|| {
         "File not found on disk — it may have been moved or deleted.".to_string()
     })?;
+    // The basename walk stays under the (already gated) recorded parent, but
+    // gate the resolved target anyway — defense in depth before the OS opens it.
+    if path_in_preview_scope(&resolved, &roots).is_none() {
+        return Err(
+            "Resolved file is outside the folders Relay can access.".to_string(),
+        );
+    }
     tauri_plugin_opener::open_path(&resolved, None::<&str>)
         .map(|_| resolved)
         .map_err(|e| format!("Could not open the file: {e}"))
@@ -4231,9 +4425,26 @@ pub async fn open_artifact_external(path: String) -> CmdResult<String> {
 // ---- Artifact download ----
 
 /// Copy a generated artifact to a user-chosen destination path (the frontend
-/// gets `dest` from a save dialog).
+/// gets `dest` from a save dialog). `src` must sit inside the preview scope —
+/// see [`preview_scope_roots`]; `dest` is user-chosen and unrestricted.
 #[tauri::command]
-pub async fn download_artifact(src: String, dest: String) -> CmdResult<()> {
+pub async fn download_artifact(
+    app: AppHandle,
+    db: State<'_, DbState>,
+    src: String,
+    dest: String,
+) -> CmdResult<()> {
+    let roots = {
+        let conn = db.0.lock();
+        preview_scope_roots(&conn, &app)
+    };
+    if path_in_preview_scope(&src, &roots).is_none() {
+        return Err(format!(
+            "Refusing to save \"{src}\": it is outside the folders Relay can \
+             access (your projects, chat worktrees, the artifacts folder, and \
+             user-granted roots)."
+        ));
+    }
     tokio::task::spawn_blocking(move || {
         std::fs::copy(&src, &dest).map_err(|e| format!("could not save file: {e}"))?;
         Ok(())
@@ -4243,13 +4454,28 @@ pub async fn download_artifact(src: String, dest: String) -> CmdResult<()> {
 }
 
 /// Zip several artifacts into a user-chosen destination `.zip` path. Duplicate
-/// filenames are disambiguated with a numeric suffix.
+/// filenames are disambiguated with a numeric suffix. Paths outside the
+/// preview scope (see [`preview_scope_roots`]) are skipped — same silent-skip
+/// behavior as unreadable files.
 ///
 /// PERF (PERFORMANCE_AUDIT.md B3): the per-file reads + deflate run in
 /// `spawn_blocking` — the sync version blocked the IPC worker for every byte
 /// read and compressed.
 #[tauri::command]
-pub async fn download_artifacts_zip(paths: Vec<String>, dest: String) -> CmdResult<()> {
+pub async fn download_artifacts_zip(
+    app: AppHandle,
+    db: State<'_, DbState>,
+    paths: Vec<String>,
+    dest: String,
+) -> CmdResult<()> {
+    let roots = {
+        let conn = db.0.lock();
+        preview_scope_roots(&conn, &app)
+    };
+    let allowed: Vec<String> = paths
+        .into_iter()
+        .filter(|p| path_in_preview_scope(p, &roots).is_some())
+        .collect();
     tokio::task::spawn_blocking(move || {
         use std::io::Write;
         use std::path::Path;
@@ -4260,7 +4486,7 @@ pub async fn download_artifacts_zip(paths: Vec<String>, dest: String) -> CmdResu
         let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for src in &paths {
+        for src in &allowed {
             let data = match std::fs::read(src) {
                 Ok(d) => d,
                 Err(_) => continue, // skip missing files rather than aborting the whole zip
@@ -5253,6 +5479,11 @@ fn meter_model_for_session(conn: &rusqlite::Connection, provider_str: &str, mode
 ///
 /// No-sidecar / errored-tokenize returns `used_tokens: null` so the meter
 /// keeps showing whatever the last known value was instead of snapping to 0.
+/// Constant OpenAI tool-spec JSON for the cloud context meter — the meter's
+/// ToolCaps are fixed, so the ~42k-char serialization is built once per
+/// process instead of on every 2s poll.
+static METER_TOOL_SPECS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 #[tauri::command]
 pub async fn count_context_tokens(
     chat_session_id: String,
@@ -5307,15 +5538,26 @@ pub async fn count_context_tokens(
             })
             .collect();
 
-        let (system_str, tool_specs_json) = if is_harness_provider(&provider_str) {
-            // Harness turns carry no Relay-built system prompt or tool schema.
-            (String::new(), String::new())
-        } else {
-            // Same builders as the local breakdown, but with the session's
-            // own provider so the estimate mirrors what the send path would
-            // assemble. LOCKING: attach_availability re-locks DbState — same
-            // rule as the local path, never while `conn` is held.
-            let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
+        // PERF: the cache check runs on CHEAP inputs BEFORE the expensive
+        // system-prompt build. `attach_availability` queries DB + MCP defs
+        // and `build_system_prompt` scans the skills directory (~55k chars of
+        // prompt), and the old fingerprint hashed the ALREADY-BUILT prompt —
+        // so the memoization only ever skipped the cheap arithmetic while
+        // still doing the expensive assembly on every 2s idle poll (same
+        // rationale as the local path's PERF B11). system_str is a
+        // deterministic function of (provider, model, custom prompt,
+        // attached sources), so a key from those inputs is equally fresh.
+        // (If a connector's live availability flips while the transcript is
+        // unchanged, the estimate stays stale until the next transcript
+        // change — acceptable for a meter, and it self-corrects on the next
+        // real turn.)
+        let is_harness = is_harness_provider(&provider_str);
+        let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) =
+            if is_harness {
+                // Harness turns carry no Relay-built system prompt or tool schema.
+                (None, Vec::new(), Vec::new())
+            } else {
+                // LOCKING: never while another `conn` guard is held.
                 let conn = db.0.lock();
                 let custom = db::get_setting(&conn, "assistant.systemPrompt")
                     .map_err(|e| e.to_string())?;
@@ -5326,6 +5568,37 @@ pub async fn count_context_tokens(
                         .partition(|r| !r.starts_with("mcp:"));
                 (custom, c, m)
             };
+
+        let max_tokens = {
+            let conn = db.0.lock();
+            let meter_model =
+                meter_model_for_session(&conn, &provider_str, &model_str, &chat_session_id);
+            effective_session_window(&conn, &provider_str, &meter_model)
+        };
+
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            is_harness.hash(&mut h);
+            provider_str.hash(&mut h);
+            model_str.hash(&mut h);
+            custom.hash(&mut h);
+            attached_c.hash(&mut h);
+            attached_m.hash(&mut h);
+            format!("{:x}:{last_id}:{n_records}", h.finish())
+        };
+        if let Some(tokens) = chat_state.0.cached_context_tokens(&chat_session_id, &fingerprint) {
+            return Ok(crate::types::ContextUsagePayload {
+                used_tokens: estimate_used_tokens(n_records, tokens as u32),
+                max_tokens,
+                cached_tokens,
+            });
+        }
+
+        // Cache miss: only now pay for the prompt/tool-spec assembly.
+        let (system_str, tool_specs_json) = if is_harness {
+            (String::new(), String::new())
+        } else {
             let attached_m: Vec<String> = attached_m
                 .iter()
                 .filter_map(|r| r.strip_prefix("mcp:").map(|s| s.to_string()))
@@ -5347,55 +5620,32 @@ pub async fn count_context_tokens(
                 )
                 .unwrap_or_default()
             };
-            let caps = crate::chat::tools::ToolCaps {
-                code_exec: true,
-                fs_roots: Vec::new(),
-                web_search: false,
-                requires_local_sandbox: false,
-                attached_connectors: std::sync::Arc::new(Vec::new()),
-                local_docs: false,
-                mcp_tools: std::sync::Arc::new(Vec::new()),
-                attachable_connectors: std::sync::Arc::new(Vec::new()),
-                attachable_mcp: std::sync::Arc::new(Vec::new()),
-                local_model: false,
-                fs_rules: Vec::new(),
-            };
-            let tool_specs_json = serde_json::to_string(
-                &crate::chat::tools::openai_tool_specs(
-                    &caps,
-                    crate::chat::permission::SandboxPolicy::WorkspaceWrite,
-                ),
-            )
-            .unwrap_or_default();
+            // The spec request here uses constant caps (fs_roots empty, no
+            // web search/docs/local model) — the serialization is identical
+            // on every poll, so build it once per process.
+            let tool_specs_json = METER_TOOL_SPECS
+                .get_or_init(|| {
+                    serde_json::to_string(&crate::chat::tools::openai_tool_specs(
+                        &crate::chat::tools::ToolCaps {
+                            code_exec: true,
+                            fs_roots: Vec::new(),
+                            web_search: false,
+                            requires_local_sandbox: false,
+                            attached_connectors: std::sync::Arc::new(Vec::new()),
+                            local_docs: false,
+                            mcp_tools: std::sync::Arc::new(Vec::new()),
+                            attachable_connectors: std::sync::Arc::new(Vec::new()),
+                            attachable_mcp: std::sync::Arc::new(Vec::new()),
+                            local_model: false,
+                            fs_rules: Vec::new(),
+                        },
+                        crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+                    ))
+                    .unwrap_or_default()
+                })
+                .clone();
             (system_str, tool_specs_json)
         };
-
-        let max_tokens = {
-            let conn = db.0.lock();
-            let meter_model =
-                meter_model_for_session(&conn, &provider_str, &model_str, &chat_session_id);
-            effective_session_window(&conn, &provider_str, &meter_model)
-        };
-
-        // Cache hit: same transcript + prompt + model → same estimate. The
-        // estimate itself is cheap, but the system-prompt build above scans
-        // the skills directory — not something the 2s meter poll should do
-        // forever while idle (same rationale as the local path's PERF B11).
-        let fingerprint = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            system_str.hash(&mut h);
-            provider_str.hash(&mut h);
-            model_str.hash(&mut h);
-            format!("{:x}:{last_id}:{n_records}", h.finish())
-        };
-        if let Some(tokens) = chat_state.0.cached_context_tokens(&chat_session_id, &fingerprint) {
-            return Ok(crate::types::ContextUsagePayload {
-                used_tokens: estimate_used_tokens(n_records, tokens as u32),
-                max_tokens,
-                cached_tokens,
-            });
-        }
 
         let (total, _sys, _msgs, tools) =
             estimate_usage_parts(&system_str, &messages, &tool_specs_json);

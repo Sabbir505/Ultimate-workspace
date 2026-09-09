@@ -155,6 +155,12 @@ pub struct ChatManager {
     /// next round can call them. One slot per session (one live turn per
     /// session — `send` cancels any prior stream first).
     late_attach: Mutex<HashMap<String, Arc<Mutex<LateAttach>>>>,
+    /// Subagent (`Task`/`Agent`) child loops spawned by the live turn, keyed
+    /// by session id. Cancelling a turn used to abort only the turn task —
+    /// which DETACHED the subagent (its JoinHandle was dropped mid-await) and
+    /// let it keep spending provider tokens for up to SUBAGENT_MAX_ROUNDS
+    /// more with no way to stop it. `cancel` aborts these too.
+    child_tasks: Mutex<HashMap<String, Vec<tokio::task::AbortHandle>>>,
 }
 
 /// Sources attached mid-turn by the `attach_connector` / `attach_mcp_server`
@@ -183,6 +189,38 @@ impl ChatManager {
             pending_questions: Mutex::new(HashMap::new()),
             context_token_cache: Mutex::new(HashMap::new()),
             late_attach: Mutex::new(HashMap::new()),
+            child_tasks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Track a subagent loop spawned for this session so `cancel` (and a
+    /// superseding `send`, which cancels first) can abort it.
+    pub(crate) fn register_child_task(&self, sid: &str, handle: tokio::task::AbortHandle) {
+        self.child_tasks
+            .lock()
+            .entry(sid.to_string())
+            .or_default()
+            .push(handle);
+    }
+
+    /// Remove one finished child from the registry — by its own task id, so
+    /// an old child's cleanup never clobbers a newer turn's registrations.
+    pub(crate) fn unregister_child_task(&self, sid: &str, task_id: tokio::task::Id) {
+        let mut map = self.child_tasks.lock();
+        if let Some(list) = map.get_mut(sid) {
+            list.retain(|h| h.id() != task_id);
+        }
+        if map.get(sid).is_some_and(|l| l.is_empty()) {
+            map.remove(sid);
+        }
+    }
+
+    /// Abort every live subagent loop for a session.
+    fn abort_child_tasks(&self, sid: &str) {
+        if let Some(list) = self.child_tasks.lock().remove(sid) {
+            for handle in list {
+                handle.abort();
+            }
         }
     }
 
@@ -1139,19 +1177,40 @@ impl ChatManager {
     }
 
     /// Cancel an active stream for the given session (no-op if none active).
-    /// Also drops any pending per-action approvals for the session so their
-    /// paused loops resume as "denied" rather than hanging forever.
+    /// Also aborts any live subagent (`Task`) loops the turn spawned, drops
+    /// pending per-action approvals for the session so their paused loops
+    /// resume as "denied" rather than hanging forever, and clears the
+    /// per-turn perf accumulator + late-attach slot — those are normally
+    /// released by the spawned task's tail, which NEVER runs when the turn is
+    /// aborted here (an aborted 500 ms perf heartbeat used to emit
+    /// `chat:perf` forever, and live connector MCP sessions stayed parked in
+    /// the late-attach map for the process lifetime).
     pub fn cancel(&self, chat_session_id: &str) {
         if let Some(handle) = self.streams.lock().remove(chat_session_id) {
             handle.abort();
         }
+        self.abort_child_tasks(chat_session_id);
         self.drop_pending_for_session(chat_session_id);
+        // A superseding `send` cancels first, THEN re-registers perf and the
+        // late-attach slot — so clearing them here cannot hurt the new turn.
+        crate::chat::turn_perf::unregister(chat_session_id);
+        self.clear_late_attach(chat_session_id);
     }
 
     /// App-exit cleanup: cancel all active streams.
     pub fn cancel_all(&self) {
         let handles: Vec<_> = self.streams.lock().drain().map(|(_, h)| h).collect();
         for handle in handles {
+            handle.abort();
+        }
+        // Abort every live subagent loop too.
+        let children: Vec<_> = self
+            .child_tasks
+            .lock()
+            .drain()
+            .flat_map(|(_, list)| list)
+            .collect();
+        for handle in children {
             handle.abort();
         }
         // Drop all pending approvals too.
@@ -2001,6 +2060,68 @@ mod tests {
 
         task_a.abort();
         task_b.abort();
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_registered_subagent_children() {
+        // Audit #1: cancelling a turn used to detach its spawned `Task`
+        // subagent loops, which kept spending provider tokens with no way to
+        // stop them. The registry must abort them — and clean up so nothing
+        // leaks per session.
+        let mgr = ChatManager::new();
+        let sid = "s-sub".to_string();
+
+        // A real parked child task that registers itself, standing in for a
+        // spawned subagent loop.
+        let mgr = Arc::new(mgr);
+        let child = {
+            let mgr = Arc::clone(&mgr);
+            let sid = sid.clone();
+            tokio::spawn(async move {
+                let inner = tokio::spawn(std::future::pending::<()>());
+                mgr.register_child_task(&sid, inner.abort_handle());
+                std::future::pending::<()>().await
+            })
+        };
+        // Let the child register.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(mgr.child_tasks.lock().contains_key(&sid), "child must be registered");
+
+        // Wait — the outer child here IS the registrant but the INNER parked
+        // task is what's tracked. cancel() must abort the inner task.
+        mgr.cancel(&sid);
+        assert!(
+            !mgr.child_tasks.lock().contains_key(&sid),
+            "cancel must drain the registry entry"
+        );
+
+        // The registrant outer task pends forever — abort it (the test's own
+        // inner stand-in was already aborted by cancel()).
+        child.abort();
+    }
+
+    #[tokio::test]
+    async fn child_unregister_removes_only_its_own_id() {
+        // Two children for one session; the first finishing must not drop
+        // the second's registration (it would leave it uncancellable).
+        let mgr = ChatManager::new();
+        let sid = "s-two".to_string();
+
+        let inner_a = tokio::spawn(std::future::pending::<()>());
+        let inner_b = tokio::spawn(std::future::pending::<()>());
+        let id_a = inner_a.abort_handle().id();
+        mgr.register_child_task(&sid, inner_a.abort_handle());
+        mgr.register_child_task(&sid, inner_b.abort_handle());
+
+        mgr.unregister_child_task(&sid, id_a);
+        assert_eq!(mgr.child_tasks.lock().get(&sid).map(|l| l.len()), Some(1));
+
+        // Aborting the session drops the surviving child and clears the map.
+        mgr.cancel(&sid);
+        assert!(!mgr.child_tasks.lock().contains_key(&sid));
+
+        inner_a.abort();
+        inner_b.abort();
     }
 
     #[test]

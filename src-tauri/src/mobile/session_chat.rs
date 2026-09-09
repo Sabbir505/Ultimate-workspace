@@ -8,14 +8,14 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rusqlite::Connection;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::chat;
 use crate::db;
 use crate::types::ChatMessageRecord;
 
 use super::protocol::{
-    ChatAttachment, DesktopMessage, MobileMessage, SessionMessageRecord,
+    ChatAttachment, ChatArtifactPayload, DesktopMessage, MobileMessage, SessionMessageRecord,
 };
 use super::relay_owner::SessionChatOwnerPayload;
 
@@ -202,11 +202,46 @@ impl SessionChatManager {
                 session_id: _,
                 pending_id,
                 decision,
-            } => handle_resolve_session_approval(&chat_mgr, pending_id, decision),
+                always_allow,
+            } => handle_resolve_session_approval(&app, &db, &chat_mgr, pending_id, decision, always_allow),
 
             MobileMessage::RenameSession { session_id, title } => {
                 handle_rename_session(&db, session_id, title)
             }
+
+            MobileMessage::SetSessionModel {
+                session_id,
+                provider_id,
+                model,
+            } => handle_set_session_model(&db, session_id, provider_id, model),
+
+            MobileMessage::DeleteChatSession { session_id } => {
+                handle_delete_chat_session(&db, session_id)
+            }
+
+            MobileMessage::GetSessionMeta { session_id } => {
+                handle_get_session_meta(&db, session_id)
+            }
+
+            MobileMessage::RegisterPushToken { token, platform } => {
+                super::push::handle_register_push_token(&db, token, platform)
+            }
+
+            MobileMessage::ListSessionArtifacts { session_id } => {
+                handle_list_session_artifacts(&db, session_id)
+            }
+
+            MobileMessage::ReadArtifact {
+                session_id,
+                path,
+            } => handle_read_artifact(app, &db, session_id, &path),
+
+            MobileMessage::ResolvePlanProposal {
+                session_id: _,
+                pending_id,
+                approved,
+                feedback,
+            } => handle_resolve_plan_proposal(app, pending_id, approved, feedback),
 
             // Other variants are not session-scoped chat and are handled by the relay.
             _ => Err(format!("message not handled by SessionChatManager: {:?}", msg)),
@@ -474,10 +509,26 @@ fn handle_cancel_session_stream(
     }])
 }
 
+/// Filesystem mutators the desktop "always allow tool + glob" rules engine
+/// governs. The phone's Always-Allow button is only shown for these; for any
+/// other tool the flag is ignored (the desktop rules engine has no vocabulary
+/// for them, and silently widening shell/browser powers from a phone tap
+/// would be the wrong default).
+const ALWAYS_ALLOWABLE_TOOLS: &[&str] = &[
+    "write_file",
+    "edit_file",
+    "delete_file",
+    "move_file",
+    "copy_file",
+];
+
 fn handle_resolve_session_approval(
+    app: &AppHandle,
+    db: &Arc<Mutex<Connection>>,
     chat_mgr: &Arc<chat::ChatManager>,
     pending_id: String,
     decision: String,
+    always_allow: bool,
 ) -> Result<Vec<DesktopMessage>, String> {
     let approved = match decision.as_str() {
         "approve" | "approved" | "yes" => true,
@@ -485,12 +536,64 @@ fn handle_resolve_session_approval(
         _ => return Err(format!("invalid decision: {decision}")),
     };
 
+    // "Always allow" needs the tool name, so look at the pending approval
+    // BEFORE taking it. take_pending_approval consumes the entry.
     let pending = chat_mgr.take_pending_approval(&pending_id)
         .ok_or_else(|| format!("unknown pending approval id: {pending_id}"))?;
+    let tool = pending.tool.clone();
+    let chat_session_id = pending.chat_session_id.clone();
+
+    if approved && always_allow && ALWAYS_ALLOWABLE_TOOLS.contains(&tool.as_str()) {
+        let conn = db.lock();
+        // The rules live in app_settings as a JSON array (same store the
+        // desktop settings UI writes). An empty pattern matches every path —
+        // still scope-gated by the dispatcher's fs_roots containment, so this
+        // can never widen writes outside the granted roots.
+        let mut rules: Vec<serde_json::Value> = db::get_setting(&conn, "permissions.rules")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        rules.push(serde_json::json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "tool": tool,
+            "pattern": "",
+            "createdAt": db::now_ts(),
+        }));
+        let serialized = serde_json::to_string(&rules)
+            .map_err(|e| format!("failed to serialize approval rules: {e}"))?;
+        let _ = db::set_setting(&conn, "permissions.rules", &serialized);
+    }
 
     // Deliver the decision via the oneshot channel. A send error means the
     // loop already ended (stream cancelled) — ignore it.
     let _ = pending.response_tx.send(approved);
+
+    // Notify the owning phone (if any) that the card is dead — the approval
+    // may have been resolved on the DESKTOP, or on a different phone
+    // connection, and a stale approval card would otherwise sit there
+    // forever. Rides the same `mobile:session_chat_event` channel the React
+    // re-broadcast uses; the relay's listener routes it by owner_session_id.
+    let owner_session_id: Option<String> = {
+        let conn = db.lock();
+        ensure_chat_session_owner_column(&conn).ok();
+        conn.query_row(
+            "SELECT owner_session_id FROM chat_sessions WHERE id = ?1 AND owner_session_id IS NOT NULL",
+            rusqlite::params![chat_session_id],
+            |r| r.get(0),
+        )
+        .ok()
+    };
+    if let Some(owner) = owner_session_id {
+        let _ = app.emit(
+            "mobile:session_chat_event",
+            serde_json::json!({
+                "session_id": owner,
+                "kind": "approval-resolved",
+                "payload": { "pendingId": pending_id },
+            }),
+        );
+    }
 
     Ok(vec![])
 }
@@ -517,4 +620,275 @@ fn handle_rename_session(
         .map_err(|e| format!("failed to update title: {e}"))?;
 
     Ok(vec![]) // No response needed — success is implicit.
+}
+
+const KNOWN_PROVIDERS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "anthropic_compatible",
+    "openai_compatible",
+    "openrouter",
+    "local_gguf",
+    "auto",
+];
+
+fn handle_set_session_model(
+    db: &Arc<Mutex<Connection>>,
+    owner_session_id: String,
+    provider_id: String,
+    model: String,
+) -> Result<Vec<DesktopMessage>, String> {
+    if !KNOWN_PROVIDERS.contains(&provider_id.as_str()) {
+        return Err(format!("unknown provider: {provider_id}"));
+    }
+    if model.trim().is_empty() {
+        return Err("model must not be empty".to_string());
+    }
+    let chat_session_id = {
+        let conn = db.lock();
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM chat_sessions WHERE owner_session_id = ?1",
+                rusqlite::params![&owner_session_id],
+                |r| r.get(0),
+            )
+            .ok();
+        id.ok_or_else(|| format!("session not found: {owner_session_id}"))?
+    };
+    {
+        let conn = db.lock();
+        db::update_chat_session_provider(&conn, &chat_session_id, &provider_id)
+            .map_err(|e| format!("failed to set provider: {e}"))?;
+        db::update_chat_session_model(&conn, &chat_session_id, &model)
+            .map_err(|e| format!("failed to set model: {e}"))?;
+    }
+    Ok(vec![DesktopMessage::SessionModelSet {
+        session_id: owner_session_id,
+        provider_id,
+        model,
+    }])
+}
+
+fn handle_delete_chat_session(
+    db: &Arc<Mutex<Connection>>,
+    owner_session_id: String,
+) -> Result<Vec<DesktopMessage>, String> {
+    let chat_session_id = {
+        let conn = db.lock();
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM chat_sessions WHERE owner_session_id = ?1",
+                rusqlite::params![&owner_session_id],
+                |r| r.get(0),
+            )
+            .ok();
+        id.ok_or_else(|| format!("session not found: {owner_session_id}"))?
+    };
+    {
+        let conn = db.lock();
+        db::delete_chat_session(&conn, &chat_session_id)
+            .map_err(|e| format!("failed to delete session: {e}"))?;
+    }
+    Ok(vec![DesktopMessage::SessionDeleted {
+        session_id: owner_session_id,
+    }])
+}
+
+fn handle_get_session_meta(
+    db: &Arc<Mutex<Connection>>,
+    owner_session_id: String,
+) -> Result<Vec<DesktopMessage>, String> {
+    let conn = db.lock();
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM chat_sessions WHERE owner_session_id = ?1",
+            rusqlite::params![&owner_session_id],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(chat_session_id) = id else {
+        // Session not created yet (no messages sent) — answer with defaults
+        // so the phone's header can render without an error round-trip.
+        return Ok(vec![DesktopMessage::SessionMeta {
+            session_id: owner_session_id,
+            provider: "auto".to_string(),
+            model: String::new(),
+            title: None,
+        }]);
+    };
+    let row = db::get_chat_session(&conn, &chat_session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "chat session row missing".to_string())?;
+    Ok(vec![DesktopMessage::SessionMeta {
+        session_id: owner_session_id,
+        provider: row.provider,
+        model: row.model,
+        title: row.title,
+    }])
+}
+
+fn artifact_kind(path: &str) -> String {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin")
+        .to_ascii_lowercase()
+}
+
+/// Extensions the phone can preview as text. Everything else (pdf, png,
+/// docx, …) rides as base64 and gets a save/share affordance instead.
+const PREVIEWABLE_TEXT_EXTS: &[&str] = &[
+    "md", "markdown", "txt", "json", "csv", "tsv", "toml", "yaml", "yml",
+    "html", "css", "svg", "xml", "js", "jsx", "ts", "tsx", "py", "rs", "go",
+    "java", "c", "h", "cpp", "sh", "bat", "ps1", "sql", "log",
+];
+/// Caps: text previews get a prefix; binaries get nothing (the phone shows a
+/// save/share card instead of trying to render megabytes).
+const TEXT_PREVIEW_CAP: usize = 512 * 1024;
+const BINARY_CAP: usize = 8 * 1024 * 1024;
+
+fn handle_list_session_artifacts(
+    db: &Arc<Mutex<Connection>>,
+    owner_session_id: String,
+) -> Result<Vec<DesktopMessage>, String> {
+    let conn = db.lock();
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM chat_sessions WHERE owner_session_id = ?1",
+            rusqlite::params![&owner_session_id],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(chat_session_id) = id else {
+        return Ok(vec![DesktopMessage::SessionArtifacts {
+            session_id: owner_session_id,
+            artifacts: vec![],
+        }]);
+    };
+    let records = db::list_artifacts_for_chat(&conn, &chat_session_id)
+        .map_err(|e| format!("failed to list artifacts: {e}"))?;
+    let artifacts = records
+        .into_iter()
+        .map(|r| {
+            let kind = artifact_kind(&r.path);
+            ChatArtifactPayload {
+                path: r.path,
+                filename: r.filename,
+                kind: Some(kind),
+                inline: None,
+            }
+        })
+        .collect();
+    Ok(vec![DesktopMessage::SessionArtifacts {
+        session_id: owner_session_id,
+        artifacts,
+    }])
+}
+
+fn handle_read_artifact(
+    app: &AppHandle,
+    db: &Arc<Mutex<Connection>>,
+    owner_session_id: String,
+    path: &str,
+) -> Result<Vec<DesktopMessage>, String> {
+    // Containment first: the phone may only read files inside the desktop's
+    // artifacts directory. Without this gate, any script that can send one
+    // relay message gets an arbitrary-file-read primitive (the exact class of
+    // hole PROJECT_AUDIT.md flags on the desktop's own artifact IPC).
+    let root = crate::chat::dispatch::artifacts_dir(app);
+    let granted = [root.to_string_lossy().to_string()];
+    if !crate::chat::permission::path_within_scope(path, &granted) {
+        return Err("artifact path is outside the artifacts directory".to_string());
+    }
+    // The artifact must also be one the session actually produced — a valid
+    // path in the artifacts dir from a DIFFERENT session is still refused.
+    let owns = {
+        let conn = db.lock();
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM chat_sessions WHERE owner_session_id = ?1",
+                rusqlite::params![&owner_session_id],
+                |r| r.get(0),
+            )
+            .ok();
+        match id {
+            Some(chat_session_id) => db::list_artifacts_for_chat(&conn, &chat_session_id)
+                .map(|rows| rows.iter().any(|r| r.path == path))
+                .unwrap_or(false),
+            None => false,
+        }
+    };
+    if !owns {
+        return Err("artifact not found in this session".to_string());
+    }
+
+    let kind = artifact_kind(path);
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("artifact")
+        .to_string();
+    let meta = std::fs::metadata(path);
+    let is_text = PREVIEWABLE_TEXT_EXTS.contains(&kind.as_str());
+
+    if is_text {
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("failed to read artifact: {e}"))?;
+        let truncated = bytes.len() > TEXT_PREVIEW_CAP;
+        let take = if truncated { TEXT_PREVIEW_CAP } else { bytes.len() };
+        // Text extensions may still hold non-UTF-8 bytes; lossy keeps the
+        // preview rendering instead of failing the whole request.
+        let text = String::from_utf8_lossy(&bytes[..take]).to_string();
+        return Ok(vec![DesktopMessage::ArtifactContent {
+            session_id: owner_session_id,
+            path: path.to_string(),
+            filename,
+            kind,
+            text: Some(text),
+            data_base64: None,
+            truncated,
+        }]);
+    }
+
+    match meta {
+        Ok(m) if m.len() as usize <= BINARY_CAP => {
+            use base64::Engine as _;
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("failed to read artifact: {e}"))?;
+            Ok(vec![DesktopMessage::ArtifactContent {
+                session_id: owner_session_id,
+                path: path.to_string(),
+                filename,
+                kind,
+                text: None,
+                data_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                truncated: false,
+            }])
+        }
+        Ok(m) => Err(format!(
+            "artifact too large for preview ({} MB) — save it from the desktop",
+            m.len() / (1024 * 1024)
+        )),
+        Err(e) => Err(format!("artifact unreadable: {e}")),
+    }
+}
+
+fn handle_resolve_plan_proposal(
+    app: &AppHandle,
+    pending_id: String,
+    approved: bool,
+    feedback: Option<String>,
+) -> Result<Vec<DesktopMessage>, String> {
+    // Same core the desktop plan card uses: takes the pending approval and
+    // resumes the paused loop; `approved: false` + feedback routes the
+    // revision request back to the model.
+    crate::chat::commands::resolve_plan_proposal(
+        pending_id,
+        approved,
+        feedback,
+        app.state::<crate::ChatState>(),
+        app.state::<crate::chat::plan::PlanState>(),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(vec![])
 }

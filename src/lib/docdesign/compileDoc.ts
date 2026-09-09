@@ -224,6 +224,20 @@ function dateLine(now: Date = new Date()): string {
 
 // --- L2 invariants -----------------------------------------------------------
 
+// The hex invariant must judge the generated SKELETON, not the model's
+// content: a heading like "Using #abcdef in CSS" lands in the program as a
+// quoted string literal and would false-trip l2/hex-hash (audit #26). Blank
+// string/template-literal contents before the check, but keep color-slot
+// literals (`"1A2B3C"`, or a real `"#1A2B3C"` bug) intact so the invariant
+// still catches actual '#'-prefixed hex colors in the skeleton.
+const STRING_LITERAL_RE = /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`/g;
+
+function skeletonOf(code: string): string {
+  return code.replace(STRING_LITERAL_RE, (lit) =>
+    /^#?[0-9a-fA-F]{6}$/.test(lit.slice(1, -1)) ? lit : lit[0] + lit[0],
+  );
+}
+
 export function checkDocInvariants(code: string, plan: DocPlan): CompileChecks {
   const issues: Issue[] = [];
   const passed: string[] = [];
@@ -235,7 +249,7 @@ export function checkDocInvariants(code: string, plan: DocPlan): CompileChecks {
     passed.push("single relay.save");
   }
 
-  if (/#[0-9a-fA-F]{6}\b/.test(code)) {
+  if (/#[0-9a-fA-F]{6}\b/.test(skeletonOf(code))) {
     issues.push({ severity: "error", rule: "l2/hex-hash", message: "emitted program contains a '#'-prefixed hex color" });
   } else {
     passed.push("hex colors are bare (no #)");

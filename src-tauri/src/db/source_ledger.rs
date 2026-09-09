@@ -43,7 +43,6 @@ pub fn add_source_note(
     published_at: Option<&str>,
 ) -> DbResult<SourceNote> {
     let now = now_ts();
-    let changes_before = conn.changes();
     conn.execute(
         "INSERT OR IGNORE INTO chat_source_notes
            (chat_session_id, url, title, fact, excerpt, unavailable, publisher, published_at, created_at)
@@ -60,7 +59,13 @@ pub fn add_source_note(
             now
         ],
     )?;
-    let was_inserted = conn.changes() > 0 && conn.changes() > changes_before;
+    // `conn.changes()` is the row count of the LAST statement on this
+    // connection — 0 means INSERT OR IGNORE hit a conflict (already present),
+    // >0 means a fresh insert. (The old `> changes_before` comparison compared
+    // against whatever statement ran PREVIOUSLY on the connection, not a
+    // before/after delta — wrong logic that only worked by accident because
+    // the else-branch re-queried the row.)
+    let was_inserted = conn.changes() > 0;
     if was_inserted {
         let id = conn.last_insert_rowid();
         Ok(SourceNote {

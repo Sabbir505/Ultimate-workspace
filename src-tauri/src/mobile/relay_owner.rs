@@ -154,6 +154,46 @@ pub fn forward_session_chat_event(
                 args: p.args,
             }
         }
+        // The approval was resolved on ANY surface (desktop card, another
+        // phone, the mobile resolve path itself) — dismiss matching cards.
+        "approval-resolved" => {
+            #[derive(Deserialize)]
+            struct ResolvedPayload {
+                #[serde(default)]
+                pendingId: Option<String>,
+                #[serde(default)]
+                pending_id: Option<String>,
+            }
+            let p: ResolvedPayload = serde_json::from_value(payload.payload)
+                .map_err(|e| format!("invalid approval-resolved payload: {e}"))?;
+            DesktopMessage::SessionApprovalResolved {
+                session_id: payload.session_id,
+                pending_id: p.pendingId.or(p.pending_id).unwrap_or_default(),
+            }
+        }
+        // Plan-proposal cards (present_plan): the phone gets the same
+        // Approve / Revise affordance the desktop card offers.
+        "plan-proposal" => {
+            #[derive(Deserialize)]
+            struct PlanPayload {
+                #[serde(default)]
+                pendingId: Option<String>,
+                #[serde(default)]
+                pending_id: Option<String>,
+                #[serde(default)]
+                title: Option<String>,
+                #[serde(default)]
+                plan: Option<String>,
+            }
+            let p: PlanPayload = serde_json::from_value(payload.payload)
+                .map_err(|e| format!("invalid plan-proposal payload: {e}"))?;
+            DesktopMessage::SessionPlanProposal {
+                session_id: payload.session_id,
+                pending_id: p.pendingId.or(p.pending_id).unwrap_or_default(),
+                title: p.title.unwrap_or_else(|| "Plan proposal".to_string()),
+                plan: p.plan.unwrap_or_default(),
+            }
+        }
         "artifact" => {
             #[derive(Deserialize)]
             struct ArtifactPayload {

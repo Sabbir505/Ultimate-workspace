@@ -1,41 +1,66 @@
 import React from 'react';
-import { View, StyleSheet } from 'react-native';
-import { theme } from '../theme';
+import { StyleSheet, Text, View } from 'react-native';
+import { theme, useTheme } from '../theme';
+import { useRelay } from '../hooks/useRelay';
 
 interface ConnectionIndicatorProps {
-  connected: boolean;
+  /** Optional override — defaults to the live relay connection state. */
+  connected?: boolean;
+  /** Mid-flight handhake state (dot turns amber). */
+  connecting?: boolean;
   size?: number;
+  /** Show the state label ("Connected" / "Connecting…" / "Offline"). */
+  showLabel?: boolean;
 }
 
-export default function ConnectionIndicator({ connected, size = 12 }: ConnectionIndicatorProps) {
+/**
+ * Quiet dot (+ optional label) for the relay connection — three states:
+ *   connected  filled green
+ *   connecting filled amber
+ *   offline    hollow gray
+ */
+export default function ConnectionIndicator({
+  connected,
+  connecting = false,
+  size = 10,
+  showLabel = false,
+}: ConnectionIndicatorProps) {
+  useTheme(); // subscribe so theme.colors is reactive
+  const relayConnected = useRelay().connected;
+  const isOn = connected ?? relayConnected;
+  const c = theme.colors;
+
+  const color = isOn ? c.success : connecting ? c.warning : c.gray;
+  const label = isOn ? 'Connected' : connecting ? 'Connecting…' : 'Offline';
+
   return (
-    <View
-      style={[
-        styles.dot,
-        {
-          width: size,
-          height: size,
-          borderRadius: size / 2,
-          backgroundColor: connected ? theme.colors.green : theme.colors.error,
-        },
-      ]}
-    >
-      {connected && (
-        <View style={[styles.pulse, { width: size * 1.5, height: size * 1.5, borderRadius: (size * 1.5) / 2 }]} />
+    <View style={styles.row}>
+      <View
+        style={[
+          isOn || connecting
+            ? { backgroundColor: color }
+            : { borderColor: color, borderWidth: 1.5 },
+          {
+            width: size,
+            height: size,
+            borderRadius: size / 2,
+          },
+        ]}
+      />
+      {showLabel && (
+        <Text style={[styles.label, { color: c.textSecondary }, theme.type.label]}>
+          {label}
+        </Text>
       )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  dot: {
-    justifyContent: 'center',
+  row: {
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 6,
   },
-  pulse: {
-    position: 'absolute',
-    borderWidth: 2,
-    borderColor: theme.colors.green,
-    opacity: 0.3,
-  },
+  label: { textTransform: 'none' },
 });

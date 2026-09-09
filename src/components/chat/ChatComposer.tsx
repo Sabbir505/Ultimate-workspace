@@ -453,6 +453,8 @@ function QueuedMessageRow({
             rows={Math.min(4, draft.split("\n").length)}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
+              // IME composition's confirming Enter commits the composition.
+              if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 commitEdit();
@@ -1261,14 +1263,22 @@ export function ChatComposer({
   useEffect(() => {
     if (!slashOpen) return;
     let stale = false;
-    void listChatSkills().then((list) => {
-      if (stale || !list) return;
-      setSlashSkills(list.map((s) => ({ name: s.name, slug: s.slug })));
-    });
-    void listPromptTemplates().then((t) => {
-      if (stale) return;
-      setPromptTemplates(t);
-    });
+    void listChatSkills()
+      .then((list) => {
+        if (stale || !list) return;
+        setSlashSkills(list.map((s) => ({ name: s.name, slug: s.slug })));
+      })
+      .catch(() => {
+        /* slash-menu skill list is best-effort */
+      });
+    void listPromptTemplates()
+      .then((t) => {
+        if (stale) return;
+        setPromptTemplates(t);
+      })
+      .catch(() => {
+        /* slash-menu template list is best-effort */
+      });
     return () => {
       stale = true;
     };
@@ -1395,9 +1405,13 @@ export function ChatComposer({
       setAttachedRows([]);
       return;
     }
-    void listSessionConnectors(chatSessionId).then((rows) => {
-      setAttachedRows(rows ?? []);
-    });
+    void listSessionConnectors(chatSessionId)
+      .then((rows) => {
+        setAttachedRows(rows ?? []);
+      })
+      .catch(() => {
+        /* connector rows are best-effort; keep whatever is showing */
+      });
   }, [chatSessionId]);
 
   // Reload the attachment rows whenever the active session changes (and when
@@ -1410,8 +1424,9 @@ export function ChatComposer({
   // MCP-gallery servers. Kiwi is the one public connector — identified by its
   // endpoint (the registry doesn't serialize an isPublic flag).
   const loadAttachSources = useCallback(() => {
-    void listConnectors().then((list) => {
-      if (!list) return;
+    void listConnectors()
+      .then((list) => {
+        if (!list) return;
       const conns: AttachSource[] = list
         .filter((c) => c.status.connected || c.mcpServerUrl === "https://mcp.kiwi.com")
         .map((c) => ({
@@ -1435,8 +1450,11 @@ export function ChatComposer({
             kind: "mcp" as const,
           }));
         setAttachSources([...conns, ...mcps]);
+        })
+        .catch(() => {
+          /* attach-source discovery is best-effort */
+        });
       });
-    });
   }, []);
 
   // (Re)load attachable sources every time the popup opens, and once per
@@ -1538,7 +1556,10 @@ export function ChatComposer({
     const ta = textareaRef.current;
     if (ta) {
       ta.focus();
-      requestAnimationFrame(() => ta.setSelectionRange(-1, -1));
+      // Negative indices clamp to 0 — the caret would sit at the START of
+      // the inserted text while `caret` state (above) claims the end,
+      // desyncing the slash/@ popup from the real caret position.
+      requestAnimationFrame(() => ta.setSelectionRange(next.length, next.length));
     }
   }, [content]);
 
@@ -2021,8 +2042,19 @@ export function ChatComposer({
   // The mic button still toggles for click users.
   const altTalkRef = useRef(false);
   useEffect(() => {
+    // Split view mounts TWO composers in one document; the Alt handlers are
+    // window-global, so a single press used to start recording in BOTH — two
+    // mic captures and the dictated text spliced into both panes. Only the
+    // FOCUSED chat's composer may react (read via getState so the listeners
+    // don't need re-registering on focus change).
+    const isFocusedChat = () => {
+      const s = useChatStore.getState();
+      const focused = s.focusedChatSessionId ?? s.activeChatSessionId;
+      return focused === effectiveSessionId;
+    };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Alt") {
+        if (!isFocusedChat()) return;
         // Ignore AltGr (reports as Ctrl+Alt on intl layouts) and shortcuts
         // already in flight — only a solo Alt press starts dictation.
         if (e.ctrlKey || e.metaKey || e.repeat) return;
@@ -2342,7 +2374,7 @@ export function ChatComposer({
     // native /compact. Cloud and local sessions: Relay's own compaction
     // (chat_compact_now — pin+summarize via the session's provider or the
     // sidecar) instead of sending the literal text to the model.
-    if (/^\/compact/.test(trimmed) && !isHarnessSession) {
+    if (/^\/compact\b/.test(trimmed) && !isHarnessSession) {
       setContent("");
       setCommandPill(null);
       setAttachments([]);
@@ -2430,6 +2462,10 @@ export function ChatComposer({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      // An IME composition's confirming Enter/Tab (CJK input; keyCode 229)
+      // must commit the composition, not send the half-composed text or
+      // apply a popup item.
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       // While either popup is showing candidates, it owns navigation keys.
       if (slashOpen && slashFiltered.length > 0) {
         if (e.key === "ArrowDown") {

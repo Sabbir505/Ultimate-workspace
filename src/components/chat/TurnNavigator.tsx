@@ -23,10 +23,16 @@ interface Turn {
 }
 
 const PREVIEW_MAX = 120;
+// Bound the input before the (backtracking-heavy) fence regexes run: the
+// output is truncated to PREVIEW_MAX anyway, and slicing first keeps this
+// off the full multi-KB message body on every token flush. 600 ≫ 120, so
+// the visible preview is unchanged for realistic content.
+const PREVIEW_INPUT_MAX = 600;
 
 /** Strip markdown/code fences for a cleaner preview. */
 function cleanPreview(text: string): string {
-  return text
+  const bounded = text.length > PREVIEW_INPUT_MAX ? text.slice(0, PREVIEW_INPUT_MAX) : text;
+  return bounded
     .replace(/```[\s\S]*?```/g, "(code)")
     .replace(/`[^`]+`/g, "")
     .replace(/[#*_>~]/g, "")
@@ -38,6 +44,8 @@ function cleanPreview(text: string): string {
 export function TurnNavigator() {
   const messages = useChatStore((s) => s.messages);
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  // Split view: dispatch the jump to the FOCUSED half's view — the rail
+  // renders the main buffer here, so target the global active chat.
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
   const turns: Turn[] = useMemo(() => {
@@ -70,7 +78,7 @@ export function TurnNavigator() {
         <div
           key={turn.userId}
           className={`turn-rail-tick ${hoveredIdx === i ? "is-hovered" : ""}`}
-          onClick={() => scrollToChatMessage(turn.userId)}
+          onClick={() => scrollToChatMessage(turn.userId, activeChatSessionId)}
           onMouseEnter={() => setHoveredIdx(i)}
           onMouseLeave={() => setHoveredIdx(null)}
         >

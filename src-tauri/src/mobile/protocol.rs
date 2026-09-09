@@ -91,10 +91,66 @@ pub enum MobileMessage {
         session_id: String,
         pending_id: String,
         decision: String,
+        /// "Always allow" — persist an approval rule so this tool stops
+        /// prompting. Only meaningful for the filesystem mutators the desktop
+        /// rules engine governs (write_file / edit_file / delete_file /
+        /// move_file / copy_file); ignored for everything else.
+        #[serde(default)]
+        always_allow: bool,
     },
     RenameSession {
         session_id: String,
         title: String,
+    },
+    /// Switch the chat session's provider + model from the phone's model
+    /// sheet. Applies to the session row, so the NEXT turn uses it (an
+    /// in-flight stream keeps its model).
+    SetSessionModel {
+        session_id: String,
+        provider_id: String,
+        model: String,
+    },
+    /// Delete a chat session and its messages from the desktop.
+    DeleteChatSession {
+        session_id: String,
+    },
+    /// Read the chat session's provider/model/title (header + model sheet).
+    GetSessionMeta {
+        session_id: String,
+    },
+    /// Register (or replace) the phone's push token so the desktop can notify
+    /// about approvals / completions while no WebSocket is connected.
+    RegisterPushToken {
+        token: String,
+        /// "ios" | "android" | "web" — diagnostics only today.
+        platform: String,
+    },
+    /// List the artifacts attached to this session's messages.
+    ListSessionArtifacts {
+        session_id: String,
+    },
+    /// Read one artifact's bytes for on-device preview. The path is
+    /// containment-checked against the desktop's artifacts directory — the
+    /// relay must never become an arbitrary-file-read primitive.
+    ReadArtifact {
+        session_id: String,
+        path: String,
+    },
+    /// Transcribe a voice note through the desktop's whisper sidecar (the
+    /// same `transcribe_audio` core the desktop push-to-talk uses).
+    TranscribeAudio {
+        /// base64 (no data: prefix) WAV/MP3 bytes.
+        data_base64: String,
+        media_type: Option<String>,
+    },
+    /// Approve/reject a plan proposal card. `approved: false` optionally
+    /// carries revision feedback back to the model (same core the desktop
+    /// card uses).
+    ResolvePlanProposal {
+        session_id: String,
+        pending_id: String,
+        approved: bool,
+        feedback: Option<String>,
     },
 }
 
@@ -196,6 +252,75 @@ pub enum DesktopMessage {
         summary: String,
         args: serde_json::Value,
     },
+    /// The approval was resolved (from ANY surface — desktop card or phone)
+    /// so every phone can dismiss its matching card instead of waiting for a
+    /// timeout that never comes.
+    SessionApprovalResolved {
+        session_id: String,
+        pending_id: String,
+    },
+    /// A `present_plan` proposal card, forwarded to the phone. The plan body
+    /// is the markdown "approach" text; the phone renders an Approve /
+    /// Revise card and answers via `ResolvePlanProposal`.
+    SessionPlanProposal {
+        session_id: String,
+        pending_id: String,
+        title: String,
+        plan: String,
+    },
+    /// Ack for `SetSessionModel` — the session row now carries this model.
+    SessionModelSet {
+        session_id: String,
+        provider_id: String,
+        model: String,
+    },
+    /// Ack for `DeleteChatSession`.
+    SessionDeleted {
+        session_id: String,
+    },
+    /// Response to `GetSessionMeta` — header + model-sheet state for a chat.
+    SessionMeta {
+        session_id: String,
+        provider: String,
+        model: String,
+        #[serde(default)]
+        title: Option<String>,
+    },
+    /// Ack for `RegisterPushToken`.
+    PushAck {
+        ok: bool,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    /// Response to `ListSessionArtifacts`.
+    SessionArtifacts {
+        session_id: String,
+        artifacts: Vec<ChatArtifactPayload>,
+    },
+    /// Response to `ReadArtifact` — preview bytes for one artifact.
+    /// `text` for previewable text formats, `data_base64` otherwise.
+    ArtifactContent {
+        session_id: String,
+        path: String,
+        filename: String,
+        /// Extension-derived format tag ("md", "pdf", "png", …).
+        kind: String,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        data_base64: Option<String>,
+        /// True when the artifact exceeded the size cap and only a prefix is
+        /// returned (text formats) or nothing (binary).
+        #[serde(default)]
+        truncated: bool,
+    },
+    /// Response to `TranscribeAudio`.
+    Transcription {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
     SessionArtifact {
         session_id: String,
         message_id: Option<i64>,
@@ -211,8 +336,7 @@ pub enum DesktopMessage {
         status: String,
         summary: String,
     },
-    /// A project's monthly spend crossed its configured budget threshold
-    /// (roadmap #10). The phone shows it as a spend alert.
+    /// Broadcast: a project's spend crossed its budget threshold.
     BudgetAlert {
         project_id: String,
         project_name: String,
@@ -352,6 +476,10 @@ pub struct MobileChatUsage {
 pub struct ChatArtifactPayload {
     pub path: String,
     pub filename: String,
+    /// Extension-derived format tag ("md", "pdf", "png", "docx", …) so the
+    /// phone can pick a preview without reading the bytes.
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inline: Option<ChatArtifactInline>,
 }

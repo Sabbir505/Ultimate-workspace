@@ -176,7 +176,19 @@ pub async fn transcribe_audio(
     let resp = if let Some(notify) = tag.as_deref().map(register_cancel_slot) {
         tokio::select! {
             r = client.post(&endpoint).multipart(form).send() => {
-                r.map_err(|e| format!("whisper request failed: {e}"))?
+                // The post-send unregister below only runs on success — a
+                // failed send must release its slot here too, or every failed
+                // tagged transcription leaked a `Notify` Arc for the process
+                // lifetime.
+                match r {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        if let Some(t) = tag.as_deref() {
+                            unregister_cancel_slot(t);
+                        }
+                        return Err(format!("whisper request failed: {e}"));
+                    }
+                }
             }
             _ = notify.notified() => {
                 if let Some(t) = tag.as_deref() {

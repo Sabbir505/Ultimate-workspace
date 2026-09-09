@@ -67,10 +67,17 @@ export function BranchPanel() {
 
   const fetchLog = useCallback(async () => {
     if (!path) return;
-    const lg = await getGitLog(path);
-    setLog(lg ?? []);
-    setError(null);
-    setLoading(false);
+    try {
+      const lg = await getGitLog(path);
+      setLog(lg ?? []);
+      setError(null);
+    } catch (e) {
+      // A rejected getGitLog (bad path, git failure) must surface here —
+      // otherwise loading stays true forever and the panel stays blank.
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
   }, [path]);
 
   useEffect(() => {

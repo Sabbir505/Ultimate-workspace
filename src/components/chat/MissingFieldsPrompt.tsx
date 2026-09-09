@@ -151,7 +151,12 @@ export function MissingFieldsPrompt({
   useEffect(() => {
     const initial: Record<string, unknown> = {};
     for (const path of missingFields) {
-      const value = getValueByPath(proposal.spec, path);
+      // Paths carry a "spec." prefix ("spec.name", "spec.trigger.schedule")
+      // but `proposal.spec` IS the spec — strip the leading segment before
+      // lookup or it never resolves (paths stay intact as the fieldValues
+      // keys; the submit side resolves them the same way, see
+      // ArtifactProposalCard.normalizeMissingFieldPath).
+      const value = getValueByPath(proposal.spec, path.replace(/^spec\./, ""));
       if (value !== undefined) {
         initial[path] = value;
       }

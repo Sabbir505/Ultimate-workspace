@@ -1120,6 +1120,18 @@ export const selectContextSessionId = (s: ChatState): string | null =>
 // P-3: per-session cap for the onArtifact tracking map (see onArtifact).
 const MAX_ARTIFACTS_PER_SESSION = 200;
 
+// Debounced artifacts-library refresh (audit #19): a single turn can emit
+// many `chat:artifact` events, and each one used to trigger a full
+// list_artifacts reload. Coalesce the burst into one trailing reload.
+let artifactLoadTimer: ReturnType<typeof setTimeout> | null = null;
+const scheduleArtifactLibraryLoad = () => {
+  if (artifactLoadTimer !== null) clearTimeout(artifactLoadTimer);
+  artifactLoadTimer = setTimeout(() => {
+    artifactLoadTimer = null;
+    void useArtifactsStore.getState().load().catch(() => {});
+  }, 1500);
+};
+
 export const useChatStore = create<ChatState>((set, get) => ({
   loaded: false,
   sessions: [],
@@ -2230,13 +2242,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const chatStatus = { ...get().chatStatus };
         delete streaming[activeChatSessionId];
         delete chatStatus[activeChatSessionId];
-        set({
+        // Gate the banner on the session still being the active one — a
+        // split-pane send failure must not surface the error in every open
+        // chat view (same guard as onError).
+        set((s) => ({
           streamingChatSessionId: null,
           streaming,
           chatStatus,
-          error: String(err),
-          errorCode: null,
-        });
+          error:
+            s.activeChatSessionId === activeChatSessionId ? String(err) : s.error,
+          errorCode:
+            s.activeChatSessionId === activeChatSessionId ? null : s.errorCode,
+        }));
         return;
       }
       return;
@@ -2269,13 +2286,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const chatStatus = { ...get().chatStatus };
       delete streaming[activeChatSessionId];
       delete chatStatus[activeChatSessionId];
-      set({
+      // Gate the banner on the session still being the active one — a
+      // split-pane send failure must not surface the error in every open
+      // chat view (same guard as onError).
+      set((s) => ({
         streamingChatSessionId: null,
         streaming,
         chatStatus,
-        error: String(err),
-        errorCode: null,
-      });
+        error:
+          s.activeChatSessionId === activeChatSessionId ? String(err) : s.error,
+        errorCode:
+          s.activeChatSessionId === activeChatSessionId ? null : s.errorCode,
+      }));
     }
   },
 
@@ -2459,17 +2481,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // Same 200-row page cap as loadMessages (M10 / audit B-23) — the
           // rollback refetch must not pull the full history.
           const msgs = await getChatMessages(activeChatSessionId, undefined, 200);
-          if (inSplit)
-            set({
-              splitMessages: msgs ?? [],
-              splitMessagesSessionId: activeChatSessionId,
-              splitHasMoreHistory: (msgs?.length ?? 0) >= 200,
-            });
-          else
+          // Re-derive which buffer currently displays this session AFTER the
+          // await: a session switch while the delete/refetch was in flight
+          // must not write the old session's rows into the other chat's
+          // buffer (same guard contract as cancelStream / onDone).
+          const isActiveSession = get().activeChatSessionId === activeChatSessionId;
+          const isSplitTarget =
+            get().splitChatSessionId === activeChatSessionId && !isActiveSession;
+          if (isActiveSession)
             set({
               messages: msgs ?? [],
               messagesSessionId: activeChatSessionId,
               hasMoreHistory: (msgs?.length ?? 0) >= 200,
+            });
+          else if (isSplitTarget)
+            set({
+              splitMessages: msgs ?? [],
+              splitMessagesSessionId: activeChatSessionId,
+              splitHasMoreHistory: (msgs?.length ?? 0) >= 200,
             });
         } catch {
           /* best-effort rollback */
@@ -2765,15 +2794,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
       try {
         // Same 200-row page cap as loadMessages (M10 / audit B-23): the
         // unbounded refetch deserialized the FULL history and desynced
-        // hasMoreHistory. The guard above already scoped this write to the
-        // active session, so the flag follows the buffer it feeds.
+        // hasMoreHistory. Each write is scoped to the buffer that still
+        // displays this session: the active view, or the split pane (Stop
+        // pressed on a split session — without that branch the live bubble
+        // vanished and the persisted partial never landed until a reload;
+        // same contract as onDone's isSplitTarget write-back).
         const messages = await getChatMessages(streamingChatSessionId, undefined, 200);
-        if (messages && get().activeChatSessionId === streamingChatSessionId) {
-          set((s) => ({
-            messages: mergeOptimistic(s.messages, messages),
-            messagesSessionId: streamingChatSessionId,
-            hasMoreHistory: messages.length >= 200,
-          }));
+        if (messages) {
+          const isActiveSession = get().activeChatSessionId === streamingChatSessionId;
+          const isSplitTarget =
+            get().splitChatSessionId === streamingChatSessionId && !isActiveSession;
+          if (isActiveSession) {
+            set((s) => ({
+              messages: mergeOptimistic(s.messages, messages),
+              messagesSessionId: streamingChatSessionId,
+              hasMoreHistory: messages.length >= 200,
+            }));
+          } else if (isSplitTarget) {
+            set((s) => ({
+              splitMessages: mergeOptimistic(s.splitMessages, messages),
+              splitMessagesSessionId: streamingChatSessionId,
+              splitHasMoreHistory: messages.length >= 200,
+            }));
+          }
         }
       } catch {
         /* best-effort refresh */
@@ -3131,7 +3174,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : { ...s.pendingArtifacts, [chatSessionId]: [...pending, artifact] },
       };
     });
-    void useArtifactsStore.getState().load();
+    // Debounced: a turn writing N artifacts fires N events but only one
+    // library reload (see scheduleArtifactLibraryLoad above).
+    scheduleArtifactLibraryLoad();
 
     // SVG renders inline in the chat bubble — no pane, no browser.
     if (ext === "svg") return;

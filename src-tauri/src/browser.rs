@@ -2230,8 +2230,10 @@ impl BrowserManager {
         #[cfg(windows)]
         {
             with_core_on_main(&self.app, self.webviews.clone(), &label, "open_devtools", move |core| {
-                unsafe { core.OpenDevToolsWindow() };
-                Ok(())
+                // Surface COM failures — a silently-failed open left the user
+                // clicking the DevTools button with nothing happening.
+                unsafe { core.OpenDevToolsWindow() }
+                    .map_err(|e| format!("OpenDevToolsWindow failed: {e}"))
             })
         }
         #[cfg(not(windows))]

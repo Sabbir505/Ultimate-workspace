@@ -107,6 +107,41 @@ describe("doc plan validation (L1)", () => {
     expect(out).not.toBeNull();
     expect(issues.some((i) => i.rule === "coherence" && i.message.includes("memo"))).toBe(true);
   });
+
+  it("validates kpi-strip entries instead of blindly casting (audit #22)", () => {
+    // Numeric values (a plausible model emission) are COERCED, not crashed on:
+    // the old bare cast let these through and esc(undefined) then threw in
+    // the PDF compiler while the docx compiler emitted `undefined` text runs.
+    const numeric = validDoc();
+    (numeric.sections[1].blocks[1] as { kpis: unknown[] }).kpis = [
+      { label: "Revenue", value: 4200 },
+      { label: "Users", value: 900 },
+    ];
+    const coerced = validateDocPlan(numeric);
+    expect(coerced.plan).not.toBeNull();
+    const strip = coerced.plan!.sections[1].blocks.find((b) => b.type === "kpi-strip") as
+      | { kpis: { label: string; value: string }[] }
+      | undefined;
+    expect(strip?.kpis.map((k) => k.value)).toEqual(["4200", "900"]);
+
+    // Missing/blank labels and null values are schema errors that block.
+    const missing = validDoc();
+    (missing.sections[1].blocks[1] as { kpis: unknown[] }).kpis = [
+      { label: "  ", value: "1" },
+      { value: "2" },
+    ];
+    const blocked = validateDocPlan(missing);
+    expect(blocked.plan).toBeNull();
+    expect(blocked.issues.some((i) => i.message.includes("text label and a value"))).toBe(true);
+
+    // Bad delta/trend types are rejected.
+    const badTrend = validDoc();
+    (badTrend.sections[1].blocks[1] as { kpis: unknown[] }).kpis = [
+      { label: "A", value: "1", trend: "sideways" },
+      { label: "B", value: "2" },
+    ];
+    expect(validateDocPlan(badTrend).plan).toBeNull();
+  });
 });
 
 describe("docx compiler (L2)", () => {

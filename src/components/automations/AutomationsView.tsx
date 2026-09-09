@@ -683,9 +683,15 @@ function AutomationDetail({
 
   const handleOpenRunLog = useCallback(
     async (chatSessionId: string) => {
-      await loadSessions();
-      await selectSession(chatSessionId);
-      setActiveView("chat");
+      try {
+        await loadSessions();
+        await selectSession(chatSessionId);
+        // Only switch views once the session actually opened — a rejected
+        // selectSession (DB lock) would otherwise land on an empty chat.
+        setActiveView("chat");
+      } catch (e) {
+        setRunError(String(e));
+      }
     },
     [loadSessions, selectSession, setActiveView],
   );

@@ -74,7 +74,7 @@ export function buildRunnerFrame(libs: string, requestId: string, userCode: stri
   });
   try {
     Promise.resolve((async function () {
-      ${userCode}
+      ${scriptSafe(userCode)}
     })()).catch(function (err) {
       if (!settled) {
         settled = true;

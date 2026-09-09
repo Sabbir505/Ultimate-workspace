@@ -73,10 +73,16 @@ export function ProjectItem({ project }: Props) {
       return;
     }
     if (!path) return;
-    // §7.10: run quick actions flagged "run on worktree creation".
-    const actions = (await listQuickActions(project.id)) ?? [];
-    for (const action of actions.filter((a) => a.runOnWorktree)) {
-      await runQuickAction(project.id, action.label, action.command);
+    // §7.10: run quick actions flagged "run on worktree creation". The
+    // worktree itself is already created at this point, so a failed action
+    // must not abort the rest of the post-creation setup silently.
+    try {
+      const actions = (await listQuickActions(project.id)) ?? [];
+      for (const action of actions.filter((a) => a.runOnWorktree)) {
+        await runQuickAction(project.id, action.label, action.command);
+      }
+    } catch (e) {
+      toastError("A post-creation quick action failed", e);
     }
   };
 

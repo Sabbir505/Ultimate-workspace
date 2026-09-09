@@ -1043,6 +1043,11 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           expires_at INTEGER NOT NULL
         );
 
+        -- insert_artifact's dedupe upsert (UPDATE ... WHERE path = ?1) and
+        -- list_artifacts' newest-per-path anti-join are per-path lookups over
+        -- the gallery table — without this index both scan per row.
+        CREATE INDEX IF NOT EXISTS idx_artifacts_path ON artifacts(path);
+
         -- Scheduled headless agent runs (see db/automations.rs +
         -- crate::automations). chat_session_id is the run log, bound lazily.
         CREATE TABLE IF NOT EXISTS automations (

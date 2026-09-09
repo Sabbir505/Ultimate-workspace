@@ -8,7 +8,7 @@
 // only needed once a code block or tool step actually renders, NOT on the
 // empty welcome screen — so we lazy-load it via dynamic import() in
 // StepCodeHighlighter below. That moves it out of the initial bundle.
-import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Pencil } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -1471,6 +1471,13 @@ function citeUrlTransform(url: string): string {
   return url.startsWith("cite:") ? url : defaultUrlTransform(url);
 }
 
+// Fenced code blocks ALWAYS render inside a <pre> in the hast tree
+// react-markdown builds; inline code never does. The `pre` override marks its
+// subtree so the `code` override can tell real block code from inline code —
+// the old heuristic ("no language class AND no newline") misclassified a
+// single-line fenced block with no language as inline code.
+const InsidePreContext = createContext(false);
+
 /** Renders a markdown string with syntax-highlighted code fences, mermaid
  *  diagrams and glass-styled links — the assistant's normal answer body.
  *  `cache` (default true) reuses the rendered element tree across mounts via
@@ -1513,6 +1520,15 @@ function Markdown({
         urlTransform={citeUrlTransform}
         components={{
           table: MarkdownTable,
+          pre({ children }) {
+            // Marks the subtree so `code` below knows it is a fenced block
+            // (see InsidePreContext above). The <pre> itself stays in the DOM.
+            return (
+              <InsidePreContext.Provider value={true}>
+                <pre>{children}</pre>
+              </InsidePreContext.Provider>
+            );
+          },
           code({ className, children, ...props }) {
             const match = /language-(\w+)/.exec(className || "");
             const rawCode = String(children).replace(/\n$/, "");
@@ -1525,8 +1541,9 @@ function Markdown({
                 ? rawCode.slice(0, MAX_CODE_BLOCK_BYTES) + "\n… (truncated)"
                 : rawCode;
 
-            // Inline code: no language class and short.
-            if (!match && !String(children).includes("\n")) {
+            // Inline code: no language class and not inside a fenced block.
+            const insidePre = useContext(InsidePreContext);
+            if (!match && !insidePre) {
               return (
                 <code style={inlineCodeStyle} {...props}>
                   {children}
@@ -1619,7 +1636,16 @@ function Markdown({
   };
   return (
     <div className="chat-markdown">
-      {cache ? cachedMarkdown(`md:${content}${fingerprint ? `|src:${fingerprint}` : ""}`, build) : build()}
+      {/* chatSessionId is in the key: the built tree closes over it (mermaid
+          "Fix with AI" routes to that session), so identical content in the
+          main + split sessions must NOT share one cached tree — the repair
+          would route to whichever session cached first. */}
+      {cache
+        ? cachedMarkdown(
+            `md:${chatSessionId ?? ""}:${content}${fingerprint ? `|src:${fingerprint}` : ""}`,
+            build,
+          )
+        : build()}
     </div>
   );
 }
@@ -2345,5 +2371,11 @@ export const MessageBubble = memo(
     a.msgId === b.msgId &&
     a.chatSessionId === b.chatSessionId &&
     (a.livePerf ?? null) === (b.livePerf ?? null) &&
+    // onRepeat is only passed to the CURRENT last assistant row; excluding it
+    // here left stale "Regenerate" buttons on rows that lost the action (and
+    // clicking one regenerated the newest turn, not the row it sat on).
+    // handleRepeat is stable per session, so this only re-renders rows that
+    // actually gain/lose the action.
+    (a.onRepeat ?? null) === (b.onRepeat ?? null) &&
     a.enter === b.enter,
 );

@@ -3,7 +3,7 @@
 // caret toggles a dropdown listing every artifact (click to switch) plus a
 // "Download all" action that saves them as a single zip.
 import { useEffect, useRef, useState } from "react";
-import { downloadArtifactsZip } from "../../lib/ipc";
+import { downloadArtifactsZip, toastError } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 
 function extLabel(filename: string): string {
@@ -37,9 +37,13 @@ export function ArtifactsMenu({
     setBusy(true);
     try {
       await downloadArtifactsZip(artifacts.map((a) => a.path));
+      setOpen(false);
+    } catch (e) {
+      // Zip failed — toast it and keep the menu open so the action stays
+      // reachable for a retry (the old finally-only version closed silently).
+      toastError("Could not create the zip archive.", e);
     } finally {
       setBusy(false);
-      setOpen(false);
     }
   };
 

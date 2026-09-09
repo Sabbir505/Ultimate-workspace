@@ -13,6 +13,7 @@
 // the app has.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { sendChatSelectionAsFollowUp } from "../../lib/chatSelection";
+import { useChatStore } from "../../state/chat";
 
 function CopyIcon() {
   return (
@@ -136,7 +137,9 @@ export function ChatSelectionToolbar() {
   };
 
   const ask = () => {
-    sendChatSelectionAsFollowUp(quoteSelection(sel.text));
+    // Split view: stack the quote on the FOCUSED chat's composer.
+    const s = useChatStore.getState();
+    sendChatSelectionAsFollowUp(quoteSelection(sel.text), s.focusedChatSessionId ?? s.activeChatSessionId);
     window.getSelection()?.removeAllRanges();
     hide();
   };

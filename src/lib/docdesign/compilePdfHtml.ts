@@ -146,6 +146,20 @@ function formatDate(now: Date): string {
 
 // --- L2 invariants -----------------------------------------------------------
 
+// The external-ref invariant must judge the generated SKELETON, not the
+// model's content: prose lives in text nodes, so a paragraph that literally
+// mentions "@import" would false-trip l2/external (audit #26). Blank text
+// nodes (the text between tags) before the check, but keep <style> blocks
+// verbatim — the CSS is compiler skeleton, and a real stylesheet @import
+// would live there. Tags/attributes stay too: esc() already neutralizes
+// < > " in content, so skeleton-level <link>/src="http" remain visible.
+function skeletonHtml(html: string): string {
+  return html
+    .split(/(<style\b[^>]*>[\s\S]*?<\/style>)/gi)
+    .map((chunk, idx) => (idx % 2 === 1 ? chunk : chunk.replace(/>[^<]*</g, "><")))
+    .join("");
+}
+
 export function checkPdfInvariants(html: string, plan: DocPlan, coverBg: string): CompileChecks {
   const issues: Issue[] = [];
   const passed: string[] = [];
@@ -165,7 +179,8 @@ export function checkPdfInvariants(html: string, plan: DocPlan, coverBg: string)
   }
 
   // Self-contained: no external fetches (the sandboxed print host is offline).
-  if (/<link\s|src="http|@import/i.test(html)) {
+  // Judged on the skeleton — model prose is blanked (see skeletonHtml).
+  if (/<link\s|src="http|@import/i.test(skeletonHtml(html))) {
     issues.push({ severity: "error", rule: "l2/external", message: "compiled HTML references external resources" });
   } else {
     passed.push("no external resources");

@@ -232,10 +232,14 @@ async fn get_project_path(db: &State<'_, DbState>, project_id: &str) -> Result<O
 
 /// Get LLM credentials from the chat session's provider/model + stored API key.
 async fn get_llm_context(db: &State<'_, DbState>, chat_session_id: &str) -> Result<LlmContext, String> {
-    let conn = db.0.lock();
-    let cs = crate::db::get_chat_session(&conn, chat_session_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "chat session not found".to_string())?;
+    // Scoped: the guard must drop before the await below (std MutexGuard is
+    // not Send, and the auto-router resolution hits the network).
+    let cs = {
+        let conn = db.0.lock();
+        crate::db::get_chat_session(&conn, chat_session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "chat session not found".to_string())?
+    };
 
     // Harness/ACP-agent sessions: the provider/model columns don't name an
     // HTTP API (model holds a CLI alias like "sonnet"; there may be no key for
@@ -257,12 +261,50 @@ async fn get_llm_context(db: &State<'_, DbState>, chat_session_id: &str) -> Resu
         }
     }
 
-    let api_key = crate::secrets::get_chat_api_key(&conn, &cs.provider).unwrap_or_default();
+    // Auto-mode chat: the row reads provider/model "auto"/"auto" until the
+    // first send resolves and writes back the pick. Resolve here with the
+    // SAME router the send path uses — without this, provider "auto" fell
+    // through to the OpenAI-shaped branch below and /create died with a 401
+    // from api.openai.com (no key exists for a provider named "auto"). The
+    // resolved pick is written back so the picker chip, context meter, and
+    // the next send's sticky resolution all see the same values — identical
+    // to the send path's write-back (auto_model stays set).
+    let (provider, stored_model) = if cs.auto_model || cs.provider == "auto" {
+        // /create prompts are small (system + schema + instruction ≪ a chat
+        // transcript); the 16k-token system-prompt budget mirrors the send
+        // path's conservative estimate.
+        let (p, m) = crate::chat::commands::resolve_auto_session_pick(
+            db,
+            &cs.provider,
+            &cs.model,
+            4_000,
+            false,
+        )
+        .await
+        .map_err(|e| {
+            format!(
+                "Auto mode found no available cloud model for /create ({e}). \
+                 Pick a concrete model from the agent picker, or check the \
+                 provider keys in Settings → API Keys."
+            )
+        })?;
+        {
+            let conn = db.0.lock();
+            let _ = crate::db::update_chat_session_provider(&conn, chat_session_id, &p);
+            let _ = crate::db::update_chat_session_model(&conn, chat_session_id, &m);
+        }
+        (p, m)
+    } else {
+        (cs.provider.clone(), cs.model.clone())
+    };
+
+    let conn = db.0.lock();
+    let api_key = crate::secrets::get_chat_api_key(&conn, &provider).unwrap_or_default();
     // Match chat/dispatch.rs exactly: filter out empty/whitespace base_urls so
     // they fall through to the provider default (e.g. https://api.openai.com).
     // Without this, an empty-string setting would produce a broken URL like
     // "/v1/chat/completions" and the request would return HTML instead of JSON.
-    let base_url = crate::db::get_setting(&conn, &format!("chat.{}.base_url", cs.provider))
+    let base_url = crate::db::get_setting(&conn, &format!("chat.{provider}.base_url"))
         .ok()
         .flatten()
         .filter(|b| !b.trim().is_empty());
@@ -272,27 +314,27 @@ async fn get_llm_context(db: &State<'_, DbState>, chat_session_id: &str) -> Resu
     // llama-server rejects with HTTP 400; the server only accepts the model
     // it was started with (the `chat.local_gguf.model` setting, written by
     // the sidecar start).
-    let model = if cs.provider == "local_gguf" {
+    let model = if provider == "local_gguf" {
         crate::db::get_setting(&conn, "chat.local_gguf.model")
             .ok()
             .flatten()
             .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| cs.model.clone())
+            .unwrap_or_else(|| stored_model)
     } else {
-        cs.model.clone()
+        stored_model
     };
 
     // The base_url is written when the llama-server sidecar starts; without a
     // running server every request would fail with a connection error — fail
     // fast with an actionable message instead.
-    if cs.provider == "local_gguf" && base_url.is_none() {
+    if provider == "local_gguf" && base_url.is_none() {
         return Err(
             "The local model isn't running — start it from the model menu, then try /create again.".to_string(),
         );
     }
 
     Ok(LlmContext {
-        provider: cs.provider,
+        provider,
         model,
         api_key,
         base_url,

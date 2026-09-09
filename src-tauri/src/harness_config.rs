@@ -194,6 +194,60 @@ fn kimi_config() -> HarnessModelConfig {
 
 // ---------------------------------------------------------------- OpenCode
 
+/// OpenCode's own config file (opencode.json / opencode.jsonc under
+/// ~/.config/opencode). Bare-id model resolution reads it directly — no
+/// `opencode models` live probe, which would stall the send path for seconds.
+fn opencode_config_json() -> Option<Value> {
+    let home = crate::util::home_dir()?;
+    let dir = home.join(".config").join("opencode");
+    read_json(dir.join("opencode.json")).or_else(|| read_json(dir.join("opencode.jsonc")))
+}
+
+/// Map a bare model id ("glm-5.2") to OpenCode's provider-qualified selector
+/// ("sharkai/glm-5.2") using the opencode.json config. OpenCode — both the
+/// persistent server's per-message model override and `run -m` — only accepts
+/// "provider/model": a bare id is silently dropped and the CLI's configured
+/// default serves the turn instead, which read as "changing the model does
+/// nothing". Ties between providers carrying the same bare id prefer the
+/// config's default model's provider. Returns the input unchanged when it
+/// already carries a provider, or when nothing in the config matches (the
+/// caller's behavior then matches the old pass-through).
+pub fn resolve_opencode_model(model: &str) -> String {
+    if model.is_empty() || model.contains('/') {
+        return model.to_string();
+    }
+    match opencode_config_json().as_ref().and_then(|j| resolve_opencode_model_in(j, model)) {
+        Some(qualified) => qualified,
+        None => model.to_string(),
+    }
+}
+
+/// Pure core of [`resolve_opencode_model`] over a parsed config — unit-testable
+/// without touching the real home dir.
+fn resolve_opencode_model_in(cfg: &Value, model: &str) -> Option<String> {
+    let providers = cfg.get("provider")?.as_object()?;
+    let mut hits: Vec<String> = Vec::new();
+    for (pid, p) in providers {
+        let Some(models) = p.get("models").and_then(|m| m.as_object()) else {
+            continue;
+        };
+        if models.contains_key(model) {
+            hits.push(pid.clone());
+        }
+    }
+    hits.sort();
+    let default_provider = cfg
+        .get("model")
+        .and_then(|m| m.as_str())
+        .and_then(|m| m.split('/').next())
+        .map(String::from);
+    let pick = hits
+        .iter()
+        .find(|pid| default_provider.as_deref() == Some(pid.as_str()))
+        .or_else(|| hits.first())?;
+    Some(format!("{pick}/{model}"))
+}
+
 fn opencode_config() -> HarnessModelConfig {
     let mut cfg = HarnessModelConfig::default();
     let Some(home) = crate::util::home_dir() else { return cfg };
@@ -610,5 +664,53 @@ mod tests {
         let cfg = commandcode_config_from(out);
         assert!(cfg.models.is_empty());
         assert!(cfg.default_model.is_none());
+    }
+
+    // ---- resolve_opencode_model_in (bare id → "provider/id") ----
+
+    fn oc_cfg(json: &str) -> Value {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn opencode_bare_id_resolves_via_config() {
+        // Shape mirrors a real opencode.json (sharkai + forangeai providers).
+        let cfg = oc_cfg(
+            r#"{"model":"sharkai/glm-5.2","provider":{
+                "sharkai":{"models":{"glm-5.2":{"name":"GLM 5.2"},"deepseek-v4-flash":{}}},
+                "forangeai":{"models":{"glm-5.3-flash":{}}}}}"#,
+        );
+        assert_eq!(
+            resolve_opencode_model_in(&cfg, "glm-5.3-flash").as_deref(),
+            Some("forangeai/glm-5.3-flash")
+        );
+    }
+
+    #[test]
+    fn opencode_ambiguous_bare_id_prefers_default_provider() {
+        // "glm-5.2" exists under both providers; the config default's
+        // provider (sharkai) wins over alphabetical order (forangeai).
+        let cfg = oc_cfg(
+            r#"{"model":"sharkai/glm-5.2","provider":{
+                "forangeai":{"models":{"glm-5.2":{}}},
+                "sharkai":{"models":{"glm-5.2":{}}}}}"#,
+        );
+        assert_eq!(
+            resolve_opencode_model_in(&cfg, "glm-5.2").as_deref(),
+            Some("sharkai/glm-5.2")
+        );
+    }
+
+    #[test]
+    fn opencode_unknown_bare_id_stays_unresolved() {
+        let cfg = oc_cfg(
+            r#"{"model":"sharkai/glm-5.2","provider":{
+                "sharkai":{"models":{"glm-5.2":{}}}}}"#,
+        );
+        // Static-catalog leftovers ("claude-opus-4-8", …) match nothing —
+        // the caller falls back to the pass-through default.
+        assert_eq!(resolve_opencode_model_in(&cfg, "claude-opus-4-8"), None);
+        // No provider section at all.
+        assert_eq!(resolve_opencode_model_in(&oc_cfg("{}"), "glm-5.2"), None);
     }
 }

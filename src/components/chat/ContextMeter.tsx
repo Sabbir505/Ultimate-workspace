@@ -260,6 +260,19 @@ export function ContextMeter({
       ]
     : [];
 
+  // Auto routing: the session's model is the pick the backend resolver chose
+  // for the LAST message, not a user-committed one — the row must say so, or
+  // the tooltip reads as a plain model chat (same wording family as the
+  // agent-picker chip's Auto tooltip).
+  const autoRouting = provider === "auto";
+  const modelRowText = autoRouting
+    ? model && model !== "auto"
+      ? `Auto · ${model} (resolved per message)`
+      : "Auto — Relay picks the model per message"
+    : model
+      ? `Model: ${model}`
+      : "Model: —";
+
   const panelMax = breakdown ? breakdown.maxTokens : max;
 
   return (
@@ -320,8 +333,11 @@ export function ContextMeter({
         >
           {/* Model + usage stats on one row */}
           <div className="context-meter-panel-top">
-            <span className="context-meter-panel-model" title={model ?? ""}>
-              {model ? `Model: ${model}` : "Model: —"}
+            <span
+              className="context-meter-panel-model"
+              title={autoRouting ? modelRowText : (model ?? "")}
+            >
+              {modelRowText}
             </span>
             <span className="context-meter-panel-meta">
               <span>{formatTokens(used)}</span>

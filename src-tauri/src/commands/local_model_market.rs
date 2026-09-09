@@ -321,6 +321,20 @@ fn http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
+/// Client for the payload downloads (model GGUFs + mmproj). NO total-request
+/// timeout: reqwest's `timeout` covers the whole body read, so sharing the
+/// 30s catalog client made every real download die ~30s in with a stream
+/// timeout ("download stream error: operation timed out") long before the
+/// first gigabyte landed. Only the connect stays bounded — a dead endpoint
+/// must still fail fast; the body may legitimately stream for hours.
+fn download_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(concat!("Relay/", env!("CARGO_PKG_VERSION"), " (desktop; +https://conduit.app)"))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default()
+}
+
 fn build_hf_request(
     client: &reqwest::Client,
     url: &str,
@@ -1092,7 +1106,9 @@ async fn run_download(
     expected_sha: Option<&str>,
     mut cancel_rx: oneshot::Receiver<()>,
 ) -> Result<(), DownloadAbort> {
-    let client = http_client();
+    // The download client, not the shared catalog client: no total timeout —
+    // multi-GB bodies stream far past 30s (see download_http_client).
+    let client = download_http_client();
 
     // Resume support: if a previous attempt left a .partial file on
     // disk, find its current size and ask the server for the rest with

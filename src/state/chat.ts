@@ -1132,6 +1132,49 @@ const scheduleArtifactLibraryLoad = () => {
   }, 1500);
 };
 
+/** Shallow-copy a per-session map without `key` — the store idiom for
+ *  optimistic removals (`const next = { ...map }; delete next[k]; return …`). */
+function omitKey<T>(map: Record<string, T>, key: string): Record<string, T> {
+  const next = { ...map };
+  delete next[key];
+  return next;
+}
+
+type PendingCardMaps = Pick<
+  ChatState,
+  "pendingApprovals" | "pendingQuestions" | "pendingPlanProposals"
+>;
+type PendingCard = PendingApproval | PendingQuestion | PendingPlanProposal;
+
+/** Shared body of the resolve* actions: optimistically drop the session's
+ *  pending card, run the resolver IPC, and on failure put the card back and
+ *  toast — the turn is still paused on the card, so losing it would hang the
+ *  turn with no way to retry (audit M3). */
+async function resolvePendingCard(
+  get: () => ChatState,
+  set: (partial: Partial<ChatState> | ((s: ChatState) => Partial<ChatState>)) => void,
+  mapKey: keyof PendingCardMaps,
+  chatSessionId: string,
+  toastTitle: string,
+  call: (pending: PendingCard) => Promise<void>,
+): Promise<void> {
+  const pending = get()[mapKey][chatSessionId] as PendingCard | undefined;
+  if (!pending) return;
+  set((s) =>
+    ({ [mapKey]: omitKey(s[mapKey] as Record<string, PendingCard>, chatSessionId) } as Partial<ChatState>),
+  );
+  try {
+    await call(pending);
+  } catch (err) {
+    set((s) =>
+      ({
+        [mapKey]: { ...(s[mapKey] as Record<string, PendingCard>), [chatSessionId]: pending },
+      } as Partial<ChatState>),
+    );
+    toastError(toastTitle, err);
+  }
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   loaded: false,
   sessions: [],
@@ -2676,26 +2719,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   cancelFullAccessConfirm: () => set({ fullAccessConfirmingFor: null }),
 
   resolveApproval: async (chatSessionId, approved) => {
-    const pending = get().pendingApprovals[chatSessionId];
-    if (!pending) return;
-    // Optimistically remove the card; the backend's `chat:approval-resolved`
-    // would also clear it, but this avoids a flicker if the event is slow.
-    set((s) => {
-      const next = { ...s.pendingApprovals };
-      delete next[chatSessionId];
-      return { pendingApprovals: next };
-    });
-    try {
-      await resolveToolAction(pending.pendingId, approved);
-    } catch (err) {
-      // The backend tool loop is still paused waiting for a resolution — if
-      // this IPC call failed the turn would hang forever with no card to
-      // retry. Put the card back and surface the failure (audit M3).
-      set((s) => ({
-        pendingApprovals: { ...s.pendingApprovals, [chatSessionId]: pending },
-      }));
-      toastError("Couldn't deliver the approval decision", err);
-    }
+    // Optimistic removal avoids a flicker if the backend's
+    // `chat:approval-resolved` event is slow.
+    await resolvePendingCard(
+      get,
+      set,
+      "pendingApprovals",
+      chatSessionId,
+      "Couldn't deliver the approval decision",
+      (pending) => resolveToolAction(pending.pendingId, approved),
+    );
   },
 
   setOwnerSessionId: (chatSessionId, ownerSessionId) =>
@@ -3242,24 +3275,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   resolveQuestion: async (chatSessionId, answers, response) => {
-    const pending = get().pendingQuestions[chatSessionId];
-    if (!pending) return;
-    // Optimistically remove the card (mirrors resolveApproval).
-    set((s) => {
-      const next = { ...s.pendingQuestions };
-      delete next[chatSessionId];
-      return { pendingQuestions: next };
-    });
-    try {
-      await resolveAgentQuestion(chatSessionId, pending.pendingId, answers, response);
-    } catch (err) {
-      // The harness is still blocked on stdin — put the card back and
-      // surface the failure so the turn can't hang silently.
-      set((s) => ({
-        pendingQuestions: { ...s.pendingQuestions, [chatSessionId]: pending },
-      }));
-      toastError("Couldn't deliver the answer", err);
-    }
+    // The harness is still blocked on stdin — if the IPC fails the card goes
+    // back so the turn can't hang silently.
+    await resolvePendingCard(
+      get,
+      set,
+      "pendingQuestions",
+      chatSessionId,
+      "Couldn't deliver the answer",
+      (pending) => resolveAgentQuestion(chatSessionId, pending.pendingId, answers, response),
+    );
   },
 
   onError: (chatSessionId, message, code) => {
@@ -3527,30 +3552,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  onPlanProposalResolved: (chatSessionId) => {
-    set((s) => {
-      const next = { ...s.pendingPlanProposals };
-      delete next[chatSessionId];
-      return { pendingPlanProposals: next };
-    });
-  },
+  onPlanProposalResolved: (chatSessionId) =>
+    set((s) => ({ pendingPlanProposals: omitKey(s.pendingPlanProposals, chatSessionId) })),
 
   resolvePlanProposal: async (chatSessionId, approved, feedback) => {
-    const pending = get().pendingPlanProposals[chatSessionId];
-    if (!pending) return;
-    // Optimistically remove the card (same contract as resolveApproval — the
-    // backend also dismisses via events, but no flicker if the event is slow).
-    get().onPlanProposalResolved(chatSessionId);
-    try {
-      await resolvePlanProposal(pending.pendingId, approved, feedback);
-    } catch (err) {
-      // The turn is still paused on the proposal — restore the card so the
-      // user can retry instead of hanging the turn (mirrors audit M3).
-      set((s) => ({
-        pendingPlanProposals: { ...s.pendingPlanProposals, [chatSessionId]: pending },
-      }));
-      toastError("Couldn't deliver the plan decision", err);
-    }
+    // The turn is still paused on the proposal — if the IPC fails the card
+    // goes back so the user can retry instead of hanging the turn (audit M3).
+    await resolvePendingCard(
+      get,
+      set,
+      "pendingPlanProposals",
+      chatSessionId,
+      "Couldn't deliver the plan decision",
+      (pending) => resolvePlanProposal(pending.pendingId, approved, feedback),
+    );
   },
 
   onSubagentSpawn: (payload) => {

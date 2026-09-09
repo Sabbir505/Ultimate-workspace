@@ -1,18 +1,25 @@
-//! Injection rendering (design §11, amended): ONE human-readable memory
-//! document per turn. The document is a single curated text field (kept by
-//! `document.rs` / the user) that merges every durable fact — identity,
-//! preferences, projects, feedback — into ONE compact paragraph of prose
-//! (user preference, 2026-09-05: no section headers, no bullet lists),
-//! injected as one budgeted block (default 2200 tokens, enforced here in
-//! code — P6). When no stored document exists yet, one is synthesized
-//! deterministically from the record store so injection works from the very
-//! first memory.
+//! Injection rendering (design §11, amended twice). The full memory document
+//! (one curated text field kept by `document.rs` / the user, merged by the
+//! pipeline) is the STORE — it is no longer injected wholesale. Per turn the
+//! send path loads on demand (`memory::on_demand_injection`): a tiny always-
+//! carried identity core (so "who is the user" never depends on retrieval)
+//! plus the records the turn's query actually retrieved, as one budgeted
+//! block (default 800 tokens, enforced here in code — P6). The document's
+//! 2200-token budget still governs the stored document itself.
 
 use crate::memory::model::{MemoryRecord, MIN_CONFIDENCE};
+use crate::memory::scoring::Scored;
 
-/// Hard injection budget for the whole memory (design amendment: the old
-/// 500 + 800 two-tier split is replaced by ONE 2200-token document).
+/// Hard budget for the stored memory document (the store, not the injection).
 pub const DOCUMENT_TOKEN_BUDGET: usize = 2200;
+/// Per-turn budget for the on-demand injection block (identity core +
+/// retrieved hits) — the number every prompt actually pays.
+pub const ON_DEMAND_TOKEN_BUDGET: usize = 800;
+/// Identity facts at least this important ride EVERY prompt (top few only),
+/// so greetings/preferences survive turns whose wording retrieves nothing.
+pub const CORE_MIN_IMPORTANCE: i64 = 8;
+/// How many core identity facts may ride every prompt.
+pub const CORE_MAX_FACTS: usize = 2;
 /// chars → tokens estimate used store-wide (`fit_budget`): 4 chars ≈ 1 token.
 const CHARS_PER_TOKEN: usize = 4;
 
@@ -58,17 +65,80 @@ pub fn render_memory_document(
     Some(out)
 }
 
-/// Enforce the token budget on a document body: over-budget text is cut at a
-/// clean boundary to fit — a line break when the text is multi-line, else the
-/// end of the last complete sentence — and always at a char boundary (a
-/// paragraph body may contain multibyte characters). Returns `(body, trimmed)`.
+/// Enforce the DOCUMENT token budget on a stored-document body.
 pub fn enforce_budget(body: String) -> (String, bool) {
+    fit_to_budget(body, DOCUMENT_TOKEN_BUDGET)
+}
+
+/// Render the per-turn ON-DEMAND memory block: the identity core (facts that
+/// ride every prompt) plus the records this turn's query retrieved, ranked
+/// best-first. Prose, no headers/bullets (same style rule as the document).
+/// `None` = nothing to carry this turn (no core, no hits) → the prompt part
+/// is omitted byte-neutral. `recall_hint` adds the "more is available via
+/// memory_recall" tail — pass false where the tool isn't attached.
+pub fn render_on_demand_block(
+    core: &[MemoryRecord],
+    hits: &[Scored],
+    now: i64,
+    recall_hint: bool,
+) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    if !core.is_empty() {
+        let mut s = String::from("Standing facts about the user: ");
+        s.push_str(
+            &core.iter()
+                .map(|m| fact_line(m, effective_confidence(m, now), now))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        lines.push(s);
+    }
+    if !hits.is_empty() {
+        let mut s = String::from("Loaded for this request: ");
+        s.push_str(
+            &hits.iter()
+                .map(|h| fact_line(&h.record, h.record.confidence, now))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        lines.push(s);
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    if recall_hint {
+        lines.push(if hits.is_empty() {
+            "Nothing in memory matched this request — call memory_recall to search every \
+             stored fact before claiming ignorance."
+                .to_string()
+        } else {
+            "These loaded on demand — call memory_recall to pull more stored facts."
+                .to_string()
+        });
+    }
+    let body = lines.join("\n");
+    let (body, _) = fit_to_budget(body, ON_DEMAND_TOKEN_BUDGET);
+    if body.is_empty() {
+        return None;
+    }
+    let mut out = String::from(HEADER);
+    out.push('\n');
+    out.push_str(HEADER_NOTE);
+    out.push_str(&body);
+    Some(out)
+}
+
+/// Enforce any token budget on a body: over-budget text is cut at a clean
+/// boundary to fit — a line break when the text is multi-line, else the end
+/// of the last complete sentence — and always at a char boundary (a
+/// paragraph body may contain multibyte characters). Returns `(body, trimmed)`.
+fn fit_to_budget(body: String, token_budget: usize) -> (String, bool) {
     let body = body.trim().to_string();
     if body.is_empty() {
         return (body, false);
     }
     let overhead = (HEADER.len() + HEADER_NOTE.len()).div_ceil(CHARS_PER_TOKEN);
-    let avail = DOCUMENT_TOKEN_BUDGET.saturating_sub(overhead) * CHARS_PER_TOKEN;
+    let avail = token_budget.saturating_sub(overhead) * CHARS_PER_TOKEN;
     if body.len() <= avail {
         return (body, false);
     }
@@ -251,5 +321,52 @@ mod tests {
             .collect();
         let block = render_memory_document(None, &mems, now).unwrap();
         assert!(block.len() <= DOCUMENT_TOKEN_BUDGET * CHARS_PER_TOKEN + HEADER.len() + 120);
+    }
+
+    #[test]
+    fn on_demand_block_carries_core_and_hits() {
+        let now = crate::db::now_ts();
+        let core = m(kind::IDENTITY, "User's name is Sabri", 9, 0.95);
+        let hits = vec![Scored { record: m(kind::PREFERENCE, "Builds with pnpm workspaces", 6, 0.9), score: 0.9 }];
+        let block = render_on_demand_block(std::slice::from_ref(&core), &hits, now, true).unwrap();
+        assert!(block.starts_with(HEADER));
+        assert!(block.contains("Standing facts about the user: User's name is Sabri."));
+        assert!(block.contains("Loaded for this request: Builds with pnpm workspaces."));
+        assert!(block.contains("memory_recall"));
+        assert!(block.len() <= ON_DEMAND_TOKEN_BUDGET * CHARS_PER_TOKEN + HEADER.len() + 160);
+    }
+
+    #[test]
+    fn on_demand_block_omitted_when_nothing_to_carry() {
+        let now = crate::db::now_ts();
+        assert!(render_on_demand_block(&[], &[], now, true).is_none());
+    }
+
+    /// Core-only turn (nothing retrieved): the block still carries the
+    /// standing identity facts and tells the model the store is searchable.
+    #[test]
+    fn on_demand_block_core_only_hints_at_recall() {
+        let now = crate::db::now_ts();
+        let core = m(kind::IDENTITY, "User's name is Sabri", 9, 0.95);
+        let block = render_on_demand_block(std::slice::from_ref(&core), &[], now, true).unwrap();
+        assert!(block.contains("Standing facts about the user"));
+        assert!(!block.contains("Loaded for this request"));
+        assert!(block.contains("Nothing in memory matched"));
+    }
+
+    /// A huge retrieval must be trimmed to the on-demand budget, not the
+    /// document one — that ceiling is the point of loading on demand.
+    #[test]
+    fn on_demand_block_stays_inside_its_budget() {
+        let now = crate::db::now_ts();
+        let hits: Vec<Scored> = (0..300)
+            .map(|i| Scored {
+                record: m(kind::FACT, &format!("Retrieved fact number {i} about the user's project."), 5, 0.8),
+                score: 0.5,
+            })
+            .collect();
+        let block = render_on_demand_block(&[], &hits, now, true).unwrap();
+        assert!(block.len() <= ON_DEMAND_TOKEN_BUDGET * CHARS_PER_TOKEN + HEADER.len() + 160);
+        assert!(block.len() < DOCUMENT_TOKEN_BUDGET * CHARS_PER_TOKEN / 2);
     }
 }

@@ -13,6 +13,11 @@ feedback (tools, formats, answer style, corrections of the assistant); durable p
 (stack, constraints, decisions, goals); notable ongoing-work state. \
 Exclude: transient task details, code bodies or file dumps, anything true only within this \
 conversation, secrets/credentials/passwords/API keys, speculation, and anything you invent. \
+Also exclude — these are the common over-captures, not memories: what is being built or \
+debugged in THIS conversation, files/paths/commands/branch names touched today, one-off \
+questions and their answers, the assistant's own suggestions, and task progress. \
+A memory earns its place only if a FUTURE conversation on an unrelated topic would be \
+worse off without it. \
 Each fact MUST be grounded in a verbatim user or assistant quote from the transcript. \
 Write each fact as ONE self-contained sentence in third person, timeless tense \
 (no \"currently\", no pronouns without antecedents). \
@@ -23,7 +28,8 @@ Return ONLY a JSON array, no prose, no code fences: \
 Rate importance: 1-2 mundane/transient, 3-4 minor convenience, 5-6 shapes how you help \
 (preference, project fact), 7-8 high-impact (workflow corrections, core stack, constraints), \
 9-10 identity-defining or safety-critical. Never rate 10 unless identity/safety-critical. \
-If nothing qualifies, return [].";
+Anything you would rate below 4 must be OMITTED, not reported low. \
+Fewer, better facts beat many; return [] when nothing durable was said.";
 
 /// Render the extraction user message: rolling summary of prior context
 /// (Mem0-style) + the new transcript window with message ids for provenance.
@@ -70,18 +76,33 @@ pub fn parse_candidates(raw: &str) -> Vec<MemoryCandidate> {
     serde_json::from_str::<Vec<MemoryCandidate>>(end).unwrap_or_default()
 }
 
+/// Deterministic importance floor (design §8.2 rubric): 1–3 is mundane /
+/// transient / minor — exactly the "writes everything to memory" failure
+/// mode. Such candidates never reach the judge (which would ADD them
+/// whenever nothing similar exists); dropping them here also saves a judge
+/// call each.
+pub const IMPORTANCE_WRITE_FLOOR: i64 = 4;
+
+/// Hard cap on candidates one extraction batch may produce, keeping the
+/// highest-importance ones. Bounds the judge calls (one per candidate) and
+/// stops a chatty transcript from dumping a dozen memories per window.
+pub const MAX_CANDIDATES: usize = 5;
+
 /// Deterministic post-extraction filters (design §7.3). Returns the cleaned
 /// list plus whether anything was dropped for the audit log.
 pub struct FilterReport {
     pub kept: Vec<MemoryCandidate>,
     pub dropped_secrets: usize,
     pub dropped_shape: usize,
+    pub dropped_importance: usize,
+    pub capped: usize,
 }
 
 pub fn filter_candidates(cands: Vec<MemoryCandidate>) -> FilterReport {
     let mut kept = Vec::new();
     let mut dropped_secrets = 0usize;
-    let dropped_shape = 0usize;
+    let mut dropped_shape = 0usize;
+    let mut dropped_importance = 0usize;
     for mut c in cands {
         let content = c.content.trim().to_string();
         // Shape: a memory is ONE self-contained sentence-ish fact.
@@ -90,6 +111,7 @@ pub fn filter_candidates(cands: Vec<MemoryCandidate>) -> FilterReport {
             || content.chars().count() > 400
             || content.matches('.').count() > 3
         {
+            dropped_shape += 1;
             continue;
         }
         c.content = content;
@@ -103,11 +125,25 @@ pub fn filter_candidates(cands: Vec<MemoryCandidate>) -> FilterReport {
         if !crate::memory::model::kind::is_valid(&c.kind) {
             c.kind = "fact".to_string();
         }
-        // Importance calibration (design §8.2): clamp into the rubric range.
+        // Importance calibration (design §8.2): clamp into the rubric range,
+        // then enforce the write floor — low-value candidates are dropped,
+        // not merely downgraded.
         c.importance = c.importance.clamp(1, 9);
+        if c.importance < IMPORTANCE_WRITE_FLOOR {
+            dropped_importance += 1;
+            continue;
+        }
         kept.push(c);
     }
-    FilterReport { kept, dropped_secrets, dropped_shape }
+    // Cap the batch, keeping the highest-importance candidates (stable sort
+    // preserves transcript order among ties).
+    let mut capped = 0usize;
+    if kept.len() > MAX_CANDIDATES {
+        capped = kept.len() - MAX_CANDIDATES;
+        kept.sort_by(|a, b| b.importance.cmp(&a.importance));
+        kept.truncate(MAX_CANDIDATES);
+    }
+    FilterReport { kept, dropped_secrets, dropped_shape, dropped_importance, capped }
 }
 
 /// Token/key-shaped strings never belong in the store. Conservative: high
@@ -161,17 +197,62 @@ mod tests {
     }
 
     #[test]
-    fn filter_drops_secrets_and_shapes() {
+    fn filter_drops_secrets_shapes_and_low_importance() {
         let cands = vec![
             MemoryCandidate { content: "User's API key is ghp_abcdefghijklmnop".into(), kind: "fact".into(), subject: "user".into(), quote: String::new(), message_ids: vec![], importance: 5 },
             MemoryCandidate { content: "ok".into(), kind: "fact".into(), subject: "user".into(), quote: String::new(), message_ids: vec![], importance: 5 },
             MemoryCandidate { content: "User prefers concise answers".into(), kind: "preference".into(), subject: "user".into(), quote: "be concise".into(), message_ids: vec![1], importance: 11 },
+            // Mundane/transient (rubric 1-3): must never reach the judge.
+            MemoryCandidate { content: "The user asked about the weather today".into(), kind: "episode".into(), subject: "user".into(), quote: "what's the weather".into(), message_ids: vec![2], importance: 2 },
         ];
         let report = filter_candidates(cands);
         assert_eq!(report.dropped_secrets, 1);
+        assert_eq!(report.dropped_shape, 1);
+        assert_eq!(report.dropped_importance, 1);
         assert_eq!(report.kept.len(), 1);
         assert_eq!(report.kept[0].content, "User prefers concise answers");
         assert_eq!(report.kept[0].importance, 9); // clamped
+    }
+
+    /// The per-batch cap keeps the HIGHEST-importance candidates when the
+    /// extractor over-produces — a chatty window must not dump a dozen
+    /// memories (each costs a judge call and a document merge).
+    #[test]
+    fn filter_caps_batch_to_highest_importance() {
+        let cands: Vec<MemoryCandidate> = (0..8)
+            .map(|i| MemoryCandidate {
+                content: format!("Durable fact number {i} about the user"),
+                kind: "fact".into(),
+                subject: "user".into(),
+                quote: "verbatim quote".into(),
+                message_ids: vec![i],
+                importance: i, // 0..=7 — first ones are below the floor too
+            })
+            .collect();
+        let report = filter_candidates(cands);
+        assert_eq!(report.dropped_importance, 4, "importance 0-3 dropped by the floor");
+        assert_eq!(report.capped, 0, "below the cap, nothing truncated");
+        assert_eq!(report.kept.len(), 4, "only the floor survivors remain");
+        assert_eq!(
+            report.kept.iter().map(|c| c.importance).collect::<Vec<_>>(),
+            vec![4, 5, 6, 7],
+            "input order preserved below the cap"
+        );
+
+        let cands: Vec<MemoryCandidate> = (4..=9)
+            .map(|i| MemoryCandidate {
+                content: format!("Durable fact number {i} about the user"),
+                kind: "fact".into(),
+                subject: "user".into(),
+                quote: "verbatim quote".into(),
+                message_ids: vec![i],
+                importance: i,
+            })
+            .collect();
+        let report = filter_candidates(cands);
+        assert_eq!(report.capped, 1);
+        assert_eq!(report.kept.len(), MAX_CANDIDATES);
+        assert!(report.kept.iter().all(|c| c.importance >= 5), "cap keeps the top of the batch");
     }
 
     #[test]

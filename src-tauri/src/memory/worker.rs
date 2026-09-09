@@ -339,12 +339,17 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
             continue;
         }
 
-        // Cheap deterministic filters (secrets, shape, calibration).
+        // Cheap deterministic filters (secrets, shape, importance floor,
+        // batch cap).
         let report = filter_candidates(cands);
-        if report.dropped_secrets > 0 {
+        if report.dropped_secrets + report.dropped_importance + report.capped > 0 {
             let conn = db.0.lock();
-            let _ = db::log_memory_op(&conn, "filter", Some(chat_session_id), "", "DROP_SECRET",
-                                      &[], &format!("{} candidate(s) contained credential-shaped text", report.dropped_secrets));
+            let _ = db::log_memory_op(&conn, "filter", Some(chat_session_id), "", "DROP",
+                                      &[],
+                                      &format!(
+                                          "{} credential-shaped, {} below the importance floor ({}), {} capped past the batch limit",
+                                          report.dropped_secrets, report.dropped_importance,
+                                          crate::memory::extract::IMPORTANCE_WRITE_FLOOR, report.capped));
         }
         // Importance calibration guard (§8.2): a batch that rates everything
         // urgent gets uniformly capped.
@@ -652,7 +657,9 @@ pub async fn save_memory(
     };
     let report = filter_candidates(vec![cand]);
     let Some(cand) = report.kept.into_iter().next() else {
-        return Err("rejected: content looks like a credential or is not a durable one-sentence fact".to_string());
+        return Err("rejected: content looks like a credential, is not a durable one-sentence \
+                    fact, or is too trivial to keep (importance below the write floor)"
+            .to_string());
     };
 
     let (provider_str, model, api_key, base_url, project_id) = {

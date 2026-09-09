@@ -1,7 +1,7 @@
 //! App-side half of the `relay-tools` MCP server. The relay binary forwards
 //! `tools/call` for generate_document / plan_document / revise_document /
-//! generate_diagram / generate_file / get_skill / list_skills / search_docs
-//! over the loopback WebSocket; this
+//! generate_diagram / generate_file / get_skill / list_skills / search_docs /
+//! the automation CRUD family over the loopback WebSocket; this
 //! module runs them through the SAME `chat::tools::execute_tool` dispatcher
 //! the built-in chat uses, so the harness gets the identical output pipeline
 //! and artifact classification. Generated files land in the shared artifacts
@@ -26,7 +26,10 @@ use crate::chat::tools::{self, ToolCaps};
 /// report a falsely empty connector list). `list_artifacts` is read-only DB
 /// introspection — the harness's always-current answer to "where does the
 /// report live" (the bundle instructions only carry a spawn-time snapshot).
-const ALLOWED_RELAY_TOOLS: [&str; 10] = [
+/// The automation family is DB-state CRUD scoped to the Automations feature
+/// (same operations the built-in chat's tools and the Automations form use);
+/// `run_automation_now` launches exactly the scheduler's own guarded path.
+const ALLOWED_RELAY_TOOLS: [&str; 15] = [
     tools::GENERATE_DOCUMENT,
     tools::PLAN_DOCUMENT,
     tools::REVISE_DOCUMENT,
@@ -37,6 +40,11 @@ const ALLOWED_RELAY_TOOLS: [&str; 10] = [
     tools::SEARCH_DOCS,
     tools::GET_CAPABILITIES,
     tools::LIST_ARTIFACTS,
+    tools::LIST_AUTOMATIONS,
+    tools::CREATE_AUTOMATION,
+    tools::UPDATE_AUTOMATION,
+    tools::DELETE_AUTOMATION,
+    tools::RUN_AUTOMATION_NOW,
 ];
 
 /// Strip the `relay_tools:` prefix from a WS op; None for non-tool ops and
@@ -71,6 +79,13 @@ pub async fn execute_relay_tool(
         let text = tools::app_capabilities_report(app).await;
         return Ok(json!({ "text": text, "artifact": Value::Null }));
     }
+    // The automation family dispatches through its own handler (AppHandle →
+    // DbState) — the same split dispatch.rs uses for the built-in chat; the
+    // provider-agnostic execute_tool doesn't route it. Tool results are text.
+    if tools::is_automation_tool(tool_name) {
+        let text = tools::execute_automation_tool(app, tool_name, args).await;
+        return Ok(json!({ "text": text, "artifact": Value::Null }));
+    }
     // Same client construction the built-in chat uses (chat/mod.rs).
     let client = reqwest::Client::new();
     let artifacts_dir = crate::chat::dispatch::artifacts_dir(app);
@@ -96,6 +111,12 @@ mod tests {
         // artifacts-dir-only risk class as generate_document).
         assert_eq!(tool_from_op("relay_tools:plan_document"), Some("plan_document".to_string()));
         assert_eq!(tool_from_op("relay_tools:revise_document"), Some("revise_document".to_string()));
+        // Automation CRUD is offered to harness sessions (built-in-chat parity).
+        assert_eq!(tool_from_op("relay_tools:list_automations"), Some("list_automations".to_string()));
+        assert_eq!(tool_from_op("relay_tools:create_automation"), Some("create_automation".to_string()));
+        assert_eq!(tool_from_op("relay_tools:update_automation"), Some("update_automation".to_string()));
+        assert_eq!(tool_from_op("relay_tools:delete_automation"), Some("delete_automation".to_string()));
+        assert_eq!(tool_from_op("relay_tools:run_automation_now"), Some("run_automation_now".to_string()));
         assert_eq!(tool_from_op("navigate"), None);
         assert_eq!(tool_from_op("relay_tools:"), None);
         // Mutating/dangerous chat tools must be rejected server-side even

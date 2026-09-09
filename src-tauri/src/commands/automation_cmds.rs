@@ -12,10 +12,13 @@ use crate::DbState;
 /// local GGUF are all valid — the execution path routes accordingly
 /// (CLI harness → run_one_shot, API/local → chat send). Kimi harness is
 /// excluded: it cannot combine prompt mode with auto-approve.
-const ALLOWED_AGENTS: [&str; 7] = [
+const ALLOWED_AGENTS: [&str; 10] = [
     // CLI harnesses
     "claude_code",
     "opencode",
+    "pi",
+    "omp",
+    "commandcode",
     // Cloud API providers
     "anthropic",
     "openai",
@@ -34,7 +37,8 @@ fn validate(input: &AutomationInput) -> Result<(), String> {
     }
     if !is_allowed_automation_agent(&input.harness) {
         return Err(format!(
-            "agent '{}' cannot run automations (supported: CLI agents, cloud APIs, local GGUF)",
+            "agent '{}' cannot run automations (supported: claude_code, opencode, \
+             pi, omp, commandcode, cloud APIs, local GGUF)",
             input.harness,
         ));
     }

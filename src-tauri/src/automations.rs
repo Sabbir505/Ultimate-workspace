@@ -36,7 +36,7 @@ use crate::agent_sessions;
 use crate::db::{
     self, create_chat_session, finish_run, get_chat_session, list_automations, record_run,
     record_status, set_automation_chat_session, start_run, update_chat_session_agent,
-    update_chat_session_title, Automation,
+    update_chat_session_model, update_chat_session_title, Automation,
 };
 
 /// Automation ids with a run currently in flight (the overlap guard).
@@ -424,7 +424,15 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
             None => false,
         };
         if stored_alive {
-            automation.chat_session_id.clone().unwrap()
+            let cs_id = automation.chat_session_id.clone().unwrap();
+            // The stored session was created at FIRST run with the harness and
+            // model current then — later edits to the automation never reached
+            // it, so the run log kept showing (and any manual follow-up kept
+            // spawning with) the stale model. Re-sync both on every launch.
+            let agent = format!("harness:{}", automation.harness);
+            let _ = update_chat_session_model(&conn, &cs_id, &automation.model);
+            let _ = update_chat_session_agent(&conn, &cs_id, Some(&agent));
+            cs_id
         } else {
             if automation.chat_session_id.is_some() {
                 eprintln!(
@@ -496,11 +504,11 @@ fn execute(
     prepared: &PreparedRun,
 ) -> Result<(), String> {
     // Route based on agent type:
-    // - CLI harnesses (claude_code, opencode) → spawn CLI process
+    // - CLI harnesses (claude_code, opencode, pi-lineage) → spawn CLI process
     // - API providers and local_gguf → chat HTTP API
     let prompt = ensure_unattended_rules(&automation.prompt);
     match automation.harness.as_str() {
-        "claude_code" | "opencode" => {
+        "claude_code" | "opencode" | "pi" | "omp" | "commandcode" => {
             agent_sessions::run_one_shot(
                 app,
                 db,

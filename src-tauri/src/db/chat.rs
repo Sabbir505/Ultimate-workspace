@@ -4,8 +4,8 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::types::*;
 use super::{new_id, now_ts, DbResult};
+use crate::types::*;
 
 // ---- chat sessions ----
 
@@ -53,9 +53,8 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
 
 /// Starred chats first, then most recent (last_active_at desc).
 pub fn list_chat_sessions(conn: &Connection) -> DbResult<Vec<ChatSession>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM chat_sessions ORDER BY starred DESC, last_active_at DESC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM chat_sessions ORDER BY starred DESC, last_active_at DESC")?;
     let rows = stmt.query_map([], map_chat_session)?;
     rows.collect()
 }
@@ -94,11 +93,7 @@ pub fn set_chat_session_unread(
 /// `false`: clears the routing flag only — a manual pick immediately
 /// afterwards overwrites provider/model (that order matters: clearing first
 /// means a failed pick can't leave the session pointing at stale auto state).
-pub fn set_chat_session_auto(
-    conn: &Connection,
-    chat_session_id: &str,
-    auto: bool,
-) -> DbResult<()> {
+pub fn set_chat_session_auto(conn: &Connection, chat_session_id: &str, auto: bool) -> DbResult<()> {
     if auto {
         conn.execute(
             "UPDATE chat_sessions SET auto_model = 1, provider = 'auto', model = 'auto' WHERE id = ?1",
@@ -363,7 +358,11 @@ pub fn permission_label_from_policies(sandbox: &str, approval: &str) -> &'static
 /// had before planning (manual / auto_edit / full_auto) is what governs tool
 /// calls the moment the plan is approved, with zero restore bookkeeping.
 /// Returns the label now stored (the caller emits it to the UI).
-pub fn set_chat_session_plan(conn: &Connection, chat_session_id: &str, plan: bool) -> DbResult<String> {
+pub fn set_chat_session_plan(
+    conn: &Connection,
+    chat_session_id: &str,
+    plan: bool,
+) -> DbResult<String> {
     let label: String = if plan {
         "plan".to_string()
     } else {
@@ -556,27 +555,55 @@ fn map_chat_message(row: &rusqlite::Row) -> rusqlite::Result<ChatMessageRecord> 
     })
 }
 
-pub fn add_chat_message(
-    conn: &Connection,
-    chat_session_id: &str,
-    role: &str,
-    content: &str,
-    input_tokens: Option<i64>,
-    output_tokens: Option<i64>,
-    cost_usd: Option<f64>,
-    cache_creation_input_tokens: Option<i64>,
-    cache_read_input_tokens: Option<i64>,
-    reasoning_output_tokens: Option<i64>,
-    provider: Option<&str>,
-    model_key: Option<&str>,
-    pricing_estimated_usd: Option<f64>,
-    started_at: Option<i64>,
-    completed_at: Option<i64>,
-    llm_time_ms: Option<i64>,
-    tool_time_ms: Option<i64>,
-    ttft_ms: Option<i64>,
-    tokens_per_second: Option<f64>,
-) -> DbResult<ChatMessageRecord> {
+/// A chat-message row under construction. Replaces the old 19-positional-arg
+/// `add_chat_message` signature, where most call sites passed telescoping
+/// lists of literal `None`s (transposition risk between the adjacent
+/// same-typed `Option<i64>` timing fields). Set the trio `chat_session_id` /
+/// `role` / `content` plus any metric you have; `..Default::default()` fills
+/// the rest with `None`.
+#[derive(Default)]
+pub struct NewChatMessage<'a> {
+    pub chat_session_id: &'a str,
+    pub role: &'a str,
+    pub content: &'a str,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+    pub cache_creation_input_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub reasoning_output_tokens: Option<i64>,
+    pub provider: Option<&'a str>,
+    pub model_key: Option<&'a str>,
+    pub pricing_estimated_usd: Option<f64>,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub llm_time_ms: Option<i64>,
+    pub tool_time_ms: Option<i64>,
+    pub ttft_ms: Option<i64>,
+    pub tokens_per_second: Option<f64>,
+}
+
+pub fn add_chat_message(conn: &Connection, msg: NewChatMessage) -> DbResult<ChatMessageRecord> {
+    let NewChatMessage {
+        chat_session_id,
+        role,
+        content,
+        input_tokens,
+        output_tokens,
+        cost_usd,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
+        reasoning_output_tokens,
+        provider,
+        model_key,
+        pricing_estimated_usd,
+        started_at,
+        completed_at,
+        llm_time_ms,
+        tool_time_ms,
+        ttft_ms,
+        tokens_per_second,
+    } = msg;
     let now = now_ts();
     conn.execute(
         "INSERT INTO chat_messages (
@@ -669,9 +696,8 @@ pub fn list_chat_messages(
     conn: &Connection,
     chat_session_id: &str,
 ) -> DbResult<Vec<ChatMessageRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM chat_messages WHERE chat_session_id = ?1 ORDER BY id",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM chat_messages WHERE chat_session_id = ?1 ORDER BY id")?;
     let rows = stmt.query_map(params![chat_session_id], map_chat_message)?;
     rows.collect()
 }
@@ -728,8 +754,8 @@ pub fn list_messages_superseded_by(
     conn: &Connection,
     summary_id: i64,
 ) -> DbResult<Vec<ChatMessageRecord>> {
-    let mut stmt = conn
-        .prepare("SELECT * FROM chat_messages WHERE superseded_by = ?1 ORDER BY id")?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM chat_messages WHERE superseded_by = ?1 ORDER BY id")?;
     let rows = stmt.query_map(params![summary_id], map_chat_message)?;
     rows.collect()
 }
@@ -925,7 +951,10 @@ pub fn search_chat_messages(
     // a single short column.
     let like = format!(
         "%{}%",
-        trimmed.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        trimmed
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
     );
     {
         let mut stmt = conn.prepare(
@@ -986,8 +1015,8 @@ pub fn search_chat_messages(
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
     use super::*;
+    use rusqlite::Connection;
 
     #[test]
     fn sweeper_skips_run_logs_and_delete_unbinds_automation_pointer() {
@@ -1021,7 +1050,9 @@ mod tests {
         // Deleting the run-log chat by hand unbinds the pointer instead of
         // leaving automations.chat_session_id dangling.
         delete_chat_session(&conn, &run_log.id).unwrap();
-        let reloaded = crate::db::get_automation(&conn, &automation.id).unwrap().unwrap();
+        let reloaded = crate::db::get_automation(&conn, &automation.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(reloaded.chat_session_id, None);
     }
 
@@ -1066,7 +1097,10 @@ mod tests {
         // adds the column runs inside mem(), so this also covers the schema).
         set_chat_session_worktree(&conn, &cs.id, Some("D:/proj/relay-abc12345")).unwrap();
         let read = get_chat_session(&conn, &cs.id).unwrap().unwrap();
-        assert_eq!(read.worktree_path.as_deref(), Some("D:/proj/relay-abc12345"));
+        assert_eq!(
+            read.worktree_path.as_deref(),
+            Some("D:/proj/relay-abc12345")
+        );
 
         // Clear reads back as None.
         set_chat_session_worktree(&conn, &cs.id, None).unwrap();
@@ -1076,7 +1110,10 @@ mod tests {
         // chat_worktree_paths only surfaces non-null values.
         assert!(chat_worktree_paths(&conn, None).unwrap().is_empty());
         set_chat_session_worktree(&conn, &cs.id, Some("D:/proj/relay-abc12345")).unwrap();
-        assert_eq!(chat_worktree_paths(&conn, None).unwrap(), vec!["D:/proj/relay-abc12345"]);
+        assert_eq!(
+            chat_worktree_paths(&conn, None).unwrap(),
+            vec!["D:/proj/relay-abc12345"]
+        );
     }
 
     #[test]
@@ -1094,10 +1131,30 @@ mod tests {
         assert_eq!(cs2.permission_mode, "full_auto");
 
         // Legacy/unknown values fail closed to manual.
-        conn.execute("UPDATE chat_sessions SET permission_mode = NULL WHERE id = ?1", params![cs.id]).unwrap();
-        assert_eq!(get_chat_session(&conn, &cs.id).unwrap().unwrap().permission_mode, "manual");
-        conn.execute("UPDATE chat_sessions SET permission_mode = 'bogus' WHERE id = ?1", params![cs.id]).unwrap();
-        assert_eq!(get_chat_session(&conn, &cs.id).unwrap().unwrap().permission_mode, "bogus");
+        conn.execute(
+            "UPDATE chat_sessions SET permission_mode = NULL WHERE id = ?1",
+            params![cs.id],
+        )
+        .unwrap();
+        assert_eq!(
+            get_chat_session(&conn, &cs.id)
+                .unwrap()
+                .unwrap()
+                .permission_mode,
+            "manual"
+        );
+        conn.execute(
+            "UPDATE chat_sessions SET permission_mode = 'bogus' WHERE id = ?1",
+            params![cs.id],
+        )
+        .unwrap();
+        assert_eq!(
+            get_chat_session(&conn, &cs.id)
+                .unwrap()
+                .unwrap()
+                .permission_mode,
+            "bogus"
+        );
         // ("bogus" survives the mapping — the fail-closed parse lives in
         // PermissionMode::from_db at the send site.)
     }
@@ -1116,9 +1173,41 @@ mod tests {
         assert_eq!(cs2.title.as_deref(), Some("my chat"));
         assert!(cs2.last_active_at >= cs.last_active_at);
 
-        let m1 = add_chat_message(&conn, &cs.id, "user", "hello", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let m1 = add_chat_message(
+            &conn,
+            NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "user",
+                content: "hello",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(m1.role, "user");
-        let m2 = add_chat_message(&conn, &cs.id, "assistant", "hi there", Some(100), Some(50), Some(0.0015), None, None, None, None, None, None, Some(100), Some(130), None, None, None, None).unwrap();
+        let m2 = add_chat_message(
+            &conn,
+            NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "hi there",
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                cost_usd: Some(0.0015),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: None,
+                model_key: None,
+                pricing_estimated_usd: None,
+                started_at: Some(100),
+                completed_at: Some(130),
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
+        )
+        .unwrap();
         assert_eq!(m2.input_tokens, Some(100));
         assert_eq!(m2.output_tokens, Some(50));
         assert!((m2.cost_usd.unwrap() - 0.0015).abs() < 1e-9);
@@ -1148,21 +1237,34 @@ mod tests {
         let empty_starred = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
         set_chat_session_starred(&conn, &empty_starred.id, true).unwrap();
         let with_msgs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
-        add_chat_message(&conn, &with_msgs.id, "user", "hello", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        add_chat_message(
+            &conn,
+            NewChatMessage {
+                chat_session_id: &with_msgs.id,
+                role: "user",
+                content: "hello",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Keep empty_a (the one being restored) — sweep the rest.
         let n = delete_empty_chat_sessions(&conn, Some(&empty_a.id)).unwrap();
         assert_eq!(n, 1, "only empty_b should be swept");
         assert!(get_chat_session(&conn, &empty_a.id).unwrap().is_some());
         assert!(get_chat_session(&conn, &empty_b.id).unwrap().is_none());
-        assert!(get_chat_session(&conn, &empty_starred.id).unwrap().is_some());
+        assert!(get_chat_session(&conn, &empty_starred.id)
+            .unwrap()
+            .is_some());
         assert!(get_chat_session(&conn, &with_msgs.id).unwrap().is_some());
 
         // With no keep, remaining empties (except starred) go too.
         let n = delete_empty_chat_sessions(&conn, None).unwrap();
         assert_eq!(n, 1);
         assert!(get_chat_session(&conn, &empty_a.id).unwrap().is_none());
-        assert!(get_chat_session(&conn, &empty_starred.id).unwrap().is_some());
+        assert!(get_chat_session(&conn, &empty_starred.id)
+            .unwrap()
+            .is_some());
         assert!(get_chat_session(&conn, &with_msgs.id).unwrap().is_some());
     }
 
@@ -1184,12 +1286,20 @@ mod tests {
 
         // Clear override (None) and confirm it falls back to NULL.
         update_chat_session_watch_mode(&conn, &cs.id, None).unwrap();
-        assert!(get_chat_session(&conn, &cs.id).unwrap().unwrap().watch_mode.is_none());
+        assert!(get_chat_session(&conn, &cs.id)
+            .unwrap()
+            .unwrap()
+            .watch_mode
+            .is_none());
 
         // Switch to "off" and confirm it sticks.
         update_chat_session_watch_mode(&conn, &cs.id, Some("off")).unwrap();
         assert_eq!(
-            get_chat_session(&conn, &cs.id).unwrap().unwrap().watch_mode.as_deref(),
+            get_chat_session(&conn, &cs.id)
+                .unwrap()
+                .unwrap()
+                .watch_mode
+                .as_deref(),
             Some("off")
         );
     }
@@ -1211,27 +1321,56 @@ mod tests {
         // Built-in / local selections persist too.
         update_chat_session_agent(&conn, &cs.id, Some("builtin")).unwrap();
         assert_eq!(
-            get_chat_session(&conn, &cs.id).unwrap().unwrap().agent.as_deref(),
+            get_chat_session(&conn, &cs.id)
+                .unwrap()
+                .unwrap()
+                .agent
+                .as_deref(),
             Some("builtin")
         );
         update_chat_session_agent(&conn, &cs.id, Some("local")).unwrap();
         assert_eq!(
-            get_chat_session(&conn, &cs.id).unwrap().unwrap().agent.as_deref(),
+            get_chat_session(&conn, &cs.id)
+                .unwrap()
+                .unwrap()
+                .agent
+                .as_deref(),
             Some("local")
         );
 
         // Clearing (None) returns the session to the unselected state.
         update_chat_session_agent(&conn, &cs.id, None).unwrap();
-        assert!(get_chat_session(&conn, &cs.id).unwrap().unwrap().agent.is_none());
+        assert!(get_chat_session(&conn, &cs.id)
+            .unwrap()
+            .unwrap()
+            .agent
+            .is_none());
     }
 
     #[test]
     fn delete_chat_message_removes_row_and_detaches_artifacts() {
         let conn = super::super::mem();
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
-        let m1 = add_chat_message(&conn, &cs.id, "user", "hi", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
-        let m2 =
-            add_chat_message(&conn, &cs.id, "assistant", "hello", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let m1 = add_chat_message(
+            &conn,
+            NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "user",
+                content: "hi",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let m2 = add_chat_message(
+            &conn,
+            NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "hello",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Attach an artifact to the assistant message we'll delete.
         let art = super::super::insert_artifact(
@@ -1289,10 +1428,46 @@ mod tests {
     fn delete_chat_messages_after_trims_later_turns_and_detaches_artifacts() {
         let conn = super::super::mem();
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
-        let m1 = add_chat_message(&conn, &cs.id, "user", "hi", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
-        let m2 = add_chat_message(&conn, &cs.id, "assistant", "hello", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
-        let m3 = add_chat_message(&conn, &cs.id, "user", "do it", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
-        let m4 = add_chat_message(&conn, &cs.id, "assistant", "done", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let m1 = add_chat_message(
+            &conn,
+            NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "user",
+                content: "hi",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let m2 = add_chat_message(
+            &conn,
+            NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "hello",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let m3 = add_chat_message(
+            &conn,
+            NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "user",
+                content: "do it",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let m4 = add_chat_message(
+            &conn,
+            NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "done",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Artifact attributed to a message the rollback will remove.
         let art = super::super::insert_artifact(
@@ -1307,7 +1482,10 @@ mod tests {
 
         // Roll back to the m2 turn: strictly-greater ids are removed, the
         // checkpointed turn and everything before it stay.
-        assert_eq!(delete_chat_messages_after(&conn, &cs.id, Some(m2.id)).unwrap(), 2);
+        assert_eq!(
+            delete_chat_messages_after(&conn, &cs.id, Some(m2.id)).unwrap(),
+            2
+        );
         let rest = list_chat_messages(&conn, &cs.id).unwrap();
         assert_eq!(rest.len(), 2);
         assert_eq!(rest[0].id, m1.id);
@@ -1334,8 +1512,26 @@ mod tests {
         // linked). Now any statement failing aborts the whole transaction.
         let conn = super::super::mem();
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
-        add_chat_message(&conn, &cs.id, "user", "keep", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
-        add_chat_message(&conn, &cs.id, "assistant", "drop", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        add_chat_message(
+            &conn,
+            NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "user",
+                content: "keep",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_chat_message(
+            &conn,
+            NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "drop",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Force the FIRST statement (artifact detach) to fail: the table it
         // writes no longer exists.
@@ -1347,14 +1543,23 @@ mod tests {
 
         // The transaction rolled back: NO rows were deleted.
         let rest = list_chat_messages(&conn, &cs.id).unwrap();
-        assert_eq!(rest.len(), 2, "no message may be deleted when the UPDATE fails");
+        assert_eq!(
+            rest.len(),
+            2,
+            "no message may be deleted when the UPDATE fails"
+        );
     }
 
     // Insert a plain message with only the fields FTS tests care about.
     fn add_msg(conn: &Connection, session: &str, role: &str, content: &str) -> ChatMessageRecord {
         add_chat_message(
-            conn, session, role, content, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None,
+            conn,
+            NewChatMessage {
+                chat_session_id: session,
+                role: role,
+                content: content,
+                ..Default::default()
+            },
         )
         .unwrap()
     }
@@ -1376,10 +1581,15 @@ mod tests {
         assert!(hits.iter().any(|h| h.chat_session_id == a.id));
         assert!(hits.iter().any(|h| h.chat_session_id == b.id));
         let snippet = hits[0].snippet.as_deref().unwrap_or("");
-        assert!(snippet.contains("stream"), "snippet should carry context: {snippet}");
+        assert!(
+            snippet.contains("stream"),
+            "snippet should carry context: {snippet}"
+        );
 
         // No match anywhere → empty, not an error.
-        assert!(search_chat_messages(&conn, "zzzznothing", 10).unwrap().is_empty());
+        assert!(search_chat_messages(&conn, "zzzznothing", 10)
+            .unwrap()
+            .is_empty());
         // Empty/whitespace query short-circuits.
         assert!(search_chat_messages(&conn, "   ", 10).unwrap().is_empty());
     }
@@ -1394,8 +1604,14 @@ mod tests {
         let hits = search_chat_messages(&conn, "relay", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chat_session_id, cs.id);
-        assert!(hits[0].message_id.is_none(), "title-only hit has no message");
-        assert_eq!(hits[0].session_title.as_deref(), Some("Deploy the relay server"));
+        assert!(
+            hits[0].message_id.is_none(),
+            "title-only hit has no message"
+        );
+        assert_eq!(
+            hits[0].session_title.as_deref(),
+            Some("Deploy the relay server")
+        );
 
         // LIKE wildcards in the query must be literal, not pattern syntax.
         assert!(search_chat_messages(&conn, "100%", 10).unwrap().is_empty());
@@ -1420,12 +1636,16 @@ mod tests {
             rusqlite::params![m2.id],
         )
         .unwrap();
-        assert!(search_chat_messages(&conn, "quixotic", 10).unwrap().is_empty());
+        assert!(search_chat_messages(&conn, "quixotic", 10)
+            .unwrap()
+            .is_empty());
         assert_eq!(search_chat_messages(&conn, "patched", 10).unwrap().len(), 1);
 
         // Deletes drop the row from the index.
         delete_chat_message(&conn, m2.id).unwrap();
-        assert!(search_chat_messages(&conn, "patched", 10).unwrap().is_empty());
+        assert!(search_chat_messages(&conn, "patched", 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1522,9 +1742,14 @@ mod tests {
         let conn = super::super::mem();
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
         let m1 = add_msg(&conn, &cs.id, "user", "old turn");
-        let summary = add_msg(&conn, &cs.id, "system", "[compacted context]
+        let summary = add_msg(
+            &conn,
+            &cs.id,
+            "system",
+            "[compacted context]
 
-summary");
+summary",
+        );
         // Compaction folded m1 into the summary row.
         mark_superseded(&conn, &[m1.id], summary.id).unwrap();
         let m3 = add_msg(&conn, &cs.id, "user", "after compaction");

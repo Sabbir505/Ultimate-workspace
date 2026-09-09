@@ -165,7 +165,12 @@ pub fn list_versions(conn: &Connection, artifact_id: &str) -> DbResult<Vec<Impro
 }
 
 /// Point a channel at a version (promote/rollback are the same operation).
-pub fn set_channel(conn: &Connection, artifact_id: &str, channel: &str, version: i64) -> DbResult<()> {
+pub fn set_channel(
+    conn: &Connection,
+    artifact_id: &str,
+    channel: &str,
+    version: i64,
+) -> DbResult<()> {
     conn.execute(
         "INSERT INTO improve_channels (artifact_id, channel, version, updated_at)
          VALUES (?1, ?2, ?3, ?4)
@@ -175,7 +180,11 @@ pub fn set_channel(conn: &Connection, artifact_id: &str, channel: &str, version:
     Ok(())
 }
 
-pub fn channel_version(conn: &Connection, artifact_id: &str, channel: &str) -> DbResult<Option<i64>> {
+pub fn channel_version(
+    conn: &Connection,
+    artifact_id: &str,
+    channel: &str,
+) -> DbResult<Option<i64>> {
     conn.query_row(
         "SELECT version FROM improve_channels WHERE artifact_id = ?1 AND channel = ?2",
         params![artifact_id, channel],
@@ -185,7 +194,11 @@ pub fn channel_version(conn: &Connection, artifact_id: &str, channel: &str) -> D
 }
 
 /// The stored body of one version.
-pub fn version_body(conn: &Connection, artifact_id: &str, version: i64) -> DbResult<Option<String>> {
+pub fn version_body(
+    conn: &Connection,
+    artifact_id: &str,
+    version: i64,
+) -> DbResult<Option<String>> {
     conn.query_row(
         "SELECT body FROM improve_versions WHERE artifact_id = ?1 AND version = ?2",
         params![artifact_id, version],
@@ -358,7 +371,10 @@ pub fn get_loop_session(conn: &Connection, loop_id: &str) -> DbResult<Option<Loo
 
 /// Most recent loop session for a chat session (used to resume state after
 /// restart and to finish dangling sessions).
-pub fn latest_loop_session(conn: &Connection, chat_session_id: &str) -> DbResult<Option<LoopSession>> {
+pub fn latest_loop_session(
+    conn: &Connection,
+    chat_session_id: &str,
+) -> DbResult<Option<LoopSession>> {
     conn.query_row(
         "SELECT id, chat_session_id, goal, iteration, max_iterations, status, run_id, created_at, updated_at
            FROM loop_sessions WHERE chat_session_id = ?1 ORDER BY created_at DESC LIMIT 1",
@@ -455,7 +471,12 @@ pub fn has_open_proposal(conn: &Connection, artifact_id: &str) -> DbResult<bool>
     Ok(n > 0)
 }
 
-pub fn set_proposal_status(conn: &Connection, id: &str, status: &str, eval_run_id: Option<&str>) -> DbResult<()> {
+pub fn set_proposal_status(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    eval_run_id: Option<&str>,
+) -> DbResult<()> {
     conn.execute(
         "UPDATE improve_proposals SET status = ?2, eval_run_id = COALESCE(?3, eval_run_id), updated_at = ?4 WHERE id = ?1",
         params![id, status, eval_run_id, now_ts()],
@@ -473,7 +494,12 @@ pub struct RunEvidence {
     pub input_text: Option<String>,
 }
 
-pub fn bad_runs_since(conn: &Connection, artifact_id: &str, since: i64, limit: i64) -> DbResult<Vec<RunEvidence>> {
+pub fn bad_runs_since(
+    conn: &Connection,
+    artifact_id: &str,
+    since: i64,
+    limit: i64,
+) -> DbResult<Vec<RunEvidence>> {
     let mut stmt = conn.prepare(
         "SELECT r.id, r.outcome, r.error_code,
                 (SELECT m.content FROM chat_messages m
@@ -498,7 +524,11 @@ pub fn bad_runs_since(conn: &Connection, artifact_id: &str, since: i64, limit: i
 
 /// Artifacts eligible for a sweep: >= `threshold` bad finished runs in the
 /// window, no proposal already open. (§6.1 throttle + dedupe.)
-pub fn sweep_candidates(conn: &Connection, since: i64, threshold: i64) -> DbResult<Vec<(ImproveArtifact, i64)>> {
+pub fn sweep_candidates(
+    conn: &Connection,
+    since: i64,
+    threshold: i64,
+) -> DbResult<Vec<(ImproveArtifact, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT a.id, a.kind, a.ref_key, a.name, a.created_at, COUNT(r.id) AS bad
            FROM improve_artifacts a
@@ -510,16 +540,22 @@ pub fn sweep_candidates(conn: &Connection, since: i64, threshold: i64) -> DbResu
           ORDER BY bad DESC",
     )?;
     let rows = stmt.query_map(params![since, threshold], |r| {
-        Ok((ImproveArtifact {
-            id: r.get(0)?,
-            kind: r.get(1)?,
-            ref_key: r.get(2)?,
-            name: r.get(3)?,
-            created_at: r.get(4)?,
-        }, r.get(5)?))
+        Ok((
+            ImproveArtifact {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                ref_key: r.get(2)?,
+                name: r.get(3)?,
+                created_at: r.get(4)?,
+            },
+            r.get(5)?,
+        ))
     })?;
     let all: Vec<_> = rows.collect::<DbResult<Vec<_>>>()?;
-    Ok(all.into_iter().filter(|(a, _)| !has_open_proposal(conn, &a.id).unwrap_or(true)).collect())
+    Ok(all
+        .into_iter()
+        .filter(|(a, _)| !has_open_proposal(conn, &a.id).unwrap_or(true))
+        .collect())
 }
 
 // ---- eval packs (P1, §7/§8) ----
@@ -572,7 +608,11 @@ pub fn add_eval_case(
     })
 }
 
-pub fn list_eval_cases(conn: &Connection, artifact_id: &str, enabled_only: bool) -> DbResult<Vec<EvalCase>> {
+pub fn list_eval_cases(
+    conn: &Connection,
+    artifact_id: &str,
+    enabled_only: bool,
+) -> DbResult<Vec<EvalCase>> {
     let mut stmt = conn.prepare(
         "SELECT id, artifact_id, input_text, expect_json, source, enabled, created_at
            FROM improve_eval_cases
@@ -586,21 +626,34 @@ pub fn list_eval_cases(conn: &Connection, artifact_id: &str, enabled_only: bool)
 /// Harvest corrected/failed runs into eval cases (dedup by input text).
 /// Expectations are judge-only: the deterministic layer has nothing to pin
 /// against a free-form user request, so the rubric carries the weight.
-pub fn harvest_eval_cases(conn: &Connection, artifact_id: &str, since: i64, max: i64) -> DbResult<usize> {
+pub fn harvest_eval_cases(
+    conn: &Connection,
+    artifact_id: &str,
+    since: i64,
+    max: i64,
+) -> DbResult<usize> {
     let evidence = bad_runs_since(conn, artifact_id, since, max)?;
     let mut added = 0;
     for e in evidence {
-        let Some(input) = e.input_text.as_deref() else { continue };
-        if input.trim().is_empty() { continue; }
+        let Some(input) = e.input_text.as_deref() else {
+            continue;
+        };
+        if input.trim().is_empty() {
+            continue;
+        }
         // Dedup: same input already covered by an existing case.
         let dup: i64 = conn.query_row(
             "SELECT COUNT(*) FROM improve_eval_cases WHERE artifact_id = ?1 AND input_text = ?2",
             params![artifact_id, input],
             |r| r.get(0),
         )?;
-        if dup > 0 { continue; }
+        if dup > 0 {
+            continue;
+        }
         add_eval_case(
-            conn, artifact_id, input,
+            conn,
+            artifact_id,
+            input,
             r#"{"judge": true, "rubric": "Addresses the user's request correctly and completely."}"#,
             "harvested",
         )?;
@@ -630,7 +683,13 @@ pub fn set_autonomy(conn: &Connection, artifact_id: &str, tier: &str) -> DbResul
         "UPDATE improve_artifacts SET autonomy = ?2 WHERE id = ?1",
         params![artifact_id, tier],
     )?;
-    record_event(conn, Some(artifact_id), None, "tier_changed", Some(&format!("{{\"tier\":\"{tier}\"}}")))
+    record_event(
+        conn,
+        Some(artifact_id),
+        None,
+        "tier_changed",
+        Some(&format!("{{\"tier\":\"{tier}\"}}")),
+    )
 }
 
 pub fn record_event(
@@ -643,25 +702,45 @@ pub fn record_event(
     conn.execute(
         "INSERT INTO improve_events (id, artifact_id, proposal_id, event, detail_json, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![new_id(), artifact_id, proposal_id, event, detail_json, now_ts()],
+        params![
+            new_id(),
+            artifact_id,
+            proposal_id,
+            event,
+            detail_json,
+            now_ts()
+        ],
     )?;
     Ok(())
 }
 
-pub fn list_events(conn: &Connection, artifact_id: &str, limit: i64) -> DbResult<Vec<(String, String, String)>> {
+pub fn list_events(
+    conn: &Connection,
+    artifact_id: &str,
+    limit: i64,
+) -> DbResult<Vec<(String, String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT event, detail_json, created_at FROM improve_events
           WHERE artifact_id = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![artifact_id, limit], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get::<_, i64>(2)?.to_string()))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            r.get::<_, i64>(2)?.to_string(),
+        ))
     })?;
     rows.collect()
 }
 
 /// Open a run pinned to `version` (used to serve shadow/canary bodies while
 /// attributing the telemetry to the right version).
-pub fn start_run_versioned(conn: &Connection, artifact_id: &str, version: i64, chat_session_id: Option<&str>) -> DbResult<String> {
+pub fn start_run_versioned(
+    conn: &Connection,
+    artifact_id: &str,
+    version: i64,
+    chat_session_id: Option<&str>,
+) -> DbResult<String> {
     let id = new_id();
     conn.execute(
         "INSERT INTO improve_runs (id, artifact_id, version, chat_session_id, started_at)
@@ -673,7 +752,11 @@ pub fn start_run_versioned(conn: &Connection, artifact_id: &str, version: i64, c
 
 /// If an open canary exists for the artifact, serve its shadow version:
 /// returns (run_id, Some(shadow_body)). Otherwise an ordinary active run.
-pub fn start_run_shadow(conn: &Connection, artifact_id: &str, chat_session_id: Option<&str>) -> DbResult<(String, Option<String>)> {
+pub fn start_run_shadow(
+    conn: &Connection,
+    artifact_id: &str,
+    chat_session_id: Option<&str>,
+) -> DbResult<(String, Option<String>)> {
     let canary: Option<(String, i64)> = conn
         .query_row(
             "SELECT c.id, c.shadow_version FROM improve_canaries c
@@ -766,7 +849,12 @@ pub fn open_canaries(conn: &Connection) -> DbResult<Vec<Canary>> {
 }
 
 /// Finished-run health for one version since a timestamp: (total, bad).
-pub fn version_run_health(conn: &Connection, artifact_id: &str, version: i64, since: i64) -> DbResult<(i64, i64)> {
+pub fn version_run_health(
+    conn: &Connection,
+    artifact_id: &str,
+    version: i64,
+    since: i64,
+) -> DbResult<(i64, i64)> {
     conn.query_row(
         "SELECT COUNT(*),
                 COALESCE(SUM(CASE WHEN outcome IN ('failed', 'corrected') THEN 1 ELSE 0 END), 0)
@@ -825,9 +913,15 @@ mod tests {
         let conn = super::super::mem();
         let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
         // Unchanged body → no new version.
-        assert_eq!(record_version(&conn, &a.id, 1, "v1", None, "auto_proposal").unwrap(), None);
+        assert_eq!(
+            record_version(&conn, &a.id, 1, "v1", None, "auto_proposal").unwrap(),
+            None
+        );
         // Changed body → v2.
-        assert_eq!(record_version(&conn, &a.id, 1, "v2 improved", None, "auto_proposal").unwrap(), Some(2));
+        assert_eq!(
+            record_version(&conn, &a.id, 1, "v2 improved", None, "auto_proposal").unwrap(),
+            Some(2)
+        );
         let versions = list_versions(&conn, &a.id).unwrap();
         assert_eq!(versions.len(), 2);
         assert_eq!(versions[1].parent_version, Some(1));
@@ -838,7 +932,9 @@ mod tests {
     fn channel_repoint_is_rollback() {
         let conn = super::super::mem();
         let a = ensure_artifact(&conn, "loop", "goal", "Goal loop", "v1").unwrap();
-        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal").unwrap().unwrap();
+        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal")
+            .unwrap()
+            .unwrap();
         set_channel(&conn, &a.id, "active", v2).unwrap();
         assert_eq!(channel_version(&conn, &a.id, "active").unwrap(), Some(2));
         // Rollback = move the pointer back.
@@ -856,11 +952,17 @@ mod tests {
         let (total, bad) = run_health(&conn, &a.id).unwrap();
         assert_eq!((total, bad), (0, 0), "open runs are not counted");
         // Turn error closes both.
-        assert_eq!(finish_session_runs(&conn, "sess1", "failed", Some("context_overflow")).unwrap(), 2);
+        assert_eq!(
+            finish_session_runs(&conn, "sess1", "failed", Some("context_overflow")).unwrap(),
+            2
+        );
         let (total, bad) = run_health(&conn, &a.id).unwrap();
         assert_eq!((total, bad), (2, 2));
         // Idempotent: nothing left open for that session.
-        assert_eq!(finish_session_runs(&conn, "sess1", "corrected", None).unwrap(), 0);
+        assert_eq!(
+            finish_session_runs(&conn, "sess1", "corrected", None).unwrap(),
+            0
+        );
         let _ = r1;
         let _ = r2;
     }
@@ -883,10 +985,22 @@ mod tests {
         let conn = super::super::mem();
         let a = ensure_artifact(&conn, "skill", "pdf", "Pdf", "v1").unwrap();
         let run = start_run(&conn, &a.id, Some("s1")).unwrap();
-        record_feedback(&conn, &a.id, Some(&run), Some("s1"), "down", Some("wrong format")).unwrap();
+        record_feedback(
+            &conn,
+            &a.id,
+            Some(&run),
+            Some("s1"),
+            "down",
+            Some("wrong format"),
+        )
+        .unwrap();
         record_feedback(&conn, &a.id, None, None, "up", None).unwrap();
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM improve_feedback WHERE artifact_id = ?1", params![a.id], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM improve_feedback WHERE artifact_id = ?1",
+                params![a.id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 2);
     }
@@ -894,13 +1008,18 @@ mod tests {
     #[test]
     fn loop_session_lifecycle_maps_status_to_outcome() {
         let conn = super::super::mem();
-        let ls = start_loop_session(&conn, "chat1", "fix the tests", 10, "loop skill body").unwrap();
+        let ls =
+            start_loop_session(&conn, "chat1", "fix the tests", 10, "loop skill body").unwrap();
         assert_eq!(ls.iteration, 0);
         assert_eq!(ls.status, "running");
         assert!(ls.run_id.is_some());
         // The loop artifact is created lazily and shared across sessions.
         let a = conn
-            .query_row("SELECT id FROM improve_artifacts WHERE kind = 'loop' AND ref_key = 'goal'", [], |r| r.get::<_, String>(0))
+            .query_row(
+                "SELECT id FROM improve_artifacts WHERE kind = 'loop' AND ref_key = 'goal'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
             .unwrap();
 
         advance_loop_session(&conn, &ls.id, 3).unwrap();
@@ -912,7 +1031,11 @@ mod tests {
         assert_eq!(got.status, "complete");
         // complete → run applied.
         let outcome: String = conn
-            .query_row("SELECT outcome FROM improve_runs WHERE id = ?1", params![got.run_id.unwrap()], |r| r.get(0))
+            .query_row(
+                "SELECT outcome FROM improve_runs WHERE id = ?1",
+                params![got.run_id.unwrap()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(outcome, "applied");
 
@@ -925,7 +1048,10 @@ mod tests {
         assert_eq!((total, bad), (3, 1));
 
         // Latest-session lookup (resume after restart).
-        assert_eq!(latest_loop_session(&conn, "chat2").unwrap().unwrap().id, ls2.id);
+        assert_eq!(
+            latest_loop_session(&conn, "chat2").unwrap().unwrap().id,
+            ls2.id
+        );
         assert!(latest_loop_session(&conn, "chatX").unwrap().is_none());
     }
 
@@ -935,9 +1061,14 @@ mod tests {
         let a = ensure_artifact(&conn, "skill", "tmp", "T", "v1").unwrap();
         start_run(&conn, &a.id, Some("s")).unwrap();
         record_version(&conn, &a.id, 1, "v2", None, "user").unwrap();
-        conn.execute("DELETE FROM improve_artifacts WHERE id = ?1", params![a.id]).unwrap();
-        let versions: i64 = conn.query_row("SELECT COUNT(*) FROM improve_versions", [], |r| r.get(0)).unwrap();
-        let runs: i64 = conn.query_row("SELECT COUNT(*) FROM improve_runs", [], |r| r.get(0)).unwrap();
+        conn.execute("DELETE FROM improve_artifacts WHERE id = ?1", params![a.id])
+            .unwrap();
+        let versions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM improve_versions", [], |r| r.get(0))
+            .unwrap();
+        let runs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM improve_runs", [], |r| r.get(0))
+            .unwrap();
         assert_eq!((versions, runs), (0, 0));
     }
 
@@ -945,8 +1076,20 @@ mod tests {
     fn proposal_lifecycle_and_open_dedupe() {
         let conn = super::super::mem();
         let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
-        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal").unwrap().unwrap();
-        let p = create_proposal(&conn, &a.id, 1, v2, "tighten instructions", None, Some("fewer failures"), None).unwrap();
+        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal")
+            .unwrap()
+            .unwrap();
+        let p = create_proposal(
+            &conn,
+            &a.id,
+            1,
+            v2,
+            "tighten instructions",
+            None,
+            Some("fewer failures"),
+            None,
+        )
+        .unwrap();
         assert_eq!(p.status, "open");
         assert!(has_open_proposal(&conn, &a.id).unwrap());
         // Gate progression: open → evaluating → passed.
@@ -981,7 +1124,9 @@ mod tests {
         // Below threshold: nothing eligible.
         assert!(sweep_candidates(&conn, since, 4).unwrap().is_empty());
         // Once a proposal is open, the artifact is deduped out.
-        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal").unwrap().unwrap();
+        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal")
+            .unwrap()
+            .unwrap();
         create_proposal(&conn, &a.id, 1, v2, "fix", None, None, None).unwrap();
         assert!(sweep_candidates(&conn, since, 3).unwrap().is_empty());
     }
@@ -1002,13 +1147,20 @@ mod tests {
     fn canary_window_and_shadow_serving() {
         let conn = super::super::mem();
         let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
-        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal").unwrap().unwrap();
+        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal")
+            .unwrap()
+            .unwrap();
         let p = create_proposal(&conn, &a.id, 1, v2, "fix", None, None, None).unwrap();
         // No canary → ordinary active run, no override body.
         let (run, body) = start_run_shadow(&conn, &a.id, Some("s0")).unwrap();
         assert!(body.is_none());
         assert_eq!(
-            conn.query_row("SELECT version FROM improve_runs WHERE id = ?1", params![run], |r| r.get::<_, i64>(0)).unwrap(),
+            conn.query_row(
+                "SELECT version FROM improve_runs WHERE id = ?1",
+                params![run],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
             1
         );
         let c = open_canary(&conn, &a.id, &p.id, 1, v2).unwrap();
@@ -1017,7 +1169,12 @@ mod tests {
         let (run2, body2) = start_run_shadow(&conn, &a.id, Some("s1")).unwrap();
         assert_eq!(body2.as_deref(), Some("v2"));
         assert_eq!(
-            conn.query_row("SELECT version FROM improve_runs WHERE id = ?1", params![run2], |r| r.get::<_, i64>(0)).unwrap(),
+            conn.query_row(
+                "SELECT version FROM improve_runs WHERE id = ?1",
+                params![run2],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
             2
         );
         finish_session_runs(&conn, "s1", "applied", None).unwrap();
@@ -1025,8 +1182,18 @@ mod tests {
         assert_eq!(version_run_health(&conn, &a.id, 2, 0).unwrap(), (1, 0));
         // Opening a second canary supersedes (stale) the first.
         let c2 = open_canary(&conn, &a.id, &p.id, 1, v2).unwrap();
-        assert_eq!(get_canary(&conn, &c.id).unwrap().unwrap().verdict.as_deref(), Some("stale"));
-        assert!(open_canaries(&conn).unwrap().len() == 1 && open_canaries(&conn).unwrap()[0].id == c2.id);
+        assert_eq!(
+            get_canary(&conn, &c.id)
+                .unwrap()
+                .unwrap()
+                .verdict
+                .as_deref(),
+            Some("stale")
+        );
+        assert!(
+            open_canaries(&conn).unwrap().len() == 1
+                && open_canaries(&conn).unwrap()[0].id == c2.id
+        );
     }
 
     #[test]
@@ -1038,22 +1205,44 @@ mod tests {
         assert!(promoted_recently(&conn, &a.id, 86_400).unwrap());
         record_event(&conn, Some(&a.id), None, "rolled_back", None).unwrap();
         record_event(&conn, Some(&a.id), None, "rolled_back", None).unwrap();
-        assert_eq!(rolled_back_count(&conn, &a.id).unwrap(), 2, "blast-radius rule trips at 2");
+        assert_eq!(
+            rolled_back_count(&conn, &a.id).unwrap(),
+            2,
+            "blast-radius rule trips at 2"
+        );
     }
 
     #[test]
     fn eval_cases_round_trip_and_harvest_dedupes() {
         let conn = super::super::mem();
         let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
-        add_eval_case(&conn, &a.id, "write a report", r#"{"mustContain": ["done"]}"#, "manual").unwrap();
+        add_eval_case(
+            &conn,
+            &a.id,
+            "write a report",
+            r#"{"mustContain": ["done"]}"#,
+            "manual",
+        )
+        .unwrap();
         // Two bad runs with the same input → one harvested case only.
         for _ in 0..2 {
             // Real chat session: improve_runs.chat_session_id joins to
             // chat_messages for input attribution.
-            let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+            let cs =
+                super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
+                    .unwrap();
             start_run(&conn, &a.id, Some(&cs.id)).unwrap();
             // Seed the triggering user message so the harvest can attribute it.
-            super::super::add_chat_message(&conn, &cs.id, "user", "make a doc", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+            super::super::add_chat_message(
+                &conn,
+                super::super::NewChatMessage {
+                    chat_session_id: &cs.id,
+                    role: "user",
+                    content: "make a doc",
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             finish_session_runs(&conn, &cs.id, "corrected", None).unwrap();
         }
         let added = harvest_eval_cases(&conn, &a.id, 0, 10).unwrap();

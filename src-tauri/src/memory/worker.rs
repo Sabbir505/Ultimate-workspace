@@ -10,16 +10,18 @@
 use crate::chat::commands::{anthropic_oneshot, openai_oneshot};
 use crate::chat::providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
 use crate::db;
-use crate::memory::consolidate::{apply_judge_op, judge_user_message, parse_judge_op, Applied, JudgeInput};
+use crate::memory::consolidate::{
+    apply_judge_op, judge_user_message, parse_judge_op, Applied, JudgeInput,
+};
 use crate::memory::document::{
     parse_rewritten, rewrite_user_message, set_document, stored_document, DocChange, REWRITE_SYSTEM,
 };
 use crate::memory::extract::{
     extraction_user_message, filter_candidates, parse_candidates, EXTRACTION_SYSTEM,
 };
-use crate::memory::model::{MemoryCandidate, SIMILAR_TOP_S, SIMILARITY_GATE};
-use tauri::{AppHandle, Emitter, Manager};
+use crate::memory::model::{MemoryCandidate, SIMILARITY_GATE, SIMILAR_TOP_S};
 use std::sync::Mutex as StdMutex;
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Cost gate: extraction runs only every `EXTRACT_MIN_TURNS..=EXTRACT_MAX_TURNS`
 /// completed assistant turns instead of every turn — each run costs an LLM
@@ -71,9 +73,7 @@ fn parse_extract_override(conn: &rusqlite::Connection) -> Option<(String, String
         return None;
     }
     match raw.split_once("::") {
-        Some((p, m)) if !p.is_empty() && !m.is_empty() => {
-            Some((p.to_string(), m.to_string()))
-        }
+        Some((p, m)) if !p.is_empty() && !m.is_empty() => Some((p.to_string(), m.to_string())),
         _ => Some((String::new(), raw.to_string())),
     }
 }
@@ -124,8 +124,7 @@ fn maybe_apply_extract_override(
         let conn = db.0.lock();
         (
             crate::secrets::get_chat_api_key(&conn, &override_provider).unwrap_or_default(),
-            db::get_setting(&conn, &format!("chat.{override_provider}.base_url"))
-                .unwrap_or(None),
+            db::get_setting(&conn, &format!("chat.{override_provider}.base_url")).unwrap_or(None),
         )
     };
     if override_key.is_empty() {
@@ -146,10 +145,7 @@ fn maybe_apply_extract_override(
 /// override (`memory.extractModel`) when set, else the session's model.
 /// Honored by EVERY stage (extraction, judge, document merge) so costs stay
 /// predictable no matter which path triggered the write.
-fn resolve_memory_model(
-    conn: &rusqlite::Connection,
-    session_model: Option<String>,
-) -> String {
+fn resolve_memory_model(conn: &rusqlite::Connection, session_model: Option<String>) -> String {
     db::get_setting(conn, crate::memory::SETTING_EXTRACT_MODEL)
         .unwrap_or(None)
         .filter(|m| !m.trim().is_empty())
@@ -201,7 +197,10 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         let proj = db::get_chat_session(&conn, chat_session_id)
             .map_err(|e| e.to_string())?
             .and_then(|s| s.project_id);
-        (db::get_cursor(&conn, chat_session_id).map_err(|e| e.to_string())?, proj)
+        (
+            db::get_cursor(&conn, chat_session_id).map_err(|e| e.to_string())?,
+            proj,
+        )
     };
     if !debounce_ok(chat_session_id) {
         return Ok(());
@@ -211,8 +210,8 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
     // `oldest_pending` feeds the stale-flush bypass below.
     let (pending, oldest_pending): (Vec<(i64, String, String)>, Option<i64>) = {
         let conn = db.0.lock();
-        let all = db::list_active_chat_messages(&conn, chat_session_id)
-            .map_err(|e| e_tostring(e))?;
+        let all =
+            db::list_active_chat_messages(&conn, chat_session_id).map_err(|e| e_tostring(e))?;
         let mut oldest: Option<i64> = None;
         let mut out: Vec<(i64, String, String)> = Vec::new();
         for m in all {
@@ -230,9 +229,11 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
     // conversation went cold mid-batch), in which case flush now. The backlog
     // is fully drained in chunks when the gate opens, so nothing is lost,
     // just deferred.
-    let new_turns = pending.iter().filter(|(_, role, _)| role == "assistant").count();
-    let stale = oldest_pending
-        .map_or(false, |t| crate::db::now_ts() - t > STALE_PENDING_SECS);
+    let new_turns = pending
+        .iter()
+        .filter(|(_, role, _)| role == "assistant")
+        .count();
+    let stale = oldest_pending.map_or(false, |t| crate::db::now_ts() - t > STALE_PENDING_SECS);
     if !extraction_due(new_turns) && !stale {
         // Still worth refreshing vectors for records written while the
         // sidecar was down — a cheap no-op when the queue is empty.
@@ -292,8 +293,7 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         if !chunk.iter().any(|(_, r, c)| r == "user" && c.len() > 24) {
             chunk_start = chunk_last_id;
             let conn = db.0.lock();
-            db::upsert_cursor(&conn, chat_session_id, chunk_last_id)
-                .map_err(|e| e_tostring(e))?;
+            db::upsert_cursor(&conn, chat_session_id, chunk_last_id).map_err(|e| e_tostring(e))?;
             continue;
         }
 
@@ -315,8 +315,15 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
                     .iter()
                     .rev()
                     .map(|m| {
-                        let who = if m.role == "user" { "User" } else { "Assistant" };
-                        format!("{who}: {}", crate::util::truncate_chars(m.content.trim(), 400))
+                        let who = if m.role == "user" {
+                            "User"
+                        } else {
+                            "Assistant"
+                        };
+                        format!(
+                            "{who}: {}",
+                            crate::util::truncate_chars(m.content.trim(), 400)
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -327,15 +334,24 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         let user_msg = extraction_user_message(rolling_summary.as_deref(), &chunk);
         // On an LLM failure the `?` aborts BEFORE the cursor moves, so this
         // chunk is retried next turn.
-        let raw = oneshot(app, &provider_str, &api_key, base_url.as_deref(), &model, EXTRACTION_SYSTEM, &user_msg, 2048).await?;
+        let raw = oneshot(
+            app,
+            &provider_str,
+            &api_key,
+            base_url.as_deref(),
+            &model,
+            EXTRACTION_SYSTEM,
+            &user_msg,
+            2048,
+        )
+        .await?;
 
         let cands = parse_candidates(&raw);
         if cands.is_empty() {
             // Nothing memorable in this chunk — commit it so we don't re-scan.
             chunk_start = chunk_last_id;
             let conn = db.0.lock();
-            db::upsert_cursor(&conn, chat_session_id, chunk_last_id)
-                .map_err(|e| e_tostring(e))?;
+            db::upsert_cursor(&conn, chat_session_id, chunk_last_id).map_err(|e| e_tostring(e))?;
             continue;
         }
 
@@ -363,8 +379,7 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         if cands.is_empty() {
             chunk_start = chunk_last_id;
             let conn = db.0.lock();
-            db::upsert_cursor(&conn, chat_session_id, chunk_last_id)
-                .map_err(|e| e_tostring(e))?;
+            db::upsert_cursor(&conn, chat_session_id, chunk_last_id).map_err(|e| e_tostring(e))?;
             continue;
         }
 
@@ -378,7 +393,8 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
                 base,
                 &cands.iter().map(|c| c.content.clone()).collect::<Vec<_>>(),
             )
-            .await {
+            .await
+            {
                 Ok(vs) => {
                     let mut out: Vec<Option<Vec<f32>>> = vs.into_iter().map(Some).collect();
                     out.resize(n, None); // sidecar returned fewer vectors than texts
@@ -395,20 +411,57 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         for (cand, emb) in cands.iter().zip(embeddings) {
             let similar = {
                 let conn = db.0.lock();
-                fetch_similar(&conn, "default", project_id.as_deref(), cand, emb.as_deref())
+                fetch_similar(
+                    &conn,
+                    "default",
+                    project_id.as_deref(),
+                    cand,
+                    emb.as_deref(),
+                )
             };
-            let judge_msg = judge_user_message(&JudgeInput { candidate: cand, similar: &similar });
-            let raw = oneshot(app, &provider_str, &api_key, base_url.as_deref(), &model, crate::memory::consolidate::JUDGE_SYSTEM, &judge_msg, 512).await?;
+            let judge_msg = judge_user_message(&JudgeInput {
+                candidate: cand,
+                similar: &similar,
+            });
+            let raw = oneshot(
+                app,
+                &provider_str,
+                &api_key,
+                base_url.as_deref(),
+                &model,
+                crate::memory::consolidate::JUDGE_SYSTEM,
+                &judge_msg,
+                512,
+            )
+            .await?;
             let valid_ids: Vec<String> = similar.iter().map(|(m, _)| m.id.clone()).collect();
             let op = parse_judge_op(&raw, &valid_ids);
             let applied = {
                 let conn = db.0.lock();
-                let applied = apply_judge_op(&conn, &JudgeInput { candidate: cand, similar: &similar }, &op,
-                                             Some(chat_session_id), project_id.as_deref(), emb, crate::db::now_ts(),
-                                             crate::memory::model::origin::EXTRACTED)
-                    .map_err(|e| e_tostring(e))?;
+                let applied = apply_judge_op(
+                    &conn,
+                    &JudgeInput {
+                        candidate: cand,
+                        similar: &similar,
+                    },
+                    &op,
+                    Some(chat_session_id),
+                    project_id.as_deref(),
+                    emb,
+                    crate::db::now_ts(),
+                    crate::memory::model::origin::EXTRACTED,
+                )
+                .map_err(|e| e_tostring(e))?;
                 let cand_json = serde_json::to_string(cand).unwrap_or_default();
-                let _ = db::log_memory_op(&conn, "judge", Some(chat_session_id), &cand_json, &applied.op, &applied.target_ids, "");
+                let _ = db::log_memory_op(
+                    &conn,
+                    "judge",
+                    Some(chat_session_id),
+                    &cand_json,
+                    &applied.op,
+                    &applied.target_ids,
+                    "",
+                );
                 applied
             };
             results.push(applied);
@@ -420,12 +473,19 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         chunk_start = chunk_last_id;
         {
             let conn = db.0.lock();
-            db::upsert_cursor(&conn, chat_session_id, chunk_last_id)
-                .map_err(|e| e_tostring(e))?;
+            db::upsert_cursor(&conn, chat_session_id, chunk_last_id).map_err(|e| e_tostring(e))?;
         }
     }
-    eprintln!("[memory] extracted {}: {} candidates → {}", chat_session_id, results.len(),
-              results.iter().map(|a| a.op.as_str()).collect::<Vec<_>>().join(","));
+    eprintln!(
+        "[memory] extracted {}: {} candidates → {}",
+        chat_session_id,
+        results.len(),
+        results
+            .iter()
+            .map(|a| a.op.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
 
     // Document merge (§11 amendment): one LLM call folds the applied changes
     // into the single human-readable memory document. Changes that applied
@@ -442,8 +502,13 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         .collect();
     if !changes.is_empty() {
         if let Err(e) = merge_document(
-            app, &provider_str, &api_key, base_url.as_deref(), &model,
-            Some(chat_session_id), &changes,
+            app,
+            &provider_str,
+            &api_key,
+            base_url.as_deref(),
+            &model,
+            Some(chat_session_id),
+            &changes,
         )
         .await
         {
@@ -572,10 +637,8 @@ async fn maybe_reflect(
             .iter()
             .map(|i| DocChange::added("insight", &i.content))
             .collect();
-        if let Err(e) = merge_document(
-            app, provider, api_key, base_url, model, None, &changes,
-        )
-        .await
+        if let Err(e) =
+            merge_document(app, provider, api_key, base_url, model, None, &changes).await
         {
             eprintln!("[memory] document merge (reflection) skipped: {e}");
         }
@@ -598,8 +661,12 @@ pub fn fetch_similar(
     embedding: Option<&[f32]>,
 ) -> Vec<(crate::memory::model::MemoryRecord, f32)> {
     if let Some(ev) = embedding {
-        if let Ok(hits) = db::similar_active_memories(conn, profile, project_id, ev, SIMILAR_TOP_S) {
-            let gated: Vec<_> = hits.into_iter().filter(|(_, s)| *s >= SIMILARITY_GATE).collect();
+        if let Ok(hits) = db::similar_active_memories(conn, profile, project_id, ev, SIMILAR_TOP_S)
+        {
+            let gated: Vec<_> = hits
+                .into_iter()
+                .filter(|(_, s)| *s >= SIMILARITY_GATE)
+                .collect();
             if !gated.is_empty() {
                 return gated;
             }
@@ -613,7 +680,9 @@ pub fn fetch_similar(
         .take(6)
         .collect();
     let mut out = Vec::new();
-    if let Ok(hits) = db::search_memories_fts(conn, profile, project_id, &kws.join(" "), SIMILAR_TOP_S) {
+    if let Ok(hits) =
+        db::search_memories_fts(conn, profile, project_id, &kws.join(" "), SIMILAR_TOP_S)
+    {
         for m in hits {
             out.push((m, 0.6)); // nominal similarity — above the gate
         }
@@ -651,15 +720,23 @@ pub async fn save_memory(
         content: content.trim().to_string(),
         kind: kind.to_string(),
         subject: subject.to_string(),
-        quote: evidence.as_ref().map(|(_, q)| q.clone()).unwrap_or_default(),
-        message_ids: evidence.as_ref().map(|(id, _)| vec![*id]).unwrap_or_default(),
+        quote: evidence
+            .as_ref()
+            .map(|(_, q)| q.clone())
+            .unwrap_or_default(),
+        message_ids: evidence
+            .as_ref()
+            .map(|(id, _)| vec![*id])
+            .unwrap_or_default(),
         importance: importance_hint.unwrap_or(6).clamp(1, 9),
     };
     let report = filter_candidates(vec![cand]);
     let Some(cand) = report.kept.into_iter().next() else {
-        return Err("rejected: content looks like a credential, is not a durable one-sentence \
+        return Err(
+            "rejected: content looks like a credential, is not a durable one-sentence \
                     fact, or is too trivial to keep (importance below the write floor)"
-            .to_string());
+                .to_string(),
+        );
     };
 
     let (provider_str, model, api_key, base_url, project_id) = {
@@ -696,20 +773,57 @@ pub async fn save_memory(
 
     let similar = {
         let conn = db.0.lock();
-        fetch_similar(&conn, "default", project_id.as_deref(), &cand, emb.as_deref())
+        fetch_similar(
+            &conn,
+            "default",
+            project_id.as_deref(),
+            &cand,
+            emb.as_deref(),
+        )
     };
-    let judge_msg = judge_user_message(&JudgeInput { candidate: &cand, similar: &similar });
-    let raw = oneshot(app, &provider_str, &api_key, base_url.as_deref(), &model, crate::memory::consolidate::JUDGE_SYSTEM, &judge_msg, 512).await?;
+    let judge_msg = judge_user_message(&JudgeInput {
+        candidate: &cand,
+        similar: &similar,
+    });
+    let raw = oneshot(
+        app,
+        &provider_str,
+        &api_key,
+        base_url.as_deref(),
+        &model,
+        crate::memory::consolidate::JUDGE_SYSTEM,
+        &judge_msg,
+        512,
+    )
+    .await?;
     let valid_ids: Vec<String> = similar.iter().map(|(m, _)| m.id.clone()).collect();
     let op = parse_judge_op(&raw, &valid_ids);
     let applied = {
         let conn = db.0.lock();
-        let applied = apply_judge_op(&conn, &JudgeInput { candidate: &cand, similar: &similar }, &op,
-                                     Some(chat_session_id), project_id.as_deref(), emb, crate::db::now_ts(),
-                                     crate::memory::model::origin::AGENT_TOOL)
-            .map_err(|e| e_tostring(e))?;
+        let applied = apply_judge_op(
+            &conn,
+            &JudgeInput {
+                candidate: &cand,
+                similar: &similar,
+            },
+            &op,
+            Some(chat_session_id),
+            project_id.as_deref(),
+            emb,
+            crate::db::now_ts(),
+            crate::memory::model::origin::AGENT_TOOL,
+        )
+        .map_err(|e| e_tostring(e))?;
         let cand_json = serde_json::to_string(&cand).unwrap_or_default();
-        let _ = db::log_memory_op(&conn, "agent_tool", Some(chat_session_id), &cand_json, &applied.op, &applied.target_ids, "");
+        let _ = db::log_memory_op(
+            &conn,
+            "agent_tool",
+            Some(chat_session_id),
+            &cand_json,
+            &applied.op,
+            &applied.target_ids,
+            "",
+        );
         applied
     };
     let note = match &applied.op {
@@ -727,15 +841,23 @@ pub async fn save_memory(
             old_content: applied.old_content.clone(),
         }];
         if let Err(e) = merge_document(
-            app, &provider_str, &api_key, base_url.as_deref(), &model,
-            Some(chat_session_id), &changes,
+            app,
+            &provider_str,
+            &api_key,
+            base_url.as_deref(),
+            &model,
+            Some(chat_session_id),
+            &changes,
         )
         .await
         {
             eprintln!("[memory] document merge skipped: {e}");
         }
     }
-    Ok(format!("Remembered: \"{}\" ({kind}, importance {}) — {note}.", cand.content, cand.importance))
+    Ok(format!(
+        "Remembered: \"{}\" ({kind}, importance {}) — {note}.",
+        cand.content, cand.importance
+    ))
 }
 
 /// Merge applied changes into the single memory document (design §11
@@ -760,8 +882,17 @@ pub async fn merge_document(
         document_seed(&conn, chat_session_id)
     };
     let user_msg = rewrite_user_message(current.as_deref(), changes);
-    let raw = oneshot(app, provider, api_key, base_url, model, REWRITE_SYSTEM, &user_msg, 2048)
-        .await?;
+    let raw = oneshot(
+        app,
+        provider,
+        api_key,
+        base_url,
+        model,
+        REWRITE_SYSTEM,
+        &user_msg,
+        2048,
+    )
+    .await?;
     let parsed = parse_rewritten(&raw);
     let (doc, trimmed) = match parsed {
         Some(d) => crate::memory::render::enforce_budget(d),
@@ -772,20 +903,45 @@ pub async fn merge_document(
         if doc.is_empty() {
             // Unusable reply → clear and let the deterministic fallback render.
             set_document(&conn, None, "").map_err(|e| e.to_string())?;
-            let _ = db::log_memory_op(&conn, "document", chat_session_id, "", "MERGE", &[], "rewrite unusable — cleared to fallback render");
+            let _ = db::log_memory_op(
+                &conn,
+                "document",
+                chat_session_id,
+                "",
+                "MERGE",
+                &[],
+                "rewrite unusable — cleared to fallback render",
+            );
         } else {
             set_document(&conn, Some(&doc), "merge").map_err(|e| e.to_string())?;
             let _ = db::log_memory_op(
-                &conn, "document", chat_session_id, &doc, "MERGE", &[],
-                &format!("{} change(s) merged{}", changes.len(), if trimmed { ", trimmed to budget" } else { "" }),
+                &conn,
+                "document",
+                chat_session_id,
+                &doc,
+                "MERGE",
+                &[],
+                &format!(
+                    "{} change(s) merged{}",
+                    changes.len(),
+                    if trimmed { ", trimmed to budget" } else { "" }
+                ),
             );
         }
     }
     // Bell-panel record: what changed, in one line.
     let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
     for c in changes {
-        let label = if c.old_content.as_deref().map_or(false, |o| !o.trim().is_empty()) {
-            if c.op == "UPDATE" { "updated" } else { "replaced" }
+        let label = if c
+            .old_content
+            .as_deref()
+            .map_or(false, |o| !o.trim().is_empty())
+        {
+            if c.op == "UPDATE" {
+                "updated"
+            } else {
+                "replaced"
+            }
         } else {
             "added"
         };
@@ -828,15 +984,18 @@ fn document_seed(conn: &rusqlite::Connection, chat_session_id: Option<&str>) -> 
             .flatten()
             .and_then(|s| s.project_id)
     });
-    let mems = db::active_memories_for_scope(conn, "default", project_id.as_deref())
-        .unwrap_or_default();
+    let mems =
+        db::active_memories_for_scope(conn, "default", project_id.as_deref()).unwrap_or_default();
     crate::memory::render::build_document_from_records(&mems, crate::db::now_ts())
 }
 
 /// Evidence anchor for an agent-tool write (P4): the session's latest user
 /// message — the one that prompted the save — as `(message_id, quote)`.
 /// `None` when the session has no substantive user message yet.
-fn tool_write_evidence(conn: &rusqlite::Connection, chat_session_id: &str) -> Option<(i64, String)> {
+fn tool_write_evidence(
+    conn: &rusqlite::Connection,
+    chat_session_id: &str,
+) -> Option<(i64, String)> {
     db::list_active_chat_messages(conn, chat_session_id)
         .ok()?
         .into_iter()
@@ -877,8 +1036,15 @@ async fn maybe_backfill_embeddings(app: &AppHandle) -> usize {
     if n > 0 {
         eprintln!("[memory] backfilled {n} embedding(s)");
         let conn = db.0.lock();
-        let _ = db::log_memory_op(&conn, "backfill", None, "", "EMBED", &[],
-                                  &format!("{n} vector(s) backfilled"));
+        let _ = db::log_memory_op(
+            &conn,
+            "backfill",
+            None,
+            "",
+            "EMBED",
+            &[],
+            &format!("{n} vector(s) backfilled"),
+        );
     }
     n
 }
@@ -909,9 +1075,12 @@ mod tests {
 
     #[test]
     fn jitter_stays_in_range_and_varies() {
-        let draws: std::collections::HashSet<usize> =
-            (0..200).map(|_| jitter(EXTRACT_MIN_TURNS, EXTRACT_MAX_TURNS)).collect();
-        assert!(draws.iter().all(|d| (EXTRACT_MIN_TURNS..=EXTRACT_MAX_TURNS).contains(d)));
+        let draws: std::collections::HashSet<usize> = (0..200)
+            .map(|_| jitter(EXTRACT_MIN_TURNS, EXTRACT_MAX_TURNS))
+            .collect();
+        assert!(draws
+            .iter()
+            .all(|d| (EXTRACT_MIN_TURNS..=EXTRACT_MAX_TURNS).contains(d)));
         assert!(draws.len() > 1, "jitter collapsed to one value: {draws:?}");
     }
 
@@ -925,14 +1094,23 @@ mod tests {
         assert!(document_seed(&conn, None).is_none());
 
         let mut m = MemoryRecord::new_extracted(
-            "mem_seed1", kind::IDENTITY, None, "user", "User's name is Sabbir Hossain", 8, None,
+            "mem_seed1",
+            kind::IDENTITY,
+            None,
+            "user",
+            "User's name is Sabbir Hossain",
+            8,
+            None,
         );
         m.last_accessed_at = Some(crate::db::now_ts());
         db::insert_memory(&conn, &m).unwrap();
 
         let seed = document_seed(&conn, None).unwrap();
         assert!(seed.contains("Sabbir Hossain"));
-        assert!(!seed.contains("## "), "seed must be the paragraph-form render: {seed}");
+        assert!(
+            !seed.contains("## "),
+            "seed must be the paragraph-form render: {seed}"
+        );
 
         // A stored document always wins — the seed must not clobber it.
         crate::memory::document::set_document(&conn, Some("# Custom doc"), "user").unwrap();
@@ -946,11 +1124,42 @@ mod tests {
         assert_eq!(tool_write_evidence(&conn, "missing"), None);
 
         let cs = db::create_chat_session(&conn, "openai", "gpt-test", None).unwrap();
-        db::add_chat_message(&conn, &cs.id, "assistant", "Sure, saving that.", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
-        assert_eq!(tool_write_evidence(&conn, &cs.id), None, "no user message yet");
+        db::add_chat_message(
+            &conn,
+            db::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "Sure, saving that.",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            tool_write_evidence(&conn, &cs.id),
+            None,
+            "no user message yet"
+        );
 
-        db::add_chat_message(&conn, &cs.id, "user", "hello", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
-        db::add_chat_message(&conn, &cs.id, "user", "remember that my name is Sabbir Hossain", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        db::add_chat_message(
+            &conn,
+            db::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "user",
+                content: "hello",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db::add_chat_message(
+            &conn,
+            db::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "user",
+                content: "remember that my name is Sabbir Hossain",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let (id, quote) = tool_write_evidence(&conn, &cs.id).unwrap();
         assert_eq!(quote, "remember that my name is Sabbir Hossain");
@@ -979,10 +1188,26 @@ async fn oneshot(
     let base_url = base_url.filter(|b| !b.trim().is_empty());
     match provider {
         "openai" => {
-            openai_oneshot(&client, api_key, base_url.unwrap_or(OpenAIProvider::DEFAULT_BASE), model, system, user).await
+            openai_oneshot(
+                &client,
+                api_key,
+                base_url.unwrap_or(OpenAIProvider::DEFAULT_BASE),
+                model,
+                system,
+                user,
+            )
+            .await
         }
         "openrouter" => {
-            openai_oneshot(&client, api_key, base_url.unwrap_or(OpenRouterProvider::DEFAULT_BASE), model, system, user).await
+            openai_oneshot(
+                &client,
+                api_key,
+                base_url.unwrap_or(OpenRouterProvider::DEFAULT_BASE),
+                model,
+                system,
+                user,
+            )
+            .await
         }
         "openai_compatible" | "local_gguf" => {
             // A missing base URL must be an ERROR, not a fake-success: an
@@ -999,7 +1224,16 @@ async fn oneshot(
             openai_oneshot(&client, api_key, base, model, system, user).await
         }
         "anthropic" => {
-            anthropic_oneshot(&client, api_key, base_url.unwrap_or(AnthropicProvider::DEFAULT_BASE), model, system, user, max_tokens).await
+            anthropic_oneshot(
+                &client,
+                api_key,
+                base_url.unwrap_or(AnthropicProvider::DEFAULT_BASE),
+                model,
+                system,
+                user,
+                max_tokens,
+            )
+            .await
         }
         "anthropic_compatible" => {
             let Some(base) = base_url else {
@@ -1009,6 +1243,8 @@ async fn oneshot(
             };
             anthropic_oneshot(&client, api_key, base, model, system, user, max_tokens).await
         }
-        _ => Err(format!("unsupported provider for memory extraction: {provider}")),
+        _ => Err(format!(
+            "unsupported provider for memory extraction: {provider}"
+        )),
     }
 }

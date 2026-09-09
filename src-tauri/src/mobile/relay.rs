@@ -37,8 +37,8 @@ use crate::secrets;
 
 use super::dispatch::dispatch_mobile;
 use super::protocol::{
-    ChatUsage as MobileChatUsage, DesktopMessage, MobileMessage, ProviderInfo,
-    ProjectCostEntry, LocalModelUsageEntry,
+    ChatUsage as MobileChatUsage, DesktopMessage, LocalModelUsageEntry, MobileMessage,
+    ProjectCostEntry, ProviderInfo,
 };
 use super::relay_ws::OwnerMap;
 
@@ -149,9 +149,7 @@ pub fn broadcast_budget_alert(
     super::push::push_if_phones_disconnected(
         app,
         format!("Budget: {project_name}"),
-        format!(
-            "Spent ${spent_usd:.2} of ${monthly_usd:.2} this month."
-        ),
+        format!("Spent ${spent_usd:.2} of ${monthly_usd:.2} this month."),
     );
 }
 
@@ -221,7 +219,10 @@ pub async fn start_relay(
         .ok()
         .and_then(|ts| ts.tailscale_ip);
     let tailnet_listener = match ts_ip {
-        Some(ip) => TcpListener::bind(format!("{ip}:{port}")).await.ok().map(Arc::new),
+        Some(ip) => TcpListener::bind(format!("{ip}:{port}"))
+            .await
+            .ok()
+            .map(Arc::new),
         None => None,
     };
 
@@ -247,7 +248,9 @@ pub async fn start_relay(
     let owner_map = relay_state.owner_map.clone();
     let app_handle = app.clone();
     tokio::spawn(async move {
-        if let Err(e) = super::relay_owner::start_session_chat_event_listener(&app_handle, owner_map) {
+        if let Err(e) =
+            super::relay_owner::start_session_chat_event_listener(&app_handle, owner_map)
+        {
             eprintln!("[mobile-relay] failed to start session_chat_event listener: {e}");
         }
     });
@@ -260,8 +263,14 @@ pub async fn start_relay(
     {
         let push_app = app.clone();
         app.listen("chat:approval-request", move |event| {
-            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
-            let chat_id = v.get("chatSessionId").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else {
+                return;
+            };
+            let chat_id = v
+                .get("chatSessionId")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
             let summary = v
                 .get("summary")
                 .and_then(|x| x.as_str())
@@ -275,15 +284,21 @@ pub async fn start_relay(
     {
         let push_app = app.clone();
         app.listen("chat:done", move |event| {
-            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
-            let chat_id = v.get("chatSessionId").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else {
+                return;
+            };
+            let chat_id = v
+                .get("chatSessionId")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
             if !chat_id.is_empty() {
                 super::push::push_turn_done_for_mobile_session(&push_app, &chat_id);
             }
         });
     }
 
-tokio::spawn(async move {
+    tokio::spawn(async move {
         let tailnet_addr = tailnet_listener
             .as_ref()
             .and_then(|l| l.local_addr().ok().map(|a| a.to_string()));
@@ -514,12 +529,11 @@ async fn handle_connection(
     // The sink carries the per-connection E2E state alongside it so the
     // request loop, the pump, and the decryptor all share one crypto
     // context (§3.2.11).
-    let write: super::relay_ws::SharedWsWrite = Arc::new(tokio::sync::Mutex::new(
-        super::relay_ws::SinkState {
+    let write: super::relay_ws::SharedWsWrite =
+        Arc::new(tokio::sync::Mutex::new(super::relay_ws::SinkState {
             sink,
             e2e: super::relay_ws::RelayE2E::default(),
-        },
-    ));
+        }));
     let (conn_tx, conn_rx) = super::relay_ws::make_channel();
     // B-25: broadcast registration is DEFERRED until pairing succeeds (the
     // insert used to happen here, so any peer that opened the socket and
@@ -802,9 +816,11 @@ async fn handle_connection(
             }
             MobileMessage::ListSessions => {
                 let sessions = build_session_list(&db, &app);
-                eprintln!("[mobile-relay] ListSessions: {} sessions ({} live)",
+                eprintln!(
+                    "[mobile-relay] ListSessions: {} sessions ({} live)",
                     sessions.len(),
-                    sessions.iter().filter(|s| s.is_live).count());
+                    sessions.iter().filter(|s| s.is_live).count()
+                );
                 let resp = DesktopMessage::SessionList { sessions };
                 let _ = send_msg(&write, &resp).await;
             }
@@ -827,8 +843,16 @@ async fn handle_connection(
                 let turn_write = Arc::clone(&write);
                 let mut turn = tokio::spawn(async move {
                     handle_chat_turn(
-                        provider_id, model, messages, system, effort, gguf_path,
-                        &turn_app, &turn_db, &turn_mgr, &turn_write,
+                        provider_id,
+                        model,
+                        messages,
+                        system,
+                        effort,
+                        gguf_path,
+                        &turn_app,
+                        &turn_db,
+                        &turn_mgr,
+                        &turn_write,
                     )
                     .await
                 });
@@ -879,18 +903,26 @@ async fn handle_connection(
             }
             MobileMessage::CancelChatTurn { chat_session_id } => {
                 chat_mgr.cancel(&chat_session_id);
-                let resp = DesktopMessage::ChatDone { chat_session_id, usage: None };
+                let resp = DesktopMessage::ChatDone {
+                    chat_session_id,
+                    usage: None,
+                };
                 let _ = send_msg(&write, &resp).await;
             }
             MobileMessage::SendToSession { session_id, text } => {
-                eprintln!("[mobile-relay] SendToSession: session={session_id} text_len={}", text.len());
+                eprintln!(
+                    "[mobile-relay] SendToSession: session={session_id} text_len={}",
+                    text.len()
+                );
                 if let Some(pty_state) = app.try_state::<crate::PtyState>() {
                     let pty = &pty_state.0;
                     if let Some(pane_id) = pty.pane_id_for_session(&session_id) {
                         eprintln!("[mobile-relay]   resolved pane_id={pane_id}");
                         let _ = pty.write(&pane_id, &text);
                     } else {
-                        eprintln!("[mobile-relay]   no pane_id found, writing directly to session_id");
+                        eprintln!(
+                            "[mobile-relay]   no pane_id found, writing directly to session_id"
+                        );
                         let _ = pty.write(&session_id, &text);
                     }
                 }
@@ -937,27 +969,39 @@ async fn handle_connection(
                                     cache_creation_input_tokens, cache_read_input_tokens,
                                     reasoning_output_tokens
                                FROM cost_events
-                              WHERE timestamp >= ?1"
-                        ) { Ok(s) => s, Err(_) => return 0.0 };
-                        let rows = stmt.query_map(rusqlite::params![since], |r| {
-                            Ok((
-                                r.get::<_, Option<i64>>(0)?,
-                                r.get::<_, Option<i64>>(1)?,
-                                r.get::<_, Option<String>>(2)?,
-                                r.get::<_, Option<i64>>(3)?,
-                                r.get::<_, Option<i64>>(4)?,
-                                r.get::<_, Option<i64>>(5)?,
-                            ))
-                        }).ok();
+                              WHERE timestamp >= ?1",
+                        ) {
+                            Ok(s) => s,
+                            Err(_) => return 0.0,
+                        };
+                        let rows = stmt
+                            .query_map(rusqlite::params![since], |r| {
+                                Ok((
+                                    r.get::<_, Option<i64>>(0)?,
+                                    r.get::<_, Option<i64>>(1)?,
+                                    r.get::<_, Option<String>>(2)?,
+                                    r.get::<_, Option<i64>>(3)?,
+                                    r.get::<_, Option<i64>>(4)?,
+                                    r.get::<_, Option<i64>>(5)?,
+                                ))
+                            })
+                            .ok();
                         if let Some(rows) = rows {
                             for row in rows.flatten() {
                                 let (i, o, k, cc, cr, r) = row;
                                 let usage = crate::harness_adapters::UsageInfo {
-                                    input_tokens: i, output_tokens: o,
-                                    cache_creation_input_tokens: cc, cache_read_input_tokens: cr,
-                                    reasoning_output_tokens: r, cost_usd: None,
+                                    input_tokens: i,
+                                    output_tokens: o,
+                                    cache_creation_input_tokens: cc,
+                                    cache_read_input_tokens: cr,
+                                    reasoning_output_tokens: r,
+                                    cost_usd: None,
                                 };
-                                if let Some(c) = crate::harness_adapters::pricing::price_usage(&usage, k.as_deref(), &overrides) {
+                                if let Some(c) = crate::harness_adapters::pricing::price_usage(
+                                    &usage,
+                                    k.as_deref(),
+                                    &overrides,
+                                ) {
                                     total += c;
                                 }
                             }
@@ -969,17 +1013,27 @@ async fn handle_connection(
                     let week = priced_sum(now - 7 * 86_400);
                     (today, week)
                 };
-                let _ = send_msg(&write, &DesktopMessage::CostSummary {
-                    today, week, version: 2,
-                }).await;
+                let _ = send_msg(
+                    &write,
+                    &DesktopMessage::CostSummary {
+                        today,
+                        week,
+                        version: 2,
+                    },
+                )
+                .await;
             }
             MobileMessage::GetCostDetails => {
                 let details = build_cost_details(&db);
-                let _ = send_msg(&write, &DesktopMessage::CostDetails {
-                    daily: details.0,
-                    per_project: details.1,
-                    local_models: details.2,
-                }).await;
+                let _ = send_msg(
+                    &write,
+                    &DesktopMessage::CostDetails {
+                        daily: details.0,
+                        per_project: details.1,
+                        local_models: details.2,
+                    },
+                )
+                .await;
             }
             MobileMessage::StartLocalModel { model, gguf_path } => {
                 // The user tapped a (possibly stopped) local model in the
@@ -996,16 +1050,14 @@ async fn handle_connection(
                             let _ = db::set_setting(&conn, "chat.local_gguf.base_url", &base_url);
                             let _ = db::set_setting(&conn, "chat.local_gguf.model", &model);
                         }
-                        let _ = send_msg(&write, &DesktopMessage::LocalModelReady {
-                            model,
-                            base_url,
-                        }).await;
+                        let _ =
+                            send_msg(&write, &DesktopMessage::LocalModelReady { model, base_url })
+                                .await;
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::LocalModelError {
-                            model,
-                            error: e,
-                        }).await;
+                        let _ =
+                            send_msg(&write, &DesktopMessage::LocalModelError { model, error: e })
+                                .await;
                     }
                 }
             }
@@ -1034,18 +1086,31 @@ async fn handle_connection(
                         }
                     }
                     Ok(None) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: session_id.clone(), error: "session not found".to_string(),
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: session_id.clone(),
+                                error: "session not found".to_string(),
+                            },
+                        )
+                        .await;
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: session_id.clone(), error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: session_id.clone(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
-            MobileMessage::CreateSession { project_id, harness } => {
+            MobileMessage::CreateSession {
+                project_id,
+                harness,
+            } => {
                 let session = {
                     let conn = db.lock();
                     crate::db::create_session(&conn, &project_id, &harness)
@@ -1062,8 +1127,11 @@ async fn handle_connection(
                         );
                         let pname = {
                             let conn = db.lock();
-                            crate::db::get_project(&conn, &project_id).ok().flatten()
-                                .map(|p| p.name).unwrap_or_default()
+                            crate::db::get_project(&conn, &project_id)
+                                .ok()
+                                .flatten()
+                                .map(|p| p.name)
+                                .unwrap_or_default()
                         };
                         let info = super::protocol::SessionInfo {
                             id: s.id,
@@ -1075,12 +1143,18 @@ async fn handle_connection(
                             last_active_at: s.last_active_at,
                             is_live: false,
                         };
-                        let _ = send_msg(&write, &DesktopMessage::SessionCreated { session: info }).await;
+                        let _ = send_msg(&write, &DesktopMessage::SessionCreated { session: info })
+                            .await;
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "create".to_string(), error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "create".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -1106,10 +1180,14 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -1144,10 +1222,14 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -1165,10 +1247,14 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -1196,10 +1282,14 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -1217,16 +1307,28 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
-            MobileMessage::SetSessionModel { session_id, provider_id, model } => {
+            MobileMessage::SetSessionModel {
+                session_id,
+                provider_id,
+                model,
+            } => {
                 match dispatch_mobile(
-                    MobileMessage::SetSessionModel { session_id, provider_id, model },
+                    MobileMessage::SetSessionModel {
+                        session_id,
+                        provider_id,
+                        model,
+                    },
                     &app,
                     Arc::clone(&db),
                     Arc::clone(&chat_mgr),
@@ -1238,10 +1340,14 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -1259,10 +1365,14 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -1280,10 +1390,14 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -1301,10 +1415,14 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -1322,10 +1440,14 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -1343,16 +1465,30 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
-            MobileMessage::ResolvePlanProposal { session_id, pending_id, approved, feedback } => {
+            MobileMessage::ResolvePlanProposal {
+                session_id,
+                pending_id,
+                approved,
+                feedback,
+            } => {
                 match dispatch_mobile(
-                    MobileMessage::ResolvePlanProposal { session_id, pending_id, approved, feedback },
+                    MobileMessage::ResolvePlanProposal {
+                        session_id,
+                        pending_id,
+                        approved,
+                        feedback,
+                    },
                     &app,
                     Arc::clone(&db),
                     Arc::clone(&chat_mgr),
@@ -1364,14 +1500,21 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&write, &DesktopMessage::ChatError {
-                            chat_session_id: "session-chat".to_string(),
-                            error: e,
-                        }).await;
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
-            MobileMessage::TranscribeAudio { data_base64, media_type } => {
+            MobileMessage::TranscribeAudio {
+                data_base64,
+                media_type,
+            } => {
                 // Voice notes ride the desktop's whisper sidecar via the same
                 // transcribe core the desktop push-to-talk uses. Async because
                 // the sidecar HTTP call is; handled inline (not through
@@ -1585,7 +1728,9 @@ async fn handle_chat_turn(
         match secrets::get_chat_api_key(&conn, &provider_id_str) {
             Some(k) => k,
             None => {
-                return Err(format!("no API key configured for provider: {provider_id_str}"));
+                return Err(format!(
+                    "no API key configured for provider: {provider_id_str}"
+                ));
             }
         }
     };
@@ -1615,7 +1760,15 @@ async fn handle_chat_turn(
     if let Some(last) = messages.last() {
         if last.role == "user" {
             let conn = db.lock();
-            let _ = db::add_chat_message(&conn, &chat_session_id, "user", &last.content, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None);
+            let _ = db::add_chat_message(
+                &conn,
+                db::NewChatMessage {
+                    chat_session_id: &chat_session_id,
+                    role: "user",
+                    content: &last.content,
+                    ..Default::default()
+                },
+            );
             let _ = db::touch_chat_session(&conn, &chat_session_id);
         }
     }
@@ -1754,20 +1907,44 @@ async fn handle_chat_turn(
             .and_then(crate::harness_adapters::canonical_model_key);
         let _ = db::add_chat_message(
             &conn,
-            &sid,
-            "assistant",
-            &full_text,
-            usage.as_ref().and_then(|u| {
-                if u.input_tokens > 0 || u.output_tokens > 0 { Some(u.input_tokens) } else { None }
-            }),
-            usage.as_ref().and_then(|u| {
-                if u.input_tokens > 0 || u.output_tokens > 0 { Some(u.output_tokens) } else { None }
-            }),
-            usage.as_ref().and_then(|u| {
-                if u.input_tokens > 0 || u.output_tokens > 0 { Some(u.cost_usd) } else { None }
-            }),
-            None, None, None, provider.as_deref(), model_key, None,
-            None, Some(db::now_ts()), None, None, None, None,
+            db::NewChatMessage {
+                chat_session_id: &sid,
+                role: "assistant",
+                content: &full_text,
+                input_tokens: usage.as_ref().and_then(|u| {
+                    if u.input_tokens > 0 || u.output_tokens > 0 {
+                        Some(u.input_tokens)
+                    } else {
+                        None
+                    }
+                }),
+                output_tokens: usage.as_ref().and_then(|u| {
+                    if u.input_tokens > 0 || u.output_tokens > 0 {
+                        Some(u.output_tokens)
+                    } else {
+                        None
+                    }
+                }),
+                cost_usd: usage.as_ref().and_then(|u| {
+                    if u.input_tokens > 0 || u.output_tokens > 0 {
+                        Some(u.cost_usd)
+                    } else {
+                        None
+                    }
+                }),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: provider.as_deref(),
+                model_key: model_key,
+                pricing_estimated_usd: None,
+                started_at: None,
+                completed_at: Some(db::now_ts()),
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
         );
         let _ = db::touch_chat_session(&conn, &sid);
     }
@@ -1870,7 +2047,10 @@ fn build_session_list(
                 .unwrap_or_default();
             let (is_live, status) = if let Some(pty) = pty_state.as_ref() {
                 if let Some(pid) = pty.0.pane_id_for_session(&s.id) {
-                    let state = pty.0.pane_state(&pid).unwrap_or_else(|| "working".to_string());
+                    let state = pty
+                        .0
+                        .pane_state(&pid)
+                        .unwrap_or_else(|| "working".to_string());
                     (true, state)
                 } else {
                     (false, "idle".to_string())
@@ -1913,17 +2093,19 @@ fn build_cost_details(
     // Phase 1: read rollups + local-model usage under one short lock.
     let (daily, per_project_ids, local_models) = {
         let conn = db.lock();
-        let rollups = crate::db::get_cost_rollups_v2(&conn, 14).unwrap_or_else(|_| crate::types::CostRollups {
-            totals: crate::types::CostTotals::default(),
-            per_provider: Vec::new(),
-            daily: Vec::new(),
-            by_kind: crate::types::CostByKind::default(),
-            per_model: Vec::new(),
-            cost_quality: crate::types::CostQuality::default(),
-            per_project: Vec::new(),
-            range_start: String::new(),
-            range_end: String::new(),
-            range_days: 14,
+        let rollups = crate::db::get_cost_rollups_v2(&conn, 14).unwrap_or_else(|_| {
+            crate::types::CostRollups {
+                totals: crate::types::CostTotals::default(),
+                per_provider: Vec::new(),
+                daily: Vec::new(),
+                by_kind: crate::types::CostByKind::default(),
+                per_model: Vec::new(),
+                cost_quality: crate::types::CostQuality::default(),
+                per_project: Vec::new(),
+                range_start: String::new(),
+                range_end: String::new(),
+                range_days: 14,
+            }
         });
         let daily: Vec<super::protocol::DailyCostEntry> = rollups
             .daily
@@ -1988,8 +2170,7 @@ fn build_cost_details(
     // Phase 2: bulk-resolve project names via a single IN-clause query.
     let per_project: Vec<ProjectCostEntry> = {
         let conn = db.lock();
-        let mut names: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+        let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut seen = std::collections::HashSet::new();
         let mut ids: Vec<&str> = Vec::new();
         for p in &per_project_ids {
@@ -2035,8 +2216,12 @@ fn build_cost_details(
     (daily, per_project, local_models)
 }
 
-
-async fn fetch_model_list(client: &reqwest::Client, base: &str, key: &str, auth_style: &str) -> Vec<String> {
+async fn fetch_model_list(
+    client: &reqwest::Client,
+    base: &str,
+    key: &str,
+    auth_style: &str,
+) -> Vec<String> {
     let url = format!("{base}/v1/models");
     let req = match auth_style {
         // Anthropic's endpoint requires the version header alongside the key.
@@ -2044,13 +2229,16 @@ async fn fetch_model_list(client: &reqwest::Client, base: &str, key: &str, auth_
             .get(&url)
             .header("x-api-key", key)
             .header("anthropic-version", "2023-06-01"),
-        _ => client.get(&url).header("Authorization", format!("Bearer {key}")),
+        _ => client
+            .get(&url)
+            .header("Authorization", format!("Bearer {key}")),
     };
     match req.timeout(std::time::Duration::from_secs(5)).send().await {
         Ok(resp) if resp.status().is_success() => {
             if let Ok(json) = resp.json::<Value>().await {
                 if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
-                    return data.iter()
+                    return data
+                        .iter()
                         .filter_map(|v| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
                         .collect();
                 }
@@ -2071,12 +2259,14 @@ async fn probe_api_provider(
     key: &str,
 ) -> Vec<String> {
     let fetched = match id {
-        "openrouter" => {
-            fetch_model_list(client, "https://openrouter.ai/api", key, "bearer").await
-        }
+        "openrouter" => fetch_model_list(client, "https://openrouter.ai/api", key, "bearer").await,
         "anthropic_compatible" | "openai_compatible" => {
             if let Some(base) = base_url {
-                let style = if id == "anthropic_compatible" { "x-api-key" } else { "bearer" };
+                let style = if id == "anthropic_compatible" {
+                    "x-api-key"
+                } else {
+                    "bearer"
+                };
                 fetch_model_list(client, base, key, style).await
             } else {
                 Vec::new()
@@ -2220,28 +2410,25 @@ pub async fn build_available_providers(
     // Fire all probes concurrently. join_all awaits them all; each probe
     // already has its own 5s timeout so the worst-case total wall time is
     // 5s (the slowest one) — typically <1s.
-    let probes = providers_to_probe.iter().map(|(id, _display, _fb, base_url, key)| {
-        let id = id.clone();
-        let fallback = api_providers
-            .iter()
-            .find(|(pid, _, _)| *pid == id.as_str())
-            .map(|(_, _, fb)| *fb)
-            .unwrap_or(&[]);
-        let base_str = base_url.clone();
-        let key_str = key.clone();
-        let client_ref = &client;
-        async move {
-            let models = probe_api_provider(
-                client_ref,
-                &id,
-                fallback,
-                base_str.as_deref(),
-                &key_str,
-            )
-            .await;
-            (id, models)
-        }
-    });
+    let probes = providers_to_probe
+        .iter()
+        .map(|(id, _display, _fb, base_url, key)| {
+            let id = id.clone();
+            let fallback = api_providers
+                .iter()
+                .find(|(pid, _, _)| *pid == id.as_str())
+                .map(|(_, _, fb)| *fb)
+                .unwrap_or(&[]);
+            let base_str = base_url.clone();
+            let key_str = key.clone();
+            let client_ref = &client;
+            async move {
+                let models =
+                    probe_api_provider(client_ref, &id, fallback, base_str.as_deref(), &key_str)
+                        .await;
+                (id, models)
+            }
+        });
     let probed: Vec<(String, Vec<String>)> = futures_util::future::join_all(probes).await;
 
     let mut providers: Vec<ProviderInfo> = Vec::new();
@@ -2279,8 +2466,7 @@ pub async fn build_available_providers(
         let base = base.to_string();
         let client_ref = &client;
         async move {
-            let (models, is_running) =
-                probe_local_endpoint(client_ref, &kind, &base).await;
+            let (models, is_running) = probe_local_endpoint(client_ref, &kind, &base).await;
             (kind, models, is_running)
         }
     });
@@ -2343,7 +2529,11 @@ pub async fn build_available_providers(
             }
             seen.insert(gguf.id.clone());
             let is_running = running_id.as_deref() == Some(&gguf.id);
-            let model_name = gguf.meta.name.clone().unwrap_or_else(|| gguf.filename.clone());
+            let model_name = gguf
+                .meta
+                .name
+                .clone()
+                .unwrap_or_else(|| gguf.filename.clone());
 
             providers.push(ProviderInfo {
                 id: "local_gguf".to_string(),
@@ -2402,16 +2592,18 @@ pub async fn warm_up_local_model(
             .flatten()
     };
     let result = local_state
-        .start(model_name.to_string(), model_path, None, Some(&overrides), user_llama_path)
+        .start(
+            model_name.to_string(),
+            model_path,
+            None,
+            Some(&overrides),
+            user_llama_path,
+        )
         .await
         .map_err(|e| format!("failed to start local model: {e}"))?;
     {
         let conn = app.state::<crate::DbState>().inner().0.lock();
-        crate::chat::local_models::save_last_good_ngl(
-            &conn,
-            &result.model_id,
-            result.n_gpu_layers,
-        );
+        crate::chat::local_models::save_last_good_ngl(&conn, &result.model_id, result.n_gpu_layers);
     }
     Ok(result.base_url)
 }

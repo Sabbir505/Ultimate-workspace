@@ -20,7 +20,11 @@ fn deserialize_session_messages() {
     let json = r#"{"type":"SessionMessages","session_id":"s1","messages":[],"has_more":false}"#;
     let msg: DesktopMessage = serde_json::from_str(json).unwrap();
     match msg {
-        DesktopMessage::SessionMessages { session_id, has_more, .. } => {
+        DesktopMessage::SessionMessages {
+            session_id,
+            has_more,
+            ..
+        } => {
             assert_eq!(session_id, "s1");
             assert!(!has_more);
         }
@@ -46,15 +50,12 @@ fn history_pagination_query() {
     for i in 1..=5 {
         db::add_chat_message(
             &conn,
-            &cs.id,
-            if i % 2 == 0 { "assistant" } else { "user" },
-            &format!("msg {i}"),
-            None,
-            None,
-            None,
-            None, None, None, None, None, None,
-            None, None,
-            None, None, None, None,
+            db::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: if i % 2 == 0 { "assistant" } else { "user" },
+                content: &format!("msg {i}"),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -103,10 +104,12 @@ fn fetch_page_clamps_phone_controlled_limit() {
     for i in 1..=201 {
         db::add_chat_message(
             &conn,
-            &cs.id,
-            "user",
-            &format!("msg {i}"),
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            db::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "user",
+                content: &format!("msg {i}"),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -121,18 +124,21 @@ fn fetch_page_clamps_phone_controlled_limit() {
     let conn2 = db::mem();
     let cs2 = db::create_chat_session(&conn2, "anthropic", "claude-sonnet-4-5", None).unwrap();
     session_chat::ensure_chat_session_owner_column(&conn2).unwrap();
-    conn2.execute(
-        "UPDATE chat_sessions SET owner_session_id = ?1 WHERE id = ?2",
-        rusqlite::params!["s2", &cs2.id],
-    )
-    .unwrap();
+    conn2
+        .execute(
+            "UPDATE chat_sessions SET owner_session_id = ?1 WHERE id = ?2",
+            rusqlite::params!["s2", &cs2.id],
+        )
+        .unwrap();
     for i in 1..=3 {
         db::add_chat_message(
             &conn2,
-            &cs2.id,
-            "user",
-            &format!("msg {i}"),
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            db::NewChatMessage {
+                chat_session_id: &cs2.id,
+                role: "user",
+                content: &format!("msg {i}"),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -152,8 +158,7 @@ fn dispatch_get_session_messages_calls_session_chat_manager() {
     let conn = db::mem();
 
     // No chat_sessions row linked to "no-such-session" → empty page, no more.
-    let (msgs, has_more) =
-        session_chat::fetch_page(&conn, "no-such-session", None, 50).unwrap();
+    let (msgs, has_more) = session_chat::fetch_page(&conn, "no-such-session", None, 50).unwrap();
     assert!(msgs.is_empty());
     assert!(!has_more);
 

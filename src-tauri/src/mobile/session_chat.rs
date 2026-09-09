@@ -15,7 +15,7 @@ use crate::db;
 use crate::types::ChatMessageRecord;
 
 use super::protocol::{
-    ChatAttachment, ChatArtifactPayload, DesktopMessage, MobileMessage, SessionMessageRecord,
+    ChatArtifactPayload, ChatAttachment, DesktopMessage, MobileMessage, SessionMessageRecord,
 };
 use super::relay_owner::SessionChatOwnerPayload;
 
@@ -96,14 +96,15 @@ pub fn fetch_page(
     // wrap in release) instead of yielding a bounded page.
     let limit = limit.min(200);
     let limit_plus_one = (limit + 1) as i64;
-    let mut stmt = db.prepare(
-        "SELECT id, role, content, created_at, input_tokens, output_tokens, cost_usd
+    let mut stmt = db
+        .prepare(
+            "SELECT id, role, content, created_at, input_tokens, output_tokens, cost_usd
          FROM chat_messages
          WHERE chat_session_id = ?1 AND (?2 IS NULL OR id < ?2)
          ORDER BY id DESC
          LIMIT ?3",
-    )
-    .map_err(|e| format!("failed to prepare fetch_page query: {e}"))?;
+        )
+        .map_err(|e| format!("failed to prepare fetch_page query: {e}"))?;
 
     let rows: Vec<ChatMessageRecord> = stmt
         .query_map(
@@ -203,7 +204,14 @@ impl SessionChatManager {
                 pending_id,
                 decision,
                 always_allow,
-            } => handle_resolve_session_approval(&app, &db, &chat_mgr, pending_id, decision, always_allow),
+            } => handle_resolve_session_approval(
+                &app,
+                &db,
+                &chat_mgr,
+                pending_id,
+                decision,
+                always_allow,
+            ),
 
             MobileMessage::RenameSession { session_id, title } => {
                 handle_rename_session(&db, session_id, title)
@@ -231,10 +239,9 @@ impl SessionChatManager {
                 handle_list_session_artifacts(&db, session_id)
             }
 
-            MobileMessage::ReadArtifact {
-                session_id,
-                path,
-            } => handle_read_artifact(app, &db, session_id, &path),
+            MobileMessage::ReadArtifact { session_id, path } => {
+                handle_read_artifact(app, &db, session_id, &path)
+            }
 
             MobileMessage::ResolvePlanProposal {
                 session_id: _,
@@ -244,7 +251,10 @@ impl SessionChatManager {
             } => handle_resolve_plan_proposal(app, pending_id, approved, feedback),
 
             // Other variants are not session-scoped chat and are handled by the relay.
-            _ => Err(format!("message not handled by SessionChatManager: {:?}", msg)),
+            _ => Err(format!(
+                "message not handled by SessionChatManager: {:?}",
+                msg
+            )),
         }
     }
 }
@@ -289,7 +299,13 @@ fn handle_send_chat_message(
         let row = db::get_chat_session(&conn, &id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "chat session missing right after resolve".to_string())?;
-        (id, row.provider, row.model, row.sandbox_policy, row.approval_policy)
+        (
+            id,
+            row.provider,
+            row.model,
+            row.sandbox_policy,
+            row.approval_policy,
+        )
     };
     let sandbox = crate::chat::permission::SandboxPolicy::from_db(&sandbox_policy);
     let approval = crate::chat::permission::ApprovalPolicy::from_db(&approval_policy);
@@ -331,7 +347,8 @@ fn handle_send_chat_message(
         };
         let Some((p, m)) = picked else {
             return Err(
-                "Auto has no usable provider: add a cloud API key in Settings → API Keys.".to_string(),
+                "Auto has no usable provider: add a cloud API key in Settings → API Keys."
+                    .to_string(),
             );
         };
         {
@@ -393,8 +410,16 @@ fn handle_send_chat_message(
     //    history matches what the model actually saw).
     {
         let conn = db.lock();
-        db::add_chat_message(&conn, &chat_session_id, "user", &content, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
-            .map_err(|e| format!("failed to persist user message: {e}"))?;
+        db::add_chat_message(
+            &conn,
+            db::NewChatMessage {
+                chat_session_id: &chat_session_id,
+                role: "user",
+                content: &content,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("failed to persist user message: {e}"))?;
         db::touch_chat_session(&conn, &chat_session_id)
             .map_err(|e| format!("failed to touch chat session: {e}"))?;
     }
@@ -405,7 +430,10 @@ fn handle_send_chat_message(
     //    history selection: compacted-active rows for local models.
     let mut messages: Vec<crate::chat::providers::ChatMessage> = {
         let conn = db.lock();
-        let records = if matches!(provider_id, crate::chat::providers::ChatProviderId::LocalGguf) {
+        let records = if matches!(
+            provider_id,
+            crate::chat::providers::ChatProviderId::LocalGguf
+        ) {
             db::list_active_chat_messages(&conn, &chat_session_id)
         } else {
             db::list_chat_messages(&conn, &chat_session_id)
@@ -538,7 +566,8 @@ fn handle_resolve_session_approval(
 
     // "Always allow" needs the tool name, so look at the pending approval
     // BEFORE taking it. take_pending_approval consumes the entry.
-    let pending = chat_mgr.take_pending_approval(&pending_id)
+    let pending = chat_mgr
+        .take_pending_approval(&pending_id)
         .ok_or_else(|| format!("unknown pending approval id: {pending_id}"))?;
     let tool = pending.tool.clone();
     let chat_session_id = pending.chat_session_id.clone();
@@ -738,9 +767,9 @@ fn artifact_kind(path: &str) -> String {
 /// Extensions the phone can preview as text. Everything else (pdf, png,
 /// docx, …) rides as base64 and gets a save/share affordance instead.
 const PREVIEWABLE_TEXT_EXTS: &[&str] = &[
-    "md", "markdown", "txt", "json", "csv", "tsv", "toml", "yaml", "yml",
-    "html", "css", "svg", "xml", "js", "jsx", "ts", "tsx", "py", "rs", "go",
-    "java", "c", "h", "cpp", "sh", "bat", "ps1", "sql", "log",
+    "md", "markdown", "txt", "json", "csv", "tsv", "toml", "yaml", "yml", "html", "css", "svg",
+    "xml", "js", "jsx", "ts", "tsx", "py", "rs", "go", "java", "c", "h", "cpp", "sh", "bat", "ps1",
+    "sql", "log",
 ];
 /// Caps: text previews get a prefix; binaries get nothing (the phone shows a
 /// save/share card instead of trying to render megabytes).
@@ -832,10 +861,13 @@ fn handle_read_artifact(
     let is_text = PREVIEWABLE_TEXT_EXTS.contains(&kind.as_str());
 
     if is_text {
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("failed to read artifact: {e}"))?;
+        let bytes = std::fs::read(path).map_err(|e| format!("failed to read artifact: {e}"))?;
         let truncated = bytes.len() > TEXT_PREVIEW_CAP;
-        let take = if truncated { TEXT_PREVIEW_CAP } else { bytes.len() };
+        let take = if truncated {
+            TEXT_PREVIEW_CAP
+        } else {
+            bytes.len()
+        };
         // Text extensions may still hold non-UTF-8 bytes; lossy keeps the
         // preview rendering instead of failing the whole request.
         let text = String::from_utf8_lossy(&bytes[..take]).to_string();
@@ -853,8 +885,7 @@ fn handle_read_artifact(
     match meta {
         Ok(m) if m.len() as usize <= BINARY_CAP => {
             use base64::Engine as _;
-            let bytes = std::fs::read(path)
-                .map_err(|e| format!("failed to read artifact: {e}"))?;
+            let bytes = std::fs::read(path).map_err(|e| format!("failed to read artifact: {e}"))?;
             Ok(vec![DesktopMessage::ArtifactContent {
                 session_id: owner_session_id,
                 path: path.to_string(),

@@ -90,7 +90,11 @@ pub struct AgentSessionManager {
 ///   turn on the request until we POST the answer to its reply endpoint.
 pub enum PendingAskRoute {
     FollowUpTurn,
-    OpenCode { base_url: String, oc_session_id: String, request_id: String },
+    OpenCode {
+        base_url: String,
+        oc_session_id: String,
+        request_id: String,
+    },
 }
 
 /// One surfaced question awaiting the user's answer.
@@ -113,7 +117,11 @@ pub struct SendCtx {
 
 impl Default for SendCtx {
     fn default() -> Self {
-        Self { cwd: None, project_id: None, connectors: Arc::new(Vec::new()) }
+        Self {
+            cwd: None,
+            project_id: None,
+            connectors: Arc::new(Vec::new()),
+        }
     }
 }
 
@@ -218,7 +226,14 @@ impl AgentSessionManager {
         self.pending_asks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(chat_session_id.to_string(), PendingAsk { pending_id: pending_id.clone(), questions, route });
+            .insert(
+                chat_session_id.to_string(),
+                PendingAsk {
+                    pending_id: pending_id.clone(),
+                    questions,
+                    route,
+                },
+            );
         pending_id
     }
 
@@ -256,11 +271,7 @@ impl AgentSessionManager {
     /// with "a turn is already running" and the answer was silently lost.
     /// The follow-up must wait for the asking turn to end. Returns false on
     /// timeout (caller surfaces the failure instead of dropping the answer).
-    pub fn wait_for_turn_idle(
-        &self,
-        chat_session_id: &str,
-        timeout: std::time::Duration,
-    ) -> bool {
+    pub fn wait_for_turn_idle(&self, chat_session_id: &str, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let in_flight = {
@@ -371,36 +382,39 @@ impl AgentSessionManager {
                 sessions
                     .entry(chat_session_id.to_string())
                     .or_insert_with(|| {
-                    // Restore a previously captured CLI session id (persisted by
-                    // the reader thread at end of turn) so conversation context
-                    // survives app restarts, not just cancels.
-                    let stored = {
-                        let conn = db.0.lock();
-                        crate::db::get_setting(&conn, &cli_session_key(harness, chat_session_id))
+                        // Restore a previously captured CLI session id (persisted by
+                        // the reader thread at end of turn) so conversation context
+                        // survives app restarts, not just cancels.
+                        let stored = {
+                            let conn = db.0.lock();
+                            crate::db::get_setting(
+                                &conn,
+                                &cli_session_key(harness, chat_session_id),
+                            )
                             .ok()
                             .flatten()
-                    };
-                    Arc::new(Mutex::new(AgentChild {
-                        harness: harness.to_string(),
-                        model: model.to_string(),
-                        child: None,
-                        spawned_model: None,
-                        spawned_mode: None,
-                        cli_session_id: Arc::new(Mutex::new(stored)),
-                        turn_in_flight: Arc::new(AtomicBool::new(false)),
-                        reader_alive: Arc::new(AtomicBool::new(false)),
-                        proc_generation: Arc::new(AtomicU64::new(0)),
-                        cancelled: Arc::new(AtomicBool::new(false)),
-                        stdin: Arc::new(Mutex::new(None)),
-                        acp_pending: Arc::new(Mutex::new(None)),
-                        acp_request_id: Arc::new(Mutex::new(None)),
-                        send_ctx: std::sync::Mutex::new(None),
-                        oc_base_url: None,
-                        oc_full: Arc::new(Mutex::new(String::new())),
-                        oc_in_think: Arc::new(Mutex::new(false)),
-                        oc_last_event_ms: Arc::new(AtomicU64::new(0)),
-                        oc_reader_alive: Arc::new(AtomicBool::new(false)),
-                    }))
+                        };
+                        Arc::new(Mutex::new(AgentChild {
+                            harness: harness.to_string(),
+                            model: model.to_string(),
+                            child: None,
+                            spawned_model: None,
+                            spawned_mode: None,
+                            cli_session_id: Arc::new(Mutex::new(stored)),
+                            turn_in_flight: Arc::new(AtomicBool::new(false)),
+                            reader_alive: Arc::new(AtomicBool::new(false)),
+                            proc_generation: Arc::new(AtomicU64::new(0)),
+                            cancelled: Arc::new(AtomicBool::new(false)),
+                            stdin: Arc::new(Mutex::new(None)),
+                            acp_pending: Arc::new(Mutex::new(None)),
+                            acp_request_id: Arc::new(Mutex::new(None)),
+                            send_ctx: std::sync::Mutex::new(None),
+                            oc_base_url: None,
+                            oc_full: Arc::new(Mutex::new(String::new())),
+                            oc_in_think: Arc::new(Mutex::new(false)),
+                            oc_last_event_ms: Arc::new(AtomicU64::new(0)),
+                            oc_reader_alive: Arc::new(AtomicBool::new(false)),
+                        }))
                     }),
             )
         };
@@ -431,10 +445,7 @@ impl AgentSessionManager {
 
         // Workspace snapshot for RELAY_ASK follow-up turns: the answer turn
         // must run where the asking turn ran (same cwd/project/connectors).
-        *entry
-            .send_ctx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(SendCtx {
+        *entry.send_ctx.lock().unwrap_or_else(|e| e.into_inner()) = Some(SendCtx {
             cwd: cwd.map(|c| c.to_string()),
             project_id: project_id.map(|p| p.to_string()),
             connectors: Arc::new(connectors.to_vec()),
@@ -446,7 +457,12 @@ impl AgentSessionManager {
         // the gate must be evaluated afterwards. Built BEFORE the user message
         // below is persisted, so the transcript covers only prior turns; this
         // turn's message rides in `content` verbatim.
-        let fresh_cli = entry.cli_session_id.lock().ok().and_then(|g| g.clone()).is_none();
+        let fresh_cli = entry
+            .cli_session_id
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_none();
         let context_primer = if fresh_cli {
             // `primer_summary` (when the async command managed to pre-build
             // one) carries a structured summary of the turns that don't fit
@@ -473,8 +489,16 @@ impl AgentSessionManager {
         // check so a rejected turn can't orphan a user message.
         {
             let conn = db.0.lock();
-            crate::db::add_chat_message(&conn, chat_session_id, "user", content, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
-                .map_err(|e| e.to_string())?;
+            crate::db::add_chat_message(
+                &conn,
+                crate::db::NewChatMessage {
+                    chat_session_id: chat_session_id,
+                    role: "user",
+                    content: content,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         // Prepend the Relay persona + the user's custom system prompt
@@ -513,8 +537,9 @@ impl AgentSessionManager {
         };
         let effective = {
             let conn = db.0.lock();
-            let custom: Option<String> =
-                crate::db::get_setting(&conn, "assistant.systemPrompt").ok().flatten();
+            let custom: Option<String> = crate::db::get_setting(&conn, "assistant.systemPrompt")
+                .ok()
+                .flatten();
             let mut base = match &instructions_prefix {
                 Some(ins) => format!("{ins}\n\n"),
                 None => String::new(),
@@ -558,16 +583,83 @@ impl AgentSessionManager {
         // helpers take `&mut AgentChild`.
         let entry = &mut *entry;
         match harness {
-            "claude_code" => send_claude_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, connectors),
-            "kimi_code" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Kimi, connectors),
-            "opencode" => send_opencode_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, connectors),
-            "pi" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Pi, connectors),
-            "omp" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Omp, connectors),
-            "commandcode" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::CommandCode, connectors),
-            s if s.starts_with("acp:") => {
-                send_acp_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, &s[4..])
-            }
-            other => Err(format!("harness '{other}' has no headless chat backend yet")),
+            "claude_code" => send_claude_turn(
+                app,
+                db,
+                chat_session_id,
+                &effective,
+                entry,
+                cwd,
+                project_id,
+                connectors,
+            ),
+            "kimi_code" => spawn_per_turn(
+                app,
+                db,
+                chat_session_id,
+                &effective,
+                entry,
+                cwd,
+                project_id,
+                PerTurn::Kimi,
+                connectors,
+            ),
+            "opencode" => send_opencode_turn(
+                app,
+                db,
+                chat_session_id,
+                &effective,
+                entry,
+                cwd,
+                project_id,
+                connectors,
+            ),
+            "pi" => spawn_per_turn(
+                app,
+                db,
+                chat_session_id,
+                &effective,
+                entry,
+                cwd,
+                project_id,
+                PerTurn::Pi,
+                connectors,
+            ),
+            "omp" => spawn_per_turn(
+                app,
+                db,
+                chat_session_id,
+                &effective,
+                entry,
+                cwd,
+                project_id,
+                PerTurn::Omp,
+                connectors,
+            ),
+            "commandcode" => spawn_per_turn(
+                app,
+                db,
+                chat_session_id,
+                &effective,
+                entry,
+                cwd,
+                project_id,
+                PerTurn::CommandCode,
+                connectors,
+            ),
+            s if s.starts_with("acp:") => send_acp_turn(
+                app,
+                db,
+                chat_session_id,
+                &effective,
+                entry,
+                cwd,
+                project_id,
+                &s[4..],
+            ),
+            other => Err(format!(
+                "harness '{other}' has no headless chat backend yet"
+            )),
         }
     }
 
@@ -605,7 +697,10 @@ impl AgentSessionManager {
                     if let Some(stdin) = guard.as_mut() {
                         let rid = entry.acp_request_id.lock().ok().and_then(|g| *g);
                         if let Some(rid) = rid {
-                            let line = crate::acp::encode_notification("request/cancel", &json!({ "requestId": rid }));
+                            let line = crate::acp::encode_notification(
+                                "request/cancel",
+                                &json!({ "requestId": rid }),
+                            );
                             let _ = write_acp_line(stdin, &line);
                         }
                     }
@@ -641,7 +736,18 @@ impl AgentSessionManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(chat_session_id);
-        emit_done(Some(app), chat_session_id, None, None, None, None, None, None, None, None);
+        emit_done(
+            Some(app),
+            chat_session_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         Ok(())
     }
 
@@ -760,12 +866,14 @@ impl AgentSessionManager {
 /// child is reaped, and the kill path skips children that already exited, so
 /// a recycled pid can never be hit. BTreeMap only because `BTreeMap::new` is
 /// const (HashMap's RandomState isn't).
-static ONE_SHOT_CHILDREN: Mutex<BTreeMap<u32, Arc<Mutex<Child>>>> =
-    Mutex::new(BTreeMap::new());
+static ONE_SHOT_CHILDREN: Mutex<BTreeMap<u32, Arc<Mutex<Child>>>> = Mutex::new(BTreeMap::new());
 
 fn register_one_shot_child(child: &Arc<Mutex<Child>>) -> Option<u32> {
     let pid = child.lock().ok()?.id();
-    ONE_SHOT_CHILDREN.lock().ok()?.insert(pid, Arc::clone(child));
+    ONE_SHOT_CHILDREN
+        .lock()
+        .ok()?
+        .insert(pid, Arc::clone(child));
     Some(pid)
 }
 
@@ -971,11 +1079,7 @@ fn assemble_one_shot_prompt(
 /// message itself is forwarded verbatim in `content`. `summary` (built async
 /// by the send command when the dropped head was large enough) rides on top
 /// of the verbatim tail.
-fn build_context_primer(
-    db: &DbState,
-    chat_session_id: &str,
-    summary: Option<&str>,
-) -> String {
+fn build_context_primer(db: &DbState, chat_session_id: &str, summary: Option<&str>) -> String {
     let records = {
         let conn = db.0.lock();
         // Same rows the built-in providers would re-send (compaction folds and
@@ -1192,7 +1296,6 @@ pub(crate) async fn build_primer_summary(
     Some(summary)
 }
 
-
 /// DB key for the model id the harness LAST actually ran (assistant
 /// message.model / message info.modelID). Feeds the composer's context meter
 /// so it shows the real model — a custom/remapped harness setup used to keep
@@ -1287,29 +1390,28 @@ fn decode_attachment_b64(data: &str) -> Option<Vec<u8>> {
 fn sanitize_attachment_name(name: &str) -> String {
     const MAX_STEM: usize = 60;
     let stem_ext = name.rsplit_once('.');
-    let sanitize_part =
-        |s: &str| -> String {
-            let mapped: String = s
-                .chars()
-                .map(|c| {
-                    if c.is_alphanumeric() || matches!(c, '-' | '_') {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            // Collapse runs of separators so "my report (final)" reads
-            // my_report_final instead of my_report__final_.
-            let mut collapsed = String::with_capacity(mapped.len());
-            for c in mapped.chars() {
-                if c == '_' && collapsed.ends_with('_') {
-                    continue;
+    let sanitize_part = |s: &str| -> String {
+        let mapped: String = s
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || matches!(c, '-' | '_') {
+                    c
+                } else {
+                    '_'
                 }
-                collapsed.push(c);
+            })
+            .collect();
+        // Collapse runs of separators so "my report (final)" reads
+        // my_report_final instead of my_report__final_.
+        let mut collapsed = String::with_capacity(mapped.len());
+        for c in mapped.chars() {
+            if c == '_' && collapsed.ends_with('_') {
+                continue;
             }
-            collapsed.trim_matches('_').to_string()
-        };
+            collapsed.push(c);
+        }
+        collapsed.trim_matches('_').to_string()
+    };
     let (stem, ext) = match stem_ext {
         Some((stem, ext)) => (sanitize_part(stem), Some(sanitize_part(ext))),
         None => (sanitize_part(name), None),
@@ -1344,7 +1446,10 @@ fn write_agent_attachment_file(
         .join("chat-attachments")
         .join(sanitize_attachment_name(chat_session_id));
     std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!("{millis}_{idx:02}_{}", sanitize_attachment_name(name)));
+    let path = dir.join(format!(
+        "{millis}_{idx:02}_{}",
+        sanitize_attachment_name(name)
+    ));
     std::fs::write(&path, bytes).ok()?;
     Some(path)
 }
@@ -1572,10 +1677,7 @@ fn send_acp_turn(
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("failed to spawn ACP agent '{}': {e}", agent.display_name))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or("failed to capture ACP stdout")?;
+        let stdout = child.stdout.take().ok_or("failed to capture ACP stdout")?;
         {
             let mut guard = entry.stdin.lock().map_err(|e| e.to_string())?;
             *guard = child.stdin.take();
@@ -1741,11 +1843,7 @@ fn read_acp_stream(
                     {
                         // Handshake or in-flight turn request failed → the
                         // turn is over before it streamed anything.
-                        emit_error(
-                            app,
-                            sid,
-                            &format!("ACP request failed: {msg}"),
-                        );
+                        emit_error(app, sid, &format!("ACP request failed: {msg}"));
                         full.clear();
                         crate::chat::turn_perf::unregister(sid);
                         perf = None;
@@ -1799,11 +1897,7 @@ fn read_acp_stream(
                         .and_then(|s| s.as_str())
                         .map(|s| s.to_string());
                     let Some(sess) = sess else {
-                        emit_error(
-                            app,
-                            sid,
-                            "ACP agent returned no sessionId for session/new",
-                        );
+                        emit_error(app, sid, "ACP agent returned no sessionId for session/new");
                         full.clear();
                         // B-4: returning here used to leave `entry.child`
                         // occupied with a live agent and no reader — the next
@@ -1864,7 +1958,8 @@ fn read_acp_stream(
                                 emit_token(app, sid, &wrapped);
                             }
                             AcpEvent::ToolCall { id, name, input } => {
-                                let marker = format!("<tool>{}</tool>", tool_meta_generic(&name, &input));
+                                let marker =
+                                    format!("<tool>{}</tool>", tool_meta_generic(&name, &input));
                                 full.push_str(&marker);
                                 emit_token(app, sid, &marker);
                                 // v1 does not execute ACP tools — answer with
@@ -1872,9 +1967,7 @@ fn read_acp_stream(
                                 // forever on a result that never comes.
                                 reply_acp_tool_error(&shared_stdin, session_cell, &id);
                             }
-                            AcpEvent::Finished
-                            | AcpEvent::Failed(_)
-                            | AcpEvent::PromptIgnored => {}
+                            AcpEvent::Finished | AcpEvent::Failed(_) | AcpEvent::PromptIgnored => {}
                         }
                     }
                 }
@@ -1901,16 +1994,27 @@ fn read_acp_stream(
                         full.clear();
                         crate::chat::turn_perf::unregister(sid);
                     } else {
-                        finish_turn(app, db, sid, &mut full, None, None, None, None, None, &mut watches, started, None);
+                        finish_turn(
+                            app,
+                            db,
+                            sid,
+                            &mut full,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            &mut watches,
+                            started,
+                            None,
+                        );
                     }
                     // Both paths above closed the turn's accumulator
                     // (finish_turn unregisters internally) — drop the handle
                     // so the next turn registers a fresh one.
                     perf = None;
-                    if should_clear_in_flight(
-                        proc_generation.load(Ordering::SeqCst),
-                        my_generation,
-                    ) {
+                    if should_clear_in_flight(proc_generation.load(Ordering::SeqCst), my_generation)
+                    {
                         in_flight.store(false, Ordering::SeqCst);
                     }
                     pending_request_id = None;
@@ -1921,14 +2025,14 @@ fn read_acp_stream(
                     }
                 }
                 "session/error" => {
-                    if let AcpEvent::Failed(m) = crate::acp::events::translate_session_error(&params) {
+                    if let AcpEvent::Failed(m) =
+                        crate::acp::events::translate_session_error(&params)
+                    {
                         emit_error(app, sid, &m);
                     }
                     full.clear();
-                    if should_clear_in_flight(
-                        proc_generation.load(Ordering::SeqCst),
-                        my_generation,
-                    ) {
+                    if should_clear_in_flight(proc_generation.load(Ordering::SeqCst), my_generation)
+                    {
                         in_flight.store(false, Ordering::SeqCst);
                     }
                     pending_request_id = None;
@@ -2156,7 +2260,12 @@ impl DirWatch {
             // pre-B6 behavior.
             *touched.lock().unwrap() = None;
         }
-        Self { dir, before, touched, _watcher: watcher }
+        Self {
+            dir,
+            before,
+            touched,
+            _watcher: watcher,
+        }
     }
 
     /// Files created/modified since the last call; refreshes the baseline.
@@ -2197,8 +2306,10 @@ impl DirWatch {
                 }
                 // Same previewable-extension filter the full-walk path
                 // applies via changed_previewable_files.
-                let mut filtered: Vec<String> =
-                    changed.into_iter().filter(|rel| previewable_ext(rel)).collect();
+                let mut filtered: Vec<String> = changed
+                    .into_iter()
+                    .filter(|rel| previewable_ext(rel))
+                    .collect();
                 filtered.sort();
                 filtered
             }
@@ -2243,7 +2354,10 @@ fn snapshot_dir(dir: &Path) -> HashMap<String, (SystemTime, u64)> {
                 .unwrap_or_else(|_| entry.path())
                 .to_string_lossy()
                 .replace('\\', "/");
-            out.insert(rel, (md.modified().unwrap_or(SystemTime::UNIX_EPOCH), md.len()));
+            out.insert(
+                rel,
+                (md.modified().unwrap_or(SystemTime::UNIX_EPOCH), md.len()),
+            );
         }
     }
     out
@@ -2281,13 +2395,47 @@ pub(crate) fn previewable_ext(path: &str) -> bool {
         .to_ascii_lowercase();
     matches!(
         ext.as_str(),
-        "md" | "markdown" | "csv" | "json" | "html" | "htm" | "txt" | "log" | "text"
-            | "js" | "ts" | "tsx" | "jsx" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h"
-            | "hpp" | "sh" | "bash" | "yaml" | "yml" | "toml" | "xml" | "sql" | "rb" | "php"
+        "md" | "markdown"
+            | "csv"
+            | "json"
+            | "html"
+            | "htm"
+            | "txt"
+            | "log"
+            | "text"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "py"
+            | "rs"
+            | "go"
+            | "java"
+            | "c"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "sh"
+            | "bash"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "xml"
+            | "sql"
+            | "rb"
+            | "php"
             | "css"
-            | "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "svg"
+            | "bmp"
             | "pdf"
-            | "docx" | "pptx" | "xlsx"
+            | "docx"
+            | "pptx"
+            | "xlsx"
     )
 }
 
@@ -2295,7 +2443,10 @@ pub(crate) fn previewable_ext(path: &str) -> bool {
 /// has no `--mcp-config` flag — it reads MCP servers from an opencode.json
 /// "mcp" section, pointed at via the OPENCODE_CONFIG env var on the spawn.
 /// Legacy fallback for per-turn spawns when the full bundle failed to write.
-fn resolve_opencode_config(app: &AppHandle, project_id: Option<&str>) -> Option<std::path::PathBuf> {
+fn resolve_opencode_config(
+    app: &AppHandle,
+    project_id: Option<&str>,
+) -> Option<std::path::PathBuf> {
     let data_dir = crate::user_dirs::app_data_dir(app);
     browser_mcp_register::write_opencode_config(&data_dir, project_id?, bound_port())
 }
@@ -2310,7 +2461,9 @@ fn resolve_opencode_config(app: &AppHandle, project_id: Option<&str>) -> Option<
 /// configured dir. The spawn dir (`spawn_dir`) remains a separate concept: it
 /// is only the CLI's working directory, never the advertised artifacts target.
 pub(crate) fn artifacts_dir_for_bundle(app: &AppHandle, _cwd: Option<&str>) -> String {
-    crate::chat::dispatch::artifacts_dir(app).to_string_lossy().into_owned()
+    crate::chat::dispatch::artifacts_dir(app)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Harness label used in the per-turn persona ("running on the … engine").
@@ -2373,7 +2526,11 @@ fn harness_context_section(
             // standing identity core only; the harness CLIs load more via
             // their own memory channels/tools.
             if let Some(rendered) = crate::memory::on_demand_injection(
-                &conn, None, project_id, crate::db::now_ts(), false,
+                &conn,
+                None,
+                project_id,
+                crate::db::now_ts(),
+                false,
             ) {
                 if !rendered.trim().is_empty() {
                     parts.push(rendered);
@@ -2413,8 +2570,9 @@ pub(crate) fn resolve_harness_bundle(
     // way to learn where Relay's artifacts live, so "open the report we made"
     // used to resolve to a shrug. Default export folder + the 10 most recent
     // artifacts (newest first, from the DB).
-    let default_export_dir =
-        crate::chat::dispatch::artifacts_dir(app).to_string_lossy().into_owned();
+    let default_export_dir = crate::chat::dispatch::artifacts_dir(app)
+        .to_string_lossy()
+        .into_owned();
     let recent: Vec<String> = app
         .try_state::<DbState>()
         .map(|db| {
@@ -2437,7 +2595,18 @@ pub(crate) fn resolve_harness_bundle(
     let gallery = gallery_servers_for_bundle(app);
     let context_section = harness_context_section(app, project_id, connectors, &gallery);
     crate::harness_bundle::write_bundle(
-        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), sandbox, approval, crate::browser_mcp::bound_port(), connectors, &gallery, &artifacts_section, &context_section)
+        &data_dir,
+        project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG),
+        cwd,
+        Some(artifacts_dir.as_str()),
+        sandbox,
+        approval,
+        crate::browser_mcp::bound_port(),
+        connectors,
+        &gallery,
+        &artifacts_section,
+        &context_section,
+    )
 }
 
 fn spawn_claude(
@@ -2525,8 +2694,19 @@ fn spawn_claude(
     // Relay-owned bundle: instructions, permissions, and both MCP servers
     // (browser + tools). Registration failure degrades to no extra flags —
     // the turn still runs, just without relay's prompt/tools.
-    if let Some(bundle) = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, Some(&sandbox_str), Some(&approval_str)) {
-        args.extend(crate::harness_bundle::claude_bundle_args(&bundle, &artifacts_dir_for_bundle(app, cwd)));
+    if let Some(bundle) = resolve_harness_bundle(
+        app,
+        project_id,
+        cwd,
+        artifacts_dir_for_bundle(app, cwd),
+        connectors,
+        Some(&sandbox_str),
+        Some(&approval_str),
+    ) {
+        args.extend(crate::harness_bundle::claude_bundle_args(
+            &bundle,
+            &artifacts_dir_for_bundle(app, cwd),
+        ));
     }
     let spec = resolve_for_spawn(&CommandSpec {
         program: "claude".into(),
@@ -2575,8 +2755,12 @@ fn spawn_claude(
                 .to_string();
                 let _ = stdin
                     .write_all(init.as_bytes())
-                    .and_then(|_| stdin.write_all(b"
-"))
+                    .and_then(|_| {
+                        stdin.write_all(
+                            b"
+",
+                        )
+                    })
                     .and_then(|_| stdin.flush());
             }
         }
@@ -2722,10 +2906,13 @@ fn handle_can_use_tool(
     // Resolve the shared approval registry. `try_state` (not `state`): the
     // reader thread also runs in unit tests / relay contexts where the app
     // state may not be registered — a miss must deny, not panic.
-    let mgr = app.and_then(|a| a.try_state::<crate::ChatState>()).map(|s| Arc::clone(&s.0));
+    let mgr = app
+        .and_then(|a| a.try_state::<crate::ChatState>())
+        .map(|s| Arc::clone(&s.0));
 
     let (approved, pending_id) = if let (Some(app), Some(mgr)) = (app, mgr) {
-        let (pending_id, rx) = mgr.register_pending_approval(sid, &tool, input.clone(), summary.clone());
+        let (pending_id, rx) =
+            mgr.register_pending_approval(sid, &tool, input.clone(), summary.clone());
         let _ = app.emit(
             "chat:approval-request",
             crate::types::ChatApprovalRequestPayload {
@@ -2762,8 +2949,12 @@ fn handle_can_use_tool(
         if let Some(stdin) = guard.as_mut() {
             let _ = stdin
                 .write_all(line.as_bytes())
-                .and_then(|_| stdin.write_all(b"
-"))
+                .and_then(|_| {
+                    stdin.write_all(
+                        b"
+",
+                    )
+                })
                 .and_then(|_| stdin.flush());
         }
     }
@@ -2876,7 +3067,7 @@ fn ask_user_skip_response(request_id: &str) -> Value {
             "response": {
                 "behavior": "deny",
                 "message": "The user dismissed the question without answering. \
-Continue with your best judgment and state any assumption you make.",
+    Continue with your best judgment and state any assumption you make.",
             },
         },
     })
@@ -2991,8 +3182,19 @@ fn read_claude_stream(
                             if let Some(u) = v.pointer("/event/message/usage") {
                                 p.note_round_usage(
                                     u.get("input_tokens").and_then(|t| t.as_i64()).unwrap_or(0),
-                                    usage_i64(u, &["cache_read_input_tokens", "cacheReadInputTokens"]).unwrap_or(0),
-                                    usage_i64(u, &["cache_creation_input_tokens", "cacheCreationInputTokens"]).unwrap_or(0),
+                                    usage_i64(
+                                        u,
+                                        &["cache_read_input_tokens", "cacheReadInputTokens"],
+                                    )
+                                    .unwrap_or(0),
+                                    usage_i64(
+                                        u,
+                                        &[
+                                            "cache_creation_input_tokens",
+                                            "cacheCreationInputTokens",
+                                        ],
+                                    )
+                                    .unwrap_or(0),
                                     false,
                                 );
                             }
@@ -3006,14 +3208,10 @@ fn read_claude_stream(
                     _ => {}
                 }
                 let delta = v.pointer("/event/delta");
-                match delta
-                    .and_then(|d| d.get("type"))
-                    .and_then(|t| t.as_str())
-                {
+                match delta.and_then(|d| d.get("type")).and_then(|t| t.as_str()) {
                     Some("text_delta") => {
-                        if let Some(text) = delta
-                            .and_then(|d| d.get("text"))
-                            .and_then(|t| t.as_str())
+                        if let Some(text) =
+                            delta.and_then(|d| d.get("text")).and_then(|t| t.as_str())
                         {
                             if in_think {
                                 full.push_str("</think>");
@@ -3169,10 +3367,7 @@ fn read_claude_stream(
                         .iter()
                         .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
                     {
-                        let is_error = r
-                            .get("is_error")
-                            .and_then(|e| e.as_bool())
-                            .unwrap_or(false);
+                        let is_error = r.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
                         let text = extract_result_text(r.get("content"));
                         if !parent_id.is_empty() {
                             tools.route_subagent_result(app, sid, parent_id, &text, is_error);
@@ -3237,8 +3432,12 @@ fn read_claude_stream(
                         }
                     }
                     let usage = v.get("usage");
-                    let input = usage.and_then(|u| u.get("input_tokens")).and_then(|t| t.as_i64());
-                    let output = usage.and_then(|u| u.get("output_tokens")).and_then(|t| t.as_i64());
+                    let input = usage
+                        .and_then(|u| u.get("input_tokens"))
+                        .and_then(|t| t.as_i64());
+                    let output = usage
+                        .and_then(|u| u.get("output_tokens"))
+                        .and_then(|t| t.as_i64());
                     let cost = v.get("total_cost_usd").and_then(|c| c.as_f64());
                     // claude's input_tokens EXCLUDES cached tokens — the cache
                     // halves of the report carry 80-95% of the prompt in
@@ -3247,10 +3446,15 @@ fn read_claude_stream(
                     // built-in chat's full-prompt accounting. Absent fields
                     // (older CLIs) stay NULL; present-but-zero is a true
                     // report and is stored as 0.
-                    let cache_creation = usage
-                        .and_then(|u| usage_i64(u, &["cache_creation_input_tokens", "cacheCreationInputTokens"]));
-                    let cache_read = usage
-                        .and_then(|u| usage_i64(u, &["cache_read_input_tokens", "cacheReadInputTokens"]));
+                    let cache_creation = usage.and_then(|u| {
+                        usage_i64(
+                            u,
+                            &["cache_creation_input_tokens", "cacheCreationInputTokens"],
+                        )
+                    });
+                    let cache_read = usage.and_then(|u| {
+                        usage_i64(u, &["cache_read_input_tokens", "cacheReadInputTokens"])
+                    });
                     // Some CLI versions also report the model on the result
                     // event itself — prefer it if we never saw an assistant
                     // message with one.
@@ -3264,7 +3468,20 @@ fn read_claude_stream(
                     if let Some(m) = actual_model.as_deref() {
                         persist_actual_model(db, "claude_code", sid, m);
                     }
-                    finish_turn(app, db, sid, &mut full, input, output, cost, cache_creation, cache_read, &mut watches, turn_started, actual_model.as_deref());
+                    finish_turn(
+                        app,
+                        db,
+                        sid,
+                        &mut full,
+                        input,
+                        output,
+                        cost,
+                        cache_creation,
+                        cache_read,
+                        &mut watches,
+                        turn_started,
+                        actual_model.as_deref(),
+                    );
                     // finish_turn unregistered the turn's accumulator — drop
                     // the local handle so the next turn's message_start
                     // registers a fresh one.
@@ -3454,7 +3671,15 @@ fn spawn_per_turn(
     // runs with full-auto approval.
     // Kimi/OpenCode headless have no approval channel — the bundle keeps its
     // default (unrestricted) permissions regardless of the session's mode.
-    let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, None, None);
+    let bundle = resolve_harness_bundle(
+        app,
+        project_id,
+        cwd,
+        artifacts_dir_for_bundle(app, cwd),
+        connectors,
+        None,
+        None,
+    );
     // Legacy fallback: browser-only MCP when the bundle (or its mcp part)
     // didn't write — keeps pty-style browser tools working in degraded mode.
     let opencode_legacy_cfg = if bundle.is_none() {
@@ -3475,10 +3700,7 @@ fn spawn_per_turn(
             // Kimi prompt mode is non-interactive; --yolo/--auto are
             // interactive-mode flags that kimi rejects with -p.
             // Tool calls are auto-approved by default in prompt mode.
-            let mut flags: Vec<String> = vec![
-                "--output-format".into(),
-                "stream-json".into(),
-            ];
+            let mut flags: Vec<String> = vec!["--output-format".into(), "stream-json".into()];
             if !entry.model.is_empty() {
                 // E-9c: the model id rides the cmd.exe wrapper line via an
                 // unquoted `%*` — reject cmd metacharacters up front.
@@ -3497,7 +3719,10 @@ fn spawn_per_turn(
             // added — matching today's degraded behavior (no browser tools).
             if let Some(b) = &bundle {
                 flags.extend(crate::harness_bundle::kimi_bundle_args(
-                    b, &artifacts_dir_for_bundle(app, cwd), resume.is_some()));
+                    b,
+                    &artifacts_dir_for_bundle(app, cwd),
+                    resume.is_some(),
+                ));
             }
             // Kimi plan mode: the CLI rejects `--plan` in prompt mode
             // ("Cannot combine --prompt with --plan", verified against the
@@ -3515,8 +3740,11 @@ End your reply with the plan and wait for the user's approval.]"
             } else {
                 content.to_string()
             };
-            let (spec, env, transport) =
-                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::Kimi, &turn_content, flags)?;
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(
+                crate::harness_adapters::TurnHarness::Kimi,
+                &turn_content,
+                flags,
+            )?;
             // Oversized prompts take the stdin transport (the env var would
             // silently expand empty past cmd.exe's line limit).
             if transport == crate::harness_adapters::TurnPromptTransport::Stdin {
@@ -3564,8 +3792,11 @@ End your reply with the plan and wait for the user's approval.]"
                 flags.push("-s".into());
                 flags.push(id.clone());
             }
-            let (spec, env, transport) =
-                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::OpenCode, content, flags)?;
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(
+                crate::harness_adapters::TurnHarness::OpenCode,
+                content,
+                flags,
+            )?;
             // Oversized prompts take the stdin transport (the env var would
             // silently expand empty past cmd.exe's line limit).
             if transport == crate::harness_adapters::TurnPromptTransport::Stdin {
@@ -3623,7 +3854,8 @@ End your reply with the plan and wait for the user's approval.]"
                 PerTurn::Omp => crate::harness_adapters::TurnHarness::Omp,
                 _ => crate::harness_adapters::TurnHarness::Pi,
             };
-            let (spec, env, transport) = crate::harness_adapters::turn_spec(harness, &turn_content, flags)?;
+            let (spec, env, transport) =
+                crate::harness_adapters::turn_spec(harness, &turn_content, flags)?;
             prompt_env = env;
             if transport == crate::harness_adapters::TurnPromptTransport::Stdin {
                 stdin_payload = Some(turn_content);
@@ -3648,8 +3880,11 @@ End your reply with the plan and wait for the user's approval.]"
                 flags.push("--resume".into());
                 flags.push(id.clone());
             }
-            let (spec, env, transport) =
-                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::CommandCode, content, flags)?;
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(
+                crate::harness_adapters::TurnHarness::CommandCode,
+                content,
+                flags,
+            )?;
             prompt_env = env;
             if transport == crate::harness_adapters::TurnPromptTransport::Stdin {
                 stdin_payload = Some(content.to_string());
@@ -3660,7 +3895,11 @@ End your reply with the plan and wait for the user's approval.]"
 
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
-        .stdin(if stdin_payload.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if stdin_payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     // The prompt travels in the process env block (never cmd-parsed) when the
@@ -3673,9 +3912,12 @@ End your reply with the plan and wait for the user's approval.]"
     if matches!(kind, PerTurn::OpenCode) {
         // Bundle's opencode.json already has both MCP servers + permissions;
         // the legacy path only applies when the bundle failed to write.
-        if let Some(cfg) = bundle.as_ref().map(|b| b.opencode_config.clone())
+        if let Some(cfg) = bundle
+            .as_ref()
+            .map(|b| b.opencode_config.clone())
             .filter(|p| p.exists())
-            .or(opencode_legacy_cfg.clone()) {
+            .or(opencode_legacy_cfg.clone())
+        {
             cmd.env("OPENCODE_CONFIG", cfg);
         }
     }
@@ -3715,10 +3957,7 @@ End your reply with the plan and wait for the user's approval.]"
         }
     }
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("failed to capture CLI stdout")?;
+    let stdout = child.stdout.take().ok_or("failed to capture CLI stdout")?;
     entry.turn_in_flight.store(true, Ordering::SeqCst);
     entry.child = Some(child);
 
@@ -3839,15 +4078,63 @@ fn read_per_turn_stream(
             continue;
         };
         match kind {
-            PerTurn::Kimi => handle_kimi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut tools),
-            PerTurn::OpenCode => handle_opencode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost, &mut last_text, &mut last_reasoning, &mut in_think, &mut tools),
+            PerTurn::Kimi => handle_kimi_event(
+                app,
+                sid,
+                &v,
+                &mut full,
+                session_cell,
+                &mut input,
+                &mut output,
+                &mut cache_read,
+                &mut cache_creation,
+                &mut tools,
+            ),
+            PerTurn::OpenCode => handle_opencode_event(
+                app,
+                sid,
+                &v,
+                &mut full,
+                session_cell,
+                &mut input,
+                &mut output,
+                &mut cache_read,
+                &mut cache_creation,
+                &mut cost,
+                &mut last_text,
+                &mut last_reasoning,
+                &mut in_think,
+                &mut tools,
+            ),
             // Pi and Omp share the pi-lineage JSON event protocol.
-            PerTurn::Pi | PerTurn::Omp => {
-                handle_pi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost, &mut in_think, &mut tools)
-            }
-            PerTurn::CommandCode => {
-                handle_commandcode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut in_think, &mut tools, &mut seen_tools)
-            }
+            PerTurn::Pi | PerTurn::Omp => handle_pi_event(
+                app,
+                sid,
+                &v,
+                &mut full,
+                session_cell,
+                &mut input,
+                &mut output,
+                &mut cache_read,
+                &mut cache_creation,
+                &mut cost,
+                &mut in_think,
+                &mut tools,
+            ),
+            PerTurn::CommandCode => handle_commandcode_event(
+                app,
+                sid,
+                &v,
+                &mut full,
+                session_cell,
+                &mut input,
+                &mut output,
+                &mut cache_read,
+                &mut cache_creation,
+                &mut in_think,
+                &mut tools,
+                &mut seen_tools,
+            ),
         }
     }
     // Process exit closes the turn. Persist any captured CLI session id so
@@ -3877,7 +4164,20 @@ fn read_per_turn_stream(
     } else {
         // per-turn CLI streams don't reliably expose a model id on their
         // events — the cost rollup falls back to the session's model.
-        finish_turn(app, db, sid, &mut full, input, output, cost, cache_creation, cache_read, &mut watches, started_at, None);
+        finish_turn(
+            app,
+            db,
+            sid,
+            &mut full,
+            input,
+            output,
+            cost,
+            cache_creation,
+            cache_read,
+            &mut watches,
+            started_at,
+            None,
+        );
     }
     // The card goes out only after chat:done — the turn is complete; the
     // answer arrives as a follow-up turn.
@@ -3908,7 +4208,10 @@ Then stop immediately: Relay surfaces it as an answer card and the user's reply 
 /// control protocol (AskUserQuestion), ACP agents have their own session
 /// protocol — both must NOT get the text directive.
 fn harness_question_channel(harness: &str) -> bool {
-    matches!(harness, "kimi_code" | "opencode" | "pi" | "omp" | "commandcode")
+    matches!(
+        harness,
+        "kimi_code" | "opencode" | "pi" | "omp" | "commandcode"
+    )
 }
 
 /// Models keep emitting single backslashes inside JSON strings ("D:\artifact"
@@ -4015,7 +4318,12 @@ fn split_relay_ask(full: String) -> (String, Option<serde_json::Value>) {
     }
     lines.remove(idx);
     let clean = lines.join("\n").trim_end().to_string();
-    (clean, Some(serde_json::Value::Array(vec![serde_json::Value::Object(obj)])))
+    (
+        clean,
+        Some(serde_json::Value::Array(vec![serde_json::Value::Object(
+            obj,
+        )])),
+    )
 }
 
 /// Build the follow-up user message that delivers the card's answer to the
@@ -4028,7 +4336,8 @@ pub(crate) fn compose_ask_follow_up(
     answers: &serde_json::Value,
     response: Option<&str>,
     skipped: bool,
-) -> String {    let q_text = questions
+) -> String {
+    let q_text = questions
         .get(0)
         .and_then(|q| q.get("question"))
         .and_then(|q| q.as_str())
@@ -4071,11 +4380,10 @@ fn surface_relay_ask(app: Option<&AppHandle>, sid: &str, questions: serde_json::
     let Some(state) = app.try_state::<AgentSessionState>() else {
         return;
     };
-    let pending_id = state.0.register_pending_ask(
-        sid,
-        questions.clone(),
-        PendingAskRoute::FollowUpTurn,
-    );
+    let pending_id =
+        state
+            .0
+            .register_pending_ask(sid, questions.clone(), PendingAskRoute::FollowUpTurn);
     let _ = app.emit(
         "chat:question-request",
         crate::types::ChatQuestionRequestPayload {
@@ -4191,7 +4499,10 @@ pub(crate) fn opencode_answer_question(
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(format!("question answer HTTP {status}: {}", truncate_output(&text)));
+            return Err(format!(
+                "question answer HTTP {status}: {}",
+                truncate_output(&text)
+            ));
         }
         Ok(())
     })
@@ -4256,13 +4567,25 @@ fn send_opencode_turn(
             }
             Err(e) => {
                 // Degraded mode: legacy one-shot `opencode run` per turn.
-                eprintln!("[agent] opencode server unavailable ({e}); falling back to per-turn run");
+                eprintln!(
+                    "[agent] opencode server unavailable ({e}); falling back to per-turn run"
+                );
                 fell_back = true;
             }
         }
     }
     if fell_back {
-        return spawn_per_turn(app, db, sid, content, entry, cwd, project_id, PerTurn::OpenCode, connectors);
+        return spawn_per_turn(
+            app,
+            db,
+            sid,
+            content,
+            entry,
+            cwd,
+            project_id,
+            PerTurn::OpenCode,
+            connectors,
+        );
     }
     let base_url = entry
         .oc_base_url
@@ -4322,8 +4645,10 @@ fn send_opencode_turn(
         // reader's token emissions hit this accumulator; finish_turn
         // unregisters, and the unconditional unregister at thread end is the
         // backstop for the error/cancel paths.
-        let _perf =
-            crate::chat::turn_perf::register(&sid2, crate::chat::turn_perf::TurnPerf::new_opt(Some(app2.clone()), &sid2));
+        let _perf = crate::chat::turn_perf::register(
+            &sid2,
+            crate::chat::turn_perf::TurnPerf::new_opt(Some(app2.clone()), &sid2),
+        );
         let mut watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
 
         // Resolve or create the server-side session id (resume across
@@ -4342,7 +4667,11 @@ fn send_opencode_turn(
                     if should_clear_in_flight(in_flight_gen.load(Ordering::SeqCst), my_generation) {
                         in_flight2.store(false, Ordering::SeqCst);
                     }
-                    emit_error(Some(&app2), &sid2, &format!("OpenCode session create failed: {e}"));
+                    emit_error(
+                        Some(&app2),
+                        &sid2,
+                        &format!("OpenCode session create failed: {e}"),
+                    );
                     return;
                 }
             },
@@ -4483,7 +4812,15 @@ fn spawn_opencode_server(
     // Same MCP registration contract as every other opencode spawn: point
     // OPENCODE_CONFIG at the Relay-owned bundle config (browser + tools +
     // connectors). Failure degrades to the legacy browser-only config.
-    let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, None, None);
+    let bundle = resolve_harness_bundle(
+        app,
+        project_id,
+        cwd,
+        artifacts_dir_for_bundle(app, cwd),
+        connectors,
+        None,
+        None,
+    );
     let legacy_cfg = if bundle.is_none() {
         resolve_opencode_config(app, project_id)
     } else {
@@ -4491,10 +4828,16 @@ fn spawn_opencode_server(
     };
 
     let mut cmd = Command::new("opencode");
-    cmd.args(["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    cmd.args([
+        "serve",
+        "--hostname",
+        "127.0.0.1",
+        "--port",
+        &port.to_string(),
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
     if let Some(cfg) = bundle
         .as_ref()
         .map(|b| b.opencode_config.clone())
@@ -4548,7 +4891,11 @@ fn spawn_opencode_server(
 
 /// Cheap liveness probe: is anything accepting TCP on the server's port?
 fn opencode_server_alive(base_url: &str) -> bool {
-    match base_url.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+    match base_url
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+    {
         Some(port) => std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
             Duration::from_millis(250),
@@ -4572,7 +4919,11 @@ fn opencode_free_port() -> Option<u16> {
 /// then give the HTTP router a short grace period. Pure socket probe — no
 /// tokio, safe to call from the async-command thread.
 fn opencode_wait_ready(base_url: &str, budget: Duration) -> bool {
-    let Some(port) = base_url.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) else {
+    let Some(port) = base_url
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+    else {
         return false;
     };
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -4604,7 +4955,10 @@ fn opencode_create_session(base_url: &str) -> Result<String, String> {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(format!("session create HTTP {status}: {}", truncate_output(&body)));
+            return Err(format!(
+                "session create HTTP {status}: {}",
+                truncate_output(&body)
+            ));
         }
         let v: Value = serde_json::from_str(&body).map_err(|e| format!("session parse: {e}"))?;
         v.get("id")
@@ -4639,7 +4993,17 @@ fn opencode_post_message(
     model: Option<Value>,
     agent: Option<&str>,
     content: &str,
-) -> Result<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<f64>, Option<String>), String> {
+) -> Result<
+    (
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<f64>,
+        Option<String>,
+    ),
+    String,
+> {
     tauri::async_runtime::block_on(async {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -4679,16 +5043,13 @@ fn opencode_post_message(
         // whatever its config says — the session's stored id can be a stale
         // catalog entry). modelID + providerID recombine into the canonical
         // "provider/model" shape the cost rollup and meter match on.
-        let model = info
-            .get("modelID")
-            .and_then(|m| m.as_str())
-            .map(|m| {
-                let provider = info.get("providerID").and_then(|p| p.as_str());
-                match provider {
-                    Some(p) if !p.is_empty() => format!("{p}/{m}"),
-                    _ => m.to_string(),
-                }
-            });
+        let model = info.get("modelID").and_then(|m| m.as_str()).map(|m| {
+            let provider = info.get("providerID").and_then(|p| p.as_str());
+            match provider {
+                Some(p) if !p.is_empty() => format!("{p}/{m}"),
+                _ => m.to_string(),
+            }
+        });
         Ok((input, output, cache_read, cache_creation, cost, model))
     })
 }
@@ -4915,8 +5276,14 @@ fn handle_opencode_sse_data(
             return;
         }
         // Route by the part's known kind; fall back to the event's field.
-        let pid = v.pointer("/properties/partID").and_then(|p| p.as_str()).unwrap_or("");
-        let field = v.pointer("/properties/field").and_then(|f| f.as_str()).unwrap_or("text");
+        let pid = v
+            .pointer("/properties/partID")
+            .and_then(|p| p.as_str())
+            .unwrap_or("");
+        let field = v
+            .pointer("/properties/field")
+            .and_then(|f| f.as_str())
+            .unwrap_or("text");
         let kind = part_kinds
             .get(pid)
             .cloned()
@@ -5063,9 +5430,7 @@ fn handle_opencode_sse_data(
             if let Some(pid) = part.get("id").and_then(|p| p.as_str()) {
                 part_kinds.insert(pid.to_string(), "tool".to_string());
             }
-            emit_opencode_tool(
-                app, sid, part, full_cell, think_cell, tools, tool_states,
-            );
+            emit_opencode_tool(app, sid, part, full_cell, think_cell, tools, tool_states);
         }
         // step-start/step-finish carry no renderable payload here — usage and
         // cost come from the POST response — so they're intentionally ignored.
@@ -5109,8 +5474,14 @@ fn emit_opencode_tool(
             let err = state.get("error").and_then(|e| e.as_str());
             tools.tool_use_with_output(name, value, out, err)
         } else if is_subagent_tool_name(name) {
-            let role = inp.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent");
-            let task = inp.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let role = inp
+                .get("subagent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("agent");
+            let task = inp
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let prompt = inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
             tools.subagent_use(name, value, app, sid, role, task, prompt, "", false)
         } else {
@@ -5170,13 +5541,27 @@ fn handle_kimi_event(
                         if is_subagent_tool_name(&name) {
                             let input = c.get("function").and_then(|f| f.get("arguments"));
                             let args = match input {
-                                Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(json!({})),
+                                Some(Value::String(s)) => {
+                                    serde_json::from_str::<Value>(s).unwrap_or(json!({}))
+                                }
                                 Some(val) => val.clone(),
                                 None => json!({}),
                             };
-                            let role = args.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent").to_string();
-                            let task = args.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let role = args
+                                .get("subagent_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("agent")
+                                .to_string();
+                            let task = args
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let prompt = args
+                                .get("prompt")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             let marker = tools.subagent_use(
                                 &name,
                                 values.into_iter().next().unwrap_or(json!({})),
@@ -5232,8 +5617,24 @@ fn handle_kimi_event(
                     // Kimi rides on Anthropic-shaped provider reports; match
                     // both the snake_case and camelCase spellings rather
                     // than guess one.
-                    *cache_read = usage_i64(u, &["cache_read_input_tokens", "cacheReadInputTokens", "cacheRead"]).or(*cache_read);
-                    *cache_creation = usage_i64(u, &["cache_creation_input_tokens", "cacheCreationInputTokens", "cacheWrite"]).or(*cache_creation);
+                    *cache_read = usage_i64(
+                        u,
+                        &[
+                            "cache_read_input_tokens",
+                            "cacheReadInputTokens",
+                            "cacheRead",
+                        ],
+                    )
+                    .or(*cache_read);
+                    *cache_creation = usage_i64(
+                        u,
+                        &[
+                            "cache_creation_input_tokens",
+                            "cacheCreationInputTokens",
+                            "cacheWrite",
+                        ],
+                    )
+                    .or(*cache_creation);
                     // Live IN/CACHE chips: kimi reports running totals, so
                     // replace (never accumulate) — same values the final done
                     // carries.
@@ -5267,7 +5668,11 @@ fn emit_todowrite_steps(app: Option<&AppHandle>, sid: &str, name: &str, inp: &Va
     let items: Vec<crate::types::PlanTodo> = todos
         .iter()
         .filter_map(|todo| {
-            let content = todo.get("content").and_then(|v| v.as_str())?.trim().to_string();
+            let content = todo
+                .get("content")
+                .and_then(|v| v.as_str())?
+                .trim()
+                .to_string();
             if content.is_empty() {
                 return None;
             }
@@ -5389,10 +5794,23 @@ fn handle_opencode_event(
             if is_subagent_tool_name(name) {
                 // Subagent spawn (claude "Agent"/"Task"): extract
                 // role/task/prompt and emit a spawn event.
-                let role = inp.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent").to_string();
-                let task = inp.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let prompt = inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let marker = tools.subagent_use(name, value, app, sid, &role, &task, &prompt, "", false);
+                let role = inp
+                    .get("subagent_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("agent")
+                    .to_string();
+                let task = inp
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let prompt = inp
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let marker =
+                    tools.subagent_use(name, value, app, sid, &role, &task, &prompt, "", false);
                 full.push_str(&marker);
                 emit_token(app, sid, &marker);
             } else {
@@ -5421,10 +5839,14 @@ fn handle_opencode_event(
                 *output = u.get("output").and_then(|t| t.as_i64()).or(*output);
                 // OpenCode nests cache counters under `cache` on the tokens
                 // object; match the flat spellings too for older versions.
-                *cache_read = u.get("cacheRead").and_then(|t| t.as_i64())
+                *cache_read = u
+                    .get("cacheRead")
+                    .and_then(|t| t.as_i64())
                     .or_else(|| u.pointer("/cache/read").and_then(|t| t.as_i64()))
                     .or(*cache_read);
-                *cache_creation = u.get("cacheWrite").and_then(|t| t.as_i64())
+                *cache_creation = u
+                    .get("cacheWrite")
+                    .and_then(|t| t.as_i64())
                     .or_else(|| u.pointer("/cache/write").and_then(|t| t.as_i64()))
                     .or(*cache_creation);
                 // Live IN/CACHE chips: report-level totals — replace, not
@@ -5496,7 +5918,11 @@ fn handle_pi_event(
                 // turns look nearly token-free.
                 *cache_read = usage_i64(u, &["cacheRead", "cache_read"]).or(*cache_read);
                 *cache_creation = usage_i64(u, &["cacheWrite", "cache_write"]).or(*cache_creation);
-                *cost = u.pointer("/cost/total").and_then(|c| c.as_f64()).filter(|c| *c > 0.0).or(*cost);
+                *cost = u
+                    .pointer("/cost/total")
+                    .and_then(|c| c.as_f64())
+                    .filter(|c| *c > 0.0)
+                    .or(*cost);
                 // Live IN/CACHE chips: pi reports running totals — replace,
                 // never accumulate.
                 crate::chat::turn_perf::set_active_round_usage(
@@ -5507,7 +5933,9 @@ fn handle_pi_event(
                     false,
                 );
             }
-            let Some(ev) = v.get("assistantMessageEvent") else { return };
+            let Some(ev) = v.get("assistantMessageEvent") else {
+                return;
+            };
             match ev.get("type").and_then(|t| t.as_str()) {
                 Some("text_delta") => {
                     // Model output resumed — open/keep the generation window.
@@ -5558,10 +5986,23 @@ fn handle_pi_event(
             emit_todowrite_steps(app, sid, name, &inp);
             let value = tool_meta_generic(name, &inp);
             if is_subagent_tool_name(name) {
-                let role = inp.get("subagent_type").and_then(|x| x.as_str()).unwrap_or("agent").to_string();
-                let task = inp.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let prompt = inp.get("prompt").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let marker = tools.subagent_use(name, value, app, sid, &role, &task, &prompt, "", false);
+                let role = inp
+                    .get("subagent_type")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("agent")
+                    .to_string();
+                let task = inp
+                    .get("description")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let prompt = inp
+                    .get("prompt")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let marker =
+                    tools.subagent_use(name, value, app, sid, &role, &task, &prompt, "", false);
                 full.push_str(&marker);
                 emit_token(app, sid, &marker);
             } else {
@@ -5656,8 +6097,10 @@ fn handle_commandcode_event(
                     if let Some(u) = inner.pointer("/result/usage") {
                         *input = u.get("inputTokens").and_then(|t| t.as_i64()).or(*input);
                         *output = u.get("outputTokens").and_then(|t| t.as_i64()).or(*output);
-                        *cache_read = usage_i64(u, &["cacheReadTokens", "cacheRead"]).or(*cache_read);
-                        *cache_creation = usage_i64(u, &["cacheWriteTokens", "cacheWrite"]).or(*cache_creation);
+                        *cache_read =
+                            usage_i64(u, &["cacheReadTokens", "cacheRead"]).or(*cache_read);
+                        *cache_creation =
+                            usage_i64(u, &["cacheWriteTokens", "cacheWrite"]).or(*cache_creation);
                         // Live IN/CACHE chips: turn-cumulative totals — replace.
                         crate::chat::turn_perf::set_active_round_usage(
                             sid,
@@ -5679,7 +6122,10 @@ fn handle_commandcode_event(
                         // Tool execution begins — close the generation window.
                         crate::chat::turn_perf::end_active_gen(sid);
                         if seen_tools.insert(call_id.to_string()) {
-                            let inp = inner.get("args").cloned().unwrap_or(inner.get("input").cloned().unwrap_or(json!({})));
+                            let inp = inner
+                                .get("args")
+                                .cloned()
+                                .unwrap_or(inner.get("input").cloned().unwrap_or(json!({})));
                             emit_todowrite_steps(app, sid, name, &inp);
                             let value = tool_meta_generic(name, &inp);
                             let marker = tools.tool_use(name, vec![value]);
@@ -5716,7 +6162,8 @@ fn handle_commandcode_event(
                 *input = u.get("inputTokens").and_then(|t| t.as_i64()).or(*input);
                 *output = u.get("outputTokens").and_then(|t| t.as_i64()).or(*output);
                 *cache_read = usage_i64(u, &["cacheReadTokens", "cacheRead"]).or(*cache_read);
-                *cache_creation = usage_i64(u, &["cacheWriteTokens", "cacheWrite"]).or(*cache_creation);
+                *cache_creation =
+                    usage_i64(u, &["cacheWriteTokens", "cacheWrite"]).or(*cache_creation);
                 crate::chat::turn_perf::set_active_round_usage(
                     sid,
                     (*input).unwrap_or(0),
@@ -5773,8 +6220,16 @@ pub fn run_one_shot(
 ) -> Result<(), String> {
     {
         let conn = db.lock();
-        crate::db::add_chat_message(&conn, chat_session_id, "user", prompt, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
-            .map_err(|e| e.to_string())?;
+        crate::db::add_chat_message(
+            &conn,
+            crate::db::NewChatMessage {
+                chat_session_id: chat_session_id,
+                role: "user",
+                content: prompt,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     // Persona + bundle instructions + custom system prompt, then the prompt
@@ -5794,7 +6249,9 @@ pub fn run_one_shot(
         };
         let custom = {
             let conn = db.lock();
-            crate::db::get_setting(&conn, "assistant.systemPrompt").ok().flatten()
+            crate::db::get_setting(&conn, "assistant.systemPrompt")
+                .ok()
+                .flatten()
         };
         let mut persona_text: Option<String> = None;
         let mut instructions: Option<String> = None;
@@ -5839,8 +6296,12 @@ pub fn run_one_shot(
     if let (Some(app), Some(b)) = (app, &bundle) {
         let artifacts = artifacts_dir_for_bundle(app, cwd);
         match harness {
-            "claude_code" => spec.args.extend(crate::harness_bundle::claude_bundle_args(b, &artifacts)),
-            "kimi_code" => spec.args.extend(crate::harness_bundle::kimi_bundle_args(b, &artifacts, false)),
+            "claude_code" => spec
+                .args
+                .extend(crate::harness_bundle::claude_bundle_args(b, &artifacts)),
+            "kimi_code" => spec.args.extend(crate::harness_bundle::kimi_bundle_args(
+                b, &artifacts, false,
+            )),
             "opencode" => {
                 if b.opencode_config.exists() {
                     opencode_cfg_env = Some((
@@ -5857,7 +6318,11 @@ pub fn run_one_shot(
     // inline in argv (POSIX).
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
-        .stdin(if prompt_via_stdin { Stdio::piped() } else { Stdio::null() })
+        .stdin(if prompt_via_stdin {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some((k, v)) = &prompt_env {
@@ -5909,20 +6374,14 @@ pub fn run_one_shot(
     let one_shot_guard = OneShotGuard(register_one_shot_child(&child));
     let stdout = {
         let mut guard = child.lock().map_err(|e| e.to_string())?;
-        guard
-            .stdout
-            .take()
-            .ok_or("failed to capture CLI stdout")?
+        guard.stdout.take().ok_or("failed to capture CLI stdout")?
     };
     // stderr capture: on a failed turn the CLI's diagnosis (auth / quota /
     // unknown model) lands here and nowhere else — without it the run history
     // only ever says "exited with code 1" or "time limit exceeded".
     let stderr = {
         let mut guard = child.lock().map_err(|e| e.to_string())?;
-        guard
-            .stderr
-            .take()
-            .ok_or("failed to capture CLI stderr")?
+        guard.stderr.take().ok_or("failed to capture CLI stderr")?
     };
     let (etx, erx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
@@ -5959,10 +6418,34 @@ pub fn run_one_shot(
         if is_claude {
             let cell = Arc::new(Mutex::new(None));
             let dummy_stdin = Arc::new(Mutex::new(None));
-            read_claude_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, &never_cancelled, dummy_stdin, watches, &generation, 1);
+            read_claude_stream(
+                app2.as_ref(),
+                &db2,
+                &sid2,
+                stdout,
+                &in_flight2,
+                &cell,
+                &never_cancelled,
+                dummy_stdin,
+                watches,
+                &generation,
+                1,
+            );
         } else {
             let cell = Arc::new(Mutex::new(None));
-            read_per_turn_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, per_turn_kind, &never_cancelled, watches, &generation, 1);
+            read_per_turn_stream(
+                app2.as_ref(),
+                &db2,
+                &sid2,
+                stdout,
+                &in_flight2,
+                &cell,
+                per_turn_kind,
+                &never_cancelled,
+                watches,
+                &generation,
+                1,
+            );
         }
     });
 
@@ -6008,9 +6491,7 @@ pub fn run_one_shot(
     let _ = reader.join();
     // The exit/kill above closed the stderr pipe; give the reader a moment to
     // drain, then surface its tail on every failure path.
-    let stderr_tail = erx
-        .recv_timeout(Duration::from_secs(2))
-        .unwrap_or_default();
+    let stderr_tail = erx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
     let suffix = stderr_suffix(&stderr_tail);
     // M2: `one_shot_guard` unregisters on drop — this return included.
     match wait {
@@ -6043,9 +6524,11 @@ pub(crate) async fn harness_oneshot_text(
     let model = model.to_string();
     let prompt = prompt.to_string();
     let cwd = cwd.map(|c| c.to_string());
-    tokio::task::spawn_blocking(move || harness_oneshot_blocking(&harness, &model, &prompt, cwd.as_deref()))
-        .await
-        .map_err(|e| format!("generation task failed: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        harness_oneshot_blocking(&harness, &model, &prompt, cwd.as_deref())
+    })
+    .await
+    .map_err(|e| format!("generation task failed: {e}"))?
 }
 
 fn harness_oneshot_blocking(
@@ -6081,7 +6564,10 @@ fn harness_oneshot_blocking(
                 args.push(claude_model_alias(model));
             }
             (
-                resolve_for_spawn(&CommandSpec { program: "claude".into(), args }),
+                resolve_for_spawn(&CommandSpec {
+                    program: "claude".into(),
+                    args,
+                }),
                 None,
                 true,
             )
@@ -6100,7 +6586,11 @@ fn harness_oneshot_blocking(
                 prompt,
                 flags,
             )?;
-            (spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin)
+            (
+                spec,
+                env,
+                transport == crate::harness_adapters::TurnPromptTransport::Stdin,
+            )
         }
         "opencode" => {
             let mut flags: Vec<String> = Vec::new();
@@ -6116,13 +6606,21 @@ fn harness_oneshot_blocking(
                 prompt,
                 flags,
             )?;
-            (spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin)
+            (
+                spec,
+                env,
+                transport == crate::harness_adapters::TurnPromptTransport::Stdin,
+            )
         }
         "pi" | "omp" | "commandcode" => {
             let mut flags: Vec<String> = Vec::new();
             if !model.is_empty() {
                 crate::harness_adapters::ensure_cmd_safe_model(model)?;
-                flags.push(if harness_id == "commandcode" { "-m".into() } else { "--model".into() });
+                flags.push(if harness_id == "commandcode" {
+                    "-m".into()
+                } else {
+                    "--model".into()
+                });
                 flags.push(model.into());
             }
             let harness = match harness_id {
@@ -6130,7 +6628,8 @@ fn harness_oneshot_blocking(
                 "commandcode" => crate::harness_adapters::TurnHarness::CommandCode,
                 _ => crate::harness_adapters::TurnHarness::Pi,
             };
-            let (spec, env, transport) = crate::harness_adapters::turn_spec(harness, prompt, flags)?;
+            let (spec, env, transport) =
+                crate::harness_adapters::turn_spec(harness, prompt, flags)?;
             (
                 spec,
                 env,
@@ -6142,7 +6641,11 @@ fn harness_oneshot_blocking(
 
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
-        .stdin(if prompt_via_stdin { Stdio::piped() } else { Stdio::null() })
+        .stdin(if prompt_via_stdin {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some((k, v)) = &prompt_env {
@@ -6228,9 +6731,7 @@ fn harness_oneshot_blocking(
         // The kill above closed the stderr pipe → the reader hits EOF; give
         // it a moment and surface WHAT the CLI was doing when it was killed
         // (a retrying API error beats a bare "timed out").
-        let err = erx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap_or_default();
+        let err = erx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
         let suffix = stderr_suffix(&err);
         return Err(format!(
             "{harness_id} generation timed out after {}s{suffix}",
@@ -6240,12 +6741,10 @@ fn harness_oneshot_blocking(
     let raw = rx
         .recv_timeout(Duration::from_secs(5))
         .map_err(|_| format!("{harness_id} closed without producing output"))?;
-    let err = erx
-        .recv_timeout(Duration::from_secs(2))
-        .unwrap_or_default();
+    let err = erx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
 
-    let text = parse_oneshot_text(harness_id, &raw)
-        .map_err(|e| format!("{e}{}", stderr_suffix(&err)))?;
+    let text =
+        parse_oneshot_text(harness_id, &raw).map_err(|e| format!("{e}{}", stderr_suffix(&err)))?;
     if text.trim().is_empty() {
         if err.trim().is_empty() {
             // Char-safe truncation: byte slicing panics when offset 200 lands
@@ -6275,9 +6774,7 @@ fn stderr_suffix(stderr: &str) -> String {
         return String::new();
     }
     let tail: String = if flat.chars().count() > 400 {
-        flat.chars()
-            .skip(flat.chars().count() - 400)
-            .collect()
+        flat.chars().skip(flat.chars().count() - 400).collect()
     } else {
         flat
     };
@@ -6314,7 +6811,9 @@ fn parse_oneshot_text(harness_id: &str, raw: &str) -> Result<String, String> {
         "kimi_code" => {
             let mut full = String::new();
             for line in raw.lines() {
-                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
                 if v.get("role").and_then(|r| r.as_str()) == Some("assistant") {
                     if let Some(text) = v.get("content").and_then(|c| c.as_str()) {
                         full.push_str(text);
@@ -6328,7 +6827,9 @@ fn parse_oneshot_text(harness_id: &str, raw: &str) -> Result<String, String> {
             // handle_pi_event's text path, minus tool markers).
             let mut full = String::new();
             for line in raw.lines() {
-                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
                 if v.get("type").and_then(|t| t.as_str()) == Some("message_update") {
                     if let Some(delta) = v
                         .pointer("/assistantMessageEvent/type")
@@ -6349,7 +6850,9 @@ fn parse_oneshot_text(harness_id: &str, raw: &str) -> Result<String, String> {
             // (mirrors handle_commandcode_event's catch-up semantics).
             let mut full = String::new();
             for line in raw.lines() {
-                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
                 if v.get("type").and_then(|t| t.as_str()) == Some("result") {
                     if let Some(text) = v.get("finalText").and_then(|t| t.as_str()) {
                         full.push_str(text);
@@ -6362,7 +6865,9 @@ fn parse_oneshot_text(harness_id: &str, raw: &str) -> Result<String, String> {
             let mut full = String::new();
             let mut last_text = String::new();
             for line in raw.lines() {
-                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
                 if v.get("type").and_then(|t| t.as_str()) == Some("text") {
                     if let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str()) {
                         let suffix = text.strip_prefix(last_text.as_str()).unwrap_or(text);
@@ -6422,10 +6927,7 @@ fn one_shot_spec(
             ))
         }
         "kimi_code" => {
-            let mut flags: Vec<String> = vec![
-                "--output-format".into(),
-                "stream-json".into(),
-            ];
+            let mut flags: Vec<String> = vec!["--output-format".into(), "stream-json".into()];
             if !model.is_empty() {
                 // E-9c: the model id rides the cmd.exe wrapper line via an
                 // unquoted `%*` — reject cmd metacharacters up front.
@@ -6438,7 +6940,11 @@ fn one_shot_spec(
                 prompt,
                 flags,
             )?;
-            Ok((spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin))
+            Ok((
+                spec,
+                env,
+                transport == crate::harness_adapters::TurnPromptTransport::Stdin,
+            ))
         }
         "opencode" => {
             // Flags BEFORE `--` (yargs swallows post-terminator tokens into
@@ -6457,7 +6963,11 @@ fn one_shot_spec(
                 prompt,
                 flags,
             )?;
-            Ok((spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin))
+            Ok((
+                spec,
+                env,
+                transport == crate::harness_adapters::TurnPromptTransport::Stdin,
+            ))
         }
         "pi" | "omp" => {
             // pi-lineage one-shot turns: `-p --mode json` streams the shared
@@ -6478,7 +6988,11 @@ fn one_shot_spec(
                 prompt,
                 flags,
             )?;
-            Ok((spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin))
+            Ok((
+                spec,
+                env,
+                transport == crate::harness_adapters::TurnPromptTransport::Stdin,
+            ))
         }
         "commandcode" => {
             // Fixed headless flags ride in turn_spec's argv (yolo/onboarding/
@@ -6495,9 +7009,15 @@ fn one_shot_spec(
                 prompt,
                 flags,
             )?;
-            Ok((spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin))
+            Ok((
+                spec,
+                env,
+                transport == crate::harness_adapters::TurnPromptTransport::Stdin,
+            ))
         }
-        other => Err(format!("harness '{other}' has no headless chat backend yet")),
+        other => Err(format!(
+            "harness '{other}' has no headless chat backend yet"
+        )),
     }
 }
 
@@ -6529,7 +7049,11 @@ fn tool_meta_claude(block: &Value) -> Option<(String, Vec<Value>)> {
             .and_then(|p| p.as_str())
             .unwrap_or("")
             .to_string();
-        let edits = input.get("edits").and_then(|e| e.as_array()).cloned().unwrap_or_default();
+        let edits = input
+            .get("edits")
+            .and_then(|e| e.as_array())
+            .cloned()
+            .unwrap_or_default();
         let vals = edits
             .iter()
             .map(|e| {
@@ -6618,7 +7142,11 @@ fn launch_receipt_agent_id(text: &str) -> Option<String> {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    if id.is_empty() { None } else { Some(id) }
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
 }
 
 /// Cap captured shell output so a huge dump can't bloat the stored message.
@@ -6735,7 +7263,12 @@ impl ToolTracker {
             }
             out.push_str(&format!("<tool>{v}</tool>"));
         }
-        self.pending.push_back(PendingTool { id, shell, subagent_id: None, sub_tool_use_id: None });
+        self.pending.push_back(PendingTool {
+            id,
+            shell,
+            subagent_id: None,
+            sub_tool_use_id: None,
+        });
         out
     }
     /// Wrap a subagent Task tool call: emits a `chat:subagent-spawn` event,
@@ -6866,7 +7399,14 @@ impl ToolTracker {
     }
     /// Emit the final subagent events: stream `text` only when nothing was
     /// already streamed live from the agent's own messages, then mark done.
-    fn finish_subagent(&self, app: Option<&AppHandle>, sid: &str, meta: &SubagentMeta, text: Option<&str>, is_error: bool) {
+    fn finish_subagent(
+        &self,
+        app: Option<&AppHandle>,
+        sid: &str,
+        meta: &SubagentMeta,
+        text: Option<&str>,
+        is_error: bool,
+    ) {
         let Some(app) = app else { return };
         let text = text.unwrap_or("");
         if !meta.streamed && !text.is_empty() {
@@ -6886,7 +7426,11 @@ impl ToolTracker {
                 id: meta.id.clone(),
                 // Empty output keeps what already streamed (the frontend's
                 // onSubagentDone falls back to the accumulated output).
-                output: if meta.streamed { String::new() } else { text.to_string() },
+                output: if meta.streamed {
+                    String::new()
+                } else {
+                    text.to_string()
+                },
                 error: is_error.then(|| "subagent exited with an error".to_string()),
             },
         );
@@ -6895,7 +7439,8 @@ impl ToolTracker {
     /// exact tool_use id), so the remaining slots stay aligned with their
     /// results.
     fn drop_pending_sub(&mut self, sub_id: &str) {
-        self.pending.retain(|s| s.subagent_id.as_deref() != Some(sub_id));
+        self.pending
+            .retain(|s| s.subagent_id.as_deref() != Some(sub_id));
     }
     /// Route ONE subagent-internal assistant message (claude tags every
     /// message produced inside a Task/Agent with `parent_tool_use_id`) into
@@ -6903,7 +7448,13 @@ impl ToolTracker {
     /// calls become the same `<tool>` markers the built-in panel parses. Must
     /// never touch the main transcript or the main tool FIFO — subagent
     /// activity would otherwise desync the queue and mis-attribute results.
-    fn route_subagent_assistant(&mut self, app: Option<&AppHandle>, sid: &str, parent_tool_use_id: &str, blocks: &[Value]) -> bool {
+    fn route_subagent_assistant(
+        &mut self,
+        app: Option<&AppHandle>,
+        sid: &str,
+        parent_tool_use_id: &str,
+        blocks: &[Value],
+    ) -> bool {
         let Some(meta) = self.by_tool_use.get_mut(parent_tool_use_id) else {
             return false;
         };
@@ -6953,7 +7504,14 @@ impl ToolTracker {
     }
     /// Route ONE subagent-internal tool result into that agent's panel as a
     /// result marker (folded onto the most recent tool row by the parser).
-    fn route_subagent_result(&mut self, app: Option<&AppHandle>, sid: &str, parent_tool_use_id: &str, text: &str, is_error: bool) -> bool {
+    fn route_subagent_result(
+        &mut self,
+        app: Option<&AppHandle>,
+        sid: &str,
+        parent_tool_use_id: &str,
+        text: &str,
+        is_error: bool,
+    ) -> bool {
         let Some(meta) = self.by_tool_use.get_mut(parent_tool_use_id) else {
             return false;
         };
@@ -6982,7 +7540,10 @@ impl ToolTracker {
     /// keys may correlate; with none matching, a single awaiting background
     /// agent is the unambiguous fallback.
     fn finish_background(&mut self, app: Option<&AppHandle>, sid: &str, v: &Value) {
-        let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("completed");
+        let status = v
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("completed");
         let summary = v.get("summary").and_then(|s| s.as_str()).unwrap_or("");
         let by_tool = v
             .get("tool_use_id")
@@ -7017,15 +7578,11 @@ impl ToolTracker {
             None
         });
         let Some(key) = key else { return };
-        let Some(meta) = self.by_tool_use.remove(&key) else { return };
+        let Some(meta) = self.by_tool_use.remove(&key) else {
+            return;
+        };
         self.drop_pending_sub(&meta.id);
-        self.finish_subagent(
-            app,
-            sid,
-            &meta,
-            Some(summary),
-            status != "completed",
-        );
+        self.finish_subagent(app, sid, &meta, Some(summary), status != "completed");
     }
     /// The CLI process ended with agents still awaiting completion (crash,
     /// cancel, session delete). Finalize them as errors so no panel entry
@@ -7116,9 +7673,15 @@ pub(crate) fn tool_meta_generic(name: &str, input: &Value) -> Value {
     let s_content = || s(&["content", "fileContent", "text"]);
     // Normalize the common aliases the CLIs use for file edits.
     let lname = name.to_lowercase();
-    let is_edit = matches!(lname.as_str(), "edit" | "edit_file" | "multiedit" | "str_replace_editor");
+    let is_edit = matches!(
+        lname.as_str(),
+        "edit" | "edit_file" | "multiedit" | "str_replace_editor"
+    );
     let is_write = matches!(lname.as_str(), "write" | "write_file" | "create_file");
-    let is_shell = matches!(lname.as_str(), "bash" | "shell" | "run_shell" | "run_command");
+    let is_shell = matches!(
+        lname.as_str(),
+        "bash" | "shell" | "run_shell" | "run_command"
+    );
 
     if is_edit {
         let path = s_path();
@@ -7143,11 +7706,21 @@ pub(crate) fn tool_meta_generic(name: &str, input: &Value) -> Value {
         json!({ "kind": "code", "title": "Running shell command", "lang": "bash", "code": sanitize(cmd) })
     } else {
         match name {
-            "Read" | "read" | "read_file" => json!({ "kind": "tool", "title": "Reading file", "detail": s_path() }),
-            "Grep" | "grep" => json!({ "kind": "search", "title": "Searching code", "detail": s(&["pattern", "query"]) }),
-            "Glob" | "glob" => json!({ "kind": "search", "title": "Finding files", "detail": s(&["pattern", "glob", "query"]) }),
-            "WebSearch" | "web_search" => json!({ "kind": "search", "title": "Searching the web", "detail": s(&["query", "searchQuery"]) }),
-            "WebFetch" | "web_fetch" | "fetch_url" => json!({ "kind": "web", "title": "Reading a web page", "detail": s(&["url", "uri"]) }),
+            "Read" | "read" | "read_file" => {
+                json!({ "kind": "tool", "title": "Reading file", "detail": s_path() })
+            }
+            "Grep" | "grep" => {
+                json!({ "kind": "search", "title": "Searching code", "detail": s(&["pattern", "query"]) })
+            }
+            "Glob" | "glob" => {
+                json!({ "kind": "search", "title": "Finding files", "detail": s(&["pattern", "glob", "query"]) })
+            }
+            "WebSearch" | "web_search" => {
+                json!({ "kind": "search", "title": "Searching the web", "detail": s(&["query", "searchQuery"]) })
+            }
+            "WebFetch" | "web_fetch" | "fetch_url" => {
+                json!({ "kind": "web", "title": "Reading a web page", "detail": s(&["url", "uri"]) })
+            }
             "TodoWrite" | "todowrite" => json!({ "kind": "tool", "title": "Updating task list" }),
             _ if is_subagent_tool_name(name) => json!({
                 "kind": "subagent",
@@ -7168,8 +7741,7 @@ pub(crate) fn tool_meta_generic(name: &str, input: &Value) -> Value {
 /// `cacheRead`, commandcode: `cacheReadTokens`), so handlers match every known
 /// spelling and take the first that's there.
 fn usage_i64(u: &Value, keys: &[&str]) -> Option<i64> {
-    keys.iter()
-        .find_map(|k| u.get(*k).and_then(|t| t.as_i64()))
+    keys.iter().find_map(|k| u.get(*k).and_then(|t| t.as_i64()))
 }
 
 /// Turn finished successfully: persist the accumulated assistant message
@@ -7217,8 +7789,12 @@ fn finish_turn(
         model_key.unwrap_or("—"),
         input.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
         output.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
-        cache_creation.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
-        cache_read.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+        cache_creation
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "?".into()),
+        cache_read
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "?".into()),
     );
     // Pull the harness turn's final perf from the active accumulator (before
     // it's unregistered below). TTFT and tok/s are measured for every
@@ -7227,8 +7803,7 @@ fn finish_turn(
     // tool-time split stays unavailable — the CLI executes tools as a black
     // box. Hoisted above the persist block so emit_done carries the same
     // numbers even for turns whose reply text ended up empty.
-    let (ttft, tok_s, llm_ms) =
-        crate::chat::turn_perf::active_harness_final(sid, output);
+    let (ttft, tok_s, llm_ms) = crate::chat::turn_perf::active_harness_final(sid, output);
 
     // Persist the assistant message FIRST so we can attribute artifacts to it.
     let message_id: Option<i64> = if !full.is_empty() {
@@ -7247,9 +7822,31 @@ fn finish_turn(
             .as_deref()
             .and_then(|a| a.strip_prefix("harness:"))
             .unwrap_or("unknown");
-        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, cache_creation, cache_read, None, Some(provider), model_key, None, Some(started_at), Some(crate::db::now_ts()), llm_ms, None, ttft, tok_s)
-            .ok()
-            .map(|m| m.id)
+        crate::db::add_chat_message(
+            &conn,
+            crate::db::NewChatMessage {
+                chat_session_id: sid,
+                role: "assistant",
+                content: full,
+                input_tokens: input,
+                output_tokens: output,
+                cost_usd: cost,
+                cache_creation_input_tokens: cache_creation,
+                cache_read_input_tokens: cache_read,
+                reasoning_output_tokens: None,
+                provider: Some(provider),
+                model_key: model_key,
+                pricing_estimated_usd: None,
+                started_at: Some(started_at),
+                completed_at: Some(crate::db::now_ts()),
+                llm_time_ms: llm_ms,
+                tool_time_ms: None,
+                ttft_ms: ttft,
+                tokens_per_second: tok_s,
+            },
+        )
+        .ok()
+        .map(|m| m.id)
     } else {
         None
     };
@@ -7304,7 +7901,18 @@ fn finish_turn(
         let _ = crate::db::attach_artifacts_to_message(&conn, sid, mid);
     }
 
-    emit_done(app, sid, input, output, cost, cache_creation, cache_read, ttft, tok_s, llm_ms);
+    emit_done(
+        app,
+        sid,
+        input,
+        output,
+        cost,
+        cache_creation,
+        cache_read,
+        ttft,
+        tok_s,
+        llm_ms,
+    );
 
     // Per-turn git checkpoint against the spawn dir (watches are ordered
     // spawn-dir-first by turn_watch_dirs; non-repo dirs skip silently).
@@ -7418,9 +8026,13 @@ fn emit_harness_compact(
         crate::chat::compaction::COMPACTED_PREFIX
     );
     let _ = crate::db::add_chat_message(
-        conn, sid, "system", &marker,
-        None, None, None, None, None, None, None, None, None,
-        None, None, None, None, None, None,
+        conn,
+        crate::db::NewChatMessage {
+            chat_session_id: sid,
+            role: "system",
+            content: &marker,
+            ..Default::default()
+        },
     );
     if let Some(app) = app {
         let _ = app.emit(
@@ -7464,7 +8076,10 @@ mod tests {
         s.push_str("日本語テキスト");
         let out = truncate_output(&s);
         assert!(out.contains("日本語テキスト") || out.starts_with('…'));
-        assert!(!out.contains('\u{FFFD}') || out.starts_with('…'), "tail kept must be char-aligned");
+        assert!(
+            !out.contains('\u{FFFD}') || out.starts_with('…'),
+            "tail kept must be char-aligned"
+        );
 
         // Same straddle with emoji (4-byte UTF-8).
         let mut s2 = "b".repeat(8_001);
@@ -7473,7 +8088,10 @@ mod tests {
         assert!(!out2.is_empty());
 
         // Over-MAX_LINES path still truncates earlier lines.
-        let many = (0..100).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let many = (0..100)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let out3 = truncate_output(&many);
         assert!(out3.contains("earlier lines truncated"));
         assert!(out3.contains("line99"), "keeps the newest lines");
@@ -7487,7 +8105,10 @@ mod tests {
         // Newlines flatten so the message stays one line in toasts/history.
         let s = stderr_suffix("stream error\nAI_APICallError: quota exhausted\n");
         assert!(!s.contains('\n'), "{s}");
-        assert!(s.starts_with(" — stderr: stream error AI_APICallError"), "{s}");
+        assert!(
+            s.starts_with(" — stderr: stream error AI_APICallError"),
+            "{s}"
+        );
         // The TAIL is kept (the last logged line is the one that mattered),
         // char-safe even when the cut lands mid-CJK.
         let long = "日".repeat(500);
@@ -7523,10 +8144,29 @@ mod tests {
         for line in lines {
             let v = serde_json::from_str(line).expect("test line must be valid JSON");
             handle_pi_event(
-                None, "s", &v, &mut full, &cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost, &mut in_think, &mut tools,
+                None,
+                "s",
+                &v,
+                &mut full,
+                &cell,
+                &mut input,
+                &mut output,
+                &mut cache_read,
+                &mut cache_creation,
+                &mut cost,
+                &mut in_think,
+                &mut tools,
             );
         }
-        UsageState { full, cell, input, output, cache_read, cache_creation, cost }
+        UsageState {
+            full,
+            cell,
+            input,
+            output,
+            cache_read,
+            cache_creation,
+            cost,
+        }
     }
 
     #[test]
@@ -7593,7 +8233,11 @@ mod tests {
             r#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"ls"}}"#,
             r#"{"type":"tool_execution_end","toolCallId":"t1","result":{"content":"a.txt"},"isError":false}"#,
         ]);
-        assert!(st.full.contains("bash"), "start marker missing: {}", st.full);
+        assert!(
+            st.full.contains("bash"),
+            "start marker missing: {}",
+            st.full
+        );
         assert!(st.full.contains("a.txt"), "result missing: {}", st.full);
     }
 
@@ -7623,10 +8267,29 @@ mod tests {
         for line in lines {
             let v = serde_json::from_str(line).expect("test line must be valid JSON");
             handle_commandcode_event(
-                None, "s", &v, &mut full, &cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut in_think, &mut tools, &mut seen,
+                None,
+                "s",
+                &v,
+                &mut full,
+                &cell,
+                &mut input,
+                &mut output,
+                &mut cache_read,
+                &mut cache_creation,
+                &mut in_think,
+                &mut tools,
+                &mut seen,
             );
         }
-        UsageState { full, cell, input, output, cache_read, cache_creation, cost: None }
+        UsageState {
+            full,
+            cell,
+            input,
+            output,
+            cache_read,
+            cache_creation,
+            cost: None,
+        }
     }
 
     #[test]
@@ -7644,7 +8307,11 @@ mod tests {
         );
         assert_eq!(st.input, Some(12));
         assert_eq!(st.output, Some(5));
-        assert_eq!(st.cache_read, Some(0), "a reported zero is a true report, not absence");
+        assert_eq!(
+            st.cache_read,
+            Some(0),
+            "a reported zero is a true report, not absence"
+        );
         assert_eq!(st.cache_creation, Some(0));
         assert!(st.full.contains("insufficient credits"), "{}", st.full);
     }
@@ -7690,7 +8357,12 @@ mod tests {
             r#"{"type":"event","event":{"type":"tool_running","toolCallId":"t1","toolName":"bash","description":"ls"}}"#,
             r#"{"type":"event","event":{"type":"tool_finished","toolCallId":"t1","toolName":"bash"}}"#,
         ]);
-        assert_eq!(st.full.matches("bash").count(), 1, "tool marked once: {}", st.full);
+        assert_eq!(
+            st.full.matches("bash").count(),
+            1,
+            "tool marked once: {}",
+            st.full
+        );
     }
 
     #[test]
@@ -7699,9 +8371,7 @@ mod tests {
         // mid-stream self-update banner ("Updated 1.44.0 → 1.45.0") observed
         // live must never corrupt the transcript — covered by the reader's
         // from_str guard, asserted here at the handler boundary.
-        let st = feed_cc(&[
-            r#"{"type":"event","event":{"type":"turn_start","turnNumber":1}}"#,
-        ]);
+        let st = feed_cc(&[r#"{"type":"event","event":{"type":"turn_start","turnNumber":1}}"#]);
         assert!(st.full.is_empty());
     }
 
@@ -7726,8 +8396,20 @@ mod tests {
         )
         .unwrap();
         handle_opencode_event(
-            None, "s", &v, &mut full, &cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost,
-            &mut last_text, &mut last_reasoning, &mut in_think, &mut tools,
+            None,
+            "s",
+            &v,
+            &mut full,
+            &cell,
+            &mut input,
+            &mut output,
+            &mut cache_read,
+            &mut cache_creation,
+            &mut cost,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut in_think,
+            &mut tools,
         );
         assert_eq!(input, Some(11));
         assert_eq!(output, Some(3));
@@ -7769,7 +8451,13 @@ mod tests {
     fn primer_tail_and_head_splits_by_budget() {
         // 40 short turns ≈ well under the 32k budget → all tail, no head.
         let small: Vec<_> = (0..40)
-            .map(|i| record(i, if i % 2 == 0 { "user" } else { "assistant" }, "turn text here"))
+            .map(|i| {
+                record(
+                    i,
+                    if i % 2 == 0 { "user" } else { "assistant" },
+                    "turn text here",
+                )
+            })
             .collect();
         let (tail, head_count, head_chars) = primer_tail_and_head(&small);
         assert_eq!(tail.len(), 40);
@@ -7780,7 +8468,13 @@ mod tests {
         // 2_000 turns ≈ 80k chars — the tail must cap at ~32k and the rest is
         // head, keeping the NEWEST turns.
         let big: Vec<_> = (0..2_000)
-            .map(|i| record(i, if i % 2 == 0 { "user" } else { "assistant" }, "turn text here"))
+            .map(|i| {
+                record(
+                    i,
+                    if i % 2 == 0 { "user" } else { "assistant" },
+                    "turn text here",
+                )
+            })
             .collect();
         let (tail, head_count, head_chars) = primer_tail_and_head(&big);
         assert!(head_count > 0);
@@ -7822,8 +8516,14 @@ mod tests {
     fn harness_persona_only_names_bridgable_tools() {
         let p = harness_persona("Claude Code");
         assert!(p.contains("I'm Relay"));
-        assert!(!p.contains("open_file"), "persona must not reference the built-in-chat open_file tool");
-        assert!(!p.contains("open_url"), "persona must not reference the built-in-chat open_url tool");
+        assert!(
+            !p.contains("open_file"),
+            "persona must not reference the built-in-chat open_file tool"
+        );
+        assert!(
+            !p.contains("open_url"),
+            "persona must not reference the built-in-chat open_url tool"
+        );
         assert!(p.contains("Artifacts gallery"));
     }
 
@@ -7833,10 +8533,16 @@ mod tests {
     #[test]
     fn instructions_ride_the_prompt_only_for_flagless_adapters() {
         for h in ["opencode", "pi", "omp", "commandcode"] {
-            assert!(harness_needs_prompt_instructions(h), "{h} has no prompt flag");
+            assert!(
+                harness_needs_prompt_instructions(h),
+                "{h} has no prompt flag"
+            );
         }
         for h in ["claude_code", "kimi_code"] {
-            assert!(!harness_needs_prompt_instructions(h), "{h} carries instructions via CLI flags");
+            assert!(
+                !harness_needs_prompt_instructions(h),
+                "{h} carries instructions via CLI flags"
+            );
         }
     }
 
@@ -7896,7 +8602,10 @@ mod tests {
         // Thinking-only turns stream no answer text but full carries think
         // markers — the suffix check runs against the delta accumulator, not
         // the marker-laden buffer, so the answer still lands whole.
-        assert_eq!(unstreamed_suffix("", "reasoned answer"), Some("reasoned answer"));
+        assert_eq!(
+            unstreamed_suffix("", "reasoned answer"),
+            Some("reasoned answer")
+        );
     }
 
     /// Observed live (2026-09): a CLI turn can succeed WITHOUT any
@@ -7907,16 +8616,19 @@ mod tests {
     #[test]
     fn claude_turn_without_partial_deltas_still_persists_the_result_text() {
         let conn = crate::db::mem();
-        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
-            .unwrap();
+        let cs =
+            crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
         let db = DbState(Arc::new(parking_lot::Mutex::new(conn)));
 
         // Transcript with NO stream_event lines: text rides only the closing
         // `result` event, exactly like the failing probe run.
         let transcript = concat!(
-            r#"{"type":"system","subtype":"init","session_id":"cli-abc"}"#, "\n",
-            r#"{"type":"assistant","message":{"model":"claude-x","content":[{"type":"text","text":"the answer"}]}}"#, "\n",
-            r#"{"type":"result","subtype":"success","result":"the answer","session_id":"cli-abc","usage":{"input_tokens":10,"output_tokens":5},"total_cost_usd":0.001}"#, "\n",
+            r#"{"type":"system","subtype":"init","session_id":"cli-abc"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"claude-x","content":[{"type":"text","text":"the answer"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","result":"the answer","session_id":"cli-abc","usage":{"input_tokens":10,"output_tokens":5},"total_cost_usd":0.001}"#,
+            "\n",
         );
         let never = AtomicBool::new(false);
         let generation = AtomicU64::new(1);
@@ -7951,14 +8663,17 @@ mod tests {
     #[test]
     fn claude_result_usage_persists_cache_read_and_write() {
         let conn = crate::db::mem();
-        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
-            .unwrap();
+        let cs =
+            crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
         let db = DbState(Arc::new(parking_lot::Mutex::new(conn)));
 
         let transcript = concat!(
-            r#"{"type":"system","subtype":"init","session_id":"cli-abc"}"#, "\n",
-            r#"{"type":"assistant","message":{"model":"claude-x","content":[{"type":"text","text":"ok"}]}}"#, "\n",
-            r#"{"type":"result","subtype":"success","result":"ok","session_id":"cli-abc","usage":{"input_tokens":120,"output_tokens":40,"cache_creation_input_tokens":2097,"cache_read_input_tokens":48311},"total_cost_usd":0.02}"#, "\n",
+            r#"{"type":"system","subtype":"init","session_id":"cli-abc"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"claude-x","content":[{"type":"text","text":"ok"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","result":"ok","session_id":"cli-abc","usage":{"input_tokens":120,"output_tokens":40,"cache_creation_input_tokens":2097,"cache_read_input_tokens":48311},"total_cost_usd":0.02}"#,
+            "\n",
         );
         let never = AtomicBool::new(false);
         let generation = AtomicU64::new(1);
@@ -7990,12 +8705,13 @@ mod tests {
     #[test]
     fn claude_result_without_cache_fields_stays_null() {
         let conn = crate::db::mem();
-        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
-            .unwrap();
+        let cs =
+            crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
         let db = DbState(Arc::new(parking_lot::Mutex::new(conn)));
 
         let transcript = concat!(
-            r#"{"type":"result","subtype":"success","result":"hi","session_id":"cli-abc","usage":{"input_tokens":7,"output_tokens":2},"total_cost_usd":0.001}"#, "\n",
+            r#"{"type":"result","subtype":"success","result":"hi","session_id":"cli-abc","usage":{"input_tokens":7,"output_tokens":2},"total_cost_usd":0.001}"#,
+            "\n",
         );
         let never = AtomicBool::new(false);
         let generation = AtomicU64::new(1);
@@ -8094,12 +8810,22 @@ mod tests {
     fn context_primer_budget_keeps_the_newest_turns() {
         let mut records = Vec::new();
         for i in 0..200 {
-            records.push(primer_record("user", &format!("old message {i} {}", "x".repeat(200))));
-            records.push(primer_record("assistant", &format!("old reply {i} {}", "y".repeat(200))));
+            records.push(primer_record(
+                "user",
+                &format!("old message {i} {}", "x".repeat(200)),
+            ));
+            records.push(primer_record(
+                "assistant",
+                &format!("old reply {i} {}", "y".repeat(200)),
+            ));
         }
         let primer = context_primer_from_records(&records, None);
         // Header + join overhead ride outside the per-line accounting.
-        assert!(primer.len() <= CONTEXT_PRIMER_MAX_CHARS + 512, "{}", primer.len());
+        assert!(
+            primer.len() <= CONTEXT_PRIMER_MAX_CHARS + 512,
+            "{}",
+            primer.len()
+        );
         // Newest turns survive truncation; the oldest fall out.
         assert!(primer.contains("old message 199"));
         assert!(primer.contains("old reply 199"));
@@ -8112,15 +8838,21 @@ mod tests {
         // subagent marker (kind "subagent"), NOT the generic "Running tool
         // Agent" row — the alias gap left harness subagents invisible.
         for name in ["Task", "task", "Agent", "agent"] {
-            assert!(is_subagent_tool_name(name), "{name} must be a subagent tool");
+            assert!(
+                is_subagent_tool_name(name),
+                "{name} must be a subagent tool"
+            );
         }
         assert!(!is_subagent_tool_name("Bash"));
         for name in ["Task", "Agent"] {
-            let meta = tool_meta_generic(name, &json!({
-                "subagent_type": "research",
-                "description": "Research inference",
-                "prompt": "Go deep"
-            }));
+            let meta = tool_meta_generic(
+                name,
+                &json!({
+                    "subagent_type": "research",
+                    "description": "Research inference",
+                    "prompt": "Go deep"
+                }),
+            );
             assert_eq!(meta["kind"], "subagent", "{name} marker kind");
             assert_eq!(meta["role"], "research");
             assert_eq!(meta["detail"], "Research inference");
@@ -8131,28 +8863,45 @@ mod tests {
     fn parse_oneshot_text_extracts_each_cli_shape() {
         // Claude `--output-format json`: final text lives in `.result`.
         let claude = r#"{"type":"result","subtype":"success","result":"{\"type\":\"skill\"}","is_error":false}"#;
-        assert_eq!(parse_oneshot_text("claude_code", claude).unwrap(), "{\"type\":\"skill\"}");
+        assert_eq!(
+            parse_oneshot_text("claude_code", claude).unwrap(),
+            "{\"type\":\"skill\"}"
+        );
         // is_error=true surfaces the message instead of the text.
         let err = r#"{"type":"result","subtype":"error_max_turns","result":"hit turn cap","is_error":true}"#;
-        assert!(parse_oneshot_text("claude_code", err).unwrap_err().contains("hit turn cap"));
+        assert!(parse_oneshot_text("claude_code", err)
+            .unwrap_err()
+            .contains("hit turn cap"));
 
         // Kimi stream-json: assistant content strings concatenate; non-assistant
         // roles and tool_calls blocks are ignored.
         let kimi = concat!(
-            r#"{"role":"user","content":"gen"}"#, "\n",
-            r#"{"role":"assistant","content":"{\"type\":"}"#, "\n",
-            r#"{"role":"assistant","content":"\"loop\"}"}"#, "\n",
+            r#"{"role":"user","content":"gen"}"#,
+            "\n",
+            r#"{"role":"assistant","content":"{\"type\":"}"#,
+            "\n",
+            r#"{"role":"assistant","content":"\"loop\"}"}"#,
+            "\n",
         );
-        assert_eq!(parse_oneshot_text("kimi_code", kimi).unwrap(), "{\"type\":\"loop\"}");
+        assert_eq!(
+            parse_oneshot_text("kimi_code", kimi).unwrap(),
+            "{\"type\":\"loop\"}"
+        );
 
         // OpenCode run-mode events: text parts carry FULL snapshots — only the
         // new suffix of each part may be appended or the JSON duplicates.
         let oc = concat!(
-            r#"{"type":"step-start"}"#, "\n",
-            r#"{"type":"text","part":{"text":"{\"type\":"}}"#, "\n",
-            r#"{"type":"text","part":{"text":"{\"type\":\"skill\"}"}}"#, "\n",
+            r#"{"type":"step-start"}"#,
+            "\n",
+            r#"{"type":"text","part":{"text":"{\"type\":"}}"#,
+            "\n",
+            r#"{"type":"text","part":{"text":"{\"type\":\"skill\"}"}}"#,
+            "\n",
         );
-        assert_eq!(parse_oneshot_text("opencode", oc).unwrap(), "{\"type\":\"skill\"}");
+        assert_eq!(
+            parse_oneshot_text("opencode", oc).unwrap(),
+            "{\"type\":\"skill\"}"
+        );
     }
 
     #[test]
@@ -8164,7 +8913,10 @@ mod tests {
         let got = sanitize_attachment_name("../../etc/passwd");
         assert_eq!(got, "file.etc_passwd");
         assert!(!got.contains('/') && !got.contains('\\') && !got.starts_with('.'));
-        assert_eq!(sanitize_attachment_name("my report (final).pdf"), "my_report_final.pdf");
+        assert_eq!(
+            sanitize_attachment_name("my report (final).pdf"),
+            "my_report_final.pdf"
+        );
         // Inner dots count as separators too ("Report v2.docx"-style names
         // stay readable enough) — only the LAST dot's extension survives verbatim.
         assert_eq!(sanitize_attachment_name("a.b.c.docx"), "a_b_c.docx");
@@ -8181,10 +8933,7 @@ mod tests {
 
     #[test]
     fn decode_attachment_b64_rejects_junk() {
-        assert_eq!(
-            decode_attachment_b64("aGVsbG8="),
-            Some(b"hello".to_vec())
-        );
+        assert_eq!(decode_attachment_b64("aGVsbG8="), Some(b"hello".to_vec()));
         assert_eq!(decode_attachment_b64("not base64 !!!"), None);
         assert_eq!(decode_attachment_b64(""), Some(Vec::new()));
     }
@@ -8238,7 +8987,8 @@ mod tests {
         let input = json!({"questions": [{"question": "Proceed?"}]});
         // A non-object answers payload must coerce to {} (never wedge the
         // protocol with a malformed updatedInput).
-        let resp = ask_user_allow_response("req-8", &input, &json!("oops"), Some("  do it safely  "));
+        let resp =
+            ask_user_allow_response("req-8", &input, &json!("oops"), Some("  do it safely  "));
         let updated = &resp["response"]["response"]["updatedInput"];
         assert_eq!(updated["answers"], json!({}));
         // Free-text reply is trimmed and replaces the structured answers.
@@ -8265,7 +9015,10 @@ mod tests {
         kill_one_shot_children();
 
         let status = child.lock().unwrap().try_wait().unwrap();
-        assert!(status.is_some(), "registered one-shot child survived the kill");
+        assert!(
+            status.is_some(),
+            "registered one-shot child survived the kill"
+        );
         assert!(
             ONE_SHOT_CHILDREN.lock().unwrap().get(&pid).is_none(),
             "registry must be drained after the kill"
@@ -8289,7 +9042,22 @@ mod tests {
         let mut tools = ToolTracker::new();
         let ev = |t: &str| json!({ "type": "text", "part": { "text": t } });
         let mut feed = |v: &Value, full: &mut String, last: &mut String| {
-            handle_opencode_event(None, "s", v, full, &cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost, last, &mut last_reasoning, &mut in_think, &mut tools);
+            handle_opencode_event(
+                None,
+                "s",
+                v,
+                full,
+                &cell,
+                &mut input,
+                &mut output,
+                &mut cache_read,
+                &mut cache_creation,
+                &mut cost,
+                last,
+                &mut last_reasoning,
+                &mut in_think,
+                &mut tools,
+            );
         };
         feed(&ev("Hello"), &mut full, &mut last);
         feed(&ev("Hello, world"), &mut full, &mut last);
@@ -8316,15 +9084,48 @@ mod tests {
                         last_text: &mut String,
                         last_reasoning: &mut String,
                         in_think: &mut bool| {
-            handle_opencode_event(None, "s", v, full, &cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost, last_text, last_reasoning, in_think, &mut tools);
+            handle_opencode_event(
+                None,
+                "s",
+                v,
+                full,
+                &cell,
+                &mut input,
+                &mut output,
+                &mut cache_read,
+                &mut cache_creation,
+                &mut cost,
+                last_text,
+                last_reasoning,
+                in_think,
+                &mut tools,
+            );
         };
         // Reasoning snapshots stream as suffixes inside one <think> block.
-        feed(&json!({ "type": "reasoning", "part": { "text": "Think" } }), &mut full, &mut last_text, &mut last_reasoning, &mut in_think);
+        feed(
+            &json!({ "type": "reasoning", "part": { "text": "Think" } }),
+            &mut full,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut in_think,
+        );
         assert!(in_think);
-        feed(&json!({ "type": "reasoning", "part": { "text": "Thinking…" } }), &mut full, &mut last_text, &mut last_reasoning, &mut in_think);
+        feed(
+            &json!({ "type": "reasoning", "part": { "text": "Thinking…" } }),
+            &mut full,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut in_think,
+        );
         assert_eq!(full, "<think>Thinking…");
         // The first real text part closes the block before appending.
-        feed(&json!({ "type": "text", "part": { "text": "Answer" } }), &mut full, &mut last_text, &mut last_reasoning, &mut in_think);
+        feed(
+            &json!({ "type": "text", "part": { "text": "Answer" } }),
+            &mut full,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut in_think,
+        );
         assert!(!in_think);
         assert_eq!(full, "<think>Thinking…</think>Answer");
     }
@@ -8340,7 +9141,15 @@ mod tests {
             "id": "prt_1", "type": "tool", "tool": "bash",
             "state": { "status": "running", "input": { "command": "ls" } }
         });
-        emit_opencode_tool(None, "s", &running, &full_cell, &think_cell, &mut tools, &mut states);
+        emit_opencode_tool(
+            None,
+            "s",
+            &running,
+            &full_cell,
+            &think_cell,
+            &mut tools,
+            &mut states,
+        );
         {
             let f = full_cell.lock().unwrap();
             // Exactly ONE call card while running — repeated updates dedup.
@@ -8353,18 +9162,42 @@ mod tests {
             "id": "prt_1", "type": "tool", "tool": "bash",
             "state": { "status": "completed", "input": { "command": "ls" }, "output": "file.txt" }
         });
-        emit_opencode_tool(None, "s", &completed, &full_cell, &think_cell, &mut tools, &mut states);
+        emit_opencode_tool(
+            None,
+            "s",
+            &completed,
+            &full_cell,
+            &think_cell,
+            &mut tools,
+            &mut states,
+        );
         {
             let f = full_cell.lock().unwrap();
             // Result marker attached exactly once for the shell step.
-            assert_eq!(f.matches("\"kind\":\"result\"").count() + f.matches("\"kind\": \"result\"").count(), 1);
+            assert_eq!(
+                f.matches("\"kind\":\"result\"").count()
+                    + f.matches("\"kind\": \"result\"").count(),
+                1
+            );
         }
 
         // A late duplicate completion must not attach another result.
-        emit_opencode_tool(None, "s", &completed, &full_cell, &think_cell, &mut tools, &mut states);
+        emit_opencode_tool(
+            None,
+            "s",
+            &completed,
+            &full_cell,
+            &think_cell,
+            &mut tools,
+            &mut states,
+        );
         {
             let f = full_cell.lock().unwrap();
-            assert_eq!(f.matches("\"kind\":\"result\"").count() + f.matches("\"kind\": \"result\"").count(), 1);
+            assert_eq!(
+                f.matches("\"kind\":\"result\"").count()
+                    + f.matches("\"kind\": \"result\"").count(),
+                1
+            );
         }
 
         // A tool that arrives already-finished is self-contained.
@@ -8372,10 +9205,22 @@ mod tests {
             "id": "prt_2", "type": "tool", "tool": "bash",
             "state": { "status": "completed", "input": { "command": "pwd" }, "output": "/tmp" }
         });
-        emit_opencode_tool(None, "s", &done, &full_cell, &think_cell, &mut tools, &mut states);
+        emit_opencode_tool(
+            None,
+            "s",
+            &done,
+            &full_cell,
+            &think_cell,
+            &mut tools,
+            &mut states,
+        );
         {
             let f = full_cell.lock().unwrap();
-            assert_eq!(f.matches("\"kind\":\"result\"").count() + f.matches("\"kind\": \"result\"").count(), 2);
+            assert_eq!(
+                f.matches("\"kind\":\"result\"").count()
+                    + f.matches("\"kind\": \"result\"").count(),
+                2
+            );
         }
     }
 
@@ -8429,13 +9274,25 @@ mod tests {
         // prompt echo — which must NOT land in the reply buffer.
         feed(
             r#"{"type":"message.updated","properties":{"info":{"id":"msg_u","role":"user"}}}"#,
-            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut tools,
+            &mut states,
+            &mut roles,
+            &mut part_kinds,
+            &mut cur_text_part,
+            &mut cur_reasoning_part,
         );
         feed(
             r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","messageID":"msg_u","part":{"type":"text","text":"tell me a story","messageID":"msg_u"}}}"#,
-            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut tools,
+            &mut states,
+            &mut roles,
+            &mut part_kinds,
+            &mut cur_text_part,
+            &mut cur_reasoning_part,
         );
         assert!(
             full_cell.lock().unwrap().is_empty(),
@@ -8444,52 +9301,100 @@ mod tests {
 
         feed(
             r#"{"type":"message.updated","properties":{"info":{"id":"msg_a","role":"assistant"}}}"#,
-            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut tools,
+            &mut states,
+            &mut roles,
+            &mut part_kinds,
+            &mut cur_text_part,
+            &mut cur_reasoning_part,
         );
 
         // Live streaming path: empty snapshot announces the reasoning part,
         // token deltas stream in, final snapshot reconciles to no-op.
         feed(
             r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","part":{"id":"prt_r1","type":"reasoning","text":"","messageID":"msg_a"}}}"#,
-            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut tools,
+            &mut states,
+            &mut roles,
+            &mut part_kinds,
+            &mut cur_text_part,
+            &mut cur_reasoning_part,
         );
         assert_eq!(*full_cell.lock().unwrap(), "<think>");
         for d in ["Thi", "nking", "…"] {
             let payload = format!(
                 r#"{{"type":"message.part.delta","properties":{{"sessionID":"ses_mine","messageID":"msg_a","partID":"prt_r1","field":"text","delta":"{d}"}}}}"#
             );
-            feed(&payload, &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-                &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part);
+            feed(
+                &payload,
+                &mut last_text,
+                &mut last_reasoning,
+                &mut tools,
+                &mut states,
+                &mut roles,
+                &mut part_kinds,
+                &mut cur_text_part,
+                &mut cur_reasoning_part,
+            );
         }
         assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…");
         // Final full snapshot for the reasoning part reconciles to a no-op.
         feed(
             r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","part":{"id":"prt_r1","type":"reasoning","text":"Thinking…","messageID":"msg_a"}}}"#,
-            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut tools,
+            &mut states,
+            &mut roles,
+            &mut part_kinds,
+            &mut cur_text_part,
+            &mut cur_reasoning_part,
         );
         assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…");
 
         // Text part: empty snapshot closes the think block, then deltas.
         feed(
             r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","part":{"id":"prt_t1","type":"text","text":"","messageID":"msg_a"}}}"#,
-            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut tools,
+            &mut states,
+            &mut roles,
+            &mut part_kinds,
+            &mut cur_text_part,
+            &mut cur_reasoning_part,
         );
         assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…</think>");
         for d in ["H", "i"] {
             let payload = format!(
                 r#"{{"type":"message.part.delta","properties":{{"sessionID":"ses_mine","messageID":"msg_a","partID":"prt_t1","field":"text","delta":"{d}"}}}}"#
             );
-            feed(&payload, &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-                &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part);
+            feed(
+                &payload,
+                &mut last_text,
+                &mut last_reasoning,
+                &mut tools,
+                &mut states,
+                &mut roles,
+                &mut part_kinds,
+                &mut cur_text_part,
+                &mut cur_reasoning_part,
+            );
         }
         feed(
             r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","part":{"id":"prt_t1","type":"text","text":"Hi","messageID":"msg_a"}}}"#,
-            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut tools,
+            &mut states,
+            &mut roles,
+            &mut part_kinds,
+            &mut cur_text_part,
+            &mut cur_reasoning_part,
         );
         assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…</think>Hi");
 
@@ -8497,16 +9402,28 @@ mod tests {
         // snapshot against the previous part's flat baseline.
         feed(
             r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","part":{"id":"prt_t2","type":"text","text":"more","messageID":"msg_a"}}}"#,
-            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut tools,
+            &mut states,
+            &mut roles,
+            &mut part_kinds,
+            &mut cur_text_part,
+            &mut cur_reasoning_part,
         );
         assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…</think>Himore");
 
         // Other sessions' traffic stays filtered.
         feed(
             r#"{"type":"message.part.updated","properties":{"sessionID":"ses_other","part":{"id":"prt_x","type":"text","text":"IGNORED","messageID":"msg_x"}}}"#,
-            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut tools,
+            &mut states,
+            &mut roles,
+            &mut part_kinds,
+            &mut cur_text_part,
+            &mut cur_reasoning_part,
         );
         assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…</think>Himore");
 
@@ -8514,8 +9431,14 @@ mod tests {
         quiet.store(0, Ordering::Relaxed);
         feed(
             r#"{"type":"session.status","properties":{"status":{"type":"busy"}}}"#,
-            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
-            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut tools,
+            &mut states,
+            &mut roles,
+            &mut part_kinds,
+            &mut cur_text_part,
+            &mut cur_reasoning_part,
         );
         assert!(quiet.load(Ordering::Relaxed) > 0);
     }
@@ -8588,7 +9511,11 @@ mod tests {
         let db = Arc::new(parking_lot::Mutex::new(conn));
         let dirs = turn_watch_dirs(Some(proj.path().to_str().unwrap()), &db);
         let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
-        assert_eq!(dirs.len(), 2, "spawn dir + configured artifacts dir: {dirs:?}");
+        assert_eq!(
+            dirs.len(),
+            2,
+            "spawn dir + configured artifacts dir: {dirs:?}"
+        );
         assert_eq!(canon(&dirs[0]), canon(proj.path()));
         assert_eq!(canon(&dirs[1]), canon(arts.path()));
     }
@@ -8659,10 +9586,24 @@ mod tests {
         // slot nor finalize the agent (the old "Done ✓ while still working" bug).
         let out = tools.tool_result(RECEIPT, false, None, "s1", Some("call_abc"));
         assert!(out.is_none());
-        assert_eq!(tools.by_tool_use.len(), 1, "receipt must keep the agent live");
-        assert_eq!(tools.pending.len(), 1, "receipt must not consume the FIFO slot");
         assert_eq!(
-            tools.by_tool_use.values().next().unwrap().agent_id.as_deref(),
+            tools.by_tool_use.len(),
+            1,
+            "receipt must keep the agent live"
+        );
+        assert_eq!(
+            tools.pending.len(),
+            1,
+            "receipt must not consume the FIFO slot"
+        );
+        assert_eq!(
+            tools
+                .by_tool_use
+                .values()
+                .next()
+                .unwrap()
+                .agent_id
+                .as_deref(),
             Some("a1b3914b301b8a387")
         );
     }
@@ -8684,7 +9625,10 @@ mod tests {
                 "summary": "BACKGROUND_OK"
             }),
         );
-        assert!(tools.by_tool_use.is_empty(), "notification finalizes the agent");
+        assert!(
+            tools.by_tool_use.is_empty(),
+            "notification finalizes the agent"
+        );
         assert!(tools.pending.is_empty());
     }
 
@@ -8750,7 +9694,11 @@ mod tests {
         // …and its internal tool result must not pop one either.
         let routed = tools.route_subagent_result(None, "s1", "call_abc", "ls output", false);
         assert!(routed);
-        assert_eq!(tools.pending.len(), 1, "main FIFO untouched by subagent activity");
+        assert_eq!(
+            tools.pending.len(),
+            1,
+            "main FIFO untouched by subagent activity"
+        );
         // Unknown parents (background BASH tasks etc.) don't route.
         assert!(!tools.route_subagent_assistant(None, "s1", "call_other", &[]));
         // The foreground completion still lands on the right agent, and the
@@ -8794,14 +9742,20 @@ mod tests {
         let reply = "I can do this two ways.\n\nWhich database should I use?\n\
             RELAY_ASK: {\"question\":\"Which database?\",\"header\":\"DB\",\"options\":[{\"label\":\"SQLite\",\"description\":\"local\"},{\"label\":\"Postgres\"}],\"multiSelect\":false}\n";
         let (clean, ask) = split_relay_ask(reply.to_string());
-        assert_eq!(clean, "I can do this two ways.\n\nWhich database should I use?");
+        assert_eq!(
+            clean,
+            "I can do this two ways.\n\nWhich database should I use?"
+        );
         let qs = ask.expect("marker must parse");
         let q = &qs[0];
         assert_eq!(q["question"], "Which database?");
         assert_eq!(q["header"], "DB");
         assert_eq!(q["options"][0]["label"], "SQLite");
         assert_eq!(q["options"][0]["description"], "local");
-        assert!(q["options"][1].get("description").is_none(), "missing description stays absent");
+        assert!(
+            q["options"][1].get("description").is_none(),
+            "missing description stays absent"
+        );
         assert_eq!(q["options"].as_array().unwrap().len(), 2);
     }
 
@@ -8814,8 +9768,14 @@ mod tests {
         let (clean, ask) = split_relay_ask(broken.to_string());
         let qs = ask.expect("invalid escapes must be repaired");
         assert_eq!(clean, "", "a bare marker leaves no prose behind");
-        assert_eq!(qs[0]["question"], "What would you like me to help you with today?");
-        assert_eq!(qs[0]["options"][1]["description"], "Build something in D:\\artifact");
+        assert_eq!(
+            qs[0]["question"],
+            "What would you like me to help you with today?"
+        );
+        assert_eq!(
+            qs[0]["options"][1]["description"],
+            "Build something in D:\\artifact"
+        );
         // Already-valid double backslashes pass through untouched.
         let ok = "RELAY_ASK: {\"question\":\"Q?\",\"options\":[{\"label\":\"L\",\"description\":\"D:\\\\dir\"}]}";
         let (_, ask) = split_relay_ask(ok.to_string());
@@ -8853,7 +9813,10 @@ mod tests {
         let qs = serde_json::json!([{"question": "Which database?"}]);
         let answers = serde_json::json!({"Which database?": "SQLite"});
         let msg = compose_ask_follow_up(&qs, &answers, None, false);
-        assert!(msg.contains("You asked: \u{201c}Which database?\u{201d}"), "{msg}");
+        assert!(
+            msg.contains("You asked: \u{201c}Which database?\u{201d}"),
+            "{msg}"
+        );
         assert!(msg.contains("Which database?: SQLite"), "{msg}");
         assert!(msg.contains("Continue the task"), "{msg}");
 
@@ -8861,7 +9824,12 @@ mod tests {
         let msg = compose_ask_follow_up(&qs, &multi, None, false);
         assert!(msg.contains("SQLite, Postgres"), "{msg}");
 
-        let free_only = compose_ask_follow_up(&qs, &serde_json::json!({}), Some("use whatever").as_deref(), false);
+        let free_only = compose_ask_follow_up(
+            &qs,
+            &serde_json::json!({}),
+            Some("use whatever").as_deref(),
+            false,
+        );
         assert!(free_only.contains("use whatever"), "{free_only}");
 
         let skipped = compose_ask_follow_up(&qs, &serde_json::json!({}), None, true);
@@ -8891,7 +9859,10 @@ mod tests {
         // Single labels, multi labels, and per-question free text fallback.
         let answers = serde_json::json!({"Which database?": "Postgres", "Migrate now?": ["yes", "also docs"]});
         let body = build_opencode_reply_answers(&qs, &answers, None);
-        assert_eq!(body, serde_json::json!([["Postgres"], ["yes", "also docs"]]));
+        assert_eq!(
+            body,
+            serde_json::json!([["Postgres"], ["yes", "also docs"]])
+        );
         // Unanswered question + free text: the free text fills THAT slot.
         let body = build_opencode_reply_answers(&qs, &serde_json::json!({}), Some("up to you"));
         assert_eq!(body, serde_json::json!([["up to you"], ["up to you"]]));

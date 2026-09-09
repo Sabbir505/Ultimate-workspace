@@ -37,6 +37,7 @@ import {
   type DocsEmbeddingStatus,
   type DocsIndexProgressPayload,
   type DownloadProgress,
+  type PerDownloadState,
 } from "../../lib/ipc";
 import { formatBytes, formatDateTime, shortName } from "../../lib/format";
 import { Modal } from "../common/Modal";
@@ -69,12 +70,6 @@ function fitClass(sizeBytes: number, budget: number): "fits" | "tight" | "too_la
   if (r < 0.5) return "fits";
   if (r < 0.8) return "tight";
   return "too_large";
-}
-
-interface PerDownloadState {
-  state: DownloadProgress["state"];
-  downloaded: number;
-  total: number | null;
 }
 
 interface PerCorpusProgress {

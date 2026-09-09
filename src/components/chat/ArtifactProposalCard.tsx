@@ -6,28 +6,12 @@
 import { useEffect, useState, useMemo } from "react";
 import type { ArtifactProposal, ArtifactSpec, SkillSpec, LoopSpec, PromptTemplateSpec, AutomationSpec } from "../../lib/ipc";
 import { listHarnessModels, listChatModels } from "../../lib/ipc";
+import { AGENT_OPTIONS } from "../../lib/agents";
 import { MissingFieldsPrompt } from "./MissingFieldsPrompt";
 import { GlassSelect } from "../common/GlassSelect";
 import { buildAutomationRunPrompt } from "../automations/shared";
 
 type ProposalState = "generating" | "ready" | "editing" | "created" | "rejected";
-
-/** Agent options for automation runs — mirrors AutomationsView's AGENT_OPTIONS
- *  so both surfaces offer the identical set (harnesses first, then API
- *  providers, then local). */
-const AGENT_OPTIONS: { id: string; label: string; group: "harness" | "api" | "local" }[] = [
-  { id: "claude_code", label: "Claude Code (harness)", group: "harness" },
-  { id: "opencode", label: "OpenCode (harness)", group: "harness" },
-  { id: "pi", label: "Pi (harness)", group: "harness" },
-  { id: "omp", label: "Omp (harness)", group: "harness" },
-  { id: "commandcode", label: "CommandCode (harness)", group: "harness" },
-  { id: "anthropic", label: "Anthropic API", group: "api" },
-  { id: "openai", label: "OpenAI API", group: "api" },
-  { id: "openrouter", label: "OpenRouter", group: "api" },
-  { id: "anthropic_compatible", label: "Anthropic-compatible", group: "api" },
-  { id: "openai_compatible", label: "OpenAI-compatible", group: "api" },
-  { id: "local_gguf", label: "Local GGUF", group: "local" },
-];
 
 interface ProposalCardState {
   state: ProposalState;

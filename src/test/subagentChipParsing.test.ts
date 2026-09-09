@@ -5,7 +5,7 @@
 // row instead of one chip per subagent (user-visible in the chat view while
 // the git sidebar AGENTS list showed the agents).
 import { describe, expect, it } from "vitest";
-import { parseSegments } from "../components/chat/MessageBubble";
+import { parseSegments } from "../lib/segments";
 
 function taskMarker(task: string): string {
   return `<tool>${JSON.stringify({

@@ -18,6 +18,7 @@ import {
   toastError,
   toastSuccess,
   type DownloadProgress,
+  type PerDownloadState,
   type SttStatus as SttStatusData,
 } from "../../lib/ipc";
 import { formatBytes, shortName } from "../../lib/format";
@@ -26,12 +27,6 @@ import { Modal } from "../common/Modal";
 /** Progress-event id emitted by `stt_install_server` (backend contract:
  *  commands/stt.rs SERVER_INSTALL_ID). */
 const SERVER_INSTALL_ID = "stt-whisper-server";
-
-interface PerDownloadState {
-  state: DownloadProgress["state"];
-  downloaded: number;
-  total: number | null;
-}
 
 export function SttPanel() {
   const [stt, setStt] = useState<SttStatusData | null>(null);

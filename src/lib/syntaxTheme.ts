@@ -16,9 +16,8 @@
 // whole object (and re-render every SyntaxHighlighter in the chat) on each
 // toggle, even when the value didn't actually change.
 import type { CSSProperties } from "react";
+import type { SyntaxStyle } from "./syntaxHighlighter";
 import { useSettingsStore } from "../state/settings";
-
-type SyntaxStyle = Record<string, CSSProperties>;
 
 let cachedThemeKey: string | null = null;
 let cachedStyle: SyntaxStyle | null = null;

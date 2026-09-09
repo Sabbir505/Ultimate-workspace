@@ -2740,6 +2740,14 @@ export interface DownloadProgress {
   error?: string | null;
 }
 
+/** Per-download UI snapshot derived from DownloadProgress events (Model
+ *  Market cards, Knowledge/STT panels). */
+export interface PerDownloadState {
+  state: DownloadProgress["state"];
+  downloaded: number;
+  total: number | null;
+}
+
 export interface FetchCatalogArgs {
   query?: string;
   sort?: ModelSort;

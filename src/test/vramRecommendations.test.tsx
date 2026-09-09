@@ -42,11 +42,12 @@ describe("ModelCard VRAM recommendation", () => {
     return render(
       <ModelCard
         entry={noopEntry()}
-        download={undefined}
+        downloads={{}}
+        checkDownloaded={() => false}
         totalRam={128 * 1024 * 1024 * 1024}
         vramBytes={vram}
         gpuName={cfg.gpuName === undefined ? "NVIDIA RTX 4070" : cfg.gpuName}
-        isDownloaded={false}
+        baseDownloaded={false}
         availableQuants={[]}
         onAction={vi.fn()}
       />,

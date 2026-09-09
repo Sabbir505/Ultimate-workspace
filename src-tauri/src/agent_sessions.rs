@@ -224,6 +224,60 @@ impl AgentSessionManager {
             .remove(chat_session_id)
     }
 
+    /// Take the pending ask ONLY if it is still the one the UI is answering.
+    /// A stale resolve (answer raced a replacement question) must leave the
+    /// newer pending in place — an unconditional take here used to consume
+    /// the replacement, so the next answer found an empty registry and the
+    /// harness waited on stdin forever.
+    pub fn take_pending_ask_if(
+        &self,
+        chat_session_id: &str,
+        expected_pending_id: &str,
+    ) -> Option<PendingAsk> {
+        let mut asks = self.pending_asks.lock().unwrap_or_else(|e| e.into_inner());
+        match asks.get(chat_session_id) {
+            Some(pending) if pending.pending_id == expected_pending_id => {
+                asks.remove(chat_session_id)
+            }
+            _ => None,
+        }
+    }
+
+    /// Block until the session's in-flight turn clears. A harness question is
+    /// registered MID-TURN (the marker/tool call arrives while the asking
+    /// turn is still streaming), so a fast answer lands while
+    /// `turn_in_flight` is still set — dispatching then makes `send` reject
+    /// with "a turn is already running" and the answer was silently lost.
+    /// The follow-up must wait for the asking turn to end. Returns false on
+    /// timeout (caller surfaces the failure instead of dropping the answer).
+    pub fn wait_for_turn_idle(
+        &self,
+        chat_session_id: &str,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let in_flight = {
+                let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                match sessions.get(chat_session_id) {
+                    Some(entry) => entry
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .turn_in_flight
+                        .load(Ordering::SeqCst),
+                    None => false,
+                }
+            };
+            if !in_flight {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+
     /// Dispatch the follow-up turn for a resolved harness question: the
     /// answer rides as a normal user message, so the CLI's own session resume
     /// (kimi `--session`, opencode server session, pi `--session`, omp /
@@ -7225,7 +7279,7 @@ fn emit_done(
     }
 }
 
-fn emit_error(app: Option<&AppHandle>, sid: &str, message: &str) {
+pub(crate) fn emit_error(app: Option<&AppHandle>, sid: &str, message: &str) {
     if let Some(app) = app {
         // Classify harness errors too: a remapped harness backend rejecting a
         // turn for window overflow must reach the same recoverable-error UX

@@ -283,6 +283,32 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
   };
 
   const doDownload = (e: CatalogEntry) => {
+    // Optimistic feedback: flip the card to "Starting…" the moment the user
+    // clicks instead of waiting for the backend's Starting event. A lost or
+    // late event used to leave the card on an unchanged "Download" button —
+    // reading as a dead click while the transfer actually ran.
+    setDownloads((prev) => ({
+      ...prev,
+      [e.id]: {
+        state: "starting",
+        downloaded: 0,
+        total: e.sizeBytes || null,
+        bps: 0,
+        finalPath: null,
+        error: null,
+      },
+    }));
+    // Safety net for a dead event pipe: if no progress event took over from
+    // the optimistic state, release the (disabled) button again so the
+    // download is retryable instead of stuck on "Starting…" forever.
+    window.setTimeout(() => {
+      setDownloads((prev) => {
+        if (prev[e.id]?.state !== "starting") return prev;
+        const next = { ...prev };
+        delete next[e.id];
+        return next;
+      });
+    }, 15_000);
     // Surface a failed START (gated repo, disk error, invalid dest) — the
     // download row only appears once the backend accepts the job, so without
     // this a rejected invoke left the user staring at an unchanged card.
@@ -293,7 +319,17 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
       downloadUrl: e.downloadUrl,
       expectedSha256: e.sha256,
       destDir: settings?.modelsDir ?? undefined,
-    }).catch((err) => toastError(`Couldn't start download: ${e.filename}`, err));
+    }).catch((err) => {
+      // Revert the optimistic state so the card doesn't say "Starting…"
+      // for a download that was never accepted.
+      setDownloads((prev) => {
+        if (prev[e.id]?.state !== "starting") return prev;
+        const next = { ...prev };
+        delete next[e.id];
+        return next;
+      });
+      toastError(`Couldn't start download: ${e.filename}`, err);
+    });
   };
 
   const onStartDownload = (e: CatalogEntry) => {
@@ -457,11 +493,12 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
               <ModelCard
                 key={e.repoId}
                 entry={e}
-                download={downloads[e.id]}
+                downloads={downloads}
+                checkDownloaded={(filename) => !!localModels?.some((m) => m.filename === filename)}
                 totalRam={memoryBudget}
                 vramBytes={vram && vram.bytes > 0 ? vram.bytes : null}
                 gpuName={vram && vram.bytes > 0 ? vram.name : null}
-                isDownloaded={!!isDownloaded}
+                baseDownloaded={!!isDownloaded}
                 availableQuants={quants}
                 onAction={(entry) => onStartDownload(entry)}
               />
@@ -533,7 +570,14 @@ function vramByteRatio(requiredBytes: number, vramBytes: number): number {
 
 interface ModelCardProps {
   entry: CatalogEntry;
-  download: PerDownload | undefined;
+  /** The whole download-state map: the card resolves progress by the
+   *  SELECTED quant's id (its own internal state), which the parent can't
+   *  know — keying by the base entry id used to leave the card showing a
+   *  plain "Download" button (no spinner, no progress) while the picked
+   *  quant quietly transferred. */
+  downloads: Record<string, PerDownload>;
+  /** Exact-filename check against the models directory (per active quant). */
+  checkDownloaded: (filename: string) => boolean;
   totalRam: number;
   /** Discrete GPU VRAM (bytes), or null when no dedicated GPU / probe failed.
    *  When set, the recommendation is VRAM-aware (offload headroom factored in)
@@ -541,7 +585,9 @@ interface ModelCardProps {
   vramBytes?: number | null;
   /** The detected GPU name for the recommendation label (e.g. "NVIDIA ..."). */
   gpuName?: string | null;
-  isDownloaded: boolean;
+  /** Fuzzy repo-level "already in the models dir" match (display-name based);
+   *  OR-ed with the exact per-quant check. */
+  baseDownloaded: boolean;
   availableQuants: { label: string; entry: CatalogEntry }[];
   onAction: (entry: CatalogEntry) => void;
 }
@@ -579,7 +625,7 @@ export function FitBadge({ ram }: { ram: RamFit }) {
   );
 }
 
-export function ModelCard({ entry, download, totalRam, vramBytes, gpuName, isDownloaded, availableQuants, onAction }: ModelCardProps) {
+export function ModelCard({ entry, downloads, checkDownloaded, totalRam, vramBytes, gpuName, baseDownloaded, availableQuants, onAction }: ModelCardProps) {
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedQuantEntry, setSelectedQuantEntry] = useState<CatalogEntry>(entry);
   const activeEntry = selectedQuantEntry || entry;
@@ -596,6 +642,11 @@ export function ModelCard({ entry, download, totalRam, vramBytes, gpuName, isDow
     ? vramClass(vramReq, vramBytes!)
     : ramClass(activeEntry.sizeBytes, totalRam);
   const recommended = usingVram && ram === "fits" && vramByteRatio(vramReq, vramBytes!) < 0.7;
+  // Progress follows the SELECTED quant (what the Download button starts),
+  // falling back to the base entry. Lookup must happen here where the
+  // selection lives — the parent keys cards by the "best" variant.
+  const download = downloads[activeEntry.id] ?? downloads[entry.id];
+  const isDownloaded = checkDownloaded(activeEntry.filename) || baseDownloaded;
   const state = download?.state;
   const pct = download?.total && download.total > 0
     ? Math.min(100, Math.round((download.downloaded / download.total) * 100))

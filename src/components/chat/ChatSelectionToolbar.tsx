@@ -52,6 +52,7 @@ export function ChatSelectionToolbar() {
   const [sel, setSel] = useState<{ x: number; y: number; text: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const selRef = useRef<typeof sel>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
 
   const hide = useCallback(() => {
     selRef.current = null;
@@ -98,13 +99,25 @@ export function ChatSelectionToolbar() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && selRef.current) hide();
     };
+    // Any press outside the toolbar dismisses it. Popups (model/agent picker,
+    // menus, modals) preventDefault their mousedown to keep focus, which also
+    // keeps the DOM selection alive — so "selection still exists" used to
+    // leave the toolbar floating next to an open picker. Capture phase: run
+    // before the popup's own handler. A fresh drag-select elsewhere re-summons
+    // the toolbar via selectionchange; clicking Copy/Ask targets the toolbar
+    // and is excluded.
+    const onPointerDown = (e: MouseEvent) => {
+      if (selRef.current && !toolbarRef.current?.contains(e.target as Node)) hide();
+    };
     document.addEventListener("selectionchange", onSelChange);
+    document.addEventListener("pointerdown", onPointerDown, true);
     window.addEventListener("scroll", hide, true); // any scroll dismisses
     window.addEventListener("resize", hide);
     window.addEventListener("keydown", onKey);
     return () => {
       if (raf) cancelAnimationFrame(raf);
       document.removeEventListener("selectionchange", onSelChange);
+      document.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("scroll", hide, true);
       window.removeEventListener("resize", hide);
       window.removeEventListener("keydown", onKey);
@@ -130,6 +143,7 @@ export function ChatSelectionToolbar() {
 
   return (
     <div
+      ref={toolbarRef}
       className="chat-selection-toolbar"
       style={{ left: sel.x, top: sel.y }}
       // preventDefault on mousedown: clicking a button must not collapse the

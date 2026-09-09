@@ -784,6 +784,14 @@ export interface ChatState {
   /** Messages queued while a turn is running, per chat session, FIFO. Sent
    *  one-by-one by `drainQueue` when the session's stream finishes. */
   messageQueue: Record<string, QueuedChatMessage[]>;
+  /** Unsent composer text, per chat session. Each conversation keeps its own
+   *  half-written prompt — switching sessions must not smear the draft across
+   *  every other chat. In-memory only. */
+  composerDrafts: Record<string, string>;
+  /** Set one session's draft. `value` may be an updater (same shape as the
+   *  React setState the composer used to own). Null session = no-op (nothing
+   *  to key the draft on yet; the composer falls back to local state). */
+  setComposerDraft: (sessionId: string | null, value: string | ((prev: string) => string)) => void;
   /** Live per-turn perf snapshot for the composer metrics row, keyed by chat
    *  session id. Updated on throttled `chat:perf` events while a turn streams,
    *  cleared on `chat:done`. Mirrors the `ChatPerfPayload` from the backend. */
@@ -1168,6 +1176,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   cwdOverrides: {},
   sessionProjects: {},
   messageQueue: {},
+  composerDrafts: {},
+
+  setComposerDraft: (sessionId, value) => {
+    if (!sessionId) return;
+    set((s) => {
+      const prev = s.composerDrafts[sessionId] ?? "";
+      const next = typeof value === "function" ? value(prev) : value;
+      if (next === prev) return s;
+      return { composerDrafts: { ...s.composerDrafts, [sessionId]: next } };
+    });
+  },
+
   livePerf: {},
   lastTurnPerf: {},
   sessionMetrics: {},

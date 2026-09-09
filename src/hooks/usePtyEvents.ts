@@ -4,7 +4,7 @@
 // import stores don't touch the Tauri event bridge.
 import { useEffect } from "react";
 import { safeListen, browserNavigateTab } from "../lib/ipc";
-import { openSession } from "../lib/sessionLauncher";
+import { openSession, surfaceBrowserTab } from "../lib/sessionLauncher";
 import { isAppFocused } from "../lib/appFocus";
 import { relayNotify } from "../lib/notifyCenter";
 import { sessionDisplayTitle } from "../lib/sessionTitle";
@@ -241,9 +241,11 @@ export function usePtyEvents(): void {
             // while the address bar claims we're already at the new URL.
             void browserNavigateTab(existing.paneId, tab.tabId, url).catch(() => {});
           }
+          surfaceBrowserTab(existing.paneId);
         } else {
           // Open a new browser pane with the detected URL
-          panesStore.addPane({ kind: "browser", url, projectId: null });
+          const paneId = panesStore.addPane({ kind: "browser", url, projectId: null });
+          surfaceBrowserTab(paneId);
         }
       }),
     );

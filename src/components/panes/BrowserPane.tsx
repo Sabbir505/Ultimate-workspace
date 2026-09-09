@@ -18,6 +18,7 @@
 // per tab, only active visible via CSS display toggle.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { Eraser, History, Pause, Play, Square } from "lucide-react";
 import {
   createHistory,
   currentUrl,
@@ -989,7 +990,8 @@ export function BrowserPane({ pane, visible = true }: Props) {
       {/* Trust layer: agent status strip (activity tint + pause/stop). */}
       <div className={`browser-trust-strip${agentWorking ? " active" : ""}${paused ? " paused" : ""}`}>
         <span className="browser-trust-status">
-          {paused ? "⏸ Agent paused" : agentWorking ? "⏺ Agent working…" : "Idle"}
+          <span className="trust-dot" aria-hidden />
+          {paused ? "Agent paused" : agentWorking ? "Agent working…" : "Idle"}
         </span>
         <div className="browser-trust-controls">
           <div className="browser-autonomy" title="Auto: confirm only risky actions (payments, destructive, credentials). Manual: confirm every agent action.">
@@ -1007,24 +1009,24 @@ export function BrowserPane({ pane, visible = true }: Props) {
             </button>
           </div>
           <button
-            className="ghost"
+            className="ghost trust-btn"
             title="Clear this site's session (cookies + storage) and reload"
             onClick={() => void browserClearSiteData(paneId, activeTabId).catch(() => {})}
           >
-            🧹
+            <Eraser size={13} aria-hidden />
           </button>
-          <button className="ghost" title={paused ? "Resume agent" : "Pause agent"} onClick={togglePause}>
-            {paused ? "▶" : "⏸"}
+          <button className="ghost trust-btn" title={paused ? "Resume agent" : "Pause agent"} onClick={togglePause}>
+            {paused ? <Play size={13} aria-hidden /> : <Pause size={13} aria-hidden />}
           </button>
-          <button className="ghost" title="Stop the agent (cancels its current action)" onClick={stopAgent}>
-            ⏹
+          <button className="ghost trust-btn" title="Stop the agent (cancels its current action)" onClick={stopAgent}>
+            <Square size={13} aria-hidden />
           </button>
           <button
-            className="ghost"
+            className={`ghost trust-btn${timelineOpen ? " active" : ""}`}
             title="Agent action timeline (what the agent did — user-owned log)"
             onClick={() => trustToggleTimeline(paneId)}
           >
-            {timelineOpen ? "✕" : "☰"}
+            <History size={13} aria-hidden />
           </button>
         </div>
       </div>

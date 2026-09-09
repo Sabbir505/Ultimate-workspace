@@ -180,33 +180,80 @@ function visiblePaneCount(): number {
   return visibleCount(usePanesStore.getState().panes);
 }
 
-/** Surface the Browser tool-panel tab: activate an already-open Browser chip
- *  when one exists (the panel's auto-open effect runs right AFTER the click
- *  that added the chip) instead of stacking a second "Browser" chip next to
- *  it; add one when there is none. Also expands the panel. */
-export function surfaceBrowserTab(): void {
+/** Surface the Browser tool-panel tab for a specific browser pane: activate
+ *  the chip BOUND to that pane when one exists, adopt (bind) an unbound
+ *  Browser chip when present, else add a chip bound to the pane. Expands the
+ *  panel. The binding matters: two unbound "Browser" chips both showed the
+ *  same most-recent pane, so opening a "new" browser just revealed the first
+ *  pane with all of its tabs. Without a paneId, falls back to the
+ *  most-recently-used visible browser pane. */
+export function surfaceBrowserTab(paneId?: string | null): void {
   const ui = useUiStore.getState();
-  const existing = ui.openTabs.find((t) => t.kind === "browser");
-  if (existing) ui.activateTab(existing.instanceId);
-  else ui.addTab("browser");
+  const panesStore = usePanesStore.getState();
+  let targetId = paneId ?? null;
+  if (!targetId) {
+    const mru = panesStore.panes
+      .filter((p) => p.data.kind === "browser" && !p.data.collapsed)
+      .reduce<Pane | null>((a, b) => (!a || a.lastUsedAt < b.lastUsedAt ? b : a), null);
+    targetId = mru?.paneId ?? null;
+  }
+  if (targetId && panesStore.panes.some((p) => p.paneId === targetId)) {
+    // Bump LRU so the pane also wins the visible slot while its chip is
+    // unbound (legacy chips) or another chip is active.
+    panesStore.focusPane(targetId);
+  }
+  if (targetId) {
+    const bound = ui.openTabs.find((t) => t.kind === "browser" && t.paneId === targetId);
+    if (bound) {
+      ui.activateTab(bound.instanceId);
+      ui.setToolPanelCollapsed(false);
+      return;
+    }
+    const unbound = ui.openTabs.find((t) => t.kind === "browser" && !t.paneId);
+    if (unbound) {
+      ui.bindTabPane(unbound.instanceId, targetId);
+      ui.activateTab(unbound.instanceId);
+      ui.setToolPanelCollapsed(false);
+      return;
+    }
+  }
+  ui.addTab("browser", targetId ? { paneId: targetId } : undefined);
   ui.setToolPanelCollapsed(false);
 }
 
-/** Open a browser pane in the tool panel's Browser tab. Used to live on the
- *  toolbar globe button; now the Browser tab's empty state / "+" affordance
- *  calls it. */
+/** Open a browser pane in the tool panel's Browser tab. Adopt a visible
+ *  browser pane that has no chip bound to it (e.g. one restored at boot or
+ *  whose chip was closed) before spawning a fresh pane; each "+"-spawned
+ *  Browser chip gets its OWN pane, so two chips never show one pane's tabs.
+ *  Used to live on the toolbar globe button; now the Browser tab's empty
+ *  state / "+" affordance calls it. */
 export function openBrowserPane(): void {
+  const ui = useUiStore.getState();
   const store = usePanesStore.getState();
-  if (visiblePaneCount() >= MAX_PANES) return;
+  const chips = ui.openTabs.filter((t) => t.kind === "browser");
+  const adoptable = store.panes.find(
+    (p) =>
+      p.data.kind === "browser" &&
+      !p.data.collapsed &&
+      !chips.some((c) => c.paneId === p.paneId),
+  );
+  if (adoptable) {
+    surfaceBrowserTab(adoptable.paneId);
+    return;
+  }
+  if (visiblePaneCount() >= MAX_PANES) {
+    // Grid full — just reveal what's already open instead of silently doing
+    // nothing (the chip the user clicked must lead somewhere).
+    surfaceBrowserTab();
+    return;
+  }
   const selectedProjectId = useProjectsStore.getState().selectedProjectId;
-  store.addPane({
+  const paneId = store.addPane({
     kind: "browser",
     url: useSettingsStore.getState().lastBrowserUrl(selectedProjectId),
     projectId: selectedProjectId,
   });
-  // Browsers live in the right tool panel — surface it so the new pane is
-  // immediately visible.
-  surfaceBrowserTab();
+  surfaceBrowserTab(paneId);
 }
 
 /** Open a file artifact in the Browser tab. Adds a new tab (or focuses an
@@ -233,8 +280,10 @@ export function openArtifactInBrowserPane(path: string): void {
   if (browsers.length > 0) {
     const target = browsers[browsers.length - 1];
     if (target.data.kind === "browser") {
-      const tabId = store.addBrowserTab(target.paneId, fileUrl);
+      store.addBrowserTab(target.paneId, fileUrl);
       store.focusPane(target.paneId);
+      surfaceBrowserTab(target.paneId);
+      return;
     }
   } else if (visiblePaneCount() < MAX_PANES) {
     const paneId = store.addPane({
@@ -243,6 +292,8 @@ export function openArtifactInBrowserPane(path: string): void {
       projectId: selectedProjectId,
     });
     store.focusPane(paneId);
+    surfaceBrowserTab(paneId);
+    return;
   } else {
     return; // grid full — silently skip
   }
@@ -259,7 +310,7 @@ export function restoreMinimizedBrowser(): void {
   if (visiblePaneCount() >= MAX_PANES) return;
   const target = minimized.reduce((a, b) => (a.lastUsedAt > b.lastUsedAt ? a : b));
   store.toggleBrowserCollapsed(target.paneId);
-  surfaceBrowserTab();
+  surfaceBrowserTab(target.paneId);
 }
 
 /** Open a plain interactive shell pane (no agent) — the Terminal tab's

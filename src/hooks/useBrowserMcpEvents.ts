@@ -30,17 +30,13 @@ import { useUiStore } from "../state/ui";
 
 /** Bring the Browser tab of the right tool panel into view — mirrors the
  *  canvas auto-open for generated artifacts. `paneId`, when known, is also
- *  focused so its webview gets the visible slot. REUSES the existing Browser
- *  chip: this runs on EVERY agent browser tool call (read/click/type/…), and
- *  a raw ui.addTab here stacked a brand-new "Browser" chip per tool call. */
+ *  focused so its webview gets the visible slot AND its own Browser chip is
+ *  the one surfaced (surfaceBrowserTab binds chips to panes, so two panes no
+ *  longer share one chip / one visible slot). REUSES an existing chip: this
+ *  runs on EVERY agent browser tool call (read/click/type/…), and a raw
+ *  ui.addTab here stacked a brand-new "Browser" chip per tool call. */
 function surfaceBrowserPanel(paneId?: string | null): void {
-  surfaceBrowserTab();
-  if (paneId) {
-    const panes = usePanesStore.getState();
-    if (panes.panes.some((p) => p.paneId === paneId)) {
-      panes.focusPane(paneId);
-    }
-  }
+  surfaceBrowserTab(paneId);
 }
 
 /**

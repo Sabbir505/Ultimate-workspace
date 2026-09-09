@@ -233,6 +233,10 @@ export interface UiState {
   activeTabId: string | null;
   /** Add a tab (spawning a new instance of that kind) and activate it. */
   addTab: (kind: ToolPanelTab, target?: { paneId?: string; subagentId?: string }) => void;
+  /** (Re)target an existing tab instance at a pane. Used to ADOPT an unbound
+   *  browser chip when a specific pane must be surfaced — activating it would
+   *  stack a second chip next to the first. */
+  bindTabPane: (instanceId: string, paneId: string) => void;
   /** Open the Agents pane for ONE subagent without stacking duplicate tabs:
    *  an existing agents tab is re-focused and re-targeted, a new instance is
    *  only created when none is open. Spawning agents never auto-opens —
@@ -534,6 +538,11 @@ export const useUiStore = create<UiState>((set, get) => ({
         ...(kind === "agents" ? { activeSubagentId: target?.subagentId ?? s.activeSubagentId } : {}),
       };
     }),
+  // (Re)target an existing tab instance at a pane. No-op for unknown ids.
+  bindTabPane: (instanceId, paneId) =>
+    set((s) => ({
+      openTabs: s.openTabs.map((t) => (t.instanceId === instanceId ? { ...t, paneId } : t)),
+    })),
   // Focus ONE subagent in the Agents pane without stacking tabs: clicking
   // three agents in a row must re-target the SAME pane, not litter the tab
   // strip with an instance per click. Reuses an open agents tab when present.

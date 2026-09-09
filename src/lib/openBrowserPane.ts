@@ -10,11 +10,6 @@ import { useProjectsStore } from "../state/projects";
 
 export function openInBrowserPane(url: string): void {
   const panes = usePanesStore.getState();
-  // Surface the Browser tab — every caller of this helper is a "show the user
-  // a web page" path, so the panel must actually become visible (mirrors the
-  // canvas auto-open for generated artifacts). surfaceBrowserTab reuses the
-  // open Browser chip instead of stacking duplicates.
-  surfaceBrowserTab();
   const existing = panes.panes.find(
     (p) => p.data.kind === "browser" && !p.data.collapsed,
   );
@@ -24,12 +19,15 @@ export function openInBrowserPane(url: string): void {
       panes.setBrowserUrl(existing.paneId, url, tab.tabId);
       void browserNavigateTab(existing.paneId, tab.tabId, url).catch(() => {});
     }
-    panes.focusPane(existing.paneId);
+    // Surface THIS pane's Browser chip — an untargeted surface could reveal a
+    // different pane than the one that just navigated to the URL.
+    surfaceBrowserTab(existing.paneId);
     return;
   }
-  panes.addPane({
+  const paneId = panes.addPane({
     kind: "browser",
     url,
     projectId: useProjectsStore.getState().selectedProjectId,
   });
+  surfaceBrowserTab(paneId);
 }

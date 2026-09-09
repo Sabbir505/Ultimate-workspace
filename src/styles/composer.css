@@ -1443,9 +1443,12 @@
 .artifact-preview-table td {
   border: none;
   border-bottom: 1px solid var(--border);
-  border-right: 1px solid var(--border);
+  /* logical end (not physical right): the inner grid tracks the table's
+     direction, so RTL tables don't grow doubled/missing edge rules. */
+  border-inline-end: 1px solid var(--border);
   padding: 5px 10px;
-  text-align: left;
+  /* start (not left): RTL cells align to their reading side. */
+  text-align: start;
 }
 /* Drop the inner rules that touch the table's rounded edge, and round the
    corner cells so header/zebra fills stay inside the card's radius. */
@@ -1453,7 +1456,7 @@
 .chat-markdown td:last-child,
 .artifact-preview-table th:last-child,
 .artifact-preview-table td:last-child {
-  border-right: none;
+  border-inline-end: none;
 }
 .chat-markdown th:first-child,
 .artifact-preview-table th:first-child {
@@ -1531,13 +1534,13 @@
   opacity: 0.7;
 }
 .chat-markdown input[type="checkbox"] {
-  margin-right: 6px;
+  margin-inline-end: 6px;
 }
 .chat-markdown li.task-list-item {
   list-style: none;
 }
 .chat-markdown ul.contains-task-list {
-  padding-left: 4px;
+  padding-inline-start: 4px;
 }
 .chat-markdown hr {
   border: none;

@@ -335,7 +335,7 @@ fn handle_send_chat_message(
                     .flatten()
                     .filter(|m| !m.trim().is_empty())
                     .unwrap_or_else(|| {
-                        let pid = crate::chat::commands::chat_provider_id_from_str(p);
+                        let pid = crate::chat::commands::parse_provider_id(p);
                         crate::chat::streaming::resolve_provider(&pid.unwrap())
                             .default_model()
                             .to_string()

@@ -2225,10 +2225,10 @@ async fn fetch_model_list(
     let url = format!("{base}/v1/models");
     let req = match auth_style {
         // Anthropic's endpoint requires the version header alongside the key.
-        "x-api-key" => client
-            .get(&url)
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01"),
+        "x-api-key" => client.get(&url).header("x-api-key", key).header(
+            "anthropic-version",
+            crate::chat::providers::ANTHROPIC_API_VERSION,
+        ),
         _ => client
             .get(&url)
             .header("Authorization", format!("Bearer {key}")),

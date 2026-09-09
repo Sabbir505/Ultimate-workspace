@@ -129,6 +129,10 @@ pub struct ChatUsage {
 /// `<think>…</think>` for the frontend's collapsible thinking block.
 pub const REASONING_PREFIX: char = '\u{E000}';
 
+/// Anthropic wire API version sent as the `anthropic-version` header on
+/// every Messages-API request (streaming, one-shot, metering, model listing).
+pub(crate) const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+
 // ---- Provider trait ----
 
 #[async_trait::async_trait]
@@ -345,7 +349,7 @@ fn anthropic_request(
     client
         .post(&url)
         .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-version", ANTHROPIC_API_VERSION)
         .header("content-type", "application/json")
         .json(&body)
 }

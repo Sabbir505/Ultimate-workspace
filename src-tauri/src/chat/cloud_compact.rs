@@ -129,7 +129,10 @@ pub(crate) async fn summarize_via_provider(
         let req = client
             .post(format!("{base}/v1/messages"))
             .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header(
+                "anthropic-version",
+                crate::chat::providers::ANTHROPIC_API_VERSION,
+            )
             .header("content-type", "application/json")
             .json(&body);
         (

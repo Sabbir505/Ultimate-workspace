@@ -25,7 +25,7 @@ use crate::chat::proto::{
 };
 use crate::chat::providers::{
     calculate_anthropic_cost, calculate_openai_cost, ChatProvider, ChatProviderId, ChatRequest,
-    ChatUsage,
+    ChatUsage, ANTHROPIC_API_VERSION,
 };
 use crate::chat::{permission, tools, ChatManager};
 
@@ -617,7 +617,7 @@ async fn anthropic_stream_round(
         client
             .post(url)
             .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")
             .json(body)
             .send(),

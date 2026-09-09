@@ -15,20 +15,6 @@ use crate::DbState;
 
 pub(crate) type CmdResult<T> = Result<T, String>;
 
-/// Map a provider id string to the ChatProviderId enum (send-path dispatch
-/// and auto fail-over chain building).
-pub(crate) fn chat_provider_id_from_str(s: &str) -> Option<ChatProviderId> {
-    match s {
-        "anthropic" => Some(ChatProviderId::Anthropic),
-        "openai" => Some(ChatProviderId::OpenAI),
-        "anthropic_compatible" => Some(ChatProviderId::AnthropicCompatible),
-        "openai_compatible" => Some(ChatProviderId::OpenAICompatible),
-        "openrouter" => Some(ChatProviderId::OpenRouter),
-        "local_gguf" => Some(ChatProviderId::LocalGguf),
-        _ => None,
-    }
-}
-
 // ---- Chat session CRUD ----
 
 /// Removes display-only process blocks — `<think>…</think>` reasoning and
@@ -675,7 +661,7 @@ pub async fn anthropic_oneshot(
     let resp = client
         .post(&url)
         .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-version", ANTHROPIC_API_VERSION)
         .header("content-type", "application/json")
         .json(&body)
         .send()
@@ -1414,7 +1400,7 @@ pub(crate) async fn fetch_models_list(
     let req = match provider {
         "anthropic" | "anthropic_compatible" => req
             .header("x-api-key", &key)
-            .header("anthropic-version", "2023-06-01"),
+            .header("anthropic-version", ANTHROPIC_API_VERSION),
         "openai" | "openai_compatible" | "openrouter" => {
             req.header("Authorization", format!("Bearer {key}"))
         }
@@ -1880,7 +1866,7 @@ pub async fn send_chat_message(
         // and this read).
         let mut fallbacks: Vec<crate::chat::AutoFallback> = Vec::new();
         for cand in chain.iter().skip(1) {
-            let Some(pid) = chat_provider_id_from_str(&cand.provider) else {
+            let Some(pid) = parse_provider_id(&cand.provider) else {
                 continue;
             };
             let key = {
@@ -5344,7 +5330,7 @@ pub async fn fetch_provider_model_windows(
             let resp = client
                 .get(format!("{base}/v1/models?limit=1000"))
                 .header("x-api-key", &api_key)
-                .header("anthropic-version", "2023-06-01")
+                .header("anthropic-version", ANTHROPIC_API_VERSION)
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
@@ -5493,10 +5479,8 @@ pub(crate) fn effective_session_window(
     crate::chat::context_windows::effective_cloud_window(model, global_cap)
 }
 
-/// Parse a chat_sessions.provider string into the provider enum. The send
-/// path matches inline (it must hard-fail on unknown providers); the meter
-/// paths need the tolerant variant — they render for whatever the session
-/// store holds, including harness ids.
+/// Map a provider id string to the ChatProviderId enum (send-path dispatch,
+/// auto fail-over chain building, and the context-meter paths).
 pub(crate) fn parse_provider_id(s: &str) -> Option<ChatProviderId> {
     match s {
         "anthropic" => Some(ChatProviderId::Anthropic),

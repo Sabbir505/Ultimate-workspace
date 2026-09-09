@@ -17,6 +17,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::chat::providers::ANTHROPIC_API_VERSION;
 use crate::chat::stream_events;
 use crate::chat::tools::ToolOutcome;
 use crate::chat::{permission, tools, ChatManager};
@@ -1121,7 +1122,7 @@ async fn run_subagent_loop(
         if is_anthropic {
             req = req
                 .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01");
+                .header("anthropic-version", ANTHROPIC_API_VERSION);
         } else {
             req = req.header("Authorization", format!("Bearer {api_key}"));
         }

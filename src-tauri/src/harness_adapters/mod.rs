@@ -280,6 +280,20 @@ pub fn resolve_for_spawn(spec: &CommandSpec) -> CommandSpec {
 /// Env var carrying the untrusted turn prompt to the wrapper batch.
 pub const TURN_PROMPT_ENV: &str = "RELAY_TURN_PROMPT";
 
+/// cmd.exe's batch-line limit is 8191 chars. Once the delayed expansion of
+/// `!RELAY_TURN_PROMPT!` pushes the wrapper line past it, the expansion
+/// silently yields an EMPTY string (empirically on Win11: 8190 chars arrive
+/// intact, 8192 arrive as nothing) and the CLI runs with no prompt at all —
+/// `opencode run` then fails with "You must provide a message or a command".
+/// Prompts above this margin use a size-immune transport instead. Measured in
+/// UTF-16 code units (cmd's own counting) with a wide margin.
+const CMD_EXPANSION_PROMPT_LIMIT: usize = 6000;
+
+/// Whether the prompt would survive the wrapper's delayed-expansion line.
+fn prompt_fits_cmd_expansion(prompt: &str) -> bool {
+    prompt.encode_utf16().count() <= CMD_EXPANSION_PROMPT_LIMIT
+}
+
 /// Harnesses with a one-shot (non-persistent) turn path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnHarness {
@@ -432,9 +446,19 @@ pub enum TurnPromptTransport {
 fn ensure_turn_wrappers() -> Option<std::path::PathBuf> {
     let dir = std::env::temp_dir().join("relay-turn-wrappers");
     std::fs::create_dir_all(&dir).ok()?;
+    let mut bodies: Vec<(&str, &str)> = Vec::new();
     for kind in [TurnHarness::Kimi, TurnHarness::OpenCode, TurnHarness::Pi, TurnHarness::Omp, TurnHarness::CommandCode] {
-        let path = dir.join(kind.wrapper_name());
-        let body = kind.wrapper_body();
+        bodies.push((kind.wrapper_name(), kind.wrapper_body()));
+    }
+    // Flags-only variant for oversized prompts (see turn_spec): the prompt
+    // arrives on stdin, so there is no env placeholder and no delayed
+    // expansion to break at cmd.exe's 8191-char line limit.
+    bodies.push((
+        OPENCODE_STDIN_WRAPPER_NAME,
+        "@echo off\r\nopencode run --format json --auto --print-logs --log-level ERROR %*\r\n",
+    ));
+    for (name, body) in bodies {
+        let path = dir.join(name);
         let current = std::fs::read_to_string(&path).unwrap_or_default();
         if current != body && std::fs::write(&path, body).is_err() {
             return None;
@@ -443,60 +467,99 @@ fn ensure_turn_wrappers() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
+#[cfg(windows)]
+const OPENCODE_STDIN_WRAPPER_NAME: &str = "opencode-turn-stdin.cmd";
+
 /// Build the spawn spec for a one-shot turn carrying an untrusted prompt.
 /// Returns the spec, the prompt transport the caller MUST honor, and — for
 /// [`TurnPromptTransport::EnvOrArgv`] on Windows — the
 /// `(TURN_PROMPT_ENV, prompt)` pair to set on the `Command`. The prompt never
 /// appears in `spec.args` for any Windows path.
+///
+/// Errors only for the one combination with no safe transport: a KIMI prompt
+/// past cmd.exe's delayed-expansion limit. Kimi's `-p` takes the prompt only
+/// as an argv value (no stdin channel — verified against the installed CLI,
+/// which hangs), so an oversized prompt cannot be carried: the env transport
+/// would silently deliver an EMPTY prompt and the turn would fail with the
+/// CLI's confusing "no message" error instead of this diagnosis.
 pub fn turn_spec(
     kind: TurnHarness,
     prompt: &str,
     flags: Vec<String>,
-) -> (
-    CommandSpec,
-    Option<(String, String)>,
-    TurnPromptTransport,
-) {
+) -> Result<
+    (
+        CommandSpec,
+        Option<(String, String)>,
+        TurnPromptTransport,
+    ),
+    String,
+> {
     // The stdin-prompt CLIs never need a wrapper or an env pair — their argv
     // is flags-only on every platform and the prompt is piped post-spawn.
     if matches!(
         kind,
         TurnHarness::Pi | TurnHarness::Omp | TurnHarness::CommandCode
     ) {
-        return (
+        return Ok((
             resolve_for_spawn(&CommandSpec {
                 program: kind.program().to_string(),
                 args: kind.argv_args(prompt, flags),
             }),
             None,
             TurnPromptTransport::Stdin,
-        );
+        ));
     }
     #[cfg(windows)]
     {
-        if let Some(wrapper) = ensure_turn_wrappers().map(|d| d.join(kind.wrapper_name())) {
+        let oversized = !prompt_fits_cmd_expansion(prompt);
+        if oversized && kind == TurnHarness::Kimi {
+            return Err(format!(
+                "This prompt is {} chars long. Past ~8k chars the cmd.exe wrapper \
+                 silently delivers an EMPTY prompt to the kimi CLI, and kimi has no \
+                 stdin prompt channel to fall back to. Shorten the message, or switch \
+                 the chat to a harness that takes the prompt on stdin.",
+                prompt.chars().count()
+            ));
+        }
+        let wrapper_name = if oversized {
+            // OpenCode only — kimi returned above. Flags-only wrapper: the
+            // prompt rides stdin (verified: `opencode run` reads the message
+            // from stdin when no positional message follows).
+            OPENCODE_STDIN_WRAPPER_NAME
+        } else {
+            kind.wrapper_name()
+        };
+        if let Some(wrapper) = ensure_turn_wrappers().map(|d| d.join(wrapper_name)) {
             let mut args = vec!["/C".to_string(), wrapper.to_string_lossy().into_owned()];
             args.extend(flags);
-            return (
+            return Ok((
                 CommandSpec {
                     program: "cmd.exe".to_string(),
                     args,
                 },
-                Some((TURN_PROMPT_ENV.to_string(), prompt.to_string())),
-                TurnPromptTransport::EnvOrArgv,
-            );
+                if oversized {
+                    None
+                } else {
+                    Some((TURN_PROMPT_ENV.to_string(), prompt.to_string()))
+                },
+                if oversized {
+                    TurnPromptTransport::Stdin
+                } else {
+                    TurnPromptTransport::EnvOrArgv
+                },
+            ));
         }
         // Wrapper write failed — fall through to the legacy argv spec so the
         // turn still runs (M12 exposure documented in BUG_LIST.md).
     }
-    (
+    Ok((
         resolve_for_spawn(&CommandSpec {
             program: kind.program().to_string(),
             args: kind.argv_args(prompt, flags),
         }),
         None,
         TurnPromptTransport::EnvOrArgv,
-    )
+    ))
 }
 
 /// Runs `<binary> --version` with a short timeout; a clean exit means the
@@ -837,12 +900,11 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn turn_spec_keeps_prompt_off_the_command_line() {
-        // M12: the untrusted prompt must travel via env for the exe-binary
+    fn turn_spec_keeps_prompt_off_the_command_line() {        // M12: the untrusted prompt must travel via env for the exe-binary
         // harnesses, and via stdin for the npm-shim harnesses — never argv.
         let hostile = "a&b %PATH% say \"hi\" <tag> | pipe ^caret 100% & calc";
         for kind in [TurnHarness::Kimi, TurnHarness::OpenCode] {
-            let (spec, env, transport) = turn_spec(kind, hostile, vec!["-m".into(), "some-model".into()]);
+            let (spec, env, transport) = turn_spec(kind, hostile, vec!["-m".into(), "some-model".into()]).unwrap();
             assert_eq!(transport, TurnPromptTransport::EnvOrArgv);
             assert_eq!(spec.program, "cmd.exe");
             // No command-line token may contain the prompt text.
@@ -869,7 +931,7 @@ mod tests {
         // `endLocal … %*` tail), which delivered the placeholder literally.
         // Their prompt is piped on stdin; argv is flags-only.
         for kind in [TurnHarness::Pi, TurnHarness::Omp, TurnHarness::CommandCode] {
-            let (spec, env, transport) = turn_spec(kind, hostile, vec!["-m".into(), "some-model".into()]);
+            let (spec, env, transport) = turn_spec(kind, hostile, vec!["-m".into(), "some-model".into()]).unwrap();
             assert_eq!(transport, TurnPromptTransport::Stdin, "{kind:?}");
             assert!(env.is_none(), "{kind:?}");
             assert!(
@@ -883,11 +945,64 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    fn turn_spec_oversized_opencode_prompt_switches_to_stdin() {
+        // Past cmd.exe's 8191-char batch-line limit the delayed expansion of
+        // !RELAY_TURN_PROMPT! silently yields an EMPTY string (reproduced
+        // live: 8190 chars arrive, 8192 arrive as nothing) and the CLI runs
+        // with no prompt. turn_spec must switch to the flags-only stdin
+        // wrapper — no env pair, no placeholder anywhere.
+        let prompt = "x".repeat(12_000);
+        let (spec, env, transport) =
+            turn_spec(TurnHarness::OpenCode, &prompt, vec!["-m".into(), "m".into()])
+                .expect("opencode has a large-prompt transport");
+        assert_eq!(transport, TurnPromptTransport::Stdin);
+        assert!(env.is_none());
+        assert!(
+            spec.args.iter().all(|a| !a.contains("RELAY_TURN_PROMPT") && !a.contains(&prompt)),
+            "prompt or placeholder leaked into argv: {:?}",
+            spec.args
+        );
+        let wrapper_path = std::path::Path::new(&spec.args[1]);
+        let body = std::fs::read_to_string(wrapper_path)
+            .unwrap_or_else(|e| panic!("wrapper {} unreadable: {e}", wrapper_path.display()));
+        assert!(!body.contains("RELAY_TURN_PROMPT"), "{body}");
+        assert!(!body.contains("EnableDelayedExpansion"), "{body}");
+        assert!(body.contains("%*"), "{body}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn turn_spec_oversized_kimi_prompt_fails_loudly() {
+        // Kimi's -p takes the prompt only as an argv value (no stdin channel
+        // — the piped-stdin probe hangs), so an oversized prompt has NO safe
+        // transport: the env wrapper would silently deliver an empty prompt.
+        // The caller must see this error instead of launching a doomed turn.
+        let prompt = "x".repeat(12_000);
+        let err = turn_spec(TurnHarness::Kimi, &prompt, vec![]).unwrap_err();
+        assert!(err.contains("EMPTY prompt"), "{err}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn turn_spec_prompt_inside_limit_keeps_env_transport() {
+        // Just inside the safety margin: the regular env wrapper.
+        let prompt = "x".repeat(5_000);
+        let (spec, env, transport) =
+            turn_spec(TurnHarness::OpenCode, &prompt, vec![]).unwrap();
+        assert_eq!(transport, TurnPromptTransport::EnvOrArgv);
+        let (key, val) = env.expect("small prompts use the env transport");
+        assert_eq!(key, TURN_PROMPT_ENV);
+        assert_eq!(val, prompt);
+        assert!(spec.args[1].ends_with("opencode-turn.cmd"));
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn pi_turn_wrapper_is_flags_only() {
         // pi/omp/commandcode wrappers forward only our trusted flags — the
         // prompt arrives on stdin, so no placeholder may appear.
         for kind in [TurnHarness::Pi, TurnHarness::Omp, TurnHarness::CommandCode] {
-            let (spec, _, transport) = turn_spec(kind, "prompt text", vec!["-m".into(), "some-model".into()]);
+            let (spec, _, transport) = turn_spec(kind, "prompt text", vec!["-m".into(), "some-model".into()]).unwrap();
             assert_eq!(transport, TurnPromptTransport::Stdin);
             assert!(
                 spec.args.iter().all(|a| !a.contains("RELAY_TURN_PROMPT") && !a.contains("prompt text")),

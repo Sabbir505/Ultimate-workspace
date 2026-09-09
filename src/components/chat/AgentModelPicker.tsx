@@ -560,14 +560,14 @@ export function AgentModelPickerInner({
     setActiveIndex(0);
     // Provider panes revalidate on every open: their content is curated in
     // Settings (Model list) and reported live by the provider's models API,
-    // so a cached pane could show a list the user just edited. Mark them for
-    // a background refresh instead of dropping the cache — the pane effect
-    // renders the cached rows instantly and swaps in fresh ones when the
-    // refetch lands, so switching providers never stalls on the network.
-    // Local and harness panes keep their cache outright (GGUF scans and CLI
-    // configs change far less often).
+    // so a cached pane could show a list the user just edited. Local panes
+    // revalidate too — a Model Market download or a folder added in Settings
+    // must show up on the next open, not after an app restart (the pane used
+    // to cache its first scan for the whole run, which read as "local models
+    // are detected only if a custom folder is added"). Harness panes keep
+    // their cache outright (CLI configs change far less often).
     for (const key of paneCache.keys()) {
-      if (key.startsWith("provider:")) refreshOnOpen.current.add(key);
+      if (key.startsWith("provider:") || key === "local") refreshOnOpen.current.add(key);
     }
     // Default to the session's entry; fall back to the first enabled one so
     // the right pane is never empty on first open.
@@ -921,7 +921,12 @@ export function AgentModelPickerInner({
                 <div className="model-effort-empty">
                   {railKey === "local"
                     ? "No local models — add a folder in Settings → Local Models"
-                    : "No models — set base URL & key in Settings → API Keys"}
+                    : railKey.startsWith("harness:")
+                      ? `No models discovered from ${
+                          harnesses.find((x) => x.id === railKey.slice("harness:".length))
+                            ?.displayName ?? "this CLI"
+                        } — turns will use its own default model`
+                      : "No models — set base URL & key in Settings → API Keys"}
                 </div>
               ) : (
                 <>

@@ -327,6 +327,17 @@ async fn call_llm_structured(
         return call_harness_structured(llm, system_prompt, user_prompt, json_schema).await;
     }
 
+    // An empty key only ever works for the local sidecar (llama-server ignores
+    // auth). For every cloud endpoint the request is a guaranteed 401
+    // round-trip — fail here with the actionable message instead.
+    if llm.api_key.trim().is_empty() && llm.provider != "local_gguf" {
+        return Err(format!(
+            "No API key configured for provider '{}'. Add it in Settings → API Keys, \
+             or pick another agent from the picker.",
+            llm.provider
+        ));
+    }
+
     let is_anthropic = matches!(llm.provider.as_str(), "anthropic" | "anthropic_compatible");
 
     if is_anthropic {

@@ -3454,8 +3454,13 @@ End your reply with the plan and wait for the user's approval.]"
             } else {
                 content.to_string()
             };
-            let (spec, env, _) =
-                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::Kimi, &turn_content, flags);
+            let (spec, env, transport) =
+                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::Kimi, &turn_content, flags)?;
+            // Oversized prompts take the stdin transport (the env var would
+            // silently expand empty past cmd.exe's line limit).
+            if transport == crate::harness_adapters::TurnPromptTransport::Stdin {
+                stdin_payload = Some(turn_content);
+            }
             prompt_env = env;
             spec
         }
@@ -3470,8 +3475,11 @@ End your reply with the plan and wait for the user's approval.]"
                 // E-9c: the model id rides the cmd.exe wrapper line via an
                 // unquoted `%*` — reject cmd metacharacters up front.
                 crate::harness_adapters::ensure_cmd_safe_model(&entry.model)?;
+                // `opencode run -m` takes "provider/model" only — resolve bare
+                // ids the same way the persistent server path does, or the
+                // CLI silently uses its configured default.
                 flags.push("-m".into());
-                flags.push(entry.model.clone());
+                flags.push(crate::harness_config::resolve_opencode_model(&entry.model));
             }
             // Harness-native mode: the session label "plan" selects OpenCode's
             // read-only planning AGENT ("build" is the default — no flag).
@@ -3495,8 +3503,13 @@ End your reply with the plan and wait for the user's approval.]"
                 flags.push("-s".into());
                 flags.push(id.clone());
             }
-            let (spec, env, _) =
-                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::OpenCode, content, flags);
+            let (spec, env, transport) =
+                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::OpenCode, content, flags)?;
+            // Oversized prompts take the stdin transport (the env var would
+            // silently expand empty past cmd.exe's line limit).
+            if transport == crate::harness_adapters::TurnPromptTransport::Stdin {
+                stdin_payload = Some(content.to_string());
+            }
             prompt_env = env;
             spec
         }
@@ -3549,7 +3562,7 @@ End your reply with the plan and wait for the user's approval.]"
                 PerTurn::Omp => crate::harness_adapters::TurnHarness::Omp,
                 _ => crate::harness_adapters::TurnHarness::Pi,
             };
-            let (spec, env, transport) = crate::harness_adapters::turn_spec(harness, &turn_content, flags);
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(harness, &turn_content, flags)?;
             prompt_env = env;
             if transport == crate::harness_adapters::TurnPromptTransport::Stdin {
                 stdin_payload = Some(turn_content);
@@ -3575,7 +3588,7 @@ End your reply with the plan and wait for the user's approval.]"
                 flags.push(id.clone());
             }
             let (spec, env, transport) =
-                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::CommandCode, content, flags);
+                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::CommandCode, content, flags)?;
             prompt_env = env;
             if transport == crate::harness_adapters::TurnPromptTransport::Stdin {
                 stdin_payload = Some(content.to_string());
@@ -4474,9 +4487,13 @@ fn opencode_create_session(base_url: &str) -> Result<String, String> {
     })
 }
 
-/// Split Relay's "provider/model" id into OpenCode's message-body shape.
-/// Empty/unparseable models stay None → server uses its configured default.
+/// Split Relay's model id into OpenCode's message-body shape. Bare ids are
+/// resolved to "provider/model" against the opencode.json config first —
+/// OpenCode only accepts provider-qualified selectors, and a bare id used to
+/// silently fall back to the CLI's configured default (the "model change does
+/// nothing" bug). Unparseable models stay None → server default.
 fn split_opencode_model(model: &str) -> Option<Value> {
+    let model = crate::harness_config::resolve_opencode_model(model);
     let (provider, name) = model.split_once('/')?;
     if provider.is_empty() || name.is_empty() {
         return None;
@@ -5934,12 +5951,12 @@ fn harness_oneshot_blocking(
                 flags.push("-m".into());
                 flags.push(model.into());
             }
-            let (spec, env, _) = crate::harness_adapters::turn_spec(
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(
                 crate::harness_adapters::TurnHarness::Kimi,
                 prompt,
                 flags,
-            );
-            (spec, env, false)
+            )?;
+            (spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin)
         }
         "opencode" => {
             let mut flags: Vec<String> = Vec::new();
@@ -5950,12 +5967,12 @@ fn harness_oneshot_blocking(
                 flags.push("-m".into());
                 flags.push(model.into());
             }
-            let (spec, env, _) = crate::harness_adapters::turn_spec(
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(
                 crate::harness_adapters::TurnHarness::OpenCode,
                 prompt,
                 flags,
-            );
-            (spec, env, false)
+            )?;
+            (spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin)
         }
         "pi" | "omp" | "commandcode" => {
             let mut flags: Vec<String> = Vec::new();
@@ -5969,7 +5986,7 @@ fn harness_oneshot_blocking(
                 "commandcode" => crate::harness_adapters::TurnHarness::CommandCode,
                 _ => crate::harness_adapters::TurnHarness::Pi,
             };
-            let (spec, env, transport) = crate::harness_adapters::turn_spec(harness, prompt, flags);
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(harness, prompt, flags)?;
             (
                 spec,
                 env,
@@ -6263,12 +6280,12 @@ fn one_shot_spec(
                 flags.push("-m".into());
                 flags.push(model.into());
             }
-            let (spec, env, _) = crate::harness_adapters::turn_spec(
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(
                 crate::harness_adapters::TurnHarness::Kimi,
                 prompt,
                 flags,
-            );
-            Ok((spec, env, false))
+            )?;
+            Ok((spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin))
         }
         "opencode" => {
             // Flags BEFORE `--` (yargs swallows post-terminator tokens into
@@ -6282,12 +6299,12 @@ fn one_shot_spec(
                 flags.push("-m".into());
                 flags.push(model.into());
             }
-            let (spec, env, _) = crate::harness_adapters::turn_spec(
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(
                 crate::harness_adapters::TurnHarness::OpenCode,
                 prompt,
                 flags,
-            );
-            Ok((spec, env, false))
+            )?;
+            Ok((spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin))
         }
         "pi" | "omp" => {
             // pi-lineage one-shot turns: `-p --mode json` streams the shared
@@ -6307,7 +6324,7 @@ fn one_shot_spec(
                 },
                 prompt,
                 flags,
-            );
+            )?;
             Ok((spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin))
         }
         "commandcode" => {
@@ -6324,7 +6341,7 @@ fn one_shot_spec(
                 crate::harness_adapters::TurnHarness::CommandCode,
                 prompt,
                 flags,
-            );
+            )?;
             Ok((spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin))
         }
         other => Err(format!("harness '{other}' has no headless chat backend yet")),

@@ -48,6 +48,25 @@ describe("ContextMeter — hover panel model row", () => {
     hover(view.container);
     expect(panelModelText()).toBe("Model: glm-5.2");
   });
+
+  // Auto routing (provider="auto"): the stored model is whatever the backend
+  // resolver picked for the last message — the row must present it as an
+  // Auto-resolved pick, not a plain model chat.
+  it("labels the resolved model as Auto when routing is auto", () => {
+    const view = render(
+      <ContextMeter usedTokens={0} model="glm-5.2" provider="auto" isLocal={false} />,
+    );
+    hover(view.container);
+    expect(panelModelText()).toBe("Auto · glm-5.2 (resolved per message)");
+  });
+
+  it("shows the Auto placeholder before a first auto resolution", () => {
+    const view = render(
+      <ContextMeter usedTokens={0} model="auto" provider="auto" isLocal={false} />,
+    );
+    hover(view.container);
+    expect(panelModelText()).toBe("Auto — Relay picks the model per message");
+  });
 });
 
 describe("ContextMeter — panel stays inside the viewport", () => {

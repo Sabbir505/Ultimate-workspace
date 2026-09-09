@@ -1466,6 +1466,45 @@ pub async fn gather_auto_snapshots_arc(
     gather_auto_snapshots(db).await
 }
 
+/// Resolve the concrete (provider, model) an Auto-mode chat should use right
+/// now — the same health/bias/sticky-aware resolver the send path runs, for
+/// non-send LLM callers (artifact generation). A fresh Auto chat stores
+/// provider/model as "auto"/"auto" until its first send resolves and writes
+/// the pick back; `/create` in such a chat used to read provider "auto" as an
+/// OpenAI-shaped endpoint and die with a 401 from api.openai.com.
+///
+/// `sticky` semantics match the send path: concrete row values (from a
+/// previous resolution) prefer the same pick while it stays eligible.
+pub(crate) async fn resolve_auto_session_pick(
+    db: &DbState,
+    provider: &str,
+    model: &str,
+    prompt_tokens: u64,
+    needs_vision: bool,
+) -> Result<(String, String), String> {
+    let sticky = if provider != "auto" || model != "auto" {
+        Some((provider.to_string(), model.to_string()))
+    } else {
+        None
+    };
+    let bias_setting = {
+        let conn = db.0.lock();
+        db::get_setting(&conn, "chat.auto.bias").ok().flatten()
+    };
+    let snapshots = gather_auto_snapshots(&db.0).await;
+    let chain = crate::chat::auto_router::resolve(
+        &snapshots,
+        &crate::chat::auto_router::AutoQuery {
+            prompt_tokens,
+            needs_vision,
+            sticky,
+            bias: crate::chat::auto_router::Bias::from_setting(bias_setting.as_deref()),
+        },
+    )?;
+    let pick = &chain[0];
+    Ok((pick.provider.clone(), pick.model.clone()))
+}
+
 /// Per-provider config snapshot gathered under one DB lock for the auto
 /// router (see gather_auto_snapshots).
 struct AutoProviderCfg {
@@ -4486,10 +4525,26 @@ pub async fn list_chat_models(
 
 /// Scan a folder (or default locations) for `.gguf` files, returning their
 /// metadata and a memory-sanity indicator.
+///
+/// Async + spawn_blocking: the recursive walk and per-file GGUF header parses
+/// can take seconds on a large Downloads folder, and the agent picker re-scans
+/// on every popup open — a sync command would run all of that on the MAIN
+/// thread and freeze the window per open (same rationale as
+/// `list_harness_models`' spawn_blocking).
 #[tauri::command]
-pub fn scan_local_models(
+pub async fn scan_local_models(
     folder: Option<String>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
+) -> CmdResult<Vec<GgufModel>> {
+    let db = DbState(std::sync::Arc::clone(&db.0));
+    tauri::async_runtime::spawn_blocking(move || scan_local_models_blocking(folder, &db))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn scan_local_models_blocking(
+    folder: Option<String>,
+    db: &DbState,
 ) -> CmdResult<Vec<GgufModel>> {
     use crate::chat::local_models::{memory_class, GgufFile};
 

@@ -30,29 +30,21 @@ const KIMI_MODELS: HarnessModel[] = [
   { id: "kimi-k2.6", label: "Kimi K2.6" },
 ];
 
-const OPENCODE_EXTRA_MODELS: HarnessModel[] = [
-  { id: "glm-5.2", label: "GLM 5.2" },
-  { id: "glm-5.1", label: "GLM 5.1" },
-  { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
-  { id: "minimax-m3", label: "MiniMax M3" },
-  { id: "qwen3.7-plus", label: "Qwen3.7 Plus" },
-];
-
-/** Models offered for a CLI agent, keyed by harness id. OpenCode, Pi, Omp,
- *  and CommandCode are provider-agnostic (they route to whatever the user
- *  configured), so they get the union of every known model. Unknown ids fall
- *  back to an empty list. */
+/** Models offered for a CLI agent, keyed by harness id. Claude and Kimi
+ *  accept the bare ids above on their `--model`/`-m` selectors (and remap
+ *  them through their own settings), so a static fallback list is safe.
+ *  OpenCode, Pi, Omp, and CommandCode are provider-scoped: their selectors
+ *  only accept "provider/id" strings discovered from each CLI's own
+ *  config/live query (listHarnessModels). A static union of bare ids can't be
+ *  selected by those CLIs — a bare pick silently fell back to the CLI's
+ *  configured default, which read as "changing the model does nothing" — so
+ *  those harnesses deliberately get no static rows. */
 export function harnessModelCatalog(harnessId: string): HarnessModel[] {
   switch (harnessId) {
     case "claude_code":
       return CLAUDE_MODELS;
     case "kimi_code":
       return KIMI_MODELS;
-    case "opencode":
-    case "pi":
-    case "omp":
-    case "commandcode":
-      return [...CLAUDE_MODELS, ...KIMI_MODELS, ...OPENCODE_EXTRA_MODELS];
     default:
       return [];
   }

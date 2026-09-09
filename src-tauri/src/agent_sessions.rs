@@ -5699,7 +5699,7 @@ pub fn run_one_shot(
     cmd.args(&spec.args)
         .stdin(if prompt_via_stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     if let Some((k, v)) = &prompt_env {
         cmd.env(k, v);
     }
@@ -5754,6 +5754,24 @@ pub fn run_one_shot(
             .take()
             .ok_or("failed to capture CLI stdout")?
     };
+    // stderr capture: on a failed turn the CLI's diagnosis (auth / quota /
+    // unknown model) lands here and nowhere else — without it the run history
+    // only ever says "exited with code 1" or "time limit exceeded".
+    let stderr = {
+        let mut guard = child.lock().map_err(|e| e.to_string())?;
+        guard
+            .stderr
+            .take()
+            .ok_or("failed to capture CLI stderr")?
+    };
+    let (etx, erx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let mut stderr = stderr;
+        use std::io::Read as _;
+        let _ = stderr.read_to_string(&mut buf);
+        let _ = etx.send(buf);
+    });
 
     let db2 = DbState(Arc::clone(db));
     let sid2 = chat_session_id.to_string();
@@ -5828,12 +5846,20 @@ pub fn run_one_shot(
         std::thread::sleep(Duration::from_millis(100));
     };
     let _ = reader.join();
+    // The exit/kill above closed the stderr pipe; give the reader a moment to
+    // drain, then surface its tail on every failure path.
+    let stderr_tail = erx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_default();
+    let suffix = stderr_suffix(&stderr_tail);
     // M2: `one_shot_guard` unregisters on drop — this return included.
     match wait {
         Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!("{} exited with {status}", spec.program)),
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Err(e.to_string()),
-        Err(e) => Err(format!("failed to wait on {}: {e}", spec.program)),
+        Ok(status) => Err(format!("{} exited with {status}{suffix}", spec.program)),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            Err(format!("{}{suffix}", e.to_string()))
+        }
+        Err(e) => Err(format!("failed to wait on {}: {e}{suffix}", spec.program)),
     }
 }
 
@@ -5958,7 +5984,7 @@ fn harness_oneshot_blocking(
     cmd.args(&spec.args)
         .stdin(if prompt_via_stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     if let Some((k, v)) = &prompt_env {
         cmd.env(k, v);
     }
@@ -5995,10 +6021,26 @@ fn harness_oneshot_blocking(
         let _ = stdout.read_to_string(&mut buf);
         let _ = tx.send(buf);
     });
+    // stderr is where harness CLIs report the cause of a dead turn (auth /
+    // quota / unknown-model errors — `opencode run` retries them indefinitely
+    // and prints NOTHING to stdout), so a discarded stderr left the caller
+    // with only "empty response" and the user with nothing actionable.
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "failed to capture CLI stderr".to_string())?;
+    let (etx, erx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        use std::io::Read as _;
+        let _ = stderr.read_to_string(&mut buf);
+        let _ = etx.send(buf);
+    });
 
     // Poll-wait with a deadline; a hung CLI is killed at the bound instead of
     // wedging the async command forever (same posture as run_one_shot).
     let deadline = std::time::Instant::now() + ONESHOT_GEN_TIMEOUT;
+    let mut timed_out = false;
     loop {
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(_) => break,
@@ -6007,28 +6049,70 @@ fn harness_oneshot_blocking(
                 // terminates the cmd.exe /C wrapper and the CLI grandchild
                 // survives, keeps running (and spending) (see kill_child_tree).
                 kill_child_tree(&mut child);
-                return Err(format!(
-                    "{harness_id} generation timed out after {}s",
-                    ONESHOT_GEN_TIMEOUT.as_secs()
-                ));
+                timed_out = true;
+                break;
             }
             None => std::thread::sleep(Duration::from_millis(100)),
         }
     }
+    if timed_out {
+        // The kill above closed the stderr pipe → the reader hits EOF; give
+        // it a moment and surface WHAT the CLI was doing when it was killed
+        // (a retrying API error beats a bare "timed out").
+        let err = erx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_default();
+        let suffix = stderr_suffix(&err);
+        return Err(format!(
+            "{harness_id} generation timed out after {}s{suffix}",
+            ONESHOT_GEN_TIMEOUT.as_secs()
+        ));
+    }
     let raw = rx
         .recv_timeout(Duration::from_secs(5))
         .map_err(|_| format!("{harness_id} closed without producing output"))?;
+    let err = erx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_default();
 
-    let text = parse_oneshot_text(harness_id, &raw)?;
+    let text = parse_oneshot_text(harness_id, &raw)
+        .map_err(|e| format!("{e}{}", stderr_suffix(&err)))?;
     if text.trim().is_empty() {
-        // Char-safe truncation: byte slicing panics when offset 200 lands
-        // mid-multibyte-char (CJK/emoji CLI output).
+        if err.trim().is_empty() {
+            // Char-safe truncation: byte slicing panics when offset 200 lands
+            // mid-multibyte-char (CJK/emoji CLI output).
+            return Err(format!(
+                "{harness_id} returned an empty response (raw: {})",
+                crate::util::truncate_chars(&raw, 200)
+            ));
+        }
         return Err(format!(
-            "{harness_id} returned an empty response (raw: {})",
-            crate::util::truncate_chars(&raw, 200)
+            "{harness_id} returned an empty response{suffix}",
+            suffix = stderr_suffix(&err)
         ));
     }
     Ok(text)
+}
+
+/// Last-resort diagnostic tail from a harness CLI's stderr, for error
+/// messages — the tail carries the actual failure (stream errors are logged
+/// repeatedly; the last line is the one that mattered). Empty input produces
+/// an empty string; otherwise ` — stderr: …` with a char-safe cut (byte
+/// slicing panics mid-multibyte-char) and newlines flattened so the message
+/// stays one line in toasts/run history.
+fn stderr_suffix(stderr: &str) -> String {
+    let flat = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.trim().is_empty() {
+        return String::new();
+    }
+    let tail: String = if flat.chars().count() > 400 {
+        flat.chars()
+            .skip(flat.chars().count() - 400)
+            .collect()
+    } else {
+        flat
+    };
+    format!(" — stderr: {tail}")
 }
 
 /// Extract the final assistant text from a one-shot CLI's raw stdout.
@@ -7196,6 +7280,23 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stderr_suffix_flattens_and_caps_tail() {
+        // Empty/whitespace stderr → empty suffix (no dangling " — stderr:").
+        assert_eq!(stderr_suffix(""), "");
+        assert_eq!(stderr_suffix("  \n\t "), "");
+        // Newlines flatten so the message stays one line in toasts/history.
+        let s = stderr_suffix("stream error\nAI_APICallError: quota exhausted\n");
+        assert!(!s.contains('\n'), "{s}");
+        assert!(s.starts_with(" — stderr: stream error AI_APICallError"), "{s}");
+        // The TAIL is kept (the last logged line is the one that mattered),
+        // char-safe even when the cut lands mid-CJK.
+        let long = "日".repeat(500);
+        let s = stderr_suffix(&long);
+        assert_eq!(s.chars().count(), " — stderr: ".chars().count() + 400);
+        assert!(s.is_char_boundary(s.len()));
+    }
 
     /// Reader-state snapshot the handler tests assert against.
     struct UsageState {

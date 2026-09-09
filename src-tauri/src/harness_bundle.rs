@@ -150,6 +150,26 @@ pub fn build_instructions_md(
     if let Some(catalog) = crate::chat::prompts::available_skills_segment() {
         parts.push(catalog);
     }
+    // Automation parity with the built-in chat's CORE prompt: without this the
+    // CLIs answer "I can't schedule things" to "run X every morning" even
+    // though the relay-tools MCP exposes the same CRUD tools the built-in chat
+    // gets as native tools.
+    parts.push(format!(
+        "## Automations\n\
+         Relay schedules headless agent runs — cron \"automations\", managed in the \
+         app's Automations view and via the `relay-tools` MCP tools \
+         `list_automations`, `create_automation`, `update_automation`, \
+         `delete_automation`, `run_automation_now`. When the user asks to \
+         schedule/repeat/automate a task, create one — never claim scheduling \
+         is impossible; confirm an ambiguous schedule first. `schedule` is a \
+         5-field local-time cron (\"0 9 * * 1-5\" = 09:00 weekdays); `agent` \
+         is one of claude_code, opencode, pi, omp, commandcode, anthropic, \
+         openai, openrouter, anthropic_compatible, openai_compatible, \
+         local_gguf. The `prompt` must be fully self-contained — each run \
+         executes it unattended, with no conversation memory and no user to \
+         answer questions — and fires only while the app is running; every \
+         run is logged to its own chat session and the Automations view."
+    ));
     // Browser section stays behavioral only: the MCP `tools/list` response
     // already delivers each tool's name/params/description to the CLI, so
     // restating them here is duplicate tokens. What the schemas can't carry —
@@ -605,6 +625,15 @@ mod tests {
         // (and preferred over the legacy generate_document).
         assert!(md.contains("plan_document"), "instructions must mention plan_document");
         assert!(md.contains("revise_document"), "instructions must mention revise_document");
+        // Automation parity: the relay-tools CRUD tools are advertised, with
+        // the cron shape and the unattended-prompt rule (the same contract
+        // the built-in chat's CORE prompt carries).
+        assert!(md.contains("## Automations"), "automations section missing");
+        assert!(md.contains("create_automation"));
+        assert!(md.contains("update_automation"));
+        assert!(md.contains("run_automation_now"));
+        assert!(md.contains("5-field local-time cron"));
+        assert!(md.contains("no conversation memory"));
     }
 
     #[test]

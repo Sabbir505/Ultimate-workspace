@@ -334,7 +334,12 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         }
         "generate_document" | "generate_diagram" | "generate_file"
         | "plan_document" | "revise_document"
-        | "get_skill" | "list_skills" | "list_artifacts" | "search_docs" | "get_capabilities" => Ok(format!("relay_tools:{tool}")),
+        | "get_skill" | "list_skills" | "list_artifacts" | "search_docs" | "get_capabilities"
+        // Automation CRUD: parity with the built-in chat's automation tools —
+        // without these a harness session answers "I can't schedule things"
+        // to the same requests the built-in chat handles.
+        | "list_automations" | "create_automation" | "update_automation"
+        | "delete_automation" | "run_automation_now" => Ok(format!("relay_tools:{tool}")),
         _ => Err("unknown tool"),
     }
 }
@@ -902,6 +907,65 @@ fn tool_schemas() -> Vec<Value> {
             "description": "Report which connectors, MCP servers, and skills are available in this Relay session, as JSON. THE authority on availability — call this instead of running `claude mcp list` or similar shell probes; it is instant, in-process, and reflects the app's real connections rather than a config file.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
+        json!({
+            "name": "list_automations",
+            "description": "List the user's Relay automations — scheduled headless agent runs (id, name, agent, cron schedule, enabled, next fire, last run status). Call before updating or deleting one, to get its id.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "create_automation",
+            "description": "Create a Relay automation: a prompt that runs UNATTENDED on a 5-field local-time cron schedule (e.g. '0 9 * * 1-5' = 09:00 weekdays), with a chosen agent (claude_code, opencode, anthropic, openai, openrouter, anthropic_compatible, openai_compatible, local_gguf, pi, omp, commandcode). The prompt must be fully self-contained — runs have no conversation memory and no user to answer questions. Fires while the app runs; each run logs to its own chat session and the Automations view.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Short display name." },
+                    "prompt": { "type": "string", "description": "The complete, self-contained instruction each run executes." },
+                    "schedule": { "type": "string", "description": "5-field local cron, e.g. '30 8 * * *'." },
+                    "agent": { "type": "string", "description": "Optional agent id (default claude_code)." },
+                    "enabled": { "type": "boolean", "description": "Optional; default true." }
+                },
+                "required": ["name", "prompt", "schedule"]
+            }
+        }),
+        json!({
+            "name": "update_automation",
+            "description": "Edit an existing automation by id (from list_automations). Partial update — absent fields keep their stored values.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "automation_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "schedule": { "type": "string", "description": "5-field local cron." },
+                    "agent": { "type": "string" },
+                    "enabled": { "type": "boolean" }
+                },
+                "required": ["automation_id"]
+            }
+        }),
+        json!({
+            "name": "delete_automation",
+            "description": "Delete an automation by id (from list_automations). Past run logs are kept.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "automation_id": { "type": "string" }
+                },
+                "required": ["automation_id"]
+            }
+        }),
+        json!({
+            "name": "run_automation_now",
+            "description": "Fire one run of an automation immediately (same unattended launch path the scheduler uses). The run continues in the background and is logged to the automation's run history.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "automation_id": { "type": "string" }
+                },
+                "required": ["automation_id"]
+            }
+        }),
     ]
 }
 
@@ -920,6 +984,8 @@ mod tests {
                      "generate_file", "plan_document", "revise_document",
                      "get_skill", "list_skills", "search_docs",
                      "get_capabilities",
+                     "list_automations", "create_automation", "update_automation",
+                     "delete_automation", "run_automation_now",
                      "history", "hover", "evaluate", "click_and_wait", "screenshot"] {
             assert!(names.contains(&tool), "missing tool schema: {tool}");
         }

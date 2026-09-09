@@ -145,8 +145,8 @@ fn validate_automation_input(
     if !crate::commands::automation_cmds::is_allowed_automation_agent(agent) {
         return Err(format!(
             "Error: agent \"{agent}\" cannot run automations. Use one of: \
-             claude_code, opencode, anthropic, openai, openrouter, \
-             anthropic_compatible, openai_compatible, local_gguf."
+             claude_code, opencode, pi, omp, commandcode, anthropic, openai, \
+             openrouter, anthropic_compatible, openai_compatible, local_gguf."
         ));
     }
     crate::automations::validate_schedule(schedule)

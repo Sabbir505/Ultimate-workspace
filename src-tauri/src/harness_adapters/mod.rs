@@ -318,8 +318,13 @@ impl TurnHarness {
             TurnHarness::Kimi => {
                 "@echo off\r\nsetlocal EnableDelayedExpansion\r\nkimi -p \"!RELAY_TURN_PROMPT!\" %*\r\n"
             }
+            // --print-logs --log-level ERROR: opencode routes turn failures
+            // (auth/quota/unknown-model — anything it will retry forever) to
+            // its internal log stream only; without this BOTH stdout and
+            // stderr stay empty on a dead turn and the caller can only report
+            // "empty response". ERROR keeps successful runs silent.
             TurnHarness::OpenCode => {
-                "@echo off\r\nsetlocal EnableDelayedExpansion\r\nopencode run --format json --auto %* -- \"!RELAY_TURN_PROMPT!\"\r\n"
+                "@echo off\r\nsetlocal EnableDelayedExpansion\r\nopencode run --format json --auto --print-logs --log-level ERROR %* -- \"!RELAY_TURN_PROMPT!\"\r\n"
             }
             TurnHarness::Pi => "@echo off\r\npi -p --approve --mode json %*\r\n",
             TurnHarness::Omp => "@echo off\r\nomp -p --auto-approve --mode=json %*\r\n",
@@ -340,11 +345,16 @@ impl TurnHarness {
                 a
             }
             TurnHarness::OpenCode => {
+                // --print-logs --log-level ERROR: see wrapper_body — opencode
+                // only surfaces turn failures through its log stream.
                 let mut a = vec![
                     "run".to_string(),
                     "--format".to_string(),
                     "json".to_string(),
                     "--auto".to_string(),
+                    "--print-logs".to_string(),
+                    "--log-level".to_string(),
+                    "ERROR".to_string(),
                 ];
                 a.extend(flags);
                 a.push("--".to_string());

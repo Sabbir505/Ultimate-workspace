@@ -121,6 +121,9 @@ export function KnowledgePanel() {
   const [busy, setBusy] = useState<string | null>(null); // corpusId being mutated
   const [progress, setProgress] = useState<Record<string, PerCorpusProgress>>({});
   const [error, setError] = useState<string | null>(null);
+  // Distinguishes a FAILED initial load from a genuinely empty library —
+  // without it a rejected docsListCorpora renders as "No corpora yet".
+  const [loadError, setLoadError] = useState(false);
 
   // --- Embedding suggestions → real catalog entries → detail modal + install.
   // Per-suggestion catalog: real HF entries (filename/size/sha/downloadUrl)
@@ -135,8 +138,17 @@ export function KnowledgePanel() {
   const [memoryBudget, setMemoryBudget] = useState(16 * 1024 * 1024 * 1024);
 
   const refresh = () => {
-    void docsListCorpora().then((c) => c && setCorpora(c));
-    void docsEmbeddingStatus().then((s) => setSidecar(s));
+    void docsListCorpora()
+      .then((c) => {
+        if (c) setCorpora(c);
+        setLoadError(false);
+      })
+      .catch(() => setLoadError(true));
+    void docsEmbeddingStatus()
+      .then((s) => setSidecar(s))
+      .catch(() => {
+        /* status is supplementary — the corpora list stays authoritative */
+      });
   };
   useEffect(refresh, []);
 
@@ -438,7 +450,15 @@ export function KnowledgePanel() {
         </div>
       )}
 
-      {!hasCorpora && !busy && (
+      {!hasCorpora && !busy && loadError && (
+        <div className="empty-reserved">
+          <div className="empty-text" style={{ color: "var(--danger, #f85149)" }}>
+            Failed to load corpora. Check that the backend is running, then retry.
+          </div>
+        </div>
+      )}
+
+      {!hasCorpora && !busy && !loadError && (
         <div className="empty-reserved">
           <div className="empty-text">
             No corpora yet. Click “+ Add folder” to index your first one.

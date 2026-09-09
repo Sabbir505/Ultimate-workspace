@@ -25,6 +25,7 @@ import { usePanesStore, type Pane } from "../../state/panes";
 import { useProjectsStore } from "../../state/projects";
 import { useSkillsStore } from "../../state/skills";
 import { useSettingsStore } from "../../state/settings";
+import { useUiStore } from "../../state/ui";
 // MermaidDiagram pulls in the heavy mermaid bundle (and its highlight.js
 // language pack) on first render — lazy-load it so the terminal pane (the
 // most common tool-panel tab) doesn't pay that cost on mount. The diagram
@@ -537,7 +538,21 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
   useEffect(() => {
     if (!exited) return;
     const handler = (e: KeyboardEvent) => {
-      if ((e.key === "r" || e.key === "R") && usePanesStore.getState().focusedPaneId === paneId) {
+      if (e.key !== "r" && e.key !== "R") return;
+      // Ignore "r" typed into inputs/textareas/contenteditable (settings
+      // search, find bar, export dialogs…) — it must not respawn the pty.
+      const target = e.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      // Terminals only exist in the chat view — ignore elsewhere.
+      if (useUiStore.getState().activeView !== "chat") return;
+      if (usePanesStore.getState().focusedPaneId === paneId) {
         void respawnPane(paneId);
       }
     };

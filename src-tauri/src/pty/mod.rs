@@ -974,22 +974,18 @@ impl PtyManager {
                             break;
                         }
                     }
-                    // If the frame has data but the budget hasn't elapsed
-                    // yet, try one more non-blocking peek to coalesce more
-                    // output before flushing.
+                    // Realize the documented 16 ms coalescing budget: hold
+                    // the frame in 3 ms slices until the budget elapses,
+                    // THEN flush. (The old code slept 3 ms and flushed
+                    // unconditionally, so every read produced its own IPC
+                    // frame — the batching this budget exists for never
+                    // actually happened during heavy TUI output.)
                     if !frame.is_empty() {
                         if let Some(started) = frame_started {
-                            if started.elapsed() >= FRAME_BUDGET {
-                                flush_frame!();
-                            } else {
-                                // Best-effort: a short wait lets the kernel
-                                // hand us the next chunk if it's already
-                                // queued, reducing the number of small
-                                // frames. ~3ms is short enough to keep
-                                // latency under the 16ms target.
+                            while started.elapsed() < FRAME_BUDGET {
                                 thread::sleep(Duration::from_millis(3));
-                                flush_frame!();
                             }
+                            flush_frame!();
                         }
                     }
                     }

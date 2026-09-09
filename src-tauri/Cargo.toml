@@ -147,9 +147,10 @@ dom_smoothie = "0.18"
 
 [dev-dependencies]
 tempfile = "3"
-# OS keychain for per-project secrets (PRD §7.16). Target-specific features so
-# Linux (which has no native backend enabled here) still compiles — secrets.rs
-# falls back to obfuscated-at-rest storage there and logs the deviation.
+# OS keychain for per-project secrets (PRD §7.16). Target-specific features:
+# every shipped platform (Windows, macOS via the default feature set, Linux
+# below) gets a native keyring backend; the XOR fallback in secrets.rs is
+# dead code on all of them.
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
 # NVML dynamic-load entry points for free-VRAM probing (see chat/local_models.rs).

@@ -415,6 +415,24 @@ export function MermaidDiagramInner({ code, onFix }: MermaidDiagramProps) {
   // "Creating the diagram of …" hint stays stable while the model keeps
   // streaming more tokens.
   const [topic, setTopic] = useState<string | null>(null);
+  // Active theme marker, mirrored into state so a theme switch re-runs the
+  // render effect below: that effect is keyed on `code` only, and without
+  // this a mounted diagram kept the old palette until a virtualized remount.
+  // Mermaid init and the SVG cache are keyed on the theme/token signature, so
+  // the re-run renders (and caches) under the NEW signature correctly.
+  const [themeAttr, setThemeAttr] = useState<string | null>(() =>
+    typeof document !== "undefined"
+      ? document.documentElement.getAttribute("data-theme")
+      : null,
+  );
+  useEffect(() => {
+    const root = document.documentElement;
+    const observer = new MutationObserver(() => {
+      setThemeAttr(root.getAttribute("data-theme"));
+    });
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -524,7 +542,7 @@ export function MermaidDiagramInner({ code, onFix }: MermaidDiagramProps) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [code]);
+  }, [code, themeAttr]);
 
   const loadingHint = topic
     ? `Creating the diagram of ${topic}…`

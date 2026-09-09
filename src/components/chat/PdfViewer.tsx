@@ -207,7 +207,7 @@ export function PdfViewer({
         void pdf.getPage(1).then((page) => {
           const w = page.getViewport({ scale: 1 }).width;
           setFitScale(Math.max(0.2, (el.clientWidth - 32) / w));
-        });
+        }).catch(() => {}); // document destroyed mid-resize — nothing to fit
       }
     };
     compute();
@@ -274,6 +274,15 @@ export function PdfViewer({
       setHits(found);
       setHitIdx(0);
       if (found.length > 0) jumpToPage(found[0].page);
+    } catch {
+      // A mid-scan rejection (e.g. the document was destroyed while switching
+      // files) must not escape the `void runSearch()` below as an unhandled
+      // rejection: surface a benign failure instead — drop partial hits and
+      // stop the searching indicator.
+      if (gen === searchGenRef.current) {
+        setHits(null);
+        setSearching(false);
+      }
     } finally {
       if (gen === searchGenRef.current) setSearching(false);
     }

@@ -189,6 +189,12 @@ struct AgentChild {
     /// events always land inside the persisted reply (the POST resolves when
     /// the turn completes, which can race its last SSE flush).
     oc_last_event_ms: Arc<AtomicU64>,
+    /// Audit #87: false once the SSE reader has exited (connection dropped /
+    /// stream error / clean close). The turn thread checks it before
+    /// finish_turn: a POST that "succeeded" while the reader was dead means
+    /// the streamed text never arrived — previously persisted as an EMPTY
+    /// reply with no error. The reader also revives it (sets true) on start.
+    oc_reader_alive: Arc<AtomicBool>,
 }
 
 impl AgentSessionManager {
@@ -393,6 +399,7 @@ impl AgentSessionManager {
                         oc_full: Arc::new(Mutex::new(String::new())),
                         oc_in_think: Arc::new(Mutex::new(false)),
                         oc_last_event_ms: Arc::new(AtomicU64::new(0)),
+                        oc_reader_alive: Arc::new(AtomicBool::new(false)),
                     }))
                     }),
             )
@@ -812,7 +819,7 @@ pub fn kill_one_shot_children() {
 /// direct handle. The stdio pipes are dropped here too (stdin/stdout/stderr
 /// live on `Child`), which unblocks the reader thread so it can observe the
 /// `cancelled` flag and exit without emitting a spurious `chat:done`.
-fn kill_child_tree(child: &mut Child) {
+pub(crate) fn kill_child_tree(child: &mut Child) {
     #[cfg(windows)]
     {
         // Kill the entire process tree first so no grandchildren survive.
@@ -3735,6 +3742,15 @@ End your reply with the plan and wait for the user's approval.]"
     let cancelled = Arc::new(AtomicBool::new(false));
     entry.cancelled = Arc::clone(&cancelled);
 
+    // E-5 for the per-turn CLIs: every turn spawns a fresh process, so each
+    // send bumps the generation and the reader clears `turn_in_flight` only
+    // while it is still the current turn. An old reader's late EOF after a
+    // cancel + immediate re-send used to clobber the NEW turn's flag
+    // unconditionally — the new turn then ran unprotected and a second
+    // concurrent send could spawn a second child for the same chat.
+    let my_generation = entry.proc_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let proc_generation = Arc::clone(&entry.proc_generation);
+
     let app2 = app.clone();
     let db2 = DbState(Arc::clone(&db.0));
     let sid2 = sid.to_string();
@@ -3751,6 +3767,8 @@ End your reply with the plan and wait for the user's approval.]"
             kind,
             &cancelled,
             watches,
+            &proc_generation,
+            my_generation,
         );
     });
     Ok(())
@@ -3769,6 +3787,8 @@ fn read_per_turn_stream(
     kind: PerTurn,
     cancelled: &AtomicBool,
     mut watches: Vec<DirWatch>,
+    proc_generation: &AtomicU64,
+    my_generation: u64,
 ) {
     let mut full = String::new();
     // Capture the turn's start instant for the "Worked for Xs" label.
@@ -3843,7 +3863,12 @@ fn read_per_turn_stream(
     } else {
         split_relay_ask(full)
     };
-    in_flight.store(false, Ordering::SeqCst);
+    // E-5 gate: only the CURRENT turn's reader may clear the shared flag —
+    // an old reader's late EOF after a superseding send must leave it (the
+    // new turn set it true and owns it).
+    if should_clear_in_flight(proc_generation.load(Ordering::SeqCst), my_generation) {
+        in_flight.store(false, Ordering::SeqCst);
+    }
     if cancelled.load(Ordering::SeqCst) {
         full.clear();
         // Cancel skips finish_turn (which normally unregisters) — drop the
@@ -4206,6 +4231,9 @@ fn send_opencode_turn(
             kill_child_tree(&mut old);
         }
         entry.oc_base_url = None;
+        // The old reader dies with the old server; the new reader revives the
+        // flag (spawn_opencode_server sets it before the thread starts).
+        entry.oc_reader_alive.store(false, Ordering::SeqCst);
         // No cold-start notice on purpose: the persistent server boots in
         // ~1s and the first token lands right after; a status flash on every
         // respawn read as noise.
@@ -4220,6 +4248,7 @@ fn send_opencode_turn(
             Arc::clone(&entry.oc_full),
             Arc::clone(&entry.oc_in_think),
             Arc::clone(&entry.oc_last_event_ms),
+            Arc::clone(&entry.oc_reader_alive),
         ) {
             Ok((child, base_url)) => {
                 entry.child = Some(child);
@@ -4264,6 +4293,14 @@ fn send_opencode_turn(
     let cancelled = Arc::new(AtomicBool::new(false));
     entry.cancelled = Arc::clone(&cancelled);
 
+    // E-5 for opencode: bump the generation per send so this turn's thread —
+    // and only this turn's thread — clears `turn_in_flight` at its tail. The
+    // old unconditional store let a cancelled-and-superseded turn's tail
+    // clobber the new turn's flag (the new turn then ran unprotected, and a
+    // second concurrent send could spawn a second child for the same chat).
+    let my_generation = entry.proc_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let proc_generation = Arc::clone(&entry.proc_generation);
+
     let app2 = app.clone();
     let db2 = DbState(Arc::clone(&db.0));
     let sid2 = sid.to_string();
@@ -4275,6 +4312,8 @@ fn send_opencode_turn(
     let think_cell = Arc::clone(&entry.oc_in_think);
     let quiet_cell = Arc::clone(&entry.oc_last_event_ms);
     let cancelled2 = Arc::clone(&cancelled);
+    let in_flight_gen = Arc::clone(&proc_generation);
+    let reader_alive2 = Arc::clone(&entry.oc_reader_alive);
     let watch_dirs = turn_watch_dirs(cwd, &db.0);
     let started_at = crate::db::now_ts();
     std::thread::spawn(move || {
@@ -4300,7 +4339,9 @@ fn send_opencode_turn(
                     id
                 }
                 Err(e) => {
-                    in_flight2.store(false, Ordering::SeqCst);
+                    if should_clear_in_flight(in_flight_gen.load(Ordering::SeqCst), my_generation) {
+                        in_flight2.store(false, Ordering::SeqCst);
+                    }
                     emit_error(Some(&app2), &sid2, &format!("OpenCode session create failed: {e}"));
                     return;
                 }
@@ -4318,6 +4359,27 @@ fn send_opencode_turn(
                     persist_actual_model(&db2, "opencode", &sid2, m);
                 }
                 let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+                // Audit #87: a POST can "succeed" while the SSE reader is
+                // dead (connection dropped mid-turn) — all streamed text was
+                // lost, and this used to persist an EMPTY reply with no
+                // error. Surface it instead; the turn is retryable.
+                if full.is_empty()
+                    && !reader_alive2.load(Ordering::SeqCst)
+                    && !cancelled2.load(Ordering::SeqCst)
+                {
+                    drop(full);
+                    crate::chat::turn_perf::unregister(&sid2);
+                    if should_clear_in_flight(in_flight_gen.load(Ordering::SeqCst), my_generation) {
+                        in_flight2.store(false, Ordering::SeqCst);
+                    }
+                    emit_error(
+                        Some(&app2),
+                        &sid2,
+                        "OpenCode's event stream dropped before any output arrived, so the \
+                         reply was lost. Retry the turn — Relay will restart the server if needed.",
+                    );
+                    return;
+                }
                 // RELAY_ASK scan BEFORE persisting: strip the marker question
                 // from the reply, surface it as a card after chat:done.
                 let (clean, ask) = split_relay_ask(std::mem::take(&mut *full));
@@ -4369,7 +4431,11 @@ fn send_opencode_turn(
         // unregistered inside it) — this no-op-on-success backstop covers all
         // three so a stale accumulator can't linger in the registry.
         crate::chat::turn_perf::unregister(&sid2);
-        in_flight2.store(false, Ordering::SeqCst);
+        // E-5 gate: only the current turn's thread may clear the shared flag
+        // (see the generation bump in send_opencode_turn).
+        if should_clear_in_flight(in_flight_gen.load(Ordering::SeqCst), my_generation) {
+            in_flight2.store(false, Ordering::SeqCst);
+        }
     });
     Ok(())
 }
@@ -4409,6 +4475,7 @@ fn spawn_opencode_server(
     full_cell: Arc<Mutex<String>>,
     think_cell: Arc<Mutex<bool>>,
     last_event_ms: Arc<AtomicU64>,
+    reader_alive: Arc<AtomicBool>,
 ) -> Result<(Child, String), String> {
     let port = opencode_free_port().ok_or("no free TCP port for opencode server")?;
     let base_url = format!("http://127.0.0.1:{port}");
@@ -4455,6 +4522,11 @@ fn spawn_opencode_server(
     // Long-lived SSE subscription covering EVERY turn this server handles.
     let app2 = app.clone();
     let sid2 = sid.to_string();
+    // Audit #87: mark the reader LIVE before it starts and DEAD on every
+    // exit path — the turn thread uses this to detect a POST that "succeeded"
+    // while the event stream was gone (which used to persist an empty reply
+    // with no error).
+    reader_alive.store(true, Ordering::SeqCst);
     std::thread::Builder::new()
         .name(format!("oc-sse-{port}"))
         .spawn(move || {
@@ -4467,6 +4539,7 @@ fn spawn_opencode_server(
                 think_cell,
                 last_event_ms,
             );
+            reader_alive.store(false, Ordering::SeqCst);
         })
         .map_err(|e| format!("failed to spawn opencode SSE reader: {e}"))?;
 
@@ -4689,6 +4762,11 @@ fn read_opencode_server_events(
         // `message.part.delta` events only name the part id + field, so this
         // map routes each delta onto the right stream.
         let mut part_kinds: HashMap<String, String> = HashMap::new();
+        // Audit #90: the SSE connection lives across hundreds of turns on a
+        // long-running server and these maps key per-message/per-part ids —
+        // they grew monotonically. `handle_opencode_sse_data` caps them.
+        // (A cap-clear worst-case re-emits one tool card once, which beats
+        // unbounded memory growth.)
         // The part id each snapshot baseline (last_text / last_reasoning)
         // currently tracks. Baselines are PER PART — a turn can hold several
         // text parts (text → tool → text), and carrying the flat baseline
@@ -4754,6 +4832,18 @@ fn handle_opencode_sse_data(
     cur_text_part: &mut String,
     cur_reasoning_part: &mut String,
 ) {
+    // Audit #90: bound the per-connection stream-state maps (see the cap at
+    // the reader's declaration).
+    const STREAM_STATE_CAP: usize = 8192;
+    if tool_states.len() > STREAM_STATE_CAP {
+        tool_states.clear();
+    }
+    if roles.len() > STREAM_STATE_CAP {
+        roles.clear();
+    }
+    if part_kinds.len() > STREAM_STATE_CAP {
+        part_kinds.clear();
+    }
     let Ok(v) = serde_json::from_str::<Value>(data) else {
         return;
     };
@@ -5872,7 +5962,7 @@ pub fn run_one_shot(
             read_claude_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, &never_cancelled, dummy_stdin, watches, &generation, 1);
         } else {
             let cell = Arc::new(Mutex::new(None));
-            read_per_turn_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, per_turn_kind, &never_cancelled, watches);
+            read_per_turn_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, per_turn_kind, &never_cancelled, watches, &generation, 1);
         }
     });
 
@@ -6067,15 +6157,24 @@ fn harness_oneshot_blocking(
         .map_err(|e| format!("failed to spawn {harness_id} CLI: {e} (is it installed?)"))?;
 
     if prompt_via_stdin {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "failed to open CLI stdin".to_string())?;
-        use std::io::Write as _;
-        stdin
-            .write_all(prompt.as_bytes())
-            .and_then(|_| stdin.flush())
-            .map_err(|e| format!("failed to write prompt to CLI stdin: {e}"))?;
+        let write_result = match child.stdin.take() {
+            Some(mut stdin) => {
+                use std::io::Write as _;
+                stdin
+                    .write_all(prompt.as_bytes())
+                    .and_then(|_| stdin.flush())
+                    .map_err(|e| format!("failed to write prompt to CLI stdin: {e}"))
+            }
+            None => Err("failed to open CLI stdin".to_string()),
+        };
+        if let Err(e) = write_result {
+            // E-7 contract (same as spawn_per_turn / run_one_shot): dropping
+            // Child does NOT terminate it — on Windows the handle is the
+            // cmd.exe wrapper and the full-auto CLI grandchild would keep
+            // running, blocked on its stdin. Kill the whole tree.
+            kill_child_tree(&mut child);
+            return Err(e);
+        }
         // stdin drops here → EOF tells the CLI the prompt is complete.
     }
 
@@ -6539,8 +6638,11 @@ fn truncate_output(s: &str) -> String {
         s.to_string()
     };
     if out.len() > MAX_BYTES {
-        let start = out.len() - MAX_BYTES;
-        out = format!("…\n{}", &out[start..]);
+        // Char-safe tail: `&out[start..]` on a multibyte boundary panics —
+        // and the panic unwinds past the turn thread's cleanup tail
+        // (in_flight clear, perf unregister), wedging the chat. A
+        // non-ASCII error body >8KB reaches here.
+        out = format!("…\n{}", crate::util::tail_chars(&out, MAX_BYTES));
     }
     out
 }
@@ -7350,6 +7452,32 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_output_never_panics_on_multibyte_tail_boundary() {
+        // The byte-slice regression: a body whose length crosses MAX_BYTES
+        // with a multibyte char straddling the old `len - MAX_BYTES` cut used
+        // to panic — on the opencode turn thread, wedging the chat with
+        // turn_in_flight stuck true. ASCII prefix + CJK tail lands the cut
+        // mid-char by construction.
+        let mut s = "a".repeat(7_999);
+        s.push_str("日本語テキスト");
+        let out = truncate_output(&s);
+        assert!(out.contains("日本語テキスト") || out.starts_with('…'));
+        assert!(!out.contains('\u{FFFD}') || out.starts_with('…'), "tail kept must be char-aligned");
+
+        // Same straddle with emoji (4-byte UTF-8).
+        let mut s2 = "b".repeat(8_001);
+        s2.push_str("🎉🎉🎉");
+        let out2 = truncate_output(&s2);
+        assert!(!out2.is_empty());
+
+        // Over-MAX_LINES path still truncates earlier lines.
+        let many = (0..100).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let out3 = truncate_output(&many);
+        assert!(out3.contains("earlier lines truncated"));
+        assert!(out3.contains("line99"), "keeps the newest lines");
+    }
 
     #[test]
     fn stderr_suffix_flattens_and_caps_tail() {

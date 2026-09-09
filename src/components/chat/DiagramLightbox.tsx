@@ -108,6 +108,13 @@ export function DiagramLightbox({
   // Bare <svg> uses the letterbox stage (aspect-fit, never cut); full HTML
   // documents use the bounded scroll card.
   const isBareSvg = useMemo(() => /^\s*<svg[\s>]/i.test(html), [html]);
+  // Sanitize once per (html, kind): the lightbox re-renders on every pan/
+  // zoom pointermove/wheel, and re-running DOMPurify over a large SVG per
+  // mouse move dominated interaction cost. Markup depends only on these two.
+  const safeHtml = useMemo(
+    () => (isBareSvg ? sanitizeSvg(html) : sanitizeHtml(html)),
+    [html, isBareSvg],
+  );
   // Paper size for the bare-SVG stage, fit to the diagram's viewBox aspect
   // and capped to the usable viewport. null → fall back to the CSS sizing.
   const [paper, setPaper] = useState<{ w: number; h: number } | null>(null);
@@ -368,9 +375,7 @@ export function DiagramLightbox({
         <div
           ref={svgHostRef}
           className={isBareSvg ? "diagram-lightbox-svgfill" : "diagram-lightbox-doc"}
-          dangerouslySetInnerHTML={{
-            __html: isBareSvg ? sanitizeSvg(html) : sanitizeHtml(html),
-          }}
+          dangerouslySetInnerHTML={{ __html: safeHtml }}
         />
       </div>
     </div>,

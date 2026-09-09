@@ -790,10 +790,16 @@ export function ArtifactPreviewPaneInner({
   // changes. A cheap stat every 2s; the re-read only fires on actual change.
   // A missing file (deleted mid-preview) keeps the last good render.
   const [fileMtime, setFileMtime] = useState<number | null>(null);
+  // Last mtime the hot-reload effect acted on. The poll's first tick after an
+  // artifact opens re-baselines (null → number); recording that baseline here
+  // keeps the flip from instantly firing the re-read below while the initial
+  // load is still in flight — which duplicated the full read on every open.
+  const hotReloadMtimeRef = useRef<number | null>(null);
   useEffect(() => {
     if (inline) return;
     let stale = false;
     setFileMtime(null); // reset when switching artifacts — first poll re-baselines
+    hotReloadMtimeRef.current = null;
     const tick = () => {
       void getFileMtime(artifact.path)
         .then((t) => {
@@ -810,6 +816,14 @@ export function ArtifactPreviewPaneInner({
   }, [artifact.path, inline]);
   useEffect(() => {
     if (inline || fileMtime == null) return;
+    // First baseline for this artifact: the initial-load effect above already
+    // read exactly this file state — only a LATER change re-reads.
+    if (hotReloadMtimeRef.current == null) {
+      hotReloadMtimeRef.current = fileMtime;
+      return;
+    }
+    if (hotReloadMtimeRef.current === fileMtime) return;
+    hotReloadMtimeRef.current = fileMtime;
     let stale = false;
     void readArtifactPreview(artifact.path)
       .then((p) => {

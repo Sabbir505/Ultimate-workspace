@@ -12,9 +12,12 @@
 //! key listing without enumerating the OS keychain (which most keychain APIs
 //! don't support).
 //!
-//! Linux fallback: no keyring backend is enabled for Linux in Cargo.toml, so
-//! there values are stored obfuscated (XOR, not encryption) directly in the
-//! table. This deviation is logged in BUILD_LOG.md.
+//! Linux: the keyring crate's Secret Service backend IS enabled for Linux in
+//! Cargo.toml (`linux-native` + `sync-secret-service`), so Linux uses the OS
+//! keychain like Windows/macOS. The XOR-obfuscated fallback below only
+//! compiles on platforms with NO keyring backend at all
+//! (`cfg(not(any(windows, macos, linux)))`) — dead code on every shipped
+//! target.
 //!
 //! Values are only ever read back for environment injection in `spawn_shell`
 //! when the caller passes `injectSecretsProjectId` — and are never logged.

@@ -985,14 +985,28 @@ async fn oneshot(
             openai_oneshot(&client, api_key, base_url.unwrap_or(OpenRouterProvider::DEFAULT_BASE), model, system, user).await
         }
         "openai_compatible" | "local_gguf" => {
-            let Some(base) = base_url else { return Ok(String::new()) };
+            // A missing base URL must be an ERROR, not a fake-success: an
+            // empty Ok() reads as "nothing memorable" downstream and the
+            // extraction cursor commits — every message permanently skipped
+            // with zero memories extracted. Returning Err aborts before the
+            // cursor moves, so the chunk retries once the URL is configured.
+            let Some(base) = base_url else {
+                return Err(format!(
+                    "no base_url configured for {provider} memory extraction — \
+                     set the endpoint in Settings"
+                ));
+            };
             openai_oneshot(&client, api_key, base, model, system, user).await
         }
         "anthropic" => {
             anthropic_oneshot(&client, api_key, base_url.unwrap_or(AnthropicProvider::DEFAULT_BASE), model, system, user, max_tokens).await
         }
         "anthropic_compatible" => {
-            let Some(base) = base_url else { return Ok(String::new()) };
+            let Some(base) = base_url else {
+                return Err(
+                    "no base_url configured for anthropic_compatible memory extraction".to_string(),
+                );
+            };
             anthropic_oneshot(&client, api_key, base, model, system, user, max_tokens).await
         }
         _ => Err(format!("unsupported provider for memory extraction: {provider}")),

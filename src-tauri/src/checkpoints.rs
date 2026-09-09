@@ -208,29 +208,45 @@ pub fn after_turn(
 /// With `rollback_messages` the conversation is trimmed to the checkpointed
 /// turn as well; the message delete is best-effort (logged, never fails the
 /// restore — the tree rollback already happened).
+///
+/// Takes the SHARED connection handle (not a held guard): the pre-restore
+/// git snapshot and the tree restore are seconds-long on a large repo and
+/// must not pin the global DB mutex — same rationale as
+/// [`maybe_baseline_detached`]. The lock is re-taken only around the DB
+/// reads/writes; `create_checkpoint`'s internal tree-diff/ref-update still
+/// run under it (cheap and bounded, matching the `after_turn` path).
 pub fn restore(
     app: &AppHandle,
-    conn: &Connection,
+    db_conn: &std::sync::Arc<parking_lot::Mutex<Connection>>,
     checkpoint_id: i64,
     rollback_messages: bool,
 ) -> Result<RestoreCheckpointResult, String> {
-    let ckpt = db::get_checkpoint(conn, checkpoint_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "checkpoint not found".to_string())?;
-    let dir = PathBuf::from(&ckpt.repo_path);
-    if !git::is_git_repo(&dir) {
-        return Err(format!("checkpoint repo is gone: {}", ckpt.repo_path));
-    }
-    // Safety net first — if the restore itself is a mistake, this snapshot
-    // brings the pre-restore state back.
+    let (ckpt, dir) = {
+        let conn = db_conn.lock();
+        let ckpt = db::get_checkpoint(&conn, checkpoint_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "checkpoint not found".to_string())?;
+        let dir = PathBuf::from(&ckpt.repo_path);
+        if !git::is_git_repo(&dir) {
+            return Err(format!("checkpoint repo is gone: {}", ckpt.repo_path));
+        }
+        (ckpt, dir)
+    };
+    // No lock: snapshot the CURRENT state (the slow part — `git add -A` over
+    // the whole working tree).
     let snap = git::snapshot_working_tree(&dir)
         .map_err(|e| format!("failed to snapshot current state before restore: {e}"))?;
-    let safety = create_checkpoint(conn, Some(app), &ckpt.chat_session_id, None, &dir, snap)
-        .map_err(|e| format!("failed to record safety checkpoint: {e:?}"))?;
+    let safety = {
+        let conn = db_conn.lock();
+        create_checkpoint(&conn, Some(app), &ckpt.chat_session_id, None, &dir, snap)
+            .map_err(|e| format!("failed to record safety checkpoint: {e:?}"))?
+    };
+    // No lock: restore the tree (a checkout of the snapshot).
     git::restore_checkpoint_tree(&dir, &ckpt.tree_sha)
         .map_err(|e| format!("restore failed: {e}"))?;
     let deleted_messages = if rollback_messages {
-        match rollback_conversation(conn, &ckpt) {
+        let conn = db_conn.lock();
+        match rollback_conversation(&conn, &ckpt) {
             Ok(n) => n,
             Err(e) => {
                 eprintln!(
@@ -260,12 +276,28 @@ pub(crate) fn rollback_conversation(conn: &Connection, ckpt: &ChatCheckpoint) ->
 /// BEFORE the DB rows cascade away on session delete. Refs are grouped by
 /// repo so each repo is hit once; the commit objects stay until gc (harmless).
 pub fn prune_session_refs(conn: &Connection, chat_session_id: &str) {
-    let mut by_repo: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    prune_ref_groups(collect_session_ref_groups(conn, chat_session_id));
+}
+
+/// DB half of [`prune_session_refs`]: read a session's (ref, repo) pairs and
+/// group them by repo. Cheap; safe under the shared lock.
+pub fn collect_session_ref_groups(
+    conn: &Connection,
+    chat_session_id: &str,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut by_repo: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     if let Ok(pairs) = db::checkpoint_ref_paths(conn, chat_session_id) {
         for (r, repo) in pairs {
             by_repo.entry(repo).or_default().push(r);
         }
     }
+    by_repo
+}
+
+/// Git half of [`prune_session_refs`]: delete already-collected ref groups.
+/// NO database access — safe to run with the shared connection unlocked (the
+/// batch delete does exactly that so git never runs under the DB mutex).
+pub fn prune_ref_groups(by_repo: std::collections::BTreeMap<String, Vec<String>>) {
     for (repo, refs) in by_repo {
         let dir = PathBuf::from(&repo);
         if !git::is_git_repo(&dir) {

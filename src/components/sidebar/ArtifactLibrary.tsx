@@ -293,6 +293,14 @@ export function ArtifactLibrary({
     [items],
   );
 
+  // Stable identity: an inline `onRemove={(id) => void remove(id)}` closure
+  // re-created every render and defeated the ArtifactCardMemo below.
+  // `remove` is a zustand store action, so its identity is stable.
+  const onRemove = useCallback(
+    (id: ArtifactRecord["id"]) => void remove(id),
+    [remove],
+  );
+
   // PERF (PERFORMANCE_AUDIT.md F5/mi27): virtualize the card grid — every
   // card mounts a preview-fetching thumbnail, so rendering ALL artifacts at
   // once costs one IPC round-trip per card plus a huge DOM. Chunk artifacts
@@ -397,7 +405,7 @@ export function ArtifactLibrary({
                         key={a.id}
                         artifact={a}
                         onOpen={openArtifact}
-                        onRemove={(id) => void remove(id)}
+                        onRemove={onRemove}
                       />
                     ))}
                   </div>

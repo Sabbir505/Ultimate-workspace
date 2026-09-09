@@ -348,13 +348,21 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   // the session's provider; picking one switches the session to local_gguf.
   useEffect(() => {
     let stale = false;
-    void scanLocalModels().then((list) => {
-      if (!stale && list) setLocalModels(list);
-    });
+    void scanLocalModels()
+      .then((list) => {
+        if (!stale && list) setLocalModels(list);
+      })
+      .catch(() => {
+        /* local-model discovery is best-effort; leave the list empty */
+      });
     return () => {
       stale = true;
     };
-  }, [activeChatSessionId]);
+    // PERF (audit #37): the scan walks the model directories over IPC and its
+    // result doesn't depend on the session — it used to re-run on EVERY chat
+    // switch. Rescan on mount and when a local-model load settles (a fresh
+    // download can add a model).
+  }, [localLoading]);
 
   // Track the running sidecar so the ⏏ button on the model pill only shows
   // when a llama-server is actually live. Polled on mount, whenever the
@@ -362,10 +370,14 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   // (so the button appears the moment a pick completes).
   useEffect(() => {
     let stale = false;
-    void localModelStatus().then((status) => {
-      if (stale) return;
-      setActiveLocalModelId(status?.modelId ?? null);
-    });
+    void localModelStatus()
+      .then((status) => {
+        if (stale) return;
+        setActiveLocalModelId(status?.modelId ?? null);
+      })
+      .catch(() => {
+        /* status probe failure just means no live sidecar */
+      });
     return () => {
       stale = true;
     };
@@ -897,11 +909,15 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   const [quotedSelections, setQuotedSelections] = useState<Array<{ id: number; text: string }>>([]);
   const nextQuoteIdRef = useRef(1);
   useEffect(() => {
-    setChatSelectionPrefill((text) =>
+    // Keyed by THIS view's session: in split view both views register, and
+    // dispatch resolves the focused one. Cleanup removes only this session's
+    // entry — the old unconditional null used to kill the other view's
+    // registration when either view unmounted.
+    setChatSelectionPrefill(activeChatSessionId, (text) =>
       setQuotedSelections((qs) => [...qs, { id: nextQuoteIdRef.current++, text }]),
     );
-    return () => setChatSelectionPrefill(null);
-  }, []);
+    return () => setChatSelectionPrefill(activeChatSessionId, null);
+  }, [activeChatSessionId]);
   const removeQuotedSelection = useCallback((id: number) => {
     setQuotedSelections((qs) => qs.filter((q) => q.id !== id));
   }, []);
@@ -943,9 +959,13 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   useEffect(() => {
     if (!loaded || !config || isSplitView || activeChatSessionId || autoStarted.current) return;
     autoStarted.current = true;
-    void deleteEmptyChatSessions().then((deleted) => {
-      if (deleted) void loadSessions();
-    });
+    void deleteEmptyChatSessions()
+      .then((deleted) => {
+        if (deleted) void loadSessions();
+      })
+      .catch(() => {
+        /* the empty-session sweep is best-effort */
+      });
     // Seed from the last committed composer pick (any kind — harness/ACP/
     // local included) so the fresh chat is ready to send on what the user was
     // last using; falls back to the per-provider config defaults. Local seeds
@@ -986,6 +1006,11 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   // off, and strand the viewport far from the content the turn ended with.
   const programmaticPinUntilRef = useRef(0);
   const PROGRAMMATIC_PIN_GUARD_MS = 120;
+  // Last observed distance-from-bottom, maintained by handleScroll. The
+  // approval/question-card anchor restore consumes it as the PRE-mutation
+  // position (the card effect runs after React already committed the card,
+  // so a live layout read there reflects the post-change layout).
+  const distFromBottomRef = useRef<number | null>(null);
   // Timestamp until which a jump-to-latest SMOOTH animation owns the scroll.
   // While hot, patchTailAndPin must not write scrollTop directly — an instant
   // write would cut the animation to a snap. Cleared when the jump lands.
@@ -996,6 +1021,13 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
+    // Always record the freshest distance-from-bottom — even for events the
+    // suppression guard ignores below. The approval/question-card anchor
+    // restore reads this ref as the PRE-mutation scroll position (reading
+    // layout inside the card effect runs AFTER React has already committed
+    // the card, which made the restore a no-op).
+    distFromBottomRef.current =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
     if (performance.now() < programmaticPinUntilRef.current) return;
     const threshold = 80; // px from bottom to still count as "at bottom"
     const distanceFromBottom =
@@ -1353,9 +1385,12 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
       });
       return () => cancelAnimationFrame(raf);
     }
-    // Snapshot the relative scroll position (distance from bottom) before the
-    // card's height change is reflected in the layout.
+    // Snapshot the relative scroll position (distance from bottom) BEFORE the
+    // card's height change is reflected in the layout — read from the ref
+    // handleScroll keeps updated (a live read here runs after React already
+    // committed the card, which made this restore a no-op).
     const prevBottom =
+      distFromBottomRef.current ??
       container.scrollHeight - container.scrollTop - container.clientHeight;
     const raf = requestAnimationFrame(() => {
       // After the card mounts/unmounts, restore the same distance-from-bottom
@@ -1371,9 +1406,11 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
 
   // Register a scroll-to-message helper so the TurnNavigator can jump to a
   // specific turn. Sets stickToBottom OFF first so the auto-follow effect
-  // doesn't yank the scroll back to the bottom while streaming.
+  // doesn't yank the scroll back to the bottom while streaming. Keyed by THIS
+  // view's session (split view registers its own); cleanup is owner-scoped so
+  // one view closing can't disable the other's registration.
   useEffect(() => {
-    setChatScrollToMessage((msgId: number) => {
+    setChatScrollToMessage(activeChatSessionId, (msgId: number) => {
       stickToBottomRef.current = false;
       // PERF (F5): with the message list virtualized, off-screen bubbles
       // aren't in the DOM — scroll the virtualizer to the message's index
@@ -1386,8 +1423,8 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
         });
       }
     });
-    return () => setChatScrollToMessage(null);
-  }, []);
+    return () => setChatScrollToMessage(activeChatSessionId, null);
+  }, [activeChatSessionId]);
 
   // Build the list of items to render: persisted messages, plus a live
   // streaming bubble for the active session if tokens are arriving.

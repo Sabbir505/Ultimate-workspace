@@ -32,8 +32,24 @@ export function ProjectSettingsPanel() {
 
   useEffect(() => {
     if (!projectId) return;
-    void listQuickActions(projectId).then((a) => setActions(a ?? []));
-    void listSecretKeys(projectId).then((k) => setSecretKeys(k ?? []));
+    // Stale guard: switching projects A→B quickly must not let A's slower
+    // response overwrite B's lists.
+    let stale = false;
+    listQuickActions(projectId)
+      .then((a) => {
+        if (stale) return;
+        setActions(a ?? []);
+      })
+      .catch(() => {});
+    listSecretKeys(projectId)
+      .then((k) => {
+        if (stale) return;
+        setSecretKeys(k ?? []);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
   }, [projectId]);
 
   if (!projectId || !project) return null;

@@ -51,8 +51,9 @@ pub(crate) const MAX_PARSE_FAILURES: u32 = 50;
 /// user-configurable, hence untrusted): without a cap, a hostile or buggy
 /// endpoint can send `"index": 4294967295` and make the grow-loops below
 /// allocate billions of entries — instant memory exhaustion mid-turn. Real
-/// rounds use a handful of blocks; 64 is generous.
-const MAX_STREAM_BLOCK_INDEX: usize = 64;
+/// rounds use a handful of blocks; 64 is generous. The subagent loop in
+/// `dispatch` clamps with the same constant.
+pub(crate) const MAX_STREAM_BLOCK_INDEX: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Search-first tripwire
@@ -635,9 +636,13 @@ async fn anthropic_stream_round(
         // independently corrupted multi-byte chars split across TCP reads.
         for line in pending.push(&chunk) {
             let line = line.trim_end();
-            let data = match line.strip_prefix("data: ") {
-                Some(d) => d,
-                None => continue,
+            // Tolerate `data:` without the trailing space — a strict
+            // strip_prefix("data: ") silently skipped EVERY event from
+            // non-conformant endpoints, "succeeding" with an empty message
+            // instead of erroring (same B-18 fix as the other SSE readers).
+            let data = match line.strip_prefix("data:").map(str::trim_start) {
+                Some(d) if !d.is_empty() => d,
+                _ => continue,
             };
             let p: Value = match serde_json::from_str(data) {
                 Ok(v) => {
@@ -1159,7 +1164,12 @@ pub(crate) async fn run_openai_tool_loop(
         // Mirror of the Anthropic loop's gateway fallback: a backend that
         // rejects the cache marks fails with an HTTP 400 before any byte
         // streams (nothing emitted into `full` yet), so retrying the round
-        // uncached is safe.
+        // uncached is safe. The guard enforces exactly that: `full.len()`
+        // unchanged means the failure happened before any delta reached the
+        // user — a mid-stream error whose TEXT merely mentions "cache_control"
+        // (is_cache_rejection is a substring match) must NOT re-run the
+        // round, or the already-streamed text would be duplicated.
+        let full_len_before = full.len();
         let (message, round_usage) = match openai_stream_round(
             client,
             &url,
@@ -1171,7 +1181,7 @@ pub(crate) async fn run_openai_tool_loop(
         )
         .await
         {
-            Err(e) if cache::is_cache_rejection(&e) => {
+            Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
                 cache::strip_cache_control(&mut body);
                 openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?
             }
@@ -1515,7 +1525,11 @@ pub(crate) async fn run_anthropic_tool_loop(
         // Some Anthropic-compatible gateways reject `cache_control` outright.
         // That rejection is an HTTP 400 raised before any byte streams, so
         // nothing has been emitted into `full` — falling back to an uncached
-        // body once is safe and keeps those providers working.
+        // body once is safe and keeps those providers working. The len guard
+        // enforces the "before any byte streams" premise: is_cache_rejection
+        // is a substring match, so a mid-stream provider error mentioning
+        // those words must not re-run the round and duplicate the text.
+        let full_len_before = full.len();
         let (content, round_usage) = match anthropic_stream_round(
             client,
             &url,
@@ -1527,7 +1541,7 @@ pub(crate) async fn run_anthropic_tool_loop(
         )
         .await
         {
-            Err(e) if cache::is_cache_rejection(&e) => {
+            Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
                 cache::strip_cache_control(&mut body);
                 anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?
             }

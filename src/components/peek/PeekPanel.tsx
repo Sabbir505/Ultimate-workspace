@@ -48,9 +48,14 @@ export function PeekPanel() {
     setFileText(null);
     setDiffText(null);
     if (peek.mode === "file" && peek.filePath) {
-      void readFileText(peek.filePath).then((t) => {
-        if (!stale) setFileText(t ?? "(unable to read file)");
-      });
+      void readFileText(peek.filePath)
+        .then((t) => {
+          if (!stale) setFileText(t ?? "(unable to read file)");
+        })
+        .catch(() => {
+          // A rejected read must not leave the panel on "Loading…" forever.
+          if (!stale) setFileText("(unable to read file)");
+        });
     } else if (peek.mode === "diff" && project) {
       // Per-pane entry points (the Changes panel) carry an explicit
       // `cwd` so a worktree-scoped session can show its own diff, not the
@@ -60,15 +65,23 @@ export function PeekPanel() {
         // File-scoped peek: the user clicked a file row in the right-side
         // Files panel. Show ONLY that file's diff (newly-created files are
         // handled by `get_git_file_diff`'s untracked fallback).
-        void getGitFileDiff(target, peek.filePath).then((d) => {
-          if (!stale) setDiffText(d ?? "");
-        });
+        void getGitFileDiff(target, peek.filePath)
+          .then((d) => {
+            if (!stale) setDiffText(d ?? "");
+          })
+          .catch(() => {
+            if (!stale) setDiffText("");
+          });
       } else {
         // Project-wide peek: the entire working-tree diff against HEAD
         // (still truncated at 200KB by the backend).
-        void getGitDiff(target).then((d) => {
-          if (!stale) setDiffText(d ?? "");
-        });
+        void getGitDiff(target)
+          .then((d) => {
+            if (!stale) setDiffText(d ?? "");
+          })
+          .catch(() => {
+            if (!stale) setDiffText("");
+          });
       }
     }
     return () => {

@@ -387,9 +387,11 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
       const onUp = () => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
       };
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
     },
     [setDiffPanelWidth],
   );
@@ -673,10 +675,15 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
       return;
     }
     let cancelled = false;
-    void getChangedFiles(cwd).then((paneFiles) => {
-      if (cancelled) return;
-      setPanePaths(new Set((paneFiles ?? []).map((f) => f.path)));
-    });
+    void getChangedFiles(cwd)
+      .then((paneFiles) => {
+        if (cancelled) return;
+        setPanePaths(new Set((paneFiles ?? []).map((f) => f.path)));
+      })
+      .catch(() => {
+        // Same contract as the poll effect above: this call can reject.
+        // The pane/project split is an optimization, so degrade silently.
+      });
     return () => {
       cancelled = true;
     };

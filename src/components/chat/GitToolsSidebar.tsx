@@ -271,14 +271,20 @@ export function GitToolsSidebar() {
 
     const poll = async () => {
       if (cancelled) return;
-      const cf = await getChangedFiles(path);
-      if (cancelled || !cf) return;
-      let a = 0, d = 0;
-      for (const f of cf) { a += f.added; d += f.deleted; }
-      setAdded(a);
-      setDeleted(d);
-      const bl = await listGitBranches(path);
-      if (!cancelled) setBranches(bl ?? []);
+      try {
+        const cf = await getChangedFiles(path);
+        if (cancelled || !cf) return;
+        let a = 0, d = 0;
+        for (const f of cf) { a += f.added; d += f.deleted; }
+        setAdded(a);
+        setDeleted(d);
+        const bl = await listGitBranches(path);
+        if (!cancelled) setBranches(bl ?? []);
+      } catch {
+        // Git failed (repo deleted mid-session, git binary error) — keep the
+        // last known counters/branches rather than leaking an unhandled
+        // rejection from this voided poll.
+      }
     };
 
     const debouncedPoll = () => {
@@ -342,11 +348,19 @@ export function GitToolsSidebar() {
   //    lists) that the model generated before implementing. Works for both
   //    CLI harness output and API chat responses.
   const messages = useChatStore((s) => s.messages);
+  // Key the regex-heavy scan on the history SHAPE (message count + newest id)
+  // instead of the messages array identity: streaming replaces the array (and
+  // the live message object) on every token flush, and re-running
+  // extractPlanSection over the whole history per flush dominated this
+  // component's cost. A content-only edit to an existing message never adds a
+  // plan, so the rescan only fires when a message is appended or replaced.
+  const planScanKey = `${messages.length}:${messages[messages.length - 1]?.id ?? ""}`;
   const plans = useMemo(() => {
+    const current = useChatStore.getState().messages;
     const found: { raw: string; label: string }[] = [];
     // Scan all assistant messages (newest first) for planning content
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
+    for (let i = current.length - 1; i >= 0; i--) {
+      const m = current[i];
       if (m.role !== "assistant") continue;
       const content = m.content || "";
       if (content.trim().length < 50) continue;
@@ -359,7 +373,8 @@ export function GitToolsSidebar() {
       }
     }
     return found.slice(0, 10);
-  }, [messages]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planScanKey]);
 
   // Progress items — from completed tasks.
   const taskList = Object.values(tasks);

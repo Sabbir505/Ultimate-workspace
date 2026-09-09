@@ -7,7 +7,7 @@
 //    typed as /slash-commands into any pane.
 // Installed skills/loops are editable in place; creating one writes it to
 // BOTH harness directories so either CLI discovers it by its slash name.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   createInstalledSkill,
   deleteInstalledSkill,
@@ -139,10 +139,17 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
     window.setTimeout(() => setNotice(null), 2000);
   };
 
+  // Open-request token: clicking skill A then B quickly lets A's slower read
+  // resolve last, which used to leave A's body in the editor while B was
+  // selected — the next Save then wrote A's content under B's slug.
+  const openRequestRef = useRef(0);
+
   const openItem = async (item: InstalledSkill) => {
     setSelected(item);
     setCreating(false);
+    const requestId = ++openRequestRef.current;
     const body = await readInstalledSkill(item.slug, kind);
+    if (openRequestRef.current !== requestId) return; // a newer open superseded this one
     setContent(body ?? "");
     setDirty(false);
   };

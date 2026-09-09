@@ -1290,6 +1290,13 @@ async fn run_subagent_loop(
                     {
                         for tc in tcs {
                             let idx = tc.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
+                            // Same clamp as the main stream rounds: base URLs
+                            // are user-configured (untrusted), and oai_calls
+                            // grows one entry per distinct index a hostile or
+                            // buggy endpoint sends.
+                            if idx < 0 || idx as usize > crate::chat::streaming::MAX_STREAM_BLOCK_INDEX {
+                                continue;
+                            }
                             let entry =
                                 oai_calls.entry(idx).or_insert_with(|| {
                                     (String::new(), String::new(), String::new())
@@ -1702,7 +1709,9 @@ pub(crate) fn spawn_run_tool(
     name: String,
     args: Value,
 ) -> tokio::task::JoinHandle<String> {
-    tokio::spawn(async move {
+    let sid_reg = sid.clone();
+    let mgr_reg = Arc::clone(&mgr);
+    let inner = tokio::spawn(async move {
         run_tool(
             &client,
             &artifacts_dir,
@@ -1716,6 +1725,20 @@ pub(crate) fn spawn_run_tool(
             &args,
         )
         .await
+    });
+    // Register the child so a cancelled (or superseded) turn aborts it —
+    // dropping the turn's JoinHandle used to DETACH the subagent loop, which
+    // then kept running provider rounds with no way to stop it.
+    let inner_id = inner.abort_handle().id();
+    mgr_reg.register_child_task(&sid_reg, inner.abort_handle());
+    let mgr_reaper = Arc::clone(&mgr_reg);
+    let sid_reaper = sid_reg;
+    tokio::spawn(async move {
+        let result = inner
+            .await
+            .unwrap_or_else(|e| format!("Error: subagent task failed: {e}"));
+        mgr_reaper.unregister_child_task(&sid_reaper, inner_id);
+        result
     })
 }
 
@@ -2574,11 +2597,21 @@ async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Value) -> Str
         }
     };
 
-    let db = app.state::<crate::DbState>();
-    let conn = db.0.lock();
-    let hits = match crate::db::search_chunks(&conn, &query_vec, top_k) {
-        Ok(h) => h,
-        Err(e) => return format!("search_docs search failed: {e}"),
+    // The chunk search is a brute-force cosine scan over ALL indexed chunks
+    // (the DB's own doc says so) — hundreds of ms on a large corpus. Run it
+    // on the blocking pool like `compute_docs_retrieval` does for the same
+    // query: holding the shared DB mutex across that scan on the async
+    // runtime stalled every IPC command and stream persist.
+    let db = Arc::clone(&app.state::<crate::DbState>().0);
+    let hits = match tokio::task::spawn_blocking(move || {
+        let conn = db.lock();
+        crate::db::search_chunks(&conn, &query_vec, top_k)
+    })
+    .await
+    {
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => return format!("search_docs search failed: {e}"),
+        Err(e) => return format!("search_docs search task failed: {e}"),
     };
 
     if hits.is_empty() {

@@ -136,6 +136,16 @@ export function Sidebar() {
     setPairingModalOpen(true);
   }, []);
 
+  // The pairing QR popover isn't a Modal, so it must register itself with the
+  // webview-occlusion system (M22) — a native browser webview would otherwise
+  // paint on top of it.
+  const setModalOpen = useUiStore((s) => s.setModalOpen);
+  useEffect(() => {
+    if (!pairingModalOpen) return;
+    setModalOpen("sidebar:pairing-qr", true);
+    return () => setModalOpen("sidebar:pairing-qr", false);
+  }, [pairingModalOpen, setModalOpen]);
+
   // DEV-ONLY mock update for visual review (see SHOW_FAKE_UPDATE in state/updater).
   useEffect(() => {
     if (!SHOW_FAKE_UPDATE) return;
@@ -244,7 +254,7 @@ export function Sidebar() {
           (a, b) =>
             Number(b.starred) - Number(a.starred) || b.lastActiveAt - a.lastActiveAt,
         ),
-    [chatSessions, sessionProjects, projects, gitStatuses],
+    [chatSessions, sessionProjects, projects, gitStatuses, cwdOverrides],
   );
 
   // PERF (PERFORMANCE_AUDIT.md mi27/F5): virtualize the flat chat-history

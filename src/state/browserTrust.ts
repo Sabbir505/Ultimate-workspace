@@ -53,6 +53,10 @@ interface BrowserTrustState {
   setTimeline: (paneId: string, entries: BrowserTimelineEntry[]) => void;
   toggleTimeline: (paneId: string) => void;
   markAgentActivity: (paneId: string | null | undefined) => void;
+  /** Drop every per-pane entry. Pane ids are fresh UUIDs, so without this a
+   *  closed browser pane's timeline/paused/activity rows would sit in these
+   *  maps forever (audit #20). */
+  clearPane: (paneId: string) => void;
 }
 
 const MAX_CLIENT_TIMELINE = 200;
@@ -94,6 +98,18 @@ export const useBrowserTrustStore = create<BrowserTrustState>((set) => ({
       lastAgentActivity: { ...s.lastAgentActivity, [paneId]: Date.now() },
     }));
   },
+  clearPane: (paneId) =>
+    set((s) => {
+      const paused = { ...s.paused };
+      const timeline = { ...s.timeline };
+      const timelineOpen = { ...s.timelineOpen };
+      const lastAgentActivity = { ...s.lastAgentActivity };
+      delete paused[paneId];
+      delete timeline[paneId];
+      delete timelineOpen[paneId];
+      delete lastAgentActivity[paneId];
+      return { paused, timeline, timelineOpen, lastAgentActivity };
+    }),
 }));
 
 /** Is the agent currently active on this pane (activity within the TTL)? */

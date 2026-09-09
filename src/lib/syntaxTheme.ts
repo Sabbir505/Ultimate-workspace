@@ -16,10 +16,11 @@
 // whole object (and re-render every SyntaxHighlighter in the chat) on each
 // toggle, even when the value didn't actually change.
 import type { CSSProperties } from "react";
+import { useSettingsStore } from "../state/settings";
 
 type SyntaxStyle = Record<string, CSSProperties>;
 
-let cachedTheme: string | null = null;
+let cachedThemeKey: string | null = null;
 let cachedStyle: SyntaxStyle | null = null;
 
 /** Returns the current theme's syntax style by reading CSS custom properties
@@ -28,7 +29,14 @@ let cachedStyle: SyntaxStyle | null = null;
 export function getSyntaxTheme(): SyntaxStyle {
   if (typeof document === "undefined") return {};
   const theme = document.documentElement.getAttribute("data-theme") || "";
-  if (cachedStyle && cachedTheme === theme) return cachedStyle;
+  // data-theme is only the resolved light/dark BASE — a custom theme layers
+  // inline --syntax-* overrides on top of it, so two custom themes sharing a
+  // base leave data-theme unchanged. Include the active custom-theme id in
+  // the cache key, or theme A's resolved colors are served forever after
+  // switching to theme B (audit #24).
+  const customThemeId = useSettingsStore.getState().customThemeId ?? "";
+  const themeKey = `${customThemeId}\u0000${theme}`;
+  if (cachedStyle && cachedThemeKey === themeKey) return cachedStyle;
 
   const cs = getComputedStyle(document.documentElement);
   const cssVar = (name: string) => cs.getPropertyValue(name).trim();
@@ -102,7 +110,7 @@ export function getSyntaxTheme(): SyntaxStyle {
     italic: { fontStyle: "italic" },
   };
 
-  cachedTheme = theme;
+  cachedThemeKey = themeKey;
   cachedStyle = style;
   return style;
 }

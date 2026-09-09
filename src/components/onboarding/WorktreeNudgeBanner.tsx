@@ -55,7 +55,13 @@ export function WorktreeNudgeBanner() {
           {canIsolate && (
             <button
               onClick={() => {
-                void toggleSessionWorktree(activeSession!.id);
+                // Re-check at click time: the active session may have changed
+                // (or lost its project) since this rendered.
+                if (!activeSession?.projectId) {
+                  dismiss();
+                  return;
+                }
+                void toggleSessionWorktree(activeSession.id);
                 dismiss();
               }}
             >

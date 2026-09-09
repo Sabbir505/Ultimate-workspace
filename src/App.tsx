@@ -103,13 +103,10 @@ export default function App() {
   // session (selectContextSessionId), so all shared chrome reflects the chat
   // the user is working in.
   const splitChatId = useChatStore((s) => s.splitChatSessionId);
-  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   // Which split half the user last interacted with — the tool panel docks to
   // the RIGHT of that half (flex order), so each chat effectively carries its
   // own side panel. Pointer-down on a column updates it.
   const [splitFocus, setSplitFocus] = useState<"main" | "side">("side");
-  const focusedSessionId =
-    splitChatId && splitFocus === "side" ? splitChatId : activeChatSessionId;
   const chatTitle = useChatStore((s) => {
     const id = s.focusedChatSessionId ?? s.activeChatSessionId;
     return id ? (s.sessions.find((x) => x.id === id)?.title?.trim() || "New chat") : null;
@@ -137,15 +134,26 @@ export default function App() {
       const handle = e.currentTarget;
       handle.setPointerCapture(e.pointerId);
       setSplitResizing(true);
-      const onMove = (ev: PointerEvent) => {
+      // PERF: pointermove fires at input frequency (up to ~1000 Hz) and every
+      // raw setSplitRatio re-rendered the whole App tree. Keep the latest X in
+      // a local and commit the ratio at most once per animation frame.
+      let latestX = e.clientX;
+      let frame: number | null = null;
+      const applyRatio = () => {
+        frame = null;
         const panel = grid.querySelector<HTMLElement>(":scope > .tool-panel");
         const panelW = panel ? panel.offsetWidth : 0;
         const total = Math.max(240, grid.clientWidth - panelW);
         const left = grid.getBoundingClientRect().left;
-        const ratio = (ev.clientX - left) / total;
+        const ratio = (latestX - left) / total;
         setSplitRatio(Math.min(0.8, Math.max(0.2, ratio)));
       };
+      const onMove = (ev: PointerEvent) => {
+        latestX = ev.clientX;
+        if (frame === null) frame = requestAnimationFrame(applyRatio);
+      };
       const onUp = () => {
+        if (frame !== null) cancelAnimationFrame(frame);
         setSplitResizing(false);
         handle.removeEventListener("pointermove", onMove);
         handle.removeEventListener("pointerup", onUp);

@@ -763,42 +763,51 @@ function LocalModelsPanel() {
     if (loaded) return;
     let stale = false;
     void (async () => {
-      // Load persisted folders for the chip display (the backend reads the
-      // same setting when scanning, so they're scanned automatically).
-      const stored = await getSetting(K_LOCAL_FOLDERS);
-      let initialFolders: string[] = [];
-      if (stored) {
-        try {
-          const parsed = JSON.parse(stored) as string[];
-          if (Array.isArray(parsed)) initialFolders = parsed.filter((f) => typeof f === "string");
-        } catch {
-          /* corrupt — start empty */
-        }
-      }
-      if (!stale) setFolders(initialFolders);
-      // Load the persisted runtime-override blob (lenient — corrupt JSON
-      // settles to empty, the backend parses the same way).
-      const blob = await getLocalModelOverrides();
-      if (!stale && blob) {
-        try {
-          const parsed = JSON.parse(blob) as Record<string, LlamaOverrides>;
-          if (parsed && typeof parsed === "object") {
-            overridesMapRef.current = parsed;
-            setOverridesMap(parsed);
+      try {
+        // Load persisted folders for the chip display (the backend reads the
+        // same setting when scanning, so they're scanned automatically).
+        const stored = await getSetting(K_LOCAL_FOLDERS);
+        let initialFolders: string[] = [];
+        if (stored) {
+          try {
+            const parsed = JSON.parse(stored) as string[];
+            if (Array.isArray(parsed)) initialFolders = parsed.filter((f) => typeof f === "string");
+          } catch {
+            /* corrupt — start empty */
           }
-        } catch {
-          /* corrupt — start empty */
+        }
+        if (!stale) setFolders(initialFolders);
+        // Load the persisted runtime-override blob (lenient — corrupt JSON
+        // settles to empty, the backend parses the same way).
+        const blob = await getLocalModelOverrides();
+        if (!stale && blob) {
+          try {
+            const parsed = JSON.parse(blob) as Record<string, LlamaOverrides>;
+            if (parsed && typeof parsed === "object") {
+              overridesMapRef.current = parsed;
+              setOverridesMap(parsed);
+            }
+          } catch {
+            /* corrupt — start empty */
+          }
+        }
+        const dismissed = await getSetting(K_LOCAL_INFO_DISMISSED);
+        if (!stale) setInfoDismissed(dismissed === "1");
+        await runScan();
+        const a = await localModelStatus();
+        if (!stale) {
+          setLoaded(true);
+          setLoading(false);
+          setActive(a);
+        }
+      } catch {
+        // A rejected scan/status fetch must not leave the panel spinning
+        // forever — settle to the (empty) loaded state instead.
+        if (!stale) {
+          setLoaded(true);
+          setLoading(false);
         }
       }
-      const dismissed = await getSetting(K_LOCAL_INFO_DISMISSED);
-      if (!stale) setInfoDismissed(dismissed === "1");
-      await runScan();
-      if (!stale) {
-        setLoaded(true);
-        setLoading(false);
-      }
-      const a = await localModelStatus();
-      if (!stale) setActive(a);
     })();
     return () => {
       stale = true;
@@ -2016,12 +2025,17 @@ function ApiKeysPanel() {
       "anthropic_compatible",
       "openai_compatible",
     ];
-    const results = await Promise.all(ids.map((id) => getChatConfig(id)));
-    const out: Record<string, ChatConfigPayload> = {};
-    ids.forEach((id, i) => {
-      if (results[i]) out[id] = results[i]!;
-    });
-    setSavedProviders(out);
+    try {
+      const results = await Promise.all(ids.map((id) => getChatConfig(id)));
+      const out: Record<string, ChatConfigPayload> = {};
+      ids.forEach((id, i) => {
+        if (results[i]) out[id] = results[i]!;
+      });
+      setSavedProviders(out);
+    } catch (e) {
+      // Keep the previous summary rather than half-updating it.
+      toastError("Couldn't load saved providers", String(e));
+    }
   };
 
   const isCompatible = provider === "anthropic_compatible" || provider === "openai_compatible";
@@ -2174,14 +2188,18 @@ function ApiKeysPanel() {
   };
 
   const handleClear = async () => {
-    await clearApiKeyFn(provider);
-    setApiKey("");
-    setBaseUrl("");
-    setModel("");
-    setFetchedModels([]);
-    setFetchError(null);
-    await loadConfigFn(provider);
-    await refreshSavedProviders();
+    try {
+      await clearApiKeyFn(provider);
+      setApiKey("");
+      setBaseUrl("");
+      setModel("");
+      setFetchedModels([]);
+      setFetchError(null);
+      await loadConfigFn(provider);
+      await refreshSavedProviders();
+    } catch (e) {
+      toastError("Couldn't clear the API key", String(e));
+    }
   };
 
   // Save is valid when:

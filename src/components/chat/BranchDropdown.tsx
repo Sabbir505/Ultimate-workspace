@@ -68,14 +68,22 @@ export function BranchDropdown({
 
   const fetchAll = useCallback(async () => {
     if (!path) return;
-    const [bl, cf] = await Promise.all([
-      listGitBranches(path),
-      getChangedFiles(path),
-    ]);
-    setBranches(bl ?? []);
-    setDirtyCount(cf?.length ?? 0);
-    setError(null);
-    setLoading(false);
+    try {
+      const [bl, cf] = await Promise.all([
+        listGitBranches(path),
+        getChangedFiles(path),
+      ]);
+      setBranches(bl ?? []);
+      setDirtyCount(cf?.length ?? 0);
+      setError(null);
+    } catch (e) {
+      // Repo deleted / git binary failure: show the error instead of staying
+      // on "Loading branches…" forever (and never let the promise reject —
+      // both call sites below `void` it).
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
   }, [path]);
 
   useEffect(() => {

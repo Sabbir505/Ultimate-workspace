@@ -118,7 +118,10 @@ export function ThemeGalleryPanel() {
   };
 
   const openTokensCss = () => {
-    window.open("https://github.com/your-repo/blob/main/src/styles/tokens.css", "_blank");
+    window.open(
+      "https://github.com/Sabbir505/Ultimate-workspace/blob/master/src/styles/tokens.css",
+      "_blank",
+    );
   };
 
   return (

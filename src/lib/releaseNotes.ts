@@ -31,7 +31,12 @@ function stripMarkdown(line: string): string {
     .replace(/\*\*(.+?)\*\*/g, "$1")
     .replace(/__(.+?)__/g, "$1")
     .replace(/\*(.+?)\*/g, "$1")
-    .replace(/_(.+?)_/g, "$1")
+    // Only markdown-EMPHASIS underscores (paired _like_this_ at word
+    // boundaries), never the single underscores inside snake_case
+    // identifiers — stripping all of them fused labels like
+    // "parse_plan_steps" into "parseplansteps" (same guard as
+    // planParser.ts's normalizeLabel).
+    .replace(/(?<![\w])_([^_\s]+)_(?![\w])/g, "$1")
     .trim();
 }
 

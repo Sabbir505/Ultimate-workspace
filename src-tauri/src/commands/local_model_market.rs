@@ -163,8 +163,19 @@ fn catalog_cache_stale_get(key: &CatalogCacheKey) -> Option<FetchCatalogResult> 
     Some(result)
 }
 
+/// Ceiling on cached catalog entries. Each entry holds up to ~200
+/// `CatalogEntry`s, and the key includes the raw user query — without a cap
+/// every distinct search a user ever typed lived in the map for the process
+/// lifetime. Clear-on-full (like the rollup cache) is fine: a cleared entry
+/// just re-fetches.
+const CATALOG_CACHE_MAX_ENTRIES: usize = 32;
+
 fn catalog_cache_put(key: CatalogCacheKey, result: FetchCatalogResult) {
-    CATALOG_CACHE.lock().insert(
+    let mut cache = CATALOG_CACHE.lock();
+    if !cache.contains_key(&key) && cache.len() >= CATALOG_CACHE_MAX_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(
         key,
         CatalogCacheEntry {
             fetched_at: std::time::Instant::now(),
@@ -223,6 +234,26 @@ impl Default for DownloadRegistry {
 
 const HF_TOKEN_NAMESPACE: &str = "market";
 const HF_TOKEN_KEY: &str = "huggingface_token";
+
+/// SECURITY: the stored Hugging Face token may only be attached to
+/// huggingface.co hosts. `start_model_download` accepts a frontend-supplied
+/// `download_url`, so a compromised webview could otherwise point the
+/// download at an attacker server and receive the user's token in the
+/// `Authorization` header. Subdomains are allowed (the resolve endpoints
+/// redirect to `cdn-lfs*.huggingface.co`).
+fn token_allowed_for_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    match parsed.host_str() {
+        Some("huggingface.co") => true,
+        Some(h) => h.ends_with(".huggingface.co"),
+        None => false,
+    }
+}
 
 fn get_hf_token(conn: &rusqlite::Connection) -> Option<String> {
     secrets::platform_load(conn, HF_TOKEN_NAMESPACE, HF_TOKEN_KEY)
@@ -341,10 +372,8 @@ fn build_hf_request(
     token: Option<&str>,
 ) -> reqwest::RequestBuilder {
     let mut r = client.get(url);
-    if let Some(t) = token {
-        if !t.is_empty() {
-            r = r.bearer_auth(t);
-        }
+    if let Some(t) = token.filter(|t| !t.is_empty() && token_allowed_for_url(url)) {
+        r = r.bearer_auth(t);
     }
     r
 }
@@ -1154,7 +1183,10 @@ async fn run_download(
     // files 401, which used to surface as a bogus "this model is gated";
     // genuinely gated repos still fail both attempts and get the friendly
     // message below.
-    let mut attempt_auth: Option<&str> = token.filter(|t| !t.is_empty());
+    // SECURITY: never send the token to a non-huggingface.co host — the URL
+    // is frontend-supplied (see token_allowed_for_url).
+    let mut attempt_auth: Option<&str> =
+        token.filter(|t| !t.is_empty() && token_allowed_for_url(url));
     let resp = loop {
         let mut req = client.get(url);
         if let Some(t) = attempt_auth.as_deref() {
@@ -1609,6 +1641,34 @@ mod tests {
         // Unreserved characters pass through.
         assert_eq!(urlencoding_lite("llama-3.1_8B~q"), "llama-3.1_8B~q");
         assert_eq!(urlencoding_lite(""), "");
+    }
+
+    // ---- SECURITY: HF token may only ride on huggingface.co hosts ----
+
+    #[test]
+    fn token_allowed_for_url_gates_by_host() {
+        // Allowed: the app's own resolve/API shapes + CDN subdomains.
+        assert!(token_allowed_for_url(
+            "https://huggingface.co/repo/resolve/main/model.gguf"
+        ));
+        assert!(token_allowed_for_url(
+            "https://cdn-lfs.huggingface.co/files/abc"
+        ));
+        // Blocked: attacker hosts, lookalike labels, other schemes.
+        assert!(!token_allowed_for_url("https://evil.com/repo/resolve/main/m.gguf"));
+        assert!(!token_allowed_for_url(
+            "https://huggingface.co.evil.com/m.gguf"
+        ));
+        assert!(!token_allowed_for_url(
+            "https://not-huggingface.co/m.gguf"
+        ));
+        assert!(!token_allowed_for_url(
+            "http://huggingface.co/repo/resolve/main/model.gguf"
+        ));
+        // Blocked: garbage / relative inputs.
+        assert!(!token_allowed_for_url("not a url"));
+        assert!(!token_allowed_for_url(""));
+        assert!(!token_allowed_for_url("file:///etc/passwd"));
     }
 
     // ---- E3: streaming hasher prime ----

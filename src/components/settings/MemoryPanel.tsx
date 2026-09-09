@@ -127,20 +127,25 @@ export function MemoryPanel() {
   const docDirty = useRef(false);
 
   const refresh = useCallback(async () => {
-    const [s, list] = await Promise.all([memoryStatus(), memoryList(true)]);
-    setStatus(s);
-    setMemories(list ?? []);
-    // Rehydrate the picker from the stored "provider::model" override.
-    const stored = s?.extractModel ?? "";
-    if (stored.includes("::")) {
-      const [p, m] = stored.split("::");
-      setExtractAgent(p);
-      setExtractModel(m);
-    } else {
-      setExtractAgent("chat");
-      setExtractModel("");
+    try {
+      const [s, list] = await Promise.all([memoryStatus(), memoryList(true)]);
+      setStatus(s);
+      setMemories(list ?? []);
+      // Rehydrate the picker from the stored "provider::model" override.
+      const stored = s?.extractModel ?? "";
+      if (stored.includes("::")) {
+        const [p, m] = stored.split("::");
+        setExtractAgent(p);
+        setExtractModel(m);
+      } else {
+        setExtractAgent("chat");
+        setExtractModel("");
+      }
+      if (!docDirty.current) setDoc(s?.document ?? "");
+    } catch (err) {
+      // Keep the previous data on screen; just stop the spinner + tell the user.
+      toastError("Couldn't load memory status", err);
     }
-    if (!docDirty.current) setDoc(s?.document ?? "");
   }, []);
 
   useEffect(() => {

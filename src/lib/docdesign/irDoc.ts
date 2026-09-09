@@ -205,7 +205,41 @@ export function validateDocPlan(
             issues.push(issue("error", "budget", "kpi-strip shows 2–4 stats", at));
             break;
           }
-          blocks.push({ type, kpis: kpis as Kpi[] });
+          // Validate per-KPI like the deck path (ir.ts): the bare cast used
+          // to let numeric/missing values through, then crashed the PDF
+          // compiler (esc(undefined)) and emitted `undefined` text runs into
+          // the docx program. Values are coerced with String() so a plausible
+          // model emission like {"label":"Revenue","value":4200} still renders.
+          const cleaned: Kpi[] = [];
+          let bad = false;
+          for (const [i, k] of kpis.entries()) {
+            const raw = (typeof k === "object" && k !== null ? k : {}) as Record<string, unknown>;
+            if (!isStr(raw.label) || !raw.label.trim() || raw.value === undefined || raw.value === null) {
+              issues.push(issue("error", "schema", `kpi-strip KPI ${i} needs a text label and a value`, `${at}.kpis[${i}]`));
+              bad = true;
+              continue;
+            }
+            if (raw.delta !== undefined && !isStr(raw.delta)) {
+              issues.push(issue("error", "schema", `kpi-strip KPI ${i} delta must be a string`, `${at}.kpis[${i}].delta`));
+              bad = true;
+              continue;
+            }
+            const trend = raw.trend === undefined ? undefined : String(raw.trend);
+            if (trend !== undefined && !["up", "down", "flat"].includes(trend)) {
+              issues.push(issue("error", "schema", `kpi-strip KPI ${i} trend must be up|down|flat`, `${at}.kpis[${i}].trend`));
+              bad = true;
+              continue;
+            }
+            cleaned.push({
+              label: raw.label,
+              value: String(raw.value),
+              delta: isStr(raw.delta) ? raw.delta : undefined,
+              trend: trend as Kpi["trend"],
+            });
+          }
+          if (!bad && cleaned.length >= 2) {
+            blocks.push({ type, kpis: cleaned });
+          }
           break;
         }
       }

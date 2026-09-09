@@ -249,6 +249,15 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatApprovalResolved((payload) => {
         useChatStore.getState().onApprovalResolved(payload);
+        // Phone companion: dismiss the matching approval card there too —
+        // the approval may have been resolved on the desktop, and a stale
+        // card would block the phone UI forever.
+        const ownerSessionId = useChatStore.getState().getOwnerSessionId(payload.chatSessionId);
+        if (ownerSessionId) {
+          void emitMobileSessionChatEvent(ownerSessionId, "approval-resolved", {
+            pendingId: payload.pendingId,
+          });
+        }
       }),
     );
 
@@ -324,6 +333,16 @@ export function useChatEvents(): void {
     unlistens.push(
       listenPlanProposal((payload) => {
         useChatStore.getState().onPlanProposal(payload);
+        // Phone companion: the plan card renders there with Approve / Revise
+        // (resolution rides the shared approval oneshot via the relay).
+        const ownerSessionId = useChatStore.getState().getOwnerSessionId(payload.chatSessionId);
+        if (ownerSessionId) {
+          void emitMobileSessionChatEvent(ownerSessionId, "plan-proposal", {
+            pendingId: payload.pendingId,
+            title: payload.title,
+            plan: payload.plan,
+          });
+        }
       }),
     );
     unlistens.push(

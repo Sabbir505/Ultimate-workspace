@@ -296,16 +296,39 @@ fn print_via_webview(
     let settings = unsafe { environment6.CreatePrintSettings() }
         .map_err(|e| format!("CreatePrintSettings failed: {e}"))?;
     unsafe {
-        settings.SetPageWidth(8.27); // A4 in inches — must match the @page size
-        settings.SetPageHeight(11.69);
-        settings.SetMarginTop(0.0);
-        settings.SetMarginBottom(0.0);
-        settings.SetMarginLeft(0.0);
-        settings.SetMarginRight(0.0);
-        settings.SetScaleFactor(1.0);
-        settings.SetOrientation(COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT);
-        settings.SetShouldPrintBackgrounds(true);
-        settings.SetShouldPrintHeaderAndFooter(false);
+        // Every setter's HRESULT is checked: a silently-failed page-size or
+        // margin setting used to produce a PDF printed with WebView2's
+        // DEFAULTS — a layout-corruption bug with no error path.
+        settings
+            .SetPageWidth(8.27) // A4 in inches — must match the @page size
+            .map_err(|e| format!("SetPageWidth failed: {e}"))?;
+        settings
+            .SetPageHeight(11.69)
+            .map_err(|e| format!("SetPageHeight failed: {e}"))?;
+        settings
+            .SetMarginTop(0.0)
+            .map_err(|e| format!("SetMarginTop failed: {e}"))?;
+        settings
+            .SetMarginBottom(0.0)
+            .map_err(|e| format!("SetMarginBottom failed: {e}"))?;
+        settings
+            .SetMarginLeft(0.0)
+            .map_err(|e| format!("SetMarginLeft failed: {e}"))?;
+        settings
+            .SetMarginRight(0.0)
+            .map_err(|e| format!("SetMarginRight failed: {e}"))?;
+        settings
+            .SetScaleFactor(1.0)
+            .map_err(|e| format!("SetScaleFactor failed: {e}"))?;
+        settings
+            .SetOrientation(COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT)
+            .map_err(|e| format!("SetOrientation failed: {e}"))?;
+        settings
+            .SetShouldPrintBackgrounds(true)
+            .map_err(|e| format!("SetShouldPrintBackgrounds failed: {e}"))?;
+        settings
+            .SetShouldPrintHeaderAndFooter(false)
+            .map_err(|e| format!("SetShouldPrintHeaderAndFooter failed: {e}"))?;
     }
 
     let core7 = core

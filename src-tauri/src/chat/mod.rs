@@ -583,53 +583,14 @@ impl ChatManager {
                 }
             }
 
-            // ── Memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11,
-            // amended) ─ The single 2200-token memory document rides in the
-            // system prompt (rendered back in send_chat_message); the old
-            // per-turn Tier-2 JIT block is gone — injecting the same facts
-            // twice wasted budget. Deeper recall stays available to the model
-            // via the `memory_recall` tool.
-            if crate::memory::memory_enabled_conn(&db) {
-                let query = chat_req
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == "user")
-                    .map(|m| m.content.trim())
-                    .filter(|c| !c.is_empty())
-                    .map(|c| c.to_string());
-                if let Some(q) = query {
-                    // Touch-recency bump for the top hybrid hits keeps the
-                    // fallback document's recency signal honest (§11.1).
-                    let project_id = {
-                        let conn = db.lock();
-                        db::get_chat_session(&conn, &sid).ok().flatten().and_then(|s| s.project_id)
-                    };
-                    let q_emb: Option<Vec<f32>> = match &embedding_base {
-                        Some(base) => {
-                            match local_models::embed_texts(base, &[q.clone()]).await {
-                                Ok(mut v) => v.pop(),
-                                Err(_) => None,
-                            }
-                        }
-                        None => None,
-                    };
-                    let hits = {
-                        let conn = db.lock();
-                        crate::memory::retrieve::search_memories(
-                            &conn, "default", project_id.as_deref(), &q, q_emb.as_deref(), 8,
-                        )
-                    };
-                    if let Ok(scored) = hits {
-                        let ids: Vec<String> =
-                            scored.iter().map(|s| s.record.id.clone()).collect();
-                        if !ids.is_empty() {
-                            let conn = db.lock();
-                            let _ = db::bump_memory_access(&conn, &ids);
-                        }
-                    }
-                }
-            }
+            // ── Memory (MEMORY_DESIGN_ARCHITECTURE.md §11, amended): the
+            // per-turn on-demand load — identity core + query-matched
+            // records, access bumps included — happens in `send_chat_message`
+            // (chat/commands.rs 5b), where the system prompt is assembled.
+            // The old turn-loop pass here only re-searched to bump access
+            // counters (plus an embedding roundtrip); that job moved into
+            // `memory::on_demand_injection`. Deeper recall stays available to
+            // the model via the `memory_recall` tool.
 
             // ── Turn execution — candidate chain with fail-over. The primary
             // runs first; Auto-routed sessions carry fail-over candidates

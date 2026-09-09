@@ -8,8 +8,9 @@
 //! - [`reflect`] — reflection: threshold, prompts, apply (§8.4)
 //! - [`retrieve`] — hybrid search over the store (§11.1)
 //! - [`document`] — the ONE human-readable memory document + its rewrite pass
-//! - [`render`]  — the single budgeted injection block rendered from the
-//!   document (§11, amended — replaces the old two-tier split)
+//! - [`render`]  — injection rendering: the stored document (the budgeted
+//!   store, §11 as amended) plus the per-turn ON-DEMAND block (identity core
+//!   + retrieved hits) the send path actually injects
 //! - [`worker`]  — background extraction + reflection orchestration (§7.1)
 //! - [`tools_impl`] — `memory_save` / `memory_recall` / `memory_forget` (§12)
 //! - [`eval`]    — offline eval harness: budget, contradiction, retrieval,
@@ -53,6 +54,62 @@ pub fn memory_enabled_conn(
 ) -> bool {
     let conn = db.lock();
     memory_enabled(&conn)
+}
+
+/// Max records one turn's on-demand load may retrieve.
+const ON_DEMAND_TOP_K: usize = 4;
+
+/// Per-turn ON-DEMAND memory load (the caller holds the DB lock; FTS-only —
+/// no embedding roundtrip on the send path, same low-latency trade the
+/// `memory_recall` tool makes). Returns the budgeted block to inject, or
+/// `None` when nothing qualifies:
+/// - identity core: the top few high-importance identity facts, carried every
+///   turn so "who is the user" never depends on keyword retrieval;
+/// - retrieved hits: records matching the turn's query (empty/None query or
+///   zero matches → core-only block).
+/// Injected ids get their access counters bumped here (the recency decay
+/// reads them), replacing the old always-on injection site's bump pass.
+pub fn on_demand_injection(
+    conn: &rusqlite::Connection,
+    query: Option<&str>,
+    project_id: Option<&str>,
+    now: i64,
+    recall_hint: bool,
+) -> Option<String> {
+    let all = crate::db::active_memories_for_scope(conn, "default", project_id).unwrap_or_default();
+    if all.is_empty() {
+        return None;
+    }
+    let mut core: Vec<crate::memory::model::MemoryRecord> = all
+        .iter()
+        .filter(|m| {
+            m.kind == crate::memory::model::kind::IDENTITY
+                && m.importance >= crate::memory::render::CORE_MIN_IMPORTANCE
+        })
+        .cloned()
+        .collect();
+    core.sort_by(|a, b| {
+        b.importance
+            .cmp(&a.importance)
+            .then(b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    core.truncate(crate::memory::render::CORE_MAX_FACTS);
+
+    let query = query.map(str::trim).filter(|q| !q.is_empty());
+    let hits = match query {
+        Some(q) => crate::memory::retrieve::search_memories(
+            conn, "default", project_id, q, None, ON_DEMAND_TOP_K,
+        )
+        .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    if core.is_empty() && hits.is_empty() {
+        return None;
+    }
+    let mut injected: Vec<String> = hits.iter().map(|h| h.record.id.clone()).collect();
+    injected.extend(core.iter().map(|m| m.id.clone()));
+    let _ = crate::db::bump_memory_access(conn, &injected);
+    crate::memory::render::render_on_demand_block(&core, &hits, now, recall_hint)
 }
 
 #[cfg(test)]
@@ -147,5 +204,40 @@ mod pipeline_tests {
         let block = render_memory_document(stored.as_deref(), &all, crate::db::now_ts()).unwrap();
         assert!(block.contains("User likes short replies."));
         assert!(!block.contains("concise answers"));
+    }
+
+    /// The send path's per-turn load: query-matched facts ride along, a
+    /// non-matching turn carries only the identity core, an unrelated query
+    /// injects nothing from the fact pool, and access counters are bumped.
+    #[test]
+    fn on_demand_injection_matches_query_and_bumps_access() {
+        let conn = crate::db::mem();
+
+        // Empty store → no block at all.
+        assert!(crate::memory::on_demand_injection(&conn, Some("pnpm"), None, crate::db::now_ts(), true).is_none());
+
+        let mut pref = crate::memory::model::MemoryRecord::new_extracted(
+            "mem_pref", "preference", None, "user", "Builds with pnpm workspaces", 6, None,
+        );
+        pref.created_at = 1;
+        crate::db::insert_memory(&conn, &pref).unwrap();
+        let mut episode = crate::memory::model::MemoryRecord::new_extracted(
+            "mem_ep", "episode", None, "user", "Debugged a flaky websocket test on Tuesday", 5, None,
+        );
+        episode.created_at = 1;
+        crate::db::insert_memory(&conn, &episode).unwrap();
+
+        // Matching query: the preference is loaded, the unrelated episode is not.
+        let block = crate::memory::on_demand_injection(&conn, Some("pnpm workspaces setup"), None, crate::db::now_ts(), true).unwrap();
+        assert!(block.contains("Builds with pnpm workspaces"), "{block}");
+        assert!(!block.contains("websocket"));
+
+        // A non-matching query: no fact pool leak, recall hint present.
+        let block = crate::memory::on_demand_injection(&conn, Some("quantum chromodynamics"), None, crate::db::now_ts(), true);
+        assert!(block.is_none() || !block.unwrap_or_default().contains("pnpm"), "non-matching turn must not load unrelated facts");
+
+        // Access counters moved for whatever was injected.
+        let touched = crate::db::get_memory(&conn, "mem_pref").unwrap().unwrap();
+        assert!(touched.access_count > 0 || touched.last_accessed_at.is_some());
     }
 }

@@ -2191,26 +2191,23 @@ pub async fn send_chat_message(
             }
         }
         // Memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11, amended):
-        // ONE human-readable document — the stored LLM-merged/user-edited
-        // text, or a deterministic render from the records — budgeted at
-        // 2200 tokens in render.rs. Empty store or feature-off → None → the
-        // prompt part is omitted byte-neutral.
+        // ON DEMAND — the turn's query loads only matching records (plus a
+        // tiny standing identity core), budgeted at 800 tokens in render.rs.
+        // The full 2200-token document is the store, no longer injected
+        // wholesale. Empty store or feature-off → None → the prompt part is
+        // omitted byte-neutral.
         let project_id = db::get_chat_session(&conn, &chat_session_id)
             .ok()
             .flatten()
             .and_then(|s| s.project_id);
         let memory_profile = if crate::memory::memory_enabled(&conn) {
-            match db::active_memories_for_scope(&conn, "default", project_id.as_deref()) {
-                Ok(mems) => {
-                    let doc = crate::memory::document::stored_document(&conn);
-                    crate::memory::render::render_memory_document(
-                        doc.as_deref(),
-                        &mems,
-                        crate::db::now_ts(),
-                    )
-                }
-                Err(_) => None,
-            }
+            crate::memory::on_demand_injection(
+                &conn,
+                Some(&content),
+                project_id.as_deref(),
+                crate::db::now_ts(),
+                tools_on,
+            )
         } else {
             None
         };

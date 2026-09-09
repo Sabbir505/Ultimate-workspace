@@ -22,6 +22,11 @@ existing memory is invalidated (history is kept automatically).\n\
 candidate is ambiguous (a joke, hypothetical, quoting someone else, uncertain context).\n\
 Rules: UPDATE preserves truth; any CHANGE of truth value is DELETE (supersession), never \
 UPDATE. When two existing memories both look relevant pick the single closest target_id. \
+ADD is the LAST resort, never the default — a write is permanent context the assistant \
+carries forever. NOOP the candidate when it is routine task chatter (today's debugging, \
+files/commands/paths, task progress), a one-off question, or a detail no future conversation \
+on an UNRELATED topic would need — even when nothing similar exists yet. Low candidate \
+importance (< 4 on the 1-10 rubric) is a strong NOOP signal. \
 If unsure, NOOP.";
 
 /// Input bundle for one candidate's judge round.
@@ -47,8 +52,8 @@ pub fn judge_user_message(input: &JudgeInput<'_>) -> String {
         ));
     }
     s.push_str(&format!(
-        "\nCANDIDATE fact: {}\nkind: {}\nsubject: {}\nuser quote: {}\n\nDecide the operation now.",
-        input.candidate.content, input.candidate.kind, input.candidate.subject, input.candidate.quote,
+        "\nCANDIDATE fact: {}\nkind: {}\nsubject: {}\nimportance: {}/10\nuser quote: {}\n\nDecide the operation now.",
+        input.candidate.content, input.candidate.kind, input.candidate.subject, input.candidate.importance, input.candidate.quote,
     ));
     s
 }
@@ -274,6 +279,21 @@ fn cand_keywords(cand: &MemoryCandidate) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn judge_message_carries_importance() {
+        let cand = MemoryCandidate {
+            content: "User prefers concise answers".into(),
+            kind: "preference".into(),
+            subject: "user".into(),
+            quote: "be concise".into(),
+            message_ids: vec![1],
+            importance: 7,
+        };
+        let msg = judge_user_message(&JudgeInput { candidate: &cand, similar: &[] });
+        assert!(msg.contains("importance: 7/10"), "{msg}");
+        assert!(msg.contains("(none)"), "empty similar set must render as (none)");
+    }
 
     #[test]
     fn parses_all_ops() {

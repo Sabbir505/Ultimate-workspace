@@ -26,11 +26,13 @@ import { Modal } from "../common/Modal";
 
 /**
  * Settings → Memory browser (MEMORY_DESIGN_ARCHITECTURE.md §12.2, amended).
- * The anti-black-box commitment: the assistant injects ONE human-readable
- * memory document each turn (≤2200 tokens, enforced in Rust) — the editor
- * below shows and edits exactly that text. New memories are merged into the
- * document automatically by the extraction pipeline (dedupe + contradiction
- * resolution). The raw fact records stay listed underneath as the audit log.
+ * The anti-black-box commitment: ONE human-readable memory document is the
+ * store (≤2200 tokens, enforced in Rust) — the editor below shows and edits
+ * exactly that text. The send path loads from it ON DEMAND (per-turn
+ * query-matched facts + a small standing identity core); new memories are
+ * merged into the document automatically by the extraction pipeline (dedupe +
+ * contradiction resolution). The raw fact records stay listed underneath as
+ * the audit log.
  */
 
 const KIND_LABELS: Record<string, string> = {
@@ -415,21 +417,23 @@ export function MemoryPanel() {
         </label>
       </div>
 
-      {/* ── The memory document: exactly what gets injected each turn ── */}
+      {/* ── The memory document: the store the assistant loads from ── */}
       <div className="memory-doc" data-testid="memory-doc">
         <div className="memory-doc-head">
           <h3>Memory document</h3>
           <span
             className={`memory-doc-budget${docOver ? " over" : ""}`}
-            title="Rough token estimate — the injection budget enforced in Rust"
+            title="Rough token estimate — the store budget enforced in Rust"
           >
             ~{docTokens} / {budget} tokens
           </span>
         </div>
         <p className="muted memory-doc-note">
           New memories are merged into this document automatically — duplicates
-          folded, contradictions resolved — and it is injected as one message
-          every turn. Edit it freely; what you save is what the assistant sees.
+          folded, contradictions resolved. It is no longer injected wholesale:
+          each turn loads only the facts relevant to your request, plus a few
+          standing identity facts. Edit it freely; this is the pool the
+          assistant loads from.
         </p>
         <textarea
           className="memory-doc-editor"

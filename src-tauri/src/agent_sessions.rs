@@ -2289,8 +2289,9 @@ fn gallery_servers_for_bundle(app: &AppHandle) -> Vec<crate::harness_bundle::Gal
 /// Additive context sections for the harness instructions — the static
 /// equivalent of what the built-in chat assembles per turn: the connector/MCP
 /// manifest (the CLIs have no attach tool, so this is informational) and the
-/// persistent-memory document under the same render budget the built-in chat
-/// uses. DB errors degrade to fewer sections; never fail the bundle.
+/// standing memory identity core (on-demand loading is a per-turn job the
+/// static bundle can't do). DB errors degrade to fewer sections; never fail
+/// the bundle.
 fn harness_context_section(
     app: &AppHandle,
     project_id: Option<&str>,
@@ -2307,13 +2308,11 @@ fn harness_context_section(
     if let Some(db) = app.try_state::<DbState>() {
         let conn = db.0.lock();
         if crate::memory::memory_enabled(&conn) {
-            let mems = crate::db::active_memories_for_scope(&conn, "default", project_id)
-                .unwrap_or_default();
-            let doc = crate::memory::document::stored_document(&conn);
-            if let Some(rendered) = crate::memory::render::render_memory_document(
-                doc.as_deref(),
-                &mems,
-                crate::db::now_ts(),
+            // Static bundle → no per-turn query, so this carries the
+            // standing identity core only; the harness CLIs load more via
+            // their own memory channels/tools.
+            if let Some(rendered) = crate::memory::on_demand_injection(
+                &conn, None, project_id, crate::db::now_ts(), false,
             ) {
                 if !rendered.trim().is_empty() {
                     parts.push(rendered);

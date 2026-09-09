@@ -130,8 +130,10 @@ pub async fn memory_export(db: State<'_, DbState>) -> CmdResult<String> {
 
 /// Feature status for the settings toggle. `document` is the EFFECTIVE memory
 /// document: the stored (LLM-merged or user-edited) text, or a deterministic
-/// render from the records when none is stored — always exactly what would be
-/// injected, so the UI can show and edit one human-readable field.
+/// render from the records when none is stored — the STORE the send path
+/// loads from on demand (identity core + query-matched records per turn, see
+/// `memory::on_demand_injection`), so the UI can show and edit one
+/// human-readable field.
 #[tauri::command]
 pub async fn memory_status(db: State<'_, DbState>) -> CmdResult<serde_json::Value> {
     let conn = db.0.lock();

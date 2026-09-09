@@ -25,7 +25,7 @@ use rand::RngCore;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -92,7 +92,8 @@ pub fn broadcast(relay_state: &MobileRelayState, msg: DesktopMessage) {
 
 /// Push an automation-finished notice to every paired phone. Called from the
 /// scheduler's finalize path — app-only, since the headless
-/// `relay-automation` binary has no relay.
+/// `relay-automation` binary has no relay. When no phone socket is connected
+/// the notice falls back to a push notification.
 pub fn broadcast_automation_run_finished(
     app: &AppHandle,
     automation_id: &str,
@@ -112,9 +113,20 @@ pub fn broadcast_automation_run_finished(
             summary: summary.to_string(),
         },
     );
+    let ok = status == "ok";
+    super::push::push_if_phones_disconnected(
+        app,
+        if ok {
+            format!("Automation finished: {name}")
+        } else {
+            format!("Automation failed: {name}")
+        },
+        summary.to_string(),
+    );
 }
 
-/// Push a budget-alert notice to every connected phone (roadmap #10).
+/// Push a budget-alert notice to every connected phone (roadmap #10). Falls
+/// back to a push notification when no phone is connected.
 pub fn broadcast_budget_alert(
     app: &AppHandle,
     project_id: &str,
@@ -133,6 +145,13 @@ pub fn broadcast_budget_alert(
             monthly_usd,
             spent_usd,
         },
+    );
+    super::push::push_if_phones_disconnected(
+        app,
+        format!("Budget: {project_name}"),
+        format!(
+            "Spent ${spent_usd:.2} of ${monthly_usd:.2} this month."
+        ),
     );
 }
 
@@ -232,6 +251,37 @@ pub async fn start_relay(
             eprintln!("[mobile-relay] failed to start session_chat_event listener: {e}");
         }
     });
+
+    // Background push (Expo push service): when no phone socket is connected,
+    // approval requests and completed turns on MOBILE-originated sessions
+    // reach the phone as OS notifications instead of being dropped. The
+    // helpers no-op when no push token is registered or a phone IS connected
+    // (the socket broadcast is the delivery path then).
+    {
+        let push_app = app.clone();
+        app.listen("chat:approval-request", move |event| {
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
+            let chat_id = v.get("chatSessionId").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+            let summary = v
+                .get("summary")
+                .and_then(|x| x.as_str())
+                .unwrap_or("A tool action is waiting for your approval.")
+                .to_string();
+            if !chat_id.is_empty() {
+                super::push::push_approval_for_mobile_session(&push_app, &chat_id, &summary);
+            }
+        });
+    }
+    {
+        let push_app = app.clone();
+        app.listen("chat:done", move |event| {
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
+            let chat_id = v.get("chatSessionId").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+            if !chat_id.is_empty() {
+                super::push::push_turn_done_for_mobile_session(&push_app, &chat_id);
+            }
+        });
+    }
 
 tokio::spawn(async move {
         let tailnet_addr = tailnet_listener
@@ -1126,12 +1176,14 @@ async fn handle_connection(
                 session_id,
                 pending_id,
                 decision,
+                always_allow,
             } => {
                 match dispatch_mobile(
                     MobileMessage::ResolveSessionApproval {
                         session_id,
                         pending_id,
                         decision,
+                        always_allow,
                     },
                     &app,
                     Arc::clone(&db),
@@ -1171,6 +1223,179 @@ async fn handle_connection(
                         }).await;
                     }
                 }
+            }
+            MobileMessage::SetSessionModel { session_id, provider_id, model } => {
+                match dispatch_mobile(
+                    MobileMessage::SetSessionModel { session_id, provider_id, model },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
+            MobileMessage::DeleteChatSession { session_id } => {
+                match dispatch_mobile(
+                    MobileMessage::DeleteChatSession { session_id },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
+            MobileMessage::GetSessionMeta { session_id } => {
+                match dispatch_mobile(
+                    MobileMessage::GetSessionMeta { session_id },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
+            MobileMessage::RegisterPushToken { token, platform } => {
+                match dispatch_mobile(
+                    MobileMessage::RegisterPushToken { token, platform },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
+            MobileMessage::ListSessionArtifacts { session_id } => {
+                match dispatch_mobile(
+                    MobileMessage::ListSessionArtifacts { session_id },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
+            MobileMessage::ReadArtifact { session_id, path } => {
+                match dispatch_mobile(
+                    MobileMessage::ReadArtifact { session_id, path },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
+            MobileMessage::ResolvePlanProposal { session_id, pending_id, approved, feedback } => {
+                match dispatch_mobile(
+                    MobileMessage::ResolvePlanProposal { session_id, pending_id, approved, feedback },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
+            MobileMessage::TranscribeAudio { data_base64, media_type } => {
+                // Voice notes ride the desktop's whisper sidecar via the same
+                // transcribe core the desktop push-to-talk uses. Async because
+                // the sidecar HTTP call is; handled inline (not through
+                // dispatch_mobile, which is sync).
+                let result = crate::commands::speech::transcribe_audio(
+                    app.state::<crate::DbState>(),
+                    app.state::<crate::commands::stt::SttState>(),
+                    data_base64,
+                    media_type,
+                    None,
+                    None,
+                )
+                .await;
+                let resp = match result {
+                    Ok(r) => DesktopMessage::Transcription {
+                        text: Some(r.text),
+                        error: None,
+                    },
+                    Err(e) => DesktopMessage::Transcription {
+                        text: None,
+                        error: Some(e.to_string()),
+                    },
+                };
+                let _ = send_msg(&write, &resp).await;
             }
             // A second Pair frame after a successful pairing is a protocol
             // violation — already handled above before this match.

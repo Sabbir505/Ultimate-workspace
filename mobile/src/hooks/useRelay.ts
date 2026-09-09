@@ -62,10 +62,22 @@ type DesktopMessage =
   | { type: 'SessionChatError'; session_id: string; error: string }
   | { type: 'SessionChatStatus'; session_id: string; reason: string; message: string }
   | { type: 'SessionApprovalRequest'; session_id: string; pending_id: string; tool: string; summary: string; args: unknown }
-  | { type: 'SessionArtifact'; session_id: string; message_id?: number; artifact: { path: string; filename: string; inline?: { kind: 'jsx' | 'tsx'; code: string } } }
+  // The approval was resolved on ANY surface — dismiss matching cards here.
+  | { type: 'SessionApprovalResolved'; session_id: string; pending_id: string }
+  | { type: 'SessionPlanProposal'; session_id: string; pending_id: string; title: string; plan: string }
+  | { type: 'SessionModelSet'; session_id: string; provider_id: string; model: string }
+  | { type: 'SessionDeleted'; session_id: string }
+  | { type: 'SessionMeta'; session_id: string; provider: string; model: string; title?: string }
+  | { type: 'PushAck'; ok: boolean; error?: string }
+  | { type: 'SessionArtifacts'; session_id: string; artifacts: SessionArtifact[] }
+  | { type: 'ArtifactContent'; session_id: string; path: string; filename: string; kind: string; text?: string; data_base64?: string; truncated?: boolean }
+  | { type: 'Transcription'; text?: string; error?: string }
+  | { type: 'SessionArtifact'; session_id: string; message_id?: number; artifact: { path: string; filename: string; kind?: string; inline?: { kind: 'jsx' | 'tsx'; code: string } } }
   // Broadcast (not session-scoped): an automation run finished on the desktop.
   // Shown as a local alert — fires only while the relay is connected.
-  | { type: 'AutomationRunFinished'; automation_id: string; name: string; status: string; summary: string };
+  | { type: 'AutomationRunFinished'; automation_id: string; name: string; status: string; summary: string }
+  // Broadcast: a project's monthly spend crossed its budget threshold.
+  | { type: 'BudgetAlert'; project_id: string; project_name: string; monthly_usd: number; spent_usd: number };
 interface MobileChatTurn {
   type: 'ChatTurn'; provider_id: string; model: string;
   messages: ChatMessage[]; system?: string; effort?: string; gguf_path?: string;
@@ -78,8 +90,16 @@ type SessionChatMessage =
   | { type: 'GetSessionMessages'; session_id: string; before_id?: number; limit: number }
   | { type: 'SendChatMessage'; session_id: string; text: string; attachments: SessionChatAttachment[] }
   | { type: 'CancelSessionStream'; session_id: string }
-  | { type: 'ResolveSessionApproval'; session_id: string; pending_id: string; decision: 'approve' | 'deny' }
-  | { type: 'RenameSession'; session_id: string; title: string };
+  | { type: 'ResolveSessionApproval'; session_id: string; pending_id: string; decision: 'approve' | 'deny'; always_allow?: boolean }
+  | { type: 'RenameSession'; session_id: string; title: string }
+  | { type: 'SetSessionModel'; session_id: string; provider_id: string; model: string }
+  | { type: 'DeleteChatSession'; session_id: string }
+  | { type: 'GetSessionMeta'; session_id: string }
+  | { type: 'RegisterPushToken'; token: string; platform: string }
+  | { type: 'ListSessionArtifacts'; session_id: string }
+  | { type: 'ReadArtifact'; session_id: string; path: string }
+  | { type: 'TranscribeAudio'; data_base64: string; media_type?: string }
+  | { type: 'ResolvePlanProposal'; session_id: string; pending_id: string; approved: boolean; feedback?: string };
 type MobileMessagePlain =
   | { type: 'ListAvailableProviders' } | { type: 'ListSessions' }
   | MobileChatTurn | { type: 'CancelChatTurn'; chat_session_id: string }
@@ -139,7 +159,16 @@ export const onSessionChatDone = new EventBus<{ sessionId: string; usage?: Sessi
 export const onSessionChatError = new EventBus<{ sessionId: string; error: string }>();
 export const onSessionChatStatus = new EventBus<{ sessionId: string; reason: string; message: string }>();
 export const onSessionApprovalRequest = new EventBus<{ sessionId: string; pendingId: string; tool: string; summary: string; args: unknown }>();
+export const onSessionApprovalResolved = new EventBus<{ sessionId: string; pendingId: string }>();
+export const onSessionPlanProposal = new EventBus<{ sessionId: string; pendingId: string; title: string; plan: string }>();
+export const onSessionModelSet = new EventBus<{ sessionId: string; providerId: string; model: string }>();
+export const onSessionDeleted = new EventBus<{ sessionId: string }>();
+export const onSessionMeta = new EventBus<{ sessionId: string; provider: string; model: string; title?: string }>();
 export const onSessionArtifact = new EventBus<{ sessionId: string; messageId?: number; artifact: SessionArtifact }>();
+export const onSessionArtifacts = new EventBus<{ sessionId: string; artifacts: SessionArtifact[] }>();
+export const onArtifactContent = new EventBus<{ sessionId: string; path: string; filename: string; kind: string; text?: string; dataBase64?: string; truncated?: boolean }>();
+export const onTranscription = new EventBus<{ text?: string; error?: string }>();
+export const onBudgetAlert = new EventBus<{ projectId: string; projectName: string; monthlyUsd: number; spentUsd: number }>();
 
 export interface SessionMessageRecord {
   id: number; role: string; content: string; created_at: number;
@@ -147,7 +176,7 @@ export interface SessionMessageRecord {
   tool_calls?: unknown; artifact_paths?: string[];
 }
 export interface SessionChatUsage { input_tokens: number; output_tokens: number; cost_usd?: number; }
-export interface SessionArtifact { path: string; filename: string; inline?: { kind: 'jsx' | 'tsx'; code: string }; }
+export interface SessionArtifact { path: string; filename: string; kind?: string; inline?: { kind: 'jsx' | 'tsx'; code: string }; }
 export interface SessionChatAttachment {
   name: string; kind: 'text' | 'image' | 'doc';
   text?: string; data?: string; media_type?: string; format?: string;
@@ -347,7 +376,23 @@ function _doConnect(target: string) {
           case 'SessionChatError': onSessionChatError.emit({ sessionId: msg.session_id, error: msg.error }); break;
           case 'SessionChatStatus': onSessionChatStatus.emit({ sessionId: msg.session_id, reason: msg.reason, message: msg.message }); break;
           case 'SessionApprovalRequest': onSessionApprovalRequest.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, tool: msg.tool, summary: msg.summary, args: msg.args }); break;
+          case 'SessionApprovalResolved': onSessionApprovalResolved.emit({ sessionId: msg.session_id, pendingId: msg.pending_id }); break;
+          case 'SessionPlanProposal': onSessionPlanProposal.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, title: msg.title, plan: msg.plan }); break;
+          case 'SessionModelSet': onSessionModelSet.emit({ sessionId: msg.session_id, providerId: msg.provider_id, model: msg.model }); break;
+          case 'SessionDeleted': onSessionDeleted.emit({ sessionId: msg.session_id }); break;
+          case 'SessionMeta': onSessionMeta.emit({ sessionId: msg.session_id, provider: msg.provider, model: msg.model, title: msg.title }); break;
+          case 'SessionArtifacts': onSessionArtifacts.emit({ sessionId: msg.session_id, artifacts: msg.artifacts || [] }); break;
+          case 'ArtifactContent': onArtifactContent.emit({ sessionId: msg.session_id, path: msg.path, filename: msg.filename, kind: msg.kind, text: msg.text, dataBase64: msg.data_base64, truncated: msg.truncated }); break;
+          case 'Transcription': onTranscription.emit({ text: msg.text, error: msg.error }); break;
           case 'SessionArtifact': onSessionArtifact.emit({ sessionId: msg.session_id, messageId: msg.message_id, artifact: msg.artifact }); break;
+          case 'BudgetAlert': {
+            onBudgetAlert.emit({ projectId: msg.project_id, projectName: msg.project_name, monthlyUsd: msg.monthly_usd, spentUsd: msg.spent_usd });
+            Alert.alert(
+              `Budget: ${msg.project_name}`,
+              `Spent $${msg.spent_usd.toFixed(2)} of $${msg.monthly_usd.toFixed(2)} this month.`,
+            );
+            break;
+          }
           case 'AutomationRunFinished': {
             const ok = msg.status === 'ok';
             Alert.alert(
@@ -449,8 +494,56 @@ export function useRelay() {
     [],
   );
   const resolveSessionApproval = useCallback(
-    (sessionId: string, pendingId: string, decision: 'approve' | 'deny') => {
-      _send({ type: 'ResolveSessionApproval', session_id: sessionId, pending_id: pendingId, decision } as SessionChatMessage);
+    (sessionId: string, pendingId: string, decision: 'approve' | 'deny', alwaysAllow = false) => {
+      _send({ type: 'ResolveSessionApproval', session_id: sessionId, pending_id: pendingId, decision, always_allow: alwaysAllow } as SessionChatMessage);
+    },
+    [],
+  );
+  const setSessionModel = useCallback(
+    (sessionId: string, providerId: string, model: string) => {
+      _send({ type: 'SetSessionModel', session_id: sessionId, provider_id: providerId, model } as SessionChatMessage);
+    },
+    [],
+  );
+  const deleteSession = useCallback(
+    (sessionId: string) => {
+      _send({ type: 'DeleteChatSession', session_id: sessionId } as SessionChatMessage);
+    },
+    [],
+  );
+  const getSessionMeta = useCallback(
+    (sessionId: string) => {
+      _send({ type: 'GetSessionMeta', session_id: sessionId } as SessionChatMessage);
+    },
+    [],
+  );
+  const registerPushToken = useCallback(
+    (token: string, platform: string) => {
+      _send({ type: 'RegisterPushToken', token, platform } as SessionChatMessage);
+    },
+    [],
+  );
+  const listSessionArtifacts = useCallback(
+    (sessionId: string) => {
+      _send({ type: 'ListSessionArtifacts', session_id: sessionId } as SessionChatMessage);
+    },
+    [],
+  );
+  const readArtifact = useCallback(
+    (sessionId: string, path: string) => {
+      _send({ type: 'ReadArtifact', session_id: sessionId, path } as SessionChatMessage);
+    },
+    [],
+  );
+  const transcribeAudio = useCallback(
+    (dataBase64: string, mediaType?: string) => {
+      _send({ type: 'TranscribeAudio', data_base64: dataBase64, media_type: mediaType } as SessionChatMessage);
+    },
+    [],
+  );
+  const resolvePlanProposal = useCallback(
+    (sessionId: string, pendingId: string, approved: boolean, feedback?: string) => {
+      _send({ type: 'ResolvePlanProposal', session_id: sessionId, pending_id: pendingId, approved, feedback } as SessionChatMessage);
     },
     [],
   );
@@ -475,5 +568,13 @@ export function useRelay() {
     cancelSessionStream,
     resolveSessionApproval,
     renameSession,
+    setSessionModel,
+    deleteSession,
+    getSessionMeta,
+    registerPushToken,
+    listSessionArtifacts,
+    readArtifact,
+    transcribeAudio,
+    resolvePlanProposal,
   };
 }

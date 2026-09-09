@@ -9,6 +9,7 @@
 pub mod commands;
 pub mod dispatch;
 pub mod protocol;
+pub mod push;
 pub mod relay;
 pub mod relay_crypto;
 pub mod relay_owner;

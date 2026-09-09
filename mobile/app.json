@@ -2,6 +2,7 @@
   "expo": {
     "name": "Relay Mobile",
     "slug": "relay-mobile",
+    "scheme": "relay",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -19,19 +20,26 @@
         {
           "iCloudContainerEnvironment": "Production"
         }
-      ]
+      ],
+      "expo-audio",
+      "expo-sharing",
+      "expo-notifications"
     ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.relay.mobile",
       "infoPlist": {
         "NSCameraUsageDescription": "Relay needs camera access to scan the desktop pairing QR code.",
-        "UIBackgroundModes": ["remote-notification"]
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
       }
     },
     "android": {
       "package": "com.relay.mobile",
-      "permissions": ["android.permission.CAMERA"],
+      "permissions": [
+        "android.permission.CAMERA"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#FAF7F5"
       }

@@ -1,297 +1,141 @@
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import {
-  View, Text, StyleSheet, FlatList, RefreshControl, TouchableOpacity,
-} from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
-// M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
-// bundle of every icon); Ionicons is a glyph font already bundled with the
-// app. These wrappers preserve the lucide call-sites' (size, color) props.
-const Zap = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="flash" size={size} color={color} />;
-const FolderOpen = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="folder-open" size={size} color={color} />;
-const Activity = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="pulse" size={size} color={color} />;
-const ChevronDown = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="chevron-down" size={size} color={color} />;
-const ChevronRight = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="chevron-forward" size={size} color={color} />;
-const Plus = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="add" size={size} color={color} />;
-import { useRelay, onSessionCreated, type Session } from '../hooks/useRelay';
+import { useRelay } from '../hooks/useRelay';
 import { theme, useTheme } from '../theme';
 import ConnectionIndicator from '../components/ConnectionIndicator';
+import { collectProjects, harnessLabel, useCreateSessionFlow, useDrawer } from '../components/AppDrawer';
+import QrScanModal from './QrScanModal';
+import { tapLight, tapMedium } from '../lib/haptics';
 
-function timeAgo(timestamp: number): string {
-  const s = Math.floor((Date.now() - timestamp) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
-}
-
-function statusColor(status: Session['status']): string {
-  return status === 'working' ? theme.colors.green
-    : status === 'waiting' ? theme.colors.yellow
-    : status === 'diff_ready' ? theme.colors.blue
-    : theme.colors.gray;
-}
-
-function statusLabel(status: Session['status']): string {
-  return status === 'working' ? 'Working'
-    : status === 'waiting' ? 'Waiting'
-    : status === 'diff_ready' ? 'Diff ready'
-    : 'Idle';
-}
-
-const HARNESS_OPTIONS: { label: string; value: string }[] = [
-  { label: 'Claude', value: 'claude_code' },
-  { label: 'Kimi', value: 'kimi_code' },
-  { label: 'OpenCode', value: 'opencode' },
-];
+/**
+ * ChatGPT-style "new chat" home: a quiet centered greeting, one prominent
+ * New chat action, and quick-start rows generated from the projects already
+ * seen on the desktop. Chat history lives in the drawer, not here.
+ */
 
 export default function HomeScreen() {
-  const { connected, sessions, connect, createSession, spawnSession } = useRelay();
-  const navigation = useNavigation<any>();
-  useTheme();
+  const { connected, sessions, connect } = useRelay();
+  const { open, openNewChat } = useDrawer();
+  useTheme(); // subscribe so theme.colors is reactive
   const c = theme.colors;
-  const [refreshing, setRefreshing] = useState(false);
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const [selectedHarness, setSelectedHarness] = useState<Record<string, string>>({});
 
+  const [qrVisible, setQrVisible] = useState(false);
+  const start = useCreateSessionFlow();
+
+  // Kick the persisted relay URL on mount (no-op when already connected).
   useEffect(() => { connect(); }, [connect]);
 
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    connect();
-    setTimeout(() => setRefreshing(false), 1000);
-  }, [connect]);
-
-  const toggleCollapse = useCallback((key: string) => {
-    setCollapsed(prev => ({ ...prev, [key]: !prev[key] }));
-  }, []);
-
-  // Pending "create session" listener lifecycle. The unsubscribe is kept in a
-  // ref so a re-click drops the previous subscription (no listener pile-up),
-  // unmount clears everything, and a 15s timeout fallback removes it when the
-  // desktop never answers (createSession is fire-and-forget on the relay
-  // socket — an offline desktop produces no SessionCreated event at all).
-  const createUnsubRef = useRef<(() => void) | null>(null);
-  const createTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const clearCreateListener = useCallback(() => {
-    createUnsubRef.current?.();
-    createUnsubRef.current = null;
-    if (createTimeoutRef.current) { clearTimeout(createTimeoutRef.current); createTimeoutRef.current = null; }
-  }, []);
-
-  useEffect(() => clearCreateListener, [clearCreateListener]);
-
-  const handleCreate = useCallback((projectName: string, projectId: string) => {
-    const harness = selectedHarness[projectName] || 'claude_code';
-    // A previous create is still pending — drop its subscription first.
-    clearCreateListener();
-    createSession(projectId, harness);
-    // Listen for the SessionCreated event and navigate to it.
-    createUnsubRef.current = onSessionCreated.on((s) => {
-      if (s.projectId === projectId && s.provider === harness) {
-        clearCreateListener();
-        // The desktop auto-opens + spawns the session when it's created, but
-        // nudge a spawn too in case that event was missed — then open the
-        // screen in live mode so it polls for terminal output right away
-        // instead of showing "session is not running".
-        spawnSession(s.id);
-        navigation.navigate('SessionDetail', { session: { ...s, isLive: true } });
-      }
-    });
-    // Timeout fallback: nothing arrived within 15s → stop listening.
-    createTimeoutRef.current = setTimeout(clearCreateListener, 15_000);
-  }, [createSession, spawnSession, selectedHarness, navigation, clearCreateListener]);
-
-  const handleTapSession = useCallback((session: Session) => {
-    if (session.isLive) {
-      navigation.navigate('SessionDetail', { session });
-    } else {
-      // Inactive session — spawn it on desktop first, then navigate in live
-      // mode: the desktop spawns the pty moments later, and the SessionScreen
-      // polls until the transcript arrives.
-      spawnSession(session.id);
-      navigation.navigate('SessionDetail', { session: { ...session, isLive: true } });
-    }
-  }, [navigation, spawnSession]);
-
-  // Group sessions by project name (memoized — the FlatList row model below
-  // depends on it and must not rebuild on every render).
-  const entries = useMemo(() => {
-    const grouped = sessions.reduce<Record<string, Session[]>>((acc, s) => {
-      const key = s.projectName || 'No Project';
-      (acc[key] ??= []).push(s);
-      return acc;
-    }, {});
-    return Object.entries(grouped);
-  }, [sessions]);
-
-  // M2 (PERFORMANCE_AUDIT.md): FlatList over a FLATTENED row model instead of
-  // ScrollView + nested .map() — the old tree mounted every session card of
-  // every project on render; the flat list lets RN window off-screen rows.
-  type Row =
-    | { type: 'project'; key: string; projectName: string; count: number; isCollapsed: boolean; last: boolean }
-    | { type: 'harness'; key: string; projectName: string; projectId: string; harness: string; last: boolean }
-    | { type: 'session'; key: string; session: Session; last: boolean };
-  const listData = useMemo(() => {
-    const rows: Row[] = [];
-    for (const [projectName, projectSessions] of entries) {
-      const isCollapsed = collapsed[projectName] ?? false;
-      rows.push({ type: 'project', key: `p:${projectName}`, projectName, count: projectSessions.length, isCollapsed, last: false });
-      if (!isCollapsed) {
-        rows.push({
-          type: 'harness', key: `h:${projectName}`, projectName,
-          projectId: projectSessions[0]?.projectId || projectName,
-          harness: selectedHarness[projectName] || 'claude_code', last: false,
-        });
-        for (const session of projectSessions) {
-          rows.push({ type: 'session', key: `s:${session.id}`, session, last: false });
-        }
-      }
-    }
-    // Mark each group's last row so it can round + close the card border.
-    for (let i = 0; i < rows.length; i++) {
-      rows[i].last = i === rows.length - 1 || rows[i + 1].type === 'project';
-    }
-    return rows;
-  }, [entries, collapsed, selectedHarness]);
-
-  const renderRow = useCallback(({ item }: { item: Row }) => {
-    const groupStyle = [
-      styles.groupRow,
-      { backgroundColor: c.surface, borderColor: c.border },
-      item.type === 'project' && styles.groupRowFirst,
-      item.last && styles.groupRowLast,
-    ];
-    if (item.type === 'project') {
-      return (
-        <View style={groupStyle}>
-          <TouchableOpacity
-            style={styles.projectHeader}
-            onPress={() => toggleCollapse(item.projectName)}
-            activeOpacity={0.6}
-          >
-            {item.isCollapsed ? (
-              <ChevronRight size={18} color={c.textSecondary} />
-            ) : (
-              <ChevronDown size={18} color={c.textSecondary} />
-            )}
-            <FolderOpen size={16} color={theme.colors.primary} />
-            <Text style={[styles.projectName, { color: c.text }]}>{item.projectName}</Text>
-            <View style={styles.sessionCountBadge}>
-              <Text style={styles.sessionCountText}>{item.count}</Text>
-            </View>
-          </TouchableOpacity>
-        </View>
-      );
-    }
-    if (item.type === 'harness') {
-      return (
-        <View style={groupStyle}>
-          <View style={styles.harnessRow}>
-            {HARNESS_OPTIONS.map(opt => (
-              <TouchableOpacity
-                key={opt.value}
-                style={[
-                  styles.harnessChip,
-                  item.harness === opt.value && { backgroundColor: theme.colors.primary },
-                ]}
-                onPress={() => setSelectedHarness(prev => ({ ...prev, [item.projectName]: opt.value }))}
-                activeOpacity={0.7}
-              >
-                <Text
-                  style={[
-                    styles.harnessChipText,
-                    item.harness === opt.value && { color: '#fff', fontWeight: '700' },
-                  ]}
-                >
-                  {opt.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-            <TouchableOpacity
-              style={styles.createBtn}
-              onPress={() => handleCreate(item.projectName, item.projectId)}
-              activeOpacity={0.7}
-            >
-              <Plus size={14} color="#fff" />
-            </TouchableOpacity>
-          </View>
-        </View>
-      );
-    }
-    const session = item.session;
-    return (
-      <View style={groupStyle}>
-        <TouchableOpacity
-          style={[styles.sessionCard, { backgroundColor: c.background, borderColor: c.border }]}
-          activeOpacity={0.7}
-          onPress={() => handleTapSession(session)}
-        >
-          <View style={styles.sessionHeader}>
-            <View style={styles.statusRow}>
-              <View style={[
-                styles.statusDot,
-                { backgroundColor: session.isLive ? theme.colors.green : theme.colors.gray },
-              ]} />
-              <Text style={{ fontSize: theme.fontSize.xs, fontWeight: '600', color: c.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                {session.isLive ? statusLabel(session.status) : 'Idle'}
-              </Text>
-            </View>
-            <Text style={{ fontSize: theme.fontSize.xs, color: c.textSecondary }}>
-              {timeAgo(session.lastActivity)}
-            </Text>
-          </View>
-          <Text style={[styles.sessionTitle, { color: c.text }]} numberOfLines={2}>
-            {session.title}
-          </Text>
-          <Text style={{ fontSize: theme.fontSize.sm, color: c.textSecondary, fontWeight: '500' }}>
-            {session.provider} {session.model ? `/ ${session.model}` : ''}
-          </Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }, [c, toggleCollapse, handleCreate, handleTapSession]);
+  // Quick-start suggestions: up to 4 recent projects from the session list.
+  const projects = useMemo(() => collectProjects(sessions).slice(0, 4), [sessions]);
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.background }]} edges={['top']}>
-      <View style={[styles.header, { backgroundColor: c.surface, borderBottomColor: c.border }]}>
-        <View style={styles.headerLeft}>
-          <Zap size={24} color={theme.colors.primary} />
-          <Text style={[styles.headerTitle, { color: c.text }]}>Relay</Text>
-        </View>
-        <View style={styles.headerRight}>
-          <ConnectionIndicator connected={connected} size={10} />
-          <Text style={{ fontSize: theme.fontSize.sm, color: c.textSecondary, fontWeight: '500' }}>
-            {connected ? 'Connected' : 'Offline'}
-          </Text>
-          {sessions.length > 0 && (
-            <View style={styles.badge}>
-              <Text style={styles.badgeText}>{sessions.length}</Text>
-            </View>
-          )}
-        </View>
+      {/* Header: drawer menu left, quiet connection right */}
+      <View style={styles.header}>
+        <TouchableOpacity
+          style={styles.iconButton}
+          accessibilityRole="button"
+          accessibilityLabel="Open menu"
+          onPress={open}
+        >
+          <Ionicons name="menu" size={24} color={c.text} />
+        </TouchableOpacity>
+        <ConnectionIndicator size={8} showLabel />
       </View>
 
-      <FlatList
-        style={styles.scrollView}
-        data={listData}
-        renderItem={renderRow}
-        keyExtractor={(row) => row.key}
-        initialNumToRender={10}
-        windowSize={5}
-        contentContainerStyle={listData.length === 0 ? styles.emptyScroll : styles.scrollContent}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-        ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <Activity size={48} color={c.border} />
-            <Text style={[styles.emptyTitle, { color: c.textSecondary }]}>No sessions yet</Text>
-            <Text style={[styles.emptySubtitle, { color: c.textSecondary }]}>
-              {connected ? 'Start a CLI session on your desktop — it will appear here.' : 'Connect to your desktop to monitor sessions.'}
-            </Text>
+      <ScrollView contentContainerStyle={styles.body} bounces={false}>
+        {/* Centered empty state */}
+        <View style={styles.hero}>
+          <View style={[styles.glyph, { backgroundColor: c.accent }]}>
+            <Text style={[styles.glyphText, { color: c.white }]}>R</Text>
           </View>
-        }
+          <Text style={[styles.greeting, { color: c.text }, theme.type.title]}>
+            What are we building?
+          </Text>
+          <Text style={[styles.tagline, { color: c.textSecondary }, theme.type.secondary]}>
+            Your desktop agent is right here.
+          </Text>
+        </View>
+
+        {connected ? (
+          <>
+            {/* Prominent New chat */}
+            <TouchableOpacity
+              style={[styles.newChatButton, { backgroundColor: c.accent }]}
+              activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel="New chat"
+              onPress={() => { tapMedium(); openNewChat(); }}
+            >
+              <Ionicons name="create-outline" size={18} color={c.white} />
+              <Text style={[styles.newChatButtonText, theme.type.body, { color: c.white }]}>
+                New chat
+              </Text>
+            </TouchableOpacity>
+
+            {/* Quick-start rows from recent projects */}
+            {projects.length > 0 && (
+              <View style={styles.quickStarts}>
+                {projects.map((p) => (
+                  <TouchableOpacity
+                    key={p.id || p.name}
+                    style={[styles.quickStartRow, { backgroundColor: c.surface2, borderColor: c.border }]}
+                    activeOpacity={0.7}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Continue ${p.name}`}
+                    onPress={() => { tapLight(); start(p.id, p.provider); }}
+                  >
+                    <View style={[styles.quickStartIcon, { backgroundColor: c.bubble }]}>
+                      <Ionicons name="folder-outline" size={16} color={c.accent} />
+                    </View>
+                    <View style={styles.quickStartText}>
+                      <Text numberOfLines={1} style={[styles.quickStartName, { color: c.text }, theme.type.body]}>
+                        {p.name}
+                      </Text>
+                      <Text numberOfLines={1} style={[{ color: c.textSecondary }, theme.type.secondary]}>
+                        Continue with {harnessLabel(p.provider)}
+                      </Text>
+                    </View>
+                    <Ionicons name="arrow-forward" size={16} color={c.textSecondary} />
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </>
+        ) : (
+          /* Offline: pairing explainer + QR scan entry */
+          <View style={[styles.offlineCard, { backgroundColor: c.surface2, borderColor: c.border }]}>
+            <Ionicons name="cloud-offline-outline" size={28} color={c.textSecondary} />
+            <Text style={[styles.offlineTitle, { color: c.text }, theme.type.title]}>
+              Pair with your desktop
+            </Text>
+            <Text style={[styles.offlineBody, { color: c.textSecondary }, theme.type.secondary]}>
+              Open Relay on your desktop, head to the Remote settings panel, and scan the
+              pairing QR code. Your sessions and agent chats stay in sync over that
+              connection.
+            </Text>
+            <TouchableOpacity
+              style={[styles.scanButton, { backgroundColor: c.accent }]}
+              activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel="Scan pairing QR code"
+              onPress={() => { tapLight(); setQrVisible(true); }}
+            >
+              <Ionicons name="qr-code-outline" size={18} color={c.white} />
+              <Text style={[styles.scanButtonText, theme.type.body, { color: c.white }]}>
+                Scan QR
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </ScrollView>
+
+      <QrScanModal
+        visible={qrVisible}
+        onClose={() => setQrVisible(false)}
+        onScanned={(url) => { connect(url); setQrVisible(false); }}
       />
     </SafeAreaView>
   );
@@ -300,74 +144,84 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   header: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: theme.spacing.lg, paddingVertical: theme.spacing.md,
-    borderBottomWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.xs,
   },
-  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  headerTitle: { fontSize: theme.fontSize['2xl'], fontWeight: '800' },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  badge: {
-    backgroundColor: theme.colors.primary, borderRadius: 10, minWidth: 20, height: 20,
-    justifyContent: 'center', alignItems: 'center', paddingHorizontal: 5,
+  iconButton: {
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: -theme.spacing.xs,
   },
-  badgeText: { color: '#fff', fontSize: 10, fontWeight: '700' },
-  scrollView: { flex: 1 },
-  scrollContent: { paddingHorizontal: theme.spacing.md, paddingBottom: 60 },
-  emptyScroll: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  emptyState: { alignItems: 'center', paddingVertical: 60, gap: 16, paddingHorizontal: 40 },
-  emptyTitle: { fontSize: theme.fontSize.xl, fontWeight: '700' },
-  emptySubtitle: { fontSize: theme.fontSize.md, textAlign: 'center', lineHeight: 22 },
-  // M2: flattened group rows re-create the old `projectGroup` card look —
-  // first row rounds/caps the top, last row rounds/closes the bottom, and
-  // consecutive rows share the side borders (gap between groups comes from
-  // the first row's marginTop).
-  groupRow: { borderLeftWidth: 1, borderRightWidth: 1 },
-  groupRowFirst: {
-    borderTopWidth: 1,
-    borderTopLeftRadius: theme.borderRadius.lg,
-    borderTopRightRadius: theme.borderRadius.lg,
-    marginTop: theme.spacing.md,
+  body: {
+    flexGrow: 1,
+    paddingHorizontal: theme.spacing.lg,
+    paddingBottom: theme.spacing.xl,
   },
-  groupRowLast: {
-    borderBottomWidth: 1,
-    borderBottomLeftRadius: theme.borderRadius.lg,
-    borderBottomRightRadius: theme.borderRadius.lg,
+  // hero
+  hero: { alignItems: 'center', paddingTop: '22%', paddingBottom: theme.spacing.xl },
+  glyph: {
+    width: 56,
+    height: 56,
+    borderRadius: theme.radius.lg,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: theme.spacing.lg,
   },
-  projectHeader: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    padding: theme.spacing.md, paddingVertical: 14,
+  glyphText: { fontSize: 26, fontWeight: '800' },
+  greeting: { fontSize: 22, marginBottom: theme.spacing.xs },
+  tagline: { textAlign: 'center' },
+  // new chat
+  newChatButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: theme.spacing.sm,
+    paddingVertical: 13,
+    borderRadius: theme.radius.pill,
   },
-  projectName: { fontSize: theme.fontSize.md, fontWeight: '700', flex: 1 },
-  sessionCountBadge: {
-    backgroundColor: 'rgba(0, 120, 168, 0.12)', borderRadius: 10,
-    paddingHorizontal: 8, paddingVertical: 2,
-  },
-  sessionCountText: { fontSize: theme.fontSize.xs, fontWeight: '700', color: theme.colors.primary },
-  harnessRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    paddingHorizontal: theme.spacing.md, paddingBottom: theme.spacing.sm,
-  },
-  harnessChip: {
-    borderRadius: theme.borderRadius.md,
-    paddingHorizontal: 12, paddingVertical: 6,
-    backgroundColor: 'rgba(0, 120, 168, 0.08)',
-    borderWidth: 1, borderColor: 'rgba(0, 120, 168, 0.2)',
-  },
-  harnessChipText: { fontSize: theme.fontSize.sm, color: theme.colors.primary, fontWeight: '500' },
-  createBtn: {
-    backgroundColor: theme.colors.primary,
-    width: 28, height: 28, borderRadius: 14,
-    justifyContent: 'center', alignItems: 'center',
-    marginLeft: 4,
-  },
-  sessionCard: {
-    borderRadius: theme.borderRadius.md, padding: theme.spacing.md,
-    marginHorizontal: theme.spacing.sm, marginBottom: theme.spacing.sm,
+  newChatButtonText: { fontWeight: '600' },
+  // quick starts
+  quickStarts: { marginTop: theme.spacing.lg, gap: theme.spacing.sm },
+  quickStartRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm + 2,
+    padding: theme.spacing.md,
+    borderRadius: theme.radius.md,
     borderWidth: 1,
   },
-  sessionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
-  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  statusDot: { width: 8, height: 8, borderRadius: 4 },
-  sessionTitle: { fontSize: theme.fontSize.md, fontWeight: '600', lineHeight: 21, marginBottom: 4 },
+  quickStartIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: theme.radius.sm,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  quickStartText: { flex: 1 },
+  quickStartName: { fontWeight: '500' },
+  // offline card
+  offlineCard: {
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+    padding: theme.spacing.lg,
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+  },
+  offlineTitle: { marginTop: theme.spacing.xs },
+  offlineBody: { textAlign: 'center', marginBottom: theme.spacing.sm },
+  scanButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: theme.spacing.sm,
+    paddingVertical: 12,
+    paddingHorizontal: theme.spacing.xl,
+    borderRadius: theme.radius.pill,
+  },
+  scanButtonText: { fontWeight: '600' },
 });

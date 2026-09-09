@@ -52,10 +52,15 @@ export default function QrScanModal({ visible, onScanned, onClose }: QrScanModal
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={[styles.container, { backgroundColor: c.background }]}>
         <View style={[styles.header, { borderBottomColor: c.border }]}>
-          <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+          <TouchableOpacity
+            onPress={onClose}
+            style={styles.closeButton}
+            accessibilityRole="button"
+            accessibilityLabel="Close scanner"
+          >
             <Ionicons name="close" size={24} color={c.text} />
           </TouchableOpacity>
-          <Text style={[styles.title, { color: c.text }]}>Scan Pairing QR</Text>
+          <Text style={[styles.title, { color: c.text }, theme.type.title]}>Scan Pairing QR</Text>
           <View style={styles.closeButton} />
         </View>
 
@@ -70,11 +75,11 @@ export default function QrScanModal({ visible, onScanned, onClose }: QrScanModal
           ) : (
             <View style={styles.permissionBlock}>
               <Ionicons name="camera" size={48} color={c.textSecondary} />
-              <Text style={[styles.permissionText, { color: c.textSecondary }]}>
+              <Text style={[styles.permissionText, { color: c.textSecondary }, theme.type.body]}>
                 Camera access is required to scan the pairing QR code.
               </Text>
               <TouchableOpacity
-                style={[styles.permissionButton, { backgroundColor: c.primary }]}
+                style={[styles.permissionButton, { backgroundColor: c.accent }]}
                 onPress={() => void requestPermission()}
               >
                 <Text style={styles.permissionButtonText}>Grant camera access</Text>
@@ -93,8 +98,8 @@ export default function QrScanModal({ visible, onScanned, onClose }: QrScanModal
           {/* Scan frame overlay */}
           {permission?.granted && (
             <View style={styles.scanOverlay} pointerEvents="none">
-              <View style={[styles.scanFrame, { borderColor: c.primary }]} />
-              <Text style={[styles.scanHint, { color: '#fff' }]}>
+              <View style={[styles.scanFrame, { borderColor: c.accent }]} />
+              <Text style={[styles.scanHint, { color: c.white }, theme.type.secondary]}>
                 Point at the QR code on the desktop's Remote settings panel
               </Text>
             </View>
@@ -109,10 +114,10 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1,
+    paddingHorizontal: theme.spacing.md, paddingVertical: 12, borderBottomWidth: 1,
   },
   closeButton: { width: 40, height: 40, justifyContent: 'center', alignItems: 'center' },
-  title: { fontSize: 17, fontWeight: '700' },
+  title: { flex: 1, textAlign: 'center' },
   cameraWrap: { flex: 1, position: 'relative' },
   camera: { flex: 1 },
   scanOverlay: {
@@ -120,22 +125,23 @@ const styles = StyleSheet.create({
     justifyContent: 'center', alignItems: 'center',
   },
   scanFrame: {
-    width: 240, height: 240, borderWidth: 2, borderRadius: 16,
+    width: 240, height: 240, borderWidth: 2, borderRadius: theme.radius.lg,
     backgroundColor: 'transparent',
   },
   scanHint: {
-    position: 'absolute', bottom: 60, fontSize: 13, textAlign: 'center',
-    backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 16, paddingVertical: 8,
-    borderRadius: 8, overflow: 'hidden',
+    position: 'absolute', bottom: 60, textAlign: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)', paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    borderRadius: theme.radius.sm, overflow: 'hidden',
   },
   permissionBlock: {
-    flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32, gap: 16,
+    flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: theme.spacing.xl, gap: theme.spacing.md,
   },
   permissionText: {
-    fontSize: 15, textAlign: 'center', lineHeight: 22,
+    textAlign: 'center',
   },
   permissionButton: {
-    paddingVertical: 14, paddingHorizontal: 24, borderRadius: 12, alignItems: 'center',
+    paddingVertical: 14, paddingHorizontal: theme.spacing.lg, borderRadius: theme.radius.md, alignItems: 'center',
   },
   permissionButtonText: { color: '#fff', fontWeight: '600', fontSize: 15 },
 });

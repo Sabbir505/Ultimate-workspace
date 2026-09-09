@@ -35,7 +35,13 @@ pub fn upsert_connector_credential_row(
             granted_scopes = excluded.granted_scopes,
             account_display = excluded.account_display,
             connected_at = excluded.connected_at",
-        params![connector_id, expires_at, granted_scopes, account_display, connected_at],
+        params![
+            connector_id,
+            expires_at,
+            granted_scopes,
+            account_display,
+            connected_at
+        ],
     )?;
     Ok(())
 }
@@ -104,8 +110,10 @@ mod tests {
     #[test]
     fn credential_rows_round_trip() {
         let conn = super::super::mem();
-        upsert_connector_credential_row(&conn, "notion", Some(123), Some("a b"), Some("me@x"), 100).unwrap();
-        upsert_connector_credential_row(&conn, "notion", Some(999), Some("c"), Some("me@y"), 200).unwrap(); // upsert
+        upsert_connector_credential_row(&conn, "notion", Some(123), Some("a b"), Some("me@x"), 100)
+            .unwrap();
+        upsert_connector_credential_row(&conn, "notion", Some(999), Some("c"), Some("me@y"), 200)
+            .unwrap(); // upsert
         upsert_connector_credential_row(&conn, "gdrive", None, None, None, 150).unwrap();
 
         let rows = list_connector_credential_rows(&conn).unwrap();
@@ -115,7 +123,9 @@ mod tests {
         assert_eq!(rows[0].account_display.as_deref(), Some("me@y"));
         assert_eq!(rows[0].expires_at, Some(999));
 
-        let one = get_connector_credential_row(&conn, "gdrive").unwrap().unwrap();
+        let one = get_connector_credential_row(&conn, "gdrive")
+            .unwrap()
+            .unwrap();
         assert!(one.expires_at.is_none());
 
         delete_connector_credential_row(&conn, "notion").unwrap();

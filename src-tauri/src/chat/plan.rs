@@ -86,11 +86,19 @@ impl PlanState {
     /// events; this accessor exists for tests and future model-facing readout.
     #[allow(dead_code)]
     pub fn todos(&self, sid: &str) -> Vec<PlanTodo> {
-        self.sessions.lock().get(sid).map(|s| s.todos.clone()).unwrap_or_default()
+        self.sessions
+            .lock()
+            .get(sid)
+            .map(|s| s.todos.clone())
+            .unwrap_or_default()
     }
 
     pub fn plan_mode(&self, sid: &str) -> bool {
-        self.sessions.lock().get(sid).map(|s| s.plan_mode).unwrap_or(false)
+        self.sessions
+            .lock()
+            .get(sid)
+            .map(|s| s.plan_mode)
+            .unwrap_or(false)
     }
 
     /// Replace the session's todo list and emit the authoritative
@@ -158,7 +166,9 @@ impl PlanState {
 
     /// Store rejection feedback for a pending plan proposal.
     pub fn store_feedback(&self, pending_id: &str, feedback: String) {
-        self.feedback.lock().insert(pending_id.to_string(), feedback);
+        self.feedback
+            .lock()
+            .insert(pending_id.to_string(), feedback);
     }
 
     pub fn take_feedback(&self, pending_id: &str) -> Option<String> {
@@ -324,12 +334,19 @@ pub(crate) fn is_mutating_tool(name: &str) -> bool {
     }
     matches!(
         name,
-        "run_shell" | "shell" | "RunShell"
-            | "download_file" | "download"
+        "run_shell"
+            | "shell"
+            | "RunShell"
+            | "download_file"
+            | "download"
             | "run_code"
-            | "generate_file" | "generate_document" | "generate_diagram"
-            | "browser_type" | "browser_click"
-            | "attach_connector" | "attach_mcp_server"
+            | "generate_file"
+            | "generate_document"
+            | "generate_diagram"
+            | "browser_type"
+            | "browser_click"
+            | "attach_connector"
+            | "attach_mcp_server"
     )
 }
 
@@ -440,9 +457,7 @@ pub(crate) fn parse_plan_text(args: &Value) -> Result<(String, String), String> 
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     if raw.is_empty() {
-        return Err(
-            "present_plan requires `plan`: the detailed approach as markdown.".to_string(),
-        );
+        return Err("present_plan requires `plan`: the detailed approach as markdown.".to_string());
     }
     let plan = normalize_plan_markdown(&raw);
     if plan.chars().count() > MAX_PLAN_CHARS {
@@ -458,12 +473,7 @@ pub(crate) fn parse_plan_text(args: &Value) -> Result<(String, String), String> 
     let derived = plan
         .lines()
         .find(|l| !l.trim().is_empty())
-        .map(|l| {
-            l.trim()
-                .trim_start_matches('#')
-                .trim()
-                .to_string()
-        })
+        .map(|l| l.trim().trim_start_matches('#').trim().to_string())
         .unwrap_or_else(|| "Plan".to_string());
     let title = arg_title.unwrap_or(derived);
     let title = if title.chars().count() > 80 {
@@ -497,8 +507,7 @@ async fn handle_present_plan(
         Err(e) => return format!("Error: {e}"),
     };
     let summary = format!("Plan proposal: {title}");
-    let (pending_id, rx) =
-        mgr.register_pending_approval(sid, PRESENT_PLAN, args.clone(), summary);
+    let (pending_id, rx) = mgr.register_pending_approval(sid, PRESENT_PLAN, args.clone(), summary);
     let _ = app.emit(
         "chat:plan-proposal",
         ChatPlanProposalPayload {
@@ -608,10 +617,19 @@ mod tests {
     #[test]
     fn gate_blocks_mutating_tools_in_plan_mode() {
         for name in [
-            "write_file", "edit_file", "delete_file", "move_file", "copy_file",
-            "run_shell", "download_file", "run_code",
-            "generate_file", "generate_document", "generate_diagram",
-            "browser_type", "browser_click",
+            "write_file",
+            "edit_file",
+            "delete_file",
+            "move_file",
+            "copy_file",
+            "run_shell",
+            "download_file",
+            "run_code",
+            "generate_file",
+            "generate_document",
+            "generate_diagram",
+            "browser_type",
+            "browser_click",
         ] {
             let denial = gate_denial(true, name);
             assert!(denial.is_some(), "{name} must be blocked in plan mode");
@@ -622,11 +640,23 @@ mod tests {
     #[test]
     fn gate_allows_reads_and_is_off_outside_plan_mode() {
         for name in [
-            "read_file", "list_directory", "search_files", "search_content",
-            "web_search", "fetch_url", "browser_read", "browser_screenshot",
-            "get_task_status", "cancel_task", "Task", "add_source_note",
+            "read_file",
+            "list_directory",
+            "search_files",
+            "search_content",
+            "web_search",
+            "fetch_url",
+            "browser_read",
+            "browser_screenshot",
+            "get_task_status",
+            "cancel_task",
+            "Task",
+            "add_source_note",
         ] {
-            assert!(gate_denial(true, name).is_none(), "{name} must stay allowed");
+            assert!(
+                gate_denial(true, name).is_none(),
+                "{name} must stay allowed"
+            );
         }
         // Gate inert when plan mode is off — even for mutating tools.
         assert!(gate_denial(false, "write_file").is_none());
@@ -665,8 +695,8 @@ mod tests {
         assert_eq!(title, "Rewrite the parser");
 
         // No heading → first non-empty line.
-        let (title, _) = parse_plan_text(&json!({ "plan": "Just do it in one pass.\nMore." }))
-            .unwrap();
+        let (title, _) =
+            parse_plan_text(&json!({ "plan": "Just do it in one pass.\nMore." })).unwrap();
         assert_eq!(title, "Just do it in one pass.");
     }
 
@@ -695,8 +725,7 @@ mod tests {
         assert!(body.contains("\n\n## Heading one"), "{body}");
         assert!(body.contains("\n\n## Heading two"), "{body}");
         // Already-multiline markdown passes through without extra breaks.
-        let (_, body) = parse_plan_text(&json!({ "plan": "## Top\nBody text.\n" }))
-            .unwrap();
+        let (_, body) = parse_plan_text(&json!({ "plan": "## Top\nBody text.\n" })).unwrap();
         assert_eq!(body, "## Top\nBody text.");
     }
 

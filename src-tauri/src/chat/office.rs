@@ -38,7 +38,10 @@ fn html_escape(s: &str) -> String {
 /// True when the char after an element-name prefix marks a real element start
 /// (`<w:p>`, `<w:p …>`, `<w:p/>`) rather than a longer name (`<w:pPr>`).
 fn is_real_start(after: &str) -> bool {
-    matches!(after.chars().next(), Some('>') | Some(' ') | Some('/') | Some('\t') | Some('\r') | Some('\n'))
+    matches!(
+        after.chars().next(),
+        Some('>') | Some(' ') | Some('/') | Some('\t') | Some('\r') | Some('\n')
+    )
 }
 
 /// Return every full `<name …>…</name>` (or self-closing `<name …/>`) element
@@ -308,7 +311,8 @@ fn docx_run_html(run: &str) -> String {
     {
         style.push_str("text-decoration:underline;");
     }
-    if let Some(c) = opening_tag(rpr, "w:color").and_then(|t| attr(t, "w:val").map(str::to_string)) {
+    if let Some(c) = opening_tag(rpr, "w:color").and_then(|t| attr(t, "w:val").map(str::to_string))
+    {
         if hex_ok(&c) {
             style.push_str(&format!("color:#{};", c.to_ascii_uppercase()));
         }
@@ -365,7 +369,9 @@ fn docx_para_html(para: &str) -> String {
     let mut block_style = String::new();
     if let Some(b) = opening_tag(ppr, "w:bottom") {
         let color = attr(b, "w:color").filter(|c| hex_ok(c)).unwrap_or("E2E8F0");
-        block_style.push_str(&format!("border-bottom:1.5px solid #{color};padding-bottom:4px;"));
+        block_style.push_str(&format!(
+            "border-bottom:1.5px solid #{color};padding-bottom:4px;"
+        ));
     }
 
     match style_val {
@@ -422,7 +428,11 @@ fn docx_table_html(tbl: &str) -> String {
         for (ci, tc) in tcs.iter().enumerate() {
             let tcpr = first_element(tc, "w:tcPr").unwrap_or("");
             let bt = if ri == 0 { &top } else { &ih };
-            let mut bb = if ri + 1 == nrows { bottom.clone() } else { ih.clone() };
+            let mut bb = if ri + 1 == nrows {
+                bottom.clone()
+            } else {
+                ih.clone()
+            };
             let bl = if ci == 0 { &left } else { &iv };
             let br = if ci + 1 == ncols { &right } else { &iv };
             // A cell-level bottom border (e.g. a strong header rule) wins.
@@ -443,7 +453,10 @@ fn docx_table_html(tbl: &str) -> String {
                     ));
                 }
             }
-            let inner: String = elements(tc, "w:p").iter().map(|p| docx_para_html(p)).collect();
+            let inner: String = elements(tc, "w:p")
+                .iter()
+                .map(|p| docx_para_html(p))
+                .collect();
             cells.push_str(&format!("<td style=\"{cs}\">{inner}</td>"));
         }
         rows.push_str(&format!("<tr>{cells}</tr>"));
@@ -456,7 +469,10 @@ fn docx_table_html(tbl: &str) -> String {
 pub fn docx_to_html(bytes: &[u8]) -> Option<String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
     let mut xml = String::new();
-    zip.by_name("word/document.xml").ok()?.read_to_string(&mut xml).ok()?;
+    zip.by_name("word/document.xml")
+        .ok()?
+        .read_to_string(&mut xml)
+        .ok()?;
     let body = first_element(&xml, "w:body").unwrap_or(&xml);
 
     let mut inner = String::from("<div class=\"page\">");
@@ -580,7 +596,10 @@ fn pptx_text_html(txbody: &str, default_color: &str) -> String {
             if let Some(f) = opening_tag(rpr, "a:latin").and_then(|t| attr(t, "typeface")) {
                 style.push_str(&format!("font-family:{};", font_stack(f)));
             }
-            runs.push_str(&format!("<span style=\"{style}\">{}</span>", html_escape(&text)));
+            runs.push_str(&format!(
+                "<span style=\"{style}\">{}</span>",
+                html_escape(&text)
+            ));
         }
         if runs.is_empty() {
             out.push_str("<div class=\"ap\">&nbsp;</div>");
@@ -593,7 +612,9 @@ fn pptx_text_html(txbody: &str, default_color: &str) -> String {
                 html_escape(&mark)
             ));
         } else {
-            out.push_str(&format!("<div class=\"ap\" style=\"text-align:{css_align}\">{runs}</div>"));
+            out.push_str(&format!(
+                "<div class=\"ap\" style=\"text-align:{css_align}\">{runs}</div>"
+            ));
         }
     }
     out
@@ -661,7 +682,10 @@ fn pptx_table_html(gf: &str, sw: f64, sh: f64, theme_text: &str) -> Option<Strin
             if let Some(f) = fill {
                 cs.push_str(&format!("background:#{f};"));
             }
-            cells.push_str(&format!("<td style=\"{cs}\">{}</td>", pptx_text_html(txbody, theme_text)));
+            cells.push_str(&format!(
+                "<td style=\"{cs}\">{}</td>",
+                pptx_text_html(txbody, theme_text)
+            ));
         }
         rows.push_str(&format!("<tr>{cells}</tr>"));
     }
@@ -705,7 +729,9 @@ pub fn pptx_to_html(bytes: &[u8]) -> Option<String> {
 
     let mut names: Vec<String> = zip
         .file_names()
-        .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml") && !n.contains("_rels"))
+        .filter(|n| {
+            n.starts_with("ppt/slides/slide") && n.ends_with(".xml") && !n.contains("_rels")
+        })
         .map(|s| s.to_string())
         .collect();
     names.sort_by_key(|n| {
@@ -773,7 +799,10 @@ fn parse_merge_range(cell_ref: &str) -> Option<(usize, usize, usize, usize)> {
     let split = |s: &str| -> Option<(usize, usize)> {
         let letters: String = s.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
         let digits: String = s.chars().skip_while(|c| !c.is_ascii_digit()).collect();
-        Some((col_index(&letters)?, digits.parse::<usize>().ok()?.checked_sub(1)?))
+        Some((
+            col_index(&letters)?,
+            digits.parse::<usize>().ok()?.checked_sub(1)?,
+        ))
     };
     let (c1, r1) = split(a)?;
     let (c2, r2) = split(b)?;
@@ -806,7 +835,10 @@ pub fn xlsx_to_html(bytes: &[u8]) -> Option<String> {
     const MAX_SHEETS: usize = 30;
     let workbook = {
         let mut xml = String::new();
-        zip.by_name("xl/workbook.xml").ok()?.read_to_string(&mut xml).ok()?;
+        zip.by_name("xl/workbook.xml")
+            .ok()?
+            .read_to_string(&mut xml)
+            .ok()?;
         xml
     };
     let mut rels: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -874,9 +906,7 @@ box-shadow:0 1px 4px rgba(15,23,42,.12)}\
 th,td{border:1px solid #e2e8f0;padding:7px 12px;text-align:left;vertical-align:top}\
 th{background:#2563eb;color:#fff;font-weight:600}\
 tr:nth-child(even) td{background:#f8fafc}";
-    Some(
-        doc_shell(body, css).replace("</style>", &format!("{sheet_css}</style>")),
-    )
+    Some(doc_shell(body, css).replace("</style>", &format!("{sheet_css}</style>")))
 }
 
 /// Render one worksheet's XML into a `<table>` with column widths and merged
@@ -1010,7 +1040,10 @@ fn render_xlsx_sheet(xml: &str, shared: &[String]) -> Option<String> {
             };
             let tag = if r == 0 { "th" } else { "td" };
             let text = cells.get(&(r, c)).cloned().unwrap_or_default();
-            cells_html.push_str(&format!("<{tag}{attrs}>{}</{tag}>", html_escape(text.trim())));
+            cells_html.push_str(&format!(
+                "<{tag}{attrs}>{}</{tag}>",
+                html_escape(text.trim())
+            ));
             c += span.0;
         }
         rows_html.push_str(&format!("<tr>{cells_html}</tr>"));
@@ -1088,7 +1121,10 @@ fn legacy_office_bytes_to_text(format: &str, bytes: &[u8]) -> Option<String> {
 fn docx_bytes_to_text(bytes: &[u8]) -> Option<String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
     let mut xml = String::new();
-    zip.by_name("word/document.xml").ok()?.read_to_string(&mut xml).ok()?;
+    zip.by_name("word/document.xml")
+        .ok()?
+        .read_to_string(&mut xml)
+        .ok()?;
     let mut out = String::new();
     for para in elements(&xml, "w:p") {
         let line = collect_text(para, "w:t");
@@ -1148,8 +1184,11 @@ fn strip_html_to_text(html: &str) -> String {
             '>' => {
                 in_tag = false;
                 let t = tag.trim_start_matches('/').to_ascii_lowercase();
-                if t.starts_with("tr") || t.starts_with("p") || t.starts_with("div")
-                    || t.starts_with("br") || t.starts_with("h")
+                if t.starts_with("tr")
+                    || t.starts_with("p")
+                    || t.starts_with("div")
+                    || t.starts_with("br")
+                    || t.starts_with("h")
                 {
                     out.push('\n');
                 } else if t.starts_with("td") || t.starts_with("th") {
@@ -1252,11 +1291,12 @@ fn find_soffice() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     let candidates: &[&str] = &["/Applications/LibreOffice.app/Contents/MacOS/soffice"];
     #[cfg(all(unix, not(target_os = "macos")))]
-    let candidates: &[&str] = &["/usr/bin/soffice", "/usr/local/bin/soffice", "/snap/bin/libreoffice"];
-    candidates
-        .iter()
-        .map(PathBuf::from)
-        .find(|p| p.is_file())
+    let candidates: &[&str] = &[
+        "/usr/bin/soffice",
+        "/usr/local/bin/soffice",
+        "/snap/bin/libreoffice",
+    ];
+    candidates.iter().map(PathBuf::from).find(|p| p.is_file())
 }
 
 /// True when a LibreOffice `soffice` binary is reachable. Exposed to the
@@ -1319,7 +1359,10 @@ pub fn office_to_pdf(input_path: &Path) -> Option<Vec<u8>> {
     let run_dir = soffice_run_dir();
     let _ = std::fs::remove_dir_all(&run_dir);
     std::fs::create_dir_all(&run_dir).ok()?;
-    let profile_uri = format!("file:///{}", run_dir.join("profile").to_string_lossy().replace('\\', "/"));
+    let profile_uri = format!(
+        "file:///{}",
+        run_dir.join("profile").to_string_lossy().replace('\\', "/")
+    );
 
     // The -env: bootstrap variable must be ONE argument ("-env:Name=Value").
     // Passed as two args, soffice parses "-env:UserInstallation" as a value-less
@@ -1429,7 +1472,10 @@ mod tests {
     fn xlsx_renders_all_sheets_merges_and_widths() {
         let html = xlsx_to_html(&two_sheet_xlsx()).expect("converter must handle the workbook");
         // Both sheets render, each labelled.
-        assert!(html.contains(">Summary</h2>"), "missing Summary sheet: {html}");
+        assert!(
+            html.contains(">Summary</h2>"),
+            "missing Summary sheet: {html}"
+        );
         assert!(html.contains(">Data</h2>"), "missing Data sheet: {html}");
         // The merged title A1:B1 becomes one spanning header, not two cells.
         assert!(html.contains("colspan=\"2\""), "missing merge: {html}");
@@ -1452,7 +1498,8 @@ mod tests {
         assert_ne!(a, b, "concurrent conversions must get distinct run dirs");
         let pid = std::process::id().to_string();
         assert!(
-            a.to_string_lossy().contains(&format!("relay-soffice-{pid}-")),
+            a.to_string_lossy()
+                .contains(&format!("relay-soffice-{pid}-")),
             "run dir keeps the pid prefix for diagnosability: {}",
             a.display()
         );
@@ -1471,7 +1518,8 @@ mod tests {
     #[test]
     fn attr_and_collect_text() {
         assert_eq!(attr("<a:off x=\"10\" y=\"20\"/>", "y"), Some("20"));
-        let run = r#"<w:r><w:t>Hello</w:t></w:r><w:r><w:t xml:space="preserve"> A &amp; B</w:t></w:r>"#;
+        let run =
+            r#"<w:r><w:t>Hello</w:t></w:r><w:r><w:t xml:space="preserve"> A &amp; B</w:t></w:r>"#;
         assert_eq!(collect_text(run, "w:t"), "Hello A & B");
     }
 
@@ -1536,7 +1584,8 @@ mod tests {
             .map(|i| format!("Slide{i}\nMarker{i}"))
             .collect::<Vec<_>>()
             .join("\n---\n");
-        let pptx = crate::chat::artifacts::generate(&dir, "pptx", "t.pptx", None, &content).unwrap();
+        let pptx =
+            crate::chat::artifacts::generate(&dir, "pptx", "t.pptx", None, &content).unwrap();
         let text = doc_to_text("pptx", &std::fs::read(&pptx.path).unwrap()).unwrap();
         let two = text.find("Marker2").unwrap();
         let ten = text.find("Marker10").unwrap();

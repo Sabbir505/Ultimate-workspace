@@ -36,10 +36,26 @@ pub enum ModelClass {
 pub fn classify_model(model: &str) -> ModelClass {
     let m = model.to_ascii_lowercase();
     let local_markers = [
-        "llama", "qwen", "phi-", "phi3", "gemma", "mistral-7b", "mixtral",
-        "deepseek-r1", "deepseek-coder", "yi-", "starcoder", "codegemma",
-        "stablelm", "falcon", "orca", "vicuna", "wizardlm", " neural",
-        "local", "ollama",
+        "llama",
+        "qwen",
+        "phi-",
+        "phi3",
+        "gemma",
+        "mistral-7b",
+        "mixtral",
+        "deepseek-r1",
+        "deepseek-coder",
+        "yi-",
+        "starcoder",
+        "codegemma",
+        "stablelm",
+        "falcon",
+        "orca",
+        "vicuna",
+        "wizardlm",
+        " neural",
+        "local",
+        "ollama",
     ];
     if local_markers.iter().any(|tok| m.contains(tok)) {
         ModelClass::Local
@@ -298,7 +314,6 @@ pub(crate) fn core_prompt_base_local() -> String {
         .to_string()
 }
 
-
 /// STRICT addendum — appended only when `ModelClass == Local`. Restates the
 /// highest-risk rules explicitly because smaller/local models follow implied
 /// instructions less reliably and this app cannot afford silent tool-use
@@ -376,10 +391,7 @@ pub fn is_research_request(content: &str) -> bool {
         return false;
     }
     // Explicit override: "/research …" forces research mode.
-    if trimmed
-        .to_ascii_lowercase()
-        .starts_with("/research")
-    {
+    if trimmed.to_ascii_lowercase().starts_with("/research") {
         return true;
     }
     let lower = trimmed.to_ascii_lowercase();
@@ -811,7 +823,10 @@ mod tests {
         assert!(local.contains("STRICT (local model)"));
         // Rule 4 points at the live tool list instead of a rot-prone name list.
         assert!(local.contains("exact tool names from your tool list"));
-        assert!(local.contains("create_automation"), "local CORE lost the automations capability");
+        assert!(
+            local.contains("create_automation"),
+            "local CORE lost the automations capability"
+        );
     }
 
     /// The CORE prompts are generated text — this pins them to the LIVE tool
@@ -829,9 +844,16 @@ mod tests {
         );
         let names: Vec<String> = registry
             .iter()
-            .filter_map(|s| s.pointer("/function/name").and_then(|n| n.as_str()).map(String::from))
+            .filter_map(|s| {
+                s.pointer("/function/name")
+                    .and_then(|n| n.as_str())
+                    .map(String::from)
+            })
             .collect();
-        for prompt in [core_prompt_base(), core_prompt_for(ChatProviderId::LocalGguf, "llama-3.1-8b")] {
+        for prompt in [
+            core_prompt_base(),
+            core_prompt_for(ChatProviderId::LocalGguf, "llama-3.1-8b"),
+        ] {
             // Every `tool_name` the prompt text mentions must exist in the
             // registry (or be one of the plan/ledger tools dispatched outside
             // the schema registry).
@@ -891,14 +913,26 @@ mod tests {
     #[test]
     fn system_prompt_embeds_current_date() {
         for provider in [ChatProviderId::LocalGguf, ChatProviderId::OpenAI] {
-            let p = build_system_prompt(provider, "test-model", None, &[], false, false, false, None, None)
-                .expect("core + date segment always present");
+            let p = build_system_prompt(
+                provider,
+                "test-model",
+                None,
+                &[],
+                false,
+                false,
+                false,
+                None,
+                None,
+            )
+            .expect("core + date segment always present");
             assert!(p.contains("## Current date & time"), "missing date anchor");
             let today = chrono::Local::now().format("%a %Y-%m-%d").to_string();
             assert!(
                 p.contains(&today),
                 "date anchor missing today's date ({today}): {:?}",
-                p.split("## Current date & time").nth(1).map(|s| &s[..80.min(s.len())])
+                p.split("## Current date & time")
+                    .nth(1)
+                    .map(|s| &s[..80.min(s.len())])
             );
         }
     }

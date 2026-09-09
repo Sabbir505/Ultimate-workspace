@@ -287,7 +287,8 @@ fn anthropic_thinking_for(req: &ChatRequest) -> (i64, Option<AnthropicThinking>)
     }
     let thinking = thinking_on.then(|| AnthropicThinking {
         kind: "enabled",
-        budget_tokens: tier_budget.unwrap_or_else(|| (max_tokens - 1024).clamp(1024, max_tokens - 1)),
+        budget_tokens: tier_budget
+            .unwrap_or_else(|| (max_tokens - 1024).clamp(1024, max_tokens - 1)),
     });
     (max_tokens, thinking)
 }
@@ -438,9 +439,9 @@ fn openai_wire_body(req: &ChatRequest, cache_marks: bool) -> OpenAIWireBody {
         stream: true,
         max_tokens: openai_wire_max_tokens(req),
         reasoning_effort: req.effort.clone(),
-        chat_template_kwargs: req.thinking.map(|t| ChatTemplateKwargs {
-            enable_thinking: t,
-        }),
+        chat_template_kwargs: req
+            .thinking
+            .map(|t| ChatTemplateKwargs { enable_thinking: t }),
     }
 }
 
@@ -529,10 +530,7 @@ impl ChatProvider for AnthropicProvider {
                         }
                         if let Some(thinking) = delta.thinking {
                             if !thinking.is_empty() {
-                                return Ok((
-                                    Some(format!("{REASONING_PREFIX}{thinking}")),
-                                    false,
-                                ));
+                                return Ok((Some(format!("{REASONING_PREFIX}{thinking}")), false));
                             }
                         }
                     }
@@ -585,7 +583,9 @@ impl ChatProvider for AnthropicProvider {
         let mut first_input: Option<(i64, i64, i64)> = None; // (input, cache_creation, cache_read)
         let mut last_output: i64 = 0;
         for line in buf.lines() {
-            let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:"))
+            let Some(data) = line
+                .strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
             else {
                 continue;
             };
@@ -737,14 +737,9 @@ impl ChatProvider for OpenAIProvider {
                                 return Ok((Some(content), false));
                             }
                         }
-                        if let Some(reasoning) =
-                            delta.reasoning_content.or(delta.reasoning)
-                        {
+                        if let Some(reasoning) = delta.reasoning_content.or(delta.reasoning) {
                             if !reasoning.is_empty() {
-                                return Ok((
-                                    Some(format!("{REASONING_PREFIX}{reasoning}")),
-                                    false,
-                                ));
+                                return Ok((Some(format!("{REASONING_PREFIX}{reasoning}")), false));
                             }
                         }
                     }
@@ -965,8 +960,7 @@ impl ChatProvider for LocalGgufProvider {
         api_key: &str,
         base_url: Option<&str>,
     ) -> Result<reqwest::RequestBuilder, String> {
-        let base =
-            base_url.ok_or_else(|| "base_url is required for LocalGguf".to_string())?;
+        let base = base_url.ok_or_else(|| "base_url is required for LocalGguf".to_string())?;
         Ok(openai_request(client, req, api_key, base))
     }
 
@@ -1054,7 +1048,6 @@ mod tests {
         assert!(thinking.is_some());
     }
 
-
     // ---- Anthropic wire-body cache tests ----
 
     fn req_with(system: Option<String>) -> ChatRequest {
@@ -1137,15 +1130,15 @@ mod tests {
         let req = req_with(Some("You are Relay.".to_string()));
         // Marks OFF — the flag is the caller's decision (OpenRouter gating on
         // `anthropic/*`), so a non-marked body never carries the field.
-        let plain: serde_json::Value =
-            serde_json::to_value(openai_wire_body(&req, false)).unwrap();
-        assert!(!serde_json::to_string(&plain).unwrap().contains("cache_control"));
+        let plain: serde_json::Value = serde_json::to_value(openai_wire_body(&req, false)).unwrap();
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("cache_control"));
         assert!(plain["messages"][0]["content"].is_string());
 
         // Marks ON — system converted to a cached content-block array,
         // newest message marked, middle messages untouched strings.
-        let marked: serde_json::Value =
-            serde_json::to_value(openai_wire_body(&req, true)).unwrap();
+        let marked: serde_json::Value = serde_json::to_value(openai_wire_body(&req, true)).unwrap();
         let msgs = marked["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[0]["content"][0]["type"], "text");
@@ -1155,7 +1148,9 @@ mod tests {
         assert_eq!(msgs[3]["content"][0]["cache_control"]["type"], "ephemeral");
 
         // And the detector that gates the flag at the OpenRouter call site.
-        assert!(crate::chat::cache::openrouter_anthropic("anthropic/claude-sonnet-4.5"));
+        assert!(crate::chat::cache::openrouter_anthropic(
+            "anthropic/claude-sonnet-4.5"
+        ));
         assert!(!crate::chat::cache::openrouter_anthropic("openai/gpt-4o"));
     }
 

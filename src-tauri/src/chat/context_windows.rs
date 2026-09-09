@@ -87,7 +87,9 @@ pub fn cloud_window_for_model(model: &str) -> u32 {
 /// either to control cost or because a remapped relay backend actually
 /// serves a smaller window than the model id suggests.
 pub fn load_context_limit_override(conn: &rusqlite::Connection) -> Option<u32> {
-    let raw = crate::db::get_setting(conn, "chat.cloud.context_limit").ok().flatten()?;
+    let raw = crate::db::get_setting(conn, "chat.cloud.context_limit")
+        .ok()
+        .flatten()?;
     let v = raw.trim().parse::<u64>().ok()?;
     if v > 0 {
         u32::try_from(v).ok()
@@ -113,7 +115,10 @@ mod tests {
 
     #[test]
     fn known_families_resolve_to_their_standard_window() {
-        assert_eq!(window_for_model("claude-sonnet-4-5-20250929"), Some(200_000));
+        assert_eq!(
+            window_for_model("claude-sonnet-4-5-20250929"),
+            Some(200_000)
+        );
         assert_eq!(window_for_model("claude-opus-4-8"), Some(200_000));
         assert_eq!(window_for_model("gpt-5"), Some(400_000));
         assert_eq!(window_for_model("openai/gpt-5-mini"), Some(400_000));
@@ -140,7 +145,10 @@ mod tests {
         assert_eq!(window_for_model("totally-unknown-model"), None);
         assert_eq!(window_for_model(""), None);
         assert_eq!(window_for_model("   "), None);
-        assert_eq!(cloud_window_for_model("totally-unknown-model"), DEFAULT_CLOUD_WINDOW);
+        assert_eq!(
+            cloud_window_for_model("totally-unknown-model"),
+            DEFAULT_CLOUD_WINDOW
+        );
     }
 
     #[test]
@@ -155,13 +163,25 @@ mod tests {
         // No override → registry value.
         assert_eq!(effective_cloud_window("claude-sonnet-4-5", None), 200_000);
         // Override below the model's window caps it.
-        assert_eq!(effective_cloud_window("claude-sonnet-4-5", Some(100_000)), 100_000);
+        assert_eq!(
+            effective_cloud_window("claude-sonnet-4-5", Some(100_000)),
+            100_000
+        );
         // Override ABOVE the model's window does not raise it — a cap can
         // only shrink, never invent headroom the provider doesn't offer.
-        assert_eq!(effective_cloud_window("claude-sonnet-4-5", Some(400_000)), 200_000);
+        assert_eq!(
+            effective_cloud_window("claude-sonnet-4-5", Some(400_000)),
+            200_000
+        );
         // Unknown model: fallback gets capped too.
-        assert_eq!(effective_cloud_window("unknown-model", Some(50_000)), 50_000);
-        assert_eq!(effective_cloud_window("unknown-model", None), DEFAULT_CLOUD_WINDOW);
+        assert_eq!(
+            effective_cloud_window("unknown-model", Some(50_000)),
+            50_000
+        );
+        assert_eq!(
+            effective_cloud_window("unknown-model", None),
+            DEFAULT_CLOUD_WINDOW
+        );
     }
 
     #[test]

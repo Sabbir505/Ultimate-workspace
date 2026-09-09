@@ -58,9 +58,9 @@
 //!    shell dispatch refuses `mcp list`-style probes (see
 //!    `dispatch::capability_probe_refusal`).
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -240,7 +240,11 @@ impl SubagentTask {
     ) {
         {
             let mut snap = self.entry.snapshot.lock();
-            snap.state = if failed { TaskState::Failed } else { TaskState::Completed };
+            snap.state = if failed {
+                TaskState::Failed
+            } else {
+                TaskState::Completed
+            };
             snap.message = message;
         }
         TaskManager::emit(app, sid, &self.entry);
@@ -306,7 +310,8 @@ impl TaskManager {
             let mut tasks = self.tasks.lock();
             // Sweep stale terminal tasks so the map can't grow unbounded.
             let now = Instant::now();
-            tasks.retain(|_, e| e.is_running() || now.duration_since(e.created) < TERMINAL_TASK_TTL);
+            tasks
+                .retain(|_, e| e.is_running() || now.duration_since(e.created) < TERMINAL_TASK_TTL);
             tasks.insert(id.clone(), Arc::clone(&entry));
         }
         (id, entry)
@@ -377,9 +382,9 @@ impl TaskManager {
         match tasks.get(task_id) {
             Some(e) => serde_json::to_string(&*e.snapshot.lock())
                 .unwrap_or_else(|_| "{\"error\":\"serialize failed\"}".to_string()),
-            None => format!(
-                "No task \"{task_id}\". Tasks are only kept for an hour after they finish."
-            ),
+            None => {
+                format!("No task \"{task_id}\". Tasks are only kept for an hour after they finish.")
+            }
         }
     }
 
@@ -431,7 +436,13 @@ impl TaskManager {
             if let Err(msg) = result {
                 let state = entry_for_task.snapshot.lock().state;
                 if state == TaskState::Running {
-                    TaskManager::finish(app.as_ref(), &sid, &entry_for_task, TaskState::Failed, msg);
+                    TaskManager::finish(
+                        app.as_ref(),
+                        &sid,
+                        &entry_for_task,
+                        TaskState::Failed,
+                        msg,
+                    );
                 }
             }
         });
@@ -461,7 +472,16 @@ impl TaskManager {
         let timeout = background_shell_timeout(timeout_secs);
         let entry_for_task = Arc::clone(&entry);
         tauri::async_runtime::spawn(async move {
-            shell_task(app.as_ref(), &sid, &entry_for_task, rx, &command, workdir, timeout).await;
+            shell_task(
+                app.as_ref(),
+                &sid,
+                &entry_for_task,
+                rx,
+                &command,
+                workdir,
+                timeout,
+            )
+            .await;
         });
         id
     }
@@ -592,7 +612,11 @@ pub fn run_shell_to_completion(
     let lines: Vec<&str> = out.lines().collect();
     let mut t = if lines.len() > MAX_LINES {
         let dropped = lines.len() - MAX_LINES;
-        format!("… [{} earlier lines truncated]\n{}", dropped, lines[lines.len()-MAX_LINES..].join("\n"))
+        format!(
+            "… [{} earlier lines truncated]\n{}",
+            dropped,
+            lines[lines.len() - MAX_LINES..].join("\n")
+        )
     } else {
         out
     };
@@ -650,7 +674,9 @@ async fn download_task<R: tauri::Runtime>(
 ) -> Result<(), String> {
     let dest_path = PathBuf::from(dest);
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(format!("download_file requires an http(s) URL, got \"{url}\""));
+        return Err(format!(
+            "download_file requires an http(s) URL, got \"{url}\""
+        ));
     }
     if !dest_path.is_absolute() {
         return Err(format!(
@@ -686,7 +712,11 @@ async fn download_task<R: tauri::Runtime>(
             .unwrap_or_else(|| "part".to_string()),
     );
     let client = reqwest::Client::builder()
-        .user_agent(concat!("Relay/", env!("CARGO_PKG_VERSION"), " (desktop; +https://conduit.app)"))
+        .user_agent(concat!(
+            "Relay/",
+            env!("CARGO_PKG_VERSION"),
+            " (desktop; +https://conduit.app)"
+        ))
         // NO blanket .timeout() here: reqwest's request timeout covers the
         // whole body stream, so any download slower than size/timeout can
         // never finish (multi-GB model weights). Bound connection setup only,
@@ -905,7 +935,10 @@ async fn download_task<R: tauri::Runtime>(
             sid,
             entry,
             TaskState::Completed,
-            format!("Downloaded to {dest} ({})", human_bytes(total.unwrap_or(downloaded))),
+            format!(
+                "Downloaded to {dest} ({})",
+                human_bytes(total.unwrap_or(downloaded))
+            ),
         );
         return Ok(());
     }
@@ -921,11 +954,7 @@ async fn download_task<R: tauri::Runtime>(
 /// produces. Previewable extensions only: model weights / archives aren't
 /// gallery material. Best-effort — a DB or emit failure must not fail the
 /// (already successful) download. `None` app (tests / headless) skips.
-fn record_download_artifact<R: tauri::Runtime>(
-    app: Option<&AppHandle<R>>,
-    sid: &str,
-    dest: &Path,
-) {
+fn record_download_artifact<R: tauri::Runtime>(app: Option<&AppHandle<R>>, sid: &str, dest: &Path) {
     use tauri::Manager;
     let Some(app) = app else { return };
     if !crate::agent_sessions::previewable_ext(&dest.to_string_lossy()) {
@@ -1017,26 +1046,25 @@ async fn shell_task<R: tauri::Runtime>(
     let mut output: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let mut last_emit = Instant::now() - SHELL_EMIT_MIN;
 
-    let mut consume_line =
-        |line: String,
-         last_emit: &mut Instant,
-         app: Option<&AppHandle<R>>,
-         sid: &str,
-         entry: &TaskEntry| {
-            if output.len() >= 40 {
-                output.pop_front();
+    let mut consume_line = |line: String,
+                            last_emit: &mut Instant,
+                            app: Option<&AppHandle<R>>,
+                            sid: &str,
+                            entry: &TaskEntry| {
+        if output.len() >= 40 {
+            output.pop_front();
+        }
+        output.push_back(line);
+        if last_emit.elapsed() >= SHELL_EMIT_MIN {
+            {
+                let mut snap = entry.snapshot.lock();
+                let joined = output.iter().cloned().collect::<Vec<_>>().join("\n");
+                snap.message = joined.chars().take(SHELL_OUTPUT_CAP).collect();
             }
-            output.push_back(line);
-            if last_emit.elapsed() >= SHELL_EMIT_MIN {
-                {
-                    let mut snap = entry.snapshot.lock();
-                    let joined = output.iter().cloned().collect::<Vec<_>>().join("\n");
-                    snap.message = joined.chars().take(SHELL_OUTPUT_CAP).collect();
-                }
-                TaskManager::emit(app, sid, entry);
-                *last_emit = Instant::now();
-            }
-        };
+            TaskManager::emit(app, sid, entry);
+            *last_emit = Instant::now();
+        }
+    };
 
     let mut stdout_open = true;
     let mut stderr_open = true;
@@ -1192,13 +1220,23 @@ mod tests {
         assert!(running.contains("running"), "got: {running}");
         assert!(running.contains("explore the repo"));
 
-        sub.finish(None::<&tauri::AppHandle<tauri::Wry>>, "sess-1", false, "found 3 call sites".to_string());
+        sub.finish(
+            None::<&tauri::AppHandle<tauri::Wry>>,
+            "sess-1",
+            false,
+            "found 3 call sites".to_string(),
+        );
         let done = tm.status_json(&sub.task_id);
         assert!(done.contains("completed"), "got: {done}");
         assert!(done.contains("found 3 call sites"));
 
         let sub2 = tm.register_subagent("failing run");
-        sub2.finish(None::<&tauri::AppHandle<tauri::Wry>>, "sess-1", true, "Error: provider 500".to_string());
+        sub2.finish(
+            None::<&tauri::AppHandle<tauri::Wry>>,
+            "sess-1",
+            true,
+            "Error: provider 500".to_string(),
+        );
         let failed = tm.status_json(&sub2.task_id);
         assert!(failed.contains("failed"), "got: {failed}");
 
@@ -1244,7 +1282,12 @@ mod tests {
                         "200 OK"
                     };
                     let extra = if start > 0 && support_range {
-                        format!("Content-Range: bytes {}-{}/{}\r\n", start, body.len() - 1, body.len())
+                        format!(
+                            "Content-Range: bytes {}-{}/{}\r\n",
+                            start,
+                            body.len() - 1,
+                            body.len()
+                        )
                     } else {
                         String::new()
                     };
@@ -1275,11 +1318,16 @@ mod tests {
         std::env::set_var("RELAY_ALLOW_PRIVATE_DOWNLOADS", "1");
         let body: &'static [u8] = &[0u8; 1024 * 1024 * 2];
         let url = tauri::async_runtime::block_on(serve(body, true, Duration::ZERO));
-        
+
         let tm = TaskManager::new();
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("model.safetensors");
-        let id = tm.start_download(None::<&tauri::AppHandle>, "sid1", &url, dest.to_str().unwrap());
+        let id = tm.start_download(
+            None::<&tauri::AppHandle>,
+            "sid1",
+            &url,
+            dest.to_str().unwrap(),
+        );
         // Poll until terminal (2 MB over loopback is near-instant).
         let mut final_state = String::new();
         for _ in 0..200 {
@@ -1296,7 +1344,10 @@ mod tests {
         );
         let meta = std::fs::metadata(&dest).expect("dest file must exist");
         assert_eq!(meta.len(), 1024 * 1024 * 2);
-        assert!(!dest.with_extension("safetensors.part").exists(), ".part must be renamed away");
+        assert!(
+            !dest.with_extension("safetensors.part").exists(),
+            ".part must be renamed away"
+        );
     }
 
     #[test]
@@ -1304,14 +1355,19 @@ mod tests {
         std::env::set_var("RELAY_ALLOW_PRIVATE_DOWNLOADS", "1");
         let body: &'static [u8] = &[7u8; 1024 * 1024];
         let url = tauri::async_runtime::block_on(serve(body, true, Duration::ZERO));
-        
+
         let tm = TaskManager::new();
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("big.bin");
         // Pre-seed the .part with the first 512KB.
         let part = dest.with_extension("bin.part");
         std::fs::write(&part, &[7u8; 512 * 1024]).unwrap();
-        let id = tm.start_download(None::<&tauri::AppHandle>, "sid1", &url, dest.to_str().unwrap());
+        let id = tm.start_download(
+            None::<&tauri::AppHandle>,
+            "sid1",
+            &url,
+            dest.to_str().unwrap(),
+        );
         let mut final_state = String::new();
         for _ in 0..200 {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1336,11 +1392,16 @@ mod tests {
         // in flight when the test cancels.
         let body: &'static [u8] = &[0u8; 1024 * 1024 * 64];
         let url = tauri::async_runtime::block_on(serve(body, true, Duration::from_millis(5)));
-        
+
         let tm = TaskManager::new();
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("slow.bin");
-        let id = tm.start_download(None::<&tauri::AppHandle>, "sid1", &url, dest.to_str().unwrap());
+        let id = tm.start_download(
+            None::<&tauri::AppHandle>,
+            "sid1",
+            &url,
+            dest.to_str().unwrap(),
+        );
         // Give it a moment to start, then cancel.
         std::thread::sleep(std::time::Duration::from_millis(300));
         let cancel_msg = tm.cancel(&id);
@@ -1364,9 +1425,12 @@ mod tests {
 
     #[test]
     fn shell_captures_output_and_exit_code() {
-
         let tm = TaskManager::new();
-        let cmd = if cfg!(windows) { "echo relay-shell-test" } else { "echo relay-shell-test" };
+        let cmd = if cfg!(windows) {
+            "echo relay-shell-test"
+        } else {
+            "echo relay-shell-test"
+        };
         let id = tm.start_shell(None::<&tauri::AppHandle>, "sid1", cmd, None, None);
         let mut final_state = String::new();
         for _ in 0..200 {
@@ -1378,8 +1442,14 @@ mod tests {
             }
         }
         assert!(final_state.contains("completed"), "got: {final_state}");
-        assert!(final_state.contains("relay-shell-test"), "output must be captured: {final_state}");
-        assert!(final_state.contains("exit 0"), "exit code must be reported: {final_state}");
+        assert!(
+            final_state.contains("relay-shell-test"),
+            "output must be captured: {final_state}"
+        );
+        assert!(
+            final_state.contains("exit 0"),
+            "exit code must be reported: {final_state}"
+        );
     }
 
     #[test]
@@ -1396,7 +1466,10 @@ mod tests {
             foreground_shell_timeout(Some(5_000)),
             Duration::from_secs(SHELL_FOREGROUND_TIMEOUT_SECS)
         );
-        assert_eq!(foreground_shell_timeout(Some(0)), Duration::from_secs(SHELL_TEMPORARY_MIN_SECS));
+        assert_eq!(
+            foreground_shell_timeout(Some(0)),
+            Duration::from_secs(SHELL_TEMPORARY_MIN_SECS)
+        );
     }
 
     #[test]
@@ -1424,7 +1497,11 @@ mod tests {
         // killed by the engine (not left running) and finish Failed with the
         // timeout notice.
         let tm = TaskManager::new();
-        let cmd = if cfg!(windows) { "ping -n 30 127.0.0.1" } else { "sleep 30" };
+        let cmd = if cfg!(windows) {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
         let id = tm.start_shell(None::<&tauri::AppHandle>, "sid1", cmd, None, Some(1));
         let mut final_state = String::new();
         for _ in 0..200 {
@@ -1435,17 +1512,30 @@ mod tests {
                 break;
             }
         }
-        assert!(final_state.contains("failed"), "expected timeout failure, got: {final_state}");
-        assert!(final_state.contains("Timed out"), "must say WHY it died: {final_state}");
+        assert!(
+            final_state.contains("failed"),
+            "expected timeout failure, got: {final_state}"
+        );
+        assert!(
+            final_state.contains("Timed out"),
+            "must say WHY it died: {final_state}"
+        );
     }
 
     #[test]
     fn foreground_run_times_out_within_ceiling() {
         // Direct runner: a never-ending command under a 1s timeout returns
         // (with the timeout notice) instead of blocking for 30s.
-        let cmd = if cfg!(windows) { "ping -n 30 127.0.0.1" } else { "sleep 30" };
+        let cmd = if cfg!(windows) {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
         let out = run_shell_to_completion(cmd, None, Duration::from_secs(1));
-        assert!(out.contains("timed out"), "must carry the timeout notice: {out}");
+        assert!(
+            out.contains("timed out"),
+            "must carry the timeout notice: {out}"
+        );
     }
 
     #[test]
@@ -1472,4 +1562,3 @@ mod tests {
         );
     }
 }
-

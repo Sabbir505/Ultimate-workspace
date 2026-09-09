@@ -12,8 +12,8 @@
 
 use serde_json::{json, Value};
 
-use crate::chat::tools;
 use super::providers::ChatMessage;
+use crate::chat::tools;
 
 /// Monotonic synthetic id for tool calls we fabricate (Hermes fallback or
 /// fenced-block recovery). OpenAI expects every tool call to carry an `id`;
@@ -212,7 +212,12 @@ fn coerce_param_value(raw: &str) -> Value {
 /// `<tool>` blocks are display-only and stripped from re-sent history exactly
 /// like `<think>` blocks.
 pub(crate) fn tool_block(name: &str, args: &Value) -> String {
-    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let s = |k: &str| {
+        args.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     // A tool's own output must never contain the structural tags or it would
     // corrupt the block on the client: a literal `</tool>` truncates it, and
     // a literal `<tool>`/`<think>` opener prematurely starts a new segment
@@ -249,7 +254,11 @@ pub(crate) fn tool_block(name: &str, args: &Value) -> String {
             "code": sanitize(s("html")),
         })
     } else if name == tools::FETCH_URL || name == tools::OPEN_URL {
-        let verb = if name == tools::OPEN_URL { "Opening" } else { "Reading" };
+        let verb = if name == tools::OPEN_URL {
+            "Opening"
+        } else {
+            "Reading"
+        };
         json!({ "kind": "web", "title": format!("{verb} a web page"), "detail": s("url") })
     } else if name == tools::GET_SKILL {
         json!({ "kind": "tool", "title": "Loading skill", "detail": format!("/{}", s("slug")) })
@@ -270,7 +279,11 @@ pub(crate) fn tool_block(name: &str, args: &Value) -> String {
                 "replace": sanitize(s("replace")),
             })
         };
-        let verb = if name == tools::WRITE_FILE { "Writing" } else { "Editing" };
+        let verb = if name == tools::WRITE_FILE {
+            "Writing"
+        } else {
+            "Editing"
+        };
         json!({
             "kind": "edit",
             "title": format!("{verb} file \"{}\"", s("path")),
@@ -316,7 +329,11 @@ pub(crate) fn tool_block(name: &str, args: &Value) -> String {
         // Subagent chip: the frontend renders this as the same "SubAgent
         // <role> · <task>" chip the git sidebar uses (shine while running,
         // click opens the Agents pane).
-        let role = if s("subagent_type").is_empty() { "agent".to_string() } else { s("subagent_type") };
+        let role = if s("subagent_type").is_empty() {
+            "agent".to_string()
+        } else {
+            s("subagent_type")
+        };
         json!({
             "kind": "subagent",
             "title": "SubAgent",
@@ -412,8 +429,8 @@ const VERB_PROGRESSIVE: &[(&str, &str)] = &[
 
 /// Words that stay uppercase in the target phrase (they read as acronyms).
 const ACRONYMS: &[&str] = &[
-    "id", "ids", "url", "urls", "api", "pdf", "pdfs", "csv", "json", "html", "css", "sql",
-    "ui", "xls", "xlsx", "docx", "pptx", "db", "http", "https",
+    "id", "ids", "url", "urls", "api", "pdf", "pdfs", "csv", "json", "html", "css", "sql", "ui",
+    "xls", "xlsx", "docx", "pptx", "db", "http", "https",
 ];
 
 /// Humanize a raw tool id into a display title: progressive verb + target
@@ -520,16 +537,28 @@ mod tests {
 
     #[test]
     fn humanize_strips_prefix_and_conjugates_verb() {
-        assert_eq!(humanize_tool_title("relay_browser_create_document"), "Creating document");
-        assert_eq!(humanize_tool_title("mcp_notion_create_page"), "Creating page");
+        assert_eq!(
+            humanize_tool_title("relay_browser_create_document"),
+            "Creating document"
+        );
+        assert_eq!(
+            humanize_tool_title("mcp_notion_create_page"),
+            "Creating page"
+        );
         assert_eq!(humanize_tool_title("search_files"), "Searching files");
         assert_eq!(humanize_tool_title("get_weather"), "Reading weather");
     }
 
     #[test]
     fn humanize_keeps_acronyms_and_falls_back_to_running() {
-        assert_eq!(humanize_tool_title("export_pdf_report"), "Exporting PDF report");
-        assert_eq!(humanize_tool_title("fetch_url_snapshot"), "Fetching URL snapshot");
+        assert_eq!(
+            humanize_tool_title("export_pdf_report"),
+            "Exporting PDF report"
+        );
+        assert_eq!(
+            humanize_tool_title("fetch_url_snapshot"),
+            "Fetching URL snapshot"
+        );
         // No known verb: still readable, never a raw snake_case id.
         assert_eq!(humanize_tool_title("zombie_mode"), "Running zombie mode");
     }

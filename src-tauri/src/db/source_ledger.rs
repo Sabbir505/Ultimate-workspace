@@ -171,28 +171,8 @@ mod tests {
         let conn = mem();
         let a = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
         let b = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
-        add_source_note(
-            &conn,
-            &a.id,
-            "https://a",
-            "A",
-            "a",
-            "a",
-            None,
-            None,
-            None,
-        ).unwrap();
-        add_source_note(
-            &conn,
-            &b.id,
-            "https://b",
-            "B",
-            "b",
-            "b",
-            None,
-            None,
-            None,
-        ).unwrap();
+        add_source_note(&conn, &a.id, "https://a", "A", "a", "a", None, None, None).unwrap();
+        add_source_note(&conn, &b.id, "https://b", "B", "b", "b", None, None, None).unwrap();
         assert_eq!(list_source_notes(&conn, &a.id).unwrap().len(), 1);
         assert_eq!(list_source_notes(&conn, &b.id).unwrap().len(), 1);
         // Clearing one session leaves the other intact.
@@ -223,17 +203,7 @@ mod tests {
         // Requires foreign_keys = ON (the `mem()` helper sets it).
         let conn = mem();
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
-        add_source_note(
-            &conn,
-            &cs.id,
-            "https://x",
-            "X",
-            "x",
-            "x",
-            None,
-            None,
-            None,
-        ).unwrap();
+        add_source_note(&conn, &cs.id, "https://x", "X", "x", "x", None, None, None).unwrap();
         assert_eq!(list_source_notes(&conn, &cs.id).unwrap().len(), 1);
 
         delete_chat_session(&conn, &cs.id).unwrap();

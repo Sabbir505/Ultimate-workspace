@@ -89,9 +89,16 @@ pub fn is_blocked_ip(ip: &IpAddr) -> bool {
 /// default, which changes what the SSRF guards can meaningfully check: the
 /// TCP peer becomes the PROXY (127.0.0.1:7890), not the target host.
 pub(super) fn proxy_env_set() -> bool {
-    ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
-        .iter()
-        .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
+    [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ]
+    .iter()
+    .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
 }
 
 /// True when `host` resolves to an IP in a blocked range (or fails to
@@ -157,11 +164,10 @@ struct JinaRateLimiter {
     hits: std::sync::Mutex<VecDeque<Instant>>,
 }
 
-static JINA_LIMITER: std::sync::LazyLock<JinaRateLimiter> = std::sync::LazyLock::new(|| {
-    JinaRateLimiter {
+static JINA_LIMITER: std::sync::LazyLock<JinaRateLimiter> =
+    std::sync::LazyLock::new(|| JinaRateLimiter {
         hits: std::sync::Mutex::new(VecDeque::new()),
-    }
-});
+    });
 
 /// True when a Jina request is allowed under the rolling 20 RPM window;
 /// records the hit when allowed.
@@ -362,7 +368,7 @@ async fn fetch_url_direct(client: &reqwest::Client, url: &str) -> Result<FetchBo
         body_buf.extend_from_slice(&chunk);
     }
     let _ = truncated; // extraction quality note only; the text cap governs output
-    // Lossy: a truncate may split a multi-byte char mid-sequence.
+                       // Lossy: a truncate may split a multi-byte char mid-sequence.
     let body = String::from_utf8_lossy(&body_buf).into_owned();
     Ok(FetchBody::Html(body))
 }
@@ -389,7 +395,12 @@ fn extract_html(url: &str, html: &str) -> String {
             };
             let body = truncate_chars(text, FETCH_URL_MAX_TEXT_CHARS);
             let mut out = format!("Title: {title}\nURL: {url}\n");
-            if let Some(byline) = article.byline.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(byline) = article
+                .byline
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 out.push_str(&format!("Byline: {byline}\n"));
             }
             if let Some(published) = article
@@ -438,19 +449,10 @@ fn html_to_text(html: &str) -> String {
     let without_blocks = remove_blocks(
         html,
         &[
-            "script",
-            "style",
-            "noscript",
-            "head",
-            "svg",
+            "script", "style", "noscript", "head", "svg",
             // Page chrome that carries no article content and would otherwise
             // drown the real text in nav links / cookie notices / ad slots.
-            "nav",
-            "header",
-            "footer",
-            "aside",
-            "form",
-            "iframe",
+            "nav", "header", "footer", "aside", "form", "iframe",
         ],
     );
     let stripped = strip_html(&without_blocks);
@@ -516,7 +518,6 @@ fn remove_blocks(html: &str, tags: &[&str]) -> String {
     }
     s
 }
-
 
 /// One organic search result. `pub(crate)` so the fallback engines (the
 /// in-app browser SERP in `serp_browser.rs`) can produce hits and the
@@ -781,8 +782,7 @@ pub(crate) async fn serp_via_reader(
 ) -> Result<Vec<SearchHit>, String> {
     if !jina_rate_limit_ok() {
         return Err(
-            "jina reader rate limit reached (20 req/min keyless); retry in a minute."
-                .to_string(),
+            "jina reader rate limit reached (20 req/min keyless); retry in a minute.".to_string(),
         );
     }
     let target = format!(
@@ -1019,7 +1019,7 @@ fn serp_page_blocked(body: &str) -> bool {
         "verify you are human",
         "just a moment", // Cloudflare JS challenge
         "cf-challenge",
-        "attention required",           // Cloudflare block
+        "attention required",            // Cloudflare block
         "enable javascript and cookies", // Cloudflare / PerimeterX wording
     ];
     let lower = body.to_ascii_lowercase();
@@ -1033,10 +1033,7 @@ fn serp_page_blocked(body: &str) -> bool {
 /// its rate limiter throttles) with a browser User-Agent and parse the result
 /// anchors out of the (small, stable) HTML the endpoint emits. This is the
 /// keyless primary search source.
-async fn duckduckgo_html(
-    client: &reqwest::Client,
-    query: &str,
-) -> Result<Vec<SearchHit>, String> {
+async fn duckduckgo_html(client: &reqwest::Client, query: &str) -> Result<Vec<SearchHit>, String> {
     let url = "https://html.duckduckgo.com/html/";
     let resp = client
         .post(url)
@@ -1221,7 +1218,10 @@ fn parse_mojeek_html(html: &str) -> Vec<SearchHit> {
         let li_start = search_from + rel;
         // Skip `<li`-prefixed tags like `<link`.
         let after = lower[li_start + 3..].chars().next();
-        if !matches!(after, Some(' ') | Some('>') | Some('\t') | Some('\n') | Some('\r')) {
+        if !matches!(
+            after,
+            Some(' ') | Some('>') | Some('\t') | Some('\n') | Some('\r')
+        ) {
             search_from = li_start + 3;
             continue;
         }
@@ -1252,7 +1252,9 @@ fn parse_mojeek_html(html: &str) -> Vec<SearchHit> {
             }
             scan = close_gt + 1;
         }
-        let Some((url, text_start)) = href else { continue };
+        let Some((url, text_start)) = href else {
+            continue;
+        };
         let title_end = match block_lower[text_start..].find("</a>") {
             Some(e) => text_start + e,
             None => continue,
@@ -1313,10 +1315,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(b) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 out.push(b);
                 i += 3;
                 continue;
@@ -1328,10 +1329,7 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-async fn wikipedia_search(
-    client: &reqwest::Client,
-    query: &str,
-) -> Result<Vec<SearchHit>, String> {
+async fn wikipedia_search(client: &reqwest::Client, query: &str) -> Result<Vec<SearchHit>, String> {
     let url = "https://en.wikipedia.org/w/api.php";
     let resp = client
         .get(url)
@@ -1367,10 +1365,7 @@ fn parse_wikipedia(json: &Value) -> Vec<SearchHit> {
             };
             let snippet_raw = r.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
             let snippet = strip_html(snippet_raw);
-            let url = format!(
-                "https://en.wikipedia.org/wiki/{}",
-                title.replace(' ', "_")
-            );
+            let url = format!("https://en.wikipedia.org/wiki/{}", title.replace(' ', "_"));
             hits.push(SearchHit {
                 title: title.to_string(),
                 url,
@@ -1413,7 +1408,6 @@ fn strip_html(input: &str) -> String {
 // straightforward — no traversal tricks, no shell-out — and report errors as
 // plain text fed back to the model so it can self-correct.
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1441,8 +1435,14 @@ mod tests {
 
     #[test]
     fn percent_encode_query_keeps_unreserved_and_escapes_the_rest() {
-        assert_eq!(percent_encode_query("rust 2026 &async?"), "rust%202026%20%26async%3F");
-        assert_eq!(percent_encode_query("plain-words_1.0~a"), "plain-words_1.0~a");
+        assert_eq!(
+            percent_encode_query("rust 2026 &async?"),
+            "rust%202026%20%26async%3F"
+        );
+        assert_eq!(
+            percent_encode_query("plain-words_1.0~a"),
+            "plain-words_1.0~a"
+        );
     }
 
     #[test]
@@ -1487,7 +1487,11 @@ mod tests {
             "- [relative](/only/relative) skipped\n",
         );
         let hits = parse_markdown_links(md);
-        assert_eq!(hits.len(), 2, "organic + wrapped kept; host/image/relative skipped");
+        assert_eq!(
+            hits.len(),
+            2,
+            "organic + wrapped kept; host/image/relative skipped"
+        );
         assert_eq!(hits[0].url, "https://www.rust-lang.org/");
         assert_eq!(hits[1].url, "https://doc.rust-lang.org/", "uddg unwrapped");
     }
@@ -1505,8 +1509,16 @@ mod tests {
         // Deterministic regardless of proxy env: the SSRF shapes that matter
         // (literal loopback / LAN / metadata addresses) are blocked by name
         // before any DNS is consulted. Public literals stay allowed.
-        for host in ["127.0.0.1", "10.0.0.5", "192.168.1.10", "172.16.0.1",
-                     "169.254.169.254", "100.64.0.1", "::1", "[::ffff:127.0.0.1]"] {
+        for host in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "192.168.1.10",
+            "172.16.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "::1",
+            "[::ffff:127.0.0.1]",
+        ] {
             assert!(host_blocked(host), "{host} must be blocked");
         }
         assert!(!host_blocked("93.184.216.34"));
@@ -1524,7 +1536,6 @@ mod tests {
         assert!(!text.to_lowercase().contains("<p>"));
     }
 
-
     #[test]
     fn parse_mojeek_html_extracts_results_tolerantly() {
         // Fixture shaped like Mojeek's SERP: <li> blocks with an <h2><a href>
@@ -1540,7 +1551,11 @@ mod tests {
             r#"</ul>"#,
         );
         let hits = parse_mojeek_html(html);
-        assert_eq!(hits.len(), 2, "external-anchor results parsed, others skipped");
+        assert_eq!(
+            hits.len(),
+            2,
+            "external-anchor results parsed, others skipped"
+        );
         assert_eq!(hits[0].url, "https://www.rust-lang.org/");
         assert_eq!(hits[0].title, "Rust Programming Language");
         assert_eq!(
@@ -1595,8 +1610,7 @@ mod tests {
         assert_eq!(hits.len(), 2, "both results parsed");
         assert_eq!(hits[0].title, "Rust Programming Language");
         assert_eq!(
-            hits[0].url,
-            "https://rust-lang.org/",
+            hits[0].url, "https://rust-lang.org/",
             "uddg redirect must be unwrapped and percent-decoded"
         );
         assert_eq!(hits[0].snippet, "A systems language...");
@@ -1653,11 +1667,8 @@ mod tests {
     #[ignore = "hits the live network"]
     fn fetch_url_live_returns_text() {
         let client = reqwest::Client::new();
-        let out = tauri::async_runtime::block_on(fetch_url(
-            &client,
-            "https://example.com",
-        ))
-        .unwrap();
+        let out =
+            tauri::async_runtime::block_on(fetch_url(&client, "https://example.com")).unwrap();
         println!("{out}");
         assert!(out.contains("Example Domain"));
         assert!(!out.to_lowercase().contains("<html"));
@@ -1738,5 +1749,4 @@ mod tests {
         assert!(!host_blocked_in("example.com", true));
         assert!(host_blocked_in("127.0.0.1", true));
     }
-
 }

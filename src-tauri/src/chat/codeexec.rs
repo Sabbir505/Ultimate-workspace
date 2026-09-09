@@ -62,10 +62,7 @@ pub(crate) async fn wait_with_bounded_output(
 }
 
 /// Drain one child pipe into a bounded tail, chunk by chunk.
-async fn drain_pipe_bounded<R: tokio::io::AsyncRead + Unpin>(
-    mut pipe: R,
-    cap: usize,
-) -> Vec<u8> {
+async fn drain_pipe_bounded<R: tokio::io::AsyncRead + Unpin>(mut pipe: R, cap: usize) -> Vec<u8> {
     use tokio::io::AsyncReadExt;
     let mut tail = crate::util::BoundedTail::new(cap);
     let mut chunk = vec![0u8; 64 * 1024];
@@ -246,7 +243,11 @@ pub async fn run_code(language: &str, code: &str) -> String {
             let stderr = String::from_utf8_lossy(&stderr_bytes);
             let code = status.code();
             let mut s = String::new();
-            s.push_str(&format!("Exit code: {}\n", code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into())));
+            s.push_str(&format!(
+                "Exit code: {}\n",
+                code.map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into())
+            ));
             if !stdout.trim().is_empty() {
                 s.push_str("\n--- stdout ---\n");
                 s.push_str(&stdout);
@@ -304,10 +305,7 @@ mod tests {
     #[test]
     #[ignore = "requires python3 on PATH"]
     fn enforces_timeout() {
-        let out = tauri::async_runtime::block_on(run_code(
-            "python",
-            "import time\ntime.sleep(60)",
-        ));
+        let out = tauri::async_runtime::block_on(run_code("python", "import time\ntime.sleep(60)"));
         assert!(out.contains("timed out"), "got: {out}");
     }
 
@@ -374,10 +372,9 @@ mod tests {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let child = cmd.spawn().expect("spawn shell");
-        let (status, out, err) = tauri::async_runtime::block_on(
-            wait_with_bounded_output(child, 4096),
-        )
-        .expect("wait succeeds");
+        let (status, out, err) =
+            tauri::async_runtime::block_on(wait_with_bounded_output(child, 4096))
+                .expect("wait succeeds");
         assert!(status.success());
         let out = String::from_utf8_lossy(&out);
         let err = String::from_utf8_lossy(&err);

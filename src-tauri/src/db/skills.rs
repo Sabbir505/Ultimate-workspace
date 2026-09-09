@@ -4,8 +4,8 @@
 
 use rusqlite::{params, Connection};
 
-use crate::types::*;
 use super::{new_id, now_ts, DbResult};
+use crate::types::*;
 
 // ---- skills ----
 
@@ -31,8 +31,8 @@ pub fn list_skills(conn: &Connection, project_id: Option<&str>) -> DbResult<Vec<
             rows.collect()
         }
         None => {
-            let mut stmt =
-                conn.prepare("SELECT * FROM skills WHERE scope = 'global' ORDER BY created_at DESC")?;
+            let mut stmt = conn
+                .prepare("SELECT * FROM skills WHERE scope = 'global' ORDER BY created_at DESC")?;
             let rows = stmt.query_map([], map_skill)?;
             rows.collect()
         }
@@ -89,9 +89,8 @@ fn map_quick_action(row: &rusqlite::Row) -> rusqlite::Result<QuickAction> {
 }
 
 pub fn list_quick_actions(conn: &Connection, project_id: &str) -> DbResult<Vec<QuickAction>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM quick_actions WHERE project_id = ?1 ORDER BY rowid",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM quick_actions WHERE project_id = ?1 ORDER BY rowid")?;
     let rows = stmt.query_map(params![project_id], map_quick_action)?;
     rows.collect()
 }
@@ -139,8 +138,8 @@ pub fn delete_quick_action(conn: &Connection, id: &str) -> DbResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
     use super::*;
+    use rusqlite::Connection;
 
     #[test]
     fn skill_round_trip_and_scoping() {
@@ -164,7 +163,8 @@ mod tests {
     fn quick_action_round_trip() {
         let conn = super::super::mem();
         let p = super::super::add_project(&conn, "/tmp/a", "a", false).unwrap();
-        let qa = create_quick_action(&conn, &p.id, "dev", "npm run dev", Some("Ctrl+D"), true).unwrap();
+        let qa =
+            create_quick_action(&conn, &p.id, "dev", "npm run dev", Some("Ctrl+D"), true).unwrap();
         assert!(qa.run_on_worktree);
         assert_eq!(qa.keybinding.as_deref(), Some("Ctrl+D"));
 

@@ -21,9 +21,8 @@ fn map_workspace(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceRecord> {
 }
 
 pub fn list_workspaces(conn: &Connection, project_id: &str) -> DbResult<Vec<WorkspaceRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM workspaces WHERE project_id = ?1 ORDER BY updated_at DESC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM workspaces WHERE project_id = ?1 ORDER BY updated_at DESC")?;
     let rows = stmt.query_map(params![project_id], map_workspace)?;
     rows.collect()
 }

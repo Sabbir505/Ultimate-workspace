@@ -164,7 +164,11 @@ pub fn generate(cfg: &TotpConfig, at_unix: u64) -> Result<String, String> {
         mac[offset as usize + 3],
     ]);
     let modulus = 10u64.pow(cfg.digits);
-    Ok(format!("{:0width$}", bin as u64 % modulus, width = cfg.digits as usize))
+    Ok(format!(
+        "{:0width$}",
+        bin as u64 % modulus,
+        width = cfg.digits as usize
+    ))
 }
 
 /// Seconds remaining in the current window — surfaced to the agent so it can
@@ -239,7 +243,8 @@ mod tests {
         assert_eq!(generate(&cfg, 59).unwrap().len(), 8);
         // URI params win over the tool-call defaults — the seed above is 16
         // chars so it must still decode.
-        let minimal = TotpConfig::from_seed("otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ", 6, 30).unwrap();
+        let minimal =
+            TotpConfig::from_seed("otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ", 6, 30).unwrap();
         assert_eq!(minimal.digits, 6);
         assert_eq!(minimal.algo, TotpAlgo::Sha1);
         assert!(TotpConfig::from_seed("otpauth://totp/x?digits=6", 6, 30).is_err());

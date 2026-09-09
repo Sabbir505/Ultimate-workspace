@@ -126,11 +126,7 @@ struct HitSink<'a> {
 impl<'a> Sink for HitSink<'a> {
     type Error = std::io::Error;
 
-    fn matched(
-        &mut self,
-        _searcher: &Searcher,
-        mat: &SinkMatch<'_>,
-    ) -> Result<bool, Self::Error> {
+    fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
         if self.hits.len() >= self.cap {
             *self.truncated = true;
             return Ok(false);
@@ -301,7 +297,15 @@ pub(super) fn fs_search_content(args: &Value) -> ToolOutcome {
                     Ok(p) => p.display().to_string(),
                     Err(_) => entry.path().display().to_string(),
                 };
-                match search_one_file(&matcher, &entry.path(), &display, &mut hits, max_results, &mut truncated, &mut notes) {
+                match search_one_file(
+                    &matcher,
+                    &entry.path(),
+                    &display,
+                    &mut hits,
+                    max_results,
+                    &mut truncated,
+                    &mut notes,
+                ) {
                     Ok(true) => files_scanned += 1,
                     Ok(false) => files_skipped += 1,
                     Err(_) => files_skipped += 1,
@@ -438,11 +442,8 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "relay_search_content_{}_{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("relay_search_content_{}_{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (name, content) in files {
@@ -530,8 +531,10 @@ mod tests {
                 format!("needle at start of file {i}\nneedle at end of file {i}\n"),
             ));
         }
-        let refs: Vec<(&str, &str)> =
-            files.iter().map(|(n, c)| (n.as_str(), c.as_str())).collect();
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(n, c)| (n.as_str(), c.as_str()))
+            .collect();
         let dir = make_tree(&refs);
         let out = fs_search_content(&json!({
             "path": dir.display().to_string(),

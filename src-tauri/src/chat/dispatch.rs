@@ -20,11 +20,11 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::chat::stream_events;
 use crate::chat::tools::ToolOutcome;
 use crate::chat::{permission, tools, ChatManager};
+use crate::db;
 use crate::types::{
     ChatApprovalRequestPayload, ChatApprovalResolvedPayload, ChatArtifactPayload,
     ChatOpenBrowserPayload, ChatOpenPreviewPayload, ChatTokenPayload,
 };
-use crate::db;
 
 /// Push a token to the accumulated full message and emit it to the frontend as
 /// a `chat:token` event. Empty tokens are no-ops.
@@ -154,9 +154,24 @@ pub(crate) fn harness_tool_summary(tool: &str, input: &Value) -> String {
     };
     // "plan" is Claude Code's ExitPlanMode payload — without it the
     // plan-mode approval card would give the user nothing to judge.
-    let target = pick(&["file_path", "path", "notebook_path", "command", "pattern", "url", "prompt", "plan"])
-        .map(|t| if t.chars().count() > 160 { format!("{}…", t.chars().take(160).collect::<String>()) } else { t })
-        .unwrap_or_default();
+    let target = pick(&[
+        "file_path",
+        "path",
+        "notebook_path",
+        "command",
+        "pattern",
+        "url",
+        "prompt",
+        "plan",
+    ])
+    .map(|t| {
+        if t.chars().count() > 160 {
+            format!("{}…", t.chars().take(160).collect::<String>())
+        } else {
+            t
+        }
+    })
+    .unwrap_or_default();
     let verb = match tool {
         "Write" => "Write a file at",
         "Edit" | "MultiEdit" | "NotebookEdit" => "Edit a file at",
@@ -337,7 +352,8 @@ async fn run_gated_mcp_tool(
             String::new()
         }
     );
-    let (pending_id, rx) = mgr.register_pending_approval(sid, &entry.wire_name, args.clone(), summary.clone());
+    let (pending_id, rx) =
+        mgr.register_pending_approval(sid, &entry.wire_name, args.clone(), summary.clone());
 
     let _ = app.emit(
         "chat:approval-request",
@@ -481,18 +497,27 @@ fn connector_tool_summary(
 fn tool_step_description(name: &str, args: &Value) -> String {
     match name {
         "write_file" | "write" | "Edit" => {
-            let path = args.get("file_path").or_else(|| args.get("path"))
-                .and_then(|v| v.as_str()).unwrap_or("file");
+            let path = args
+                .get("file_path")
+                .or_else(|| args.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("file");
             format!("Write {}", path)
         }
         "read_file" | "read" | "Read" => {
-            let path = args.get("file_path").or_else(|| args.get("path"))
-                .and_then(|v| v.as_str()).unwrap_or("file");
+            let path = args
+                .get("file_path")
+                .or_else(|| args.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("file");
             format!("Read {}", path)
         }
         "run_shell" | "shell" | "RunShell" => {
-            let cmd = args.get("command").or_else(|| args.get("cmd"))
-                .and_then(|v| v.as_str()).unwrap_or("command");
+            let cmd = args
+                .get("command")
+                .or_else(|| args.get("cmd"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("command");
             // Truncate long commands (char-safe: the command is model text and
             // may be multibyte — a byte slice here panics mid-turn).
             let short = if cmd.chars().count() > 60 {
@@ -579,11 +604,23 @@ pub fn capability_probe_refusal(command: &str) -> Option<String> {
 async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -> String {
     use tools::{CANCEL_TASK, DOWNLOAD_FILE, DOWNLOAD_PROGRESS, GET_TASK_STATUS, RUN_SHELL, TASK};
     let tasks = app.state::<crate::TaskState>();
-    let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
     match name {
         DOWNLOAD_FILE => {
-            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let dest = args.get("dest_path").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let url = args
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let dest = args
+                .get("dest_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
             if url.is_empty() {
                 return "Error: download_file requires a non-empty \"url\".".to_string();
             }
@@ -613,7 +650,11 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
             tasks.0.cancel(task_id)
         }
         RUN_SHELL => {
-            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
             if command.is_empty() {
                 return "Error: run_shell requires a non-empty \"command\".".to_string();
             }
@@ -658,7 +699,11 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
             let cmd_owned = command.to_string();
             let wd_owned = workdir.map(str::to_string);
             tokio::task::spawn_blocking(move || {
-                crate::chat::tasks::run_shell_to_completion(&cmd_owned, wd_owned.as_deref(), timeout)
+                crate::chat::tasks::run_shell_to_completion(
+                    &cmd_owned,
+                    wd_owned.as_deref(),
+                    timeout,
+                )
             })
             .await
             .unwrap_or_else(|e| format!("shell task failed: {e}"))
@@ -672,11 +717,18 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
             // chat:subagent-tokens, the main conversation keeps working, and
             // the result lands in get_task_status (pollable) with the entry
             // finalized to Completed/Failed/Cancelled.
-            let background = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+            let background = args
+                .get("background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if !background {
                 return run_task_subagent(app, sid, args, &tasks).await;
             }
-            let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let prompt = args
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
             if prompt.is_empty() {
                 "Error: Task requires a non-empty \"prompt\".".to_string()
             } else {
@@ -724,17 +776,25 @@ async fn run_task_subagent(
     args: &Value,
     _tasks: &crate::TaskState,
 ) -> String {
-    use crate::chat::providers::{
-        AnthropicProvider, OpenAIProvider, OpenRouterProvider,
-    };
+    use crate::chat::providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
     use crate::secrets;
-    use crate::types::{
-        SubagentDonePayload, SubagentSpawnPayload,
-    };
+    use crate::types::{SubagentDonePayload, SubagentSpawnPayload};
 
-    let description = args.get("description").and_then(|v| v.as_str()).unwrap_or("").trim();
-    let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("").trim();
-    let role = args.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent").to_string();
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let role = args
+        .get("subagent_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("agent")
+        .to_string();
     if prompt.is_empty() {
         return "Error: Task requires a non-empty \"prompt\".".to_string();
     }
@@ -755,10 +815,7 @@ async fn run_task_subagent(
         if let Some(pid) = &project_id {
             let db_state = app.state::<crate::DbState>();
             let conn = db_state.0.lock();
-            db::get_project(&conn, pid)
-                .ok()
-                .flatten()
-                .map(|p| p.path)
+            db::get_project(&conn, pid).ok().flatten().map(|p| p.path)
         } else {
             None
         }
@@ -873,9 +930,7 @@ async fn run_task_subagent(
             // back into the follow-up rounds' assistant messages.
             "thinking": {"type": "enabled", "budget_tokens": 2048},
         });
-        run_subagent_loop(
-            &client, &url, &api_key, &mut body, app, sid, &sub_id, true,
-        ).await
+        run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, &sub_id, true).await
     } else {
         let base = base_url
             .as_deref()
@@ -894,9 +949,7 @@ async fn run_task_subagent(
                 {"role": "user", "content": prompt},
             ],
         });
-        run_subagent_loop(
-            &client, &url, &api_key, &mut body, app, sid, &sub_id, false,
-        ).await
+        run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, &sub_id, false).await
     };
 
     match result {
@@ -1074,17 +1127,19 @@ async fn run_subagent_loop(
         }
         // B-10: bound time-to-headers (a hung subagent request used to hang
         // the whole parent turn).
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            req.send(),
-        )
-        .await
-        .map_err(|_| "subagent request timed out waiting for response headers (60s)".to_string())?
-        .map_err(|e| format!("request failed: {e}"))?;
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(60), req.send())
+            .await
+            .map_err(|_| {
+                "subagent request timed out waiting for response headers (60s)".to_string()
+            })?
+            .map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status();
         if !status.is_success() {
             let b = resp.text().await.unwrap_or_default();
-            return Err(format!("HTTP {status}: {}", crate::util::truncate_chars(&b, 500)));
+            return Err(format!(
+                "HTTP {status}: {}",
+                crate::util::truncate_chars(&b, 500)
+            ));
         }
 
         let mut stream = resp.bytes_stream();
@@ -1165,8 +1220,7 @@ async fn run_subagent_loop(
                                             .or_insert_with(|| (String::new(), String::new()))
                                             .0
                                             .push_str(c);
-                                        let clean =
-                                            crate::chat::streaming::sanitize_stream_text(c);
+                                        let clean = crate::chat::streaming::sanitize_stream_text(c);
                                         output.push_str(&clean);
                                         emit(&clean);
                                     }
@@ -1196,22 +1250,24 @@ async fn run_subagent_loop(
                                     // — raw `c` feeds the round echo, the UI /
                                     // persisted output gets the sanitized text.
                                     round_text.push_str(c);
-                                    let clean =
-                                        crate::chat::streaming::sanitize_stream_text(c);
+                                    let clean = crate::chat::streaming::sanitize_stream_text(c);
                                     output.push_str(&clean);
                                     emit(&clean);
                                 }
                             }
-                            if dtype == Some("input_json_delta")
-                            {
+                            if dtype == Some("input_json_delta") {
                                 if let Some(idx) = v.get("index").and_then(|i| i.as_i64()) {
                                     let piece = v
                                         .pointer("/delta/partial_json")
                                         .and_then(|x| x.as_str())
                                         .unwrap_or("");
-                                    ant_calls.entry(idx).or_insert_with(|| {
-                                        (String::new(), String::new(), String::new())
-                                    }).2.push_str(piece);
+                                    ant_calls
+                                        .entry(idx)
+                                        .or_insert_with(|| {
+                                            (String::new(), String::new(), String::new())
+                                        })
+                                        .2
+                                        .push_str(piece);
                                 }
                             }
                         }
@@ -1255,7 +1311,8 @@ async fn run_subagent_loop(
                         .pointer("/choices/0/delta/reasoning_content")
                         .and_then(|x| x.as_str())
                         .or_else(|| {
-                            v.pointer("/choices/0/delta/reasoning").and_then(|x| x.as_str())
+                            v.pointer("/choices/0/delta/reasoning")
+                                .and_then(|x| x.as_str())
                         })
                     {
                         if !r.is_empty() {
@@ -1269,7 +1326,9 @@ async fn run_subagent_loop(
                             emit(&clean);
                         }
                     }
-                    if let Some(c) = v.pointer("/choices/0/delta/content").and_then(|x| x.as_str())
+                    if let Some(c) = v
+                        .pointer("/choices/0/delta/content")
+                        .and_then(|x| x.as_str())
                     {
                         if !c.is_empty() {
                             if in_think {
@@ -1285,8 +1344,9 @@ async fn run_subagent_loop(
                             emit(&clean);
                         }
                     }
-                    if let Some(tcs) =
-                        v.pointer("/choices/0/delta/tool_calls").and_then(|x| x.as_array())
+                    if let Some(tcs) = v
+                        .pointer("/choices/0/delta/tool_calls")
+                        .and_then(|x| x.as_array())
                     {
                         for tc in tcs {
                             let idx = tc.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
@@ -1294,21 +1354,20 @@ async fn run_subagent_loop(
                             // are user-configured (untrusted), and oai_calls
                             // grows one entry per distinct index a hostile or
                             // buggy endpoint sends.
-                            if idx < 0 || idx as usize > crate::chat::streaming::MAX_STREAM_BLOCK_INDEX {
+                            if idx < 0
+                                || idx as usize > crate::chat::streaming::MAX_STREAM_BLOCK_INDEX
+                            {
                                 continue;
                             }
-                            let entry =
-                                oai_calls.entry(idx).or_insert_with(|| {
-                                    (String::new(), String::new(), String::new())
-                                });
+                            let entry = oai_calls
+                                .entry(idx)
+                                .or_insert_with(|| (String::new(), String::new(), String::new()));
                             if let Some(id) = tc.get("id").and_then(|x| x.as_str()) {
                                 if !id.is_empty() {
                                     entry.0 = id.to_string();
                                 }
                             }
-                            if let Some(n) =
-                                tc.pointer("/function/name").and_then(|x| x.as_str())
-                            {
+                            if let Some(n) = tc.pointer("/function/name").and_then(|x| x.as_str()) {
                                 if !n.is_empty() {
                                     entry.1 = n.to_string();
                                 }
@@ -1352,9 +1411,7 @@ async fn run_subagent_loop(
             let mut blocks: Vec<Value> = Vec::new();
             for (_idx, (text, sig)) in ant_think.iter() {
                 if !text.is_empty() {
-                    blocks.push(
-                        json!({ "type": "thinking", "thinking": text, "signature": sig }),
-                    );
+                    blocks.push(json!({ "type": "thinking", "thinking": text, "signature": sig }));
                 }
             }
             if !round_text.trim().is_empty() {
@@ -1481,7 +1538,10 @@ async fn run_gated_system_tool(
 /// only guard on create/delete/run-now in the safer modes, so it must name
 /// what will change.
 fn automation_tool_summary(name: &str, args: &Value) -> String {
-    let id = args.get("automation_id").and_then(|v| v.as_str()).unwrap_or("");
+    let id = args
+        .get("automation_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let label = |v: &Value| {
         v.get("name")
             .and_then(|n| n.as_str())
@@ -1609,7 +1669,9 @@ async fn run_attach_tool(
         let already_attached = if is_mcp {
             caps.mcp_tools.iter().any(|e| e.server_id == id)
         } else {
-            caps.attached_connectors.iter().any(|c| c.connector_id == id)
+            caps.attached_connectors
+                .iter()
+                .any(|c| c.connector_id == id)
         };
         if already_attached {
             return format!("{display} is already attached — its tools are in your tool list; call them directly.");
@@ -1925,10 +1987,7 @@ pub(crate) async fn run_tool(
         // against an empty root list).
         if name == tools::DOWNLOAD_FILE
             && !caps.fs_roots.is_empty()
-            && !permission::path_within_scope(
-                &fs_target_path(name, args),
-                &caps.fs_roots,
-            )
+            && !permission::path_within_scope(&fs_target_path(name, args), &caps.fs_roots)
         {
             return format!(
                 "Error: {name} is gated — destination path is outside the granted roots. \
@@ -1952,15 +2011,13 @@ pub(crate) async fn run_tool(
         // per-action card. The hard scope-gate below still runs for mutating
         // tools, so a rule can never grant writes outside the enabled/dir
         // scope — it only suppresses the approval prompt.
-        let decision =
-            if permission::any_rule_allows(&caps.fs_rules, name, &target) {
-                permission::PermissionDecision::AutoRun
-            } else {
-                permission::check_permission(sandbox, approval, name, &target, &caps.fs_roots)
-            };
+        let decision = if permission::any_rule_allows(&caps.fs_rules, name, &target) {
+            permission::PermissionDecision::AutoRun
+        } else {
+            permission::check_permission(sandbox, approval, name, &target, &caps.fs_roots)
+        };
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
-            return run_gated_fs_tool(client, artifacts_dir, caps, mgr, app, sid, name, args)
-                .await;
+            return run_gated_fs_tool(client, artifacts_dir, caps, mgr, app, sid, name, args).await;
         }
         // AutoRun: a mutating tool call still has to lie within a granted
         // root. The check below is the hard scope gate that turns
@@ -2063,11 +2120,19 @@ async fn run_browser_tool(
     artifacts_dir: &std::path::Path,
     sid: &str,
 ) -> Option<String> {
-    use tools::{BROWSER_CLICK, BROWSER_EXTRACT, BROWSER_OBSERVE, BROWSER_READ, BROWSER_SCREENSHOT, BROWSER_SCROLL, BROWSER_TYPE};
+    use tools::{
+        BROWSER_CLICK, BROWSER_EXTRACT, BROWSER_OBSERVE, BROWSER_READ, BROWSER_SCREENSHOT,
+        BROWSER_SCROLL, BROWSER_TYPE,
+    };
     if !matches!(
         name,
-        BROWSER_READ | BROWSER_CLICK | BROWSER_TYPE | BROWSER_SCROLL | BROWSER_SCREENSHOT
-            | BROWSER_OBSERVE | BROWSER_EXTRACT
+        BROWSER_READ
+            | BROWSER_CLICK
+            | BROWSER_TYPE
+            | BROWSER_SCROLL
+            | BROWSER_SCREENSHOT
+            | BROWSER_OBSERVE
+            | BROWSER_EXTRACT
     ) {
         return None;
     }
@@ -2097,7 +2162,9 @@ async fn run_browser_tool(
         let filename = format!("browser-shot-{millis}.png");
         let path = artifacts_dir.join(&filename);
         if let Err(e) = std::fs::write(&path, &png) {
-            return Some(format!("browser_screenshot failed: could not save PNG: {e}"));
+            return Some(format!(
+                "browser_screenshot failed: could not save PNG: {e}"
+            ));
         }
         let path_str = path.to_string_lossy().into_owned();
         // Persist + surface like a generated artifact: the shot pops open in
@@ -2122,10 +2189,7 @@ async fn run_browser_tool(
 
     let result = match name {
         BROWSER_READ => {
-            let mode_str = args
-                .get("mode")
-                .and_then(|v| v.as_str())
-                .unwrap_or("full");
+            let mode_str = args.get("mode").and_then(|v| v.as_str()).unwrap_or("full");
             let mode = match mode_str {
                 "summary_only" => crate::browser::ReadMode::SummaryOnly,
                 "section" => crate::browser::ReadMode::Section,
@@ -2159,7 +2223,10 @@ async fn run_browser_tool(
                 .trim()
                 .to_string();
             if prompt.is_empty() {
-                Err("browser_extract requires a non-empty \"prompt\" (what to look for).".to_string())
+                Err(
+                    "browser_extract requires a non-empty \"prompt\" (what to look for)."
+                        .to_string(),
+                )
             } else {
                 let max_chars = args
                     .get("max_chars")
@@ -2312,10 +2379,7 @@ async fn run_cached_web_tool(
                 // Count result lines ("N. title — url") for the audit row.
                 let result_count = text
                     .lines()
-                    .filter(|l| {
-                        l.starts_with(|c: char| c.is_ascii_digit())
-                            && l.contains(" — ")
-                    })
+                    .filter(|l| l.starts_with(|c: char| c.is_ascii_digit()) && l.contains(" — "))
                     .count() as i64;
                 if let Ok(already) =
                     db::record_search(&conn, sid, query, &engines_tag, result_count)
@@ -2356,7 +2420,9 @@ async fn run_cached_web_tool(
         }
         _ => {
             // Guarded by the matches! at the call site; delegate as a fallback.
-            tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app)).await.text
+            tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app))
+                .await
+                .text
         }
     }
 }
@@ -2380,9 +2446,21 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
         let conn = db.0.lock();
         match name {
             ADD_SOURCE_NOTE => {
-                let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
-                let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").trim();
-                let fact = args.get("fact").and_then(|v| v.as_str()).unwrap_or("").trim();
+                let url = args
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                let title = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                let fact = args
+                    .get("fact")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
                 let excerpt = args
                     .get("excerpt")
                     .and_then(|v| v.as_str())
@@ -2401,7 +2479,8 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
                     .filter(|s| !s.is_empty());
                 if url.is_empty() || fact.is_empty() {
                     return Some(
-                        "Error: add_source_note requires a non-empty \"url\" and \"fact\".".to_string(),
+                        "Error: add_source_note requires a non-empty \"url\" and \"fact\"."
+                            .to_string(),
                     );
                 }
                 match db::add_source_note(
@@ -2452,7 +2531,9 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
                             })
                         })
                         .collect();
-                    return Some(serde_json::to_string(&index).unwrap_or_else(|_| "[]".to_string()));
+                    return Some(
+                        serde_json::to_string(&index).unwrap_or_else(|_| "[]".to_string()),
+                    );
                 }
                 return Some(serde_json::to_string(&notes).unwrap_or_else(|_| "[]".to_string()));
             }
@@ -2461,7 +2542,9 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
                 // query history — the repeat-query nudge must not fire on
                 // queries from the previous task.
                 let clear_q = db::clear_searches(&conn, sid).map_err(|e| e.to_string());
-                match clear_q.and_then(|_| db::clear_source_notes(&conn, sid).map_err(|e| e.to_string())) {
+                match clear_q
+                    .and_then(|_| db::clear_source_notes(&conn, sid).map_err(|e| e.to_string()))
+                {
                     Ok(_) => Ok("Source ledger and query history cleared.".to_string()),
                     Err(e) => Err(format!("reset_source_ledger failed: {e}")),
                 }
@@ -2473,14 +2556,12 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
                 // no unexplained gaps) and tell it exactly what's missing.
                 let Some(items) = args.get("subquestions").and_then(|v| v.as_array()) else {
                     return Some(
-                        "Error: check_sufficiency requires a \"subquestions\" array."
-                            .to_string(),
+                        "Error: check_sufficiency requires a \"subquestions\" array.".to_string(),
                     );
                 };
                 if items.is_empty() {
                     return Some(
-                        "Error: check_sufficiency got an empty \"subquestions\" array."
-                            .to_string(),
+                        "Error: check_sufficiency got an empty \"subquestions\" array.".to_string(),
                     );
                 }
                 let mut insufficient: Vec<String> = Vec::new();
@@ -2511,9 +2592,8 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
                         .and_then(|v| v.as_str())
                         .map(str::trim)
                         .filter(|s| !s.is_empty());
-                    let weak = status != "sufficient"
-                        || independent < 2
-                        || (!opposing && gap.is_none());
+                    let weak =
+                        status != "sufficient" || independent < 2 || (!opposing && gap.is_none());
                     if weak {
                         let detail = gap.unwrap_or("no opposing/stale view was looked for");
                         insufficient.push(format!(
@@ -2671,7 +2751,8 @@ mod tests {
     /// tool. The subagent loop bypasses the main loop's permission layer (no
     /// approval cards by design), so the allowlist IS the permission boundary.
     #[test]
-    fn subagent_allowlist_is_read_only() {        const MUTATING: &[&str] = &[
+    fn subagent_allowlist_is_read_only() {
+        const MUTATING: &[&str] = &[
             tools::WRITE_FILE,
             tools::EDIT_FILE,
             tools::DELETE_FILE,

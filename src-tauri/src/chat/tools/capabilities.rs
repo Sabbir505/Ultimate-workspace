@@ -126,7 +126,9 @@ pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
         let conn = db.0.lock();
         let rows = crate::db::list_connector_credential_rows(&conn).unwrap_or_default();
         (
-            rows.iter().map(|r| r.connector_id.clone()).collect::<Vec<_>>(),
+            rows.iter()
+                .map(|r| r.connector_id.clone())
+                .collect::<Vec<_>>(),
             rows.iter()
                 .filter_map(|r| r.account_display.clone())
                 .collect::<Vec<_>>(),
@@ -148,11 +150,13 @@ pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
 
     let mcp_gallery: Vec<Value> = crate::mcp_gallery::load_defs(app)
         .iter()
-        .map(|d| json!({
-            "id": d.id,
-            "name": d.name,
-            "enabled": d.enabled,
-        }))
+        .map(|d| {
+            json!({
+                "id": d.id,
+                "name": d.name,
+                "enabled": d.enabled,
+            })
+        })
         .collect();
 
     let skills: Vec<String> = crate::installed_skills::list_all_skills()
@@ -165,9 +169,9 @@ pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
     let report = json!({
         "note": NOTE,
         "harness_context": "You are a CLI harness running inside Relay (the desktop app). \
-This report describes the APP's connections — what Relay registered into your \
-MCP config at spawn. Connected connectors appear as MCP servers in your own \
-config; do not probe them with shell commands.",
+    This report describes the APP's connections — what Relay registered into your \
+    MCP config at spawn. Connected connectors appear as MCP servers in your own \
+    config; do not probe them with shell commands.",
         "connectors": {
             "connected": connected,
             "accounts": account_displays,

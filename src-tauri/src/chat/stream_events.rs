@@ -49,7 +49,10 @@ static REGISTRY: once_cell::sync::Lazy<Registry> =
 /// Register a channel for a chat session. Replaces any previous channel for
 /// the same session id (v1 single-subscriber per session).
 pub fn register(session_id: &str, ch: ChatTokenChannel) {
-    REGISTRY.lock().by_session.insert(session_id.to_string(), ch);
+    REGISTRY
+        .lock()
+        .by_session
+        .insert(session_id.to_string(), ch);
 }
 
 /// Clear the channel for a chat session. Safe to call when nothing was

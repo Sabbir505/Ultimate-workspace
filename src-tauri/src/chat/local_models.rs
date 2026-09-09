@@ -118,12 +118,12 @@ pub fn parse_gguf(path: &Path) -> GgufMeta {
 
     let _version = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
     let _tensor_count = u64::from_le_bytes([
-        header[8], header[9], header[10], header[11],
-        header[12], header[13], header[14], header[15],
+        header[8], header[9], header[10], header[11], header[12], header[13], header[14],
+        header[15],
     ]);
     let metadata_kv_count = u64::from_le_bytes([
-        header[16], header[17], header[18], header[19],
-        header[20], header[21], header[22], header[23],
+        header[16], header[17], header[18], header[19], header[20], header[21], header[22],
+        header[23],
     ]);
 
     // Read KV pairs.
@@ -157,10 +157,21 @@ pub fn parse_gguf(path: &Path) -> GgufMeta {
                 // after an array parsed as garbage.
                 let mut arr_header = [0u8; 4 + 8]; // type (u32) + count (u64)
                 if file.read_exact(&mut arr_header).is_ok() {
-                    let _arr_type = u32::from_le_bytes([arr_header[0], arr_header[1], arr_header[2], arr_header[3]]);
+                    let _arr_type = u32::from_le_bytes([
+                        arr_header[0],
+                        arr_header[1],
+                        arr_header[2],
+                        arr_header[3],
+                    ]);
                     let arr_count = u64::from_le_bytes([
-                        arr_header[4], arr_header[5], arr_header[6], arr_header[7],
-                        arr_header[8], arr_header[9], arr_header[10], arr_header[11],
+                        arr_header[4],
+                        arr_header[5],
+                        arr_header[6],
+                        arr_header[7],
+                        arr_header[8],
+                        arr_header[9],
+                        arr_header[10],
+                        arr_header[11],
                     ]);
                     // Skip the array payload. Since we only care about string KV values,
                     // and arrays are metadata blobs (tokenizer, etc.), skip them.
@@ -198,7 +209,10 @@ fn read_gguf_string(file: &mut fs::File) -> Result<String, std::io::Error> {
     let len = u64::from_le_bytes(len_buf) as usize;
     // Safety cap: strings over 64 KiB are suspicious.
     if len > 65536 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "gguf string too long"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "gguf string too long",
+        ));
     }
     let mut buf = vec![0u8; len];
     file.read_exact(&mut buf)?;
@@ -207,15 +221,15 @@ fn read_gguf_string(file: &mut fs::File) -> Result<String, std::io::Error> {
 
 fn gguf_scalar_size(value_type: u32) -> usize {
     match value_type {
-        1 => 1,  // bool
-        2 | 3 => 1, // uint8 / int8
-        4 | 5 => 2, // uint16 / int16
-        6 | 7 => 4, // uint32 / int32
-        8 => 0,  // string (handled separately)
-        9 => 0,  // array (handled separately)
+        1 => 1,       // bool
+        2 | 3 => 1,   // uint8 / int8
+        4 | 5 => 2,   // uint16 / int16
+        6 | 7 => 4,   // uint32 / int32
+        8 => 0,       // string (handled separately)
+        9 => 0,       // array (handled separately)
         10 | 11 => 8, // uint64 / int64
-        12 => 4, // float32
-        13 => 8, // float64
+        12 => 4,      // float32
+        13 => 8,      // float64
         _ => 0,
     }
 }
@@ -276,7 +290,8 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
     // companion model. The mmproj file usually lives in the same directory as
     // the model with a predictable name (mmproj-<model>.gguf or mmproj.gguf).
     let mut model_files: Vec<(walkdir::DirEntry, GgufMeta)> = Vec::new();
-    let mut mmproj_paths: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    let mut mmproj_paths: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
 
     for entry in walker {
         if !entry.file_type().is_file() {
@@ -297,7 +312,10 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
         // We store them keyed by directory so models in the same dir can find
         // their companion.
         if name.starts_with("mmproj") || matches!(meta.architecture.as_deref(), Some("clip")) {
-            let dir_key = path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            let dir_key = path
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
             mmproj_paths.insert(dir_key, path.to_path_buf());
             continue;
         }
@@ -311,11 +329,7 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
         // embedder) are not chat models: they only work with llama-server's
         // --embedding flag and would fail to chat. Keep them out of the chat
         // picker; the Knowledge panel resolves them via is_embedding_arch.
-        if meta
-            .architecture
-            .as_deref()
-            .is_some_and(is_embedding_arch)
-        {
+        if meta.architecture.as_deref().is_some_and(is_embedding_arch) {
             continue;
         }
 
@@ -326,7 +340,10 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
     // one was found in the same directory.
     for (entry, meta) in model_files {
         let path = entry.path();
-        let dir_key = path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        let dir_key = path
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
         let (has_vision, mmproj_path) = if let Some(mp) = mmproj_paths.get(&dir_key) {
             (true, Some(mp.to_string_lossy().to_string()))
         } else {
@@ -634,7 +651,10 @@ impl LocalModelRegistry {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| format!("failed to bind port: {e}"))?;
-        let port = listener.local_addr().map_err(|e| format!("local addr: {e}"))?.port();
+        let port = listener
+            .local_addr()
+            .map_err(|e| format!("local addr: {e}"))?
+            .port();
         drop(listener);
 
         // GPU layers: user override → last successful count → auto probe.
@@ -661,10 +681,14 @@ impl LocalModelRegistry {
         // we detect a CUDA/Metal build.)
         let mut args_template: Vec<String> = {
             let mut v = vec![
-                "--model".to_string(), gguf_path.to_string(),
-                "--port".to_string(), port.to_string(),
-                "--host".to_string(), "127.0.0.1".to_string(),
-                "-c".to_string(), ctx.to_string(),
+                "--model".to_string(),
+                gguf_path.to_string(),
+                "--port".to_string(),
+                port.to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "-c".to_string(),
+                ctx.to_string(),
                 // Required for the chat completions endpoint to accept a
                 // `tools` array. Without it, llama-server returns HTTP 400
                 // with "tools param requires --jinja flag" (pre-b4400 also
@@ -780,9 +804,7 @@ impl LocalModelRegistry {
             // output to decide whether the failure was an OOM (retry on CPU)
             // or a real error (return to caller).
             let timeout_secs: u64 = {
-                let gb = fs::metadata(gguf_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0) as f64
+                let gb = fs::metadata(gguf_path).map(|m| m.len()).unwrap_or(0) as f64
                     / (1024.0 * 1024.0 * 1024.0);
                 (30.0 + gb * 15.0).clamp(30.0, 180.0) as u64
             };
@@ -879,8 +901,7 @@ impl LocalModelRegistry {
                 // Special-case the --jinja flag: Clang 20.1.8 builds reject it
                 // with "unrecognized argument" — try once more without it.
                 let stderr = output.trim();
-                let no_jinja =
-                    stderr.contains("unrecognized argument")
+                let no_jinja = stderr.contains("unrecognized argument")
                     || stderr.contains("invalid option flag");
                 if no_jinja && args_template.contains(&"--jinja".to_string()) {
                     eprintln!(
@@ -996,19 +1017,27 @@ impl LocalModelRegistry {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| format!("failed to bind port: {e}"))?;
-        let port = listener.local_addr().map_err(|e| format!("local addr: {e}"))?.port();
+        let port = listener
+            .local_addr()
+            .map_err(|e| format!("local addr: {e}"))?
+            .port();
         drop(listener);
 
         // Full GPU offload first, CPU fallback. The embedder is ~140 MB — OOM
         // is unlikely, but a crowded GPU can still reject the allocation.
         for try_ngl in [auto_ngl(gguf_path), 0] {
             let args = vec![
-                "--model".to_string(), gguf_path.to_string(),
-                "--port".to_string(), port.to_string(),
-                "--host".to_string(), "127.0.0.1".to_string(),
-                "-c".to_string(), "2048".to_string(),
+                "--model".to_string(),
+                gguf_path.to_string(),
+                "--port".to_string(),
+                port.to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "-c".to_string(),
+                "2048".to_string(),
                 "--embedding".to_string(),
-                "--n-gpu-layers".to_string(), try_ngl.to_string(),
+                "--n-gpu-layers".to_string(),
+                try_ngl.to_string(),
             ];
             let mut cmd = tokio::process::Command::new(bin);
             cmd.args(&args)
@@ -1034,7 +1063,10 @@ impl LocalModelRegistry {
 
             // Health poll: embedding models load in a few seconds.
             let health_url = format!("http://127.0.0.1:{port}/health");
-            let client = reqwest::Client::builder().no_proxy().build().unwrap_or_default();
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap_or_default();
             let mut ready = false;
             for _ in 0..60 {
                 match child.try_wait() {
@@ -1104,22 +1136,34 @@ pub async fn embed_texts(base_url: &str, texts: &[String]) -> Result<Vec<Vec<f32
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("embedding HTTP {status}: {}", text.chars().take(200).collect::<String>()));
+        return Err(format!(
+            "embedding HTTP {status}: {}",
+            text.chars().take(200).collect::<String>()
+        ));
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     parse_embedding_response(&json, texts.len())
 }
 
 /// Extract `expected` vectors from a llama-server /embedding response.
-fn parse_embedding_response(json: &serde_json::Value, expected: usize) -> Result<Vec<Vec<f32>>, String> {
-    let arr = json.as_array().ok_or_else(|| "embedding response is not an array".to_string())?;
+fn parse_embedding_response(
+    json: &serde_json::Value,
+    expected: usize,
+) -> Result<Vec<Vec<f32>>, String> {
+    let arr = json
+        .as_array()
+        .ok_or_else(|| "embedding response is not an array".to_string())?;
     let mut out = Vec::with_capacity(expected);
     for item in arr.iter().take(expected) {
         let emb = item
             .get("embedding")
             .ok_or_else(|| "embedding item missing `embedding`".to_string())?;
         // Flat: [f32, …]. Pooled: [[f32, …]] — take the first row.
-        let row = if emb.as_array().and_then(|a| a.first()).is_some_and(|v| v.is_array()) {
+        let row = if emb
+            .as_array()
+            .and_then(|a| a.first())
+            .is_some_and(|v| v.is_array())
+        {
             emb.get(0).cloned().unwrap_or(emb.clone())
         } else {
             emb.clone()
@@ -1136,7 +1180,10 @@ fn parse_embedding_response(json: &serde_json::Value, expected: usize) -> Result
         out.push(vec);
     }
     if out.len() != expected {
-        return Err(format!("embedding response had {} vectors, expected {expected}", out.len()));
+        return Err(format!(
+            "embedding response had {} vectors, expected {expected}",
+            out.len()
+        ));
     }
     Ok(out)
 }
@@ -1222,15 +1269,25 @@ struct ResolvedBinary {
 
 fn resolve_llama_server_binary(user_path: Option<&str>) -> Result<ResolvedBinary, String> {
     let to_resolved = |p: PathBuf| -> ResolvedBinary {
-        let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
-        ResolvedBinary { path: p.to_string_lossy().to_string(), dir }
+        let dir = p
+            .parent()
+            .map(|d| d.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        ResolvedBinary {
+            path: p.to_string_lossy().to_string(),
+            dir,
+        }
     };
 
     // 0. User-configured path from settings (e.g. "one-click path setup").
     //    Checked first so users can override everything else.
     if let Some(path_str) = user_path {
         let p = Path::new(path_str);
-        let bin_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+        let bin_name = if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        };
         let resolved_file = if p.is_file() {
             Some(p.to_path_buf())
         } else if cfg!(windows) && p.with_extension("exe").is_file() {
@@ -1251,7 +1308,11 @@ fn resolve_llama_server_binary(user_path: Option<&str>) -> Result<ResolvedBinary
     //    launcher uses RUNPATH $ORIGIN to find them, so the dir returned
     //    here MUST be used as current_dir at spawn time.
     if let Some(dir) = bundled_llama_server_dir() {
-        let bin_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+        let bin_name = if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        };
         let launcher = dir.join(bin_name);
         if launcher.is_file() {
             return Ok(ResolvedBinary {
@@ -1264,7 +1325,11 @@ fn resolve_llama_server_binary(user_path: Option<&str>) -> Result<ResolvedBinary
     // 1. LLAMA_SERVER_PATH env var: a file, or a directory containing the binary.
     if let Ok(path) = std::env::var("LLAMA_SERVER_PATH") {
         let p = Path::new(&path);
-        let bin_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+        let bin_name = if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        };
         let resolved_file = if p.is_file() {
             Some(p.to_path_buf())
         } else if cfg!(windows) && p.with_extension("exe").is_file() {
@@ -1286,7 +1351,11 @@ fn resolve_llama_server_binary(user_path: Option<&str>) -> Result<ResolvedBinary
     // a bare PATH lookup until we resolve it, so on Windows we instead rely on
     // the explicit candidate scan below (step 3) which sets the dir correctly.
     // On non-Windows a bare PATH invocation is safe (no sibling-DLL issue).
-    let bin_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let bin_name = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
     if !cfg!(windows) {
         let output = std::process::Command::new(bin_name)
             .arg("--version")
@@ -1309,7 +1378,9 @@ fn resolve_llama_server_binary(user_path: Option<&str>) -> Result<ResolvedBinary
     // LLAMA_SERVER_PATH rather than guessed by scanning drives.
     let mut candidates: Vec<PathBuf> = Vec::new();
     if cfg!(windows) {
-        candidates.push(PathBuf::from(r"C:\llama.cpp\build\bin\Release\llama-server.exe"));
+        candidates.push(PathBuf::from(
+            r"C:\llama.cpp\build\bin\Release\llama-server.exe",
+        ));
         candidates.push(PathBuf::from(r"C:\llama.cpp\build\bin\llama-server.exe"));
     } else {
         candidates.push(PathBuf::from("/usr/local/bin/llama-server"));
@@ -1482,8 +1553,12 @@ fn query_free_vram_bytes() -> Option<u64> {
 
         Some(NvmlFns {
             init: std::mem::transmute::<FARPROC, NvmlInit>(init_addr),
-            device_get_handle_by_index: std::mem::transmute::<FARPROC, NvmlDeviceGetHandleByIndex>(dhbi_addr),
-            device_get_memory_info: std::mem::transmute::<FARPROC, NvmlDeviceGetMemoryInfo>(dgmi_addr),
+            device_get_handle_by_index: std::mem::transmute::<FARPROC, NvmlDeviceGetHandleByIndex>(
+                dhbi_addr,
+            ),
+            device_get_memory_info: std::mem::transmute::<FARPROC, NvmlDeviceGetMemoryInfo>(
+                dgmi_addr,
+            ),
             shutdown: std::mem::transmute::<FARPROC, NvmlShutdown>(shutdown_addr),
         })
     });
@@ -1578,7 +1653,8 @@ pub fn query_total_vram_bytes() -> Option<(u64, String)> {
                 best_bytes = desc.DedicatedVideoMemory as u64;
                 // Description is a wide UTF-16 string; trim trailing NULs.
                 let name = String::from_utf16_lossy(
-                    &desc.Description
+                    &desc
+                        .Description
                         .iter()
                         .take_while(|c| **c != 0)
                         .copied()
@@ -1811,7 +1887,10 @@ mod scanner_tests {
     fn scan_folder_finds_gguf_by_extension() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("model.Q4_K_M.gguf");
-        fs::File::create(&p).unwrap().write_all(&tiny_gguf_bytes()).unwrap();
+        fs::File::create(&p)
+            .unwrap()
+            .write_all(&tiny_gguf_bytes())
+            .unwrap();
         let found = scan_folder(dir.path(), "user");
         assert_eq!(found.len(), 1, "should detect .gguf by extension");
         assert_eq!(found[0].filename, "model.Q4_K_M.gguf");
@@ -1824,7 +1903,10 @@ mod scanner_tests {
         // gets the magic-byte fallback.
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sha256-abcd1234");
-        fs::File::create(&p).unwrap().write_all(&tiny_gguf_bytes()).unwrap();
+        fs::File::create(&p)
+            .unwrap()
+            .write_all(&tiny_gguf_bytes())
+            .unwrap();
         assert!(scan_folder(dir.path(), "user").is_empty());
         assert!(scan_folder(dir.path(), "lm-studio").is_empty());
     }
@@ -1833,16 +1915,26 @@ mod scanner_tests {
     fn scan_folder_ollama_detects_extensionless_blob_via_magic() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sha256-abcd1234");
-        fs::File::create(&p).unwrap().write_all(&tiny_gguf_bytes()).unwrap();
+        fs::File::create(&p)
+            .unwrap()
+            .write_all(&tiny_gguf_bytes())
+            .unwrap();
         let found = scan_folder(dir.path(), "ollama");
-        assert_eq!(found.len(), 1, "ollama blobs must be detected via GGUF magic");
+        assert_eq!(
+            found.len(),
+            1,
+            "ollama blobs must be detected via GGUF magic"
+        );
     }
 
     #[test]
     fn scan_folder_ollama_rejects_non_gguf_blob() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sha256-notreallyagguf");
-        fs::File::create(&p).unwrap().write_all(b"{\"json\":\"manifest\"}").unwrap();
+        fs::File::create(&p)
+            .unwrap()
+            .write_all(b"{\"json\":\"manifest\"}")
+            .unwrap();
         assert!(scan_folder(dir.path(), "ollama").is_empty());
     }
 
@@ -1865,7 +1957,10 @@ mod scanner_tests {
                     .filter_map(|e| e.ok())
                     .any(|e| {
                         e.file_type().is_file()
-                            && e.file_name().to_string_lossy().to_lowercase().ends_with(".gguf")
+                            && e.file_name()
+                                .to_string_lossy()
+                                .to_lowercase()
+                                .ends_with(".gguf")
                     });
                 if has_gguf {
                     assert!(
@@ -1911,7 +2006,12 @@ mod tests {
             ..Default::default()
         };
         // Pre-existing stale flag values must be replaced, not duplicated.
-        let mut args = vec!["--model".to_string(), "x.gguf".into(), "--threads".into(), "4".into()];
+        let mut args = vec![
+            "--model".to_string(),
+            "x.gguf".into(),
+            "--threads".into(),
+            "4".into(),
+        ];
         apply_overrides_args(&mut args, &o);
         assert_eq!(args.iter().filter(|a| *a == "--threads").count(), 1);
         let idx = args.iter().position(|a| a == "--threads").unwrap();
@@ -1933,7 +2033,9 @@ mod tests {
         ] {
             assert!(args.iter().any(|a| a == flag), "missing {flag}");
         }
-        assert!(args.windows(2).any(|w| w[0] == "--cache-type-k" && w[1] == "q8_0"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--cache-type-k" && w[1] == "q8_0"));
         // Extra args are split on whitespace and appended verbatim.
         assert!(args.iter().any(|a| a == "--foo"));
         assert!(args.iter().any(|a| a == "bar"));
@@ -1942,16 +2044,37 @@ mod tests {
     #[test]
     fn overrides_args_skip_unknown_kv_and_gate_v_on_fa() {
         let mut args = vec![];
-        apply_overrides_args(&mut args, &LlamaOverrides { kv_cache: Some("bogus".into()), ..Default::default() });
+        apply_overrides_args(
+            &mut args,
+            &LlamaOverrides {
+                kv_cache: Some("bogus".into()),
+                ..Default::default()
+            },
+        );
         assert!(args.is_empty(), "unknown kv value skipped entirely");
 
         let mut args = vec![];
-        apply_overrides_args(&mut args, &LlamaOverrides { kv_cache: Some("q4_0".into()), ..Default::default() });
+        apply_overrides_args(
+            &mut args,
+            &LlamaOverrides {
+                kv_cache: Some("q4_0".into()),
+                ..Default::default()
+            },
+        );
         assert!(args.iter().any(|a| a == "--cache-type-k"));
-        assert!(!args.iter().any(|a| a == "--cache-type-v"), "V quant requires FA");
+        assert!(
+            !args.iter().any(|a| a == "--cache-type-v"),
+            "V quant requires FA"
+        );
 
         let mut args = vec![];
-        apply_overrides_args(&mut args, &LlamaOverrides { flash_attn: Some(false), ..Default::default() });
+        apply_overrides_args(
+            &mut args,
+            &LlamaOverrides {
+                flash_attn: Some(false),
+                ..Default::default()
+            },
+        );
         assert!(args.is_empty(), "explicit false stays off");
     }
 

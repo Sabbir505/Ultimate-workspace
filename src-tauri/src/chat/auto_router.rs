@@ -198,14 +198,15 @@ fn best_of_provider(
     query: &AutoQuery,
     needed: u64,
 ) -> Option<(ModelEntry, String)> {
-    let sticky_model = query
-        .sticky
-        .as_ref()
-        .map(|(_, m)| m.to_ascii_lowercase());
+    let sticky_model = query.sticky.as_ref().map(|(_, m)| m.to_ascii_lowercase());
     let rank = |i: usize, m: &ModelEntry| -> (u8, u8, u8, u8, usize) {
         (
             // Vision tier: 0 = vision not needed or known-capable, 1 = unknown.
-            if !query.needs_vision || supports_vision(&m.id) { 0 } else { 1 },
+            if !query.needs_vision || supports_vision(&m.id) {
+                0
+            } else {
+                1
+            },
             // Economy: cheaper models first within the provider.
             if query.bias == Bias::Economy {
                 cost_class_for(&m.id) as u8
@@ -485,7 +486,10 @@ mod tests {
 
     #[test]
     fn vision_turns_prefer_known_vision_models() {
-        let models = vec![entry("text-only-small", Some(8_000)), entry("claude-3-5", None)];
+        let models = vec![
+            entry("text-only-small", Some(8_000)),
+            entry("claude-3-5", None),
+        ];
         let chain = resolve(&all_keyed(models), &query(100)).map_err(|e| e.to_string());
         // vision off: smallest fits → "text-only-small"
         assert_eq!(chain.unwrap()[0].model, "text-only-small");
@@ -511,12 +515,19 @@ mod tests {
             bias: Bias::Balanced,
         };
         let chain = resolve(&all_keyed(models), &q).unwrap();
-        assert!(chain[0].reason.contains("vision unverified"), "got: {}", chain[0].reason);
+        assert!(
+            chain[0].reason.contains("vision unverified"),
+            "got: {}",
+            chain[0].reason
+        );
     }
 
     #[test]
     fn sticky_pick_wins_and_moves_to_the_front() {
-        let models = vec![entry("preferred-a", Some(200_000)), entry("other", Some(200_000))];
+        let models = vec![
+            entry("preferred-a", Some(200_000)),
+            entry("other", Some(200_000)),
+        ];
         let mut snaps = all_keyed(models);
         snaps[1].preferred_model = Some("preferred-a".to_string());
         let q = AutoQuery {
@@ -535,7 +546,10 @@ mod tests {
 
     #[test]
     fn provider_default_beats_list_order() {
-        let models = vec![entry("first", Some(200_000)), entry("default", Some(200_000))];
+        let models = vec![
+            entry("first", Some(200_000)),
+            entry("default", Some(200_000)),
+        ];
         let mut snaps = all_keyed(models);
         snaps[0].preferred_model = Some("default".to_string());
         let chain = resolve(&snaps, &query(100)).unwrap();
@@ -584,7 +598,10 @@ mod tests {
     #[test]
     fn cost_class_sniffer() {
         // OpenRouter's :free convention → Free.
-        assert_eq!(cost_class_for("meta-llama/llama-3.1-8b:free"), CostClass::Free);
+        assert_eq!(
+            cost_class_for("meta-llama/llama-3.1-8b:free"),
+            CostClass::Free
+        );
         // Known rates: output $/Mtok drives the tier.
         assert_eq!(cost_class_for("claude-opus-4-8"), CostClass::Premium); // $25 out
         assert_eq!(cost_class_for("claude-sonnet-4-5"), CostClass::Premium); // $15 out
@@ -592,7 +609,7 @@ mod tests {
         assert_eq!(cost_class_for("claude-haiku-4-5"), CostClass::Standard); // $5 out
         assert_eq!(cost_class_for("minimax-m3"), CostClass::Cheap); // $1.2 out
         assert_eq!(cost_class_for("deepseek-v4-pro"), CostClass::Cheap); // $0.87 out
-        // Unknown ids are Unknown — never mispriced as free.
+                                                                         // Unknown ids are Unknown — never mispriced as free.
         assert_eq!(cost_class_for("some-future-model-x"), CostClass::Unknown);
         assert_ne!(cost_class_for("some-future-model-x"), CostClass::Free);
     }
@@ -609,7 +626,11 @@ mod tests {
     fn economy_promotes_free_candidates_over_provider_preference() {
         // Anthropic offers a premium pick; OpenRouter offers a free one.
         let mut snaps = all_keyed(vec![entry("claude-opus-4-8", Some(200_000))]);
-        snaps[2] = snap("openrouter", true, Ok(vec![entry("qwen/free-model:free", Some(32_000))]));
+        snaps[2] = snap(
+            "openrouter",
+            true,
+            Ok(vec![entry("qwen/free-model:free", Some(32_000))]),
+        );
         let balanced = resolve(&snaps, &query_with_bias(100, Bias::Balanced)).unwrap();
         assert_eq!(balanced[0].provider, "anthropic");
         let economy = resolve(&snaps, &query_with_bias(100, Bias::Economy)).unwrap();
@@ -623,7 +644,11 @@ mod tests {
     #[test]
     fn quality_demotes_free_variants_behind_unknown_cost_models() {
         let mut snaps = all_keyed(vec![entry("deepseek-chat", Some(128_000))]);
-        snaps[0] = snap("anthropic", true, Ok(vec![entry("anthropic/claude:free", Some(200_000))]));
+        snaps[0] = snap(
+            "anthropic",
+            true,
+            Ok(vec![entry("anthropic/claude:free", Some(200_000))]),
+        );
         let quality = resolve(&snaps, &query_with_bias(100, Bias::Quality)).unwrap();
         // Anthropic's :free twin is demoted behind deepseek (unknown cost).
         assert_eq!(quality[0].provider, "openai");

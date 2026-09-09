@@ -13,8 +13,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
 use super::{
-    CREATE_AUTOMATION, DELETE_AUTOMATION, LIST_AUTOMATIONS, RUN_AUTOMATION_NOW,
-    UPDATE_AUTOMATION,
+    CREATE_AUTOMATION, DELETE_AUTOMATION, LIST_AUTOMATIONS, RUN_AUTOMATION_NOW, UPDATE_AUTOMATION,
 };
 
 /// Dispatch an automation-family tool call. Permission gating (read-only vs
@@ -138,9 +137,11 @@ fn validate_automation_input(
         return Err("Error: create_automation requires a non-empty \"name\".".into());
     }
     if prompt.is_empty() {
-        return Err("Error: create_automation requires a non-empty \"prompt\" — it is the \
+        return Err(
+            "Error: create_automation requires a non-empty \"prompt\" — it is the \
              full instruction the automation runs unattended."
-            .into());
+                .into(),
+        );
     }
     if !crate::commands::automation_cmds::is_allowed_automation_agent(agent) {
         return Err(format!(
@@ -160,7 +161,11 @@ fn create_automation(app: &AppHandle, args: &Value) -> String {
     // Default mirrors the Automations form's first agent option.
     let agent = {
         let a = arg_str(args, "agent");
-        if a.is_empty() { "claude_code".to_string() } else { a }
+        if a.is_empty() {
+            "claude_code".to_string()
+        } else {
+            a
+        }
     };
     let enabled = arg_bool(args, "enabled").unwrap_or(true);
     if let Err(e) = validate_automation_input(&name, &prompt, &schedule, &agent) {
@@ -222,19 +227,35 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
     // overwrites every column, so the row must be re-fetched and merged here.
     let name = {
         let n = arg_str(args, "name");
-        if n.is_empty() { existing.name.clone() } else { n }
+        if n.is_empty() {
+            existing.name.clone()
+        } else {
+            n
+        }
     };
     let prompt = {
         let p = arg_str(args, "prompt");
-        if p.is_empty() { existing.prompt.clone() } else { p }
+        if p.is_empty() {
+            existing.prompt.clone()
+        } else {
+            p
+        }
     };
     let schedule = {
         let s = arg_str(args, "schedule");
-        if s.is_empty() { existing.schedule.clone() } else { s }
+        if s.is_empty() {
+            existing.schedule.clone()
+        } else {
+            s
+        }
     };
     let agent = {
         let a = arg_str(args, "agent");
-        if a.is_empty() { existing.harness.clone() } else { a }
+        if a.is_empty() {
+            existing.harness.clone()
+        } else {
+            a
+        }
     };
     if let Err(e) = validate_automation_input(&name, &prompt, &schedule, &agent) {
         // Same validation as create, with the tool name corrected.

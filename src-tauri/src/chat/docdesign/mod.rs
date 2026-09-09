@@ -198,9 +198,14 @@ mod tests {
             let obj = color.as_object().unwrap();
             assert!(!obj.is_empty(), "{theme} has no colors");
             for (key, value) in obj {
-                let hex = value.as_str().unwrap_or_else(|| panic!("{theme}.{key} not a string"));
+                let hex = value
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{theme}.{key} not a string"));
                 assert_eq!(hex.len(), 6, "{theme}.{key} = {hex} is not 6 hex digits");
-                assert!(!hex.contains('#'), "{theme}.{key} carries a '#' (pptxgenjs corruption)");
+                assert!(
+                    !hex.contains('#'),
+                    "{theme}.{key} carries a '#' (pptxgenjs corruption)"
+                );
                 assert!(
                     hex.chars().all(|ch| ch.is_ascii_hexdigit()),
                     "{theme}.{key} = {hex} has non-hex chars"
@@ -219,14 +224,14 @@ mod tests {
             let ink = theme_color(&theme, "ink").unwrap();
             let bg = theme_color(&theme, "bg").unwrap();
             let ratio = contrast_ratio(ink, bg);
-            assert!(
-                ratio >= 4.5,
-                "{theme}: body text contrast {ratio:.2} < 4.5"
-            );
+            assert!(ratio >= 4.5, "{theme}: body text contrast {ratio:.2} < 4.5");
             let cbg = theme_color(&theme, "coverBg").unwrap();
             let cfg = theme_color(&theme, "coverFg").unwrap();
             let cover_ratio = contrast_ratio(cfg, cbg);
-            assert!(cover_ratio >= 4.5, "{theme}: cover contrast {cover_ratio:.2} < 4.5");
+            assert!(
+                cover_ratio >= 4.5,
+                "{theme}: cover contrast {cover_ratio:.2} < 4.5"
+            );
         }
     }
 
@@ -236,7 +241,11 @@ mod tests {
         fn lum(hex: &str) -> f64 {
             let ch = |i: usize| -> f64 {
                 let c = i64::from_str_radix(&hex[i..i + 2], 16).unwrap() as f64 / 255.0;
-                if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+                if c <= 0.03928 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
             };
             0.2126 * ch(0) + 0.7152 * ch(2) + 0.0722 * ch(4)
         }

@@ -33,6 +33,8 @@ export interface RelayNotifyOptions {
   paneId?: string;
   /** Overlay view to open from the bell panel. */
   view?: "automations" | "cost" | "settings";
+  /** Settings category to preselect when `view` is "settings". */
+  settingsCategory?: string;
   /** Show an OS toast (DND-gated). Default false — completions only toast
    *  when the app is unfocused; callers decide. */
   osToast?: boolean;
@@ -54,6 +56,7 @@ export function relayNotify(opts: RelayNotifyOptions): void {
     chatSessionId: opts.chatSessionId,
     paneId: opts.paneId,
     view: opts.view,
+    settingsCategory: opts.settingsCategory,
   });
 
   const settings = useSettingsStore.getState();

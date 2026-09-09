@@ -307,10 +307,14 @@ function NotificationsPanel() {
 export function SettingsView() {
   const setActiveView = useUiStore((s) => s.setActiveView);
   const harnesses = useProjectsStore((s) => s.harnesses);
+  const harnessUpdates = useProjectsStore((s) => s.harnessUpdates);
   const projects = useProjectsStore((s) => s.projects);
   const refreshHarnesses = useProjectsStore((s) => s.refreshHarnesses);
-  // One-click harness install (Harnesses panel): the id currently running
-  // `npm install -g`, so its row button shows progress and stays disabled.
+  const refreshHarnessUpdates = useProjectsStore((s) => s.refreshHarnessUpdates);
+  const markHarnessUpdated = useProjectsStore((s) => s.markHarnessUpdated);
+  // One-click harness install/update (Harnesses panel): the id currently
+  // running `npm install -g`, so its row button shows progress and stays
+  // disabled.
   const [installingHarness, setInstallingHarness] = useState<string | null>(null);
 
   const handleInstallHarness = async (id: HarnessId, displayName: string) => {
@@ -319,25 +323,32 @@ export function SettingsView() {
       // The backend verifies the CLI actually runs post-install and may add
       // a PATH-refresh/runtime warning to the confirmation line.
       const msg = await installHarness(id);
+      // Flip the row to "current" now — the forced re-probe below takes
+      // seconds (a --version spawn + registry GET per harness) and left the
+      // stale Update button visible after the toast already said "ready".
+      markHarnessUpdated(id);
       toastSuccess(msg || `${displayName} installed`);
     } catch (e) {
       toastError(`Couldn't install ${displayName}`, String(e));
     } finally {
       setInstallingHarness(null);
-      // Forced probe: the row must reflect reality the moment the install
-      // lands, regardless of the backend's 30s probe cache.
+      // Forced probes: reconcile the optimistic flip and pick up any other
+      // rows the install affected, regardless of the 30s/1h probe caches.
       void refreshHarnesses(true);
+      void refreshHarnessUpdates(true);
     }
   };
 
   // "Re-check" must catch an out-of-band install/uninstall (done in a
   // terminal), so it force-bypasses the backend's 30s probe cache — and gives
   // feedback while the multi-second probe runs or when the backend errors.
+  // The update check (registry latest vs installed version) is refreshed in
+  // the same pass so an update that shipped out-of-band shows up too.
   const [rechecking, setRechecking] = useState(false);
   const handleRecheckHarnesses = async () => {
     setRechecking(true);
     try {
-      await refreshHarnesses(true);
+      await Promise.all([refreshHarnesses(true), refreshHarnessUpdates(true)]);
     } catch (e) {
       toastError("Couldn't re-check harnesses", String(e));
     } finally {
@@ -375,6 +386,18 @@ export function SettingsView() {
     setCategory(c);
     setSettingsCategory(c);
   };
+
+  // The boot-time check usually seeds harnessUpdates (and the backend caches
+  // it for an hour); if it didn't run or failed, quietly refresh the first
+  // time the Harnesses panel opens so the Update buttons are correct.
+  const [updateCheckAttempted, setUpdateCheckAttempted] = useState(false);
+  useEffect(() => {
+    if (category !== "harnesses" || updateCheckAttempted) return;
+    setUpdateCheckAttempted(true);
+    if (Object.keys(harnessUpdates).length === 0) {
+      refreshHarnessUpdates(false).catch(() => {});
+    }
+  }, [category, updateCheckAttempted, harnessUpdates, refreshHarnessUpdates]);
 
   return (
     <div className="view-overlay modal-centered" onPointerDown={(e) => e.target === e.currentTarget && setActiveView("chat")}>
@@ -476,7 +499,7 @@ export function SettingsView() {
                       className="ghost"
                       onClick={() => void handleRecheckHarnesses()}
                       disabled={rechecking}
-                      title="Re-probe every harness binary on PATH (bypasses the 30s cache)"
+                      title="Re-probe every harness binary on PATH and re-check update availability (bypasses the probe caches)"
                       style={{ padding: "2px 8px" }}
                     >
                       {rechecking ? "Checking…" : "Re-check"}
@@ -492,42 +515,64 @@ export function SettingsView() {
                   ) : (
                     <table className="kv">
                       <tbody>
-                        {harnesses.map((h) => (
-                          <tr key={h.id}>
-                            <td>{h.displayName}</td>
-                            <td>
-                              {h.installed ? (
-                                <span style={{ color: "var(--state-working)" }}>installed</span>
-                              ) : installingHarness === h.id ? (
-                                <span style={{ color: "var(--state-waiting)" }}>installing…</span>
-                              ) : (
-                                <span style={{ color: "var(--text-dim)" }}>not installed</span>
-                              )}
-                            </td>
-                            <td style={{ textAlign: "right" }}>
-                              {h.installed ? (
-                                <button
-                                  onClick={() => {
-                                    const cwd = projects[0]?.path ?? ".";
-                                    void runLoginFlow(h.id, cwd, `${h.displayName} login`);
-                                    setActiveView("chat");
-                                  }}
-                                >
-                                  Run login
-                                </button>
-                              ) : (
-                                <button
-                                  className="primary cta-strong"
-                                  disabled={installingHarness !== null}
-                                  title={`Runs npm install -g to install ${h.displayName}`}
-                                  onClick={() => void handleInstallHarness(h.id, h.displayName)}
-                                >
-                                  {installingHarness === h.id ? "Installing…" : "Install"}
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
+                        {harnesses.map((h) => {
+                          const upd = harnessUpdates[h.id];
+                          const updatePending = Boolean(h.installed && upd?.updateAvailable && upd.latestVersion);
+                          return (
+                            <tr key={h.id}>
+                              <td>{h.displayName}</td>
+                              <td>
+                                {h.installed ? (
+                                  <span style={{ color: "var(--state-working)" }}>
+                                    installed{upd?.installedVersion ? ` · v${upd.installedVersion}` : ""}
+                                    {updatePending && (
+                                      <span style={{ color: "var(--state-waiting)" }}> → v{upd.latestVersion}</span>
+                                    )}
+                                  </span>
+                                ) : installingHarness === h.id ? (
+                                  <span style={{ color: "var(--state-waiting)" }}>installing…</span>
+                                ) : (
+                                  <span style={{ color: "var(--text-dim)" }}>not installed</span>
+                                )}
+                              </td>
+                              <td style={{ textAlign: "right" }}>
+                                {h.installed ? (
+                                  updatePending ? (
+                                    // Newer npm release than the installed CLI — the
+                                    // Update button takes the row until it's current.
+                                    <button
+                                      className="primary cta-strong"
+                                      disabled={installingHarness !== null}
+                                      title={`v${upd.installedVersion ?? "?"} → v${upd.latestVersion} — updates the copy this app launches`}
+                                      onClick={() => void handleInstallHarness(h.id, h.displayName)}
+                                    >
+                                      {installingHarness === h.id ? "Updating…" : "Update"}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      onClick={() => {
+                                        const cwd = projects[0]?.path ?? ".";
+                                        void runLoginFlow(h.id, cwd, `${h.displayName} login`);
+                                        setActiveView("chat");
+                                      }}
+                                    >
+                                      Run login
+                                    </button>
+                                  )
+                                ) : (
+                                  <button
+                                    className="primary cta-strong"
+                                    disabled={installingHarness !== null}
+                                    title={`Runs npm install -g to install ${h.displayName}`}
+                                    onClick={() => void handleInstallHarness(h.id, h.displayName)}
+                                  >
+                                    {installingHarness === h.id ? "Installing…" : "Install"}
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   )}

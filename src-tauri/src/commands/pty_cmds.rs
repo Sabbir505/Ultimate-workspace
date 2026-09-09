@@ -12,7 +12,7 @@ use crate::browser_mcp_register;
 use crate::db;
 use crate::harness_adapters::{all_adapters, get_adapter, resolve_for_spawn, CommandSpec};
 use crate::secrets;
-use crate::types::HarnessStatus;
+use crate::types::{HarnessStatus, HarnessUpdateStatus};
 use crate::{DbState, PtyState};
 
 type CmdResult<T> = Result<T, String>;
@@ -36,6 +36,12 @@ fn harness_status_cache_get() -> Option<Vec<HarnessStatus>> {
 
 fn harness_status_cache_store(list: Vec<HarnessStatus>) {
     if let Ok(mut guard) = HARNESS_STATUS_CACHE.lock() {
+        *guard = Some((Instant::now(), list));
+    }
+}
+
+fn harness_update_cache_store(list: Vec<HarnessUpdateStatus>) {
+    if let Ok(mut guard) = HARNESS_UPDATE_CACHE.lock() {
         *guard = Some((Instant::now(), list));
     }
 }
@@ -317,6 +323,112 @@ pub async fn list_harnesses(force: Option<bool>) -> CmdResult<Vec<HarnessStatus>
     Ok(probed)
 }
 
+/// Cached `check_harness_updates` results. The check hits the npm registry
+/// (one HTTP GET per installed harness) plus a `--version` spawn per binary,
+/// so — unlike the 30s install-status cache — this keeps results for a full
+/// hour. `force` (Settings "Re-check", post-install refresh) bypasses it.
+static HARNESS_UPDATE_CACHE: Lazy<Mutex<Option<(Instant, Vec<HarnessUpdateStatus>)>>> =
+    Lazy::new(|| Mutex::new(None));
+const HARNESS_UPDATE_TTL: Duration = Duration::from_secs(3600);
+
+/// Compare dotted numeric versions: true when `latest` is strictly newer than
+/// `installed`. Hand-rolled rather than a semver crate because the inputs are
+/// dist-tag versions ("2.4.1"); pre-release suffixes ("1.0.0-rc.1") compare
+/// equal to the base version, which is fine for stable-channel CLIs.
+fn version_is_newer(latest: &str, installed: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.trim()
+            .trim_start_matches('v')
+            .split(|c: char| c == '.' || c == '-' || c == '+')
+            .map_while(|p| p.parse::<u64>().ok())
+            .collect()
+    }
+    let (l, r) = (parts(latest), parts(installed));
+    if l.is_empty() || r.is_empty() {
+        return false;
+    }
+    for i in 0..l.len().max(r.len()) {
+        let a = l.get(i).copied().unwrap_or(0);
+        let b = r.get(i).copied().unwrap_or(0);
+        if a != b {
+            return a > b;
+        }
+    }
+    false
+}
+
+/// Latest published version of an npm package (`latest` dist-tag). One HTTP
+/// GET against registry.npmjs.org; None when offline or the package vanished.
+async fn npm_latest_version(package: &str) -> Option<String> {
+    static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .unwrap_or_default()
+    });
+    let url = format!("https://registry.npmjs.org/{package}/latest");
+    let json: serde_json::Value = CLIENT.get(&url).send().await.ok()?.json().await.ok()?;
+    json.get("version")?.as_str().map(str::to_string)
+}
+
+/// For every installed harness with a known npm package: installed version
+/// (the CLI's own `--version` output) vs the registry's latest. Drives the
+/// Settings "Update" button (shown only when newer) and the boot-time
+/// notification. Cached for an hour; `force` re-probes immediately.
+#[tauri::command]
+pub async fn check_harness_updates(force: Option<bool>) -> CmdResult<Vec<HarnessUpdateStatus>> {
+    let force = force.unwrap_or(false);
+    if !force {
+        if let Ok(guard) = HARNESS_UPDATE_CACHE.lock() {
+            if let Some((at, list)) = guard.as_ref() {
+                if at.elapsed() < HARNESS_UPDATE_TTL {
+                    return Ok(list.clone());
+                }
+            }
+        }
+    }
+    let checks = tauri::async_runtime::spawn_blocking(|| {
+        all_adapters()
+            .into_iter()
+            .filter_map(|a| {
+                let package = harness_npm_package(a.id())?;
+                let installed = crate::harness_adapters::installed_cli_version(a.binary());
+                Some((a.id().to_string(), package, installed))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| format!("harness update probe join failed: {e}"))?;
+
+    let mut results = Vec::new();
+    for (id, package, installed_version) in checks {
+        // Not installed (or --version failed) → nothing to update; skip the
+        // registry call entirely so offline machines pay no network cost.
+        let Some(installed_version) = installed_version else {
+            results.push(HarnessUpdateStatus {
+                id,
+                installed_version: None,
+                latest_version: None,
+                update_available: false,
+            });
+            continue;
+        };
+        let latest_version = npm_latest_version(package).await;
+        let update_available = latest_version
+            .as_deref()
+            .map(|latest| version_is_newer(latest, &installed_version))
+            .unwrap_or(false);
+        results.push(HarnessUpdateStatus {
+            id,
+            installed_version: Some(installed_version),
+            latest_version,
+            update_available,
+        });
+    }
+    harness_update_cache_store(results.clone());
+    Ok(results)
+}
+
 /// Spawns the harness's login flow in the given pane (PRD §9 onboarding).
 #[tauri::command]
 pub fn run_harness_login(
@@ -366,22 +478,145 @@ fn harness_runtime_prerequisite(harness_id: &str) -> Option<(&'static str, &'sta
     }
 }
 
-/// One-click harness install: `npm install -g <package>` for the requested
-/// harness. Long-running (npm can take a minute+) so this is async with a
-/// 5-minute ceiling; the frontend re-probes install status afterwards.
+/// npm's global install prefix (`npm config get prefix`). npm-managed
+/// binaries live directly inside it on Windows (`…\Roaming\npm\claude.cmd`)
+/// and in `<prefix>/bin` on Unix. Blocking and slow-ish (spawns npm) — keep
+/// off the main thread.
+fn npm_global_prefix() -> Option<std::path::PathBuf> {
+    use std::process::{Command, Stdio};
+    let spec = resolve_for_spawn(&CommandSpec::new("npm", &["config", "get", "prefix"]));
+    let mut cmd = Command::new(&spec.program);
+    cmd.args(&spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then(|| std::path::PathBuf::from(s))
+}
+
+/// True when `resolved` is a file inside npm's global bin area — i.e. an
+/// `npm install -g` of the package would replace this exact binary. A copy
+/// anywhere else (winget, vendor installer, ~/.kimi-code/bin) SHADOWS the
+/// shim on PATH and must be updated by its own tool instead.
+fn binary_is_npm_managed(resolved: &std::path::Path) -> bool {
+    let Some(prefix) = npm_global_prefix() else {
+        return false;
+    };
+    #[cfg(windows)]
+    let bin_dir = prefix;
+    #[cfg(not(windows))]
+    let bin_dir = prefix.join("bin");
+    // Component-wise so "C:\foo\bar" can't match base "C:\foo\b"; ASCII-case
+    // folding only on Windows where path casing is not significant.
+    let pcs: Vec<_> = resolved
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    let bcs: Vec<_> = bin_dir
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    pcs.len() > bcs.len()
+        && pcs.iter().zip(bcs.iter()).all(|(p, b)| {
+            #[cfg(windows)]
+            {
+                p.eq_ignore_ascii_case(b)
+            }
+            #[cfg(not(windows))]
+            {
+                p == b
+            }
+        })
+}
+
+/// One-click harness install / update. npm-managed copies go through
+/// `npm install -g <package>` (which always resolves the latest dist-tag);
+/// a native copy that shadows the npm shim on PATH is updated with the
+/// CLI's own updater instead. Long-running (either can take a minute+) so
+/// this is async with a 5-minute ceiling; the frontend re-probes afterwards.
 #[tauri::command]
 pub async fn install_harness(harness_id: String) -> CmdResult<String> {
-    if let Some((binary, hint)) = harness_runtime_prerequisite(&harness_id) {
-        let present = tauri::async_runtime::spawn_blocking(move || crate::harness_adapters::binary_on_path(binary))
-            .await
-            .unwrap_or(false);
-        if !present {
-            return Err(hint.to_string());
-        }
-    }
-    let package = harness_npm_package(&harness_id)
+    let adapter = get_adapter(&harness_id)
         .ok_or_else(|| format!("unknown harness: {harness_id}"))?;
-    let spec = resolve_for_spawn(&CommandSpec::new("npm", &["install", "-g", package]));
+    let display_name = adapter.display_name();
+    // WHO gets updated: `npm install -g` rewrites the shim inside npm's
+    // prefix, but PATH may resolve a native copy (winget / vendor installer)
+    // that shadows it — updating the shim then silently fixes the wrong copy
+    // and the row's version never moves (the "Update button never clears"
+    // bug). Resolve the actual binary and route native copies to the CLI's
+    // own updater.
+    enum UpdateTarget {
+        Npm,
+        Native(CommandSpec),
+        NativeUnsupported,
+    }
+    let resolver_adapter = adapter.clone();
+    let target = tauri::async_runtime::spawn_blocking(move || {
+        let Some(resolved) = crate::harness_adapters::resolve_binary_on_path(resolver_adapter.binary())
+        else {
+            // Not installed (or nothing resolvable) → npm install must work.
+            return UpdateTarget::Npm;
+        };
+        if binary_is_npm_managed(&resolved) {
+            return UpdateTarget::Npm;
+        }
+        match resolver_adapter.native_update_command(&resolved) {
+            Some(native_spec) => UpdateTarget::Native(native_spec),
+            None => UpdateTarget::NativeUnsupported,
+        }
+    })
+    .await
+    .unwrap_or(UpdateTarget::Npm);
+
+    let (spec, label, success_line) = match target {
+        UpdateTarget::NativeUnsupported => {
+            return Err(format!(
+                "{display_name} is installed natively (not via npm) and has no in-app \
+                 updater — update it with its own tool (winget / vendor installer), \
+                 then press Re-check",
+            ));
+        }
+        UpdateTarget::Native(native) => {
+            let label = format!("{} update (native updater)", native.program);
+            (
+                resolve_for_spawn(&native),
+                label,
+                format!(
+                    "Updated {display_name} via its native updater — {harness_id} is ready to use",
+                ),
+            )
+        }
+        UpdateTarget::Npm => {
+            if let Some((binary, hint)) = harness_runtime_prerequisite(&harness_id) {
+                let present =
+                    tauri::async_runtime::spawn_blocking(move || crate::harness_adapters::binary_on_path(binary))
+                        .await
+                        .unwrap_or(false);
+                if !present {
+                    return Err(hint.to_string());
+                }
+            }
+            let package = harness_npm_package(&harness_id)
+                .ok_or_else(|| format!("unknown harness: {harness_id}"))?;
+            let label = format!("npm install -g {package}");
+            let success_line = format!("Installed {package} — {harness_id} is ready to use");
+            (
+                resolve_for_spawn(&CommandSpec::new("npm", &["install", "-g", package])),
+                label,
+                success_line,
+            )
+        }
+    };
     let mut cmd = tokio::process::Command::new(&spec.program);
     cmd.args(&spec.args)
         .stdin(std::process::Stdio::null())
@@ -398,15 +633,18 @@ pub async fn install_harness(harness_id: String) -> CmdResult<String> {
     }
     let output = tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output())
         .await
-        .map_err(|_| format!(
-            "installing {package} timed out after 5 minutes — check your network / npm registry",
-        ))?
-        .map_err(|e| format!("failed to run npm (is Node.js installed?): {e}"))?;
+        .map_err(|_| format!("{label} timed out after 5 minutes"))?
+        .map_err(|e| format!("failed to run {} (is Node.js installed?): {e}", spec.program))?;
     if output.status.success() {
         // The install flipped the probe result — drop the cached statuses so
         // the frontend's immediate re-probe sees "installed" instead of a
-        // stale entry from the 30s TTL window.
+        // stale entry from the 30s TTL window. Same for the update cache: the
+        // freshly installed version IS the registry latest, so the row must
+        // flip from "Update" back to "Run login" on the next check.
         if let Ok(mut guard) = HARNESS_STATUS_CACHE.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = HARNESS_UPDATE_CACHE.lock() {
             *guard = None;
         }
         // Verify the CLI actually RUNS now before reporting success. A freshly
@@ -431,13 +669,13 @@ pub async fn install_harness(harness_id: String) -> CmdResult<String> {
         .await
         .unwrap_or(false);
         if verified {
-            Ok(format!("Installed {package} — {} is ready to use", harness_id))
+            Ok(success_line)
         } else {
             let binary = get_adapter(&harness_id)
                 .map(|a| a.binary().to_string())
                 .unwrap_or_else(|| harness_id.clone());
             Ok(format!(
-                "Installed {package}, but `{binary} --version` still fails — it may need a PATH \
+                "Ran {label}, but `{binary} --version` still fails — it may need a PATH \
                  refresh (restart Relay) or a runtime this device is missing",
             ))
         }
@@ -453,8 +691,8 @@ pub async fn install_harness(harness_id: String) -> CmdResult<String> {
             .collect::<Vec<_>>()
             .join("\n");
         Err(format!(
-            "npm install -g {package} failed:\n{}",
-            if tail.trim().is_empty() { "unknown npm error" } else { tail.trim() },
+            "{label} failed:\n{}",
+            if tail.trim().is_empty() { "unknown error" } else { tail.trim() },
         ))
     }
 }
@@ -479,4 +717,38 @@ pub fn pty_subscribe(
 ) -> CmdResult<()> {
     pty.0.attach_output_channel(&pane_id, channel);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_is_newer;
+
+    #[test]
+    fn newer_when_latest_is_ahead() {
+        assert!(version_is_newer("2.1.263", "2.1.220"));
+        assert!(version_is_newer("1.0", "0.99.9"));
+        assert!(version_is_newer("2.0", "1.9.9"));
+    }
+
+    #[test]
+    fn not_newer_when_equal_or_behind() {
+        assert!(!version_is_newer("2.1.263", "2.1.263"));
+        assert!(!version_is_newer("2.1.220", "2.1.263"));
+        assert!(!version_is_newer("18.1.14", "18.1.14"));
+    }
+
+    #[test]
+    fn tolerates_v_prefix_and_short_forms() {
+        assert!(version_is_newer("v2.0", "1.9.9"));
+        // "1.10" vs "1.9" compares numerically, not lexically.
+        assert!(version_is_newer("1.10", "1.9"));
+        assert!(!version_is_newer("1.9", "1.10"));
+    }
+
+    #[test]
+    fn garbage_or_missing_versions_never_report_update() {
+        assert!(!version_is_newer("", "1.0"));
+        assert!(!version_is_newer("1.0", ""));
+        assert!(!version_is_newer("abc", "1.0"));
+    }
 }

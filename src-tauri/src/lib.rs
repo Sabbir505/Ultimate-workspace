@@ -278,6 +278,7 @@ pub fn run() {
             commands::pty_cmds::kill_pty,
             commands::pty_cmds::pane_memory,
             commands::pty_cmds::list_harnesses,
+            commands::pty_cmds::check_harness_updates,
             commands::pty_cmds::install_harness,
             commands::pty_cmds::run_harness_login,
             commands::pty_cmds::pty_subscribe,

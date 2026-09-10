@@ -25,7 +25,7 @@ use crate::chat::proto::{
 };
 use crate::chat::providers::{
     calculate_anthropic_cost, calculate_openai_cost, ChatProvider, ChatProviderId, ChatRequest,
-    ChatUsage, ANTHROPIC_API_VERSION,
+    ChatUsage, ANTHROPIC_API_VERSION, REASONING_PREFIX,
 };
 use crate::chat::{permission, tools, ChatManager};
 
@@ -1730,6 +1730,108 @@ fn build_usage(openai: bool, u: RoundUsage) -> Option<ChatUsage> {
         cache_read_input_tokens: u.cache_read,
         reasoning_tokens: u.reasoning,
     })
+}
+
+/// What one complete SSE line produced in [`ProviderSsePump::line`].
+pub(crate) enum SsePumpEvent {
+    /// An answer chunk, already wrapped in `<think>` boundaries where the
+    /// reasoning sentinel required it — the caller emits it verbatim (the
+    /// pump has already appended it to `full_text`).
+    Token(String),
+    /// The provider signalled end-of-stream.
+    Done,
+    /// Nothing to emit (non-data line, ping, tolerated parse failure).
+    Quiet,
+}
+
+/// Incremental SSE pump shared by the provider-trait streaming loops
+/// (chat/mod.rs `run_chat_stream`, mobile/relay.rs `handle_chat_turn`).
+/// Feeds complete SSE lines through a provider's `parse_sse_chunk`, tracks
+/// the reasoning sentinel to wrap contiguous thinking runs in
+/// `<think>…</think>`, accumulates the full answer text, and enforces the
+/// B-18 parse-failure tolerance (a stray malformed line is skipped;
+/// `MAX_PARSE_FAILURES` consecutive failures fail the turn, while genuine
+/// `{"error": …}` provider events — surfaced as "provider error:" — fail
+/// immediately).
+pub(crate) struct ProviderSsePump<'a> {
+    /// Usage-bearing lines, retained for the provider's `parse_usage`.
+    pub buf: &'a mut String,
+    /// The full answer text so far (think markers included).
+    pub full_text: &'a mut String,
+    in_think: bool,
+    parse_failures: u32,
+}
+
+impl<'a> ProviderSsePump<'a> {
+    pub(crate) fn new(buf: &'a mut String, full_text: &'a mut String) -> Self {
+        Self {
+            buf,
+            full_text,
+            in_think: false,
+            parse_failures: 0,
+        }
+    }
+
+    /// Feed one complete, newline-terminated (and trimmed) SSE line.
+    pub(crate) fn line(
+        &mut self,
+        provider: &dyn ChatProvider,
+        line: &str,
+    ) -> Result<SsePumpEvent, String> {
+        let (token, done) = match provider.parse_sse_chunk(line, self.buf) {
+            Ok(pair) => {
+                self.parse_failures = 0;
+                pair
+            }
+            Err(e) if e.starts_with("provider error:") => return Err(e),
+            Err(_) => {
+                self.parse_failures += 1;
+                if self.parse_failures >= MAX_PARSE_FAILURES {
+                    return Err(format!(
+                        "SSE parse stalled: {MAX_PARSE_FAILURES} consecutive JSON parse failures"
+                    ));
+                }
+                return Ok(SsePumpEvent::Quiet);
+            }
+        };
+        match (token, done) {
+            (Some(token), false) => {
+                // Reasoning tokens are sentinel-prefixed by the parser; wrap
+                // contiguous runs in <think>…</think> so the UI can render a
+                // collapsible thinking block.
+                let mut out = String::new();
+                if let Some(reasoning) = token.strip_prefix(REASONING_PREFIX) {
+                    if !self.in_think {
+                        out.push_str("<think>");
+                        self.in_think = true;
+                    }
+                    out.push_str(reasoning);
+                } else {
+                    if self.in_think {
+                        out.push_str("</think>");
+                        self.in_think = false;
+                    }
+                    out.push_str(&token);
+                }
+                self.full_text.push_str(&out);
+                Ok(SsePumpEvent::Token(out))
+            }
+            (_, true) => Ok(SsePumpEvent::Done),
+            _ => Ok(SsePumpEvent::Quiet),
+        }
+    }
+
+    /// `</think>` when a thinking block is still open at end-of-stream — the
+    /// caller emits it so the reply can't end inside an unterminated
+    /// collapsible block.
+    pub(crate) fn close_think(&mut self) -> Option<String> {
+        if self.in_think {
+            self.in_think = false;
+            Some("</think>".to_string())
+        } else {
+            None
+        }
+    }
 }
 
 pub(crate) fn resolve_provider(id: &ChatProviderId) -> Box<dyn ChatProvider> {

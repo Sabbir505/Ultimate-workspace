@@ -421,6 +421,7 @@ export const setSetting = (key: string, value: string) => safeInvoke<void>("set_
 export const getChatDbPath = () => safeInvoke<string | null>("get_chat_db_path", {});
 
 export * from "./ipc/modelMarket";
+export * from "./ipc/chatSessions";
 export * from "./ipc/approvals";
 export * from "./ipc/budget";
 export * from "./ipc/voice";

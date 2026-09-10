@@ -27,6 +27,14 @@ Prior context:
 - Autoreview (code-review subagent) after each significant step; findings fixed or logged before moving on.
 - One conventional commit per step.
 
+## Steps — session 8: resumable-download engine + a caught deadlock (2026-09-11)
+
+| # | Step | Outcome | Verification | Commit |
+|---|---|---|---|---|
+| 8 | **Resumable-download consolidation.** New `src/download.rs`: `pump_body_to_file(resp, partial, start, resuming, stall, &mut cancel_rx, on_chunk)` owns the body→file loop with cancel + data-stall watchdogs, returning a `BodyPumpOutcome` (Completed/Cancelled/Stalled/ReadError/WriteError) + byte count. Migrated: `download_task` (model tool — keeps .part on cancel/stall, retries via Range) and `run_download` (HF market — removes .partial on cancel, maps outcomes to DownloadAbort::Failed, gains a 500-char error snippet where bodies were untruncated). **Bonus find:** migrating exposed a REAL deadlock — download_task's cancelled arm held the `entry.snapshot` std-Mutex guard across `TaskManager::emit`, which re-locks the same mutex. Original code scoped the guard; the pump-migration version had hoisted it. Fixed with an inner scope + a comment explaining why the guard must die before emit | cargo check 0 errors · warnings 61 (< 62 baseline) · cargo test --lib **1021 ✓** incl. `cancel_keeps_part_file_for_resume` 0.36s | n/a (test IS the verification) | `refactor(download): market run_download onto the shared body pump; fix cancel deadlock` |
+
+**Debugging war-story (documented for future sessions):** the hang initially looked like a slow build. Actual chain: (1) the deadlock genuinely hung the test binary; (2) every later `cargo test` hit LNK1104 — Windows keeps the .exe locked while the hung process lives — which masqueraded as "could not compile" churn; (3) `git checkout` of sources didn't help while the process lived. Fix: kill `relay_lib*` processes, then scope the guard. Also: the user's dev `relay.exe` + the auto-format watcher share `target/`, so expect lock waits when editing rs files while the app runs.
+
 ## Steps — session 7: agent_sessions split completed (2026-09-11)
 
 | # | Step | Outcome | Verification | Commit |

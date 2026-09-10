@@ -3,6 +3,7 @@
 // the last tile becomes a "more" button opening a modal with the full list.
 // Clicking a tile opens Settings → Connectors for management.
 import { useEffect, useState } from "react";
+import { useOcclusion } from "../../hooks/useOcclusion";
 import { listConnectors, type ConnectorWithStatus } from "../../lib/ipc";
 import { ConnectorIcon } from "../settings/ConnectorIcon";
 import { Modal } from "../common/Modal";
@@ -13,15 +14,11 @@ const GRID_CAP = 12; // 4 columns × 3 rows
 export function ConnectorGrid({ onManage }: { onManage: () => void }) {
   const [connectors, setConnectors] = useState<ConnectorWithStatus[]>([]);
   const [showAll, setShowAll] = useState(false);
-  const setModalOpen = useUiStore((s) => s.setModalOpen);
 
   // M25: the "more" modal must hide native webviews like every other modal —
   // register its open state (under its own id, M22) or the browser webview
   // floats above the dialog.
-  useEffect(() => {
-    setModalOpen("connector-grid:all", showAll);
-    return () => { setModalOpen("connector-grid:all", false); };
-  }, [showAll, setModalOpen]);
+  useOcclusion("connector-grid:all", showAll);
 
   useEffect(() => {
     let stale = false;

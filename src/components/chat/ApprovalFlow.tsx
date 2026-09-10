@@ -7,6 +7,7 @@
 //     session switches into full_auto mode (deliberate friction, not a silent
 //     one-click toggle).
 import { useEffect, useState } from "react";
+import { useOcclusion } from "../../hooks/useOcclusion";
 import { Modal } from "../common/Modal";
 import { useUiStore } from "../../state/ui";
 import {
@@ -144,12 +145,8 @@ export function FullAutoConfirmModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const setModalOpen = useUiStore((s) => s.setModalOpen);
-
-  useEffect(() => {
-    setModalOpen("approval:full-auto", true);
-    return () => setModalOpen("approval:full-auto", false);
-  }, [setModalOpen]);
+  // Register with the webview-occlusion system (M22) for the modal's lifetime.
+  useOcclusion("approval:full-auto", true);
 
   return (
     <Modal

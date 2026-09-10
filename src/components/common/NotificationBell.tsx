@@ -26,6 +26,7 @@ import { useChatStore } from "../../state/chat";
 import { usePanesStore } from "../../state/panes";
 import { useUiStore } from "../../state/ui";
 import { relativeTime } from "../../lib/relativeTime";
+import { useOcclusion } from "../../hooks/useOcclusion";
 
 const KIND_META: Record<RelayNotificationKind, { icon: typeof Bell; label: string }> = {
   completed: { icon: CheckCircle2, label: "Completed" },
@@ -73,7 +74,6 @@ export function NotificationBell() {
   // this viewing even though opening marks them seen.
   const [freshIds, setFreshIds] = useState<Set<string>>(() => new Set());
   const wrapRef = useRef<HTMLDivElement>(null);
-  const setModalOpen = useUiStore((s) => s.setModalOpen);
 
   const toggle = useCallback(() => {
     setOpen((prev) => {
@@ -91,10 +91,7 @@ export function NotificationBell() {
 
   // Register with the webview-occlusion system (M22) so native browser panes
   // hide while the panel is open.
-  useEffect(() => {
-    setModalOpen("app:notification-bell", open);
-    return () => setModalOpen("app:notification-bell", false);
-  }, [open, setModalOpen]);
+  useOcclusion("app:notification-bell", open);
 
   // Close on Escape and on any click outside the bell + panel.
   useEffect(() => {

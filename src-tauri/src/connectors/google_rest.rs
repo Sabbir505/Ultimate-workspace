@@ -387,18 +387,8 @@ async fn get_json(
     product: &str,
     op: &str,
 ) -> Result<serde_json::Value, String> {
-    let resp = http
-        .get(url)
-        .bearer_auth(token)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| format!("{product} {op} failed: {e}"))?;
-    let status = resp.status();
+    let resp = crate::util::checked_send_ctx(http .get(url) .bearer_auth(token) .timeout(std::time::Duration::from_secs(30)), 500, "{product} {op}").await?;
     let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!("{product} {op} HTTP {status}: {body}"));
-    }
     serde_json::from_str(&body).map_err(|e| format!("{product} {op} response not JSON: {e}"))
 }
 
@@ -410,19 +400,8 @@ async fn post_json(
     product: &str,
     op: &str,
 ) -> Result<serde_json::Value, String> {
-    let resp = http
-        .post(url)
-        .bearer_auth(token)
-        .json(payload)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| format!("{product} {op} failed: {e}"))?;
-    let status = resp.status();
+    let resp = crate::util::checked_send_ctx(http .post(url) .bearer_auth(token) .json(payload) .timeout(std::time::Duration::from_secs(30)), 500, "{product} {op}").await?;
     let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!("{product} {op} HTTP {status}: {body}"));
-    }
     serde_json::from_str(&body).map_err(|e| format!("{product} {op} response not JSON: {e}"))
 }
 
@@ -434,19 +413,8 @@ async fn put_json(
     product: &str,
     op: &str,
 ) -> Result<serde_json::Value, String> {
-    let resp = http
-        .put(url)
-        .bearer_auth(token)
-        .json(payload)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| format!("{product} {op} failed: {e}"))?;
-    let status = resp.status();
+    let resp = crate::util::checked_send_ctx(http .put(url) .bearer_auth(token) .json(payload) .timeout(std::time::Duration::from_secs(30)), 500, "{product} {op}").await?;
     let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!("{product} {op} HTTP {status}: {body}"));
-    }
     serde_json::from_str(&body).map_err(|e| format!("{product} {op} response not JSON: {e}"))
 }
 
@@ -544,18 +512,8 @@ async fn drive_call(
             } else {
                 format!("{BASE}/files/{}?alt=media", urlencoding::encode(file_id))
             };
-            let resp = http
-                .get(&url)
-                .bearer_auth(token)
-                .timeout(std::time::Duration::from_secs(60))
-                .send()
-                .await
-                .map_err(|e| format!("drive read_file_content failed: {e}"))?;
-            let status = resp.status();
+            let resp = crate::util::checked_send_ctx(http .get(&url) .bearer_auth(token) .timeout(std::time::Duration::from_secs(60)), 500, "drive read_file_content").await?;
             let body = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(format!("drive read_file_content HTTP {status}: {body}"));
-            }
             if export.is_none() && !body.is_ascii() && !body.is_empty() {
                 return Ok("[binary file content — not displayed]".to_string());
             }
@@ -583,19 +541,8 @@ async fn drive_call(
                     "file",
                     reqwest::multipart::Part::bytes(content.into_bytes()).file_name(name_arg.to_string()),
                 );
-            let resp = http
-                .post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart")
-                .bearer_auth(token)
-                .multipart(form)
-                .timeout(std::time::Duration::from_secs(60))
-                .send()
-                .await
-                .map_err(|e| format!("drive create_file failed: {e}"))?;
-            let status = resp.status();
+            let resp = crate::util::checked_send_ctx(http .post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart") .bearer_auth(token) .multipart(form) .timeout(std::time::Duration::from_secs(60)), 500, "drive create_file").await?;
             let body = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(format!("drive create_file HTTP {status}: {body}"));
-            }
             let json: serde_json::Value = serde_json::from_str(&body)
                 .map_err(|e| format!("drive create_file response not JSON: {e}"))?;
             let id = json.get("id").cloned().unwrap_or(serde_json::Value::Null);

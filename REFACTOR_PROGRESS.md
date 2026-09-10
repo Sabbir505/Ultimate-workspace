@@ -27,6 +27,29 @@ Prior context:
 - Autoreview (code-review subagent) after each significant step; findings fixed or logged before moving on.
 - One conventional commit per step.
 
+## Steps — session 7: agent_sessions split completed (2026-09-11)
+
+| # | Step | Outcome | Verification | Commit |
+|---|---|---|---|---|
+| 2 | **agent_sessions split — COMPLETE.** The 9,213-line mod.rs carved into 13 domain child modules along its mapped seams: `lifecycle` (133 — one-shot child registry/guards, CLI session persistence), `primer` (318 — context-primer assembly, actual-model persistence), `attachments` (147), `acp` (663 — ACP turn dispatch + stream reader), `dirwatch` (329), `bundle` (174), `claude` (1005 — spawn, permission/ask handling, read_claude_stream), `perturn` (579 — per-turn harness spawn + reader), `ask` (324 — RELAY_ASK channel), `opencode` (1001 — turn dispatch, server lifecycle, SSE reader), `handlers` (679 — the four harness event handlers + spawn/usage helpers), `oneshot` (895 — run_one_shot family), `tracker` (654, prior session). mod.rs shell: 3,045 lines (manager, shared emit/persist, finalization, inline tests). Every child is a `use super::*` carve (inherits parent imports + private helpers), items pub(super), glob-reimported so call sites are unchanged; pub/pub(crate) items re-exported for external consumers; trailing doc comments moved with their items; ONE_SHOT_CHILDREN doc reunified | cargo check 0 errors · warnings 61 (< 62 baseline) · cargo test --lib **1021 ✓** | n/a (pure moves) | `refactor(agent_sessions): split the 9.2k-line file into 13 domain modules` |
+
+Note: one commit message lost two words to shell backtick expansion (`use super::*` in the text) — cosmetic, left as-is rather than force-pushing the shared branch.
+
+## Steps — session 6: finishing the list (2026-09-10)
+
+| # | Item | Outcome | Verification | Commit |
+|---|---|---|---|---|
+| 1 | `run_subagent_loop` (last streaming transport) | **Decision: parsing stays bespoke by design** — the subagent loop needs B-11 thinking-echo (text + signature), D6 output sanitization, transcript-embedded markers, and SUBAGENT_RESULT_CAP capping, which the shared pump/execution primitives don't model; forcing them through would change subagent semantics. The genuinely duplicated part was extracted: `parse_subagent_args` + `run_subagent_call` collapse the two format branches' identical per-call tails | cargo · 1021 ✓ | `refactor(subagent): shared per-call execution tail…` |
+| 4 | lib/ipc rehoming | `chatSessions.ts` now owns the chat wire-type family (from prompts.ts) + session mutators/cancel/persist/resolve/key+config wrappers (from automations.ts); prompts.ts 345→83, automations.ts 213→113; barrel re-export keeps consumers unchanged | tsc · vitest 865 ✓ | `refactor(ipc): rehome the chat wire-type family…` |
+| 3 | checked_send long tail | New `checked_send_ctx(builder, n, op)`: keeps operation context prefixes ("gmail search failed: …" / "gmail search HTTP 400: …" — the "HTTP {status}:" marker stays load-bearing) and adds a 500-char body snippet where bodies previously flowed untruncated. Migrated gmail_api ×7 + google_rest ×5 (+1 hand-migrated for its inline-comment builder); search.rs's compact no-body form stays by design | cargo · 1021 ✓ | `refactor(connectors): checked_send_ctx…` |
+| 2 | agent_sessions.rs split (first carve) | Directory module: `agent_sessions/mod.rs` + `tracker.rs` (654 lines — ToolTracker cluster: PendingTool/SubagentMeta/ToolTracker + impl, tool_meta_* builders, shell/subagent name helpers, result markers), child module inheriting the parent's imports/helpers via `use super::*`, items re-exposed pub(super), glob-imported back so all call sites are unchanged | cargo · 1021 ✓ (test build incl.) | `refactor(agent_sessions): extract ToolTracker/meta…` |
+
+**Streaming merge: CLOSED.** mobile ✓ · run_chat_stream ✓ · tool loops ✓ (execution shared) · subagent ✓ (execution shared; parsing bespoke by design — recorded above). The ~1,600 LOC duplication estimate resolved into: execution contracts now shared everywhere they could be without behavior change; the per-format round parsers remain distinct because they genuinely parse different wire shapes.
+
+**agent_sessions split: first carve landed** (tracker.rs). Remaining carves (same mechanical pattern — slice by top-level items, child module + `use super::*`, pub(super) + glob back): primer/context assembly, attachments, claude turn reader, per-turn harness spawn/read, opencode server, the four event handlers, one-shot runner, finalization/emitters, and the tests module. Each carve is independently committable.
+
+---
+
 ## Steps — session 5: streaming loop merge, transports 1–2 (2026-09-10)
 
 | # | Step | Verification | Autoreview | Commit |

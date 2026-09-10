@@ -128,19 +128,8 @@ pub async fn call_tool(
             if !q.is_empty() {
                 params.push(("q", q.to_string()));
             }
-            let resp = http
-                .get(format!("{base}/messages"))
-                .bearer_auth(&token)
-                .query(&params)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| format!("gmail search failed: {e}"))?;
-            let status = resp.status();
+            let resp = crate::util::checked_send_ctx(http .get(format!("{base}/messages")) .bearer_auth(&token) .query(&params) .timeout(std::time::Duration::from_secs(30)), 500, "gmail search").await?;
             let body = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(format!("gmail search HTTP {status}: {body}"));
-            }
             let json: serde_json::Value = serde_json::from_str(&body)
                 .map_err(|e| format!("gmail search response not JSON: {e}"))?;
             // Lighten the payload: keep id/threadId + metadata headers + snippet.
@@ -186,7 +175,8 @@ pub async fn call_tool(
                 .get("format")
                 .and_then(|v| v.as_str())
                 .unwrap_or("full");
-            let resp = http
+            let resp = crate::util::checked_send_ctx(
+                http
                 // Encode the id: thread/message ids come from tool args (model-editable)
                 // and may contain `/`, `?`, `#` or spaces that would silently
                 // reinterpret parts of the path as query/fragment (parity with
@@ -194,15 +184,12 @@ pub async fn call_tool(
                 .get(format!("{base}/threads/{}", urlencoding::encode(thread_id)))
                 .bearer_auth(&token)
                 .query(&[("format", fmt)])
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| format!("gmail get_thread failed: {e}"))?;
-            let status = resp.status();
+                .timeout(std::time::Duration::from_secs(30)),
+                500,
+                "gmail get_thread",
+            )
+            .await?;
             let body = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(format!("gmail get_thread HTTP {status}: {body}"));
-            }
             Ok(body)
         }
         "gmail_get_message" => {
@@ -214,34 +201,13 @@ pub async fn call_tool(
                 .get("format")
                 .and_then(|v| v.as_str())
                 .unwrap_or("full");
-            let resp = http
-                .get(format!("{base}/messages/{}", urlencoding::encode(message_id)))
-                .bearer_auth(&token)
-                .query(&[("format", fmt)])
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| format!("gmail get_message failed: {e}"))?;
-            let status = resp.status();
+            let resp = crate::util::checked_send_ctx(http .get(format!("{base}/messages/{}", urlencoding::encode(message_id))) .bearer_auth(&token) .query(&[("format", fmt)]) .timeout(std::time::Duration::from_secs(30)), 500, "gmail get_message").await?;
             let body = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(format!("gmail get_message HTTP {status}: {body}"));
-            }
             Ok(body)
         }
         "gmail_list_labels" => {
-            let resp = http
-                .get(format!("{base}/labels"))
-                .bearer_auth(&token)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| format!("gmail list_labels failed: {e}"))?;
-            let status = resp.status();
+            let resp = crate::util::checked_send_ctx(http .get(format!("{base}/labels")) .bearer_auth(&token) .timeout(std::time::Duration::from_secs(30)), 500, "gmail list_labels").await?;
             let body = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(format!("gmail list_labels HTTP {status}: {body}"));
-            }
             Ok(body)
         }
         "gmail_create_draft" => {
@@ -249,19 +215,8 @@ pub async fn call_tool(
             let body_json = serde_json::json!({
                 "message": { "raw": base64url(raw.as_bytes()) }
             });
-            let resp = http
-                .post(format!("{base}/drafts"))
-                .bearer_auth(&token)
-                .json(&body_json)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| format!("gmail create_draft failed: {e}"))?;
-            let status = resp.status();
+            let resp = crate::util::checked_send_ctx(http .post(format!("{base}/drafts")) .bearer_auth(&token) .json(&body_json) .timeout(std::time::Duration::from_secs(30)), 500, "gmail create_draft").await?;
             let body = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(format!("gmail create_draft HTTP {status}: {body}"));
-            }
             let json: serde_json::Value = serde_json::from_str(&body)
                 .map_err(|e| format!("gmail create_draft response not JSON: {e}"))?;
             let id = json.get("id").cloned().unwrap_or(serde_json::Value::Null);
@@ -282,19 +237,8 @@ pub async fn call_tool(
             let body_json = serde_json::json!({
                 "raw": base64url(raw.as_bytes())
             });
-            let resp = http
-                .post(format!("{base}/messages/send"))
-                .bearer_auth(&token)
-                .json(&body_json)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| format!("gmail send_message failed: {e}"))?;
-            let status = resp.status();
+            let resp = crate::util::checked_send_ctx(http .post(format!("{base}/messages/send")) .bearer_auth(&token) .json(&body_json) .timeout(std::time::Duration::from_secs(30)), 500, "gmail send_message").await?;
             let body = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(format!("gmail send_message HTTP {status}: {body}"));
-            }
             let json: serde_json::Value = serde_json::from_str(&body)
                 .map_err(|e| format!("gmail send_message response not JSON: {e}"))?;
             let id = json.get("id").cloned().unwrap_or(serde_json::Value::Null);
@@ -338,22 +282,8 @@ pub async fn call_tool(
                         .to_string(),
                 );
             }
-            let resp = http
-                .post(format!("{base}/threads/{}/modify", urlencoding::encode(thread_id)))
-                .bearer_auth(&token)
-                .json(&serde_json::json!({
-                    "addLabelIds": add,
-                    "removeLabelIds": remove,
-                }))
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| format!("gmail label_thread failed: {e}"))?;
-            let status = resp.status();
+            let resp = crate::util::checked_send_ctx(http .post(format!("{base}/threads/{}/modify", urlencoding::encode(thread_id))) .bearer_auth(&token) .json(&serde_json::json!({ "addLabelIds": add, "removeLabelIds": remove, })) .timeout(std::time::Duration::from_secs(30)), 500, "gmail label_thread").await?;
             let body = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(format!("gmail label_thread HTTP {status}: {body}"));
-            }
             let json: serde_json::Value = serde_json::from_str(&body)
                 .map_err(|e| format!("gmail label_thread response not JSON: {e}"))?;
             let labels = json

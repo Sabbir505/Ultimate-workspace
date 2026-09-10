@@ -5509,6 +5509,66 @@ fn emit_opencode_tool(
 /// Kimi stream-json: `{"role":"assistant","content":…}` messages, tool events
 /// (see tool_marker_kimi), and a `session.resume_hint` meta line carrying the
 /// resume id. (Verified against v0.31.1 output.)
+/// Shared subagent-spawn path for the harness event handlers: extract the
+/// claude-"Task"-style role/task/prompt from the tool input, emit the
+/// SubAgent spawn marker into the stream.
+fn emit_subagent_spawn(
+    tools: &mut ToolTracker,
+    full: &mut String,
+    app: Option<&AppHandle>,
+    sid: &str,
+    name: &str,
+    value: Value,
+    inp: &Value,
+) {
+    let role = inp
+        .get("subagent_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("agent")
+        .to_string();
+    let task = inp
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let prompt = inp
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let marker = tools.subagent_use(name, value, app, sid, &role, &task, &prompt, "", false);
+    full.push_str(&marker);
+    emit_token(app, sid, &marker);
+}
+
+/// Shared usage-application tail for the harness event handlers: OR-merge
+/// the per-stream running totals into the turn accumulators and refresh the
+/// live IN/CACHE chips (harnesses report running totals — replace, never
+/// accumulate). Callers differ only in WHERE they read the numbers.
+fn merge_round_usage(
+    sid: &str,
+    in_val: Option<i64>,
+    out_val: Option<i64>,
+    cr: Option<i64>,
+    cc: Option<i64>,
+    input: &mut Option<i64>,
+    output: &mut Option<i64>,
+    cache_read: &mut Option<i64>,
+    cache_creation: &mut Option<i64>,
+) {
+    *input = in_val.or(*input);
+    *output = out_val.or(*output);
+    *cache_read = cr.or(*cache_read);
+    *cache_creation = cc.or(*cache_creation);
+    crate::chat::turn_perf::set_active_round_usage(
+        sid,
+        (*input).unwrap_or(0),
+        (*cache_read).unwrap_or(0),
+        (*cache_creation).unwrap_or(0),
+        false,
+    );
+}
+
 fn handle_kimi_event(
     app: Option<&AppHandle>,
     sid: &str,
@@ -5544,34 +5604,15 @@ fn handle_kimi_event(
                                 Some(val) => val.clone(),
                                 None => json!({}),
                             };
-                            let role = args
-                                .get("subagent_type")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("agent")
-                                .to_string();
-                            let task = args
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let prompt = args
-                                .get("prompt")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let marker = tools.subagent_use(
-                                &name,
-                                values.into_iter().next().unwrap_or(json!({})),
+                            emit_subagent_spawn(
+                                tools,
+                                full,
                                 app,
                                 sid,
-                                &role,
-                                &task,
-                                &prompt,
-                                "",
-                                false,
+                                &name,
+                                values.into_iter().next().unwrap_or(json!({})),
+                                &args,
                             );
-                            full.push_str(&marker);
-                            emit_token(app, sid, &marker);
                         } else {
                             let marker = tools.tool_use(&name, values);
                             full.push_str(&marker);
@@ -5609,38 +5650,33 @@ fn handle_kimi_event(
             }
             if v.get("type").and_then(|t| t.as_str()) == Some("usage") {
                 if let Some(u) = v.get("usage") {
-                    *input = u.get("input_tokens").and_then(|t| t.as_i64()).or(*input);
-                    *output = u.get("output_tokens").and_then(|t| t.as_i64()).or(*output);
                     // Kimi rides on Anthropic-shaped provider reports; match
                     // both the snake_case and camelCase spellings rather
                     // than guess one.
-                    *cache_read = usage_i64(
-                        u,
-                        &[
-                            "cache_read_input_tokens",
-                            "cacheReadInputTokens",
-                            "cacheRead",
-                        ],
-                    )
-                    .or(*cache_read);
-                    *cache_creation = usage_i64(
-                        u,
-                        &[
-                            "cache_creation_input_tokens",
-                            "cacheCreationInputTokens",
-                            "cacheWrite",
-                        ],
-                    )
-                    .or(*cache_creation);
-                    // Live IN/CACHE chips: kimi reports running totals, so
-                    // replace (never accumulate) — same values the final done
-                    // carries.
-                    crate::chat::turn_perf::set_active_round_usage(
+                    merge_round_usage(
                         sid,
-                        (*input).unwrap_or(0),
-                        (*cache_read).unwrap_or(0),
-                        (*cache_creation).unwrap_or(0),
-                        false,
+                        u.get("input_tokens").and_then(|t| t.as_i64()),
+                        u.get("output_tokens").and_then(|t| t.as_i64()),
+                        usage_i64(
+                            u,
+                            &[
+                                "cache_read_input_tokens",
+                                "cacheReadInputTokens",
+                                "cacheRead",
+                            ],
+                        ),
+                        usage_i64(
+                            u,
+                            &[
+                                "cache_creation_input_tokens",
+                                "cacheCreationInputTokens",
+                                "cacheWrite",
+                            ],
+                        ),
+                        input,
+                        output,
+                        cache_read,
+                        cache_creation,
                     );
                 }
             }
@@ -5791,25 +5827,7 @@ fn handle_opencode_event(
             if is_subagent_tool_name(name) {
                 // Subagent spawn (claude "Agent"/"Task"): extract
                 // role/task/prompt and emit a spawn event.
-                let role = inp
-                    .get("subagent_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("agent")
-                    .to_string();
-                let task = inp
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let prompt = inp
-                    .get("prompt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let marker =
-                    tools.subagent_use(name, value, app, sid, &role, &task, &prompt, "", false);
-                full.push_str(&marker);
-                emit_token(app, sid, &marker);
+                emit_subagent_spawn(tools, full, app, sid, name, value, &inp);
             } else {
                 // OpenCode reports a tool's completed output inline on the same
                 // part (`state.output` / `state.error`); attach it for shell tools.
@@ -5832,28 +5850,22 @@ fn handle_opencode_event(
                 }
             }
             if let Some(u) = v.pointer("/part/tokens") {
-                *input = u.get("input").and_then(|t| t.as_i64()).or(*input);
-                *output = u.get("output").and_then(|t| t.as_i64()).or(*output);
                 // OpenCode nests cache counters under `cache` on the tokens
                 // object; match the flat spellings too for older versions.
-                *cache_read = u
-                    .get("cacheRead")
-                    .and_then(|t| t.as_i64())
-                    .or_else(|| u.pointer("/cache/read").and_then(|t| t.as_i64()))
-                    .or(*cache_read);
-                *cache_creation = u
-                    .get("cacheWrite")
-                    .and_then(|t| t.as_i64())
-                    .or_else(|| u.pointer("/cache/write").and_then(|t| t.as_i64()))
-                    .or(*cache_creation);
-                // Live IN/CACHE chips: report-level totals — replace, not
-                // accumulate.
-                crate::chat::turn_perf::set_active_round_usage(
+                merge_round_usage(
                     sid,
-                    (*input).unwrap_or(0),
-                    (*cache_read).unwrap_or(0),
-                    (*cache_creation).unwrap_or(0),
-                    false,
+                    u.get("input").and_then(|t| t.as_i64()),
+                    u.get("output").and_then(|t| t.as_i64()),
+                    u.get("cacheRead")
+                        .and_then(|t| t.as_i64())
+                        .or_else(|| u.pointer("/cache/read").and_then(|t| t.as_i64())),
+                    u.get("cacheWrite")
+                        .and_then(|t| t.as_i64())
+                        .or_else(|| u.pointer("/cache/write").and_then(|t| t.as_i64())),
+                    input,
+                    output,
+                    cache_read,
+                    cache_creation,
                 );
             }
             // Free models report cost 0; Zen/relay models report real dollars.
@@ -5908,27 +5920,25 @@ fn handle_pi_event(
             // Cumulative provider-reported usage; cost.total is relay-reported
             // and may stay 0 — finish_turn falls back to the session's model.
             if let Some(u) = v.get("usage") {
-                *input = u.get("input").and_then(|t| t.as_i64()).or(*input);
-                *output = u.get("output").and_then(|t| t.as_i64()).or(*output);
                 // pi/omp report the cache halves alongside input/output
                 // (cacheRead/cacheWrite); dropping them once made these
                 // turns look nearly token-free.
-                *cache_read = usage_i64(u, &["cacheRead", "cache_read"]).or(*cache_read);
-                *cache_creation = usage_i64(u, &["cacheWrite", "cache_write"]).or(*cache_creation);
+                merge_round_usage(
+                    sid,
+                    u.get("input").and_then(|t| t.as_i64()),
+                    u.get("output").and_then(|t| t.as_i64()),
+                    usage_i64(u, &["cacheRead", "cache_read"]),
+                    usage_i64(u, &["cacheWrite", "cache_write"]),
+                    input,
+                    output,
+                    cache_read,
+                    cache_creation,
+                );
                 *cost = u
                     .pointer("/cost/total")
                     .and_then(|c| c.as_f64())
                     .filter(|c| *c > 0.0)
                     .or(*cost);
-                // Live IN/CACHE chips: pi reports running totals — replace,
-                // never accumulate.
-                crate::chat::turn_perf::set_active_round_usage(
-                    sid,
-                    (*input).unwrap_or(0),
-                    (*cache_read).unwrap_or(0),
-                    (*cache_creation).unwrap_or(0),
-                    false,
-                );
             }
             let Some(ev) = v.get("assistantMessageEvent") else {
                 return;
@@ -5983,25 +5993,7 @@ fn handle_pi_event(
             emit_todowrite_steps(app, sid, name, &inp);
             let value = tool_meta_generic(name, &inp);
             if is_subagent_tool_name(name) {
-                let role = inp
-                    .get("subagent_type")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("agent")
-                    .to_string();
-                let task = inp
-                    .get("description")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let prompt = inp
-                    .get("prompt")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let marker =
-                    tools.subagent_use(name, value, app, sid, &role, &task, &prompt, "", false);
-                full.push_str(&marker);
-                emit_token(app, sid, &marker);
+                emit_subagent_spawn(tools, full, app, sid, name, value, &inp);
             } else {
                 // pi reports the tool's output separately (tool_execution_end),
                 // so the start marker queues a pending slot for tool_result to
@@ -6092,19 +6084,16 @@ fn handle_commandcode_event(
                 }
                 "run_end" => {
                     if let Some(u) = inner.pointer("/result/usage") {
-                        *input = u.get("inputTokens").and_then(|t| t.as_i64()).or(*input);
-                        *output = u.get("outputTokens").and_then(|t| t.as_i64()).or(*output);
-                        *cache_read =
-                            usage_i64(u, &["cacheReadTokens", "cacheRead"]).or(*cache_read);
-                        *cache_creation =
-                            usage_i64(u, &["cacheWriteTokens", "cacheWrite"]).or(*cache_creation);
-                        // Live IN/CACHE chips: turn-cumulative totals — replace.
-                        crate::chat::turn_perf::set_active_round_usage(
+                        merge_round_usage(
                             sid,
-                            (*input).unwrap_or(0),
-                            (*cache_read).unwrap_or(0),
-                            (*cache_creation).unwrap_or(0),
-                            false,
+                            u.get("inputTokens").and_then(|t| t.as_i64()),
+                            u.get("outputTokens").and_then(|t| t.as_i64()),
+                            usage_i64(u, &["cacheReadTokens", "cacheRead"]),
+                            usage_i64(u, &["cacheWriteTokens", "cacheWrite"]),
+                            input,
+                            output,
+                            cache_read,
+                            cache_creation,
                         );
                     }
                 }
@@ -6156,17 +6145,16 @@ fn handle_commandcode_event(
             // line). camelCase — commandcode, unlike claude, doesn't use
             // snake_case usage fields.
             if let Some(u) = v.get("usage") {
-                *input = u.get("inputTokens").and_then(|t| t.as_i64()).or(*input);
-                *output = u.get("outputTokens").and_then(|t| t.as_i64()).or(*output);
-                *cache_read = usage_i64(u, &["cacheReadTokens", "cacheRead"]).or(*cache_read);
-                *cache_creation =
-                    usage_i64(u, &["cacheWriteTokens", "cacheWrite"]).or(*cache_creation);
-                crate::chat::turn_perf::set_active_round_usage(
+                merge_round_usage(
                     sid,
-                    (*input).unwrap_or(0),
-                    (*cache_read).unwrap_or(0),
-                    (*cache_creation).unwrap_or(0),
-                    false,
+                    u.get("inputTokens").and_then(|t| t.as_i64()),
+                    u.get("outputTokens").and_then(|t| t.as_i64()),
+                    usage_i64(u, &["cacheReadTokens", "cacheRead"]),
+                    usage_i64(u, &["cacheWriteTokens", "cacheWrite"]),
+                    input,
+                    output,
+                    cache_read,
+                    cache_creation,
                 );
             }
             if v.get("subtype").and_then(|s| s.as_str()) == Some("error") {

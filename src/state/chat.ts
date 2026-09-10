@@ -142,9 +142,7 @@ async function maybeEnsureWorktree(session: ChatSession | null | undefined): Pro
     const path = await ensureChatSessionWorktree(session.id);
     if (path) {
       useChatStore.setState((s) => ({
-        sessions: s.sessions.map((sess) =>
-          sess.id === session.id ? { ...sess, worktreePath: path } : sess,
-        ),
+        sessions: patchSessions(s.sessions, session.id, { worktreePath: path }),
       }));
     }
   } catch {
@@ -1175,6 +1173,92 @@ async function resolvePendingCard(
   }
 }
 
+/** Store-key bundles for the two chat buffers (main pane vs split pane):
+ *  loadMessages/loadSplitMessages and the older-page loaders are the same
+ *  algorithm over different keys, guarded by the pane's own target session. */
+const CHAT_BUFFER_KEYS = {
+  main: {
+    messages: "messages",
+    sessionId: "messagesSessionId",
+    hasMore: "hasMoreHistory",
+    target: "activeChatSessionId",
+  },
+  split: {
+    messages: "splitMessages",
+    sessionId: "splitMessagesSessionId",
+    hasMore: "splitHasMoreHistory",
+    target: "splitChatSessionId",
+  },
+} as const;
+type ChatBuffer = keyof typeof CHAT_BUFFER_KEYS;
+
+/** Shallow-patch one session row by id inside a sessions list — the store
+ *  idiom `sessions.map((sess) => sess.id === id ? { ...sess, patch } : sess)`. */
+function patchSessions(
+  sessions: ChatState["sessions"],
+  id: string,
+  patch: Partial<ChatState["sessions"][number]>,
+): ChatState["sessions"] {
+  return sessions.map((sess) => (sess.id === id ? { ...sess, ...patch } : sess));
+}
+
+/** Load the latest page of one buffer (M7: long sessions no longer
+ *  deserialize their full history on open; older pages prepend via
+ *  loadBufferOlder). */
+async function loadBufferPage(
+  get: () => ChatState,
+  set: (partial: Partial<ChatState> | ((s: ChatState) => Partial<ChatState>)) => void,
+  buf: ChatBuffer,
+  chatSessionId: string,
+): Promise<void> {
+  const k = CHAT_BUFFER_KEYS[buf];
+  const messages = await getChatMessages(chatSessionId, undefined, 200);
+  set((s) => ({
+    // mergeOptimistic: a session opened while its queued message is mid-
+    // drain keeps the in-flight bubble instead of snapping back to the
+    // pre-persist snapshot.
+    [k.messages]:
+      s[k.target] === chatSessionId
+        ? mergeOptimistic(s[k.messages], messages ?? [])
+        : s[k.messages],
+    [k.sessionId]: s[k.target] === chatSessionId ? chatSessionId : s[k.sessionId],
+    [k.hasMore]: s[k.target] === chatSessionId ? (messages?.length ?? 0) >= 200 : s[k.hasMore],
+  }) as Partial<ChatState>);
+}
+
+/** Prepend one older page into a buffer, deduped by id. Returns the number
+ *  of fresh rows (0 also when the pane's flag says history is exhausted —
+ *  an unguarded flag write while the user switched panes would kill infinite
+ *  scroll for the newly-viewed chat, audit L1). */
+async function loadBufferOlder(
+  get: () => ChatState,
+  set: (partial: Partial<ChatState> | ((s: ChatState) => Partial<ChatState>)) => void,
+  buf: ChatBuffer,
+  chatSessionId: string,
+): Promise<number> {
+  const k = CHAT_BUFFER_KEYS[buf];
+  const first = get()[k.messages][0];
+  if (!first || first.id <= 0 || !get()[k.hasMore]) return 0;
+  const older = await getChatMessages(chatSessionId, first.id, 200);
+  if (!older || older.length === 0) {
+    if (get()[k.target] === chatSessionId) {
+      set({ [k.hasMore]: false } as Partial<ChatState>);
+    }
+    return 0;
+  }
+  set((s) => {
+    if (s[k.target] !== chatSessionId) return s;
+    // Dedupe by id (the page boundary row may overlap).
+    const known = new Set(s[k.messages].map((m) => m.id));
+    const fresh = older.filter((m) => !known.has(m.id));
+    return {
+      [k.messages]: [...fresh, ...s[k.messages]],
+      [k.hasMore]: older.length >= 200,
+    } as Partial<ChatState>;
+  });
+  return older.length;
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   loaded: false,
   sessions: [],
@@ -1268,9 +1352,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return {
         sessionProjects,
         cwdOverrides,
-        sessions: s.sessions.map((sess) =>
-          sess.id === chatSessionId ? { ...sess, projectId: null, worktreePath: null } : sess,
-        ),
+        sessions: patchSessions(s.sessions, chatSessionId, { projectId: null, worktreePath: null }),
       };
     });
   },
@@ -1287,9 +1369,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // Best-effort by design — still clear the local pointer below.
       }
       set((s) => ({
-        sessions: s.sessions.map((sess) =>
-          sess.id === chatSessionId ? { ...sess, worktreePath: null } : sess,
-        ),
+        sessions: patchSessions(s.sessions, chatSessionId, { worktreePath: null }),
       }));
       return;
     }
@@ -1444,48 +1524,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   loadMessages: async (chatSessionId) => {
-    // M7: latest page only — long sessions no longer deserialize their full
-    // history on open. Older pages prepend via loadOlderMessages.
-    const messages = await getChatMessages(chatSessionId, undefined, 200);
-    set((s) => ({
-      // mergeOptimistic: a session opened while its queued message is mid-
-      // drain keeps the in-flight bubble instead of snapping back to the
-      // pre-persist snapshot.
-      messages:
-        s.activeChatSessionId === chatSessionId
-          ? mergeOptimistic(s.messages, messages ?? [])
-          : s.messages,
-      messagesSessionId:
-        s.activeChatSessionId === chatSessionId ? chatSessionId : s.messagesSessionId,
-      hasMoreHistory: s.activeChatSessionId === chatSessionId ? (messages?.length ?? 0) >= 200 : s.hasMoreHistory,
-    }));
+    await loadBufferPage(get, set, "main", chatSessionId);
   },
 
-  loadOlderMessages: async (chatSessionId) => {
-    const first = get().messages[0];
-    if (!first || first.id <= 0 || !get().hasMoreHistory) return 0;
-    const older = await getChatMessages(chatSessionId, first.id, 200);
-    if (!older || older.length === 0) {
-      // Guard the flag the same way as the set below: an unguarded write
-      // while the user switched sessions would kill infinite scroll for the
-      // newly-viewed chat (audit L1).
-      if (get().activeChatSessionId === chatSessionId) {
-        set({ hasMoreHistory: false });
-      }
-      return 0;
-    }
-    set((s) => {
-      if (s.activeChatSessionId !== chatSessionId) return s;
-      // Dedupe by id (the page boundary row may overlap).
-      const known = new Set(s.messages.map((m) => m.id));
-      const fresh = older.filter((m) => !known.has(m.id));
-      return {
-        messages: [...fresh, ...s.messages],
-        hasMoreHistory: older.length >= 200,
-      };
-    });
-    return older.length;
-  },
+  loadOlderMessages: async (chatSessionId) => loadBufferOlder(get, set, "main", chatSessionId),
 
   // --- Split chat view (session-row ⋮ → "Open in split view") ---
   openChatSplit: (chatSessionId) => {
@@ -1511,40 +1553,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadSplitMessages: async (chatSessionId) => {
     // Mirrors loadMessages but fills the SPLIT pane's buffer; guarded so a
     // slow fetch for a pane the user already re-targeted can't clobber it.
-    const messages = await getChatMessages(chatSessionId, undefined, 200);
-    set((s) => ({
-      splitMessages:
-        s.splitChatSessionId === chatSessionId
-          ? mergeOptimistic(s.splitMessages, messages ?? [])
-          : s.splitMessages,
-      splitMessagesSessionId:
-        s.splitChatSessionId === chatSessionId ? chatSessionId : s.splitMessagesSessionId,
-      splitHasMoreHistory:
-        s.splitChatSessionId === chatSessionId ? (messages?.length ?? 0) >= 200 : s.splitHasMoreHistory,
-    }));
+    await loadBufferPage(get, set, "split", chatSessionId);
   },
 
-  loadOlderSplitMessages: async (chatSessionId) => {
-    const first = get().splitMessages[0];
-    if (!first || first.id <= 0 || !get().splitHasMoreHistory) return 0;
-    const older = await getChatMessages(chatSessionId, first.id, 200);
-    if (!older || older.length === 0) {
-      if (get().splitChatSessionId === chatSessionId) {
-        set({ splitHasMoreHistory: false });
-      }
-      return 0;
-    }
-    set((s) => {
-      if (s.splitChatSessionId !== chatSessionId) return s;
-      const known = new Set(s.splitMessages.map((m) => m.id));
-      const fresh = older.filter((m) => !known.has(m.id));
-      return {
-        splitMessages: [...fresh, ...s.splitMessages],
-        splitHasMoreHistory: older.length >= 200,
-      };
-    });
-    return older.length;
-  },
+  loadOlderSplitMessages: async (chatSessionId) =>
+    loadBufferOlder(get, set, "split", chatSessionId),
 
   reloadFor: async (chatSessionId) => {
     const s = get();
@@ -1938,9 +1951,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     markManuallyRenamed(chatSessionId);
     await updateChatSessionTitle(chatSessionId, title);
     set((s) => ({
-      sessions: s.sessions.map((sess) =>
-        sess.id === chatSessionId ? { ...sess, title } : sess,
-      ),
+      sessions: patchSessions(s.sessions, chatSessionId, { title }),
     }));
   },
 
@@ -1948,9 +1959,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await setChatSessionStarred(chatSessionId, starred);
     set((s) => ({
       sessions: sortSessions(
-        s.sessions.map((sess) =>
-          sess.id === chatSessionId ? { ...sess, starred } : sess,
-        ),
+        patchSessions(s.sessions, chatSessionId, { starred }),
       ),
     }));
   },
@@ -1958,9 +1967,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setUnread: async (chatSessionId, unread) => {
     await setChatSessionUnread(chatSessionId, unread);
     set((s) => ({
-      sessions: s.sessions.map((sess) =>
-        sess.id === chatSessionId ? { ...sess, unread } : sess,
-      ),
+      sessions: patchSessions(s.sessions, chatSessionId, { unread }),
     }));
   },
 
@@ -1976,9 +1983,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     await updateChatSessionModel(chatSessionId, model);
     set((s) => ({
-      sessions: s.sessions.map((sess) =>
-        sess.id === chatSessionId ? { ...sess, model } : sess,
-      ),
+      sessions: patchSessions(s.sessions, chatSessionId, { model }),
     }));
     // Keep the per-provider default in sync with explicit picks so freshly
     // created chats seed with THIS model instead of a long-stale one (the
@@ -1996,9 +2001,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setSessionProvider: async (chatSessionId, provider) => {
     await updateChatSessionProvider(chatSessionId, provider);
     set((s) => ({
-      sessions: s.sessions.map((sess) =>
-        sess.id === chatSessionId ? { ...sess, provider } : sess,
-      ),
+      sessions: patchSessions(s.sessions, chatSessionId, { provider }),
     }));
   },
 
@@ -2147,9 +2150,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const derived = generateSessionTitle(content);
       if (derived) {
         set((s) => ({
-          sessions: s.sessions.map((sess) =>
-            sess.id === activeChatSessionId ? { ...sess, title: derived } : sess,
-          ),
+          sessions: patchSessions(s.sessions, activeChatSessionId, { title: derived }),
         }));
         void updateChatSessionTitle(activeChatSessionId, derived).catch(() => {
           /* best-effort: the local title above still stands for this run */
@@ -2666,9 +2667,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setSessionWatchMode: async (chatSessionId, mode) => {
     await updateChatSessionWatchMode(chatSessionId, mode);
     set((s) => ({
-      sessions: s.sessions.map((sess) =>
-        sess.id === chatSessionId ? { ...sess, watchMode: mode } : sess,
-      ),
+      sessions: patchSessions(s.sessions, chatSessionId, { watchMode: mode }),
     }));
   },
 
@@ -3068,9 +3067,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (!title) return;
           set((s) => ({
             sessions: sortSessions(
-              s.sessions.map((sess) =>
-                sess.id === chatSessionId ? { ...sess, title } : sess,
-              ),
+              patchSessions(s.sessions, chatSessionId, { title }),
             ),
           }));
         })
@@ -3454,9 +3451,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setSessionPermissionMode: async (chatSessionId, mode) => {
     // Optimistic label; the harness spawn reads the persisted row per turn.
     set((s) => ({
-      sessions: s.sessions.map((sess) =>
-        sess.id === chatSessionId ? { ...sess, permissionMode: mode } : sess,
-      ),
+      sessions: patchSessions(s.sessions, chatSessionId, { permissionMode: mode }),
     }));
     try {
       await setChatSessionPermissionMode(chatSessionId, mode);

@@ -27,6 +27,33 @@ Prior context:
 - Autoreview (code-review subagent) after each significant step; findings fixed or logged before moving on.
 - One conventional commit per step.
 
+## Steps — session 3: backlog sweep (2026-09-10)
+
+Worked the remaining survey backlog item by item, each step verified + committed.
+
+| # | Item | Outcome | Verification | Commit |
+|---|---|---|---|---|
+| 7 | Pin toolchain | `src-tauri/rust-toolchain.toml` — stable channel + rustfmt component guaranteed present (its absence caused the 1.9 migration) | n/a | `chore: pin toolchain…` |
+| 8 | Hermetic format tests | format.test.ts pins TZ=UTC + stubs Intl.DateTimeFormat to en-US | vitest ✓ | `test: pin locale + timezone…` |
+| 9 | Repo-root cleanup | `.playwright-mcp/` ignored; loose research notes/artifacts moved to `Random Stuff/`; stray codemod script removed | n/a | (with #7) |
+| 6 | Resize-handle lifecycle | `lib/pointerDrag::startPointerDrag` replaces 4 hand-rolled pointerdown/move/up/cancel dances (App split rAF batching, ToolPanel, DevDiffPanel, ArtifactPreviewPane keep their own math). Capture-based drags gain pointercancel handling + guarded release | tsc · vitest 865 ✓ · build ✓ | `refactor(ui): shared startPointerDrag…` |
+| 5 | chat.ts loaders + session patches | `loadBufferPage`/`loadBufferOlder` unify the main/split buffer twins (per-pane guards + dedupe preserved); `patchSessions` replaces 12 uniform `sessions.map` sites (8 conditional-patch sites stay explicit) | tsc · vitest 865 ✓ | `refactor(state): buffer-keyed page loaders + patchSessions…` |
+| 1 | Streaming behavior pins | 8 new tests: OpenAI-family `parse_sse_chunk` (content/reasoning alias/[DONE]/finish_reason/fatal error events/usage retention), `resolve_base_url` table, thinking-budget bounds property (documents the clamp precondition) | cargo test --lib **1021 ✓** | `test(llm): pin the SSE-parse and provider-dispatch contracts` |
+| 2 | HTTP status-check helper | `util::checked_send(builder, snippet_chars)` with the load-bearing `HTTP {status}:` prefix documented on both sides (error_class.rs substring match). Migrated the 2 fully-canonical sites (llm_client one-shots). ~20 residual sites embed operation context ("gmail search HTTP …") or untruncated bodies — collapsing them changes user-visible error text, needs per-site review | cargo check · 1021 ✓ | `refactor(util): checked_send…` |
+| 3 | Harness handler dedup | `emit_subagent_spawn` (3 copies) + `merge_round_usage` (5 copies incl. 2 in commandcode) extracted from the four per-harness event handlers; frame parsing stays per-harness | cargo · 1021 ✓ · autoreview **PASS** | `refactor(harness): extract emit_subagent_spawn + merge_round_usage` |
+| 4a | ipc.ts split (scoped) | `lib/ipcCore.ts` (runtime guard, safeInvoke/safeListen, toasts) + `lib/ipc/modelMarket.ts` (HF market domain) extracted; ipc.ts re-exports both → 125 consumer sites unchanged. Pattern proof for rolling out the remaining ~24 sections | tsc · vitest 865 ✓ · build ✓ | `refactor(ipc): split transport core + first domain…` |
+| 4b | SettingsView split (first cut) | `ToggleSwitch.tsx` + `LocalModelsPanel.tsx` (991 lines incl. electricity/compaction sub-panels + shared KV constants, now exported) extracted; SettingsView 3,085 → 2,105 lines | tsc · vitest 865 ✓ · build ✓ | `refactor(settings): extract ToggleSwitch and the LocalModels panel cluster` |
+
+### Still open (next-up list)
+
+- ipc.ts: roll the remaining sections (browser, git, harness/models, chat streaming, connectors…) into `lib/ipc/*.ts` on the ipcCore foundation — mechanical now that the pattern exists.
+- SettingsView: same extraction treatment for ApiKeysPanel (564), ConnectorsPanel (280), DataPanel (~290), GitPanel (170).
+- agent_sessions.rs: full split along the surveyed seams (the four handlers now share their tails; the frames themselves stay per-harness by design).
+- checked_send long tail: ~20 sites needing per-site decisions on context prefixes and truncation bounds (mobile app surfaces these strings).
+- Streaming loop-body merge: prerequisites now exist (behavior pins + shared primitives); merge transport-by-transport.
+
+---
+
 ## Steps — session 2: streaming-turn consolidation (2026-09-10)
 
 The highest-value deferred item: the ~1,600 LOC of duplicated "stream one LLM turn" machinery. Attacked in verifiable stages, foundations first — the full loop unification deliberately NOT forced in one pass (see "what remains" below).

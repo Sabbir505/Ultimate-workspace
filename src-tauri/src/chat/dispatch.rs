@@ -1420,21 +1420,11 @@ async fn run_subagent_loop(
             }
             let mut results: Vec<Value> = Vec::new();
             for (_idx, (id, name, args_acc)) in ant_calls.iter() {
-                let args: Value = if args_acc.trim().is_empty() {
-                    json!({})
-                } else {
-                    serde_json::from_str(args_acc).unwrap_or(json!({}))
-                };
+                let args = parse_subagent_args(args_acc);
                 blocks.push(json!({ "type": "tool_use", "id": id, "name": name, "input": args }));
-                let meta = crate::agent_sessions::tool_meta_generic(name, &args);
-                emit(&format!("<tool>{meta}</tool>"));
-                let outcome =
-                    subagent_run_tool(app, sid, client, &artifacts_dir, &caps, name, &args).await;
-                let result = crate::util::truncate_chars(&outcome.text, SUBAGENT_RESULT_CAP);
-                emit(&format!(
-                    "<tool>{}</tool>",
-                    json!({"kind": "result", "title": "Output", "result": crate::chat::streaming::neutralize_markers(&result)})
-                ));
+                let result =
+                    run_subagent_call(&emit, app, sid, client, &artifacts_dir, &caps, name, &args)
+                        .await;
                 results.push(json!({
                     "type": "tool_result",
                     "tool_use_id": id,
@@ -1454,20 +1444,10 @@ async fn run_subagent_loop(
                     "id": id, "type": "function",
                     "function": { "name": name, "arguments": args_acc },
                 }));
-                let args: Value = if args_acc.trim().is_empty() {
-                    json!({})
-                } else {
-                    serde_json::from_str(args_acc).unwrap_or(json!({}))
-                };
-                let meta = crate::agent_sessions::tool_meta_generic(name, &args);
-                emit(&format!("<tool>{meta}</tool>"));
-                let outcome =
-                    subagent_run_tool(app, sid, client, &artifacts_dir, &caps, name, &args).await;
-                let result = crate::util::truncate_chars(&outcome.text, SUBAGENT_RESULT_CAP);
-                emit(&format!(
-                    "<tool>{}</tool>",
-                    json!({"kind": "result", "title": "Output", "result": crate::chat::streaming::neutralize_markers(&result)})
-                ));
+                let args = parse_subagent_args(args_acc);
+                let result =
+                    run_subagent_call(&emit, app, sid, client, &artifacts_dir, &caps, name, &args)
+                        .await;
                 results.push(json!({
                     "role": "tool",
                     "tool_call_id": id,
@@ -1492,6 +1472,43 @@ async fn run_subagent_loop(
     }
     Ok(output)
 }
+
+/// Shared argument-assembly for a subagent tool call: the streamed
+/// `arguments` accumulator is raw partial JSON — empty means no arguments.
+fn parse_subagent_args(args_acc: &str) -> Value {
+    if args_acc.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(args_acc).unwrap_or(json!({}))
+    }
+}
+
+/// Shared per-call tail of the subagent loop's two format branches: emit the
+/// step marker, execute via the subagent wrapper, cap the result, and emit
+/// the collapsible output marker. The result text feeds the format-specific
+/// tool-result message the caller assembles.
+#[allow(clippy::too_many_arguments)]
+async fn run_subagent_call<E: Fn(&str) + Sync>(
+    emit: &E,
+    app: &AppHandle,
+    sid: &str,
+    client: &reqwest::Client,
+    artifacts_dir: &std::path::Path,
+    caps: &tools::ToolCaps,
+    name: &str,
+    args: &Value,
+) -> String {
+    let meta = crate::agent_sessions::tool_meta_generic(name, args);
+    emit(&format!("<tool>{meta}</tool>"));
+    let outcome = subagent_run_tool(app, sid, client, artifacts_dir, caps, name, args).await;
+    let result = crate::util::truncate_chars(&outcome.text, SUBAGENT_RESULT_CAP);
+    emit(&format!(
+        "<tool>{}</tool>",
+        json!({"kind": "result", "title": "Output", "result": crate::chat::streaming::neutralize_markers(&result)})
+    ));
+    result
+}
+
 /// Mirrors `run_gated_fs_tool`: register a pending approval, emit
 /// `chat:approval-request`, pause on the oneshot until the UI resolves, then
 /// execute. A denial returns a "denied" tool result.

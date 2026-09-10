@@ -56,6 +56,10 @@ pub fn home_dir() -> Option<std::path::PathBuf> {
 /// previous `drain(..=nl)` produced — callers keep their `trim_end()`.
 pub struct SseLineBuffer {
     buf: Vec<u8>,
+    /// Flood guard: when set, a partial line growing past this many bytes is
+    /// dropped whole (the opencode SSE reader's 4 MiB guard). Complete lines
+    /// still drain normally; only runaway no-newline input is discarded.
+    cap: Option<usize>,
 }
 
 impl Default for SseLineBuffer {
@@ -66,7 +70,19 @@ impl Default for SseLineBuffer {
 
 impl SseLineBuffer {
     pub fn new() -> Self {
-        Self { buf: Vec::new() }
+        Self {
+            buf: Vec::new(),
+            cap: None,
+        }
+    }
+
+    /// Like [`Self::new`], but discards the buffered partial line whole when
+    /// it exceeds `cap` bytes (server flood without newlines).
+    pub fn with_cap(cap: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            cap: Some(cap),
+        }
     }
 
     /// Append raw bytes and drain every COMPLETE line as lossy UTF-8
@@ -78,6 +94,11 @@ impl SseLineBuffer {
         while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
             let drained: Vec<u8> = self.buf.drain(..=pos).collect();
             lines.push(String::from_utf8_lossy(&drained).into_owned());
+        }
+        if let Some(cap) = self.cap {
+            if self.buf.len() > cap {
+                self.buf.clear();
+            }
         }
         lines
     }
@@ -201,6 +222,27 @@ pub fn path_starts_with_ci(path: &std::path::Path, prefix: &std::path::Path) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sse_line_buffer_cap_drops_runaway_partial_only() {
+        let mut sb = SseLineBuffer::with_cap(8);
+        // Complete lines drain even while a flood follows them.
+        let lines = sb.push(b"data: ok\n");
+        assert_eq!(lines, vec!["data: ok\n".to_string()]);
+        // A partial line past the cap is dropped whole, not grown.
+        let lines = sb.push(b"0123456789abcdef");
+        assert!(lines.is_empty());
+        // The buffer recovers: the next complete line parses normally.
+        let lines = sb.push(b"x\ndata: resumed\n");
+        assert_eq!(lines, vec!["x\n".to_string(), "data: resumed\n".to_string()]);
+    }
+
+    #[test]
+    fn sse_line_buffer_uncapped_keeps_partial() {
+        let mut sb = SseLineBuffer::new();
+        assert!(sb.push(b"0123456789").is_empty());
+        assert_eq!(sb.push(b"AB\n"), vec!["0123456789AB\n".to_string()]);
+    }
 
     #[test]
     #[cfg(windows)]

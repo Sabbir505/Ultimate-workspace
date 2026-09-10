@@ -1813,11 +1813,11 @@ async fn handle_chat_turn(
     // Stream SSE chunks and forward tokens over the WebSocket.
     use futures_util::StreamExt;
     let mut stream = response.bytes_stream();
-    let mut buf = String::new();
     // Partial-line carry-over (same fix as chat::run_chat_stream): TCP chunks
     // split SSE `data:` lines arbitrarily, and parse_sse_chunk is fatal on a
     // half line. Only complete newline-terminated lines may be parsed.
-    let mut pending = String::new();
+    let mut pending = crate::util::SseLineBuffer::new();
+    let mut buf = String::new();
     let mut full_text = String::new();
     let mut in_think = false;
 
@@ -1829,12 +1829,7 @@ async fn handle_chat_turn(
                 return Err(format!("stream read error: {e}"));
             }
         };
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-
-        let mut complete_lines: Vec<String> = Vec::new();
-        while let Some(nl) = pending.find('\n') {
-            complete_lines.push(pending.drain(..=nl).collect());
-        }
+        let complete_lines = pending.push(&chunk);
 
         for line in complete_lines {
             let line = line.trim_end();

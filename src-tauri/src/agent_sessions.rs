@@ -5110,7 +5110,7 @@ fn read_opencode_server_events(
             _ => return,
         };
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        let mut buf = crate::util::SseLineBuffer::with_cap(4 * 1024 * 1024);
         let mut last_text = String::new();
         let mut last_reasoning = String::new();
         let mut tools = ToolTracker::new();
@@ -5139,14 +5139,11 @@ fn read_opencode_server_events(
                 Ok(b) => b,
                 Err(_) => break,
             };
-            buf.push_str(&String::from_utf8_lossy(&bytes));
-            // Guard against a pathological flood without newlines.
-            if buf.len() > 4 * 1024 * 1024 {
-                buf.clear();
-                continue;
-            }
-            while let Some(pos) = buf.find('\n') {
-                let line: String = buf.drain(..=pos).collect();
+            // Shared SSE line buffer carries partial lines across TCP chunks;
+            // the 4 MiB cap is the pathological-flood guard (a server sending
+            // megabytes without a newline gets its partial dropped whole
+            // instead of growing the buffer without bound).
+            for line in buf.push(&bytes) {
                 let line = line.trim_end_matches(['\n', '\r']);
                 if let Some(data) = line.strip_prefix("data:") {
                     handle_opencode_sse_data(

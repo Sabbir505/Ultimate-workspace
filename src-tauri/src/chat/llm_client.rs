@@ -49,23 +49,7 @@ pub(crate) async fn openai_oneshot(
             {"role": "user", "content": user},
         ],
     });
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    // B-16: check the status BEFORE parsing — an error body has no `choices`,
-    // so an unchecked 401/429/5xx used to come back as a silent "" (titles,
-    // commit messages, automations all recorded blank successes).
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let snippet = crate::util::truncate_chars(body.trim(), 500);
-        return Err(format!("HTTP {status}: {snippet}"));
-    }
+    let resp = crate::util::checked_send(client .post(&url) .header("Authorization", format!("Bearer {api_key}")) .header("content-type", "application/json") .json(&body), 500).await?;
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(v["choices"][0]["message"]["content"]
         .as_str()
@@ -93,23 +77,7 @@ pub(crate) async fn anthropic_oneshot(
         "system": system,
         "messages": [{"role": "user", "content": user}],
     });
-    let resp = client
-        .post(&url)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", crate::chat::providers::ANTHROPIC_API_VERSION)
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    // B-16: same as the OpenAI oneshot — surface HTTP errors instead of
-    // silently returning "".
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let snippet = crate::util::truncate_chars(body.trim(), 500);
-        return Err(format!("HTTP {status}: {snippet}"));
-    }
+    let resp = crate::util::checked_send(client .post(&url) .header("x-api-key", api_key) .header("anthropic-version", crate::chat::providers::ANTHROPIC_API_VERSION) .header("content-type", "application/json") .json(&body), 500).await?;
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(v["content"][0]["text"].as_str().unwrap_or("").to_string())
 }

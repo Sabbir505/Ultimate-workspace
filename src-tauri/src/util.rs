@@ -8,6 +8,29 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
+/// Send a request and check the status, returning the canonical
+/// `HTTP {status}: {body-snippet}` error on non-2xx. The `HTTP {status}:`
+/// prefix is LOAD-BEARING: chat/error_class.rs substring-matches it
+/// (lowercased, e.g. "http 413") to classify context-overflow failures, so
+/// every migrated call site must keep this exact shape. `snippet_chars`
+/// bounds the included body — callers historically chose 200/300/500 ad hoc;
+/// pass the value the call site had so what the user (and the classifier)
+/// sees is unchanged.
+pub async fn checked_send(
+    builder: reqwest::RequestBuilder,
+    snippet_chars: usize,
+) -> Result<reqwest::Response, String> {
+    let resp = builder.send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let snippet = truncate_chars(body.trim(), snippet_chars);
+        return Err(format!("HTTP {status}: {snippet}"));
+    }
+    Ok(resp)
+}
+
+
 /// Char-safe suffix truncation: keep the LAST `max` characters (used for
 /// tail-capping long shell output). Same panic-safety rationale as
 /// `truncate_chars`.

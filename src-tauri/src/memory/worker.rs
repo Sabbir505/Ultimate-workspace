@@ -7,8 +7,6 @@
 //! extraction + one per candidate for the judge; embedding via the local
 //! sidecar (optional — store/retrieval degrade gracefully without it).
 
-use crate::chat::commands::{anthropic_oneshot, openai_oneshot};
-use crate::chat::providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
 use crate::db;
 use crate::memory::consolidate::{
     apply_judge_op, judge_user_message, parse_judge_op, Applied, JudgeInput,
@@ -1168,7 +1166,12 @@ mod tests {
     }
 }
 
-/// Provider-agnostic one-shot call (mirrors generate_chat_title's dispatch).
+/// Provider-agnostic one-shot call. Thin over `chat::llm_client::oneshot`:
+/// memory extraction needs a missing base URL to be a hard ERROR (not a skip)
+/// — an empty Ok() reads as "nothing memorable" downstream and the extraction
+/// cursor commits, permanently skipping the chunk with zero memories
+/// extracted. Err'ing here aborts before the cursor moves, so the chunk
+/// retries once the URL is configured.
 #[allow(clippy::too_many_arguments)]
 async fn oneshot(
     _app: &AppHandle,
@@ -1180,71 +1183,18 @@ async fn oneshot(
     user: &str,
     max_tokens: u32,
 ) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-    let base_url = base_url.filter(|b| !b.trim().is_empty());
-    match provider {
-        "openai" => {
-            openai_oneshot(
-                &client,
-                api_key,
-                base_url.unwrap_or(OpenAIProvider::DEFAULT_BASE),
-                model,
-                system,
-                user,
-            )
-            .await
-        }
-        "openrouter" => {
-            openai_oneshot(
-                &client,
-                api_key,
-                base_url.unwrap_or(OpenRouterProvider::DEFAULT_BASE),
-                model,
-                system,
-                user,
-            )
-            .await
-        }
-        "openai_compatible" | "local_gguf" => {
-            // A missing base URL must be an ERROR, not a fake-success: an
-            // empty Ok() reads as "nothing memorable" downstream and the
-            // extraction cursor commits — every message permanently skipped
-            // with zero memories extracted. Returning Err aborts before the
-            // cursor moves, so the chunk retries once the URL is configured.
-            let Some(base) = base_url else {
-                return Err(format!(
-                    "no base_url configured for {provider} memory extraction — \
-                     set the endpoint in Settings"
-                ));
-            };
-            openai_oneshot(&client, api_key, base, model, system, user).await
-        }
-        "anthropic" => {
-            anthropic_oneshot(
-                &client,
-                api_key,
-                base_url.unwrap_or(AnthropicProvider::DEFAULT_BASE),
-                model,
-                system,
-                user,
-                max_tokens,
-            )
-            .await
-        }
-        "anthropic_compatible" => {
-            let Some(base) = base_url else {
-                return Err(
-                    "no base_url configured for anthropic_compatible memory extraction".to_string(),
-                );
-            };
-            anthropic_oneshot(&client, api_key, base, model, system, user, max_tokens).await
-        }
-        _ => Err(format!(
-            "unsupported provider for memory extraction: {provider}"
-        )),
+    if matches!(provider, "openai_compatible" | "local_gguf" | "anthropic_compatible")
+        && base_url.map(|b| b.trim().is_empty()).unwrap_or(true)
+    {
+        return Err(format!(
+            "no base_url configured for {provider} memory extraction — \
+             set the endpoint in Settings"
+        ));
     }
+    let client = crate::chat::llm_client::oneshot_client()?;
+    crate::chat::llm_client::oneshot(
+        provider, &client, api_key, base_url, model, system, user, max_tokens,
+    )
+    .await?
+    .ok_or_else(|| format!("unsupported provider for memory extraction: {provider}"))
 }

@@ -471,7 +471,6 @@ pub async fn github_draft_pr_text(
     chat_session_id: String,
     db: State<'_, DbState>,
 ) -> CmdResult<Option<PullRequestDraft>> {
-    use crate::chat::providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
 
     let project_path = {
         let conn = db.0.lock();
@@ -545,38 +544,23 @@ TITLE: <one line, imperative, ≤80 chars>
 Diff (truncated):
 {patch}");
 
-    let client = reqwest::Client::new();
-    let raw = match provider_str.as_str() {
-        "openai" => {
-            crate::chat::commands::openai_oneshot(
-                &client, &api_key,
-                base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE),
-                &model_str, system, &user,
-            ).await?
-        }
-        "openrouter" => {
-            crate::chat::commands::openai_oneshot(
-                &client, &api_key,
-                base_url.as_deref().unwrap_or(OpenRouterProvider::DEFAULT_BASE),
-                &model_str, system, &user,
-            ).await?
-        }
-        "openai_compatible" | "local_gguf" => {
-            let Some(base) = base_url.as_deref() else { return Ok(None) };
-            crate::chat::commands::openai_oneshot(&client, &api_key, base, &model_str, system, &user).await?
-        }
-        "anthropic" => {
-            crate::chat::commands::anthropic_oneshot(
-                &client, &api_key,
-                base_url.as_deref().unwrap_or(AnthropicProvider::DEFAULT_BASE),
-                &model_str, system, &user, 768,
-            ).await?
-        }
-        "anthropic_compatible" => {
-            let Some(base) = base_url.as_deref() else { return Ok(None) };
-            crate::chat::commands::anthropic_oneshot(&client, &api_key, base, &model_str, system, &user, 768).await?
-        }
-        _ => return Ok(None),
+    // B-10: one-shot JSON call — a total timeout bounds a wedged endpoint
+    // instead of hanging the PR-draft command forever (matches the other
+    // one-shot generators; this one previously used Client::new()).
+    let client = crate::chat::llm_client::oneshot_client()?;
+    let Some(raw) = crate::chat::llm_client::oneshot(
+        &provider_str,
+        &client,
+        &api_key,
+        base_url.as_deref(),
+        &model_str,
+        system,
+        &user,
+        768,
+    )
+    .await?
+    else {
+        return Ok(None);
     };
     Ok(Some(parse_pr_draft(&raw)))
 }

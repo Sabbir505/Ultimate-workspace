@@ -596,89 +596,6 @@ pub(crate) fn format_compact_token_count(n: i64) -> String {
     }
 }
 
-/// One-shot (non-streaming) OpenAI-style completion returning the message text.
-pub async fn openai_oneshot(
-    client: &reqwest::Client,
-    api_key: &str,
-    base: &str,
-    model: &str,
-    system: &str,
-    user: &str,
-) -> CmdResult<String> {
-    let url = format!("{base}/v1/chat/completions");
-    let body = serde_json::json!({
-        "model": model,
-        "stream": false,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    });
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    // B-16: check the status BEFORE parsing — an error body has no `choices`,
-    // so an unchecked 401/429/5xx used to come back as a silent "" (titles,
-    // commit messages, automations all recorded blank successes).
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let snippet = crate::util::truncate_chars(body.trim(), 500);
-        return Err(format!("HTTP {status}: {snippet}"));
-    }
-    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(v["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string())
-}
-
-/// One-shot (non-streaming) Anthropic-style completion returning the text.
-/// `max_tokens` is required by Anthropic's API; callers choose it (titles: 32,
-/// commit messages: 200 for subject + body).
-pub async fn anthropic_oneshot(
-    client: &reqwest::Client,
-    api_key: &str,
-    base: &str,
-    model: &str,
-    system: &str,
-    user: &str,
-    max_tokens: u32,
-) -> CmdResult<String> {
-    let url = format!("{base}/v1/messages");
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": max_tokens,
-        "stream": false,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
-    });
-    let resp = client
-        .post(&url)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", ANTHROPIC_API_VERSION)
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    // B-16: same as the OpenAI oneshot — surface HTTP errors instead of
-    // silently returning "".
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let snippet = crate::util::truncate_chars(body.trim(), 500);
-        return Err(format!("HTTP {status}: {snippet}"));
-    }
-    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(v["content"][0]["text"].as_str().unwrap_or("").to_string())
-}
-
 /// Ask the session's model for a short (3–6 word) title summarizing the
 /// conversation so far and persist it. Returns the new title, or `None` when
 /// one couldn't be produced (missing key/model, empty transcript, API error) —
@@ -762,43 +679,20 @@ pub async fn generate_chat_title(
     let user = format!("Conversation:\n{transcript}\nTitle:");
 
     let base_url = base_url.filter(|b| !b.trim().is_empty());
-    // B-10: these are one-shot JSON calls — a total timeout is safe here and
-    // bounds a wedged endpoint instead of hanging the async command forever.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-    let raw = match provider_str.as_str() {
-        "openai" => {
-            let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openrouter" => {
-            let base = base_url
-                .as_deref()
-                .unwrap_or(OpenRouterProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openai_compatible" | "local_gguf" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "anthropic" => {
-            let base = base_url
-                .as_deref()
-                .unwrap_or(AnthropicProvider::DEFAULT_BASE);
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 32).await?
-        }
-        "anthropic_compatible" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 32).await?
-        }
-        _ => return Ok(None),
+    let client = crate::chat::llm_client::oneshot_client()?;
+    let Some(raw) = crate::chat::llm_client::oneshot(
+        &provider_str,
+        &client,
+        &api_key,
+        base_url.as_deref(),
+        &model,
+        system,
+        &user,
+        32,
+    )
+    .await?
+    else {
+        return Ok(None);
     };
 
     let title = clean_title(&raw);
@@ -894,45 +788,20 @@ pub async fn generate_commit_message(
     let user = format!("Diff:\n{diff}\nCommit subject:");
 
     let base_url = base_url.filter(|b| !b.trim().is_empty());
-    // B-10: these are one-shot JSON calls — a total timeout is safe here and
-    // bounds a wedged endpoint instead of hanging the async command forever.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-    let raw = match provider_str.as_str() {
-        "openai" => {
-            let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openrouter" => {
-            let base = base_url
-                .as_deref()
-                .unwrap_or(OpenRouterProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openai_compatible" | "local_gguf" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "anthropic" => {
-            let base = base_url
-                .as_deref()
-                .unwrap_or(AnthropicProvider::DEFAULT_BASE);
-            // 64 tokens is plenty for a single ≤80-char subject line and keeps
-            // generation fast (latency scales with output tokens).
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 64).await?
-        }
-        "anthropic_compatible" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 64).await?
-        }
-        _ => return Ok(None),
+    let client = crate::chat::llm_client::oneshot_client()?;
+    let Some(raw) = crate::chat::llm_client::oneshot(
+        &provider_str,
+        &client,
+        &api_key,
+        base_url.as_deref(),
+        &model,
+        system,
+        &user,
+        64,
+    )
+    .await?
+    else {
+        return Ok(None);
     };
 
     // Reasoning models (DeepSeek-R1, Qwen-QwQ, …) wrap chain-of-thought in
@@ -1101,43 +970,20 @@ pub async fn generate_diff_review(
     let user = format!("Please review this diff:\n\n{diff}");
 
     let base_url = base_url.filter(|b| !b.trim().is_empty());
-    // B-10: these are one-shot JSON calls — a total timeout is safe here and
-    // bounds a wedged endpoint instead of hanging the async command forever.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-    let raw = match provider_str.as_str() {
-        "openai" => {
-            let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openrouter" => {
-            let base = base_url
-                .as_deref()
-                .unwrap_or(OpenRouterProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openai_compatible" | "local_gguf" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "anthropic" => {
-            let base = base_url
-                .as_deref()
-                .unwrap_or(AnthropicProvider::DEFAULT_BASE);
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 2048).await?
-        }
-        "anthropic_compatible" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 2048).await?
-        }
-        _ => return Ok(None),
+    let client = crate::chat::llm_client::oneshot_client()?;
+    let Some(raw) = crate::chat::llm_client::oneshot(
+        &provider_str,
+        &client,
+        &api_key,
+        base_url.as_deref(),
+        &model,
+        system,
+        &user,
+        2048,
+    )
+    .await?
+    else {
+        return Ok(None);
     };
 
     let review = strip_think_blocks(&raw).trim().to_string();

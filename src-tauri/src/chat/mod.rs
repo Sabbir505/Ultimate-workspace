@@ -7,6 +7,7 @@ pub mod artifacts;
 pub mod auto_router;
 pub mod cache;
 pub mod citation_lint;
+pub(crate) mod llm_client;
 pub mod citation_verify;
 pub mod cloud_compact;
 pub mod codeexec;
@@ -1779,7 +1780,7 @@ pub fn run_one_shot_chat(
                 } else {
                     crate::chat::providers::OpenAIProvider::DEFAULT_BASE
                 });
-                crate::chat::commands::openai_oneshot(
+                crate::chat::llm_client::openai_oneshot(
                     &client, &api_key, base, &model, &system, prompt,
                 )
                 .await
@@ -1789,7 +1790,7 @@ pub fn run_one_shot_chat(
                 let Some(base) = base_url.as_deref() else {
                     return Err("No base URL configured for this provider. Set one in Settings \u{2192} Connectors.".into());
                 };
-                crate::chat::commands::openai_oneshot(
+                crate::chat::llm_client::openai_oneshot(
                     &client, &api_key, base, &model, &system, prompt,
                 )
                 .await
@@ -1799,7 +1800,7 @@ pub fn run_one_shot_chat(
                 let base = base_url.as_deref().unwrap_or(
                     crate::chat::providers::AnthropicProvider::DEFAULT_BASE,
                 );
-                crate::chat::commands::anthropic_oneshot(
+                crate::chat::llm_client::anthropic_oneshot(
                     &client, &api_key, base, &model, &system, prompt, 1024,
                 )
                 .await

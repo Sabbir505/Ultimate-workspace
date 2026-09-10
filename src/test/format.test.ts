@@ -1,5 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { formatBytes, formatDate, formatDateTime, formatDuration, formatRate, shortName } from "../lib/format";
+
+// The date assertions below expect en-US output in UTC. Node defaults vary by
+// machine (locale + system timezone), so pin both: TZ via the environment and
+// locale via a stubbed Intl.DateTimeFormat that always resolves to en-US.
+process.env.TZ = "UTC";
+
+class PinnedDateTimeFormat extends Intl.DateTimeFormat {
+  constructor(
+    locales?: ConstructorParameters<typeof Intl.DateTimeFormat>[0],
+    options?: ConstructorParameters<typeof Intl.DateTimeFormat>[1],
+  ) {
+    super("en-US", options);
+  }
+}
+
+beforeAll(() => {
+  vi.stubGlobal("Intl", { ...Intl, DateTimeFormat: PinnedDateTimeFormat });
+});
 
 describe("formatBytes", () => {
   it("formats each unit tier", () => {

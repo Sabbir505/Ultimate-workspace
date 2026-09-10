@@ -30,6 +30,26 @@ pub async fn checked_send(
     Ok(resp)
 }
 
+/// [`checked_send`] with an operation context, for sites whose errors name
+/// the operation: transport failures read "{op} failed: {e}", non-2xx reads
+/// "{op} HTTP {status}: {snippet}" (the "HTTP {status}:" marker stays
+/// load-bearing — see `checked_send`). The snippet bound also caps error
+/// bodies that previously flowed through untruncated.
+pub async fn checked_send_ctx(
+    builder: reqwest::RequestBuilder,
+    snippet_chars: usize,
+    op: &str,
+) -> Result<reqwest::Response, String> {
+    let resp = builder.send().await.map_err(|e| format!("{op} failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let snippet = truncate_chars(body.trim(), snippet_chars);
+        return Err(format!("{op} HTTP {status}: {snippet}"));
+    }
+    Ok(resp)
+}
+
 
 /// Char-safe suffix truncation: keep the LAST `max` characters (used for
 /// tail-capping long shell output). Same panic-safety rationale as

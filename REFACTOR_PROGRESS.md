@@ -35,6 +35,22 @@ Prior context:
 
 **Debugging war-story (documented for future sessions):** the hang initially looked like a slow build. Actual chain: (1) the deadlock genuinely hung the test binary; (2) every later `cargo test` hit LNK1104 — Windows keeps the .exe locked while the hung process lives — which masqueraded as "could not compile" churn; (3) `git checkout` of sources didn't help while the process lived. Fix: kill `relay_lib*` processes, then scope the guard. Also: the user's dev `relay.exe` + the auto-format watcher share `target/`, so expect lock waits when editing rs files while the app runs.
 
+### Still open (final audit 2026-09-11)
+
+Everything prioritized in the original survey and subsequent sessions is done. The remainder is the deep-tail, each item larger than the context left in this effort — listed here as the honest hand-off:
+
+- **MessageBubble.tsx (2,278)** — carve the activity-steps region (ToolIcon/StepStatusIcon/stepLabel/InlineDiff/StepCodeHighlighter/ActivityStepRow/ProcessSummary/FoldedStepGroup/EditFileRow + ActivityStep/ActivityGroup/Block types + the Search/Memory/Globe/Terminal/Wrench/Check icons they use, ~lines 500-1720) into ActivitySteps.tsx. A scripted attempt was reverted mid-flight (boundary drift + missing icon co-dependencies); do it with the dependency map above.
+- **ChatComposer.tsx (3,098)** — extract the voice-recording engine (joinSamples/encodeWav16k + permission flow) and the attachment classifier to `lib/`.
+- **ChatView.tsx (2,246)** — remainder is one 2,100-line component; candidate seams: message-list scroll logic, split-pane wiring.
+- **chat/commands.rs** — `send_chat_message` (1,199 lines) split; broader commands.rs section split.
+- **browser.rs** — ~490 lines of injected JS builders → `browser_js.rs`; 2,454-line impl split.
+- **mobile/relay.rs** — `handle_connection` (~918 lines) split; provider-catalog triplication vs providers.rs.
+- **chat.ts streaming-map quartet** — the four streaming-map cleanup sites need regression-guard tests written first (deliberate blocker).
+- **Round-parser unification** — pin openai/anthropic_stream_round delta-accumulation with mock-server tests, then merge; deepest item.
+- **AgentModelPicker remainder** — helpers/caches now in agentPickerShared.tsx; the 900-line component body (rail/popup/gear sub-modal) could split further.
+
+---
+
 ## Steps — session 7: agent_sessions split completed (2026-09-11)
 
 | # | Step | Outcome | Verification | Commit |

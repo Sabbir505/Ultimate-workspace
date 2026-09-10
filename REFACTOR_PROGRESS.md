@@ -41,13 +41,13 @@ Everything prioritized in the original survey and subsequent sessions is done. T
 
 - **MessageBubble.tsx (2,278)** — carve region [Per-tool-kind icon doc ≈ line 533 → groupSegments end ≈ line 1719] plus co-dependencies OUTSIDE the region: iconProps + FileIcon (116/167), SearchIcon/MemoryIcon/GlobeIcon/TerminalIcon/WrenchIcon/CheckIcon (488-535), useLazyComponent (60), SyntaxHighlighterComponent type (54), useSyntaxTheme (46), and Markdown-context items listed above that stay put. Verified markers and a working end_of_item brace-counter are in git history (scripts/mb_carve.py at the reverted state).
 
-- **ChatComposer.tsx (3,098)** — extract the voice-recording engine (joinSamples/encodeWav16k + permission flow) and the attachment classifier to `lib/`.
-- **ChatView.tsx (2,246)** — remainder is one 2,100-line component; candidate seams: message-list scroll logic, split-pane wiring.
+- **ChatComposer.tsx (3,098)** — ✅ voice engine done (session 8: `lib/voiceRecording.ts` — joinSamples/encodeWav16k/blobToBase64); remainder is one ~2,800-line component body; candidate seams: attachment classifier, queued-message rows, text-command parsing.
+- **Streaming-map quartet** — ✅ done (session 8: `clearStreamState` helper + regression tests).
+- **Round-parser pins** — ✅ done (session 8: mock-server delta-accumulation pins for both stream rounds).
+- **ChatView.tsx (2,246)** — welcome screen extracted (ChatWelcome.tsx); remainder is one 2,100-line component; candidate seams: message-list scroll logic, split-pane wiring.
 - **chat/commands.rs** — `send_chat_message` (1,199 lines) split; broader commands.rs section split.
 - **browser.rs** — ~490 lines of injected JS builders → `browser_js.rs`; 2,454-line impl split.
 - **mobile/relay.rs** — `handle_connection` (~918 lines) split; provider-catalog triplication vs providers.rs.
-- **chat.ts streaming-map quartet** — the four streaming-map cleanup sites need regression-guard tests written first (deliberate blocker).
-- **Round-parser unification** — pin openai/anthropic_stream_round delta-accumulation with mock-server tests, then merge; deepest item.
 - **AgentModelPicker remainder** — helpers/caches now in agentPickerShared.tsx; the 900-line component body (rail/popup/gear sub-modal) could split further.
 
 ---

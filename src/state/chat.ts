@@ -1259,6 +1259,19 @@ async function loadBufferOlder(
   return older.length;
 }
 
+/** Shared cleanup for terminal streaming events (cancel / done / error /
+ *  remote-turn-end): drop the session's streaming buffer and status notice,
+ *  and null streamingChatSessionId when it points at this session (all four
+ *  terminal paths share the rule; callers spread their own extras — livePerf,
+ *  stoppedPartial, pending maps — on top). */
+export function clearStreamState(s: ChatState, id: string): Partial<ChatState> {
+  return {
+    streaming: omitKey(s.streaming, id),
+    chatStatus: omitKey(s.chatStatus, id),
+    streamingChatSessionId: s.streamingChatSessionId === id ? null : s.streamingChatSessionId,
+  };
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   loaded: false,
   sessions: [],
@@ -2761,22 +2774,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // the persist (same straggler guard shape as onToken/onPerf). This is
       // also the builtin path's ONLY cleanup: its cancel is handle.abort(), so
       // no terminal chat:done/chat:error ever arrives to clear these keys.
-      set((s) => {
-        const nextStreaming = { ...s.streaming };
-        delete nextStreaming[streamingChatSessionId];
-        const nextStatus = { ...s.chatStatus };
-        delete nextStatus[streamingChatSessionId];
+      set((s) => ({
         // Also clear livePerf so the next turn starts its timer from 0, not
         // the cancelled turn's elapsed time (regression: stale timer).
-        const nextLivePerf = { ...s.livePerf };
-        delete nextLivePerf[streamingChatSessionId];
-        return {
-          streaming: nextStreaming,
-          chatStatus: nextStatus,
-          livePerf: nextLivePerf,
-          streamingChatSessionId: null,
-        };
-      });
+        ...clearStreamState(s, streamingChatSessionId),
+        livePerf: omitKey(s.livePerf, streamingChatSessionId),
+        streamingChatSessionId: null,
+      }));
       if (partial.trim().length > 0) {
         try {
           await persistPartialChatMessage(streamingChatSessionId, partial);
@@ -2892,18 +2896,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // when a streaming entry survived (provider one-shots emit no terminal
     // chat event, and failure paths can die before emitting one).
     if (!(chatSessionId in get().streaming)) return;
-    set((s) => {
-      const nextStreaming = { ...s.streaming };
-      delete nextStreaming[chatSessionId];
-      const nextStatus = { ...s.chatStatus };
-      delete nextStatus[chatSessionId];
-      return {
-        streaming: nextStreaming,
-        chatStatus: nextStatus,
-        streamingChatSessionId:
-          s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
-      };
-    });
+    set((s) => clearStreamState(s, chatSessionId));
     // Surface the persisted reply: an active viewer refetches the page;
     // everyone else gets the unread mark (same posture as onDone).
     if (get().activeChatSessionId !== chatSessionId) {
@@ -3018,28 +3011,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
 
     // Clear streaming + live-perf state for this session.
-    set((s) => {
-      const nextStreaming = { ...s.streaming };
-      delete nextStreaming[chatSessionId];
-      const nextStatus = { ...s.chatStatus };
-      delete nextStatus[chatSessionId];
-      const livePerf = { ...s.livePerf };
-      delete livePerf[chatSessionId];
+    set((s) => ({
       // A turn can only complete after its question was answered, but a
       // CANCELLED turn drops the pending on the backend without a resolved
       // event — clear any stale card here so cancel never leaves one stuck.
-      const pendingQuestions = { ...s.pendingQuestions };
-      delete pendingQuestions[chatSessionId];
-      return {
-        streaming: nextStreaming,
-        chatStatus: nextStatus,
-        livePerf,
-        pendingQuestions,
-        lastTurnPerf: { ...s.lastTurnPerf, [chatSessionId]: lastTurn },
-        streamingChatSessionId:
-          s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
-      };
-    });
+      ...clearStreamState(s, chatSessionId),
+      livePerf: omitKey(s.livePerf, chatSessionId),
+      pendingQuestions: omitKey(s.pendingQuestions, chatSessionId),
+      lastTurnPerf: { ...s.lastTurnPerf, [chatSessionId]: lastTurn },
+    }));
 
     // Refetch messages from the backend to get the final persisted
     // ChatMessageRecord with usage data. Best-effort: a transient IPC/DB
@@ -3298,44 +3278,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Also drop this session's live-perf chip and pending-artifact buffer —
     // onDone clears both, and an errored turn must not leave them stuck
     // (audit H3).
-    set((s) => {
-      const nextStreaming = { ...s.streaming };
-      delete nextStreaming[chatSessionId];
-      const nextStatus = { ...s.chatStatus };
-      delete nextStatus[chatSessionId];
-      const nextLivePerf = { ...s.livePerf };
-      delete nextLivePerf[chatSessionId];
-      const nextPendingArtifacts = { ...s.pendingArtifacts };
-      delete nextPendingArtifacts[chatSessionId];
+    set((s) => ({
+      ...clearStreamState(s, chatSessionId),
+      livePerf: omitKey(s.livePerf, chatSessionId),
+      pendingArtifacts: omitKey(s.pendingArtifacts, chatSessionId),
       // An errored/cancelled turn must not leave a question card stuck
       // (the backend already dropped its pending).
-      const nextPendingQuestions = { ...s.pendingQuestions };
-      delete nextPendingQuestions[chatSessionId];
+      pendingQuestions: omitKey(s.pendingQuestions, chatSessionId),
       // Remember what the errored turn had produced (matches the persisted
       // partial row) — same as the cancel path, so the partial bubble keeps
       // its process section expanded and reads "Stopped" instead of
       // collapsing to an empty "Worked" row.
-      const nextStopped = { ...s.stoppedPartial };
-      if (hadPartial) {
-        nextStopped[chatSessionId] = partial.trim();
-      } else {
-        delete nextStopped[chatSessionId];
-      }
-      return {
-        streaming: nextStreaming,
-        chatStatus: nextStatus,
-        livePerf: nextLivePerf,
-        pendingArtifacts: nextPendingArtifacts,
-        pendingQuestions: nextPendingQuestions,
-        stoppedPartial: nextStopped,
-        streamingChatSessionId:
-          s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
+      stoppedPartial: hadPartial
+        ? { ...s.stoppedPartial, [chatSessionId]: partial.trim() }
+        : omitKey(s.stoppedPartial, chatSessionId),
+      streamingChatSessionId:
+        s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
         error:
           s.activeChatSessionId === chatSessionId ? message : s.error,
         errorCode:
           s.activeChatSessionId === chatSessionId ? (code ?? null) : s.errorCode,
-      };
-    });
+      })),
     // Artifact telemetry (SELF_IMPROVING_ARTIFACTS.md §5.2): the turn errored,
     // so open runs count as failed with the classified error code.
     void finishArtifactRuns(chatSessionId, "failed", code ?? undefined).catch(() => {});

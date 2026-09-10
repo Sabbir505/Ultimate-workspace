@@ -1460,12 +1460,26 @@ pub(crate) async fn run_chat_stream(
                                  // multi-byte char split across reads is never corrupted.
     let mut pending = crate::util::SseLineBuffer::new();
     let mut full_text = String::new();
-    let mut in_think = false;
-    // B-18: tolerate scattered malformed lines like the tool loops do
-    // (MAX_PARSE_FAILURES) instead of killing the turn on the first one.
-    // Genuine `{"error": …}` provider events (surfaced as "provider error:"
-    // by the parser) still fail immediately.
-    let mut parse_failures: u32 = 0;
+    // Shared provider-SSE pump (streaming.rs): reasoning-sentinel <think>
+    // wrapping, full-text accumulation, and B-18 parse-failure tolerance —
+    // a stray malformed line is skipped, MAX_PARSE_FAILURES consecutive
+    // failures fail the turn, and genuine "provider error:" events fail
+    // immediately.
+    let mut pump = crate::chat::streaming::ProviderSsePump::new(&mut buf, &mut full_text);
+
+    // Token emit: stream_events channel first, app event as the fallback
+    // (headless tests run without an app handle).
+    let emit_token = |out: String| {
+        let payload = ChatTokenPayload {
+            chat_session_id: chat_session_id.to_string(),
+            token: out,
+        };
+        if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
+            if let Some(app) = app {
+                let _ = app.emit("chat:token", payload);
+            }
+        }
+    };
 
     // D4: the done flag previously broke only the INNER line loop, so the
     // outer read kept pulling from the SSE body. Providers that hold the
@@ -1491,60 +1505,18 @@ pub(crate) async fn run_chat_stream(
 
         for line in complete_lines {
             let line = line.trim_end();
-            let (token, done) = match provider.parse_sse_chunk(line, &mut buf) {
-                Ok(pair) => {
-                    parse_failures = 0;
-                    pair
-                }
-                Err(e) if e.starts_with("provider error:") => return Err(e),
-                Err(_) => {
-                    parse_failures += 1;
-                    if parse_failures >= crate::chat::streaming::MAX_PARSE_FAILURES {
-                        return Err(format!(
-                            "SSE parse stalled: {} consecutive JSON parse failures",
-                            crate::chat::streaming::MAX_PARSE_FAILURES
-                        ));
-                    }
-                    continue;
-                }
-            };
-            match (token, done) {
-                (Some(token), false) => {
-                    // Reasoning tokens are sentinel-prefixed by the parser;
-                    // wrap contiguous runs in <think>…</think> so the UI can
-                    // render a collapsible thinking block.
-                    let mut out = String::new();
-                    if let Some(reasoning) = token.strip_prefix(REASONING_PREFIX) {
-                        if !in_think {
-                            out.push_str("<think>");
-                            in_think = true;
-                        }
-                        out.push_str(reasoning);
-                    } else {
-                        if in_think {
-                            out.push_str("</think>");
-                            in_think = false;
-                        }
-                        out.push_str(&token);
-                    }
-                    full_text.push_str(&out);
-                    let payload = ChatTokenPayload {
-                        chat_session_id: chat_session_id.to_string(),
-                        token: out,
-                    };
-                    if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
-                        if let Some(app) = app {
-                            let _ = app.emit("chat:token", payload);
-                        }
-                    }
+            match pump.line(provider, line) {
+                Ok(crate::chat::streaming::SsePumpEvent::Token(out)) => {
+                    emit_token(out);
                     perf.record_token();
                     perf.maybe_emit_perf();
                 }
-                (_, true) => {
+                Ok(crate::chat::streaming::SsePumpEvent::Done) => {
                     // Stream done — usage will be parsed from buffer below.
                     break 'read;
                 }
-                _ => {}
+                Ok(crate::chat::streaming::SsePumpEvent::Quiet) => {}
+                Err(e) => return Err(e),
             }
         }
     }
@@ -1555,53 +1527,23 @@ pub(crate) async fn run_chat_stream(
     // fatal: the stream has already ended, and erroring now would throw away
     // a turn whose tokens were all delivered.
     for trailing in pending.finish() {
-        let trailing = trailing.trim_end().to_string();
+        let trailing = trailing.trim_end();
         if trailing.is_empty() {
             continue;
         }
-        if let Ok((Some(token), _)) = provider.parse_sse_chunk(&trailing, &mut buf) {
-            let mut out = String::new();
-            if let Some(reasoning) = token.strip_prefix(REASONING_PREFIX) {
-                if !in_think {
-                    out.push_str("<think>");
-                    in_think = true;
-                }
-                out.push_str(reasoning);
-            } else {
-                if in_think {
-                    out.push_str("</think>");
-                    in_think = false;
-                }
-                out.push_str(&token);
-            }
-            full_text.push_str(&out);
-            let payload = ChatTokenPayload {
-                chat_session_id: chat_session_id.to_string(),
-                token: out,
-            };
-            if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
-                if let Some(app) = app {
-                    let _ = app.emit("chat:token", payload);
-                }
-            }
+        if let Ok(crate::chat::streaming::SsePumpEvent::Token(out)) = pump.line(provider, trailing)
+        {
+            emit_token(out);
             perf.record_token();
             perf.maybe_emit_perf();
         }
     }
 
-    if in_think {
-        full_text.push_str("</think>");
+    if let Some(closing) = pump.close_think() {
+        full_text.push_str(&closing);
         // Structural closer, not a model token — emit without recording so
         // the live OUT/tok/s aren't bumped by UI scaffolding.
-        let payload = ChatTokenPayload {
-            chat_session_id: chat_session_id.to_string(),
-            token: "</think>".to_string(),
-        };
-        if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
-            if let Some(app) = app {
-                let _ = app.emit("chat:token", payload);
-            }
-        }
+        emit_token(closing);
     }
 
     let usage = provider.parse_usage(&buf);

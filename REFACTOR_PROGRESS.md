@@ -27,6 +27,26 @@ Prior context:
 - Autoreview (code-review subagent) after each significant step; findings fixed or logged before moving on.
 - One conventional commit per step.
 
+## Steps — session 5: streaming loop merge, transports 1–2 (2026-09-10)
+
+| # | Step | Verification | Autoreview | Commit |
+|---|---|---|---|---|
+| M0 | `streaming::ProviderSsePump` + `SsePumpEvent` — shared per-line provider-SSE machinery: parse via the ChatProvider trait, reasoning-sentinel `<think>` wrapping, full-text accumulation, B-18 parse-failure tolerance, `close_think()` | tsc n/a · cargo 1021 ✓ | reviewed with M1+M2 | (with M1) |
+| M1 | **Transport 1 — mobile `handle_chat_turn`** onto the pump. Gains three safety nets the builtin path already had: B-18 parse tolerance (stray malformed line skipped instead of failing the turn), EOF flush of a trailing unterminated line, pump-managed think state. Emit channel (ws), done handling, usage parse, persist unchanged; the chunk watchdog was deliberately NOT added (plain `stream.next()` kept) | cargo check clean · 1021 ✓ | **PASS** | `refactor(stream): ProviderSsePump; mobile chat loop…` |
+| M2 | **Transport 2 — `run_chat_stream`** (builtin non-tool path) onto the same pump, via a local `emit_token` closure (stream_events → app.emit fallback). B-9 watchdog, D4 whole-loop done, perf recording (not on the think closer), EOF tolerance, think-closer all preserved; −60 lines, one loop definition left instead of two | cargo 1021 ✓ incl. `done_marker_ends_the_whole_read_loop` (mock server e2e) | **PASS** | `refactor(stream): run_chat_stream onto the shared ProviderSsePump` |
+
+| M3 | **Tool loops** (`run_openai_tool_loop` / `run_anthropic_tool_loop`): both now normalize their wire shape once into `NormalizedToolCall` (id, name, parsed args) and share `spawn_task_fanout` (parallel Task pre-pass) + `run_round_tool` (marker pair, deferred await, RUN_SHELL output attachment, live-web flag). Request building, round parsing, echo/result-message shapes, B-17 cache-rejection retry, Hermes fallback, and tripwire logic stay per-loop — they genuinely differ | cargo check clean · 1021 ✓ | n/a (mechanical) | `refactor(stream): shared tool-call execution in both tool loops` |
+
+**Transport status:** mobile ✓ · run_chat_stream ✓ · tool loops ✓ (execution shared; round parsing per-format by design) · **`run_subagent_loop` remains** — it emits raw chunks to `chat:subagent-tokens`, uses its own `subagent_run_tool` wrapper, and carries inline dual-format accumulators (~250 lines); merging it means deciding whether its execution wrapper can route through `run_round_tool` without changing subagent permission semantics — a dedicated session. The agent_sessions.rs harness readers parse CLI JSON event schemas, not provider SSE — out of scope by design.
+
+### Remaining transports
+
+- **Tool loops** (`run_openai_tool_loop` / `run_anthropic_tool_loop` + their `*_stream_round` bodies): these parse raw provider JSON inline (not via the trait) and interleave tool-call accumulation + B-17 cache-rejection retries — merging them onto the pump (or each other) is the next transport, but needs the rounds' delta-accumulation behavior pinned first.
+- **`run_subagent_loop`** (dispatch.rs): carries both OpenAI- and Anthropic-shaped accumulators inline; same treatment after the tool loops.
+- The harness readers in agent_sessions.rs parse CLI JSON event schemas, not provider SSE — correctly out of scope for this pump.
+
+---
+
 ## Steps — session 4: the still-open list (2026-09-10)
 
 | # | Item | Outcome | Verification | Commit |

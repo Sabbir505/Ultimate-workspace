@@ -25,7 +25,7 @@ use crate::chat::proto::{
 };
 use crate::chat::providers::{
     calculate_anthropic_cost, calculate_openai_cost, ChatProvider, ChatProviderId, ChatRequest,
-    ChatUsage, ANTHROPIC_API_VERSION,
+    ChatUsage, ANTHROPIC_API_VERSION, REASONING_PREFIX,
 };
 use crate::chat::{permission, tools, ChatManager};
 
@@ -1073,6 +1073,116 @@ fn build_openai_body(
 /// answer (or the iteration cap is hit). Each tool call is emitted as a
 /// `<tool>` marker the UI shows as a collapsible card and strips from re-sent
 /// history.
+/// One tool call normalized across wire formats: id, name, parsed args.
+type NormalizedToolCall = (String, String, Value);
+
+/// Fan-out pre-pass shared by both tool loops: spawn every Task (subagent)
+/// call onto its own tokio task and open its step marker immediately, so
+/// parallel subagents run CONCURRENTLY while the in-order pass below still
+/// attaches results in call order. Returns one deferred handle per call
+/// (None for non-Task calls).
+#[allow(clippy::too_many_arguments)]
+fn spawn_task_fanout(
+    calls: &[NormalizedToolCall],
+    client: &reqwest::Client,
+    art_dir: &std::path::Path,
+    live_caps: &tools::ToolCaps,
+    sandbox: permission::SandboxPolicy,
+    approval: permission::ApprovalPolicy,
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    full: &mut String,
+) -> Vec<Option<tokio::task::JoinHandle<String>>> {
+    let mut deferred: Vec<Option<tokio::task::JoinHandle<String>>> =
+        (0..calls.len()).map(|_| None).collect();
+    for (idx, (_, name, args)) in calls.iter().enumerate() {
+        if name != tools::TASK {
+            continue;
+        }
+        let block = tool_block(name, args);
+        let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
+        emit_marker(app, sid, &open, full);
+        deferred[idx] = Some(crate::chat::dispatch::spawn_run_tool(
+            client.clone(),
+            art_dir.to_path_buf(),
+            std::sync::Arc::new(live_caps.clone()),
+            sandbox,
+            approval,
+            Arc::clone(mgr),
+            app.clone(),
+            sid.to_string(),
+            name.to_string(),
+            args.clone(),
+        ));
+    }
+    deferred
+}
+
+/// Execute one tool call inside a tool loop (the in-order pass): open the
+/// step marker before running so the frontend sees the step as live, await
+/// the deferred subagent handle or run the tool directly, close the marker,
+/// and attach captured shell output to the step (title required — the
+/// frontend's stepLabel renders a titleless marker as a phantom "working…"
+/// row). Returns `(was_live_web, result_text)`.
+#[allow(clippy::too_many_arguments)]
+async fn run_round_tool(
+    client: &reqwest::Client,
+    art_dir: &std::path::Path,
+    live_caps: &tools::ToolCaps,
+    sandbox: permission::SandboxPolicy,
+    approval: permission::ApprovalPolicy,
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+    deferred: &mut Option<tokio::task::JoinHandle<String>>,
+    perf: &crate::chat::turn_perf::TurnPerf,
+    full: &mut String,
+) -> (bool, String) {
+    let live_web = is_live_web_tool(name);
+    // Two-part emission: open the block BEFORE running the tool so the
+    // frontend sees the step as live (spinner + live action label) while it
+    // executes — the closing tag after completion flips it to done. `full`
+    // accumulates the same bytes either way, so the persisted message is
+    // identical. (Deferred Task calls opened their marker in the pre-pass.)
+    let is_deferred = deferred.is_some();
+    if !is_deferred {
+        let block = tool_block(name, args);
+        let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
+        emit_marker(app, sid, &open, full);
+    }
+    perf.begin_tool();
+    let result = if let Some(handle) = deferred.take() {
+        handle
+            .await
+            .unwrap_or_else(|e| format!("Error: subagent task failed: {e}"))
+    } else {
+        run_tool(client, art_dir, live_caps, sandbox, approval, mgr, app, sid, name, args).await
+    };
+    perf.end_tool();
+    let block = tool_block(name, args);
+    if block.ends_with("</tool>") {
+        emit_marker(app, sid, "</tool>", full);
+    }
+    // Attach the captured terminal output to the shell step so the UI shows
+    // a collapsible preview under the command.
+    if name == tools::RUN_SHELL && !result.trim().is_empty() {
+        let result_marker = json!({
+            "kind": "result",
+            "title": "Output",
+            // Neutralize the structural openers too: a literal <tool>/<think>
+            // in shell output would prematurely open a new frontend segment
+            // (see proto.rs tool_block).
+            "result": neutralize_markers(&result),
+        });
+        let rm = format!("<tool>{result_marker}</tool>");
+        emit_marker(app, sid, &rm, full);
+    }
+    (live_web, result)
+}
+
 pub(crate) async fn run_openai_tool_loop(
     client: &reqwest::Client,
     base: &str,
@@ -1300,113 +1410,42 @@ pub(crate) async fn run_openai_tool_loop(
                 }
             }
             messages.push(echoed);
+            // Normalize once across wire shapes: (id, name, parsed args).
+            let calls: Vec<NormalizedToolCall> = tool_calls
+                .iter()
+                .map(|tc| {
+                    (
+                        tc.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        tc.get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        parse_tool_args(
+                            tc.get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("{}"),
+                        ),
+                    )
+                })
+                .collect();
             // PARALLEL SUBAGENT FAN-OUT: a round that contains several `Task`
             // calls (the model asking for multiple subagents at once — the
             // whole point of subagents) must run them CONCURRENTLY, not
-            // one-by-one. Pre-pass: open every Task's marker and spawn its
-            // run_tool onto its own tokio task; the in-order pass below then
-            // awaits the handles so tool results still attach in call order.
-            let mut deferred: Vec<Option<tokio::task::JoinHandle<String>>> =
-                (0..tool_calls.len()).map(|_| None).collect();
-            for (idx, tc) in tool_calls.iter().enumerate() {
-                let name = tc
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("");
-                if name != tools::TASK {
-                    continue;
-                }
-                let args_str = tc
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("{}");
-                let args = parse_tool_args(args_str);
-                let block = tool_block(&name, &args);
-                let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
-                emit_marker(app, sid, &open, &mut full);
-                deferred[idx] = Some(crate::chat::dispatch::spawn_run_tool(
-                    client.clone(),
-                    art_dir.to_path_buf(),
-                    std::sync::Arc::new(live_caps.clone()),
-                    sandbox,
-                    approval,
-                    Arc::clone(mgr),
-                    app.clone(),
-                    sid.to_string(),
-                    name.to_string(),
-                    args,
-                ));
-            }
-            for (idx, tc) in tool_calls.iter().enumerate() {
-                let id = tc
-                    .get("id")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let name = tc
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let args_str = tc
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("{}");
-                let args = parse_tool_args(args_str);
-
-                if is_live_web_tool(&name) {
-                    live_web_used = true;
-                }
-
-                // Two-part emission: open the block BEFORE running the tool so
-                // the frontend sees the step as live (spinner + live action
-                // label) while it executes — the closing tag after completion
-                // flips it to done. `full` accumulates the same bytes either
-                // way, so the persisted message is identical. (Deferred Task
-                // calls opened their marker in the pre-pass above.)
-                let is_deferred = deferred[idx].is_some();
-                if !is_deferred {
-                    let block = tool_block(&name, &args);
-                    let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
-                    emit_marker(app, sid, &open, &mut full);
-                }
-                perf.begin_tool();
-                let result = if let Some(handle) = deferred[idx].take() {
-                    handle
-                        .await
-                        .unwrap_or_else(|e| format!("Error: subagent task failed: {e}"))
-                } else {
-                    run_tool(
-                        client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name,
-                        &args,
-                    )
-                    .await
-                };
-                perf.end_tool();
-                let block = tool_block(&name, &args);
-                if block.ends_with("</tool>") {
-                    emit_marker(app, sid, "</tool>", &mut full);
-                }
-                // Attach the captured terminal output to the shell step so the
-                // UI shows a collapsible preview under the command. The title
-                // is required: the frontend's stepLabel renders a titleless
-                // marker as a phantom "working…" step row.
-                if name == tools::RUN_SHELL && !result.trim().is_empty() {
-                    let result_marker = json!({
-                        "kind": "result",
-                        "title": "Output",
-                        // Neutralize the structural openers too: a literal
-                        // <tool>/<think> in shell output would prematurely open
-                        // a new frontend segment (see proto.rs tool_block).
-                        "result": neutralize_markers(&result),
-                    });
-                    let rm = format!("<tool>{result_marker}</tool>");
-                    emit_marker(app, sid, &rm, &mut full);
-                }
+            // one-by-one. The pre-pass opens every Task's marker and spawns
+            // its run_tool onto its own tokio task; the in-order pass below
+            // then awaits the handles so tool results still attach in call
+            // order.
+            let mut deferred =
+                spawn_task_fanout(&calls, client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &mut full);
+            for (idx, (id, name, args)) in calls.iter().enumerate() {
+                let (live, result) = run_round_tool(
+                    client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, name, args,
+                    &mut deferred[idx], &perf, &mut full,
+                )
+                .await;
+                live_web_used |= live;
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": id,
@@ -1592,82 +1631,27 @@ pub(crate) async fn run_anthropic_tool_loop(
             messages.push(json!({ "role": "assistant", "content": content }));
 
             let mut results: Vec<Value> = Vec::new();
-            // PARALLEL SUBAGENT FAN-OUT — see the OpenAI loop's pre-pass.
-            let mut deferred: Vec<Option<tokio::task::JoinHandle<String>>> =
-                (0..tool_uses.len()).map(|_| None).collect();
-            for (idx, tu) in tool_uses.iter().enumerate() {
-                let name = tu.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                if name != tools::TASK {
-                    continue;
-                }
-                let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
-                let block = tool_block(name, &args);
-                let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
-                emit_marker(app, sid, &open, &mut full);
-                deferred[idx] = Some(crate::chat::dispatch::spawn_run_tool(
-                    client.clone(),
-                    art_dir.to_path_buf(),
-                    std::sync::Arc::new(live_caps.clone()),
-                    sandbox,
-                    approval,
-                    Arc::clone(mgr),
-                    app.clone(),
-                    sid.to_string(),
-                    name.to_string(),
-                    args,
-                ));
-            }
-            for (idx, tu) in tool_uses.iter().enumerate() {
-                let id = tu
-                    .get("id")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let name = tu
-                    .get("name")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
-
-                if is_live_web_tool(&name) {
-                    live_web_used = true;
-                }
-
-                // Two-part emission — see the OpenAI loop's marker. (Deferred
-                // Task calls opened their marker in the pre-pass above.)
-                if deferred[idx].is_none() {
-                    let block = tool_block(&name, &args);
-                    let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
-                    emit_marker(app, sid, &open, &mut full);
-                }
-                perf.begin_tool();
-                let result = if let Some(handle) = deferred[idx].take() {
-                    handle
-                        .await
-                        .unwrap_or_else(|e| format!("Error: subagent task failed: {e}"))
-                } else {
-                    run_tool(
-                        client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name,
-                        &args,
+            // Normalize once across wire shapes: (id, name, parsed args).
+            let calls: Vec<NormalizedToolCall> = tool_uses
+                .iter()
+                .map(|tu| {
+                    (
+                        tu.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        tu.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        tu.get("input").cloned().unwrap_or_else(|| json!({})),
                     )
-                    .await
-                };
-                perf.end_tool();
-                let block = tool_block(&name, &args);
-                if block.ends_with("</tool>") {
-                    emit_marker(app, sid, "</tool>", &mut full);
-                }
-                if name == tools::RUN_SHELL && !result.trim().is_empty() {
-                    let result_marker = json!({
-                        "kind": "result",
-                        // Title required — see the OpenAI loop's marker.
-                        "title": "Output",
-                        "result": neutralize_markers(&result),
-                    });
-                    let rm = format!("<tool>{result_marker}</tool>");
-                    emit_marker(app, sid, &rm, &mut full);
-                }
+                })
+                .collect();
+            // PARALLEL SUBAGENT FAN-OUT — see the OpenAI loop's pre-pass.
+            let mut deferred =
+                spawn_task_fanout(&calls, client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &mut full);
+            for (idx, (id, name, args)) in calls.iter().enumerate() {
+                let (live, result) = run_round_tool(
+                    client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, name, args,
+                    &mut deferred[idx], &perf, &mut full,
+                )
+                .await;
+                live_web_used |= live;
                 results.push(json!({
                     "type": "tool_result",
                     "tool_use_id": id,
@@ -1730,6 +1714,108 @@ fn build_usage(openai: bool, u: RoundUsage) -> Option<ChatUsage> {
         cache_read_input_tokens: u.cache_read,
         reasoning_tokens: u.reasoning,
     })
+}
+
+/// What one complete SSE line produced in [`ProviderSsePump::line`].
+pub(crate) enum SsePumpEvent {
+    /// An answer chunk, already wrapped in `<think>` boundaries where the
+    /// reasoning sentinel required it — the caller emits it verbatim (the
+    /// pump has already appended it to `full_text`).
+    Token(String),
+    /// The provider signalled end-of-stream.
+    Done,
+    /// Nothing to emit (non-data line, ping, tolerated parse failure).
+    Quiet,
+}
+
+/// Incremental SSE pump shared by the provider-trait streaming loops
+/// (chat/mod.rs `run_chat_stream`, mobile/relay.rs `handle_chat_turn`).
+/// Feeds complete SSE lines through a provider's `parse_sse_chunk`, tracks
+/// the reasoning sentinel to wrap contiguous thinking runs in
+/// `<think>…</think>`, accumulates the full answer text, and enforces the
+/// B-18 parse-failure tolerance (a stray malformed line is skipped;
+/// `MAX_PARSE_FAILURES` consecutive failures fail the turn, while genuine
+/// `{"error": …}` provider events — surfaced as "provider error:" — fail
+/// immediately).
+pub(crate) struct ProviderSsePump<'a> {
+    /// Usage-bearing lines, retained for the provider's `parse_usage`.
+    pub buf: &'a mut String,
+    /// The full answer text so far (think markers included).
+    pub full_text: &'a mut String,
+    in_think: bool,
+    parse_failures: u32,
+}
+
+impl<'a> ProviderSsePump<'a> {
+    pub(crate) fn new(buf: &'a mut String, full_text: &'a mut String) -> Self {
+        Self {
+            buf,
+            full_text,
+            in_think: false,
+            parse_failures: 0,
+        }
+    }
+
+    /// Feed one complete, newline-terminated (and trimmed) SSE line.
+    pub(crate) fn line(
+        &mut self,
+        provider: &dyn ChatProvider,
+        line: &str,
+    ) -> Result<SsePumpEvent, String> {
+        let (token, done) = match provider.parse_sse_chunk(line, self.buf) {
+            Ok(pair) => {
+                self.parse_failures = 0;
+                pair
+            }
+            Err(e) if e.starts_with("provider error:") => return Err(e),
+            Err(_) => {
+                self.parse_failures += 1;
+                if self.parse_failures >= MAX_PARSE_FAILURES {
+                    return Err(format!(
+                        "SSE parse stalled: {MAX_PARSE_FAILURES} consecutive JSON parse failures"
+                    ));
+                }
+                return Ok(SsePumpEvent::Quiet);
+            }
+        };
+        match (token, done) {
+            (Some(token), false) => {
+                // Reasoning tokens are sentinel-prefixed by the parser; wrap
+                // contiguous runs in <think>…</think> so the UI can render a
+                // collapsible thinking block.
+                let mut out = String::new();
+                if let Some(reasoning) = token.strip_prefix(REASONING_PREFIX) {
+                    if !self.in_think {
+                        out.push_str("<think>");
+                        self.in_think = true;
+                    }
+                    out.push_str(reasoning);
+                } else {
+                    if self.in_think {
+                        out.push_str("</think>");
+                        self.in_think = false;
+                    }
+                    out.push_str(&token);
+                }
+                self.full_text.push_str(&out);
+                Ok(SsePumpEvent::Token(out))
+            }
+            (_, true) => Ok(SsePumpEvent::Done),
+            _ => Ok(SsePumpEvent::Quiet),
+        }
+    }
+
+    /// `</think>` when a thinking block is still open at end-of-stream — the
+    /// caller emits it so the reply can't end inside an unterminated
+    /// collapsible block.
+    pub(crate) fn close_think(&mut self) -> Option<String> {
+        if self.in_think {
+            self.in_think = false;
+            Some("</think>".to_string())
+        } else {
+            None
+        }
+    }
 }
 
 pub(crate) fn resolve_provider(id: &ChatProviderId) -> Box<dyn ChatProvider> {

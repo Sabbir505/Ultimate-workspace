@@ -1,10 +1,12 @@
 # Make src-tauri/icons/final.png background transparent and roll it out.
 #
-# The artwork sits on a pure-black backdrop (border pixels are RGB 0-1) and
-# the tile's own rim measures 11-15 with a hard edge, so a border flood-fill
-# at a TIGHT threshold cleanly separates them — a looser threshold (12) leaks
-# through the rim into the dark tile body and eats it. No feathering: the
-# artwork edge is already hard, and rim pixels must stay fully opaque.
+# 2026-09-10 artwork: the backdrop is a dark navy (border pixels RGB 2-26,
+# max channel 26) and the artwork is far brighter, so a border flood-fill at
+# maxc <= 35 captures the backdrop and plateaus — raising the threshold to
+# 56 doesn't eat a single artwork pixel (verified opaque% stable 26→56, and
+# the content bbox settles at (226,203,1028,1003)). The previous artwork sat
+# on pure black (border RGB 0-1) and needed a TIGHT threshold of 4; re-tune
+# here if the artwork's backdrop changes again.
 #
 # Outputs:
 #   public/logo.png                 512x512 (AppLogo, favicon, boot splash)
@@ -18,8 +20,11 @@ im = np.asarray(Image.open(SRC).convert("RGB")).astype(np.int16)
 h, w = im.shape[:2]
 maxc = im.max(axis=2)
 
+# 1) Backdrop mask (dark navy), keep only the component connected to the
+#    border — artwork pixels enclosed by brighter content are left alone.
+NEAR_MAXC = 35
 # 1) Pure-black mask, keep only the component connected to the border.
-near = maxc <= 4
+near = maxc <= NEAR_MAXC
 bg = np.zeros_like(near)
 bg[0, :] = near[0, :]
 bg[-1, :] = near[-1, :]

@@ -30,7 +30,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::chat::providers::{ChatProviderId, ChatRequest, REASONING_PREFIX};
+use crate::chat::providers::{ChatProviderId, ChatRequest};
 use crate::chat::ChatManager;
 use crate::db;
 use crate::secrets;
@@ -1819,7 +1819,12 @@ async fn handle_chat_turn(
     let mut pending = crate::util::SseLineBuffer::new();
     let mut buf = String::new();
     let mut full_text = String::new();
-    let mut in_think = false;
+    // Shared provider-SSE pump: reasoning-sentinel <think> wrapping, full-text
+    // accumulation, and B-18 parse-failure tolerance (a stray malformed line
+    // is skipped instead of killing the turn — same contract as the builtin
+    // chat path).
+    let mut pump =
+        crate::chat::streaming::ProviderSsePump::new(&mut buf, &mut full_text);
 
     'chunks: while let Some(chunk_result) = stream.next().await {
         let chunk = match chunk_result {
@@ -1833,23 +1838,8 @@ async fn handle_chat_turn(
 
         for line in complete_lines {
             let line = line.trim_end();
-            match provider.parse_sse_chunk(line, &mut buf) {
-                Ok((Some(token), false)) => {
-                    let mut out = String::new();
-                    if let Some(reasoning) = token.strip_prefix(REASONING_PREFIX) {
-                        if !in_think {
-                            out.push_str("<think>");
-                            in_think = true;
-                        }
-                        out.push_str(reasoning);
-                    } else {
-                        if in_think {
-                            out.push_str("</think>");
-                            in_think = false;
-                        }
-                        out.push_str(&token);
-                    }
-                    full_text.push_str(&out);
+            match pump.line(provider.as_ref(), line) {
+                Ok(crate::chat::streaming::SsePumpEvent::Token(out)) => {
                     let token_msg = DesktopMessage::ChatToken {
                         chat_session_id: sid.clone(),
                         token: out,
@@ -1860,11 +1850,11 @@ async fn handle_chat_turn(
                         break 'chunks;
                     }
                 }
-                Ok((_, true)) => {
+                Ok(crate::chat::streaming::SsePumpEvent::Done) => {
                     // Stream done — usage will be parsed from buffer below.
                     break 'chunks;
                 }
-                Ok((None, false)) => {}
+                Ok(crate::chat::streaming::SsePumpEvent::Quiet) => {}
                 Err(e) => {
                     let _ = send_done(&write, &sid, None).await;
                     return Err(format!("SSE parse error: {e}"));
@@ -1873,11 +1863,27 @@ async fn handle_chat_turn(
         }
     }
 
-    if in_think {
-        full_text.push_str("</think>");
+    // EOF flush: a trailing line without a final newline (some servers close
+    // this way) is still parsed — failures tolerated, the stream has ended.
+    for trailing in pending.finish() {
+        let trailing = trailing.trim_end();
+        if trailing.is_empty() {
+            continue;
+        }
+        if let Ok(crate::chat::streaming::SsePumpEvent::Token(out)) = pump.line(provider.as_ref(), trailing) {
+            let token_msg = DesktopMessage::ChatToken {
+                chat_session_id: sid.clone(),
+                token: out,
+            };
+            let _ = send_msg(&write, &token_msg).await;
+        }
+    }
+
+    if let Some(closing) = pump.close_think() {
+        full_text.push_str(&closing);
         let token_msg = DesktopMessage::ChatToken {
             chat_session_id: sid.clone(),
-            token: "</think>".to_string(),
+            token: closing,
         };
         let _ = send_msg(&write, &token_msg).await;
     }

@@ -27,6 +27,22 @@ Prior context:
 - Autoreview (code-review subagent) after each significant step; findings fixed or logged before moving on.
 - One conventional commit per step.
 
+## Steps — session 4: the still-open list (2026-09-10)
+
+| # | Item | Outcome | Verification | Commit |
+|---|---|---|---|---|
+| ipc rollout | All remaining sections out of lib/ipc.ts | 15 contiguous domain files (`approvals budget voice prompts artifacts automations localModels harnessChat exportImport updater workspaces marketFiles github rag mcp`) over ipcCore; ipc.ts = 448-line base (projects/sessions/chat) + barrel re-exports. Cross-slice type refs resolve through the barrel as erased imports; script-assisted with tsc-driven import synthesis. Autoreview: PASS with cosmetic cleanups (dead head imports pruned, duplicate star-export removed, unused safeListen imports dropped) | tsc clean · vitest 865 ✓ · build ✓ · autoreview **PASS** | `refactor(ipc): roll remaining sections…` + cleanups |
+| settings split (rest) | GitPanel (219), ApiKeysPanel (615), ConnectorsPanel (331), DataPanel (303) extracted | **SettingsView.tsx: 3,085 → 843 lines** — every panel now a standalone module; SettingsView remains the sole importer (lazy) | tsc · vitest 865 ✓ · build ✓ | `refactor(settings): extract GitPanel, ApiKeysPanel…` |
+
+### Still open (updated)
+
+- **Streaming loop-body merge** — prerequisites in place (behavior pins, shared primitives); merge transport-by-transport, biggest remaining item.
+- **agent_sessions.rs full split** along the surveyed seams (handler tails already deduped).
+- **checked_send long tail** (~20 sites) — per-site decisions on context prefixes/truncation bounds; mobile app surfaces these strings.
+- **Semantic rehoming pass** in lib/ipc/ (e.g. chat-session CRUD wrappers scattered across prompts/automations slices per the original banner order — autoreview observation, cosmetic).
+
+---
+
 ## Steps — session 3: backlog sweep (2026-09-10)
 
 Worked the remaining survey backlog item by item, each step verified + committed.

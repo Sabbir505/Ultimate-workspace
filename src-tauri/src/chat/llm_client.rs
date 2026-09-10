@@ -153,3 +153,63 @@ pub(crate) async fn oneshot(
         _ => Ok(None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
+
+    #[test]
+    fn managed_providers_fall_back_to_default_base() {
+        assert_eq!(resolve_base_url("openai", None), Some(OpenAIProvider::DEFAULT_BASE));
+        assert_eq!(
+            resolve_base_url("openrouter", None),
+            Some(OpenRouterProvider::DEFAULT_BASE)
+        );
+        assert_eq!(
+            resolve_base_url("anthropic", None),
+            Some(AnthropicProvider::DEFAULT_BASE)
+        );
+        // An explicit base always wins over the default.
+        assert_eq!(resolve_base_url("openai", Some("http://x")), Some("http://x"));
+    }
+
+    #[test]
+    fn compatible_providers_require_an_explicit_base() {
+        for p in ["openai_compatible", "local_gguf", "anthropic_compatible"] {
+            assert_eq!(resolve_base_url(p, None), None, "{p}");
+            // Blank-filtering is the caller's job (the generators pre-filter);
+            // resolve only treats absence as missing.
+            assert_eq!(resolve_base_url(p, Some("  ")), Some("  "), "{p}");
+            assert_eq!(
+                resolve_base_url(p, Some("http://lan:8080")),
+                Some("http://lan:8080"),
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_providers_resolve_to_none() {
+        assert_eq!(resolve_base_url("harness:claude_code", Some("http://x")), None);
+        assert_eq!(resolve_base_url("nonsense", None), None);
+    }
+
+    #[test]
+    fn thinking_budget_stays_within_anthropic_bounds() {
+        // Property: budget >= 1024, strictly < max_tokens, and max_tokens -
+        // budget leaves >= 1024 for the visible answer. (max_tokens < 2048
+        // panics the clamp — both call sites floor the cap to >= 3072 first,
+        // the E-3 guard.)
+        for mt in [2048i64, 3072, 4096, 8192, 32_768] {
+            let b = crate::chat::providers::anthropic_thinking_budget(mt);
+            assert!(b >= 1024, "mt={mt} budget={b}");
+            assert!(b < mt, "mt={mt} budget={b}");
+            assert!(mt - b >= 1024, "mt={mt} budget={b}");
+        }
+        assert_eq!(
+            crate::chat::providers::anthropic_thinking_budget(4096),
+            3072
+        );
+    }
+}

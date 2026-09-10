@@ -1174,6 +1174,83 @@ mod tests {
     }
 
     #[test]
+    fn openai_parse_sse_delta_content_and_reasoning() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+
+        // Plain content delta.
+        let line = r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#;
+        let (tok, done) = provider.parse_sse_chunk(line, &mut buf).unwrap();
+        assert_eq!(tok, Some("Hi".to_string()));
+        assert!(!done);
+
+        // Reasoning models stream thinking under reasoning_content (or the
+        // `reasoning` alias) — prefixed so the stream runner wraps it in
+        // <think> for the collapsible reasoning block.
+        let line = r#"data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}"#;
+        let (tok, done) = provider.parse_sse_chunk(line, &mut buf).unwrap();
+        assert_eq!(tok, Some(format!("{REASONING_PREFIX}thinking")));
+        assert!(!done);
+
+        // Non-data lines parse to nothing.
+        let (tok, done) = provider.parse_sse_chunk("event: ping", &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(!done);
+    }
+
+    #[test]
+    fn openai_parse_sse_done_and_finish_reason() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+
+        let (tok, done) = provider.parse_sse_chunk("data: [DONE]", &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(done);
+
+        let (tok, done) = provider
+            .parse_sse_chunk(
+                r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                &mut buf,
+            )
+            .unwrap();
+        assert!(tok.is_none());
+        assert!(done);
+    }
+
+    #[test]
+    fn openai_parse_sse_error_event_is_fatal() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+        let err = provider
+            .parse_sse_chunk(
+                r#"data: {"error":{"message":"overloaded"}}"#,
+                &mut buf,
+            )
+            .unwrap_err();
+        assert!(err.contains("provider error: overloaded"), "{err}");
+    }
+
+    #[test]
+    fn openai_parse_usage_reads_last_usage_line() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+        // Only usage-bearing lines are retained in the buffer (mi24).
+        provider
+            .parse_sse_chunk(r#"data: {"choices":[{"delta":{"content":"a"}}]}"#, &mut buf)
+            .unwrap();
+        provider
+            .parse_sse_chunk(
+                r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50}}"#,
+                &mut buf,
+            )
+            .unwrap();
+        let usage = provider.parse_usage(&buf).expect("usage parsed");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert!(usage.cost_usd > 0.0);
+    }
+
+    #[test]
     fn anthropic_parse_message_delta_with_usage() {
         let provider = AnthropicProvider;
         let mut buf = String::new();

@@ -1234,24 +1234,11 @@ async fn run_download(
     } else {
         resp.content_length()
     };
-    let mut stream = resp.bytes_stream();
-
-    // Open the partial in append mode when resuming, truncate mode
-    // otherwise. We track `downloaded` as the running total of what
-    // *this* run has written; the UI event reports the cumulative count
-    // (so progress bars don't reset on resume).
-    let mut file = if resuming {
-        let mut opts = fs::OpenOptions::new();
-        opts.append(true).open(partial_path).await
-    } else {
-        fs::File::create(partial_path).await
-    }
-    .map_err(|e| format!("could not open .partial file: {e}"))?;
 
     let mut downloaded: u64 = resume_from;
     let started = Instant::now();
     let mut last_emit = Instant::now();
-    // Tell the UI the transfer has STARTED (headers + file ready) even before
+    // Tell the UI the transfer has STARTED (headers received) even before
     // the first byte lands — a slow CDN first-byte used to leave the card on
     // "Starting…" with no progress bar at all.
     let _ = app.emit(
@@ -1282,57 +1269,56 @@ async fn run_download(
         None
     };
 
-    loop {
-        // Body-stall watchdog: headers can succeed and then the CDN can go
-        // quiet (dropped connection, hung proxy). Without this the stream
-        // future just parks forever — 0-byte .partial, no terminal event,
-        // and the UI card sits in the active state for hours.
-        let stall = tokio::time::sleep(std::time::Duration::from_secs(60));
-        tokio::pin!(stall);
-        tokio::select! {
-            biased;
-            _ = &mut cancel_rx => {
-                drop(file);
-                let _ = fs::remove_file(partial_path).await;
-                return Err(DownloadAbort::Cancelled);
+    // Shared body pump (download.rs): write + hashing/progress callback +
+    // cancel/stall watchdogs. Error policies: cancel removes the partial;
+    // stall/read/write failures keep it (a later attempt may finish it).
+    let (outcome, downloaded) = crate::download::pump_body_to_file(
+        resp,
+        partial_path,
+        resume_from,
+        resuming,
+        std::time::Duration::from_secs(60),
+        &mut cancel_rx,
+        &mut |chunk, downloaded, total| {
+            if let Some(h) = hasher.as_mut() {
+                h.update(chunk);
             }
-            _ = &mut stall => {
-                drop(file);
-                return Err(DownloadAbort::Failed(
-                    "download stalled — no data received for 60s".to_string(),
-                ));
+            if last_emit.elapsed().as_millis() >= 150 {
+                let elapsed = started.elapsed().as_secs_f64().max(0.001);
+                let _ = app.emit(
+                    "local-model:download:progress",
+                    &DownloadProgress {
+                        id: id.to_string(),
+                        downloaded_bytes: downloaded,
+                        total_bytes: total,
+                        state: DownloadState::Downloading,
+                        bytes_per_second: downloaded as f64 / elapsed,
+                        final_path: None,
+                        error: None,
+                    },
+                );
+                last_emit = Instant::now();
             }
-            next = stream.next() => {
-                let Some(chunk) = next else { break };
-                let chunk = chunk.map_err(|e| format!("download stream error: {e}"))?;
-                if chunk.is_empty() { continue; }
-                file.write_all(&chunk).await.map_err(|e| format!("write error: {e}"))?;
-                if let Some(h) = hasher.as_mut() {
-                    h.update(&chunk);
-                }
-                downloaded = downloaded.saturating_add(chunk.len() as u64);
-                if last_emit.elapsed().as_millis() >= 150 {
-                    let elapsed = started.elapsed().as_secs_f64().max(0.001);
-                    let _ = app.emit(
-                        "local-model:download:progress",
-                        &DownloadProgress {
-                            id: id.to_string(),
-                            downloaded_bytes: downloaded,
-                            total_bytes: total,
-                            state: DownloadState::Downloading,
-                            bytes_per_second: downloaded as f64 / elapsed,
-                            final_path: None,
-                            error: None,
-                        },
-                    );
-                    last_emit = Instant::now();
-                }
-            }
+            Ok(())
+        },
+    )
+    .await;
+    match outcome {
+        crate::download::BodyPumpOutcome::Completed => {}
+        crate::download::BodyPumpOutcome::Cancelled => {
+            let _ = fs::remove_file(partial_path).await;
+            return Err(DownloadAbort::Cancelled);
         }
+        crate::download::BodyPumpOutcome::Stalled => {
+            return Err(DownloadAbort::Failed(
+                "download stalled — no data received for 60s".to_string(),
+            ));
+        }
+        crate::download::BodyPumpOutcome::ReadError(e) => {
+            return Err(DownloadAbort::Failed(format!("download stream error: {e}")));
+        }
+        crate::download::BodyPumpOutcome::WriteError(e) => return Err(DownloadAbort::Failed(e)),
     }
-
-    file.flush().await.map_err(|e| format!("flush: {e}"))?;
-    drop(file);
 
     if let (Some(expected), Some(h)) = (expected_sha, hasher) {
         let digest = h.finalize();

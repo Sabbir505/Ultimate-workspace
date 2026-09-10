@@ -291,10 +291,19 @@ fn anthropic_thinking_for(req: &ChatRequest) -> (i64, Option<AnthropicThinking>)
     }
     let thinking = thinking_on.then(|| AnthropicThinking {
         kind: "enabled",
-        budget_tokens: tier_budget
-            .unwrap_or_else(|| (max_tokens - 1024).clamp(1024, max_tokens - 1)),
+        budget_tokens: tier_budget.unwrap_or_else(|| anthropic_thinking_budget(max_tokens)),
     });
     (max_tokens, thinking)
+}
+
+/// The fallback thinking budget when no effort tier pins it: reserve ≥1024
+/// visible-answer tokens, keeping the budget itself in Anthropic's valid
+/// range (≥1024 and strictly below max_tokens). Used by BOTH the non-tool
+/// builder (`anthropic_thinking_for` above) and the streaming tool-loop body
+/// (streaming.rs `build_anthropic_body`) — the two must stay in lockstep or
+/// one path starts emitting API-rejected requests.
+pub(crate) fn anthropic_thinking_budget(max_tokens: i64) -> i64 {
+    (max_tokens - 1024).clamp(1024, max_tokens - 1)
 }
 
 /// Build the Anthropic `/v1/messages` streaming request. Both
@@ -422,20 +431,7 @@ fn openai_wire_body(req: &ChatRequest, cache_marks: bool) -> OpenAIWireBody {
         }));
     }
     if cache_marks {
-        // System message → cached content-block array, and a breakpoint on
-        // the newest message — the same two marks the Anthropic loop sends
-        // natively (tools need no separate mark: Anthropic caches the whole
-        // prefix up to the system breakpoint, tools included).
-        if let Some(sys) = messages.first_mut() {
-            if sys.get("role").and_then(|r| r.as_str()) == Some("system") {
-                if let Some(serde_json::Value::String(text)) = sys.get_mut("content") {
-                    if !text.is_empty() {
-                        sys["content"] = crate::chat::cache::cached_system_block(text);
-                    }
-                }
-            }
-        }
-        crate::chat::cache::mark_last_message(&mut messages);
+        crate::chat::cache::apply_openai_cache_marks(&mut messages);
     }
     OpenAIWireBody {
         model: req.model.clone(),

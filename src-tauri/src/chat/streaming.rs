@@ -1059,16 +1059,7 @@ fn build_openai_body(
     }
     if cache_marks {
         let mut msgs = messages.to_vec();
-        if let Some(sys) = msgs.first_mut() {
-            if sys.get("role").and_then(|r| r.as_str()) == Some("system") {
-                if let Some(Value::String(text)) = sys.get_mut("content") {
-                    if !text.is_empty() {
-                        sys["content"] = cache::cached_system_block(text);
-                    }
-                }
-            }
-        }
-        cache::mark_last_message(&mut msgs);
+        cache::apply_openai_cache_marks(&mut msgs);
         body["messages"] = Value::Array(msgs);
     }
     body
@@ -1506,7 +1497,7 @@ fn build_anthropic_body(req: &ChatRequest, messages: &[Value], tool_specs: &[Val
     if req.thinking == Some(true) {
         body["thinking"] = json!({
             "type": "enabled",
-            "budget_tokens": (max_tokens - 1024).clamp(1024, max_tokens - 1),
+            "budget_tokens": crate::chat::providers::anthropic_thinking_budget(max_tokens),
         });
     }
     body

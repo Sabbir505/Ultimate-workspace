@@ -20,12 +20,12 @@ pub(crate) fn oneshot_client() -> Result<reqwest::Client, String> {
 pub(crate) fn resolve_base_url<'a>(provider: &str, base_url: Option<&'a str>) -> Option<&'a str> {
     match provider {
         "openai" => Some(base_url.unwrap_or(crate::chat::providers::OpenAIProvider::DEFAULT_BASE)),
-        "openrouter" => Some(
-            base_url.unwrap_or(crate::chat::providers::OpenRouterProvider::DEFAULT_BASE),
-        ),
-        "anthropic" => Some(
-            base_url.unwrap_or(crate::chat::providers::AnthropicProvider::DEFAULT_BASE),
-        ),
+        "openrouter" => {
+            Some(base_url.unwrap_or(crate::chat::providers::OpenRouterProvider::DEFAULT_BASE))
+        }
+        "anthropic" => {
+            Some(base_url.unwrap_or(crate::chat::providers::AnthropicProvider::DEFAULT_BASE))
+        }
         "openai_compatible" | "local_gguf" | "anthropic_compatible" => base_url,
         _ => None,
     }
@@ -49,7 +49,15 @@ pub(crate) async fn openai_oneshot(
             {"role": "user", "content": user},
         ],
     });
-    let resp = crate::util::checked_send(client .post(&url) .header("Authorization", format!("Bearer {api_key}")) .header("content-type", "application/json") .json(&body), 500).await?;
+    let resp = crate::util::checked_send(
+        client
+            .post(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("content-type", "application/json")
+            .json(&body),
+        500,
+    )
+    .await?;
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(v["choices"][0]["message"]["content"]
         .as_str()
@@ -77,7 +85,19 @@ pub(crate) async fn anthropic_oneshot(
         "system": system,
         "messages": [{"role": "user", "content": user}],
     });
-    let resp = crate::util::checked_send(client .post(&url) .header("x-api-key", api_key) .header("anthropic-version", crate::chat::providers::ANTHROPIC_API_VERSION) .header("content-type", "application/json") .json(&body), 500).await?;
+    let resp = crate::util::checked_send(
+        client
+            .post(&url)
+            .header("x-api-key", api_key)
+            .header(
+                "anthropic-version",
+                crate::chat::providers::ANTHROPIC_API_VERSION,
+            )
+            .header("content-type", "application/json")
+            .json(&body),
+        500,
+    )
+    .await?;
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(v["content"][0]["text"].as_str().unwrap_or("").to_string())
 }
@@ -113,11 +133,17 @@ pub(crate) async fn oneshot(
                 .await
                 .map(Some)
         }
-        "anthropic" | "anthropic_compatible" => {
-            anthropic_oneshot(client, api_key, base, model, system, user, anthropic_max_tokens)
-                .await
-                .map(Some)
-        }
+        "anthropic" | "anthropic_compatible" => anthropic_oneshot(
+            client,
+            api_key,
+            base,
+            model,
+            system,
+            user,
+            anthropic_max_tokens,
+        )
+        .await
+        .map(Some),
         _ => Ok(None),
     }
 }
@@ -129,7 +155,10 @@ mod tests {
 
     #[test]
     fn managed_providers_fall_back_to_default_base() {
-        assert_eq!(resolve_base_url("openai", None), Some(OpenAIProvider::DEFAULT_BASE));
+        assert_eq!(
+            resolve_base_url("openai", None),
+            Some(OpenAIProvider::DEFAULT_BASE)
+        );
         assert_eq!(
             resolve_base_url("openrouter", None),
             Some(OpenRouterProvider::DEFAULT_BASE)
@@ -139,7 +168,10 @@ mod tests {
             Some(AnthropicProvider::DEFAULT_BASE)
         );
         // An explicit base always wins over the default.
-        assert_eq!(resolve_base_url("openai", Some("http://x")), Some("http://x"));
+        assert_eq!(
+            resolve_base_url("openai", Some("http://x")),
+            Some("http://x")
+        );
     }
 
     #[test]
@@ -159,7 +191,10 @@ mod tests {
 
     #[test]
     fn unknown_providers_resolve_to_none() {
-        assert_eq!(resolve_base_url("harness:claude_code", Some("http://x")), None);
+        assert_eq!(
+            resolve_base_url("harness:claude_code", Some("http://x")),
+            None
+        );
         assert_eq!(resolve_base_url("nonsense", None), None);
     }
 

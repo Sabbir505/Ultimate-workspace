@@ -27,7 +27,28 @@ Prior context:
 - Autoreview (code-review subagent) after each significant step; findings fixed or logged before moving on.
 - One conventional commit per step.
 
-## Steps
+## Steps — session 2: streaming-turn consolidation (2026-09-10)
+
+The highest-value deferred item: the ~1,600 LOC of duplicated "stream one LLM turn" machinery. Attacked in verifiable stages, foundations first — the full loop unification deliberately NOT forced in one pass (see "what remains" below).
+
+| # | Step | Verification | Autoreview | Commit |
+|---|---|---|---|---|
+| 7A | `src/chat/llm_client.rs`: `oneshot_client()` (B-10 timeouts) + `resolve_base_url` + `oneshot()` dispatch replaces 5 copies of the "resolve provider → dispatch one call" block (title 32 / commit 64 / diff-review 2048 / github PR 768 / memory extraction). `openai_oneshot`/`anthropic_oneshot` moved verbatim. Intentional deltas: github PR draft gains B-10 timeouts (was `Client::new()`, could hang forever); memory-extraction's anthropic_compatible missing-base error gains the "set the endpoint in Settings" suffix. The assistant-panel one-shot in chat/mod.rs stays bespoke on purpose (treats anthropic_compatible as managed-with-default, errors instead of skipping) | cargo check clean · warnings 62 (= baseline) · cargo test --lib **1011 ✓** | **PASS** | `refactor(llm): chat::llm_client — one dispatch for all one-shot completions` |
+| 7C | `SseLineBuffer::with_cap()` — the mobile chat-turn loop and the opencode server-event reader hand-rolled the push_str/find/drain line buffering (the B-14 bug class the shared buffer exists for). The cap preserves the opencode reader's 4 MiB no-newline flood guard, and is strictly better: complete lines still drain mid-flood. (stt.rs "hand-rolled SSE" from the survey was actually a binary zip download — no change needed) | cargo check clean · cargo test --lib **1013 ✓** (2 new buffer tests) | n/a (small, covered by D review) | `refactor(util): SseLineBuffer::with_cap; adopt the shared buffer in mobile + opencode readers` |
+| 7D | `cache::apply_openai_cache_marks()` — the 12-line cache-marking block was copy-identical between providers.rs (non-tool builder) and streaming.rs (tool-loop body); now one home for the cache-correctness invariant. `providers::anthropic_thinking_budget()` — the budget fallback formula must stay in lockstep across both Anthropic builders; the paths keep their own (deliberately diverged) thinking semantics and share only the formula | cargo check clean · warnings 62 · cargo test --lib **1013 ✓** | n/a (mechanical) | `refactor(chat): shared OpenAI cache-mark helper + anthropic thinking budget` |
+
+### What remains of the streaming consolidation (and why it stopped here)
+
+The five loop bodies themselves (streaming.rs `openai_stream_round`/`anthropic_stream_round` + their tool loops, dispatch.rs `run_subagent_loop`, mod.rs `run_chat_stream`, mobile/relay.rs `handle_chat_turn`, agent_sessions.rs harness readers) still carry per-path semantics that are NOT mechanical to merge:
+- retry guards differ (B-17/B-18 cache-rejection retry in streaming.rs, absent in mobile);
+- block-index clamping differs (main rounds clamp at 64; the subagent BTreeMap doesn't);
+- `<think>` wrapping placement, usage parsing, and emit channels (app.emit vs ws send vs Channel) differ per transport;
+- the harness readers (agent_sessions.rs) parse Claude-Code/opencode event schemas, not provider SSE.
+Unifying them safely means first pinning those behaviors with targeted tests, then merging transport-by-transport. The shared primitives this session extracted (oneshot dispatch, SSE buffering, cache marks, budget formula) are the pieces those loops can each adopt without behavior risk; the survey's finding #11 (`util::send_checked` for ~55 HTTP status-check sites) is also still open, with the caveat that `chat/error_class.rs` pattern-matches error strings — the helper must keep the exact classification formats.
+
+---
+
+## Steps — session 1: survey + first pass (2026-09-10)
 
 | # | Step | Type | Verification | Autoreview | Commit |
 |---|---|---|---|---|---|

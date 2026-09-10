@@ -35,11 +35,12 @@ Prior context:
 
 **Debugging war-story (documented for future sessions):** the hang initially looked like a slow build. Actual chain: (1) the deadlock genuinely hung the test binary; (2) every later `cargo test` hit LNK1104 — Windows keeps the .exe locked while the hung process lives — which masqueraded as "could not compile" churn; (3) `git checkout` of sources didn't help while the process lived. Fix: kill `relay_lib*` processes, then scope the guard. Also: the user's dev `relay.exe` + the auto-format watcher share `target/`, so expect lock waits when editing rs files while the app runs.
 
-### Still open (final audit 2026-09-11)
+### Still open (final audit 2026-09-11, amended after a carve attempt)
 
-Everything prioritized in the original survey and subsequent sessions is done. The remainder is the deep-tail, each item larger than the context left in this effort — listed here as the honest hand-off:
+Everything prioritized in the original survey and subsequent sessions is done. The remainder is the deep-tail. One carve attempt (MessageBubble activity-steps → ActivitySteps.tsx) was executed and **reverted by compile-evidence**: the region is not a leaf module — ActivityStepRow/ProcessSummary/FoldedStepGroup/EditFileRow reach into MessageBubble's Markdown rendering context (Markdown, citeUrlTransform, InsidePreContext, useCopyToClipboard, readArtifactPreview, defaultUrlTransform, ChatPerfPayload, SmoothReveal, useProjectsStore/useUiStore). A clean extraction requires moving the Markdown rendering system with it, or accepting bidirectional MessageBubble ↔ ActivitySteps imports (works in ESM but a design smell). The dependency map below is the accurate starting point:
 
-- **MessageBubble.tsx (2,278)** — carve the activity-steps region (ToolIcon/StepStatusIcon/stepLabel/InlineDiff/StepCodeHighlighter/ActivityStepRow/ProcessSummary/FoldedStepGroup/EditFileRow + ActivityStep/ActivityGroup/Block types + the Search/Memory/Globe/Terminal/Wrench/Check icons they use, ~lines 500-1720) into ActivitySteps.tsx. A scripted attempt was reverted mid-flight (boundary drift + missing icon co-dependencies); do it with the dependency map above.
+- **MessageBubble.tsx (2,278)** — carve region [Per-tool-kind icon doc ≈ line 533 → groupSegments end ≈ line 1719] plus co-dependencies OUTSIDE the region: iconProps + FileIcon (116/167), SearchIcon/MemoryIcon/GlobeIcon/TerminalIcon/WrenchIcon/CheckIcon (488-535), useLazyComponent (60), SyntaxHighlighterComponent type (54), useSyntaxTheme (46), and Markdown-context items listed above that stay put. Verified markers and a working end_of_item brace-counter are in git history (scripts/mb_carve.py at the reverted state).
+
 - **ChatComposer.tsx (3,098)** — extract the voice-recording engine (joinSamples/encodeWav16k + permission flow) and the attachment classifier to `lib/`.
 - **ChatView.tsx (2,246)** — remainder is one 2,100-line component; candidate seams: message-list scroll logic, split-pane wiring.
 - **chat/commands.rs** — `send_chat_message` (1,199 lines) split; broader commands.rs section split.

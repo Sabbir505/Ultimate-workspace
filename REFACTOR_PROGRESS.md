@@ -27,6 +27,14 @@ Prior context:
 - Autoreview (code-review subagent) after each significant step; findings fixed or logged before moving on.
 - One conventional commit per step.
 
+## Steps — session 7: agent_sessions split completed (2026-09-11)
+
+| # | Step | Outcome | Verification | Commit |
+|---|---|---|---|---|
+| 2 | **agent_sessions split — COMPLETE.** The 9,213-line mod.rs carved into 13 domain child modules along its mapped seams: `lifecycle` (133 — one-shot child registry/guards, CLI session persistence), `primer` (318 — context-primer assembly, actual-model persistence), `attachments` (147), `acp` (663 — ACP turn dispatch + stream reader), `dirwatch` (329), `bundle` (174), `claude` (1005 — spawn, permission/ask handling, read_claude_stream), `perturn` (579 — per-turn harness spawn + reader), `ask` (324 — RELAY_ASK channel), `opencode` (1001 — turn dispatch, server lifecycle, SSE reader), `handlers` (679 — the four harness event handlers + spawn/usage helpers), `oneshot` (895 — run_one_shot family), `tracker` (654, prior session). mod.rs shell: 3,045 lines (manager, shared emit/persist, finalization, inline tests). Every child is a `use super::*` carve (inherits parent imports + private helpers), items pub(super), glob-reimported so call sites are unchanged; pub/pub(crate) items re-exported for external consumers; trailing doc comments moved with their items; ONE_SHOT_CHILDREN doc reunified | cargo check 0 errors · warnings 61 (< 62 baseline) · cargo test --lib **1021 ✓** | n/a (pure moves) | `refactor(agent_sessions): split the 9.2k-line file into 13 domain modules` |
+
+Note: one commit message lost two words to shell backtick expansion (`use super::*` in the text) — cosmetic, left as-is rather than force-pushing the shared branch.
+
 ## Steps — session 6: finishing the list (2026-09-10)
 
 | # | Item | Outcome | Verification | Commit |

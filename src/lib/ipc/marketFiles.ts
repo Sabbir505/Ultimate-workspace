@@ -1,6 +1,6 @@
 // Extracted domain of lib/ipc.ts (see its header). Command names and
 // payload shapes are binding (CONTRACT.md).
-import { safeInvoke, safeListen } from "../ipcCore";
+import { safeInvoke } from "../ipcCore";
 
 // ---- Local Models market: file management + auto-sidecar download ----
 

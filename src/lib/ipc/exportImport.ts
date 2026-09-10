@@ -1,6 +1,6 @@
 // Extracted domain of lib/ipc.ts (see its header). Command names and
 // payload shapes are binding (CONTRACT.md).
-import { safeInvoke, safeListen } from "../ipcCore";
+import { safeInvoke } from "../ipcCore";
 
 // ---- Chat export / import (local-first backup, roadmap #7) ----
 

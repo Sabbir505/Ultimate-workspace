@@ -5,32 +5,23 @@
 // src/lib/ipcCore.ts.
 
 import type {
-  AvailableSkill,
   AcpAgentStatus,
   ChangedFile,
-  CostEvent,
-  CostRollups,
-  DocsEmbeddingStatus,
-  DocCorpus,
-  DocsIndexProgressPayload,
   GitStatusInfo,
   HarnessId,
   HarnessStatus,
   HarnessUpdateStatus,
-  InstalledSkill,
   Project,
-  QuickAction,
   SessionRecord,
-  Skill,
 } from "../types";
-import {
-  safeInvoke,
-  safeListen,
-  tauriRuntimeAvailable as tauriAvailable,
-  toastError,
-} from "./ipcCore";
+import { safeInvoke, safeListen } from "./ipcCore";
 
-export type { ChangedFile, DocCorpus, DocsEmbeddingStatus, DocsIndexProgressPayload };
+export type {
+  ChangedFile,
+  DocCorpus,
+  DocsEmbeddingStatus,
+  DocsIndexProgressPayload,
+} from "../types";
 
 export {
   tauriRuntimeAvailable,
@@ -40,7 +31,6 @@ export {
   toastInfo,
   toastSuccess,
 } from "./ipcCore";
-export * from "./ipc/modelMarket";
 
 // --- Projects / sessions ---
 export const listProjects = () => safeInvoke<Project[] | null>("list_projects");

@@ -18,10 +18,11 @@ import {
   checkoutGitBranch,
   createGitBranch,
   getChangedFiles,
-  safeListen,
   type ChangedFile,
   type BranchInfo,
 } from "../../lib/ipc";
+import { useTauriEvent } from "../../hooks/useTauriEvent";
+import { pathUnderChanged } from "../../lib/paths";
 import { useProjectsStore } from "../../state/projects";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
@@ -89,32 +90,19 @@ export function BranchDropdown({
   useEffect(() => {
     setLoading(true);
     void fetchAll();
-    // Subscribe to the FS watcher event so the branch list and dirty count
-    // refresh on actual changes (e.g. `git checkout` from the terminal, an
-    // agent editing files). The backend debounces to 300 ms so a burst of
-    // FS events from one git op becomes one refresh, not a thundering herd.
-    let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    void safeListen<string>("project:fs-changed", (changedPath) => {
-      if (
-        path &&
-        (changedPath === path ||
-          changedPath.startsWith(path + "\\") ||
-          changedPath.startsWith(path + "/"))
-      ) {
-        void fetchAll();
-      }
-    }).then((u) => {
-      // Unmount won the race: the subscription resolved after cleanup — call
-      // the unlisten NOW, or this listener leaks for the app's lifetime.
-      if (cancelled) u();
-      else unlisten = u;
-    });
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-    };
   }, [fetchAll, path]);
+
+  // Subscribe to the FS watcher event so the branch list and dirty count
+  // refresh on actual changes (e.g. `git checkout` from the terminal, an
+  // agent editing files). The backend debounces to 300 ms so a burst of
+  // FS events from one git op becomes one refresh, not a thundering herd.
+  useTauriEvent<string>(
+    "project:fs-changed",
+    (changedPath) => {
+      if (path && pathUnderChanged(path, changedPath)) void fetchAll();
+    },
+    [fetchAll, path],
+  );
 
   useEffect(() => {
     inputRef.current?.focus();

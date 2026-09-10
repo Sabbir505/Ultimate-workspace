@@ -191,8 +191,14 @@ pub fn is_mutating_fs_tool(name: &str) -> bool {
 pub fn is_filesystem_tool(name: &str) -> bool {
     matches!(
         name,
-        LIST_DIRECTORY | READ_FILE | SEARCH_FILES
-            | WRITE_FILE | EDIT_FILE | DELETE_FILE | MOVE_FILE | COPY_FILE
+        LIST_DIRECTORY
+            | READ_FILE
+            | SEARCH_FILES
+            | WRITE_FILE
+            | EDIT_FILE
+            | DELETE_FILE
+            | MOVE_FILE
+            | COPY_FILE
     )
 }
 
@@ -229,12 +235,7 @@ use super::tools::{
 pub fn is_system_tool(name: &str) -> bool {
     matches!(
         name,
-        DOWNLOAD_FILE
-            | DOWNLOAD_PROGRESS
-            | RUN_SHELL
-            | GET_TASK_STATUS
-            | CANCEL_TASK
-            | TASK
+        DOWNLOAD_FILE | DOWNLOAD_PROGRESS | RUN_SHELL | GET_TASK_STATUS | CANCEL_TASK | TASK
     )
 }
 
@@ -433,14 +434,14 @@ pub fn classify_connector_tool(name: &str, description: Option<&str>) -> Connect
     // Write keywords — any whole-word match ⇒ Write. Ordered roughly by
     // specificity (checked before read keywords).
     let write_kw = [
-        "create", "insert", "add", "write", "update", "edit", "patch", "modify",
-        "delete", "remove", "trash", "archive", "move", "rename", "publish",
-        "send", "post", "comment", "assign", "share", "grant", "revoke",
+        "create", "insert", "add", "write", "update", "edit", "patch", "modify", "delete",
+        "remove", "trash", "archive", "move", "rename", "publish", "send", "post", "comment",
+        "assign", "share", "grant", "revoke",
     ];
     // Read keywords — a clear read verb with no write verb ⇒ Read.
     let read_kw = [
-        "search", "find", "get", "read", "list", "query", "fetch", "retrieve",
-        "show", "view", "inspect", "describe",
+        "search", "find", "get", "read", "list", "query", "fetch", "retrieve", "show", "view",
+        "inspect", "describe",
     ];
     let has_any = |ks: &[&str], toks: &[String]| ks.iter().any(|kw| toks.iter().any(|t| t == kw));
 
@@ -498,19 +499,20 @@ pub fn path_within_granted_roots(path: &str, granted_roots: &[String]) -> bool {
         return false;
     }
     let needle = canonicalize(path);
-    granted_roots
-        .iter()
-        .map(|r| canonicalize(r))
-        .any(|root| {
-            if needle == root {
-                return true;
-            }
-            // Segment boundary required: with granted root `c:/projects/alpha`,
-            // a raw `starts_with` would also pass the sibling `c:/projects/alpha2/…`
-            // (or `alpha-evil/…`), silently widening the granted scope.
-            let root_with_sep = if root.ends_with('/') { root } else { format!("{root}/") };
-            needle.starts_with(&root_with_sep)
-        })
+    granted_roots.iter().map(|r| canonicalize(r)).any(|root| {
+        if needle == root {
+            return true;
+        }
+        // Segment boundary required: with granted root `c:/projects/alpha`,
+        // a raw `starts_with` would also pass the sibling `c:/projects/alpha2/…`
+        // (or `alpha-evil/…`), silently widening the granted scope.
+        let root_with_sep = if root.ends_with('/') {
+            root
+        } else {
+            format!("{root}/")
+        };
+        needle.starts_with(&root_with_sep)
+    })
 }
 
 /// Resolve a path through the FILESYSTEM (junctions/symlinks included).
@@ -564,8 +566,8 @@ pub fn path_within_scope(path: &str, granted_roots: &[String]) -> bool {
     // filesystem form is used for the comparison (both sides come back from
     // canonicalize in the same `\\?\` verbatim form on Windows).
     granted_roots.iter().any(|r| {
-        let root = fs_resolved(std::path::Path::new(r))
-            .unwrap_or_else(|| std::path::PathBuf::from(r));
+        let root =
+            fs_resolved(std::path::Path::new(r)).unwrap_or_else(|| std::path::PathBuf::from(r));
         crate::util::path_starts_with_ci(&needle, &root)
     })
 }
@@ -588,7 +590,10 @@ fn canonicalize(p: &str) -> String {
     // without this step). This is a lexicographic resolve — not a
     // filesystem canonicalize; the actual filesystem tools operate on
     // the original path, so this only affects the containment check.
-    let segments: Vec<&str> = s.split('/').filter(|seg| !seg.is_empty() && *seg != ".").collect();
+    let segments: Vec<&str> = s
+        .split('/')
+        .filter(|seg| !seg.is_empty() && *seg != ".")
+        .collect();
     let mut resolved: Vec<&str> = Vec::with_capacity(segments.len());
     for seg in segments {
         if seg == ".." {
@@ -668,12 +673,26 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
     // Case-insensitive on Windows, sensitive elsewhere (so the compare below
     // uses the lowered forms only under cfg(windows)).
     let pat_segs: Vec<String> = {
-        let s = if cfg!(windows) { pat_lower.as_str() } else { pat.as_str() };
-        s.split('/').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect()
+        let s = if cfg!(windows) {
+            pat_lower.as_str()
+        } else {
+            pat.as_str()
+        };
+        s.split('/')
+            .filter(|x| !x.is_empty())
+            .map(|x| x.to_string())
+            .collect()
     };
     let path_segs: Vec<String> = {
-        let s = if cfg!(windows) { pth_lower.as_str() } else { pth.as_str() };
-        s.split('/').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect()
+        let s = if cfg!(windows) {
+            pth_lower.as_str()
+        } else {
+            pth.as_str()
+        };
+        s.split('/')
+            .filter(|x| !x.is_empty())
+            .map(|x| x.to_string())
+            .collect()
     };
 
     fn seg_match(pat: &str, seg: &str) -> bool {
@@ -768,17 +787,35 @@ mod tests {
             (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::FullAccess),
         ] {
             assert_eq!(
-                check_permission(sandbox, approval, READ_FILE, "C:/projects/alpha/notes.md", &roots()),
+                check_permission(
+                    sandbox,
+                    approval,
+                    READ_FILE,
+                    "C:/projects/alpha/notes.md",
+                    &roots()
+                ),
                 PermissionDecision::AutoRun,
                 "read_file should auto-run under {sandbox:?} + {approval:?}"
             );
             assert_eq!(
-                check_permission(sandbox, approval, LIST_DIRECTORY, "C:/projects/alpha", &roots()),
+                check_permission(
+                    sandbox,
+                    approval,
+                    LIST_DIRECTORY,
+                    "C:/projects/alpha",
+                    &roots()
+                ),
                 PermissionDecision::AutoRun,
                 "list_directory should auto-run under {sandbox:?} + {approval:?}"
             );
             assert_eq!(
-                check_permission(sandbox, approval, SEARCH_FILES, "C:/projects/alpha", &roots()),
+                check_permission(
+                    sandbox,
+                    approval,
+                    SEARCH_FILES,
+                    "C:/projects/alpha",
+                    &roots()
+                ),
                 PermissionDecision::AutoRun,
                 "search_files should auto-run under {sandbox:?} + {approval:?}"
             );
@@ -791,13 +828,25 @@ mod tests {
     fn granted_root_requires_segment_boundary() {
         // Sibling directories that share a name prefix with a granted root
         // must NOT be treated as inside it.
-        assert!(!path_within_granted_roots("C:/projects/alpha2/secret.txt", &roots()));
-        assert!(!path_within_granted_roots("C:/projects/alpha-evil/x", &roots()));
+        assert!(!path_within_granted_roots(
+            "C:/projects/alpha2/secret.txt",
+            &roots()
+        ));
+        assert!(!path_within_granted_roots(
+            "C:/projects/alpha-evil/x",
+            &roots()
+        ));
         assert!(!path_within_granted_roots("C:/projects/beta2/y", &roots()));
         // …while exact-root and nested paths still pass.
         assert!(path_within_granted_roots("C:/projects/alpha", &roots()));
-        assert!(path_within_granted_roots("C:/projects/alpha/sub/file.txt", &roots()));
-        assert!(path_within_granted_roots("C:/projects/beta/src/main.rs", &roots()));
+        assert!(path_within_granted_roots(
+            "C:/projects/alpha/sub/file.txt",
+            &roots()
+        ));
+        assert!(path_within_granted_roots(
+            "C:/projects/beta/src/main.rs",
+            &roots()
+        ));
     }
 
     /// B1 (round 2): a junction/symlink INSIDE a granted root that points
@@ -825,7 +874,10 @@ mod tests {
         #[cfg(not(windows))]
         let linked = std::os::unix::fs::symlink(&outside, &link).is_ok();
         if !linked {
-            eprintln!("skipping: could not create link in {}", tmp.path().display());
+            eprintln!(
+                "skipping: could not create link in {}",
+                tmp.path().display()
+            );
             return;
         }
         let roots = vec![root.to_string_lossy().to_string()];
@@ -877,7 +929,13 @@ mod tests {
             (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::AutoEdit),
         ] {
             assert_eq!(
-                check_permission(sandbox, approval, DELETE_FILE, "C:/projects/alpha/x", &roots()),
+                check_permission(
+                    sandbox,
+                    approval,
+                    DELETE_FILE,
+                    "C:/projects/alpha/x",
+                    &roots()
+                ),
                 PermissionDecision::NeedsApproval,
                 "delete must be gated under {sandbox:?} + {approval:?}"
             );
@@ -992,17 +1050,29 @@ mod tests {
     fn path_within_root_matches_exact_and_nested() {
         let roots = vec!["C:/projects/alpha".to_string()];
         assert!(path_within_granted_roots("C:/projects/alpha", &roots));
-        assert!(path_within_granted_roots("C:/projects/alpha/src/main.rs", &roots));
-        assert!(!path_within_granted_roots("C:/projects/alpha/../../etc", &roots));
+        assert!(path_within_granted_roots(
+            "C:/projects/alpha/src/main.rs",
+            &roots
+        ));
+        assert!(!path_within_granted_roots(
+            "C:/projects/alpha/../../etc",
+            &roots
+        ));
         // But a legit nested path with .. that stays inside should still pass.
-        assert!(path_within_granted_roots("C:/projects/alpha/subdir/../src/main.rs", &roots));
+        assert!(path_within_granted_roots(
+            "C:/projects/alpha/subdir/../src/main.rs",
+            &roots
+        ));
     }
 
     #[test]
     fn path_within_root_is_separator_and_case_insensitive() {
         let roots = vec!["C:\\Projects\\Alpha".to_string()];
         assert!(path_within_granted_roots("c:/projects/alpha/file", &roots));
-        assert!(path_within_granted_roots("C:\\Projects\\Alpha\\file", &roots));
+        assert!(path_within_granted_roots(
+            "C:\\Projects\\Alpha\\file",
+            &roots
+        ));
     }
 
     #[test]
@@ -1243,7 +1313,11 @@ mod tests {
             );
         }
         assert_eq!(
-            check_system_permission(SandboxPolicy::WorkspaceWrite, ApprovalPolicy::FullAccess, RUN_SHELL),
+            check_system_permission(
+                SandboxPolicy::WorkspaceWrite,
+                ApprovalPolicy::FullAccess,
+                RUN_SHELL
+            ),
             PermissionDecision::AutoRun
         );
     }
@@ -1339,7 +1413,10 @@ mod tests {
     fn glob_exact_and_prefix() {
         assert!(glob_match("**/notes.md", "notes.md"));
         assert!(glob_match("**/notes.md", "docs/notes.md"));
-        assert!(glob_match("/C:/projects/alpha/**", "/C:/projects/alpha/src/main.rs"));
+        assert!(glob_match(
+            "/C:/projects/alpha/**",
+            "/C:/projects/alpha/src/main.rs"
+        ));
         assert!(glob_match("src/*.ts", "src/main.ts"));
         assert!(!glob_match("src/*.ts", "src/sub/main.ts"));
     }
@@ -1359,10 +1436,22 @@ mod tests {
             pattern: "**/*.test.ts".to_string(),
             created_at: 0,
         };
-        assert!(any_rule_allows(&[r.clone()], "write_file", "/p/src/foo.test.ts"));
-        assert!(!any_rule_allows(&[r.clone()], "write_file", "/p/src/foo.spec.ts"));
+        assert!(any_rule_allows(
+            &[r.clone()],
+            "write_file",
+            "/p/src/foo.test.ts"
+        ));
+        assert!(!any_rule_allows(
+            &[r.clone()],
+            "write_file",
+            "/p/src/foo.spec.ts"
+        ));
         // Tool mismatch → no match.
-        assert!(!any_rule_allows(&[r.clone()], "delete_file", "/p/src/foo.test.ts"));
+        assert!(!any_rule_allows(
+            &[r.clone()],
+            "delete_file",
+            "/p/src/foo.test.ts"
+        ));
     }
 
     #[test]
@@ -1373,7 +1462,11 @@ mod tests {
             pattern: "**/dist/*".to_string(),
             created_at: 0,
         };
-        assert!(any_rule_allows(&[r.clone()], "write_file", "/p/dist/app.js"));
+        assert!(any_rule_allows(
+            &[r.clone()],
+            "write_file",
+            "/p/dist/app.js"
+        ));
         assert!(any_rule_allows(&[r], "delete_file", "/p/dist/app.js"));
     }
 

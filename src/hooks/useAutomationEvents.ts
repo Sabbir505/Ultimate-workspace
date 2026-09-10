@@ -7,29 +7,31 @@
 // streaming state the run still holds, and refreshes the automations store
 // so the view's status column and Past Runs list stay live. Failures
 // additionally become OS toasts with the optional chime, DND-aware.
-import { useEffect } from "react";
 import {
   listenAutomationRunFinished,
   listenAutomationRunStarted,
+  type AutomationRunFinishedPayload,
+  type AutomationRunStartedPayload,
 } from "../lib/ipc";
 import { relayNotify } from "../lib/notifyCenter";
+import { useEventSubscription } from "./useTauriEvent";
 import { useAutomationsStore } from "../state/automations";
 import { useChatStore } from "../state/chat";
 
 export function useAutomationEvents(): void {
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    let unlistenStart: (() => void) | undefined;
-    void listenAutomationRunStarted(({ chatSessionId }) => {
+  useEventSubscription<AutomationRunStartedPayload>(
+    listenAutomationRunStarted,
+    ({ chatSessionId }) => {
       // Mark the run-log chat as streaming so onToken accepts the run's
       // tokens and an open (or opened mid-run) chat shows the live turn.
       useChatStore.getState().beginRemoteTurn(chatSessionId);
-    }).then((u) => {
-      if (disposed) u();
-      else unlistenStart = u;
-    });
-    void listenAutomationRunFinished((p) => {
+    },
+    [],
+  );
+
+  useEventSubscription<AutomationRunFinishedPayload>(
+    listenAutomationRunFinished,
+    (p) => {
       // Refresh the list + status regardless of outcome.
       const store = useAutomationsStore.getState();
       // Promise.resolve wrapper: tolerate a sync/mock load() that returns
@@ -69,14 +71,7 @@ export function useAutomationEvents(): void {
         // what the user needs to hear about).
         soundOnlyUnfocused: false,
       });
-    }).then((u) => {
-      if (disposed) u();
-      else unlisten = u;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-      unlistenStart?.();
-    };
-  }, []);
+    },
+    [],
+  );
 }

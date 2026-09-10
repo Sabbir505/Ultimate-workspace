@@ -59,7 +59,9 @@ pub async fn generate(
         return Err("generate_document requires non-empty \"code\".".to_string());
     }
     if !is_supported(format) {
-        return Err(format!("the JavaScript engine supports docx and pptx (got \"{format}\")"));
+        return Err(format!(
+            "the JavaScript engine supports docx and pptx (got \"{format}\")"
+        ));
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("could not create artifacts dir: {e}"))?;
 
@@ -105,9 +107,11 @@ pub async fn generate(
         Ok(Ok(Ok(bytes))) if !bytes.is_empty() => bytes,
         Ok(Ok(Ok(_))) => {
             PENDING.lock().remove(&request_id);
-            return Err("the document runner produced an empty file. Check the code calls \
+            return Err(
+                "the document runner produced an empty file. Check the code calls \
                         `await relay.save(...)` exactly once with the finished document."
-                .to_string());
+                    .to_string(),
+            );
         }
         Ok(Ok(Err(e))) => {
             PENDING.lock().remove(&request_id);
@@ -177,10 +181,7 @@ mod tests {
     #[test]
     fn planned_paths_add_extension() {
         let dir = Path::new("C:\\artifacts");
-        assert_eq!(
-            planned_path(dir, "docx", "Report"),
-            dir.join("Report.docx")
-        );
+        assert_eq!(planned_path(dir, "docx", "Report"), dir.join("Report.docx"));
         assert_eq!(
             planned_path(dir, "pptx", "deck.pptx"),
             dir.join("deck.pptx")

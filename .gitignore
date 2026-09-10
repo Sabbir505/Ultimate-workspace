@@ -25,3 +25,6 @@ src-tauri/binaries/
 # Bundled LibreOffice for PPTX# Preview (fetched by scripts/fetch-bundled-libreoffice.mjs).
 # 1.5 GB of binaries — regenerated at bundle time, never committed.
 src-tauri/resources/libreoffice/
+
+# Playwright MCP automation scratch output (screenshots/session artifacts).
+.playwright-mcp/

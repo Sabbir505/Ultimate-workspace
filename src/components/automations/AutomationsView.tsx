@@ -49,6 +49,7 @@ import { useProjectsStore } from "../../state/projects";
 import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import { useChatStore } from "../../state/chat";
+import { AGENT_OPTIONS } from "../../lib/agents";
 import type { HarnessId } from "../../types";
 import {
   AUTOMATION_STATE_META,
@@ -71,24 +72,6 @@ const SCHEDULE_PRESETS: { label: string; cron: string }[] = [
   { label: "Daily at 9:00 AM", cron: "2 9 * * *" },
   { label: "Weekdays at 9:00 AM", cron: "2 9 * * 1-5" },
   { label: "Nightly at 2:00 AM", cron: "1 2 * * *" },
-];
-
-/** Agent options: harnesses first, then API providers, then local. */
-const AGENT_OPTIONS: { id: string; label: string; group: "harness" | "api" | "local" }[] = [
-  // Harnesses
-  { id: "claude_code", label: "Claude Code (harness)", group: "harness" },
-  { id: "opencode", label: "OpenCode (harness)", group: "harness" },
-  { id: "pi", label: "Pi (harness)", group: "harness" },
-  { id: "omp", label: "Omp (harness)", group: "harness" },
-  { id: "commandcode", label: "CommandCode (harness)", group: "harness" },
-  // API providers
-  { id: "anthropic", label: "Anthropic API", group: "api" },
-  { id: "openai", label: "OpenAI API", group: "api" },
-  { id: "openrouter", label: "OpenRouter", group: "api" },
-  { id: "anthropic_compatible", label: "Anthropic-compatible", group: "api" },
-  { id: "openai_compatible", label: "OpenAI-compatible", group: "api" },
-  // Local
-  { id: "local_gguf", label: "Local GGUF", group: "local" },
 ];
 
 function agentGroupLabel(group: string): string {

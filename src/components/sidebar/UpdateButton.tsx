@@ -12,19 +12,7 @@ import { createPortal } from "react-dom";
 import { Download, Loader2, AlertCircle } from "lucide-react";
 import { useUpdaterStore } from "../../state/updater";
 import { parseReleaseNotes } from "../../lib/releaseNotes";
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
+import { formatBytes, formatDate } from "../../lib/format";
 
 function NotesSection({ title, items }: { title: string; items: string[] }) {
   if (items.length === 0) return null;
@@ -207,7 +195,7 @@ export function UpdateButton() {
             <div className="update-popover-progress">
               <div className="update-popover-progress-top">
                 <span>Downloading…</span>
-                <span>{pct != null ? `${pct}%` : formatBytes(downloaded)}</span>
+                <span>{pct != null ? `${pct}%` : formatBytes(downloaded, "0 B")}</span>
               </div>
               <div className="update-popover-bar">
                 <div
@@ -217,7 +205,7 @@ export function UpdateButton() {
               </div>
               {total != null && (
                 <div className="update-popover-progress-meta">
-                  {formatBytes(downloaded)} of {formatBytes(total)}
+                  {formatBytes(downloaded, "0 B")} of {formatBytes(total, "0 B")}
                 </div>
               )}
             </div>

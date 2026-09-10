@@ -20,6 +20,7 @@ import {
   type BranchInfo,
   type SubagentInfo,
 } from "../../lib/ipc";
+import { pathUnderChanged } from "../../lib/paths";
 import { useProjectsStore } from "../../state/projects";
 import { useChatStore, selectContextSessionId } from "../../state/chat";
 import type { ChatTaskProgress, LoopState, PlanStep } from "../../state/chat";
@@ -297,11 +298,7 @@ export function GitToolsSidebar() {
     const setup = async () => {
       const u = await safeListen<string>("project:fs-changed", (changedPath) => {
         if (cancelled) return;
-        if (
-          changedPath === path ||
-          changedPath.startsWith(path + "\\") ||
-          changedPath.startsWith(path + "/")
-        ) {
+        if (pathUnderChanged(path, changedPath)) {
           debouncedPoll();
         }
       });

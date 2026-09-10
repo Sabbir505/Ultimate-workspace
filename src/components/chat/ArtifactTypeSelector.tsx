@@ -1,8 +1,7 @@
 // Artifact type selector for the /create slash command.
 // Shows a dropdown with the four artifact types when user types "/create"
 import { useEffect, useRef, useState } from "react";
-
-type ArtifactType = "skill" | "loop" | "prompt_template" | "automation";
+import type { ArtifactType } from "../../lib/ipc";
 
 interface ArtifactTypeSelectorProps {
   /** Called when user selects a type. */

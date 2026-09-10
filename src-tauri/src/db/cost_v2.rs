@@ -5,13 +5,15 @@
 //! `cost_events` (harness panes) with `chat_messages` (in-app chat) so the
 //! dashboard treats them as one universe.
 
+use super::DbResult;
+use crate::chat::local_models::{ELECTRICITY_RATE_KEY, GPU_POWER_WATTS_KEY};
+use crate::harness_adapters::pricing::{
+    cache_savings, local_model_electricity_cost, price_usage, ModelRate,
+};
+use crate::harness_adapters::UsageInfo;
+use crate::types::*;
 use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, HashMap};
-use crate::harness_adapters::pricing::{price_usage, cache_savings, local_model_electricity_cost, ModelRate};
-use crate::harness_adapters::UsageInfo;
-use crate::chat::local_models::{ELECTRICITY_RATE_KEY, GPU_POWER_WATTS_KEY};
-use crate::types::*;
-use super::DbResult;
 
 /// Read Settings overrides once: `price.<key>.{input,cache_read,output}_per_mtok`.
 /// Each row contributes one field; if the field is 0 the default stands.
@@ -22,23 +24,32 @@ pub fn read_rate_overrides(conn: &Connection) -> HashMap<String, ModelRate> {
         "SELECT key, value FROM app_settings
           WHERE key LIKE 'price.%.input_per_mtok'
              OR key LIKE 'price.%.cache_read_per_mtok'
-             OR key LIKE 'price.%.output_per_mtok'"
-    ) { Ok(s) => s, Err(_) => return out };
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    });
+             OR key LIKE 'price.%.output_per_mtok'",
+    ) {
+        Ok(s) => s,
+        Err(_) => return out,
+    };
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
     if let Ok(rows) = rows {
         for row in rows.flatten() {
             let (key, value) = row;
             // Key shape: "price.<model>.<suffix>". Model keys may contain dots
             // (e.g. "kimi-k2.7-code"), so split on the LAST dot, not the
             // second one.
-            let Some((prefix, suffix)) = key.rsplit_once('.') else { continue };
-            let Some(model) = prefix.strip_prefix("price.") else { continue };
+            let Some((prefix, suffix)) = key.rsplit_once('.') else {
+                continue;
+            };
+            let Some(model) = prefix.strip_prefix("price.") else {
+                continue;
+            };
             let val: f64 = value.parse().unwrap_or(0.0);
-            if val <= 0.0 { continue; }
+            if val <= 0.0 {
+                continue;
+            }
             let entry = out.entry(model.to_string()).or_insert(ModelRate {
-                input_per_mtok: 0.0, cache_read_per_mtok: 0.0, output_per_mtok: 0.0,
+                input_per_mtok: 0.0,
+                cache_read_per_mtok: 0.0,
+                output_per_mtok: 0.0,
             });
             match suffix {
                 "input_per_mtok" => entry.input_per_mtok = val,
@@ -70,7 +81,6 @@ pub fn read_local_model_electricity_settings(conn: &Connection) -> (f64, f64) {
 }
 
 fn iso_date_for_range(start_ts: i64, end_ts: i64) -> (String, String) {
-    
     let fmt = |ts: i64| -> String {
         // Cheap Y-M-D via chrono-free computation: civil_from_days from Howard Hinnant.
         let secs_per_day = 86_400i64;
@@ -168,7 +178,7 @@ fn rollup_freshness_marker(conn: &Connection) -> DbResult<String> {
     // aggregation. Nothing security-sensitive rides on this hash; it only
     // needs determinism within one process.
     let overrides_hash = {
-        use std::hash::{Hasher, };
+        use std::hash::Hasher;
         let sorted: BTreeMap<_, _> = overrides.iter().collect();
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for (k, v) in sorted {
@@ -213,9 +223,7 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
     // NOT the write-only pricing_estimated_usd column).
     let session_project: HashMap<String, String> = {
         let mut stmt = conn.prepare("SELECT id, project_id FROM sessions")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         rows.collect::<DbResult<HashMap<_, _>>>()?
     };
     let mut by_project: BTreeMap<String, (f64, i64, i64)> = BTreeMap::new();
@@ -225,7 +233,7 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                     cache_creation_input_tokens, cache_read_input_tokens,
                     reasoning_output_tokens, reported_cost_usd, session_id
                FROM cost_events
-              WHERE timestamp >= ?1"
+              WHERE timestamp >= ?1",
         )?;
         let rows = stmt.query_map(params![since], |r| {
             Ok((
@@ -244,15 +252,20 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
         for row in rows {
             let (ts, i, o, provider, model_key, cc, cr, reasoning, reported, sid) = row?;
             let usage = UsageInfo {
-                input_tokens: i, output_tokens: o,
-                cache_creation_input_tokens: cc, cache_read_input_tokens: cr,
-                reasoning_output_tokens: reasoning, cost_usd: None,
+                input_tokens: i,
+                output_tokens: o,
+                cache_creation_input_tokens: cc,
+                cache_read_input_tokens: cr,
+                reasoning_output_tokens: reasoning,
+                cost_usd: None,
             };
             // Rows with NULL model_key price at the harness's default model
             // (spec §7.2 — "priced as harness default"). The provider column
             // carries the harness id ('claude_code' | 'kimi_code' | 'opencode').
             let key = model_key.as_deref().or_else(|| {
-                provider.as_deref().map(crate::harness_adapters::harness_default_model_key)
+                provider
+                    .as_deref()
+                    .map(crate::harness_adapters::harness_default_model_key)
             });
             // Prefer the cost the harness actually reported (e.g. Claude Code's
             // "Total cost: $X.XX" line, scraped from pty output). Fall back to
@@ -260,7 +273,11 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
             // so the Pricing section's rate table is just a safety net, not
             // the primary source. (Spec §7.5: reported vs estimated stay distinct.)
             let cost = reported.or_else(|| price_usage(&usage, key, &overrides));
-            let tokens_i = i.unwrap_or(0) + cc.unwrap_or(0) + cr.unwrap_or(0) + o.unwrap_or(0) + reasoning.unwrap_or(0);
+            let tokens_i = i.unwrap_or(0)
+                + cc.unwrap_or(0)
+                + cr.unwrap_or(0)
+                + o.unwrap_or(0)
+                + reasoning.unwrap_or(0);
             let day = date_str(ts);
             total_rows += 1;
             if let Some(c) = cost {
@@ -272,11 +289,16 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                     entry.1 += tokens_i;
                 }
                 if let Some(k) = key {
-                    let entry = by_model.entry(k.to_string()).or_insert((0.0, 0, provider.clone()));
+                    let entry = by_model
+                        .entry(k.to_string())
+                        .or_insert((0.0, 0, provider.clone()));
                     entry.0 += c;
                     entry.1 += tokens_i;
                 }
-                let d = daily_map.entry(day.clone()).or_insert_with(|| DailyCost { day: day.clone(), ..Default::default() });
+                let d = daily_map.entry(day.clone()).or_insert_with(|| DailyCost {
+                    day: day.clone(),
+                    ..Default::default()
+                });
                 d.cost_usd += c;
                 let prov_label = provider.clone().unwrap_or_else(|| "unknown".to_string());
                 *d.tokens_by_provider.entry(prov_label.clone()).or_insert(0) += tokens_i;
@@ -317,7 +339,7 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                     cm.started_at, cm.completed_at, cs.project_id
                FROM chat_messages cm
                JOIN chat_sessions cs ON cs.id = cm.chat_session_id
-              WHERE cm.created_at >= ?1 AND cm.role = 'assistant'"
+              WHERE cm.created_at >= ?1 AND cm.role = 'assistant'",
         )?;
         let rows = stmt.query_map(params![since], |r| {
             Ok((
@@ -336,17 +358,35 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
             ))
         })?;
         for row in rows {
-            let (ts, i, o, provider, model_key, cc, cr, reasoning, session_model, started_at, completed_at, chat_project) = row?;
+            let (
+                ts,
+                i,
+                o,
+                provider,
+                model_key,
+                cc,
+                cr,
+                reasoning,
+                session_model,
+                started_at,
+                completed_at,
+                chat_project,
+            ) = row?;
             let usage = UsageInfo {
-                input_tokens: i, output_tokens: o,
-                cache_creation_input_tokens: cc, cache_read_input_tokens: cr,
-                reasoning_output_tokens: reasoning, cost_usd: None,
+                input_tokens: i,
+                output_tokens: o,
+                cache_creation_input_tokens: cc,
+                cache_read_input_tokens: cr,
+                reasoning_output_tokens: reasoning,
+                cost_usd: None,
             };
             // Chat rows with NULL model_key fall back to the chat session's
             // model (canonicalized), mirroring the harness default fallback.
-            let key = model_key
-                .as_deref()
-                .or_else(|| session_model.as_deref().and_then(crate::harness_adapters::canonical_model_key));
+            let key = model_key.as_deref().or_else(|| {
+                session_model
+                    .as_deref()
+                    .and_then(crate::harness_adapters::canonical_model_key)
+            });
             // Local models: derive cost from electricity (power × duration × rate).
             // No rate table — they run on the user's hardware. Cloud models keep
             // the per-token rate calculation.
@@ -361,8 +401,15 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                 }
                 _ => price_usage(&usage, key, &overrides),
             };
-            let tokens_i = i.unwrap_or(0) + cc.unwrap_or(0) + cr.unwrap_or(0) + o.unwrap_or(0) + reasoning.unwrap_or(0);
-            let grouped = format!("chat:{}", provider.clone().unwrap_or_else(|| "unknown".to_string()));
+            let tokens_i = i.unwrap_or(0)
+                + cc.unwrap_or(0)
+                + cr.unwrap_or(0)
+                + o.unwrap_or(0)
+                + reasoning.unwrap_or(0);
+            let grouped = format!(
+                "chat:{}",
+                provider.clone().unwrap_or_else(|| "unknown".to_string())
+            );
             total_rows += 1;
             let c = cost.unwrap_or(0.0);
             // Chat rows count toward the hero total too (spec §8: harness + chat
@@ -386,11 +433,16 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                 .map(String::from)
                 .or_else(|| session_model.as_deref().map(basename))
                 .unwrap_or_else(|| "unknown".to_string());
-            let entry = by_model.entry(model_label).or_insert((0.0, 0, Some(grouped.clone())));
+            let entry = by_model
+                .entry(model_label)
+                .or_insert((0.0, 0, Some(grouped.clone())));
             entry.0 += c;
             entry.1 += tokens_i;
             let day = date_str(ts);
-            let d = daily_map.entry(day.clone()).or_insert_with(|| DailyCost { day: day.clone(), ..Default::default() });
+            let d = daily_map.entry(day.clone()).or_insert_with(|| DailyCost {
+                day: day.clone(),
+                ..Default::default()
+            });
             d.cost_usd += c;
             *d.tokens_by_provider.entry(grouped.clone()).or_insert(0) += tokens_i;
             *d.cost_by_provider.entry(grouped).or_insert(0.0) += c;
@@ -420,32 +472,57 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
     by_kind.sessions = count_distinct_sessions(conn, since).unwrap_or(0)
         + count_distinct_chat_sessions(conn, since).unwrap_or(0);
 
-    let mut per_provider: Vec<ProviderCostRollup> = by_provider.iter().map(|(p, (c, t))| ProviderCostRollup {
-        provider: p.clone(),
-        cost_usd: *c,
-        tokens: *t,
-        share_pct: if totals.raw_token_cost_usd > 0.0 { *c / totals.raw_token_cost_usd * 100.0 } else { 0.0 },
-    }).collect();
-    per_provider.sort_by(|a, b| b.cost_usd.partial_cmp(&a.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
+    let mut per_provider: Vec<ProviderCostRollup> = by_provider
+        .iter()
+        .map(|(p, (c, t))| ProviderCostRollup {
+            provider: p.clone(),
+            cost_usd: *c,
+            tokens: *t,
+            share_pct: if totals.raw_token_cost_usd > 0.0 {
+                *c / totals.raw_token_cost_usd * 100.0
+            } else {
+                0.0
+            },
+        })
+        .collect();
+    per_provider.sort_by(|a, b| {
+        b.cost_usd
+            .partial_cmp(&a.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-    let mut per_model: Vec<ModelCostRollup> = by_model.iter().map(|(k, (c, t, p))| ModelCostRollup {
-        model_key: k.clone(),
-        display_name: k.clone(),
-        cost_usd: *c,
-        share_pct: if totals.raw_token_cost_usd > 0.0 { *c / totals.raw_token_cost_usd * 100.0 } else { 0.0 },
-        tokens: *t,
-        provider: p.clone(),
-    }).collect();
-    per_model.sort_by(|a, b| b.cost_usd.partial_cmp(&a.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
+    let mut per_model: Vec<ModelCostRollup> = by_model
+        .iter()
+        .map(|(k, (c, t, p))| ModelCostRollup {
+            model_key: k.clone(),
+            display_name: k.clone(),
+            cost_usd: *c,
+            share_pct: if totals.raw_token_cost_usd > 0.0 {
+                *c / totals.raw_token_cost_usd * 100.0
+            } else {
+                0.0
+            },
+            tokens: *t,
+            provider: p.clone(),
+        })
+        .collect();
+    per_model.sort_by(|a, b| {
+        b.cost_usd
+            .partial_cmp(&a.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // perProject — read-time priced (accumulated in the cost_events loop above;
     // never the write-only pricing_estimated_usd column, spec §7).
-    let per_project: Vec<ProjectCostRollup> = by_project.iter().map(|(pid, (c, ti, to))| ProjectCostRollup {
-        project_id: pid.clone(),
-        total_cost_usd: *c,
-        total_input_tokens: *ti,
-        total_output_tokens: *to,
-    }).collect();
+    let per_project: Vec<ProjectCostRollup> = by_project
+        .iter()
+        .map(|(pid, (c, ti, to))| ProjectCostRollup {
+            project_id: pid.clone(),
+            total_cost_usd: *c,
+            total_input_tokens: *ti,
+            total_output_tokens: *to,
+        })
+        .collect();
 
     let mut daily: Vec<DailyCost> = daily_map.into_values().collect();
     daily.sort_by(|a, b| a.day.cmp(&b.day));
@@ -484,13 +561,18 @@ fn basename(s: &str) -> String {
     let trimmed = s.trim_end_matches(['/', '\\']);
     let leaf = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
     match leaf.rsplit_once('.') {
-        Some((stem, ext)) if !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| c.is_ascii_alphanumeric()) => stem.to_string(),
+        Some((stem, ext))
+            if !ext.is_empty()
+                && ext.len() <= 8
+                && ext.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            stem.to_string()
+        }
         _ => leaf.to_string(),
     }
 }
 
 fn date_str(ts: i64) -> String {
-    
     let secs_per_day = 86_400i64;
     let days = (ts / secs_per_day) + 719_468;
     let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
@@ -527,8 +609,8 @@ fn count_distinct_chat_sessions(conn: &Connection, since: i64) -> DbResult<i64> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness_adapters::UsageInfo;
     use crate::db::insert_cost_event;
+    use crate::harness_adapters::UsageInfo;
 
     #[test]
     fn rollup_totals_match_sum() {
@@ -536,22 +618,33 @@ mod tests {
         let p = super::super::add_project(&conn, "/tmp/a", "a", false).unwrap();
         let s = super::super::create_session(&conn, &p.id, "claude_code").unwrap();
         let u = |i: i64, o: i64, cc: i64, cr: i64, r: i64| UsageInfo {
-            input_tokens: Some(i), output_tokens: Some(o),
-            cache_creation_input_tokens: Some(cc), cache_read_input_tokens: Some(cr),
-            reasoning_output_tokens: Some(r), cost_usd: None,
+            input_tokens: Some(i),
+            output_tokens: Some(o),
+            cache_creation_input_tokens: Some(cc),
+            cache_read_input_tokens: Some(cr),
+            reasoning_output_tokens: Some(r),
+            cost_usd: None,
         };
         // 1M input + 0.5M cache_creation @ $3 = 4.5;
         // 2M cache_read @ $0.30 = 0.6; 0.5M output @ $15 = 7.5.
         // = 12.6 per event (the test passes r=0 for reasoning).
         for _ in 0..3 {
             insert_cost_event(
-                &conn, &s.id,
+                &conn,
+                &s.id,
                 &u(1_000_000, 500_000, 500_000, 2_000_000, 0),
-                "claude_code", "on_disk", Some(12.6),
-            ).unwrap();
+                "claude_code",
+                "on_disk",
+                Some(12.6),
+            )
+            .unwrap();
         }
         let r = rollups_for_tests(&conn);
-        assert!((r.totals.raw_token_cost_usd - 37.8).abs() < 1e-6, "got {}", r.totals.raw_token_cost_usd);
+        assert!(
+            (r.totals.raw_token_cost_usd - 37.8).abs() < 1e-6,
+            "got {}",
+            r.totals.raw_token_cost_usd
+        );
         assert_eq!(r.per_provider.len(), 1);
         assert_eq!(r.per_provider[0].provider, "claude_code");
         assert!((r.per_provider[0].cost_usd - 37.8).abs() < 1e-6);
@@ -580,22 +673,61 @@ mod tests {
     #[test]
     fn rollup_unions_chat_messages() {
         let conn = super::super::mem();
-        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
+            .unwrap();
         super::super::add_chat_message(
-            &conn, &cs.id, "assistant", "hi", Some(1_000_000), Some(500_000), Some(0.0),
-            None, None, None, Some("anthropic"), None, None, None, None,
-            None, None, None, None,
-        ).unwrap();
+            &conn,
+            super::super::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "hi",
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(500_000),
+                cost_usd: Some(0.0),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: Some("anthropic"),
+                model_key: None,
+                pricing_estimated_usd: None,
+                started_at: None,
+                completed_at: None,
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
+        )
+        .unwrap();
         let r = rollups_for_tests(&conn);
         // claude-sonnet-4-5: $3 input, $15 output → 1M*3/1M + 0.5M*15/1M = 10.5
-        let chat_provider = r.per_provider.iter().find(|p| p.provider == "chat:anthropic").unwrap();
-        assert!((chat_provider.cost_usd - 10.5).abs() < 1e-6, "got {}", chat_provider.cost_usd);
+        let chat_provider = r
+            .per_provider
+            .iter()
+            .find(|p| p.provider == "chat:anthropic")
+            .unwrap();
+        assert!(
+            (chat_provider.cost_usd - 10.5).abs() < 1e-6,
+            "got {}",
+            chat_provider.cost_usd
+        );
         // The hero total must include chat rows (spec §8: per-provider shares
         // sum to rawTokenCostUsd). Regression for the missing-totals bug.
-        assert!((r.totals.raw_token_cost_usd - 10.5).abs() < 1e-6, "got {}", r.totals.raw_token_cost_usd);
+        assert!(
+            (r.totals.raw_token_cost_usd - 10.5).abs() < 1e-6,
+            "got {}",
+            r.totals.raw_token_cost_usd
+        );
         assert!((r.daily.iter().map(|d| d.cost_usd).sum::<f64>() - 10.5).abs() < 1e-6);
         // Cost-quality %s are row counts and sum to 100 (spec §13.3).
-        assert!((r.cost_quality.provider_reported_pct + r.cost_quality.model_priced_pct + r.cost_quality.unpriced_pct - 100.0).abs() < 1e-6);
+        assert!(
+            (r.cost_quality.provider_reported_pct
+                + r.cost_quality.model_priced_pct
+                + r.cost_quality.unpriced_pct
+                - 100.0)
+                .abs()
+                < 1e-6
+        );
     }
 
     #[test]
@@ -605,17 +737,45 @@ mod tests {
         // budget alert never fired. Chat rows must accumulate per-project too.
         let conn = super::super::mem();
         let p = super::super::add_project(&conn, "/tmp/chat-only", "chat-only", false).unwrap();
-        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", Some(&p.id)).unwrap();
+        let cs =
+            super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", Some(&p.id))
+                .unwrap();
         super::super::add_chat_message(
-            &conn, &cs.id, "assistant", "hi", Some(1_000_000), Some(500_000), Some(0.0),
-            None, None, None, Some("anthropic"), None, None, None, None,
-            None, None, None, None,
-        ).unwrap();
+            &conn,
+            super::super::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "hi",
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(500_000),
+                cost_usd: Some(0.0),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: Some("anthropic"),
+                model_key: None,
+                pricing_estimated_usd: None,
+                started_at: None,
+                completed_at: None,
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
+        )
+        .unwrap();
         let r = rollups_for_tests(&conn);
-        let proj = r.per_project.iter().find(|x| x.project_id == p.id)
+        let proj = r
+            .per_project
+            .iter()
+            .find(|x| x.project_id == p.id)
             .expect("chat-only project must appear in per_project");
         // $3/M input + $15/M output → 3.0 + 7.5 = 10.5
-        assert!((proj.total_cost_usd - 10.5).abs() < 1e-6, "got {}", proj.total_cost_usd);
+        assert!(
+            (proj.total_cost_usd - 10.5).abs() < 1e-6,
+            "got {}",
+            proj.total_cost_usd
+        );
         assert_eq!(proj.total_input_tokens, 1_000_000);
         assert_eq!(proj.total_output_tokens, 500_000);
     }
@@ -627,21 +787,52 @@ mod tests {
         // session model is a full file path (GGUF without metadata name);
         // the breakdown must show the basename, not the path.
         let cs = super::super::create_chat_session(
-            &conn, "local_gguf", r"D:\models\qwen2.5-7b-q4_k_m.gguf", None,
-        ).unwrap();
+            &conn,
+            "local_gguf",
+            r"D:\models\qwen2.5-7b-q4_k_m.gguf",
+            None,
+        )
+        .unwrap();
         super::super::add_chat_message(
-            &conn, &cs.id, "assistant", "hi", Some(1_000_000), Some(500_000), Some(0.0),
-            None, None, None, Some("local_gguf"), None, None, None, None,
-            None, None, None, None,
-        ).unwrap();
+            &conn,
+            super::super::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "hi",
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(500_000),
+                cost_usd: Some(0.0),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: Some("local_gguf"),
+                model_key: None,
+                pricing_estimated_usd: None,
+                started_at: None,
+                completed_at: None,
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
+        )
+        .unwrap();
         let r = rollups_for_tests(&conn);
         // Local models appear in the per-model breakdown under their basename
         // with $0 cost (no API pricing), tokens still counted.
-        let local = r.per_model.iter().find(|m| m.model_key == "qwen2.5-7b-q4_k_m").unwrap();
+        let local = r
+            .per_model
+            .iter()
+            .find(|m| m.model_key == "qwen2.5-7b-q4_k_m")
+            .unwrap();
         assert_eq!(local.cost_usd, 0.0);
         assert_eq!(local.tokens, 1_500_000);
         // Grouped under chat:local_gguf in the per-provider breakdown.
-        let prov = r.per_provider.iter().find(|p| p.provider == "chat:local_gguf").unwrap();
+        let prov = r
+            .per_provider
+            .iter()
+            .find(|p| p.provider == "chat:local_gguf")
+            .unwrap();
         assert_eq!(prov.tokens, 1_500_000);
         assert_eq!(prov.cost_usd, 0.0);
     }
@@ -652,46 +843,104 @@ mod tests {
         // Legacy chat row: provider column NULL (written before the column
         // existed). The rollup must fall back to the chat session's provider
         // instead of showing "chat:unknown".
-        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
+            .unwrap();
         super::super::add_chat_message(
-            &conn, &cs.id, "assistant", "hi", Some(100_000), Some(50_000), Some(0.0),
-            None, None, None, None, None, None, // provider = NULL, model_key = NULL
-            None, None, None, None, None, None,
-        ).unwrap();
+            &conn,
+            super::super::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "hi",
+                input_tokens: Some(100_000),
+                output_tokens: Some(50_000),
+                cost_usd: Some(0.0),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: None,
+                model_key: None,
+                pricing_estimated_usd: None,
+                started_at: None,
+                completed_at: None,
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
+        )
+        .unwrap();
         let r = rollups_for_tests(&conn);
         assert!(
             !r.per_provider.iter().any(|p| p.provider == "chat:unknown"),
             "legacy chat row grouped as chat:unknown"
         );
-        assert!(r.per_provider.iter().any(|p| p.provider == "chat:anthropic"));
+        assert!(r
+            .per_provider
+            .iter()
+            .any(|p| p.provider == "chat:anthropic"));
     }
 
     #[test]
     fn local_model_electricity_cost_appears_in_rollup() {
         let conn = super::super::mem();
         // 200W GPU, $0.15/kWh rate, 1h duration => $0.03 per row
-        crate::db::set_setting(&conn, crate::chat::local_models::GPU_POWER_WATTS_KEY, "200").unwrap();
-        crate::db::set_setting(&conn, crate::chat::local_models::ELECTRICITY_RATE_KEY, "0.15").unwrap();
+        crate::db::set_setting(&conn, crate::chat::local_models::GPU_POWER_WATTS_KEY, "200")
+            .unwrap();
+        crate::db::set_setting(
+            &conn,
+            crate::chat::local_models::ELECTRICITY_RATE_KEY,
+            "0.15",
+        )
+        .unwrap();
         let cs = super::super::create_chat_session(
-            &conn, "local_gguf", r"D:\models\qwen2.5-7b-q4_k_m.gguf", None,
-        ).unwrap();
+            &conn,
+            "local_gguf",
+            r"D:\models\qwen2.5-7b-q4_k_m.gguf",
+            None,
+        )
+        .unwrap();
         let now = crate::db::now_ts();
         // 1h = 3600s of work
         super::super::add_chat_message(
-            &conn, &cs.id, "assistant", "hi", Some(1_000_000), Some(500_000), Some(0.0),
-            None, None, None, Some("local_gguf"), None, None,
-            Some(now), Some(now + 3600),
-            None, None, None, None,
-        ).unwrap();
+            &conn,
+            super::super::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "hi",
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(500_000),
+                cost_usd: Some(0.0),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: Some("local_gguf"),
+                model_key: None,
+                pricing_estimated_usd: None,
+                started_at: Some(now),
+                completed_at: Some(now + 3600),
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
+        )
+        .unwrap();
         let r = rollups_for_tests(&conn);
-        let prov = r.per_provider.iter().find(|p| p.provider == "chat:local_gguf").unwrap();
+        let prov = r
+            .per_provider
+            .iter()
+            .find(|p| p.provider == "chat:local_gguf")
+            .unwrap();
         // 200W × 1h × $0.15/kWh / 1000 = $0.03
         assert!((prov.cost_usd - 0.03).abs() < 1e-9, "got {}", prov.cost_usd);
     }
 
     #[test]
     fn basename_strips_path_and_extension() {
-        assert_eq!(basename(r"D:\models\qwen2.5-7b-q4_k_m.gguf"), "qwen2.5-7b-q4_k_m");
+        assert_eq!(
+            basename(r"D:\models\qwen2.5-7b-q4_k_m.gguf"),
+            "qwen2.5-7b-q4_k_m"
+        );
         assert_eq!(basename("/home/u/models/llama-3b.gguf"), "llama-3b");
         // Plain names and dotted-but-short extensions survive untouched.
         assert_eq!(basename("DeepSeek R1 0528"), "DeepSeek R1 0528");
@@ -706,14 +955,26 @@ mod tests {
         // Insert WITHOUT pricing_estimated_usd (NULL — as real on-disk rows
         // are). The per-project rollup must still show the read-time price.
         insert_cost_event(
-            &conn, &s.id,
-            &UsageInfo { input_tokens: Some(1_000_000), output_tokens: Some(500_000), ..Default::default() },
-            "claude_code", "on_disk", None,
-        ).unwrap();
+            &conn,
+            &s.id,
+            &UsageInfo {
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(500_000),
+                ..Default::default()
+            },
+            "claude_code",
+            "on_disk",
+            None,
+        )
+        .unwrap();
         let r = rollups_for_tests(&conn);
         let proj = r.per_project.iter().find(|x| x.project_id == p.id).unwrap();
         // claude-sonnet-4-5 (harness default): $3/M input, $15/M output → 10.5
-        assert!((proj.total_cost_usd - 10.5).abs() < 1e-6, "got {}", proj.total_cost_usd);
+        assert!(
+            (proj.total_cost_usd - 10.5).abs() < 1e-6,
+            "got {}",
+            proj.total_cost_usd
+        );
         assert_eq!(proj.total_input_tokens, 1_000_000);
         assert_eq!(proj.total_output_tokens, 500_000);
     }

@@ -10,18 +10,12 @@
 // shows the raw release notes as a fallback while the chunk downloads.
 import { lazy, Suspense, useMemo, useState } from "react";
 import { useUpdaterStore } from "../../state/updater";
+import { formatBytes } from "../../lib/format";
 import { AppLogo } from "../common/AppLogo";
 
 /** Self-contained markdown renderer. Imported lazily; the parent's Suspense
  *  boundary shows the raw notes for one frame if it's the first render. */
 const MarkdownNotes = lazy(() => import("./UpdateBannerMarkdown").then((m) => ({ default: m.MarkdownNotes })));
-
-/** Human-readable byte count, no trailing decimals unless needed. */
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 export function UpdateBanner() {
   const update = useUpdaterStore((s) => s.update);
@@ -92,7 +86,7 @@ export function UpdateBanner() {
             <div className="update-modal-progress-top">
               <span className="update-modal-progress-label">Downloading update…</span>
               <span className="update-modal-progress-value">
-                {pct != null ? `${pct}%` : formatBytes(downloaded)}
+                {pct != null ? `${pct}%` : formatBytes(downloaded, "0 B")}
               </span>
             </div>
             <div className="update-modal-bar">
@@ -103,7 +97,7 @@ export function UpdateBanner() {
             </div>
             {total != null && (
               <div className="update-modal-progress-meta">
-                {formatBytes(downloaded)} of {formatBytes(total)}
+                {formatBytes(downloaded, "0 B")} of {formatBytes(total, "0 B")}
               </div>
             )}
           </div>

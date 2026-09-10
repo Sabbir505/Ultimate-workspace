@@ -45,10 +45,7 @@ pub fn set_resource_dir(resource_dir: Option<PathBuf>) {
 /// still present on disk. `None` means: no bundle shipped / not registered /
 /// the directory was removed — fall back to the system interpreter.
 fn bundled_dir() -> Option<&'static PathBuf> {
-    BUNDLED
-        .get_or_init(|| None)
-        .as_ref()
-        .filter(|d| d.is_dir())
+    BUNDLED.get_or_init(|| None).as_ref().filter(|d| d.is_dir())
 }
 
 /// Absolute path to the bundled interpreter executable, when available.
@@ -121,9 +118,7 @@ fn probe(prog: &str) -> bool {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    cmd.status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -163,7 +158,9 @@ mod tests {
         // placeholder file is present but not a real ELF — skip rather
         // than panic on `Exec format error`.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let dir = std::path::Path::new(manifest_dir).join("resources").join("python");
+        let dir = std::path::Path::new(manifest_dir)
+            .join("resources")
+            .join("python");
         let Some(exe) = bundled_interpreter_in(&dir) else {
             eprintln!("bundled python not staged at {dir:?} — skipping");
             return;
@@ -175,7 +172,10 @@ mod tests {
             return;
         };
         if meta.len() < 1024 {
-            eprintln!("bundled python placeholder at {exe:?} ({meta_len} bytes) — skipping", meta_len = meta.len());
+            eprintln!(
+                "bundled python placeholder at {exe:?} ({meta_len} bytes) — skipping",
+                meta_len = meta.len()
+            );
             return;
         }
         let out = std::process::Command::new(&exe)

@@ -26,6 +26,7 @@ import { listHarnesses, listAcpAgents, listHarnessModels, listChatModels, scanLo
 import type { HarnessStatus, AcpAgentStatus } from "../../types";
 import { fuzzyFilter, type FuzzyResult } from "../../lib/fuzzy";
 import { shortModelName } from "../../lib/modelLabel";
+import { CLOUD_PROVIDER_IDS as PROVIDER_IDS } from "../../lib/agents";
 import { useSettingsStore } from "../../state/settings";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { SegmentedSlider } from "./SegmentedSlider";
@@ -58,13 +59,6 @@ export const EFFORT_LABELS: Record<string, string> = {
 
 /** The five cloud providers from Settings → API Keys — each is its own
  *  endpoint, so each gets its own rail entry. */
-const PROVIDER_IDS = [
-  "anthropic",
-  "openai",
-  "openrouter",
-  "anthropic_compatible",
-  "openai_compatible",
-] as const;
 type ProviderId = (typeof PROVIDER_IDS)[number];
 
 const PROVIDER_LABELS: Record<ProviderId, string> = {

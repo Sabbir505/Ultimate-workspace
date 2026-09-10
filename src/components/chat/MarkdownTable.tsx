@@ -7,9 +7,10 @@
 // The cell text comes from the hast `node` react-markdown hands the custom
 // component, so no DOM scraping is needed and cached element trees keep
 // working (the extraction is a pure function of the parsed node).
-import { useMemo, useState, type ComponentPropsWithoutRef } from "react";
+import { useMemo, type ComponentPropsWithoutRef } from "react";
 import type { ExtraProps } from "react-markdown";
 import { Check, Copy, Download } from "lucide-react";
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 
 interface HastNode {
   type?: string;
@@ -80,17 +81,11 @@ function csvFilename(rows: string[][]): string {
 }
 
 function TableActions({ rows }: { rows: string[][] }) {
-  const [copied, setCopied] = useState(false);
   const disabled = rows.length === 0;
+  const [copied, copyToClipboard] = useCopyToClipboard();
 
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(toTsv(rows));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch {
-      // Clipboard unavailable — silently ignore.
-    }
+    await copyToClipboard(toTsv(rows));
   };
 
   return (

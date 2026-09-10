@@ -129,7 +129,10 @@ pub(crate) async fn summarize_via_provider(
         let req = client
             .post(format!("{base}/v1/messages"))
             .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header(
+                "anthropic-version",
+                crate::chat::providers::ANTHROPIC_API_VERSION,
+            )
             .header("content-type", "application/json")
             .json(&body);
         (
@@ -266,13 +269,26 @@ pub async fn run_cloud_compaction(
 
     let pre_tokens = estimate_request_tokens(system, entries, 0);
     let prior_text = prior.as_ref().map(|(_, t)| t.as_str());
-    let (summary, in_tok, out_tok) =
-        summarize_via_provider(client, provider_id, base, api_key, model, &to_compact, prior_text)
-            .await?;
+    let (summary, in_tok, out_tok) = summarize_via_provider(
+        client,
+        provider_id,
+        base,
+        api_key,
+        model,
+        &to_compact,
+        prior_text,
+    )
+    .await?;
 
-    let compacted_exchange_count = to_compact.iter().filter(|e| e.message.role == "user").count();
-    let mut superseded_ids: Vec<i64> =
-        to_compact.iter().map(|e| e.id).filter(|id| *id != 0).collect();
+    let compacted_exchange_count = to_compact
+        .iter()
+        .filter(|e| e.message.role == "user")
+        .count();
+    let mut superseded_ids: Vec<i64> = to_compact
+        .iter()
+        .map(|e| e.id)
+        .filter(|id| *id != 0)
+        .collect();
     if let Some((prior_id, _)) = &prior {
         if *prior_id != 0 {
             superseded_ids.push(*prior_id);
@@ -317,25 +333,26 @@ pub fn persist_summary_row(
     let summary_content = format!("{COMPACTED_PREFIX}\n\n{}", run.summary_text);
     let row = crate::db::add_chat_message(
         conn,
-        chat_session_id,
-        "system",
-        &summary_content,
-        Some(run.summary_input_tokens),
-        Some(run.summary_output_tokens),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        // started_at, completed_at, llm, tool, ttft, tok_s
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        crate::db::NewChatMessage {
+            chat_session_id: chat_session_id,
+            role: "system",
+            content: &summary_content,
+            input_tokens: Some(run.summary_input_tokens),
+            output_tokens: Some(run.summary_output_tokens),
+            cost_usd: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            provider: None,
+            model_key: None,
+            pricing_estimated_usd: None,
+            started_at: None,
+            completed_at: None,
+            llm_time_ms: None,
+            tool_time_ms: None,
+            ttft_ms: None,
+            tokens_per_second: None,
+        },
     )
     .map_err(|e| e.to_string())?;
     if !run.superseded_ids.is_empty() {
@@ -402,7 +419,7 @@ mod tests {
     fn estimate_counts_system_messages_and_reserved() {
         let msgs = vec![entry(1, "user", "abcd"), entry(2, "assistant", "abcdabcd")];
         let sys = Some("abcdabcd".to_string()); // 2 tokens
-        // 8 chars/4 = 2 (system) + 1 + 2 (messages) + 7 (reserved) = 12.
+                                                // 8 chars/4 = 2 (system) + 1 + 2 (messages) + 7 (reserved) = 12.
         assert_eq!(estimate_request_tokens(&sys, &msgs, 7), 12);
         assert_eq!(estimate_request_tokens(&None, &msgs, 0), 3);
     }

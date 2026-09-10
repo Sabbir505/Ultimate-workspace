@@ -223,7 +223,9 @@ pub(super) fn fs_edit_file(args: &Value) -> ToolOutcome {
         let find = args.get("find").and_then(|v| v.as_str()).unwrap_or("");
         let replace = args.get("replace").and_then(|v| v.as_str()).unwrap_or("");
         if find.is_empty() {
-            return ToolOutcome::text("Error: edit_file requires either \"append\" or a non-empty \"find\".");
+            return ToolOutcome::text(
+                "Error: edit_file requires either \"append\" or a non-empty \"find\".",
+            );
         }
         // Count every match. `match_indices` gives us both the byte offset and
         // the matched substring, so we can build a "lines 12, 45, 102"
@@ -372,7 +374,9 @@ pub(super) fn fs_copy_file(args: &Value) -> ToolOutcome {
         return ToolOutcome::text("Error: copy_file requires \"src\" and \"dest\".");
     }
     if std::path::Path::new(&src).is_dir() {
-        return ToolOutcome::text("copy_file only supports files, not directories (use move_file or write_file).");
+        return ToolOutcome::text(
+            "copy_file only supports files, not directories (use move_file or write_file).",
+        );
     }
     if let Some(parent) = std::path::Path::new(&dest).parent() {
         if !parent.as_os_str().is_empty() {
@@ -394,7 +398,6 @@ pub(super) fn fs_copy_file(args: &Value) -> ToolOutcome {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,7 +410,8 @@ mod tests {
         let path = dir.join("sub").join("hello.txt");
 
         // write_file creates parent dirs + writes content.
-        let out = fs_write_file(&json!({ "path": path.display().to_string(), "content": "hello world" }));
+        let out =
+            fs_write_file(&json!({ "path": path.display().to_string(), "content": "hello world" }));
         assert!(out.text.contains("Wrote"), "{}", out.text);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
 
@@ -511,7 +515,10 @@ mod tests {
             "expected_matches": 2
         }));
         assert!(out.text.contains("expected_matches"), "{}", out.text);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha needle omega");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "alpha needle omega"
+        );
 
         // The correct count proceeds normally.
         let out = fs_edit_file(&json!({
@@ -536,14 +543,18 @@ mod tests {
 
         // copy_file
         let dest = dir.join("b.txt");
-        let out = fs_copy_file(&json!({ "src": src.display().to_string(), "dest": dest.display().to_string() }));
+        let out = fs_copy_file(
+            &json!({ "src": src.display().to_string(), "dest": dest.display().to_string() }),
+        );
         assert!(out.text.contains("Copied"), "{}", out.text);
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "abc");
         assert!(src.exists(), "source still present after copy");
 
         // move_file
         let moved = dir.join("moved.txt");
-        let out = fs_move_file(&json!({ "src": src.display().to_string(), "dest": moved.display().to_string() }));
+        let out = fs_move_file(
+            &json!({ "src": src.display().to_string(), "dest": moved.display().to_string() }),
+        );
         assert!(out.text.contains("Moved"), "{}", out.text);
         assert!(!src.exists(), "source gone after move");
         assert_eq!(std::fs::read_to_string(&moved).unwrap(), "abc");
@@ -645,11 +656,17 @@ mod tests {
             "replace": "REPLACED"
         }));
         assert!(out.text.contains("matched 2 times"), "got: {}", out.text);
-        assert!(out.text.contains("line 2") && out.text.contains("line 4"),
-            "expected both line numbers in conflict report, got: {}", out.text);
+        assert!(
+            out.text.contains("line 2") && out.text.contains("line 4"),
+            "expected both line numbers in conflict report, got: {}",
+            out.text
+        );
         // File is unchanged.
         let after = std::fs::read_to_string(&f).unwrap();
-        assert_eq!(after, "alpha\nthe needle is here\nbeta\nthe needle is here\ngamma\n");
+        assert_eq!(
+            after,
+            "alpha\nthe needle is here\nbeta\nthe needle is here\ngamma\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

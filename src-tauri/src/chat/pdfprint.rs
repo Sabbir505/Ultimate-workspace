@@ -91,7 +91,11 @@ pub(crate) fn compose_print_document(model_html: &str, title: &str) -> String {
         // model's first <style> so its styles win the cascade), else before
         // </head>, else before <body>.
         if let Some(style_pos) = lower.find("<style") {
-            return format!("{}\n{head_inject}{}", &trimmed[..style_pos], &trimmed[style_pos..]);
+            return format!(
+                "{}\n{head_inject}{}",
+                &trimmed[..style_pos],
+                &trimmed[style_pos..]
+            );
         }
         if let Some(pos) = lower.find("</head>") {
             return format!("{}\n{head_inject}{}", &trimmed[..pos], &trimmed[pos..]);
@@ -155,9 +159,11 @@ pub async fn render_html_to_pdf(
     #[cfg(not(windows))]
     {
         let _ = (app, model_html, out_path, title);
-        Err("The HTML→PDF print engine requires the WebView2 runtime (Windows). \
+        Err(
+            "The HTML→PDF print engine requires the WebView2 runtime (Windows). \
              Re-run with language=\"python\" to use the ReportLab engine instead."
-            .to_string())
+                .to_string(),
+        )
     }
 }
 
@@ -219,10 +225,7 @@ fn print_via_webview(
     let temp_html = temp_dir.join(&file_name);
     std::fs::write(&temp_html, doc_html)
         .map_err(|e| format!("could not write the print document: {e}"))?;
-    let file_url = format!(
-        "file:///{}",
-        temp_html.to_string_lossy().replace('\\', "/")
-    );
+    let file_url = format!("file:///{}", temp_html.to_string_lossy().replace('\\', "/"));
 
     let cleanup = |result: Result<(), String>| -> Result<(), String> {
         let _ = std::fs::remove_file(&temp_html);
@@ -292,7 +295,9 @@ fn print_via_webview(
     };
     let environment6 = environment
         .cast::<ICoreWebView2Environment6>()
-        .map_err(|e| format!("missing ICoreWebView2Environment6 (WebView2 runtime too old): {e}"))?;
+        .map_err(|e| {
+            format!("missing ICoreWebView2Environment6 (WebView2 runtime too old): {e}")
+        })?;
     let settings = unsafe { environment6.CreatePrintSettings() }
         .map_err(|e| format!("CreatePrintSettings failed: {e}"))?;
     unsafe {
@@ -340,7 +345,8 @@ fn print_via_webview(
             let core7 = core7.clone();
             let settings = settings.clone();
             Box::new(move |handler| unsafe {
-                core7.PrintToPdf(&out_target, &settings, &handler)
+                core7
+                    .PrintToPdf(&out_target, &settings, &handler)
                     .map_err(webview2_com::Error::WindowsError)
             })
         },
@@ -349,7 +355,9 @@ fn print_via_webview(
             if succeeded {
                 Ok(())
             } else {
-                Err(windows::core::Error::from(windows::core::HRESULT(-2147467259))) // E_FAIL
+                Err(windows::core::Error::from(windows::core::HRESULT(
+                    -2147467259,
+                ))) // E_FAIL
             }
         }),
     )

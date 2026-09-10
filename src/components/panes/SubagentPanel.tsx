@@ -14,30 +14,10 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
-import { parseSegments, ThinkingBlock } from "../chat/MessageBubble";
-import { DiffCard, type EditPayload } from "../chat/DiffCard";
+import { ThinkingBlock } from "../chat/MessageBubble";
+import { parseSegments, type Segment as SubSegment } from "../../lib/segments";
+import { DiffCard } from "../chat/DiffCard";
 import { mdLinkComponents } from "../chat/MdLink";
-
-/** The marker payload the backend embeds in <tool>{json}</tool> (see
- *  tool_meta_generic) — the same shape the chat view's ToolData carries. */
-interface ToolData {
-  kind?: string;
-  title?: string;
-  detail?: string;
-  lang?: string;
-  code?: string;
-  path?: string;
-  edit?: EditPayload;
-  role?: string;
-  task?: string;
-  result?: string;
-}
-
-/** Ordered output segment — mirrors the chat view's Segment union. */
-type SubSegment =
-  | { type: "text"; text: string }
-  | { type: "think"; text: string; done: boolean }
-  | { type: "tool"; data: ToolData | null; done: boolean };
 
 /** Parse a (possibly mid-stream) subagent output into ORDERED render
  *  segments using the chat view's own parser (text / think / tool, tolerant
@@ -51,7 +31,7 @@ type SubSegment =
  *  its result folded in — not when its marker closed. Exported for the
  *  pane-fidelity regression tests. */
 export function parseSubagentOutput(output: string): SubSegment[] {
-  const segs = parseSegments(output) as SubSegment[];
+  const segs = parseSegments(output);
   const out: SubSegment[] = [];
   for (const seg of segs) {
     if (seg.type === "tool" && seg.data?.kind === "result") {

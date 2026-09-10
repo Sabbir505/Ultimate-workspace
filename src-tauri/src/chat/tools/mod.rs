@@ -14,11 +14,11 @@ use serde_json::{json, Value};
 use super::codeexec;
 
 mod search;
-pub(crate) use search::{
-    configured_provider, fetch_url, render_search_results, serp_via_reader,
-    web_search_with_status, SearchOutcome,
-};
 use search::web_search;
+pub(crate) use search::{
+    configured_provider, fetch_url, render_search_results, serp_via_reader, web_search_with_status,
+    SearchOutcome,
+};
 /// Re-exported so `download_task` (chat/tasks.rs) can reuse the SSRF guard
 /// (host_blocked / is_blocked_ip) instead of duplicating it.
 pub(crate) use search::{host_blocked, is_blocked_ip};
@@ -29,11 +29,11 @@ mod serp_browser;
 pub(crate) use serp_browser::browser_serp_search;
 
 mod generate;
-use generate::{generate_document, generate_diagram, generate_file};
 /// Re-exported so `commands.rs` can detect diagram artifacts via
 /// `crate::chat::tools::DIAGRAM_MARKER` (and the pre-rebrand sentinel).
 pub use generate::DIAGRAM_MARKER;
 pub use generate::LEGACY_DIAGRAM_MARKER;
+use generate::{generate_diagram, generate_document, generate_file};
 
 mod fs;
 use fs::{
@@ -651,10 +651,12 @@ pub(crate) fn normalize_open_url(raw: &str) -> Result<String, String> {
     if raw.starts_with('/') {
         return Ok(format!("file://{raw}"));
     }
-    Err("open_url needs an absolute http(s) URL, a file:/// URL, or an absolute \
+    Err(
+        "open_url needs an absolute http(s) URL, a file:/// URL, or an absolute \
          file path (e.g. C:\\project\\index.html or /home/u/project/index.html). \
          Relative paths can't be opened — give the full path."
-        .to_string())
+            .to_string(),
+    )
 }
 
 const OPEN_URL_DESC: &str = "Open a page in the app's built-in browser so the \
@@ -868,10 +870,7 @@ fn plan_text_parameters() -> Value {
 /// Run a blocking (sync, unbounded-walk) tool implementation on the dedicated
 /// blocking pool instead of the async runtime. A JoinHandle panic surfaces as
 /// an error string rather than killing the dispatching task.
-async fn run_blocking_tool(
-    args: &Value,
-    f: fn(&Value) -> ToolOutcome,
-) -> ToolOutcome {
+async fn run_blocking_tool(args: &Value, f: fn(&Value) -> ToolOutcome) -> ToolOutcome {
     let a = args.clone();
     match tokio::task::spawn_blocking(move || f(&a)).await {
         Ok(out) => out,
@@ -908,8 +907,12 @@ pub async fn execute_tool(
         }
         GENERATE_FILE => generate_file(artifacts_dir, args),
         GENERATE_DOCUMENT => generate_document(app, artifacts_dir, args).await,
-        PLAN_DOCUMENT => crate::chat::docdesign::plan::plan_document(app, artifacts_dir, args).await,
-        REVISE_DOCUMENT => crate::chat::docdesign::plan::revise_document(app, artifacts_dir, args).await,
+        PLAN_DOCUMENT => {
+            crate::chat::docdesign::plan::plan_document(app, artifacts_dir, args).await
+        }
+        REVISE_DOCUMENT => {
+            crate::chat::docdesign::plan::revise_document(app, artifacts_dir, args).await
+        }
         GENERATE_DIAGRAM => generate_diagram(artifacts_dir, args),
         FETCH_URL => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
@@ -919,7 +922,11 @@ pub async fn execute_tool(
             }
         }
         OPEN_URL => {
-            let raw = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let raw = args
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
             let normalized = match normalize_open_url(raw) {
                 Ok(u) => u,
                 Err(e) => return ToolOutcome::text(format!("Error: {e}")),
@@ -956,7 +963,11 @@ pub async fn execute_tool(
             }
         }
         OPEN_FILE => {
-            let raw = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let raw = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
             if raw.is_empty() {
                 return ToolOutcome::text("Error: open_file requires a \"path\".");
             }
@@ -1003,9 +1014,9 @@ pub async fn execute_tool(
             // Launching the OS handler can block briefly — keep it off the
             // async runtime (same pattern as the other blocking tools).
             match tokio::task::spawn_blocking(move || open::that(&target)).await {
-                Ok(Ok(_)) => ToolOutcome::text(format!(
-                    "Opened {raw} with the OS default application."
-                )),
+                Ok(Ok(_)) => {
+                    ToolOutcome::text(format!("Opened {raw} with the OS default application."))
+                }
                 Ok(Err(e)) => ToolOutcome::text(format!("open_file failed for {raw}: {e}")),
                 Err(e) => ToolOutcome::text(format!("Error: open_file task failed: {e}")),
             }
@@ -1015,7 +1026,11 @@ pub async fn execute_tool(
             // request fits one, instead of requiring the user to type `/slug`.
             // Read-only (no FS/DB mutation) so it stays available under every
             // permission mode. See `installed_skills::read_skill_body`.
-            let slug = args.get("slug").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let slug = args
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
             if slug.is_empty() {
                 ToolOutcome::text("Error: get_skill requires a \"slug\" argument.")
             } else {
@@ -1149,8 +1164,8 @@ pub async fn execute_tool(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::permission::SandboxPolicy;
+    use super::*;
 
     #[test]
     fn normalize_open_url_accepts_every_preview_form() {
@@ -1238,7 +1253,10 @@ mod tests {
             .find(|s| s["function"]["name"] == GENERATE_DIAGRAM)
             .unwrap()["function"]["parameters"];
         assert!(spec["properties"]["html"].is_object());
-        assert!(spec["required"].as_array().unwrap().contains(&json!("html")));
+        assert!(spec["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("html")));
     }
 
     #[test]
@@ -1258,9 +1276,16 @@ mod tests {
         let art = out.artifact.unwrap();
         assert!(art.filename.ends_with(".html"));
         let on_disk = std::fs::read_to_string(&art.path).unwrap();
-        assert!(on_disk.starts_with(DIAGRAM_MARKER), "file must start with the diagram marker");
+        assert!(
+            on_disk.starts_with(DIAGRAM_MARKER),
+            "file must start with the diagram marker"
+        );
         // The structural check should pass for this clean input.
-        assert!(out.text.contains("Structural check passed"), "text was: {}", out.text);
+        assert!(
+            out.text.contains("Structural check passed"),
+            "text was: {}",
+            out.text
+        );
         let _ = std::fs::remove_file(&art.path);
     }
 
@@ -1280,7 +1305,6 @@ mod tests {
         assert!(out.text.contains("requires non-empty"));
     }
 
-
     #[test]
     fn browser_read_is_listed_in_openai_spec_with_parameters() {
         let specs = openai_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
@@ -1289,8 +1313,14 @@ mod tests {
             .find(|s| s["function"]["name"] == BROWSER_READ)
             .expect("browser_read must be in the tool spec");
         let params = &read_spec["function"]["parameters"];
-        assert!(params["properties"]["mode"].is_object(), "browser_read must have mode parameter");
-        assert!(params["properties"]["selector"].is_object(), "browser_read must have selector parameter");
+        assert!(
+            params["properties"]["mode"].is_object(),
+            "browser_read must have mode parameter"
+        );
+        assert!(
+            params["properties"]["selector"].is_object(),
+            "browser_read must have selector parameter"
+        );
     }
 
     #[test]
@@ -1301,8 +1331,14 @@ mod tests {
             .find(|s| s["name"] == BROWSER_READ)
             .expect("browser_read must be in the Anthropic tool spec");
         let params = &read_spec["input_schema"];
-        assert!(params["properties"]["mode"].is_object(), "expected mode property in input_schema, got: {params}");
-        assert!(params["properties"]["selector"].is_object(), "expected selector property in input_schema, got: {params}");
+        assert!(
+            params["properties"]["mode"].is_object(),
+            "expected mode property in input_schema, got: {params}"
+        );
+        assert!(
+            params["properties"]["selector"].is_object(),
+            "expected selector property in input_schema, got: {params}"
+        );
     }
 
     #[test]
@@ -1311,7 +1347,10 @@ mod tests {
         // by sandbox) and must appear in both provider specs.
         for sandbox in [SandboxPolicy::WorkspaceWrite, SandboxPolicy::ReadOnly] {
             let o = openai_names(&ToolCaps::default(), sandbox);
-            assert!(o.contains(&ADD_SOURCE_NOTE.to_string()), "openai {sandbox:?}: add_source_note missing");
+            assert!(
+                o.contains(&ADD_SOURCE_NOTE.to_string()),
+                "openai {sandbox:?}: add_source_note missing"
+            );
             assert!(o.contains(&GET_SOURCE_LEDGER.to_string()));
             assert!(o.contains(&RESET_SOURCE_LEDGER.to_string()));
             let a = anthropic_tool_specs(&ToolCaps::default(), sandbox);
@@ -1322,31 +1361,41 @@ mod tests {
         }
     }
 
-
     #[test]
     fn run_code_gated_behind_capability() {
-        assert!(!openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite).contains(&RUN_CODE.to_string()));
-        assert!(openai_names(&ToolCaps { code_exec: true, ..Default::default() }, SandboxPolicy::WorkspaceWrite).contains(&RUN_CODE.to_string()));
+        assert!(
+            !openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
+                .contains(&RUN_CODE.to_string())
+        );
+        assert!(openai_names(
+            &ToolCaps {
+                code_exec: true,
+                ..Default::default()
+            },
+            SandboxPolicy::WorkspaceWrite
+        )
+        .contains(&RUN_CODE.to_string()));
     }
 
     #[test]
     fn search_docs_gated_behind_local_docs_capability() {
         // Off by default (no corpus indexed / no sidecar).
         let off = ToolCaps::default();
-        assert!(!openai_names(&off, SandboxPolicy::WorkspaceWrite).contains(&SEARCH_DOCS.to_string()));
         assert!(
-            !anthropic_tool_specs(&off, SandboxPolicy::WorkspaceWrite)
-                .iter()
-                .any(|s| s["name"] == SEARCH_DOCS)
+            !openai_names(&off, SandboxPolicy::WorkspaceWrite).contains(&SEARCH_DOCS.to_string())
         );
+        assert!(!anthropic_tool_specs(&off, SandboxPolicy::WorkspaceWrite)
+            .iter()
+            .any(|s| s["name"] == SEARCH_DOCS));
         // On when the local-docs capability is set.
-        let on = ToolCaps { local_docs: true, ..Default::default() };
+        let on = ToolCaps {
+            local_docs: true,
+            ..Default::default()
+        };
         assert!(openai_names(&on, SandboxPolicy::WorkspaceWrite).contains(&SEARCH_DOCS.to_string()));
-        assert!(
-            anthropic_tool_specs(&on, SandboxPolicy::WorkspaceWrite)
-                .iter()
-                .any(|s| s["name"] == SEARCH_DOCS)
-        );
+        assert!(anthropic_tool_specs(&on, SandboxPolicy::WorkspaceWrite)
+            .iter()
+            .any(|s| s["name"] == SEARCH_DOCS));
         // The spec requires query and exposes top_k.
         let spec_value = openai_tool_specs(&on, SandboxPolicy::WorkspaceWrite);
         let spec = spec_value
@@ -1354,13 +1403,19 @@ mod tests {
             .find(|s| s["function"]["name"] == SEARCH_DOCS)
             .and_then(|s| s["function"]["parameters"].as_object())
             .expect("search_docs spec present when enabled");
-        assert!(spec["required"].as_array().unwrap().contains(&json!("query")));
+        assert!(spec["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("query")));
         assert!(spec["properties"]["top_k"]["maximum"] == 20);
     }
 
     #[test]
     fn open_url_listed_as_safe_tool() {
-        assert!(openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite).contains(&OPEN_URL.to_string()));
+        assert!(
+            openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
+                .contains(&OPEN_URL.to_string())
+        );
     }
 
     #[test]
@@ -1368,10 +1423,11 @@ mod tests {
         // Present for both wire formats whenever mutating tools run…
         let openai = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         assert!(openai.contains(&OPEN_FILE.to_string()));
-        let anthropic: Vec<String> = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
-            .iter()
-            .map(|s| s["name"].as_str().unwrap().to_string())
-            .collect();
+        let anthropic: Vec<String> =
+            anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
+                .iter()
+                .map(|s| s["name"].as_str().unwrap().to_string())
+                .collect();
         assert!(anthropic.contains(&OPEN_FILE.to_string()));
         // …and absent from the schema entirely under read_only, so the model
         // can't even attempt it there.
@@ -1385,10 +1441,11 @@ mod tests {
     /// entry on one provider is the "model claims it can't automate" bug class.
     #[test]
     fn automation_tools_exposed_and_gated_consistently() {
-        let anthropic_ro: Vec<String> = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::ReadOnly)
-            .iter()
-            .map(|s| s["name"].as_str().unwrap().to_string())
-            .collect();
+        let anthropic_ro: Vec<String> =
+            anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::ReadOnly)
+                .iter()
+                .map(|s| s["name"].as_str().unwrap().to_string())
+                .collect();
         assert!(
             anthropic_ro.contains(&LIST_AUTOMATIONS.to_string()),
             "read-only list_automations missing from the anthropic schema"
@@ -1399,10 +1456,11 @@ mod tests {
             "read-only list_automations missing from the openai schema"
         );
         let openai = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
-        let anthropic: Vec<String> = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
-            .iter()
-            .map(|s| s["name"].as_str().unwrap().to_string())
-            .collect();
+        let anthropic: Vec<String> =
+            anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
+                .iter()
+                .map(|s| s["name"].as_str().unwrap().to_string())
+                .collect();
         for name in [
             LIST_AUTOMATIONS,
             CREATE_AUTOMATION,
@@ -1410,12 +1468,26 @@ mod tests {
             DELETE_AUTOMATION,
             RUN_AUTOMATION_NOW,
         ] {
-            assert!(openai.contains(&name.to_string()), "openai schema missing {name}");
-            assert!(anthropic.contains(&name.to_string()), "anthropic schema missing {name}");
+            assert!(
+                openai.contains(&name.to_string()),
+                "openai schema missing {name}"
+            );
+            assert!(
+                anthropic.contains(&name.to_string()),
+                "anthropic schema missing {name}"
+            );
         }
         let ro = openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly);
-        for name in [CREATE_AUTOMATION, UPDATE_AUTOMATION, DELETE_AUTOMATION, RUN_AUTOMATION_NOW] {
-            assert!(!ro.contains(&name.to_string()), "{name} must be stripped under read_only");
+        for name in [
+            CREATE_AUTOMATION,
+            UPDATE_AUTOMATION,
+            DELETE_AUTOMATION,
+            RUN_AUTOMATION_NOW,
+        ] {
+            assert!(
+                !ro.contains(&name.to_string()),
+                "{name} must be stripped under read_only"
+            );
         }
     }
 
@@ -1580,7 +1652,10 @@ mod tests {
         // move_file/copy_file must be ABSENT from the tool schema (schema-level
         // exclusion, not a UI block) — the model literally cannot invoke them.
         let names = openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly);
-        assert!(!names.contains(&WRITE_FILE.to_string()), "write_file must be absent under read_only");
+        assert!(
+            !names.contains(&WRITE_FILE.to_string()),
+            "write_file must be absent under read_only"
+        );
         assert!(!names.contains(&EDIT_FILE.to_string()));
         assert!(!names.contains(&DELETE_FILE.to_string()));
         assert!(!names.contains(&MOVE_FILE.to_string()));
@@ -1642,11 +1717,16 @@ mod tests {
         // read_only must drop download_file + run_shell from the schema
         // (like write_file) while keeping the read-only tracking tools.
         let names = openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly);
-        assert!(!names.contains(&DOWNLOAD_FILE.to_string()), "download_file must be absent under read_only");
-        assert!(!names.contains(&RUN_SHELL.to_string()), "run_shell must be absent under read_only");
+        assert!(
+            !names.contains(&DOWNLOAD_FILE.to_string()),
+            "download_file must be absent under read_only"
+        );
+        assert!(
+            !names.contains(&RUN_SHELL.to_string()),
+            "run_shell must be absent under read_only"
+        );
         assert!(names.contains(&DOWNLOAD_PROGRESS.to_string()));
         assert!(names.contains(&GET_TASK_STATUS.to_string()));
         assert!(names.contains(&CANCEL_TASK.to_string()));
     }
-
 }

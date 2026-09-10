@@ -7,23 +7,24 @@ pub mod artifacts;
 pub mod auto_router;
 pub mod cache;
 pub mod citation_lint;
+pub(crate) mod llm_client;
 pub mod citation_verify;
-pub mod docdesign;
-pub mod jsdocgen;
-pub mod pdfprint;
-pub mod codeexec;
 pub mod cloud_compact;
-pub mod compaction;
+pub mod codeexec;
 pub mod commands;
+pub mod compaction;
 pub mod context_windows;
 pub mod dispatch;
+pub mod docdesign;
 pub mod docs;
 pub mod docs_images;
-pub mod export;
 pub mod error_class;
+pub mod export;
+pub mod jsdocgen;
 pub mod local_models;
 pub mod model_health;
 pub mod office;
+pub mod pdfprint;
 pub mod permission;
 pub mod plan;
 pub mod prompts;
@@ -34,8 +35,8 @@ pub mod python_runtime;
 pub mod stream_events;
 pub mod streaming;
 pub mod tasks;
-pub mod totp;
 pub mod tools;
+pub mod totp;
 pub mod turn_perf;
 
 use std::collections::HashMap;
@@ -57,7 +58,6 @@ use crate::types::*;
 use proto::*;
 use providers::*;
 use streaming::*;
-
 
 /// One fail-over candidate for Auto-routed turns (chat/auto_router.rs): the
 /// resolver's ordered chain — primary first, then fallbacks — with each
@@ -228,7 +228,9 @@ impl ChatManager {
     /// by `send` before the turn spawns; `clear_late_attach` on completion.
     pub(crate) fn reset_late_attach(&self, sid: &str) -> Arc<Mutex<LateAttach>> {
         let slot = Arc::new(Mutex::new(LateAttach::default()));
-        self.late_attach.lock().insert(sid.to_string(), Arc::clone(&slot));
+        self.late_attach
+            .lock()
+            .insert(sid.to_string(), Arc::clone(&slot));
         slot
     }
 
@@ -243,16 +245,31 @@ impl ChatManager {
     }
 
     /// Look up a memoized token count for the given fingerprint.
-    pub(crate) fn cached_context_tokens(&self, chat_session_id: &str, fingerprint: &str) -> Option<u32> {
+    pub(crate) fn cached_context_tokens(
+        &self,
+        chat_session_id: &str,
+        fingerprint: &str,
+    ) -> Option<u32> {
         self.context_token_cache
             .lock()
             .get(chat_session_id)
-            .and_then(|(fp, tokens)| if fp == fingerprint { Some(*tokens) } else { None })
+            .and_then(|(fp, tokens)| {
+                if fp == fingerprint {
+                    Some(*tokens)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Store a token count under the given fingerprint (replaces any stale
     /// entry for the session).
-    pub(crate) fn store_context_tokens(&self, chat_session_id: &str, fingerprint: String, tokens: u32) {
+    pub(crate) fn store_context_tokens(
+        &self,
+        chat_session_id: &str,
+        fingerprint: String,
+        tokens: u32,
+    ) {
         self.context_token_cache
             .lock()
             .insert(chat_session_id.to_string(), (fingerprint, tokens));
@@ -548,7 +565,8 @@ impl ChatManager {
             // Sessions are cached across turns; a server that fails to
             // start is skipped without failing the turn.
             if tools_enabled {
-                let mcp_tools = crate::mcp_gallery::attach_filtered(&app, Some(&mcp_server_ids)).await;
+                let mcp_tools =
+                    crate::mcp_gallery::attach_filtered(&app, Some(&mcp_server_ids)).await;
                 if !mcp_tools.is_empty() {
                     caps.mcp_tools = Arc::new(mcp_tools);
                 }
@@ -567,11 +585,15 @@ impl ChatManager {
                             .values()
                             .map(|(_, d)| d.as_ref().map(|s| s.len()).unwrap_or(0))
                             .sum();
-                        format!("{}={} tools/{} desc chars", c.display_name, c.tools.len(), desc)
+                        format!(
+                            "{}={} tools/{} desc chars",
+                            c.display_name,
+                            c.tools.len(),
+                            desc
+                        )
                     })
                     .collect();
-                let mut mcp: std::collections::BTreeMap<&str, (usize, usize)> =
-                    Default::default();
+                let mut mcp: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
                 for e in caps.mcp_tools.iter() {
                     let agg = mcp.entry(e.server_name.as_str()).or_default();
                     agg.0 += 1;
@@ -609,13 +631,7 @@ impl ChatManager {
                     .map(|m| m.content.trim())
                     .filter(|c| !c.is_empty())
                     .map(|c| c.to_string());
-                let retrieval = compute_docs_retrieval(
-                    &db,
-                    base_url,
-                    query,
-                    &pinned_ids,
-                )
-                .await;
+                let retrieval = compute_docs_retrieval(&db, base_url, query, &pinned_ids).await;
                 if !retrieval.is_empty() {
                     chat_req.local_docs_retrieval = retrieval;
                 }
@@ -704,7 +720,11 @@ impl ChatManager {
                     )
                     .unwrap_or_default();
                     s.push_str(&inp.system_suffix);
-                    if s.trim().is_empty() { None } else { Some(s) }
+                    if s.trim().is_empty() {
+                        None
+                    } else {
+                        Some(s)
+                    }
                 });
                 // THIS candidate's request: same messages/params, its own
                 // model + system prompt. On success/failure the request's
@@ -714,12 +734,35 @@ impl ChatManager {
                 let attempt = loop {
                     let attempt = if tools_enabled && cand_is_openai {
                         run_openai_tool_loop(
-                            &client, &cand_tool_base, &cand.api_key, &chat_req, caps.clone(), sandbox, approval, &mgr, &sid, &app, research_mode, cand_cache_marks, perf.clone(),
+                            &client,
+                            &cand_tool_base,
+                            &cand.api_key,
+                            &chat_req,
+                            caps.clone(),
+                            sandbox,
+                            approval,
+                            &mgr,
+                            &sid,
+                            &app,
+                            research_mode,
+                            cand_cache_marks,
+                            perf.clone(),
                         )
                         .await
                     } else if tools_enabled && cand_is_anthropic {
                         run_anthropic_tool_loop(
-                            &client, &cand_tool_base, &cand.api_key, &chat_req, caps.clone(), sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
+                            &client,
+                            &cand_tool_base,
+                            &cand.api_key,
+                            &chat_req,
+                            caps.clone(),
+                            sandbox,
+                            approval,
+                            &mgr,
+                            &sid,
+                            &app,
+                            research_mode,
+                            perf.clone(),
                         )
                         .await
                     } else {
@@ -742,7 +785,14 @@ impl ChatManager {
                     {
                         retried_after_compaction = true;
                         match compact_and_retry(
-                            &db, &client, cand.provider_id.clone(), &cand_tool_base, &cand.api_key, &sid, &chat_req, &app,
+                            &db,
+                            &client,
+                            cand.provider_id.clone(),
+                            &cand_tool_base,
+                            &cand.api_key,
+                            &sid,
+                            &chat_req,
+                            &app,
                         )
                         .await
                         {
@@ -764,9 +814,14 @@ impl ChatManager {
                         // The endpoint works — clear its failure state.
                         {
                             let conn = db.lock();
-                            crate::chat::model_health::record_success(&conn, cand.provider_id.as_str(), db::now_ts());
+                            crate::chat::model_health::record_success(
+                                &conn,
+                                cand.provider_id.as_str(),
+                                db::now_ts(),
+                            );
                         }
-                        winner = Some((cand_tool_base.clone(), cand.api_key.clone(), cand_is_openai));
+                        winner =
+                            Some((cand_tool_base.clone(), cand.api_key.clone(), cand_is_openai));
                         result = Some(Ok(turn));
                         break;
                     }
@@ -782,8 +837,10 @@ impl ChatManager {
                                 db::now_ts(),
                             );
                         }
-                        let retryable =
-                            failure.as_ref().map(|f| f.kind.retryable()).unwrap_or(false);
+                        let retryable = failure
+                            .as_ref()
+                            .map(|f| f.kind.retryable())
+                            .unwrap_or(false);
                         if retryable && ci + 1 < candidates.len() {
                             let next = &candidates[ci + 1];
                             eprintln!(
@@ -806,9 +863,13 @@ impl ChatManager {
                                     reason: "auto_failover".to_string(),
                                     message: format!(
                                         "Auto: {} · {} unavailable — trying {} · {}",
-                                        crate::chat::auto_router::provider_label(cand.provider_id.as_str()),
+                                        crate::chat::auto_router::provider_label(
+                                            cand.provider_id.as_str()
+                                        ),
                                         cand.model,
-                                        crate::chat::auto_router::provider_label(next.provider_id.as_str()),
+                                        crate::chat::auto_router::provider_label(
+                                            next.provider_id.as_str()
+                                        ),
                                         next.model,
                                     ),
                                 },
@@ -858,47 +919,68 @@ impl ChatManager {
                         // provider + model_key on the row let the rollup group
                         // in-app chat under chat:<provider> and price by the
                         // session's model (spec §8 / §10.3).
-                        let model_key = crate::harness_adapters::canonical_model_key(&chat_req.model);
+                        let model_key =
+                            crate::harness_adapters::canonical_model_key(&chat_req.model);
                         let persisted = db::add_chat_message(
                             &conn,
-                            &sid,
-                            "assistant",
-                            &full_response,
-                            usage.as_ref().and_then(|u| {
-                                if u.input_tokens > 0 || u.output_tokens > 0 {
-                                    Some(u.input_tokens)
-                                } else {
-                                    None
-                                }
-                            }),
-                            usage.as_ref().and_then(|u| {
-                                if u.input_tokens > 0 || u.output_tokens > 0 {
-                                    Some(u.output_tokens)
-                                } else {
-                                    None
-                                }
-                            }),
-                            usage.as_ref().and_then(|u| {
-                                if u.input_tokens > 0 || u.output_tokens > 0 {
-                                    Some(u.cost_usd)
-                                } else {
-                                    None
-                                }
-                            }),
-                            usage.as_ref().and_then(|u| if u.cache_creation_input_tokens > 0 { Some(u.cache_creation_input_tokens) } else { None }),
-                            usage.as_ref().and_then(|u| if u.cache_read_input_tokens > 0 { Some(u.cache_read_input_tokens) } else { None }),
-                            usage.as_ref().and_then(|u| if u.reasoning_tokens > 0 { Some(u.reasoning_tokens) } else { None }),
-                            Some(provider_id.as_str()),
-                            model_key,
-                            None,
-                            Some(started_at),
-                            Some(db::now_ts()),
-                            perf.llm_time_ms(),
-                            perf.tool_time_ms(),
-                            perf.ttft_ms(),
-                            perf.tokens_per_second(
-                                usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
-                            ),
+                            db::NewChatMessage {
+                                chat_session_id: &sid,
+                                role: "assistant",
+                                content: &full_response,
+                                input_tokens: usage.as_ref().and_then(|u| {
+                                    if u.input_tokens > 0 || u.output_tokens > 0 {
+                                        Some(u.input_tokens)
+                                    } else {
+                                        None
+                                    }
+                                }),
+                                output_tokens: usage.as_ref().and_then(|u| {
+                                    if u.input_tokens > 0 || u.output_tokens > 0 {
+                                        Some(u.output_tokens)
+                                    } else {
+                                        None
+                                    }
+                                }),
+                                cost_usd: usage.as_ref().and_then(|u| {
+                                    if u.input_tokens > 0 || u.output_tokens > 0 {
+                                        Some(u.cost_usd)
+                                    } else {
+                                        None
+                                    }
+                                }),
+                                cache_creation_input_tokens: usage.as_ref().and_then(|u| {
+                                    if u.cache_creation_input_tokens > 0 {
+                                        Some(u.cache_creation_input_tokens)
+                                    } else {
+                                        None
+                                    }
+                                }),
+                                cache_read_input_tokens: usage.as_ref().and_then(|u| {
+                                    if u.cache_read_input_tokens > 0 {
+                                        Some(u.cache_read_input_tokens)
+                                    } else {
+                                        None
+                                    }
+                                }),
+                                reasoning_output_tokens: usage.as_ref().and_then(|u| {
+                                    if u.reasoning_tokens > 0 {
+                                        Some(u.reasoning_tokens)
+                                    } else {
+                                        None
+                                    }
+                                }),
+                                provider: Some(provider_id.as_str()),
+                                model_key: model_key,
+                                pricing_estimated_usd: None,
+                                started_at: Some(started_at),
+                                completed_at: Some(db::now_ts()),
+                                llm_time_ms: perf.llm_time_ms(),
+                                tool_time_ms: perf.tool_time_ms(),
+                                ttft_ms: perf.ttft_ms(),
+                                tokens_per_second: perf.tokens_per_second(
+                                    usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
+                                ),
+                            },
                         );
                         // Attribute this turn's artifacts to the assistant
                         // message so they reappear on its bubble when the chat
@@ -955,7 +1037,9 @@ impl ChatManager {
                             // The strip already rendered; when verdicts land,
                             // a refined `chat:citation-report` updates it and
                             // a refined row is persisted for the Fix action.
-                            if !report.weak.is_empty() && !matches!(provider_id, ChatProviderId::LocalGguf) {
+                            if !report.weak.is_empty()
+                                && !matches!(provider_id, ChatProviderId::LocalGguf)
+                            {
                                 let verify_claims: Vec<citation_verify::VerifyClaim> = report
                                     .weak
                                     .iter()
@@ -1000,11 +1084,7 @@ impl ChatManager {
                                     let refined = {
                                         let conn = db2.lock();
                                         citation_lint::refine_with_verdicts(
-                                            &conn,
-                                            &sid2,
-                                            mid2,
-                                            &report2,
-                                            &verdicts,
+                                            &conn, &sid2, mid2, &report2, &verdicts,
                                         )
                                     };
                                     if let Some(refined) = refined {
@@ -1171,7 +1251,10 @@ impl ChatManager {
     /// stream's handle and leave it uncancellable.
     fn remove_stream_if_current(&self, chat_session_id: &str, task_id: tokio::task::Id) {
         let mut streams = self.streams.lock();
-        if streams.get(chat_session_id).is_some_and(|h| h.id() == task_id) {
+        if streams
+            .get(chat_session_id)
+            .is_some_and(|h| h.id() == task_id)
+        {
             streams.remove(chat_session_id);
         }
     }
@@ -1323,9 +1406,7 @@ pub(crate) async fn compute_docs_retrieval(
     } else {
         "From your pinned documents and your local documents:".to_string()
     };
-    std::iter::once(prefix)
-        .chain(body)
-        .collect()
+    std::iter::once(prefix).chain(body).collect()
 }
 
 /// Runs the full SSE stream lifecycle for one chat request.
@@ -1355,13 +1436,10 @@ pub(crate) async fn run_chat_stream(
     // B-10: bound time-to-headers — a blackholed connect otherwise hangs the
     // turn forever (OS TCP timeouts can be minutes). The B-9 watchdog below
     // covers the body.
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        request.send(),
-    )
-    .await
-    .map_err(|_| "request timed out waiting for response headers (60s)".to_string())?
-    .map_err(|e| format!("request failed: {e}"))?;
+    let response = tokio::time::timeout(std::time::Duration::from_secs(60), request.send())
+        .await
+        .map_err(|_| "request timed out waiting for response headers (60s)".to_string())?
+        .map_err(|e| format!("request failed: {e}"))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -1374,12 +1452,12 @@ pub(crate) async fn run_chat_stream(
 
     let mut stream = response.bytes_stream();
     let mut buf = String::new(); // SSE buffer passed to provider parser
-    // Carry-over for partial lines: TCP chunks split SSE `data:` lines
-    // arbitrarily, and feeding half a line into parse_sse_chunk is fatal
-    // (its serde_json::from_str fails and kills the whole turn). Only
-    // complete, newline-terminated lines may be parsed — same pattern the
-    // tool-loop rounds use in streaming.rs. B-14: byte-buffered, so a
-    // multi-byte char split across reads is never corrupted.
+                                 // Carry-over for partial lines: TCP chunks split SSE `data:` lines
+                                 // arbitrarily, and feeding half a line into parse_sse_chunk is fatal
+                                 // (its serde_json::from_str fails and kills the whole turn). Only
+                                 // complete, newline-terminated lines may be parsed — same pattern the
+                                 // tool-loop rounds use in streaming.rs. B-14: byte-buffered, so a
+                                 // multi-byte char split across reads is never corrupted.
     let mut pending = crate::util::SseLineBuffer::new();
     let mut full_text = String::new();
     let mut in_think = false;
@@ -1516,14 +1594,14 @@ pub(crate) async fn run_chat_stream(
         // Structural closer, not a model token — emit without recording so
         // the live OUT/tok/s aren't bumped by UI scaffolding.
         let payload = ChatTokenPayload {
-                chat_session_id: chat_session_id.to_string(),
-                token: "</think>".to_string(),
-            };
-            if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
-                if let Some(app) = app {
-                    let _ = app.emit("chat:token", payload);
-                }
+            chat_session_id: chat_session_id.to_string(),
+            token: "</think>".to_string(),
+        };
+        if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
+            if let Some(app) = app {
+                let _ = app.emit("chat:token", payload);
             }
+        }
     }
 
     let usage = provider.parse_usage(&buf);
@@ -1649,10 +1727,15 @@ pub fn run_one_shot_chat(
     {
         let conn = db.lock();
         crate::db::add_chat_message(
-            &conn, chat_session_id, "user",
-            prompt, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None,
-        ).map_err(|e| e.to_string())?;
+            &conn,
+            crate::db::NewChatMessage {
+                chat_session_id: chat_session_id,
+                role: "user",
+                content: prompt,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
         crate::db::touch_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
     }
 
@@ -1697,7 +1780,7 @@ pub fn run_one_shot_chat(
                 } else {
                     crate::chat::providers::OpenAIProvider::DEFAULT_BASE
                 });
-                crate::chat::commands::openai_oneshot(
+                crate::chat::llm_client::openai_oneshot(
                     &client, &api_key, base, &model, &system, prompt,
                 )
                 .await
@@ -1707,7 +1790,7 @@ pub fn run_one_shot_chat(
                 let Some(base) = base_url.as_deref() else {
                     return Err("No base URL configured for this provider. Set one in Settings \u{2192} Connectors.".into());
                 };
-                crate::chat::commands::openai_oneshot(
+                crate::chat::llm_client::openai_oneshot(
                     &client, &api_key, base, &model, &system, prompt,
                 )
                 .await
@@ -1717,7 +1800,7 @@ pub fn run_one_shot_chat(
                 let base = base_url.as_deref().unwrap_or(
                     crate::chat::providers::AnthropicProvider::DEFAULT_BASE,
                 );
-                crate::chat::commands::anthropic_oneshot(
+                crate::chat::llm_client::anthropic_oneshot(
                     &client, &api_key, base, &model, &system, prompt, 1024,
                 )
                 .await
@@ -1731,12 +1814,29 @@ pub fn run_one_shot_chat(
     {
         let conn = db.lock();
         crate::db::add_chat_message(
-            &conn, chat_session_id, "assistant",
-            &response_text,
-            None, None, None, None, None, None, None, None, None,
-            Some(started_at), Some(crate::db::now_ts()),
-            None, None, None, None,
-        ).map_err(|e| e.to_string())?;
+            &conn,
+            crate::db::NewChatMessage {
+                chat_session_id: chat_session_id,
+                role: "assistant",
+                content: &response_text,
+                input_tokens: None,
+                output_tokens: None,
+                cost_usd: None,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: None,
+                model_key: None,
+                pricing_estimated_usd: None,
+                started_at: Some(started_at),
+                completed_at: Some(crate::db::now_ts()),
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
+        )
+        .map_err(|e| e.to_string())?;
         crate::db::touch_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -1748,11 +1848,21 @@ mod tests {
 
     #[test]
     fn research_trigger_fires_on_research_phrases() {
-        assert!(is_research_request("Research the history of the Rust language"));
-        assert!(is_research_request("Can you find out about WebGPU adoption?"));
-        assert!(is_research_request("What's the current state of WebGPU across browsers?"));
-        assert!(is_research_request("Compare React and Vue for a new dashboard"));
-        assert!(is_research_request("Do a survey of recent transformer papers"));
+        assert!(is_research_request(
+            "Research the history of the Rust language"
+        ));
+        assert!(is_research_request(
+            "Can you find out about WebGPU adoption?"
+        ));
+        assert!(is_research_request(
+            "What's the current state of WebGPU across browsers?"
+        ));
+        assert!(is_research_request(
+            "Compare React and Vue for a new dashboard"
+        ));
+        assert!(is_research_request(
+            "Do a survey of recent transformer papers"
+        ));
         assert!(is_research_request("Investigate the cause of the outage"));
         assert!(is_research_request("Deep dive on CRDTs please"));
     }
@@ -1838,7 +1948,10 @@ mod tests {
         // the registry: totp_code (2FA), browser_observe, browser_extract,
         // plus the Task tool's background param — each reviewed for length
         // before landing.
-        assert!(total < 55_500, "fresh-turn baseline over fixed-cost budget: {total} chars");
+        assert!(
+            total < 55_500,
+            "fresh-turn baseline over fixed-cost budget: {total} chars"
+        );
     }
 
     #[test]
@@ -1989,7 +2102,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "generate_document");
         assert_eq!(calls[0].1["format"], "docx");
-        assert!(calls[0].1["instructions"].as_str().unwrap().contains("table"));
+        assert!(calls[0].1["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("table"));
     }
 
     #[test]
@@ -2085,7 +2201,10 @@ mod tests {
         };
         // Let the child register.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(mgr.child_tasks.lock().contains_key(&sid), "child must be registered");
+        assert!(
+            mgr.child_tasks.lock().contains_key(&sid),
+            "child must be registered"
+        );
 
         // Wait — the outer child here IS the registrant but the INNER parked
         // task is what's tracked. cancel() must abort the inner task.
@@ -2175,7 +2294,10 @@ mod tests {
                 buf.push_str(line);
                 buf.push('\n');
             }
-            if let Some(c) = v.pointer("/choices/0/delta/content").and_then(|x| x.as_str()) {
+            if let Some(c) = v
+                .pointer("/choices/0/delta/content")
+                .and_then(|x| x.as_str())
+            {
                 return Ok((Some(c.to_string()), false));
             }
             Ok((None, false))

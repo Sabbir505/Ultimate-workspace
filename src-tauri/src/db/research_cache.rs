@@ -30,9 +30,10 @@ pub fn canonical_url_key(raw: &str) -> String {
     };
     parsed.set_fragment(None);
     if let Some(host) = parsed.host_str() {
-        let _ = url::Url::parse(&format!("{}://{}", parsed.scheme(), host.to_lowercase())).map(|_| {
-            // set_host on the parsed url (cannot borrow &mut while host_str borrow lives)
-        });
+        let _ =
+            url::Url::parse(&format!("{}://{}", parsed.scheme(), host.to_lowercase())).map(|_| {
+                // set_host on the parsed url (cannot borrow &mut while host_str borrow lives)
+            });
     }
     // Rebuild manually: url::Url::set_host needs a String anyway.
     let scheme = parsed.scheme().to_ascii_lowercase();
@@ -183,7 +184,10 @@ pub fn page_cache_get(
     match row {
         Some((content, created_at)) if created_at >= cutoff => Ok(Some(content)),
         Some((_, created_at)) => {
-            conn.execute("DELETE FROM page_cache WHERE url_key = ?1", params![canonical])?;
+            conn.execute(
+                "DELETE FROM page_cache WHERE url_key = ?1",
+                params![canonical],
+            )?;
             let _ = created_at;
             Ok(None)
         }
@@ -242,7 +246,10 @@ pub fn save_citation_report(
 /// Most recent citation-integrity verdict for a session, as the stored JSON
 /// detail. The "Fix citations" repair action feeds it back to the model so
 /// the repair pass names the exact claims to re-cite or drop.
-pub fn latest_citation_detail(conn: &Connection, chat_session_id: &str) -> DbResult<Option<String>> {
+pub fn latest_citation_detail(
+    conn: &Connection,
+    chat_session_id: &str,
+) -> DbResult<Option<String>> {
     conn.query_row(
         "SELECT detail FROM citation_reports WHERE chat_session_id = ?1 \
           ORDER BY created_at DESC, id DESC LIMIT 1",
@@ -325,7 +332,14 @@ pub fn record_search(
         "INSERT INTO research_queries \
            (chat_session_id, query, normalized_query, engines, result_count, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![chat_session_id, query, normalized, engines_tag, result_count, now],
+        params![
+            chat_session_id,
+            query,
+            normalized,
+            engines_tag,
+            result_count,
+            now
+        ],
     )?;
     Ok(already)
 }
@@ -415,9 +429,11 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(page_cache_get(&conn, "https://example.com/a", PAGE_CACHE_TTL_SECS)
-            .unwrap()
-            .is_none());
+        assert!(
+            page_cache_get(&conn, "https://example.com/a", PAGE_CACHE_TTL_SECS)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -436,10 +452,7 @@ mod tests {
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
         assert!(!record_search(&conn, &cs.id, "rust async runtime", "duckduckgo:ok", 8).unwrap());
         // Same query, different case/spacing → repeat detected.
-        assert!(
-            record_search(&conn, &cs.id, "  Rust   ASYNC   Runtime ", "mojeek:ok", 6)
-                .unwrap()
-        );
+        assert!(record_search(&conn, &cs.id, "  Rust   ASYNC   Runtime ", "mojeek:ok", 6).unwrap());
         // Distinct query → not a repeat.
         assert!(!record_search(&conn, &cs.id, "tokio vs async-std", "wikipedia:ok", 3).unwrap());
         clear_searches(&conn, &cs.id).unwrap();
@@ -464,8 +477,18 @@ mod tests {
         assert!(latest_citation_detail(&conn, &cs.id).unwrap().is_none());
         assert!(citation_quality_trend(&conn, 10).unwrap().is_empty());
         for i in 0..3i64 {
-            save_citation_report(&conn, &cs.id, Some(i), 10 + i, i, 0, 0, 0, &format!("{{\"run\":{i}}}"))
-                .unwrap();
+            save_citation_report(
+                &conn,
+                &cs.id,
+                Some(i),
+                10 + i,
+                i,
+                0,
+                0,
+                0,
+                &format!("{{\"run\":{i}}}"),
+            )
+            .unwrap();
             // Distinct created_at rows (now_ts has second resolution).
             conn.execute(
                 "UPDATE citation_reports SET created_at = created_at + ?1 WHERE id = (SELECT MAX(id) FROM citation_reports)",
@@ -477,7 +500,10 @@ mod tests {
         assert!(latest.contains("\"run\":2"));
         let trend = citation_quality_trend(&conn, 2).unwrap();
         assert_eq!(trend.len(), 2, "limit applies");
-        assert_eq!(trend[0].total_citations, 11, "oldest of the latest-two first");
+        assert_eq!(
+            trend[0].total_citations, 11,
+            "oldest of the latest-two first"
+        );
         assert_eq!(trend[1].total_citations, 12);
         // Scoped per session.
         let other = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();

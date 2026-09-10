@@ -18,38 +18,15 @@ import {
   toastError,
   toastSuccess,
   type DownloadProgress,
+  type PerDownloadState,
   type SttStatus as SttStatusData,
 } from "../../lib/ipc";
+import { formatBytes, shortName } from "../../lib/format";
 import { Modal } from "../common/Modal";
 
 /** Progress-event id emitted by `stt_install_server` (backend contract:
  *  commands/stt.rs SERVER_INSTALL_ID). */
 const SERVER_INSTALL_ID = "stt-whisper-server";
-
-function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
-}
-
-function shortName(path: string): string {
-  if (path.length <= 56) return path;
-  const parts = path.split(/[/\\]/).filter(Boolean);
-  if (parts.length <= 2) return path;
-  return `…/${parts.slice(-2).join("/")}`;
-}
-
-interface PerDownloadState {
-  state: DownloadProgress["state"];
-  downloaded: number;
-  total: number | null;
-}
 
 export function SttPanel() {
   const [stt, setStt] = useState<SttStatusData | null>(null);

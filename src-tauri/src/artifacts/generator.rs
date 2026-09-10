@@ -14,13 +14,8 @@ pub async fn generate_artifact(
     let user_prompt = build_user_prompt(&context);
     let json_schema = build_json_schema(&context.artifact_type);
 
-    let spec = call_llm_structured(
-        &context.llm,
-        &system_prompt,
-        &user_prompt,
-        &json_schema,
-    )
-    .await?;
+    let spec =
+        call_llm_structured(&context.llm, &system_prompt, &user_prompt, &json_schema).await?;
 
     let confidence = compute_confidence(context.intent_confidence, &spec);
     let proposal = ArtifactProposal::new(context.artifact_type, spec, confidence);
@@ -88,7 +83,12 @@ fn spec_completeness(spec: &ArtifactSpec) -> f32 {
     if total <= 0.0 {
         return 0.0;
     }
-    checks.iter().filter(|(_, met)| *met).map(|(w, _)| w).sum::<f32>() / total
+    checks
+        .iter()
+        .filter(|(_, met)| *met)
+        .map(|(w, _)| w)
+        .sum::<f32>()
+        / total
 }
 
 /// Regenerate an artifact with additional instruction.
@@ -113,24 +113,32 @@ fn build_system_prompt(
     let base = "You are an expert at creating reusable Relay artifacts. Generate a complete, valid artifact specification in JSON format.\n\n";
 
     let type_specific = match artifact_type {
-        ArtifactType::Skill => r#"Create a SKILL artifact. A skill is a reusable prompt that can be invoked with `/skill-name` in chat.
+        ArtifactType::Skill => {
+            r#"Create a SKILL artifact. A skill is a reusable prompt that can be invoked with `/skill-name` in chat.
 Required fields: name, description, instructions, inputs[], outputs[], tools[], model?, permissions?, examples?
 Example tools: "read_file", "write_file", "edit_file", "list_directory", "search_files", "run_shell", "web_search", "web_fetch", "github_list_issues", "github_get_issue", "git_status", "git_diff"
-Permissions: "read_only" | "workspace_write" | "full_access""#,
-        ArtifactType::Loop => r#"Create a LOOP artifact. A loop is an iterative workflow that runs until a condition is met.
+Permissions: "read_only" | "workspace_write" | "full_access""#
+        }
+        ArtifactType::Loop => {
+            r#"Create a LOOP artifact. A loop is an iterative workflow that runs until a condition is met.
 Required fields: name, description, objective, inputs[], steps[], iteration{max, condition?}, outputs[], permissions?
 Each step: label, description?, action, parameters?
-Iteration: max (1-100), condition? (natural language stop condition)"#,
-        ArtifactType::PromptTemplate => r#"Create a PROMPT_TEMPLATE artifact. A prompt template is a parameterized prompt with {{variables}}.
+Iteration: max (1-100), condition? (natural language stop condition)"#
+        }
+        ArtifactType::PromptTemplate => {
+            r#"Create a PROMPT_TEMPLATE artifact. A prompt template is a parameterized prompt with {{variables}}.
 Required fields: name, description, template, variables[], output_format?, examples?
 Variables: name, description?, required, default?
-Template should use {{variable}} syntax for placeholders."#,
-        ArtifactType::Automation => r#"Create an AUTOMATION artifact. An automation runs on a schedule or event.
+Template should use {{variable}} syntax for placeholders."#
+        }
+        ArtifactType::Automation => {
+            r#"Create an AUTOMATION artifact. An automation runs on a schedule or event.
 Required fields: name, description, trigger{type, schedule?}, steps[], inputs?, outputs?, permissions?, enabled
 Trigger types: "schedule" (needs 5-field cron), "event", "webhook"
 Steps: label, description?, action, parameters?
 The run prompt is compiled VERBATIM from the description and steps, and each run is unattended (no user available to answer questions). Every step's action must therefore be a concrete, self-contained instruction: name the exact files, paths, commands, queries, or tool calls to use — never a vague verb like "handle" or "process the data". The description must state what a successful run produces.
-enabled defaults to true — the automation is active right after the user presses Create. Set it to false ONLY if the user explicitly asked to create it paused/off. Always provide a concrete 5-field cron for schedule triggers."#,
+enabled defaults to true — the automation is active right after the user presses Create. Set it to false ONLY if the user explicitly asked to create it paused/off. Always provide a concrete 5-field cron for schedule triggers."#
+        }
     };
 
     let tools_list = workspace.available_tools.join(", ");
@@ -142,12 +150,18 @@ enabled defaults to true — the automation is active right after the user press
             .iter()
             .map(|a| format!("- {} ({})", a.name, a.artifact_type.as_str()))
             .collect();
-        format!("\n\nExisting artifacts for reference:\n{}", summaries.join("\n"))
+        format!(
+            "\n\nExisting artifacts for reference:\n{}",
+            summaries.join("\n")
+        )
     } else {
         String::new()
     };
 
-    format!("{}{}{}{}", base, type_specific, tools_context, artifacts_context)
+    format!(
+        "{}{}{}{}",
+        base, type_specific, tools_context, artifacts_context
+    )
 }
 
 /// Build user prompt from context.
@@ -364,7 +378,8 @@ async fn call_harness_structured(
         user_prompt,
         serde_json::to_string_pretty(json_schema).unwrap()
     );
-    let text = crate::agent_sessions::harness_oneshot_text(harness_id, &llm.model, &prompt, None).await?;
+    let text =
+        crate::agent_sessions::harness_oneshot_text(harness_id, &llm.model, &prompt, None).await?;
     parse_spec_from_text(&text)
 }
 
@@ -458,11 +473,21 @@ async fn call_openai_structured(
         .text()
         .await
         .map_err(|e| format!("Failed to read response body: {}", e))?;
-    let v: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("Failed to parse JSON response: {} (raw: {})", e, crate::util::truncate_chars(&raw, 200)))?;
+    let v: Value = serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "Failed to parse JSON response: {} (raw: {})",
+            e,
+            crate::util::truncate_chars(&raw, 200)
+        )
+    })?;
     let content = v["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or_else(|| format!("Missing content in response (raw: {})", crate::util::truncate_chars(&raw, 200)))?;
+        .ok_or_else(|| {
+            format!(
+                "Missing content in response (raw: {})",
+                crate::util::truncate_chars(&raw, 200)
+            )
+        })?;
 
     parse_spec_from_text(content)
 }
@@ -475,7 +500,10 @@ async fn call_anthropic_structured(
     user_prompt: &str,
     json_schema: &Value,
 ) -> Result<ArtifactSpec, String> {
-    let base = llm.base_url.as_deref().unwrap_or("https://api.anthropic.com");
+    let base = llm
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.anthropic.com");
     let url = format!("{base}/v1/messages");
 
     let user_with_schema = format!(
@@ -495,7 +523,10 @@ async fn call_anthropic_structured(
     let resp = client
         .post(&url)
         .header("x-api-key", &llm.api_key)
-        .header("anthropic-version", "2023-06-01")
+        .header(
+            "anthropic-version",
+            crate::chat::providers::ANTHROPIC_API_VERSION,
+        )
         .header("content-type", "application/json")
         .json(&body)
         .send()
@@ -519,9 +550,12 @@ async fn call_anthropic_structured(
             crate::util::truncate_chars(&raw, 500)
         )
     })?;
-    let content = v["content"][0]["text"]
-        .as_str()
-        .ok_or_else(|| format!("Missing content in Anthropic response (raw: {})", crate::util::truncate_chars(&raw, 500)))?;
+    let content = v["content"][0]["text"].as_str().ok_or_else(|| {
+        format!(
+            "Missing content in Anthropic response (raw: {})",
+            crate::util::truncate_chars(&raw, 500)
+        )
+    })?;
 
     parse_spec_from_text(content)
 }
@@ -599,8 +633,10 @@ mod tests {
     /// (all three provider paths share this parser).
     #[test]
     fn parse_spec_from_text_handles_fences_and_errors() {
-        let spec = parse_spec_from_text("{\"type\":\"skill\",\"name\":\"N\",\"description\":\"D\",\"instructions\":\"I\"}")
-            .expect("bare json parses");
+        let spec = parse_spec_from_text(
+            "{\"type\":\"skill\",\"name\":\"N\",\"description\":\"D\",\"instructions\":\"I\"}",
+        )
+        .expect("bare json parses");
         match spec {
             ArtifactSpec::Skill(s) => {
                 assert_eq!(s.name, "N");
@@ -610,7 +646,10 @@ mod tests {
         }
 
         let fenced = "```json\n{\"type\":\"skill\",\"name\":\"N\",\"description\":\"D\",\"instructions\":\"I\"}\n```";
-        assert!(matches!(parse_spec_from_text(fenced), Ok(ArtifactSpec::Skill(_))));
+        assert!(matches!(
+            parse_spec_from_text(fenced),
+            Ok(ArtifactSpec::Skill(_))
+        ));
 
         let err = parse_spec_from_text("not json at all").unwrap_err();
         assert!(err.contains("Failed to parse LLM output as ArtifactSpec"));

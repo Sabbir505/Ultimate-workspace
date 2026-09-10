@@ -41,6 +41,8 @@ import { PdfViewer } from "./PdfViewer";
 import { sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
 import { linkCitations, parseChatSources } from "../../lib/chatCitations";
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { startPointerDrag } from "../../lib/pointerDrag";
 import { MdLink } from "./MdLink";
 
 function formatSize(bytes: number): string {
@@ -69,16 +71,10 @@ function citeUrlTransform(url: string): string {
 /** Copy affordance for fenced code blocks in the markdown preview — same
  *  behavior as the chat bubble's CopyButton (clipboard API, transient label). */
 function MdCopyButton({ code }: { code: string }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, copyToClipboard] = useCopyToClipboard(1800);
   const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    } catch {
-      // Clipboard unavailable — silently ignore.
-    }
-  }, [code]);
+    await copyToClipboard(code);
+  }, [code, copyToClipboard]);
   return (
     <button type="button" className="ghost copy-code-btn" onClick={() => void handleCopy()}>
       {copied ? "Copied" : "Copy"}
@@ -732,21 +728,17 @@ export function ArtifactPreviewPaneInner({
   // Drag the left edge to resize the pane, mirroring the browser pane.
   const startResize = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
-    const handle = e.currentTarget as HTMLElement;
-    handle.setPointerCapture(e.pointerId);
-    const onMove = (ev: PointerEvent) => {
-      // Pane is docked right, so width grows as the pointer moves left.
-      const next = window.innerWidth - ev.clientX;
-      const max = window.innerWidth - 360;
-      setPaneWidth(Math.min(max, Math.max(MIN_PANE_WIDTH, next)));
-    };
-    const onUp = (ev: PointerEvent) => {
-      handle.releasePointerCapture(ev.pointerId);
-      handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onUp);
-    };
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onUp);
+    // Pane is docked right, so width grows as the pointer moves left.
+    startPointerDrag(
+      e,
+      (x) => {
+        const next = window.innerWidth - x;
+        const max = window.innerWidth - 360;
+        setPaneWidth(Math.min(max, Math.max(MIN_PANE_WIDTH, next)));
+      },
+      undefined,
+      { capture: true },
+    );
   }, []);
 
   const paneStyle = paneWidth != null ? { flex: `0 0 ${paneWidth}px` } : undefined;

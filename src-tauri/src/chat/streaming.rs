@@ -18,14 +18,16 @@ use serde_json::{json, Value};
 use tauri::AppHandle;
 
 use crate::chat::cache;
-use crate::chat::{permission, tools, ChatManager};
 use crate::chat::dispatch::{artifacts_dir, emit_marker, emit_token, run_tool};
 use crate::chat::proto::{
-    next_synthetic_tool_id, openai_message_json, anthropic_message_json, parse_hermes_tool_calls,
+    anthropic_message_json, next_synthetic_tool_id, openai_message_json, parse_hermes_tool_calls,
     parse_tool_args, strip_hermes_tool_calls, tool_block,
 };
-use crate::chat::providers::{ChatProvider, ChatProviderId, ChatRequest, ChatUsage,
-    calculate_anthropic_cost, calculate_openai_cost};
+use crate::chat::providers::{
+    calculate_anthropic_cost, calculate_openai_cost, ChatProvider, ChatProviderId, ChatRequest,
+    ChatUsage, ANTHROPIC_API_VERSION,
+};
+use crate::chat::{permission, tools, ChatManager};
 
 /// Tool-loop round cap. The model⇄tool round-trip limit was removed by
 /// request: a single turn may now chain as many tool calls as the task needs.
@@ -86,11 +88,32 @@ fn is_live_web_tool(name: &str) -> bool {
 /// precision.
 fn user_message_is_time_sensitive(text: &str) -> bool {
     const TRIGGERS: &[&str] = &[
-        "latest", "current", "currently", "today", "now", "recent", "recently",
-        "newest", "this week", "this month", "this year", "so far",
-        "up to date", "up-to-date", "price", "worth", "version",
-        "release", "released", "news", "score", "weather", "stock",
-        "exchange rate", "who won", "standings",
+        "latest",
+        "current",
+        "currently",
+        "today",
+        "now",
+        "recent",
+        "recently",
+        "newest",
+        "this week",
+        "this month",
+        "this year",
+        "so far",
+        "up to date",
+        "up-to-date",
+        "price",
+        "worth",
+        "version",
+        "release",
+        "released",
+        "news",
+        "score",
+        "weather",
+        "stock",
+        "exchange rate",
+        "who won",
+        "standings",
     ];
     let lower = text.to_lowercase();
     // Any recent-ish year: "what happened in 2026" is definitionally a
@@ -384,7 +407,10 @@ async fn openai_stream_round(
                 return Err(format!("provider error: {msg}"));
             }
             if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
-                usage.input = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(usage.input);
+                usage.input = u
+                    .get("prompt_tokens")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(usage.input);
                 usage.output = u
                     .get("completion_tokens")
                     .and_then(|x| x.as_i64())
@@ -508,7 +534,10 @@ async fn openai_stream_round(
             // NOT terminal here — the provider's usage chunk follows it (see
             // `stop_seen` above); the 2s post-stop read grace ends the round
             // if it never arrives.
-            if v.pointer("/choices/0/finish_reason").and_then(|x| x.as_str()) == Some("stop") {
+            if v.pointer("/choices/0/finish_reason")
+                .and_then(|x| x.as_str())
+                == Some("stop")
+            {
                 stop_seen = true;
             }
         }
@@ -588,7 +617,7 @@ async fn anthropic_stream_round(
         client
             .post(url)
             .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")
             .json(body)
             .send(),
@@ -727,7 +756,9 @@ async fn anthropic_stream_round(
                         .unwrap_or("");
                     match dtype {
                         "text_delta" => {
-                            if let Some(t) = delta.and_then(|d| d.get("text")).and_then(|x| x.as_str()) {
+                            if let Some(t) =
+                                delta.and_then(|d| d.get("text")).and_then(|x| x.as_str())
+                            {
                                 if in_think {
                                     emit_marker(app, sid, "</think>", full);
                                     in_think = false;
@@ -743,8 +774,9 @@ async fn anthropic_stream_round(
                             }
                         }
                         "input_json_delta" => {
-                            if let Some(j) =
-                                delta.and_then(|d| d.get("partial_json")).and_then(|x| x.as_str())
+                            if let Some(j) = delta
+                                .and_then(|d| d.get("partial_json"))
+                                .and_then(|x| x.as_str())
                             {
                                 if let Some(b) = blocks.get_mut(idx) {
                                     b.json.push_str(j);
@@ -752,8 +784,9 @@ async fn anthropic_stream_round(
                             }
                         }
                         "thinking_delta" => {
-                            if let Some(t) =
-                                delta.and_then(|d| d.get("thinking")).and_then(|x| x.as_str())
+                            if let Some(t) = delta
+                                .and_then(|d| d.get("thinking"))
+                                .and_then(|x| x.as_str())
                             {
                                 if !in_think {
                                     emit_marker(app, sid, "<think>", full);
@@ -773,8 +806,9 @@ async fn anthropic_stream_round(
                             }
                         }
                         "signature_delta" => {
-                            if let Some(s) =
-                                delta.and_then(|d| d.get("signature")).and_then(|x| x.as_str())
+                            if let Some(s) = delta
+                                .and_then(|d| d.get("signature"))
+                                .and_then(|x| x.as_str())
                             {
                                 if let Some(b) = blocks.get_mut(idx) {
                                     b.sig.push_str(s);
@@ -837,14 +871,15 @@ async fn anthropic_stream_round(
         .into_iter()
         .filter_map(|b| match b.kind {
             1 => {
-                let input_val = serde_json::from_str::<Value>(&b.json).unwrap_or_else(|_| json!({}));
+                let input_val =
+                    serde_json::from_str::<Value>(&b.json).unwrap_or_else(|_| json!({}));
                 Some(json!({ "type": "tool_use", "id": b.id, "name": b.name, "input": input_val }))
             }
             // Thinking blocks must be echoed back verbatim (text + signature)
             // during tool use or the API 400s on the next round.
-            2 if !b.text.is_empty() => Some(
-                json!({ "type": "thinking", "thinking": b.text, "signature": b.sig }),
-            ),
+            2 if !b.text.is_empty() => {
+                Some(json!({ "type": "thinking", "thinking": b.text, "signature": b.sig }))
+            }
             2 => None,
             _ if !b.text.is_empty() => Some(json!({ "type": "text", "text": b.text })),
             _ => None,
@@ -862,12 +897,10 @@ async fn anthropic_stream_round(
 /// then owns the only strong Arc ref and `try_unwrap` hands us the Vec to
 /// extend. If a future caller ever shares that Arc, the connector merge
 /// degrades to a restore-and-skip instead of panicking mid-turn.
-fn fold_late_attaches(
-    mgr: &Arc<ChatManager>,
-    sid: &str,
-    live_caps: &mut tools::ToolCaps,
-) -> bool {
-    let Some(slot) = mgr.late_attach_slot(sid) else { return false };
+fn fold_late_attaches(mgr: &Arc<ChatManager>, sid: &str, live_caps: &mut tools::ToolCaps) -> bool {
+    let Some(slot) = mgr.late_attach_slot(sid) else {
+        return false;
+    };
     let late = std::mem::take(&mut *slot.lock());
     if late.connectors.is_empty() && late.mcp.is_empty() {
         return false;
@@ -976,10 +1009,7 @@ fn elide_stale_tool_results(messages: &mut [Value], openai: bool) {
                     *content = elided_result_stub(content);
                 }
             }
-        } else if let Some(blocks) = message
-            .get_mut("content")
-            .and_then(|c| c.as_array_mut())
-        {
+        } else if let Some(blocks) = message.get_mut("content").and_then(|c| c.as_array_mut()) {
             for block in blocks.iter_mut() {
                 if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
                     continue;
@@ -1029,16 +1059,7 @@ fn build_openai_body(
     }
     if cache_marks {
         let mut msgs = messages.to_vec();
-        if let Some(sys) = msgs.first_mut() {
-            if sys.get("role").and_then(|r| r.as_str()) == Some("system") {
-                if let Some(Value::String(text)) = sys.get_mut("content") {
-                    if !text.is_empty() {
-                        sys["content"] = cache::cached_system_block(text);
-                    }
-                }
-            }
-        }
-        cache::mark_last_message(&mut msgs);
+        cache::apply_openai_cache_marks(&mut msgs);
         body["messages"] = Value::Array(msgs);
     }
     body
@@ -1150,7 +1171,10 @@ pub(crate) async fn run_openai_tool_loop(
             .take(6)
             .map(|(chars, name)| format!("{name}({chars})"))
             .collect();
-        eprintln!("[prompt-audit] largest tool descriptions: {}", top.join(", "));
+        eprintln!(
+            "[prompt-audit] largest tool descriptions: {}",
+            top.join(", ")
+        );
     }
 
     for round in 0..cap {
@@ -1170,23 +1194,14 @@ pub(crate) async fn run_openai_tool_loop(
         // (is_cache_rejection is a substring match) must NOT re-run the
         // round, or the already-streamed text would be duplicated.
         let full_len_before = full.len();
-        let (message, round_usage) = match openai_stream_round(
-            client,
-            &url,
-            api_key,
-            &body,
-            app,
-            sid,
-            &mut full,
-        )
-        .await
-        {
-            Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
-                cache::strip_cache_control(&mut body);
-                openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?
-            }
-            other => other?,
-        };
+        let (message, round_usage) =
+            match openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await {
+                Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
+                    cache::strip_cache_control(&mut body);
+                    openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?
+                }
+                other => other?,
+            };
         perf.end_gen();
         if round_usage.have {
             eprintln!(
@@ -1197,7 +1212,12 @@ pub(crate) async fn run_openai_tool_loop(
         // Fold round-boundary usage into the live snapshot so the composer's
         // IN/CACHE chips update before chat:done. OpenAI-style prompt_tokens
         // already includes cached tokens (inclusive).
-        perf.note_round_usage(round_usage.input, round_usage.cache_read, round_usage.cache_creation, true);
+        perf.note_round_usage(
+            round_usage.input,
+            round_usage.cache_read,
+            round_usage.cache_creation,
+            true,
+        );
         total.add(round_usage);
 
         let tool_calls = message
@@ -1214,7 +1234,10 @@ pub(crate) async fn run_openai_tool_loop(
         // shape the loop below already handles, so the tools actually run.
         let mut hermes_recovered = false;
         let tool_calls: Vec<Value> = if tool_calls.is_empty() {
-            let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            let content = message
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
             match parse_hermes_tool_calls(content) {
                 Some(parsed) if !parsed.is_empty() => {
                     hermes_recovered = true;
@@ -1268,16 +1291,10 @@ pub(crate) async fn run_openai_tool_loop(
                     }
                 }
             }
-            if let Some(arr) = echoed
-                .get_mut("tool_calls")
-                .and_then(|t| t.as_array_mut())
-            {
+            if let Some(arr) = echoed.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
                 for tc in arr.iter_mut() {
                     if let Some(a) = tc.get_mut("function").and_then(|f| f.get_mut("arguments")) {
-                        let cleaned = a
-                            .as_str()
-                            .map(parse_tool_args)
-                            .unwrap_or_else(|| json!({}));
+                        let cleaned = a.as_str().map(parse_tool_args).unwrap_or_else(|| json!({}));
                         *a = json!(cleaned.to_string());
                     }
                 }
@@ -1292,11 +1309,19 @@ pub(crate) async fn run_openai_tool_loop(
             let mut deferred: Vec<Option<tokio::task::JoinHandle<String>>> =
                 (0..tool_calls.len()).map(|_| None).collect();
             for (idx, tc) in tool_calls.iter().enumerate() {
-                let name = tc.get("function").and_then(|f| f.get("name")).and_then(|x| x.as_str()).unwrap_or("");
+                let name = tc
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
                 if name != tools::TASK {
                     continue;
                 }
-                let args_str = tc.get("function").and_then(|f| f.get("arguments")).and_then(|x| x.as_str()).unwrap_or("{}");
+                let args_str = tc
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("{}");
                 let args = parse_tool_args(args_str);
                 let block = tool_block(&name, &args);
                 let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
@@ -1315,7 +1340,11 @@ pub(crate) async fn run_openai_tool_loop(
                 ));
             }
             for (idx, tc) in tool_calls.iter().enumerate() {
-                let id = tc.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let id = tc
+                    .get("id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let name = tc
                     .get("function")
                     .and_then(|f| f.get("name"))
@@ -1351,7 +1380,11 @@ pub(crate) async fn run_openai_tool_loop(
                         .await
                         .unwrap_or_else(|e| format!("Error: subagent task failed: {e}"))
                 } else {
-                    run_tool(client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name, &args).await
+                    run_tool(
+                        client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name,
+                        &args,
+                    )
+                    .await
                 };
                 perf.end_tool();
                 let block = tool_block(&name, &args);
@@ -1388,7 +1421,9 @@ pub(crate) async fn run_openai_tool_loop(
                 eprintln!(
                     "[prompt-audit] late-attach: specs now {} ({} chars JSON)",
                     tool_specs.len(),
-                    serde_json::to_string(&tool_specs).map(|s| s.len()).unwrap_or(0)
+                    serde_json::to_string(&tool_specs)
+                        .map(|s| s.len())
+                        .unwrap_or(0)
                 );
             }
             continue;
@@ -1462,7 +1497,7 @@ fn build_anthropic_body(req: &ChatRequest, messages: &[Value], tool_specs: &[Val
     if req.thinking == Some(true) {
         body["thinking"] = json!({
             "type": "enabled",
-            "budget_tokens": (max_tokens - 1024).clamp(1024, max_tokens - 1),
+            "budget_tokens": crate::chat::providers::anthropic_thinking_budget(max_tokens),
         });
     }
     body
@@ -1494,11 +1529,7 @@ pub(crate) async fn run_anthropic_tool_loop(
         MAX_TOOL_ITERS
     };
 
-    let mut messages: Vec<Value> = req
-        .messages
-        .iter()
-        .map(anthropic_message_json)
-        .collect();
+    let mut messages: Vec<Value> = req.messages.iter().map(anthropic_message_json).collect();
     // Per-turn local-docs auto-retrieval (§3.1.7): appended as the LAST
     // message, next to the turn's question — see the OpenAI loop for why
     // appending (not injecting at the head) keeps prefix caching intact.
@@ -1530,28 +1561,25 @@ pub(crate) async fn run_anthropic_tool_loop(
         // is a substring match, so a mid-stream provider error mentioning
         // those words must not re-run the round and duplicate the text.
         let full_len_before = full.len();
-        let (content, round_usage) = match anthropic_stream_round(
-            client,
-            &url,
-            api_key,
-            &body,
-            app,
-            sid,
-            &mut full,
-        )
-        .await
-        {
-            Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
-                cache::strip_cache_control(&mut body);
-                anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?
-            }
-            other => other?,
-        };
+        let (content, round_usage) =
+            match anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await {
+                Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
+                    cache::strip_cache_control(&mut body);
+                    anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full)
+                        .await?
+                }
+                other => other?,
+            };
         perf.end_gen();
         // Fold round-boundary usage into the live snapshot so the composer's
         // IN/CACHE chips update before chat:done. Anthropic's input_tokens is
         // the uncached portion (cache fields billed separately — exclusive).
-        perf.note_round_usage(round_usage.input, round_usage.cache_read, round_usage.cache_creation, false);
+        perf.note_round_usage(
+            round_usage.input,
+            round_usage.cache_read,
+            round_usage.cache_creation,
+            false,
+        );
         total.add(round_usage);
 
         let tool_uses: Vec<&Value> = content
@@ -1590,8 +1618,16 @@ pub(crate) async fn run_anthropic_tool_loop(
                 ));
             }
             for (idx, tu) in tool_uses.iter().enumerate() {
-                let id = tu.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let name = tu.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let id = tu
+                    .get("id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = tu
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
 
                 if is_live_web_tool(&name) {
@@ -1611,7 +1647,11 @@ pub(crate) async fn run_anthropic_tool_loop(
                         .await
                         .unwrap_or_else(|e| format!("Error: subagent task failed: {e}"))
                 } else {
-                    run_tool(client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name, &args).await
+                    run_tool(
+                        client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name,
+                        &args,
+                    )
+                    .await
                 };
                 perf.end_tool();
                 let block = tool_block(&name, &args);
@@ -1794,9 +1834,21 @@ mod tests {
     #[test]
     fn last_user_text_picks_the_newest_user_turn() {
         let msgs = vec![
-            ChatMessage { role: "user".into(), content: "first question".into(), images: vec![] },
-            ChatMessage { role: "assistant".into(), content: "answer".into(), images: vec![] },
-            ChatMessage { role: "user".into(), content: "latest news?".into(), images: vec![] },
+            ChatMessage {
+                role: "user".into(),
+                content: "first question".into(),
+                images: vec![],
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "answer".into(),
+                images: vec![],
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "latest news?".into(),
+                images: vec![],
+            },
         ];
         assert_eq!(last_user_text(&msgs), "latest news?");
     }
@@ -1883,10 +1935,10 @@ mod tests {
         assert!(cache::is_cache_rejection(
             "HTTP 400: `ephemeral` is not a valid cache type"
         ));
+        assert!(!cache::is_cache_rejection("HTTP 429: rate limited"));
         assert!(!cache::is_cache_rejection(
-            "HTTP 429: rate limited"
+            "request failed: connection reset"
         ));
-        assert!(!cache::is_cache_rejection("request failed: connection reset"));
     }
 
     fn openai_turn_messages() -> Vec<Value> {
@@ -1907,19 +1959,31 @@ mod tests {
         elide_stale_tool_results(&mut messages, true);
 
         // 5 tool messages → the 2 oldest elide, the newest 3 stay verbatim.
-        let tools: Vec<&Value> = messages
-            .iter()
-            .filter(|m| m["role"] == "tool")
-            .collect();
+        let tools: Vec<&Value> = messages.iter().filter(|m| m["role"] == "tool").collect();
         assert_eq!(tools.len(), 5);
         for (i, m) in tools.iter().enumerate() {
             let content = m["content"].as_str().unwrap();
             if i < 2 {
-                assert!(content.starts_with(ELISION_MARKER), "tool {i} should be elided");
-                assert!(content.contains(&format!("original {} chars", 1000 + format!("result number {i} — ").len())), "stub carries the original size: {content}");
-                assert!(content.contains(&format!("result number {i}")), "stub keeps the head: {content}");
+                assert!(
+                    content.starts_with(ELISION_MARKER),
+                    "tool {i} should be elided"
+                );
+                assert!(
+                    content.contains(&format!(
+                        "original {} chars",
+                        1000 + format!("result number {i} — ").len()
+                    )),
+                    "stub carries the original size: {content}"
+                );
+                assert!(
+                    content.contains(&format!("result number {i}")),
+                    "stub keeps the head: {content}"
+                );
             } else {
-                assert!(content.starts_with("result number"), "tool {i} must stay verbatim: {content}");
+                assert!(
+                    content.starts_with("result number"),
+                    "tool {i} must stay verbatim: {content}"
+                );
                 assert!(content.contains("xxx"), "verbatim result keeps its body");
             }
         }
@@ -1974,10 +2038,19 @@ mod tests {
         for (i, b) in results.iter().enumerate() {
             let content = b["content"].as_str().unwrap();
             if i < 2 {
-                assert!(content.starts_with(ELISION_MARKER), "result {i} should be elided");
-                assert!(content.contains(&format!("file body {i}")), "stub keeps the head");
+                assert!(
+                    content.starts_with(ELISION_MARKER),
+                    "result {i} should be elided"
+                );
+                assert!(
+                    content.contains(&format!("file body {i}")),
+                    "stub keeps the head"
+                );
             } else {
-                assert!(content.starts_with("file body"), "result {i} must stay verbatim");
+                assert!(
+                    content.starts_with("file body"),
+                    "result {i} must stay verbatim"
+                );
             }
         }
         // Assistant tool_use echoes are never touched.
@@ -2069,7 +2142,10 @@ mod tests {
         let flat = serde_json::to_string(&marked).unwrap();
         // No system message to mark; the single message still gets the
         // newest-message breakpoint.
-        assert_eq!(marked["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            marked["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
         assert!(!flat.contains("\"role\":\"system\""));
     }
 

@@ -29,7 +29,10 @@ pub const REFS_PREFIX: &str = "refs/relay/checkpoints";
 /// (snapshots, baselines, restores). Anything else (or missing) = enabled.
 fn enabled(conn: &Connection) -> bool {
     !matches!(
-        db::get_setting(conn, "checkpoints.enabled").ok().flatten().as_deref(),
+        db::get_setting(conn, "checkpoints.enabled")
+            .ok()
+            .flatten()
+            .as_deref(),
         Some("false")
     )
 }
@@ -63,7 +66,10 @@ fn create_checkpoint(
     let files_json = serde_json::to_string(
         &files
             .iter()
-            .map(|f| crate::types::CheckpointFile { path: f.path.clone(), status: f.status.clone() })
+            .map(|f| crate::types::CheckpointFile {
+                path: f.path.clone(),
+                status: f.status.clone(),
+            })
             .collect::<Vec<_>>(),
     )
     .unwrap_or_else(|_| "[]".to_string());
@@ -184,7 +190,9 @@ pub fn after_turn(
     message_id: Option<i64>,
     dir: &Path,
 ) {
-    let Some(dir) = checkpointable(conn, dir) else { return };
+    let Some(dir) = checkpointable(conn, dir) else {
+        return;
+    };
     let snap = match git::snapshot_working_tree(&dir) {
         Ok(s) => s,
         Err(e) => {
@@ -340,7 +348,10 @@ mod tests {
         assert_eq!(all.len(), 1, "baseline checkpoint recorded");
         assert!(all[0].message_id.is_none());
         assert!(
-            all[0].files.iter().any(|f| f.path == "seed.txt" && f.status == "A"),
+            all[0]
+                .files
+                .iter()
+                .any(|f| f.path == "seed.txt" && f.status == "A"),
             "baseline lists the working tree vs empty tree: {:?}",
             all[0].files
         );
@@ -396,10 +407,46 @@ mod tests {
     fn rollback_messages_keeps_checkpointed_turn_and_wipes_on_baseline() {
         let conn = db::mem();
         let cs = chat_db::create_chat_session(&conn, "anthropic", "m", None).unwrap();
-        let m1 = db::add_chat_message(&conn, &cs.id, "user", "hi", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
-        let m2 = db::add_chat_message(&conn, &cs.id, "assistant", "hello", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
-        let m3 = db::add_chat_message(&conn, &cs.id, "user", "do it", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
-        let m4 = db::add_chat_message(&conn, &cs.id, "assistant", "done", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let m1 = db::add_chat_message(
+            &conn,
+            db::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "user",
+                content: "hi",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let m2 = db::add_chat_message(
+            &conn,
+            db::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "hello",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let m3 = db::add_chat_message(
+            &conn,
+            db::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "user",
+                content: "do it",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let m4 = db::add_chat_message(
+            &conn,
+            db::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "done",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Post-turn checkpoint following m2: rollback keeps m1+m2, drops m3+m4.
         let ckpt = ChatCheckpoint {
@@ -419,7 +466,10 @@ mod tests {
         assert_eq!(rest[1].id, m2.id);
 
         // Baseline checkpoint (message_id None): whole conversation wiped.
-        let baseline = ChatCheckpoint { message_id: None, ..ckpt };
+        let baseline = ChatCheckpoint {
+            message_id: None,
+            ..ckpt
+        };
         assert_eq!(rollback_conversation(&conn, &baseline).unwrap(), 2);
         assert!(db::list_chat_messages(&conn, &cs.id).unwrap().is_empty());
     }
@@ -451,7 +501,13 @@ mod tests {
         assert_eq!(target, path.to_path_buf());
 
         // After a baseline exists: not eligible anymore.
-        insert_baseline(None, &conn, &cs.id, path, git::snapshot_working_tree(path).unwrap());
+        insert_baseline(
+            None,
+            &conn,
+            &cs.id,
+            path,
+            git::snapshot_working_tree(path).unwrap(),
+        );
         assert!(
             baseline_target(&conn, &cs.id).is_none(),
             "existing checkpoint must gate the baseline"

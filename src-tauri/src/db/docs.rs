@@ -93,8 +93,14 @@ pub fn set_corpus_enabled(conn: &Connection, corpus_id: &str, enabled: bool) -> 
 
 /// Remove a corpus and everything it indexed.
 pub fn remove_corpus(conn: &Connection, corpus_id: &str) -> DbResult<()> {
-    conn.execute("DELETE FROM doc_chunks WHERE corpus_id = ?1", params![corpus_id])?;
-    conn.execute("DELETE FROM doc_files WHERE corpus_id = ?1", params![corpus_id])?;
+    conn.execute(
+        "DELETE FROM doc_chunks WHERE corpus_id = ?1",
+        params![corpus_id],
+    )?;
+    conn.execute(
+        "DELETE FROM doc_files WHERE corpus_id = ?1",
+        params![corpus_id],
+    )?;
     conn.execute("DELETE FROM doc_corpora WHERE id = ?1", params![corpus_id])?;
     Ok(())
 }
@@ -130,10 +136,10 @@ pub fn any_searchable_corpus(conn: &Connection) -> bool {
 
 /// (mtime, size) per indexed file.
 pub fn list_indexed_files(conn: &Connection, corpus_id: &str) -> DbResult<Vec<(String, i64, i64)>> {
-    let mut stmt = conn.prepare(
-        "SELECT path, mtime, size FROM doc_files WHERE corpus_id = ?1",
-    )?;
-    let rows = stmt.query_map(params![corpus_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    let mut stmt = conn.prepare("SELECT path, mtime, size FROM doc_files WHERE corpus_id = ?1")?;
+    let rows = stmt.query_map(params![corpus_id], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })?;
     rows.collect()
 }
 
@@ -160,8 +166,14 @@ pub fn delete_indexed_files_not_in(
     // Chunk rows for vanished files must go too, or they'd keep matching
     // searches forever.
     if keep_paths.is_empty() {
-        conn.execute("DELETE FROM doc_chunks WHERE corpus_id = ?1", params![corpus_id])?;
-        conn.execute("DELETE FROM doc_files WHERE corpus_id = ?1", params![corpus_id])?;
+        conn.execute(
+            "DELETE FROM doc_chunks WHERE corpus_id = ?1",
+            params![corpus_id],
+        )?;
+        conn.execute(
+            "DELETE FROM doc_files WHERE corpus_id = ?1",
+            params![corpus_id],
+        )?;
         return Ok(());
     }
     // Per-row delete against the keep-set — the PK index makes this fast even
@@ -207,7 +219,14 @@ pub fn replace_file_chunks(
         tx.execute(
             "INSERT INTO doc_chunks (corpus_id, path, chunk_index, kind, content, embedding)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![corpus_id, path, i as i64, kind, content, f32_slice_to_blob(embedding)],
+            params![
+                corpus_id,
+                path,
+                i as i64,
+                kind,
+                content,
+                f32_slice_to_blob(embedding)
+            ],
         )?;
     }
     tx.commit()?;
@@ -259,11 +278,7 @@ pub struct ChunkHit {
 /// Brute-force cosine top-k over all enabled corpora. Loads every chunk blob
 /// for those corpora — fine at folder scale; revisit with an ANN index if a
 /// user ever indexes hundreds of thousands of chunks.
-pub fn search_chunks(
-    conn: &Connection,
-    query: &[f32],
-    top_k: usize,
-) -> DbResult<Vec<ChunkHit>> {
+pub fn search_chunks(conn: &Connection, query: &[f32], top_k: usize) -> DbResult<Vec<ChunkHit>> {
     let mut stmt = conn.prepare(
         "SELECT c.corpus_id, c.path, c.kind, c.content, c.embedding
            FROM doc_chunks c
@@ -297,9 +312,19 @@ pub fn search_chunks(
         }
         let dot = query.iter().zip(v.iter()).map(|(a, b)| a * b).sum::<f32>();
         let score = dot / (qnorm * vnorm);
-        hits.push(ChunkHit { corpus_id, path, kind, content, score });
+        hits.push(ChunkHit {
+            corpus_id,
+            path,
+            kind,
+            content,
+            score,
+        });
     }
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(top_k);
     Ok(hits)
 }
@@ -344,16 +369,30 @@ pub fn search_chunks_in_corpus(
         }
         let dot = query.iter().zip(v.iter()).map(|(a, b)| a * b).sum::<f32>();
         let score = dot / (qnorm * vnorm);
-        hits.push(ChunkHit { corpus_id, path, kind, content, score });
+        hits.push(ChunkHit {
+            corpus_id,
+            path,
+            kind,
+            content,
+            score,
+        });
     }
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(top_k);
     Ok(hits)
 }
 
 /// Pin a corpus to a chat session so its documents are always in the
 /// auto-retrieval context for that chat (§3.1.7).
-pub fn attach_corpus_to_chat(conn: &Connection, chat_session_id: &str, corpus_id: &str) -> DbResult<()> {
+pub fn attach_corpus_to_chat(
+    conn: &Connection,
+    chat_session_id: &str,
+    corpus_id: &str,
+) -> DbResult<()> {
     conn.execute(
         "INSERT OR IGNORE INTO chat_documents (chat_session_id, corpus_id, attached_at)
          VALUES (?1, ?2, ?3)",
@@ -363,7 +402,11 @@ pub fn attach_corpus_to_chat(conn: &Connection, chat_session_id: &str, corpus_id
 }
 
 /// Remove a corpus from a chat's pinned set. No-op when absent.
-pub fn detach_corpus_from_chat(conn: &Connection, chat_session_id: &str, corpus_id: &str) -> DbResult<()> {
+pub fn detach_corpus_from_chat(
+    conn: &Connection,
+    chat_session_id: &str,
+    corpus_id: &str,
+) -> DbResult<()> {
     conn.execute(
         "DELETE FROM chat_documents WHERE chat_session_id = ?1 AND corpus_id = ?2",
         rusqlite::params![chat_session_id, corpus_id],
@@ -431,7 +474,14 @@ mod tests {
         let wrong_dims = vec![1.0f32; 8];
         replace_file_chunks(&conn, &c.id, "a.md", "text", &[("near".into(), near)]).unwrap();
         replace_file_chunks(&conn, &c.id, "b.md", "text", &[("far".into(), far)]).unwrap();
-        replace_file_chunks(&conn, &c.id, "c.md", "text", &[("wrong".into(), wrong_dims)]).unwrap();
+        replace_file_chunks(
+            &conn,
+            &c.id,
+            "c.md",
+            "text",
+            &[("wrong".into(), wrong_dims)],
+        )
+        .unwrap();
 
         let hits = search_chunks(&conn, &[1.0, 0.0, 0.0], 5).unwrap();
         assert_eq!(hits.len(), 2, "dimension-mismatched chunk skipped");
@@ -445,7 +495,9 @@ mod tests {
 
         // Disabled corpora drop out of search entirely.
         set_corpus_enabled(&conn, &c.id, false).unwrap();
-        assert!(search_chunks(&conn, &[1.0, 0.0, 0.0], 5).unwrap().is_empty());
+        assert!(search_chunks(&conn, &[1.0, 0.0, 0.0], 5)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -460,7 +512,11 @@ mod tests {
         let files = list_indexed_files(&conn, &c.id).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].0, "keep.md");
-        assert_eq!(count_chunks(&conn, &c.id).unwrap(), 0, "gone file's chunks deleted");
+        assert_eq!(
+            count_chunks(&conn, &c.id).unwrap(),
+            0,
+            "gone file's chunks deleted"
+        );
 
         // Empty keep-list wipes the corpus cleanly.
         upsert_indexed_file(&conn, &c.id, "keep.md", 2, 11).unwrap();
@@ -473,7 +529,14 @@ mod tests {
         let conn = mem();
         let c = add_corpus(&conn, "D:/docs", "docs").unwrap();
         replace_file_chunks(&conn, &c.id, "a.md", "text", &[("v1".into(), vec![1.0])]).unwrap();
-        replace_file_chunks(&conn, &c.id, "a.md", "text", &[("v2a".into(), vec![1.0]), ("v2b".into(), vec![0.0])]).unwrap();
+        replace_file_chunks(
+            &conn,
+            &c.id,
+            "a.md",
+            "text",
+            &[("v2a".into(), vec![1.0]), ("v2b".into(), vec![0.0])],
+        )
+        .unwrap();
         assert_eq!(count_chunks(&conn, &c.id).unwrap(), 2);
     }
 
@@ -486,7 +549,10 @@ mod tests {
         assert!(attached_corpus_ids(&conn, "s1").unwrap().is_empty());
 
         attach_corpus_to_chat(&conn, "s1", &c.id).unwrap();
-        assert_eq!(attached_corpus_ids(&conn, "s1").unwrap(), vec![c.id.clone()]);
+        assert_eq!(
+            attached_corpus_ids(&conn, "s1").unwrap(),
+            vec![c.id.clone()]
+        );
 
         // Idempotent re-attach.
         attach_corpus_to_chat(&conn, "s1", &c.id).unwrap();
@@ -511,8 +577,22 @@ mod tests {
         let b = add_corpus(&conn, "D:/corp-b", "b").unwrap();
         let query_vec = vec![1.0f32, 0.0, 0.0];
 
-        replace_file_chunks(&conn, &a.id, "a1.md", "text", &[("in a".into(), query_vec.clone())]).unwrap();
-        replace_file_chunks(&conn, &b.id, "b1.md", "text", &[("in b".into(), query_vec.clone())]).unwrap();
+        replace_file_chunks(
+            &conn,
+            &a.id,
+            "a1.md",
+            "text",
+            &[("in a".into(), query_vec.clone())],
+        )
+        .unwrap();
+        replace_file_chunks(
+            &conn,
+            &b.id,
+            "b1.md",
+            "text",
+            &[("in b".into(), query_vec.clone())],
+        )
+        .unwrap();
 
         // Scoped search returns only that corpus.
         let hits_a = search_chunks_in_corpus(&conn, &query_vec, &a.id, 5).unwrap();

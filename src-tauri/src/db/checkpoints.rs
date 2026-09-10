@@ -8,8 +8,8 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::types::*;
 use super::{now_ts, DbResult};
+use crate::types::*;
 
 fn map_checkpoint(row: &rusqlite::Row) -> rusqlite::Result<ChatCheckpoint> {
     let files_json: String = row.get("files")?;
@@ -41,7 +41,14 @@ pub fn insert_checkpoint(
         "INSERT INTO chat_checkpoints
             (chat_session_id, message_id, ref, tree_sha, repo_path, files, created_at)
          VALUES (?1, ?2, '', ?3, ?4, ?5, ?6)",
-        params![chat_session_id, message_id, tree_sha, repo_path, files_json, now_ts()],
+        params![
+            chat_session_id,
+            message_id,
+            tree_sha,
+            repo_path,
+            files_json,
+            now_ts()
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -60,9 +67,8 @@ pub fn list_chat_checkpoints(
     conn: &Connection,
     chat_session_id: &str,
 ) -> DbResult<Vec<ChatCheckpoint>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM chat_checkpoints WHERE chat_session_id = ?1 ORDER BY id ASC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM chat_checkpoints WHERE chat_session_id = ?1 ORDER BY id ASC")?;
     let rows = stmt.query_map(params![chat_session_id], map_checkpoint)?;
     rows.collect()
 }
@@ -141,7 +147,10 @@ mod tests {
     fn files_json(entries: &[(&str, &str)]) -> String {
         serde_json::json!(entries
             .iter()
-            .map(|(path, status)| CheckpointFile { path: path.to_string(), status: status.to_string() })
+            .map(|(path, status)| CheckpointFile {
+                path: path.to_string(),
+                status: status.to_string()
+            })
             .collect::<Vec<_>>())
         .to_string()
     }
@@ -157,8 +166,15 @@ mod tests {
         // Baseline (no message), then post-turn (message 7).
         let id1 = insert_checkpoint(&conn, &cs.id, None, "tree1", "D:/repo", "[]").unwrap();
         set_checkpoint_ref(&conn, id1, "refs/relay/checkpoints/s/1").unwrap();
-        let id2 = insert_checkpoint(&conn, &cs.id, Some(7), "tree2", "D:/repo", &files_json(&[("a.rs", "M"), ("b.txt", "A")]))
-            .unwrap();
+        let id2 = insert_checkpoint(
+            &conn,
+            &cs.id,
+            Some(7),
+            "tree2",
+            "D:/repo",
+            &files_json(&[("a.rs", "M"), ("b.txt", "A")]),
+        )
+        .unwrap();
         set_checkpoint_ref(&conn, id2, "refs/relay/checkpoints/s/2").unwrap();
 
         let all = list_chat_checkpoints(&conn, &cs.id).unwrap();
@@ -175,17 +191,26 @@ mod tests {
         assert_eq!(latest.id, id2);
         assert_eq!(latest.tree_sha, "tree2");
 
-        assert_eq!(get_checkpoint(&conn, id1).unwrap().unwrap().tree_sha, "tree1");
+        assert_eq!(
+            get_checkpoint(&conn, id1).unwrap().unwrap().tree_sha,
+            "tree1"
+        );
         assert!(get_checkpoint(&conn, 9999).unwrap().is_none());
 
         // Ref paths for delete-time pruning.
         let refs = checkpoint_ref_paths(&conn, &cs.id).unwrap();
         assert_eq!(refs.len(), 2);
-        assert!(refs.contains(&("refs/relay/checkpoints/s/2".to_string(), "D:/repo".to_string())));
+        assert!(refs.contains(&(
+            "refs/relay/checkpoints/s/2".to_string(),
+            "D:/repo".to_string()
+        )));
 
         // Corrupt JSON files column degrades to empty, never panics.
-        conn.execute("UPDATE chat_checkpoints SET files = 'not json' WHERE id = ?1", rusqlite::params![id2])
-            .unwrap();
+        conn.execute(
+            "UPDATE chat_checkpoints SET files = 'not json' WHERE id = ?1",
+            rusqlite::params![id2],
+        )
+        .unwrap();
         let reloaded = get_checkpoint(&conn, id2).unwrap().unwrap();
         assert!(reloaded.files.is_empty());
     }
@@ -246,7 +271,10 @@ mod tests {
             rusqlite::params![blank.id],
         )
         .unwrap();
-        assert_eq!(chat_session_repo_path(&conn, &blank.id).as_deref(), Some("D:/proj"));
+        assert_eq!(
+            chat_session_repo_path(&conn, &blank.id).as_deref(),
+            Some("D:/proj")
+        );
         // Unbound chats still resolve to None.
         let loose = chat::create_chat_session(&conn, "anthropic", "m", None).unwrap();
         assert!(chat_session_repo_path(&conn, &loose.id).is_none());

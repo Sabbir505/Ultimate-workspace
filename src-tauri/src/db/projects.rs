@@ -7,8 +7,8 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::types::*;
 use super::{new_id, now_ts, DbResult};
+use crate::types::*;
 
 fn map_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
     Ok(Project {
@@ -23,15 +23,19 @@ fn map_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
 
 /// Ordered by lastOpenedAt desc, NULLs last (CONTRACT.md).
 pub fn list_projects(conn: &Connection) -> DbResult<Vec<Project>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM projects ORDER BY last_opened_at IS NULL, last_opened_at DESC",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT * FROM projects ORDER BY last_opened_at IS NULL, last_opened_at DESC")?;
     let rows = stmt.query_map([], map_project)?;
     rows.collect()
 }
 
 /// Insert-or-return-existing on the UNIQUE path; always bumps last_opened_at.
-pub fn add_project(conn: &Connection, path: &str, name: &str, is_git_repo: bool) -> DbResult<Project> {
+pub fn add_project(
+    conn: &Connection,
+    path: &str,
+    name: &str,
+    is_git_repo: bool,
+) -> DbResult<Project> {
     let now = now_ts();
     conn.execute(
         "INSERT INTO projects (id, path, name, is_git_repo, created_at, last_opened_at)
@@ -39,7 +43,11 @@ pub fn add_project(conn: &Connection, path: &str, name: &str, is_git_repo: bool)
          ON CONFLICT(path) DO UPDATE SET last_opened_at = ?5",
         params![new_id(), path, name, is_git_repo, now],
     )?;
-    conn.query_row("SELECT * FROM projects WHERE path = ?1", params![path], map_project)
+    conn.query_row(
+        "SELECT * FROM projects WHERE path = ?1",
+        params![path],
+        map_project,
+    )
 }
 
 /// Also removes the project's sessions, their cost events, quick actions,
@@ -57,10 +65,22 @@ pub fn remove_project(conn: &Connection, project_id: &str) -> DbResult<()> {
         "DELETE FROM cost_events WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?1)",
         params![project_id],
     )?;
-    tx.execute("DELETE FROM sessions WHERE project_id = ?1", params![project_id])?;
-    tx.execute("DELETE FROM quick_actions WHERE project_id = ?1", params![project_id])?;
-    tx.execute("DELETE FROM project_secrets WHERE project_id = ?1", params![project_id])?;
-    tx.execute("DELETE FROM workspaces WHERE project_id = ?1", params![project_id])?;
+    tx.execute(
+        "DELETE FROM sessions WHERE project_id = ?1",
+        params![project_id],
+    )?;
+    tx.execute(
+        "DELETE FROM quick_actions WHERE project_id = ?1",
+        params![project_id],
+    )?;
+    tx.execute(
+        "DELETE FROM project_secrets WHERE project_id = ?1",
+        params![project_id],
+    )?;
+    tx.execute(
+        "DELETE FROM workspaces WHERE project_id = ?1",
+        params![project_id],
+    )?;
     // Chat messages cascade off chat_sessions via FK ON DELETE CASCADE.
     super::chat::delete_chat_sessions_for_project(&tx, project_id)?;
     tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
@@ -120,15 +140,18 @@ pub fn list_sessions(conn: &Connection, project_id: Option<&str>) -> DbResult<Ve
             rows.collect()
         }
         None => {
-            let mut stmt =
-                conn.prepare("SELECT * FROM sessions ORDER BY last_active_at DESC")?;
+            let mut stmt = conn.prepare("SELECT * FROM sessions ORDER BY last_active_at DESC")?;
             let rows = stmt.query_map([], map_session)?;
             rows.collect()
         }
     }
 }
 
-pub fn create_session(conn: &Connection, project_id: &str, harness: &str) -> DbResult<SessionRecord> {
+pub fn create_session(
+    conn: &Connection,
+    project_id: &str,
+    harness: &str,
+) -> DbResult<SessionRecord> {
     let now = now_ts();
     let id = new_id();
     conn.execute(
@@ -136,7 +159,11 @@ pub fn create_session(conn: &Connection, project_id: &str, harness: &str) -> DbR
          VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, ?4, 'idle')",
         params![id, project_id, harness, now],
     )?;
-    conn.query_row("SELECT * FROM sessions WHERE id = ?1", params![id], map_session)
+    conn.query_row(
+        "SELECT * FROM sessions WHERE id = ?1",
+        params![id],
+        map_session,
+    )
 }
 
 pub fn get_session(conn: &Connection, session_id: &str) -> DbResult<Option<SessionRecord>> {
@@ -199,9 +226,9 @@ pub fn set_session_harness_id(
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
-    use crate::harness_adapters::UsageInfo;
     use super::*;
+    use crate::harness_adapters::UsageInfo;
+    use rusqlite::Connection;
 
     #[test]
     fn project_round_trip_and_upsert() {
@@ -226,9 +253,12 @@ mod tests {
             &UsageInfo {
                 input_tokens: Some(1),
                 output_tokens: None,
-                cost_usd: Some(0.01), ..Default::default()
+                cost_usd: Some(0.01),
+                ..Default::default()
             },
-            "claude_code", "pty", Some(0.01),
+            "claude_code",
+            "pty",
+            Some(0.01),
         )
         .unwrap();
         super::super::create_quick_action(&conn, &p.id, "dev", "npm run dev", None, false).unwrap();
@@ -237,9 +267,15 @@ mod tests {
         remove_project(&conn, &p.id).unwrap();
         assert!(list_projects(&conn).unwrap().is_empty());
         assert!(list_sessions(&conn, None).unwrap().is_empty());
-        assert!(super::super::get_cost_events(&conn, None, None, None).unwrap().is_empty());
-        assert!(super::super::list_quick_actions(&conn, &p.id).unwrap().is_empty());
-        assert!(super::super::list_secret_keys(&conn, &p.id).unwrap().is_empty());
+        assert!(super::super::get_cost_events(&conn, None, None, None)
+            .unwrap()
+            .is_empty());
+        assert!(super::super::list_quick_actions(&conn, &p.id)
+            .unwrap()
+            .is_empty());
+        assert!(super::super::list_secret_keys(&conn, &p.id)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -257,9 +293,12 @@ mod tests {
             &UsageInfo {
                 input_tokens: Some(1),
                 output_tokens: None,
-                cost_usd: Some(0.01), ..Default::default()
+                cost_usd: Some(0.01),
+                ..Default::default()
             },
-            "claude_code", "pty", Some(0.01),
+            "claude_code",
+            "pty",
+            Some(0.01),
         )
         .unwrap();
         super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", Some(&p.id))
@@ -274,8 +313,14 @@ mod tests {
         );
 
         // The transaction rolled back: NOTHING was deleted.
-        assert!(get_project(&conn, &p.id).unwrap().is_some(), "project must survive");
-        assert!(get_session(&conn, &s.id).unwrap().is_some(), "sessions must survive");
+        assert!(
+            get_project(&conn, &p.id).unwrap().is_some(),
+            "project must survive"
+        );
+        assert!(
+            get_session(&conn, &s.id).unwrap().is_some(),
+            "sessions must survive"
+        );
         assert!(
             !super::super::get_cost_events(&conn, None, None, None)
                 .unwrap()

@@ -74,9 +74,10 @@ pub fn register(session_id: &str, perf: TurnPerf) -> TurnPerf {
         loop {
             interval.tick().await;
             let still_active = {
-                ACTIVE.lock().get(&sid).is_some_and(|p| {
-                    Arc::ptr_eq(&p.inner, &heartbeat.inner)
-                })
+                ACTIVE
+                    .lock()
+                    .get(&sid)
+                    .is_some_and(|p| Arc::ptr_eq(&p.inner, &heartbeat.inner))
             };
             if !still_active {
                 break;
@@ -140,7 +141,12 @@ pub fn note_active_round_usage(
     input_includes_cache: bool,
 ) {
     if let Some(p) = ACTIVE.lock().get(session_id) {
-        p.note_round_usage(input_tokens, cache_read, cache_creation, input_includes_cache);
+        p.note_round_usage(
+            input_tokens,
+            cache_read,
+            cache_creation,
+            input_includes_cache,
+        );
     }
 }
 
@@ -181,7 +187,11 @@ pub fn active_harness_final(
     p.close_open_windows();
     let g = p.inner.lock();
     let tok_s = output_tokens.and_then(|o| tokens_per_second(o, g.decode_ms));
-    (g.ttft_ms, tok_s, (g.llm_time_ms > 0).then_some(g.llm_time_ms))
+    (
+        g.ttft_ms,
+        tok_s,
+        (g.llm_time_ms > 0).then_some(g.llm_time_ms),
+    )
 }
 
 /// Read the session's active `TurnPerf` snapshot for a live `chat:perf`
@@ -506,12 +516,7 @@ impl TurnPerf {
         // `ru_input` is already the uncached slice (normalized at the fold),
         // so the exclusive total-prompt formula applies for both conventions.
         let cache_hit_rate = if g.ru_seen {
-            cache_hit_rate(
-                g.ru_cache_read,
-                g.ru_cache_creation,
-                g.ru_input,
-                false,
-            )
+            cache_hit_rate(g.ru_cache_read, g.ru_cache_creation, g.ru_input, false)
         } else {
             None
         };
@@ -723,8 +728,8 @@ mod tests {
         p.record_token();
         std::thread::sleep(std::time::Duration::from_millis(10));
         p.end_gen(); // round 1 decode ≈ 10ms
-        // A delta arriving BETWEEN rounds (window closed) — e.g. from a
-        // nested stream sharing the sid — must not anchor the next window.
+                     // A delta arriving BETWEEN rounds (window closed) — e.g. from a
+                     // nested stream sharing the sid — must not anchor the next window.
         p.record_stream_delta();
         p.begin_gen();
         std::thread::sleep(std::time::Duration::from_millis(30)); // prefill

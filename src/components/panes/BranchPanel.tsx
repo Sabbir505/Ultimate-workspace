@@ -7,7 +7,9 @@
 // without a manual reload. Branch switching lives in the branch dropdown
 // (git sidebar / composer pill) — this tab is a read-only view.
 import { useCallback, useEffect, useState } from "react";
-import { getGitLog, safeListen, type GitLogEntry } from "../../lib/ipc";
+import { getGitLog, type GitLogEntry } from "../../lib/ipc";
+import { useTauriEvent } from "../../hooks/useTauriEvent";
+import { pathUnderChanged } from "../../lib/paths";
 import { useProjectsStore } from "../../state/projects";
 import { useChatStore } from "../../state/chat";
 
@@ -83,24 +85,17 @@ export function BranchPanel() {
   useEffect(() => {
     setLoading(true);
     void fetchLog();
-    // Hold the listen() promise: if the component unmounts before it
-    // resolves, the real unlisten arrives AFTER cleanup ran — dropping it
-    // would leak the handler (and its closure) for the app's lifetime.
-    // Resolve it here and unsubscribe late (DevDiffPanel pattern).
-    const listenReady = safeListen<string>("project:fs-changed", (changedPath) => {
-      if (
-        path &&
-        (changedPath === path ||
-          changedPath.startsWith(path + "\\") ||
-          changedPath.startsWith(path + "/"))
-      ) {
-        void fetchLog();
-      }
-    });
-    return () => {
-      void listenReady.then((u) => u());
-    };
   }, [fetchLog, path]);
+
+  // Refresh on the FS watcher event so a `git checkout` typed in a terminal
+  // updates the panel without a manual reload.
+  useTauriEvent<string>(
+    "project:fs-changed",
+    (changedPath) => {
+      if (path && pathUnderChanged(path, changedPath)) void fetchLog();
+    },
+    [fetchLog, path],
+  );
 
   if (!project) {
     return (

@@ -129,6 +129,10 @@ pub struct ChatUsage {
 /// `<think>…</think>` for the frontend's collapsible thinking block.
 pub const REASONING_PREFIX: char = '\u{E000}';
 
+/// Anthropic wire API version sent as the `anthropic-version` header on
+/// every Messages-API request (streaming, one-shot, metering, model listing).
+pub(crate) const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+
 // ---- Provider trait ----
 
 #[async_trait::async_trait]
@@ -287,9 +291,19 @@ fn anthropic_thinking_for(req: &ChatRequest) -> (i64, Option<AnthropicThinking>)
     }
     let thinking = thinking_on.then(|| AnthropicThinking {
         kind: "enabled",
-        budget_tokens: tier_budget.unwrap_or_else(|| (max_tokens - 1024).clamp(1024, max_tokens - 1)),
+        budget_tokens: tier_budget.unwrap_or_else(|| anthropic_thinking_budget(max_tokens)),
     });
     (max_tokens, thinking)
+}
+
+/// The fallback thinking budget when no effort tier pins it: reserve ≥1024
+/// visible-answer tokens, keeping the budget itself in Anthropic's valid
+/// range (≥1024 and strictly below max_tokens). Used by BOTH the non-tool
+/// builder (`anthropic_thinking_for` above) and the streaming tool-loop body
+/// (streaming.rs `build_anthropic_body`) — the two must stay in lockstep or
+/// one path starts emitting API-rejected requests.
+pub(crate) fn anthropic_thinking_budget(max_tokens: i64) -> i64 {
+    (max_tokens - 1024).clamp(1024, max_tokens - 1)
 }
 
 /// Build the Anthropic `/v1/messages` streaming request. Both
@@ -344,7 +358,7 @@ fn anthropic_request(
     client
         .post(&url)
         .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-version", ANTHROPIC_API_VERSION)
         .header("content-type", "application/json")
         .json(&body)
 }
@@ -417,20 +431,7 @@ fn openai_wire_body(req: &ChatRequest, cache_marks: bool) -> OpenAIWireBody {
         }));
     }
     if cache_marks {
-        // System message → cached content-block array, and a breakpoint on
-        // the newest message — the same two marks the Anthropic loop sends
-        // natively (tools need no separate mark: Anthropic caches the whole
-        // prefix up to the system breakpoint, tools included).
-        if let Some(sys) = messages.first_mut() {
-            if sys.get("role").and_then(|r| r.as_str()) == Some("system") {
-                if let Some(serde_json::Value::String(text)) = sys.get_mut("content") {
-                    if !text.is_empty() {
-                        sys["content"] = crate::chat::cache::cached_system_block(text);
-                    }
-                }
-            }
-        }
-        crate::chat::cache::mark_last_message(&mut messages);
+        crate::chat::cache::apply_openai_cache_marks(&mut messages);
     }
     OpenAIWireBody {
         model: req.model.clone(),
@@ -438,9 +439,9 @@ fn openai_wire_body(req: &ChatRequest, cache_marks: bool) -> OpenAIWireBody {
         stream: true,
         max_tokens: openai_wire_max_tokens(req),
         reasoning_effort: req.effort.clone(),
-        chat_template_kwargs: req.thinking.map(|t| ChatTemplateKwargs {
-            enable_thinking: t,
-        }),
+        chat_template_kwargs: req
+            .thinking
+            .map(|t| ChatTemplateKwargs { enable_thinking: t }),
     }
 }
 
@@ -529,10 +530,7 @@ impl ChatProvider for AnthropicProvider {
                         }
                         if let Some(thinking) = delta.thinking {
                             if !thinking.is_empty() {
-                                return Ok((
-                                    Some(format!("{REASONING_PREFIX}{thinking}")),
-                                    false,
-                                ));
+                                return Ok((Some(format!("{REASONING_PREFIX}{thinking}")), false));
                             }
                         }
                     }
@@ -585,7 +583,9 @@ impl ChatProvider for AnthropicProvider {
         let mut first_input: Option<(i64, i64, i64)> = None; // (input, cache_creation, cache_read)
         let mut last_output: i64 = 0;
         for line in buf.lines() {
-            let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:"))
+            let Some(data) = line
+                .strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
             else {
                 continue;
             };
@@ -737,14 +737,9 @@ impl ChatProvider for OpenAIProvider {
                                 return Ok((Some(content), false));
                             }
                         }
-                        if let Some(reasoning) =
-                            delta.reasoning_content.or(delta.reasoning)
-                        {
+                        if let Some(reasoning) = delta.reasoning_content.or(delta.reasoning) {
                             if !reasoning.is_empty() {
-                                return Ok((
-                                    Some(format!("{REASONING_PREFIX}{reasoning}")),
-                                    false,
-                                ));
+                                return Ok((Some(format!("{REASONING_PREFIX}{reasoning}")), false));
                             }
                         }
                     }
@@ -965,8 +960,7 @@ impl ChatProvider for LocalGgufProvider {
         api_key: &str,
         base_url: Option<&str>,
     ) -> Result<reqwest::RequestBuilder, String> {
-        let base =
-            base_url.ok_or_else(|| "base_url is required for LocalGguf".to_string())?;
+        let base = base_url.ok_or_else(|| "base_url is required for LocalGguf".to_string())?;
         Ok(openai_request(client, req, api_key, base))
     }
 
@@ -1054,7 +1048,6 @@ mod tests {
         assert!(thinking.is_some());
     }
 
-
     // ---- Anthropic wire-body cache tests ----
 
     fn req_with(system: Option<String>) -> ChatRequest {
@@ -1137,15 +1130,15 @@ mod tests {
         let req = req_with(Some("You are Relay.".to_string()));
         // Marks OFF — the flag is the caller's decision (OpenRouter gating on
         // `anthropic/*`), so a non-marked body never carries the field.
-        let plain: serde_json::Value =
-            serde_json::to_value(openai_wire_body(&req, false)).unwrap();
-        assert!(!serde_json::to_string(&plain).unwrap().contains("cache_control"));
+        let plain: serde_json::Value = serde_json::to_value(openai_wire_body(&req, false)).unwrap();
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("cache_control"));
         assert!(plain["messages"][0]["content"].is_string());
 
         // Marks ON — system converted to a cached content-block array,
         // newest message marked, middle messages untouched strings.
-        let marked: serde_json::Value =
-            serde_json::to_value(openai_wire_body(&req, true)).unwrap();
+        let marked: serde_json::Value = serde_json::to_value(openai_wire_body(&req, true)).unwrap();
         let msgs = marked["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[0]["content"][0]["type"], "text");
@@ -1155,7 +1148,9 @@ mod tests {
         assert_eq!(msgs[3]["content"][0]["cache_control"]["type"], "ephemeral");
 
         // And the detector that gates the flag at the OpenRouter call site.
-        assert!(crate::chat::cache::openrouter_anthropic("anthropic/claude-sonnet-4.5"));
+        assert!(crate::chat::cache::openrouter_anthropic(
+            "anthropic/claude-sonnet-4.5"
+        ));
         assert!(!crate::chat::cache::openrouter_anthropic("openai/gpt-4o"));
     }
 
@@ -1176,6 +1171,83 @@ mod tests {
         let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
         assert_eq!(tok, Some("Hello".to_string()));
         assert!(!done);
+    }
+
+    #[test]
+    fn openai_parse_sse_delta_content_and_reasoning() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+
+        // Plain content delta.
+        let line = r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#;
+        let (tok, done) = provider.parse_sse_chunk(line, &mut buf).unwrap();
+        assert_eq!(tok, Some("Hi".to_string()));
+        assert!(!done);
+
+        // Reasoning models stream thinking under reasoning_content (or the
+        // `reasoning` alias) — prefixed so the stream runner wraps it in
+        // <think> for the collapsible reasoning block.
+        let line = r#"data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}"#;
+        let (tok, done) = provider.parse_sse_chunk(line, &mut buf).unwrap();
+        assert_eq!(tok, Some(format!("{REASONING_PREFIX}thinking")));
+        assert!(!done);
+
+        // Non-data lines parse to nothing.
+        let (tok, done) = provider.parse_sse_chunk("event: ping", &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(!done);
+    }
+
+    #[test]
+    fn openai_parse_sse_done_and_finish_reason() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+
+        let (tok, done) = provider.parse_sse_chunk("data: [DONE]", &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(done);
+
+        let (tok, done) = provider
+            .parse_sse_chunk(
+                r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                &mut buf,
+            )
+            .unwrap();
+        assert!(tok.is_none());
+        assert!(done);
+    }
+
+    #[test]
+    fn openai_parse_sse_error_event_is_fatal() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+        let err = provider
+            .parse_sse_chunk(
+                r#"data: {"error":{"message":"overloaded"}}"#,
+                &mut buf,
+            )
+            .unwrap_err();
+        assert!(err.contains("provider error: overloaded"), "{err}");
+    }
+
+    #[test]
+    fn openai_parse_usage_reads_last_usage_line() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+        // Only usage-bearing lines are retained in the buffer (mi24).
+        provider
+            .parse_sse_chunk(r#"data: {"choices":[{"delta":{"content":"a"}}]}"#, &mut buf)
+            .unwrap();
+        provider
+            .parse_sse_chunk(
+                r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50}}"#,
+                &mut buf,
+            )
+            .unwrap();
+        let usage = provider.parse_usage(&buf).expect("usage parsed");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert!(usage.cost_usd > 0.0);
     }
 
     #[test]

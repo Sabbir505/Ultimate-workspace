@@ -131,7 +131,10 @@ pub(crate) async fn browser_serp_search(
     let mgr = app.state::<crate::BrowserState>().0.clone();
 
     let sweep = async {
-        let ddg_url = format!("https://html.duckduckgo.com/html/?q={}", percent_encode_query(query));
+        let ddg_url = format!(
+            "https://html.duckduckgo.com/html/?q={}",
+            percent_encode_query(query)
+        );
 
         // Host the sweep: a throwaway tab in the open pane, or a fresh pane
         // (left open — see the module doc) when none exists.
@@ -158,7 +161,10 @@ pub(crate) async fn browser_serp_search(
             }
         };
         let label = crate::browser::browser_label(&pane_id, &tab_id);
-        let _ = app.emit("browser:activity", serde_json::json!({ "pane_id": pane_id }));
+        let _ = app.emit(
+            "browser:activity",
+            serde_json::json!({ "pane_id": pane_id }),
+        );
 
         // The fresh tab / fresh pane already points at the DDG SERP; an
         // explicit navigate is only needed for the second engine.
@@ -166,8 +172,10 @@ pub(crate) async fn browser_serp_search(
         let hits = match first {
             Ok(h) if !h.is_empty() => h,
             first => {
-                let mojeek_url =
-                    format!("https://www.mojeek.com/search?q={}", percent_encode_query(query));
+                let mojeek_url = format!(
+                    "https://www.mojeek.com/search?q={}",
+                    percent_encode_query(query)
+                );
                 match load_and_extract(&mgr, app, &pane_id, &tab_id, &label, &mojeek_url, true)
                     .await
                 {
@@ -193,8 +201,7 @@ pub(crate) async fn browser_serp_search(
     match tokio::time::timeout(std::time::Duration::from_secs(40), sweep).await {
         Ok(Ok(hits)) if !hits.is_empty() => Ok(hits),
         Ok(Ok(_)) => Err(
-            "browser SERP yielded no organic results (challenge page or markup change)"
-                .to_string(),
+            "browser SERP yielded no organic results (challenge page or markup change)".to_string(),
         ),
         Ok(Err(e)) => Err(e),
         Err(_) => Err("browser SERP sweep timed out after 40s".to_string()),
@@ -214,7 +221,11 @@ mod tests {
             "no tab separator line\n",
         );
         let hits = parse_extraction(raw);
-        assert_eq!(hits.len(), 2, "organic + wrapped kept; SERP-host link dropped");
+        assert_eq!(
+            hits.len(),
+            2,
+            "organic + wrapped kept; SERP-host link dropped"
+        );
         assert_eq!(hits[0].title, "Rust Programming Language");
         assert_eq!(hits[0].url, "https://www.rust-lang.org/");
         assert_eq!(hits[1].url, "https://doc.rust-lang.org/book/");

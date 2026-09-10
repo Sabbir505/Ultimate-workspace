@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 /// Extensions indexed as plain text (chunked + embedded directly).
 pub const TEXT_EXTENSIONS: &[&str] = &[
     "md", "markdown", "txt", "rst", "json", "jsonl", "csv", "tsv", "html", "htm", "xml", "yaml",
-    "yml", "toml", "ts", "tsx", "js", "jsx", "mjs", "py", "rs", "css", "scss", "sql", "sh",
-    "bash", "ps1", "c", "h", "cpp", "hpp", "cc", "java", "go", "kt", "swift", "rb", "php", "cs",
-    "ini", "cfg", "conf", "log", "tex", "vue", "svelte",
+    "yml", "toml", "ts", "tsx", "js", "jsx", "mjs", "py", "rs", "css", "scss", "sql", "sh", "bash",
+    "ps1", "c", "h", "cpp", "hpp", "cc", "java", "go", "kt", "swift", "rb", "php", "cs", "ini",
+    "cfg", "conf", "log", "tex", "vue", "svelte",
 ];
 
 /// Extensions indexed as images — embedded via their text surrogate
@@ -22,8 +22,19 @@ pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gi
 
 /// Directories never descended into.
 const SKIP_DIRS: &[&str] = &[
-    ".git", "node_modules", "target", "dist", "build", ".next", "out", "__pycache__", ".venv",
-    "venv", "vendor", ".idea", ".vscode",
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    "out",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "vendor",
+    ".idea",
+    ".vscode",
 ];
 
 pub const MAX_TEXT_FILE_BYTES: u64 = 1_000_000;
@@ -70,7 +81,9 @@ pub fn walk_corpus(root: &Path) -> Vec<WalkEntry> {
     let mut out = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in read.flatten() {
             let path = entry.path();
             let name = entry.file_name();
@@ -88,7 +101,9 @@ pub fn walk_corpus(root: &Path) -> Vec<WalkEntry> {
             if !meta.is_file() {
                 continue;
             }
-            let Some(kind) = classify_path(&path) else { continue };
+            let Some(kind) = classify_path(&path) else {
+                continue;
+            };
             let size = meta.len();
             let cap = match kind {
                 WalkKind::Text => MAX_TEXT_FILE_BYTES,
@@ -197,7 +212,10 @@ mod tests {
 
     #[test]
     fn classify_extensions() {
-        assert_eq!(classify_path(Path::new("a/README.md")), Some(WalkKind::Text));
+        assert_eq!(
+            classify_path(Path::new("a/README.md")),
+            Some(WalkKind::Text)
+        );
         assert_eq!(classify_path(Path::new("a/main.RS")), Some(WalkKind::Text));
         assert_eq!(classify_path(Path::new("a/pic.PNG")), Some(WalkKind::Image));
         assert_eq!(classify_path(Path::new("a/blob.bin")), None);
@@ -220,7 +238,11 @@ mod tests {
         let para = "lorem ipsum dolor sit amet ".repeat(18); // ~495 chars
         let text = vec![para; 10].join("\n\n");
         let chunks = chunk_text(&text);
-        assert!(chunks.len() >= 4, "expected several chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() >= 4,
+            "expected several chunks, got {}",
+            chunks.len()
+        );
         // Every chunk respects the target ceiling (plus boundary slack).
         for c in &chunks {
             assert!(c.len() <= CHUNK_TARGET + 64, "chunk too big: {}", c.len());
@@ -229,8 +251,10 @@ mod tests {
         // Overlap: chunk 2 starts inside chunk 1's tail (byte-level proof).
         let first_len = chunks[0].len();
         let tail_probe = &chunks[0][first_len - 60..];
-        assert!(chunks[1].contains(tail_probe.trim_end()),
-            "chunk 2 should contain chunk 1's 60-char tail");
+        assert!(
+            chunks[1].contains(tail_probe.trim_end()),
+            "chunk 2 should contain chunk 1's 60-char tail"
+        );
         // Coverage: total chunked text at least covers the source.
         let total: usize = chunks.iter().map(|c| c.len()).sum();
         assert!(total >= text.trim().len());
@@ -243,7 +267,15 @@ mod tests {
         let chunks = chunk_text(&text);
         assert!(chunks.len() >= 2);
         for c in &chunks {
-            assert!(c.chars().all(|ch| ch == '日' || ch == '本' || ch == '語' || ch == 'の' || ch == 'テ' || ch == 'キ' || ch == 'ス' || ch == 'ト' || ch == '。'));
+            assert!(c.chars().all(|ch| ch == '日'
+                || ch == '本'
+                || ch == '語'
+                || ch == 'の'
+                || ch == 'テ'
+                || ch == 'キ'
+                || ch == 'ス'
+                || ch == 'ト'
+                || ch == '。'));
         }
     }
 
@@ -266,7 +298,9 @@ mod tests {
         assert_eq!(rels, ["readme.md", "sub/photo.png"]);
         assert_eq!(entries[0].kind, WalkKind::Text);
         assert_eq!(entries[1].kind, WalkKind::Image);
-        assert!(entries.iter().all(|e| e.size > 0 && !e.rel_path.contains('\\')));
+        assert!(entries
+            .iter()
+            .all(|e| e.size > 0 && !e.rel_path.contains('\\')));
 
         let _ = std::fs::remove_dir_all(&root);
     }

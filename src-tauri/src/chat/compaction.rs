@@ -114,8 +114,7 @@ impl Default for CompactionConfig {
 /// a bad stored value must never block a chat turn.
 pub fn load_compaction_config(conn: &Connection) -> CompactionConfig {
     let mut cfg = CompactionConfig::default();
-    if let Ok(Some(raw)) = crate::db::get_setting(conn, "chat.local_gguf.compaction_threshold")
-    {
+    if let Ok(Some(raw)) = crate::db::get_setting(conn, "chat.local_gguf.compaction_threshold") {
         if let Ok(v) = raw.trim().parse::<f64>() {
             // Clamp to a sane band; anything outside is treated as the default.
             if (0.25..=0.99).contains(&v) {
@@ -131,7 +130,8 @@ pub fn load_compaction_config(conn: &Connection) -> CompactionConfig {
             }
         }
     }
-    if let Ok(Some(raw)) = crate::db::get_setting(conn, "chat.local_gguf.compaction_rebuild_from_raw")
+    if let Ok(Some(raw)) =
+        crate::db::get_setting(conn, "chat.local_gguf.compaction_rebuild_from_raw")
     {
         cfg.rebuild_from_raw = !matches!(raw.trim(), "false" | "0" | "off");
     }
@@ -273,7 +273,12 @@ pub async fn count_entries_tokens<T: std::borrow::Borrow<CompactionEntry>>(
     system: &Option<String>,
     entries: &[T],
 ) -> Result<u32, String> {
-    tokenize_content(client, base_url, assemble_entries_for_tokenization(system, entries)).await
+    tokenize_content(
+        client,
+        base_url,
+        assemble_entries_for_tokenization(system, entries),
+    )
+    .await
 }
 
 /// Count tokens for the assembled system+messages via `POST {base}/tokenize`.
@@ -285,7 +290,12 @@ pub async fn count_tokens(
     system: &Option<String>,
     messages: &[ChatMessage],
 ) -> Result<u32, String> {
-    tokenize_content(client, base_url, assemble_for_tokenization(system, messages)).await
+    tokenize_content(
+        client,
+        base_url,
+        assemble_for_tokenization(system, messages),
+    )
+    .await
 }
 
 /// Count tokens for arbitrary raw text via `POST {base}/tokenize` — used for
@@ -322,9 +332,8 @@ pub async fn count_json_tokens_cached(
     base_url.hash(&mut h);
     text.hash(&mut h);
     let key = h.finish();
-    let cache = JSON_TOKEN_CACHE.get_or_init(|| {
-        parking_lot::Mutex::new(std::collections::HashMap::new())
-    });
+    let cache =
+        JSON_TOKEN_CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
     if let Some(&n) = cache.lock().get(&key) {
         return Ok(n);
     }
@@ -374,7 +383,9 @@ pub(crate) fn split_for_compaction(
     Vec<&CompactionEntry>, // pinned
 )> {
     // Pull out a prior summary, if present.
-    let prior_idx = messages.iter().position(|e| is_compacted_summary(&e.message));
+    let prior_idx = messages
+        .iter()
+        .position(|e| is_compacted_summary(&e.message));
     let prior = prior_idx.and_then(|i| {
         let e = &messages[i];
         Some((e.id, strip_compacted_prefix(&e.message.content)))
@@ -526,13 +537,21 @@ async fn summarize(
 ) -> Result<(String, i64, i64), String> {
     let cloud = match route {
         SummarizerRoute::Sidecar => None,
-        SummarizerRoute::Cloud { provider_id, base, api_key, model } => {
-            Some((*provider_id, base.clone(), api_key.clone(), model.clone()))
-        }
+        SummarizerRoute::Cloud {
+            provider_id,
+            base,
+            api_key,
+            model,
+        } => Some((*provider_id, base.clone(), api_key.clone(), model.clone())),
     };
     if let Some((provider_id, cloud_base, cloud_key, cloud_model)) = cloud {
         return crate::chat::cloud_compact::summarize_via_provider(
-            client, provider_id, &cloud_base, &cloud_key, &cloud_model, to_compact,
+            client,
+            provider_id,
+            &cloud_base,
+            &cloud_key,
+            &cloud_model,
+            to_compact,
             prior_summary,
         )
         .await;
@@ -572,9 +591,7 @@ async fn summarize(
     if !resp.status().is_success() {
         let status = resp.status();
         let err_body = resp.text().await.unwrap_or_default();
-        eprintln!(
-            "[local-compaction] summarize FAILED status={status} body={err_body}"
-        );
+        eprintln!("[local-compaction] summarize FAILED status={status} body={err_body}");
         return Err(format!("summarize returned {status}: {err_body}"));
     }
     let v: Value = resp
@@ -659,7 +676,12 @@ pub async fn maybe_compact(
     // Lazy materialization of the owned passthrough Vec: the entries are only
     // cloned (image payloads included) on paths that actually RETURN them
     // (PERF B7). The token counts read role+content by reference.
-    let wire_messages = || messages.iter().map(|e| e.message.clone()).collect::<Vec<_>>();
+    let wire_messages = || {
+        messages
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    };
     if n_ctx == 0 {
         return Ok(CompactionOutcome::passthrough(wire_messages()));
     }
@@ -702,9 +724,7 @@ pub async fn maybe_compact(
     // If even the pinned tail + system would overflow, summarizing won't help
     // (the window is too small for the pinned turns alone). Fall back and let
     // context-shifting handle it — log so it's visible during testing.
-    if let Ok(pinned_tokens) =
-        count_entries_tokens(client, base_url, system, &pinned).await
-    {
+    if let Ok(pinned_tokens) = count_entries_tokens(client, base_url, system, &pinned).await {
         if pinned_tokens.saturating_add(RESPONSE_HEADROOM) >= effective_ctx {
             eprintln!(
                 "[local-compaction] pinned tail ({pinned_tokens} tokens) already fills \
@@ -758,8 +778,7 @@ pub async fn maybe_compact(
     // nothing is lost to the budget anymore, only condensed one level
     // deeper. A failing partial is logged and skipped (best effort), never
     // fatal.
-    let mut prior_parts: Vec<String> =
-        prior.as_ref().map(|(_, t)| t.clone()).into_iter().collect();
+    let mut prior_parts: Vec<String> = prior.as_ref().map(|(_, t)| t.clone()).into_iter().collect();
     if to_compact_truncated.len() < to_compact.len() {
         let dropped_count = to_compact.len() - to_compact_truncated.len();
         let dropped = &to_compact[..dropped_count];
@@ -787,13 +806,18 @@ pub async fn maybe_compact(
         for (i, chunk) in chunks.iter().enumerate() {
             match summarize(client, base_url, model, chunk, None, 512, route).await {
                 Ok((partial, _, _)) => {
-                    prior_parts.push(format!("[Earlier part {}]
-{}", i + 1, partial));
+                    prior_parts.push(format!(
+                        "[Earlier part {}]
+{}",
+                        i + 1,
+                        partial
+                    ));
                 }
                 Err(e) => {
                     eprintln!(
-                        "[local-compaction] map-summarize part {} failed ({e}); continuing"
-                    , i + 1);
+                        "[local-compaction] map-summarize part {} failed ({e}); continuing",
+                        i + 1
+                    );
                 }
             }
         }
@@ -805,9 +829,11 @@ pub async fn maybe_compact(
     let prior_text = if prior_parts.is_empty() {
         None
     } else {
-        Some(prior_parts.join("
+        Some(prior_parts.join(
+            "
 
-"))
+",
+        ))
     };
     let (summary, in_tok, out_tok) = match summarize(
         client,
@@ -830,8 +856,15 @@ pub async fn maybe_compact(
         }
     };
 
-    let compacted_exchange_count = to_compact.iter().filter(|e| e.message.role == "user").count();
-    let mut superseded_ids: Vec<i64> = to_compact.iter().map(|e| e.id).filter(|id| *id != 0).collect();
+    let compacted_exchange_count = to_compact
+        .iter()
+        .filter(|e| e.message.role == "user")
+        .count();
+    let mut superseded_ids: Vec<i64> = to_compact
+        .iter()
+        .map(|e| e.id)
+        .filter(|id| *id != 0)
+        .collect();
     if let Some((prior_id, _)) = &prior {
         if *prior_id != 0 {
             superseded_ids.push(*prior_id);
@@ -933,8 +966,14 @@ mod tests {
             strip_compacted_prefix("[compacted context]\n\nthe real summary"),
             "the real summary"
         );
-        assert_eq!(strip_compacted_prefix("[compacted context]: the summary"), "the summary");
-        assert_eq!(strip_compacted_prefix("  [compacted context]\nsummary"), "summary");
+        assert_eq!(
+            strip_compacted_prefix("[compacted context]: the summary"),
+            "the summary"
+        );
+        assert_eq!(
+            strip_compacted_prefix("  [compacted context]\nsummary"),
+            "summary"
+        );
     }
 
     #[test]
@@ -1034,7 +1073,12 @@ mod tests {
     fn load_config_clamps_garbage_to_defaults() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        crate::db::set_setting(&conn, "chat.local_gguf.compaction_threshold", "not a number").unwrap();
+        crate::db::set_setting(
+            &conn,
+            "chat.local_gguf.compaction_threshold",
+            "not a number",
+        )
+        .unwrap();
         crate::db::set_setting(&conn, "chat.local_gguf.compaction_pin_exchanges", "999").unwrap();
         let cfg = load_compaction_config(&conn);
         assert_eq!(cfg.threshold, DEFAULT_THRESHOLD);

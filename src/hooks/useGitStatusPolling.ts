@@ -12,6 +12,7 @@
 import { useEffect } from "react";
 import { useProjectsStore } from "../state/projects";
 import { safeListen } from "../lib/ipc";
+import { pathUnderChanged } from "../lib/paths";
 
 const HEARTBEAT_MS = 60_000;
 
@@ -55,12 +56,7 @@ export function useGitStatusPolling(): void {
     const listenReady = safeListen<string>("project:fs-changed", (changedPath) => {
       if (cancelled) return;
       const ps = useProjectsStore.getState();
-      const project = ps.projects.find(
-        (p) =>
-          p.path === changedPath ||
-          changedPath.startsWith(p.path + "\\") ||
-          changedPath.startsWith(p.path + "/"),
-      );
+      const project = ps.projects.find((p) => pathUnderChanged(p.path, changedPath));
       if (project) {
         debouncedRefreshFor(project.id);
       } else {

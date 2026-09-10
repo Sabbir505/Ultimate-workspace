@@ -13,6 +13,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
+import type { EditPayload } from "../../lib/segments";
+
+// The canonical EditPayload lives in lib/segments (next to the `<tool>`
+// parser); re-exported here for the components that import it from this card.
+export type { EditPayload };
 
 function PencilIcon() {
   return (
@@ -32,12 +37,6 @@ function PencilIcon() {
     </svg>
   );
 }
-
-/** The edit payload embedded in a `<tool>` marker for write_file / edit_file. */
-export type EditPayload =
-  | { mode: "write"; content: string }
-  | { mode: "append"; append: string }
-  | { mode: "replace"; find: string; replace: string };
 
 interface PreviewLine {
   type: "add" | "del";

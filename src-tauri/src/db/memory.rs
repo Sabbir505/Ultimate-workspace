@@ -35,9 +35,9 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
         access_count: r.get("access_count")?,
         origin: r.get("origin")?,
         reflected: r.get::<_, i64>("reflected")? != 0,
-        embedding: r.get::<_, Option<Vec<u8>>>("embedding")?.map(|b| {
-            crate::db::docs::blob_to_f32_slice(&b)
-        }),
+        embedding: r
+            .get::<_, Option<Vec<u8>>>("embedding")?
+            .map(|b| crate::db::docs::blob_to_f32_slice(&b)),
     })
 }
 
@@ -92,7 +92,11 @@ pub fn list_memories(
 ) -> DbResult<Vec<MemoryRecord>> {
     let sql = format!(
         "SELECT {COLS} FROM memories WHERE profile = ?1 {} ORDER BY created_at DESC, id",
-        if include_inactive { "" } else { "AND status = 'active'" }
+        if include_inactive {
+            ""
+        } else {
+            "AND status = 'active'"
+        }
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![profile], map_row)?;
@@ -156,11 +160,7 @@ pub fn set_memory_status(conn: &Connection, id: &str, status: &str) -> DbResult<
 /// Bi-temporal invalidation: the old memory ends (`valid_until` = now,
 /// `status = 'superseded'`) and points at its replacement. The candidate row
 /// itself is inserted by the caller with `valid_from` = this same instant.
-pub fn supersede_memory(
-    conn: &Connection,
-    old_id: &str,
-    new_id: &str,
-) -> DbResult<()> {
+pub fn supersede_memory(conn: &Connection, old_id: &str, new_id: &str) -> DbResult<()> {
     let now = crate::db::now_ts();
     conn.execute(
         "UPDATE memories SET status = 'superseded', superseded_by = ?2, \
@@ -214,7 +214,11 @@ pub fn similar_active_memories(
         if vnorm == 0.0 {
             continue;
         }
-        let dot = embedding.iter().zip(v.iter()).map(|(a, b)| a * b).sum::<f32>();
+        let dot = embedding
+            .iter()
+            .zip(v.iter())
+            .map(|(a, b)| a * b)
+            .sum::<f32>();
         hits.push((rec, dot / (qnorm * vnorm)));
     }
     hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -239,7 +243,11 @@ pub fn search_memories_fts(
     // fetch, which must find a contradictee that shares only one keyword).
     let safe: String = query
         .split_whitespace()
-        .map(|t| t.chars().filter(|c| c.is_alphanumeric()).collect::<String>())
+        .map(|t| {
+            t.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        })
         .filter(|t| !t.is_empty())
         .map(|t| format!("\"{t}\"*"))
         .collect::<Vec<_>>()
@@ -388,7 +396,11 @@ pub fn get_cursor(conn: &Connection, chat_session_id: &str) -> DbResult<i64> {
     .map(|v| v.unwrap_or(0))
 }
 
-pub fn upsert_cursor(conn: &Connection, chat_session_id: &str, last_message_id: i64) -> DbResult<()> {
+pub fn upsert_cursor(
+    conn: &Connection,
+    chat_session_id: &str,
+    last_message_id: i64,
+) -> DbResult<()> {
     conn.execute(
         "INSERT INTO memory_cursor (chat_session_id, last_message_id, last_run_at) \
            VALUES (?1, ?2, ?3) \
@@ -451,10 +463,7 @@ pub fn insert_document_version(conn: &Connection, source: &str, text: &str) -> D
     Ok(())
 }
 
-pub fn list_document_versions(
-    conn: &Connection,
-    limit: i64,
-) -> DbResult<Vec<MemoryDocVersionRow>> {
+pub fn list_document_versions(conn: &Connection, limit: i64) -> DbResult<Vec<MemoryDocVersionRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, source, text, created_at FROM memory_document_versions \
          ORDER BY id DESC LIMIT ?1",
@@ -592,13 +601,31 @@ mod tests {
     #[test]
     fn fts_and_similar_search() {
         let conn = crate::db::mem();
-        insert_memory(&conn, &rec("m1", "User uses pnpm workspaces not npm", 6, None)).unwrap();
-        insert_memory(&conn, &rec("m2", "Project targets Tauri v2 on Windows", 7, Some(vec![
-            1.0, 0.0, 0.0,
-        ]))).unwrap();
-        insert_memory(&conn, &rec("m3", "User dislikes code comments", 8, Some(vec![
-            0.0, 1.0, 0.0,
-        ]))).unwrap();
+        insert_memory(
+            &conn,
+            &rec("m1", "User uses pnpm workspaces not npm", 6, None),
+        )
+        .unwrap();
+        insert_memory(
+            &conn,
+            &rec(
+                "m2",
+                "Project targets Tauri v2 on Windows",
+                7,
+                Some(vec![1.0, 0.0, 0.0]),
+            ),
+        )
+        .unwrap();
+        insert_memory(
+            &conn,
+            &rec(
+                "m3",
+                "User dislikes code comments",
+                8,
+                Some(vec![0.0, 1.0, 0.0]),
+            ),
+        )
+        .unwrap();
 
         let fts = search_memories_fts(&conn, "default", None, "pnpm workspaces", 5).unwrap();
         assert_eq!(fts.len(), 1);
@@ -617,7 +644,16 @@ mod tests {
         add_memory_evidence(&conn, "m1", "s1", 11, "always use pnpm").unwrap(); // dedup
         assert_eq!(evidence_count_for_memory(&conn, "m1").unwrap(), 1);
 
-        log_memory_op(&conn, "judge", Some("s1"), "{\"content\":\"fact\"}", "ADD", &["m1".into()], "novel").unwrap();
+        log_memory_op(
+            &conn,
+            "judge",
+            Some("s1"),
+            "{\"content\":\"fact\"}",
+            "ADD",
+            &["m1".into()],
+            "novel",
+        )
+        .unwrap();
         let ops = list_memory_ops(&conn, 10).unwrap();
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].target_ids, vec!["m1".to_string()]);

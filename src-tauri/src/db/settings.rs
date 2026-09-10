@@ -31,8 +31,8 @@ pub fn delete_setting(conn: &Connection, key: &str) -> DbResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
     use super::*;
+    use rusqlite::Connection;
 
     #[test]
     fn settings_round_trip() {
@@ -40,6 +40,9 @@ mod tests {
         assert_eq!(get_setting(&conn, "theme").unwrap(), None);
         set_setting(&conn, "theme", "dark").unwrap();
         set_setting(&conn, "theme", "light").unwrap();
-        assert_eq!(get_setting(&conn, "theme").unwrap().as_deref(), Some("light"));
+        assert_eq!(
+            get_setting(&conn, "theme").unwrap().as_deref(),
+            Some("light")
+        );
     }
 }

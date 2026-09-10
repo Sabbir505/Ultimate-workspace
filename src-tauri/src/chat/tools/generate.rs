@@ -9,8 +9,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::chat::artifacts;
 use super::{ArtifactRef, ToolOutcome};
+use crate::chat::artifacts;
 
 pub(super) fn generate_file(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
     let format = args
@@ -218,10 +218,7 @@ pub(super) async fn generate_document(
         .unwrap_or("");
     if code.trim().is_empty() {
         let (engine_hint, guide) = match language {
-            "html" => (
-                "a complete styled HTML document",
-                HTML_PDF_GUIDE,
-            ),
+            "html" => ("a complete styled HTML document", HTML_PDF_GUIDE),
             "javascript" => (
                 "a complete JavaScript program (uses the preloaded `docx` / `PptxGenJS` \
                  globals and `await relay.save(...)`)",
@@ -251,10 +248,12 @@ pub(super) async fn generate_document(
     // headless runs); they degrade to a Python-fallback hint rather than a
     // dead end.
     let no_app = || {
-        Err("the selected engine needs the app window, which is unavailable in this \
+        Err(
+            "the selected engine needs the app window, which is unavailable in this \
              headless run. Re-run with language=\\\"python\\\" to use the bundled Python \
              engine instead."
-            .to_string())
+                .to_string(),
+        )
     };
     let result = match language {
         "html" if format == "pdf" => match app {
@@ -262,7 +261,9 @@ pub(super) async fn generate_document(
             None => no_app(),
         },
         "javascript" if matches!(format.as_str(), "docx" | "pptx") => match app {
-            Some(a) => crate::chat::jsdocgen::generate(a, artifacts_dir, &format, filename, code).await,
+            Some(a) => {
+                crate::chat::jsdocgen::generate(a, artifacts_dir, &format, filename, code).await
+            }
             None => no_app(),
         },
         "python" => crate::chat::pygen::generate(artifacts_dir, &format, filename, code).await,
@@ -274,7 +275,9 @@ pub(super) async fn generate_document(
                 None => no_app(),
             },
             "javascript" => match app {
-                Some(a) => crate::chat::jsdocgen::generate(a, artifacts_dir, &format, filename, code).await,
+                Some(a) => {
+                    crate::chat::jsdocgen::generate(a, artifacts_dir, &format, filename, code).await
+                }
                 None => no_app(),
             },
             _ => crate::chat::pygen::generate(artifacts_dir, &format, filename, code).await,
@@ -295,7 +298,10 @@ pub(super) async fn generate_document(
                 file.filename,
                 file.path.display()
             );
-            if !file.log.trim().is_empty() && file.log.trim() != "generated with the in-app JavaScript engine (docx / PptxGenJS)" {
+            if !file.log.trim().is_empty()
+                && file.log.trim()
+                    != "generated with the in-app JavaScript engine (docx / PptxGenJS)"
+            {
                 text.push_str(&format!("\n\nGenerator output:\n{}", file.log));
             }
             ToolOutcome {
@@ -468,8 +474,10 @@ fn validate_diagram_html(html: &str) -> DiagramReport {
     // The sandboxed preview iframe disables scripts; a <script> would silently
     // do nothing and likely means the diagram relies on JS to render.
     if lower.contains("<script") {
-        r.add("Contains a <script> tag — scripts are blocked in the preview iframe; \
-              render must be pure HTML/CSS.");
+        r.add(
+            "Contains a <script> tag — scripts are blocked in the preview iframe; \
+              render must be pure HTML/CSS.",
+        );
     }
     // iframes inside the diagram are a nesting/security hazard in the sandbox.
     if lower.contains("<iframe") {
@@ -477,8 +485,10 @@ fn validate_diagram_html(html: &str) -> DiagramReport {
     }
     // External resources won't load in the sandboxed srcDoc iframe.
     if lower.contains(" src=\"http") || lower.contains(" src='http") || lower.contains("@import") {
-        r.add("References external resources (http(s) src / @import) — the sandboxed \
-              preview cannot fetch them; inline all styles.");
+        r.add(
+            "References external resources (http(s) src / @import) — the sandboxed \
+              preview cannot fetch them; inline all styles.",
+        );
     }
 
     // Balanced-tag check for a small set of structural containers the model is
@@ -492,7 +502,9 @@ fn validate_diagram_html(html: &str) -> DiagramReport {
         // is unnecessary for these tags in practice; a close-count of 0 with
         // opens > 0 is the real signal.
         if open != close {
-            r.add(format!("<{tag}> tags unbalanced: {open} open vs {close} close."));
+            r.add(format!(
+                "<{tag}> tags unbalanced: {open} open vs {close} close."
+            ));
         }
     }
 
@@ -582,7 +594,10 @@ mod tests {
         let outcome = generate_diagram(tmp.path(), &args);
         let path = outcome.artifact.expect("artifact ref").path;
         let written = std::fs::read_to_string(path).unwrap();
-        assert_eq!(written.matches(DIAGRAM_MARKER).count(), 1, "marker written more than once:\n{written}");
+        assert_eq!(
+            written.matches(DIAGRAM_MARKER).count(),
+            1,
+            "marker written more than once:\n{written}"
+        );
     }
-
 }

@@ -84,9 +84,8 @@ pub fn list_artifacts_for_chat(
     conn: &Connection,
     chat_session_id: &str,
 ) -> DbResult<Vec<ArtifactRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM artifacts WHERE chat_session_id = ?1 ORDER BY created_at ASC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM artifacts WHERE chat_session_id = ?1 ORDER BY created_at ASC")?;
     let rows = stmt.query_map(params![chat_session_id], map_artifact)?;
     rows.collect()
 }
@@ -170,8 +169,14 @@ mod tests {
     #[test]
     fn artifact_round_trip_and_expiry() {
         let conn = super::super::mem();
-        let a = insert_artifact(&conn, Some("sess1"), "report.docx", "/tmp/report.docx", "docx")
-            .unwrap();
+        let a = insert_artifact(
+            &conn,
+            Some("sess1"),
+            "report.docx",
+            "/tmp/report.docx",
+            "docx",
+        )
+        .unwrap();
         assert_eq!(a.kind, "docx");
         assert_eq!(a.expires_at - a.created_at, RETENTION_SECS);
 
@@ -198,8 +203,8 @@ mod tests {
     #[test]
     fn reinserting_a_path_updates_instead_of_duplicating() {
         let conn = super::super::mem();
-        let first = insert_artifact(&conn, Some("s1"), "draft.md", "/tmp/draft.md", "markdown")
-            .unwrap();
+        let first =
+            insert_artifact(&conn, Some("s1"), "draft.md", "/tmp/draft.md", "markdown").unwrap();
         // Simulate the model editing the same file later in another session.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let second =

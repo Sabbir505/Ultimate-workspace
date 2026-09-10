@@ -129,10 +129,16 @@ pub fn classify_failure(message: &str) -> Option<PreStreamFailure> {
     // Pre-stream network failures: connection/transport errors that happen
     // before any byte of the response.
     if m.starts_with("request failed:") {
-        return Some(PreStreamFailure { kind: FailureKind::Network, status: None });
+        return Some(PreStreamFailure {
+            kind: FailureKind::Network,
+            status: None,
+        });
     }
     if m.starts_with("request timed out waiting for response headers") {
-        return Some(PreStreamFailure { kind: FailureKind::Network, status: None });
+        return Some(PreStreamFailure {
+            kind: FailureKind::Network,
+            status: None,
+        });
     }
     let status = status_of(&m)?;
     let kind = match status {
@@ -141,13 +147,18 @@ pub fn classify_failure(message: &str) -> Option<PreStreamFailure> {
         // Anthropic's monthly spend-cap 429 names "enforced_spend_limit" —
         // retrying can never succeed, so it's Payment, not RateLimit.
         429 if m.contains("spend_limit") || m.contains("spend limit") => FailureKind::Payment,
-        429 => FailureKind::RateLimit { retry_after_secs: parse_retry_after(&m) },
+        429 => FailureKind::RateLimit {
+            retry_after_secs: parse_retry_after(&m),
+        },
         404 => FailureKind::ModelNotFound,
         s if s >= 500 => FailureKind::Server,
         // Other 4xx = bad request shape — switching models won't fix it.
         _ => return None,
     };
-    Some(PreStreamFailure { kind, status: Some(status) })
+    Some(PreStreamFailure {
+        kind,
+        status: Some(status),
+    })
 }
 
 /// Best-effort `retry-after` scrape from an error BODY (the header is lost by
@@ -202,7 +213,10 @@ mod tests {
             classify_error("input token count exceeds the maximum number of tokens allowed"),
             Some(CODE_CONTEXT_OVERFLOW)
         );
-        assert_eq!(classify_error("HTTP 413: payload too large"), Some(CODE_CONTEXT_OVERFLOW));
+        assert_eq!(
+            classify_error("HTTP 413: payload too large"),
+            Some(CODE_CONTEXT_OVERFLOW)
+        );
     }
 
     #[test]
@@ -225,10 +239,15 @@ mod tests {
             kind_of("HTTP 401: {\"error\":\"invalid_api_key\"}"),
             Some(FailureKind::Auth)
         );
-        assert_eq!(kind_of("HTTP 402: insufficient credits"), Some(FailureKind::Payment));
+        assert_eq!(
+            kind_of("HTTP 402: insufficient credits"),
+            Some(FailureKind::Payment)
+        );
         assert_eq!(
             kind_of("HTTP 429: rate limit exceeded"),
-            Some(FailureKind::RateLimit { retry_after_secs: None })
+            Some(FailureKind::RateLimit {
+                retry_after_secs: None
+            })
         );
         // Anthropic's monthly spend-cap 429 can never succeed by retrying.
         assert_eq!(
@@ -261,11 +280,20 @@ mod tests {
 
     #[test]
     fn never_classifies_mid_stream_errors() {
-        assert_eq!(classify_failure("stream stalled: no data received for 60s"), None);
-        assert_eq!(classify_failure("stream read error: connection reset"), None);
+        assert_eq!(
+            classify_failure("stream stalled: no data received for 60s"),
+            None
+        );
+        assert_eq!(
+            classify_failure("stream read error: connection reset"),
+            None
+        );
         // A mid-stream provider error event (after the 200 OK) carries the
         // "provider error:" prefix — tokens may already be on screen.
-        assert_eq!(classify_failure("provider error: HTTP 429: slow down"), None);
+        assert_eq!(
+            classify_failure("provider error: HTTP 429: slow down"),
+            None
+        );
         assert_eq!(classify_failure(""), None);
     }
 
@@ -273,15 +301,21 @@ mod tests {
     fn parses_retry_after_from_bodies() {
         assert_eq!(
             kind_of("HTTP 429: Rate limited. Please retry after 12s."),
-            Some(FailureKind::RateLimit { retry_after_secs: Some(12) })
+            Some(FailureKind::RateLimit {
+                retry_after_secs: Some(12)
+            })
         );
         assert_eq!(
             kind_of("HTTP 429: slow_down, try again in 30 seconds"),
-            Some(FailureKind::RateLimit { retry_after_secs: Some(30) })
+            Some(FailureKind::RateLimit {
+                retry_after_secs: Some(30)
+            })
         );
         assert_eq!(
             kind_of("HTTP 429: Retry-After: 45"),
-            Some(FailureKind::RateLimit { retry_after_secs: Some(45) })
+            Some(FailureKind::RateLimit {
+                retry_after_secs: Some(45)
+            })
         );
     }
 
@@ -289,7 +323,10 @@ mod tests {
     fn every_failure_kind_is_retryable_for_auto() {
         assert!(FailureKind::Auth.retryable());
         assert!(FailureKind::Payment.retryable());
-        assert!(FailureKind::RateLimit { retry_after_secs: None }.retryable());
+        assert!(FailureKind::RateLimit {
+            retry_after_secs: None
+        }
+        .retryable());
         assert!(FailureKind::Server.retryable());
         assert!(FailureKind::Network.retryable());
         assert!(FailureKind::ModelNotFound.retryable());

@@ -22,6 +22,7 @@ import {
 } from "../../lib/ipc";
 import { shortModelName } from "../../lib/modelLabel";
 import { toastError } from "../../lib/ipc";
+import { AGENT_OPTIONS as EXTRACT_AGENT_OPTIONS } from "../../lib/agents";
 import { Modal } from "../common/Modal";
 
 /**
@@ -50,23 +51,6 @@ const STATUS_FILTERS = ["active", "superseded", "retired", "flagged"] as const;
  *  keystroke otherwise, and rapid KV writes can land OUT OF ORDER (a shorter
  *  intermediate value overwriting the final one). */
 const EXTRACT_MODEL_DEBOUNCE_MS = 400;
-
-/** Agent sources for the extraction-model picker — the SAME groups and ids
- *  the Automations form offers (AGENT_OPTIONS there), so both surfaces read
- *  identically: CLI harnesses, cloud API providers, local GGUF. */
-const EXTRACT_AGENT_OPTIONS: { id: string; label: string; group: "harness" | "api" | "local" }[] = [
-  { id: "claude_code", label: "Claude Code (harness)", group: "harness" },
-  { id: "opencode", label: "OpenCode (harness)", group: "harness" },
-  { id: "pi", label: "Pi (harness)", group: "harness" },
-  { id: "omp", label: "Omp (harness)", group: "harness" },
-  { id: "commandcode", label: "CommandCode (harness)", group: "harness" },
-  { id: "anthropic", label: "Anthropic API", group: "api" },
-  { id: "openai", label: "OpenAI API", group: "api" },
-  { id: "openrouter", label: "OpenRouter", group: "api" },
-  { id: "anthropic_compatible", label: "Anthropic-compatible", group: "api" },
-  { id: "openai_compatible", label: "OpenAI-compatible", group: "api" },
-  { id: "local_gguf", label: "Local GGUF", group: "local" },
-];
 
 function extractAgentGroup(id: string): "harness" | "api" | "local" {
   return EXTRACT_AGENT_OPTIONS.find((a) => a.id === id)?.group ?? "api";

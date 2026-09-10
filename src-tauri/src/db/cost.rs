@@ -4,9 +4,9 @@
 
 use rusqlite::{params, Connection};
 
+use super::{now_ts, DbResult};
 use crate::harness_adapters::UsageInfo;
 use crate::types::*;
-use super::{now_ts, DbResult};
 
 fn map_cost_event(row: &rusqlite::Row) -> rusqlite::Result<CostEvent> {
     Ok(CostEvent {
@@ -43,18 +43,27 @@ pub fn insert_cost_event(
             reported_cost_usd, pricing_estimated_usd
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
-            session_id, now_ts(),
-            usage.input_tokens, usage.output_tokens,
-            provider, source,
-            usage.cache_creation_input_tokens, usage.cache_read_input_tokens,
+            session_id,
+            now_ts(),
+            usage.input_tokens,
+            usage.output_tokens,
+            provider,
+            source,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
             usage.reasoning_output_tokens,
-            usage.cost_usd, pricing_estimated_usd,
+            usage.cost_usd,
+            pricing_estimated_usd,
         ],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
-pub fn update_cost_event_model_key(conn: &Connection, cost_event_id: i64, model_key: Option<&str>) -> DbResult<()> {
+pub fn update_cost_event_model_key(
+    conn: &Connection,
+    cost_event_id: i64,
+    model_key: Option<&str>,
+) -> DbResult<()> {
     conn.execute(
         "UPDATE cost_events SET model_key = ?1 WHERE id = ?2",
         params![model_key, cost_event_id],
@@ -99,9 +108,9 @@ pub fn get_cost_events(
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
-    use crate::harness_adapters::UsageInfo;
     use super::*;
+    use crate::harness_adapters::UsageInfo;
+    use rusqlite::Connection;
 
     #[test]
     fn cost_v2_migration_preserves_rows_and_adds_columns() {
@@ -124,14 +133,18 @@ mod tests {
         // model_key backfill requires a last_synced_at — which is only set when
         // the on-disk sync has run, so seed it to 0 here to make the backfill
         // fire.
-        conn.execute("UPDATE sessions SET last_synced_at = 1 WHERE id = 's1'", []).unwrap();
+        conn.execute("UPDATE sessions SET last_synced_at = 1 WHERE id = 's1'", [])
+            .unwrap();
         super::super::migrate_cost_v2(&conn).unwrap();
 
         // Old `estimated_cost_usd` is gone, new columns exist.
         let cols: Vec<String> = conn
-            .prepare("PRAGMA table_info(cost_events)").unwrap()
-            .query_map([], |r| r.get::<_, String>(1)).unwrap()
-            .filter_map(Result::ok).collect();
+            .prepare("PRAGMA table_info(cost_events)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
         assert!(!cols.contains(&"estimated_cost_usd".to_string()));
         assert!(cols.contains(&"provider".to_string()));
         assert!(cols.contains(&"model_key".to_string()));
@@ -144,9 +157,11 @@ mod tests {
 
         // The legacy row's tokens are preserved, model_key backfilled, source kept.
         let row: (Option<i64>, Option<i64>, String, Option<String>) = conn
-            .query_row("SELECT input_tokens, output_tokens, source, model_key FROM cost_events", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
+            .query_row(
+                "SELECT input_tokens, output_tokens, source, model_key FROM cost_events",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
             .unwrap();
         assert_eq!(row.0, Some(100));
         assert_eq!(row.1, Some(50));
@@ -164,11 +179,55 @@ mod tests {
         let s1 = super::super::create_session(&conn, &p1.id, "claude_code").unwrap();
         let s2 = super::super::create_session(&conn, &p2.id, "kimi_code").unwrap();
 
-        insert_cost_event(&conn, &s1.id, &UsageInfo { input_tokens: Some(100), output_tokens: Some(50), cost_usd: Some(0.10), ..Default::default() }, "claude_code", "pty", Some(0.10)).unwrap();
-        insert_cost_event(&conn, &s1.id, &UsageInfo { input_tokens: Some(200), output_tokens: None, cost_usd: Some(0.20), ..Default::default() }, "claude_code", "pty", Some(0.20)).unwrap();
-        insert_cost_event(&conn, &s2.id, &UsageInfo { input_tokens: None, output_tokens: Some(5), cost_usd: None, ..Default::default() }, "kimi_code", "pty", Some(0.0)).unwrap();
+        insert_cost_event(
+            &conn,
+            &s1.id,
+            &UsageInfo {
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                cost_usd: Some(0.10),
+                ..Default::default()
+            },
+            "claude_code",
+            "pty",
+            Some(0.10),
+        )
+        .unwrap();
+        insert_cost_event(
+            &conn,
+            &s1.id,
+            &UsageInfo {
+                input_tokens: Some(200),
+                output_tokens: None,
+                cost_usd: Some(0.20),
+                ..Default::default()
+            },
+            "claude_code",
+            "pty",
+            Some(0.20),
+        )
+        .unwrap();
+        insert_cost_event(
+            &conn,
+            &s2.id,
+            &UsageInfo {
+                input_tokens: None,
+                output_tokens: Some(5),
+                cost_usd: None,
+                ..Default::default()
+            },
+            "kimi_code",
+            "pty",
+            Some(0.0),
+        )
+        .unwrap();
 
-        assert_eq!(get_cost_events(&conn, Some(&s1.id), None, None).unwrap().len(), 2);
+        assert_eq!(
+            get_cost_events(&conn, Some(&s1.id), None, None)
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(get_cost_events(&conn, None, None, None).unwrap().len(), 3);
 
         // Rollup invariants are covered by get_cost_rollups_v2 in cost_v2.rs

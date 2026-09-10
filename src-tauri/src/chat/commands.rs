@@ -6,28 +6,14 @@ use std::sync::Arc;
 use base64::Engine;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::chat::providers::*;
 use crate::chat::local_models;
+use crate::chat::providers::*;
 use crate::db;
 use crate::secrets;
 use crate::types::*;
 use crate::DbState;
 
 pub(crate) type CmdResult<T> = Result<T, String>;
-
-/// Map a provider id string to the ChatProviderId enum (send-path dispatch
-/// and auto fail-over chain building).
-pub(crate) fn chat_provider_id_from_str(s: &str) -> Option<ChatProviderId> {
-    match s {
-        "anthropic" => Some(ChatProviderId::Anthropic),
-        "openai" => Some(ChatProviderId::OpenAI),
-        "anthropic_compatible" => Some(ChatProviderId::AnthropicCompatible),
-        "openai_compatible" => Some(ChatProviderId::OpenAICompatible),
-        "openrouter" => Some(ChatProviderId::OpenRouter),
-        "local_gguf" => Some(ChatProviderId::LocalGguf),
-        _ => None,
-    }
-}
 
 // ---- Chat session CRUD ----
 
@@ -233,7 +219,8 @@ pub fn create_chat_session(
     db: State<DbState>,
 ) -> CmdResult<ChatSession> {
     let conn = db.0.lock();
-    db::create_chat_session(&conn, &provider, &model, project_id.as_deref()).map_err(|e| e.to_string())
+    db::create_chat_session(&conn, &provider, &model, project_id.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -287,8 +274,7 @@ pub fn set_chat_session_project(
     db: State<DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
-    let before = db::get_chat_session(&conn, &chat_session_id)
-        .map_err(|e| e.to_string())?;
+    let before = db::get_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())?;
     if let Some(sess) = &before {
         let changed = sess.project_id.as_deref() != project_id.as_deref();
         if changed && sess.worktree_path.is_some() {
@@ -305,10 +291,7 @@ pub fn set_chat_session_project(
 /// session from the sweep; useful when the caller is about to select it.
 /// Returns the number of rows deleted.
 #[tauri::command]
-pub fn delete_empty_chat_sessions(
-    keep: Option<String>,
-    db: State<DbState>,
-) -> CmdResult<usize> {
+pub fn delete_empty_chat_sessions(keep: Option<String>, db: State<DbState>) -> CmdResult<usize> {
     let conn = db.0.lock();
     db::delete_empty_chat_sessions(&conn, keep.as_deref()).map_err(|e| e.to_string())
 }
@@ -350,10 +333,7 @@ pub fn delete_all_chat_sessions(
         for sess in &sessions {
             let id = &sess.id;
             for harness in ["claude_code", "kimi_code", "opencode"] {
-                let _ = db::delete_setting(
-                    &conn,
-                    &format!("agent.cli_session_id.{harness}.{id}"),
-                );
+                let _ = db::delete_setting(&conn, &format!("agent.cli_session_id.{harness}.{id}"));
             }
             for (repo, refs) in crate::checkpoints::collect_session_ref_groups(&conn, id) {
                 ref_groups.entry(repo).or_default().extend(refs);
@@ -374,7 +354,8 @@ pub fn delete_all_chat_sessions(
     crate::checkpoints::prune_ref_groups(ref_groups);
     for (_, worktree_path, proj_path) in &worktrees {
         if let (Some(wt), Some(proj)) = (worktree_path, proj_path) {
-            let _ = crate::git::remove_worktree(std::path::Path::new(proj), std::path::Path::new(wt));
+            let _ =
+                crate::git::remove_worktree(std::path::Path::new(proj), std::path::Path::new(wt));
         }
     }
     // Phase 4 (one lock): clear worktree pointers and delete the rows.
@@ -442,7 +423,11 @@ pub fn update_chat_session_provider(
 ) -> CmdResult<()> {
     // Validate against the known providers so a bogus value can't be persisted.
     let provider = match provider.as_str() {
-        "anthropic" | "openai" | "anthropic_compatible" | "openai_compatible" | "openrouter"
+        "anthropic"
+        | "openai"
+        | "anthropic_compatible"
+        | "openai_compatible"
+        | "openrouter"
         | "local_gguf" => provider,
         other => return Err(format!("unknown provider: {other}")),
     };
@@ -491,7 +476,8 @@ pub fn update_chat_session_watch_mode(
         }
     }
     let conn = db.0.lock();
-    db::update_chat_session_watch_mode(&conn, &chat_session_id, mode.as_deref()).map_err(|e| e.to_string())
+    db::update_chat_session_watch_mode(&conn, &chat_session_id, mode.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 /// Flip a chat session between Auto model routing and a pinned provider/model
@@ -529,15 +515,12 @@ pub fn update_chat_session_agent(
     if let Some(ref a) = agent {
         let valid = a == "builtin"
             || a == "local"
-            || a
-                .strip_prefix("harness:")
+            || a.strip_prefix("harness:")
                 .is_some_and(|id| crate::harness_adapters::get_adapter(id).is_some())
-            || a
-                .strip_prefix("acp:")
-                .is_some_and(|id| {
-                    let conn = db.0.lock();
-                    crate::acp_agents::find_agent(&conn, id).is_some()
-                });
+            || a.strip_prefix("acp:").is_some_and(|id| {
+                let conn = db.0.lock();
+                crate::acp_agents::find_agent(&conn, id).is_some()
+            });
         if !valid {
             return Err(format!(
                 "unknown agent: {a} (expected 'builtin', 'local', 'harness:<id>', or 'acp:<id>')"
@@ -545,7 +528,8 @@ pub fn update_chat_session_agent(
         }
     }
     let conn = db.0.lock();
-    db::update_chat_session_agent(&conn, &chat_session_id, agent.as_deref()).map_err(|e| e.to_string())
+    db::update_chat_session_agent(&conn, &chat_session_id, agent.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -562,12 +546,19 @@ pub fn update_chat_session_title(
 /// prefix stripped, capped to a handful of words and characters, no trailing
 /// punctuation.
 fn clean_title(raw: &str) -> String {
-    let line = raw.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let line = raw
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     let mut t = line
         .trim_matches(|c| c == '"' || c == '\'' || c == '`')
         .trim()
         .to_string();
-    if let Some(stripped) = t.strip_prefix("Title:").or_else(|| t.strip_prefix("title:")) {
+    if let Some(stripped) = t
+        .strip_prefix("Title:")
+        .or_else(|| t.strip_prefix("title:"))
+    {
         t = stripped.trim().to_string();
     }
     let words: Vec<&str> = t.split_whitespace().collect();
@@ -603,89 +594,6 @@ pub(crate) fn format_compact_token_count(n: i64) -> String {
     } else {
         n.to_string()
     }
-}
-
-/// One-shot (non-streaming) OpenAI-style completion returning the message text.
-pub async fn openai_oneshot(
-    client: &reqwest::Client,
-    api_key: &str,
-    base: &str,
-    model: &str,
-    system: &str,
-    user: &str,
-) -> CmdResult<String> {
-    let url = format!("{base}/v1/chat/completions");
-    let body = serde_json::json!({
-        "model": model,
-        "stream": false,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    });
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    // B-16: check the status BEFORE parsing — an error body has no `choices`,
-    // so an unchecked 401/429/5xx used to come back as a silent "" (titles,
-    // commit messages, automations all recorded blank successes).
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let snippet = crate::util::truncate_chars(body.trim(), 500);
-        return Err(format!("HTTP {status}: {snippet}"));
-    }
-    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(v["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string())
-}
-
-/// One-shot (non-streaming) Anthropic-style completion returning the text.
-/// `max_tokens` is required by Anthropic's API; callers choose it (titles: 32,
-/// commit messages: 200 for subject + body).
-pub async fn anthropic_oneshot(
-    client: &reqwest::Client,
-    api_key: &str,
-    base: &str,
-    model: &str,
-    system: &str,
-    user: &str,
-    max_tokens: u32,
-) -> CmdResult<String> {
-    let url = format!("{base}/v1/messages");
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": max_tokens,
-        "stream": false,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
-    });
-    let resp = client
-        .post(&url)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    // B-16: same as the OpenAI oneshot — surface HTTP errors instead of
-    // silently returning "".
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let snippet = crate::util::truncate_chars(body.trim(), 500);
-        return Err(format!("HTTP {status}: {snippet}"));
-    }
-    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(v["content"][0]["text"].as_str().unwrap_or("").to_string())
 }
 
 /// Ask the session's model for a short (3–6 word) title summarizing the
@@ -745,7 +653,11 @@ pub async fn generate_chat_title(
             if text.is_empty() {
                 continue;
             }
-            let who = if r.role == "user" { "User" } else { "Assistant" };
+            let who = if r.role == "user" {
+                "User"
+            } else {
+                "Assistant"
+            };
             let snippet: String = text.chars().take(600).collect();
             t.push_str(who);
             t.push_str(": ");
@@ -767,39 +679,20 @@ pub async fn generate_chat_title(
     let user = format!("Conversation:\n{transcript}\nTitle:");
 
     let base_url = base_url.filter(|b| !b.trim().is_empty());
-    // B-10: these are one-shot JSON calls — a total timeout is safe here and
-    // bounds a wedged endpoint instead of hanging the async command forever.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-    let raw = match provider_str.as_str() {
-        "openai" => {
-            let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openrouter" => {
-            let base = base_url.as_deref().unwrap_or(OpenRouterProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openai_compatible" | "local_gguf" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "anthropic" => {
-            let base = base_url.as_deref().unwrap_or(AnthropicProvider::DEFAULT_BASE);
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 32).await?
-        }
-        "anthropic_compatible" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 32).await?
-        }
-        _ => return Ok(None),
+    let client = crate::chat::llm_client::oneshot_client()?;
+    let Some(raw) = crate::chat::llm_client::oneshot(
+        &provider_str,
+        &client,
+        &api_key,
+        base_url.as_deref(),
+        &model,
+        system,
+        &user,
+        32,
+    )
+    .await?
+    else {
+        return Ok(None);
     };
 
     let title = clean_title(&raw);
@@ -808,7 +701,8 @@ pub async fn generate_chat_title(
     }
     {
         let conn = db.0.lock();
-        db::update_chat_session_title(&conn, &chat_session_id, &title).map_err(|e| e.to_string())?;
+        db::update_chat_session_title(&conn, &chat_session_id, &title)
+            .map_err(|e| e.to_string())?;
     }
     Ok(Some(title))
 }
@@ -894,41 +788,20 @@ pub async fn generate_commit_message(
     let user = format!("Diff:\n{diff}\nCommit subject:");
 
     let base_url = base_url.filter(|b| !b.trim().is_empty());
-    // B-10: these are one-shot JSON calls — a total timeout is safe here and
-    // bounds a wedged endpoint instead of hanging the async command forever.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-    let raw = match provider_str.as_str() {
-        "openai" => {
-            let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openrouter" => {
-            let base = base_url.as_deref().unwrap_or(OpenRouterProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openai_compatible" | "local_gguf" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "anthropic" => {
-            let base = base_url.as_deref().unwrap_or(AnthropicProvider::DEFAULT_BASE);
-            // 64 tokens is plenty for a single ≤80-char subject line and keeps
-            // generation fast (latency scales with output tokens).
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 64).await?
-        }
-        "anthropic_compatible" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 64).await?
-        }
-        _ => return Ok(None),
+    let client = crate::chat::llm_client::oneshot_client()?;
+    let Some(raw) = crate::chat::llm_client::oneshot(
+        &provider_str,
+        &client,
+        &api_key,
+        base_url.as_deref(),
+        &model,
+        system,
+        &user,
+        64,
+    )
+    .await?
+    else {
+        return Ok(None);
     };
 
     // Reasoning models (DeepSeek-R1, Qwen-QwQ, …) wrap chain-of-thought in
@@ -973,7 +846,12 @@ fn clean_commit_message(raw: &str) -> String {
     }
     // Enforce the 80-char subject cap.
     if t.chars().count() > 80 {
-        t = t.chars().take(80).collect::<String>().trim_end().to_string();
+        t = t
+            .chars()
+            .take(80)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
     }
     t.trim().to_string()
 }
@@ -1016,8 +894,13 @@ pub async fn generate_diff_review(
         {
             (cs.provider, cs.model)
         } else {
-            const PROVIDERS: [&str; 5] =
-                ["openai", "openrouter", "anthropic", "openai_compatible", "anthropic_compatible"];
+            const PROVIDERS: [&str; 5] = [
+                "openai",
+                "openrouter",
+                "anthropic",
+                "openai_compatible",
+                "anthropic_compatible",
+            ];
             let mut fallback = None;
             for p in PROVIDERS {
                 if secrets::get_chat_api_key(&conn, p).is_some() {
@@ -1087,43 +970,28 @@ pub async fn generate_diff_review(
     let user = format!("Please review this diff:\n\n{diff}");
 
     let base_url = base_url.filter(|b| !b.trim().is_empty());
-    // B-10: these are one-shot JSON calls — a total timeout is safe here and
-    // bounds a wedged endpoint instead of hanging the async command forever.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-    let raw = match provider_str.as_str() {
-        "openai" => {
-            let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openrouter" => {
-            let base = base_url.as_deref().unwrap_or(OpenRouterProvider::DEFAULT_BASE);
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "openai_compatible" | "local_gguf" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
-        }
-        "anthropic" => {
-            let base = base_url.as_deref().unwrap_or(AnthropicProvider::DEFAULT_BASE);
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 2048).await?
-        }
-        "anthropic_compatible" => {
-            let Some(base) = base_url.as_deref() else {
-                return Ok(None);
-            };
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 2048).await?
-        }
-        _ => return Ok(None),
+    let client = crate::chat::llm_client::oneshot_client()?;
+    let Some(raw) = crate::chat::llm_client::oneshot(
+        &provider_str,
+        &client,
+        &api_key,
+        base_url.as_deref(),
+        &model,
+        system,
+        &user,
+        2048,
+    )
+    .await?
+    else {
+        return Ok(None);
     };
 
     let review = strip_think_blocks(&raw).trim().to_string();
-    if review.is_empty() { Ok(None) } else { Ok(Some(review)) }
+    if review.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(review))
+    }
 }
 
 #[tauri::command]
@@ -1290,10 +1158,7 @@ fn cache_accounted_tokens(provider: Option<&str>, cache_read: i64, cache_creatio
 }
 
 #[tauri::command]
-pub fn touch_chat_session(
-    chat_session_id: String,
-    db: State<DbState>,
-) -> CmdResult<()> {
+pub fn touch_chat_session(chat_session_id: String, db: State<DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::touch_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())
 }
@@ -1304,9 +1169,7 @@ pub fn touch_chat_session(
 /// files and extracted document text are appended to the message body so they
 /// persist in history; images are collected separately to be sent as vision
 /// content on the live turn (a short placeholder is added to the body text).
-pub(crate) fn process_attachments(
-    attachments: &[ChatAttachmentInput],
-) -> (String, Vec<ChatImage>) {
+pub(crate) fn process_attachments(attachments: &[ChatAttachmentInput]) -> (String, Vec<ChatImage>) {
     let mut extra = String::new();
     let mut images: Vec<ChatImage> = Vec::new();
     for a in attachments {
@@ -1383,7 +1246,7 @@ pub(crate) async fn fetch_models_list(
     let req = match provider {
         "anthropic" | "anthropic_compatible" => req
             .header("x-api-key", &key)
-            .header("anthropic-version", "2023-06-01"),
+            .header("anthropic-version", ANTHROPIC_API_VERSION),
         "openai" | "openai_compatible" | "openrouter" => {
             req.header("Authorization", format!("Bearer {key}"))
         }
@@ -1408,7 +1271,10 @@ pub(crate) async fn fetch_models_list(
         Err(e) => {
             // Log the raw response for debugging
             eprintln!("[list_chat_models] Failed to parse JSON: {e}");
-            eprintln!("[list_chat_models] Raw response (first 500 chars): {}", &body_text.chars().take(500).collect::<String>());
+            eprintln!(
+                "[list_chat_models] Raw response (first 500 chars): {}",
+                &body_text.chars().take(500).collect::<String>()
+            );
             return Err(format!("error decoding response body: {e}"));
         }
     };
@@ -1424,47 +1290,48 @@ pub(crate) async fn fetch_models_list(
             .or_else(|| v.get("context_length").and_then(|w| w.as_u64()))
             .filter(|w| *w > 0)
     };
-    let models: Vec<crate::types::ChatModel> = if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
-        data.iter()
-            .filter_map(|v| {
-                let id = v.get("id")?.as_str()?.to_string();
-                let object = v
-                    .get("object")
-                    .and_then(|o| o.as_str())
-                    .unwrap_or("model")
-                    .to_string();
-                let created = v.get("created").and_then(|c| c.as_i64()).unwrap_or(0);
-                let owned_by = v
-                    .get("owned_by")
-                    .and_then(|o| o.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Some(crate::types::ChatModel {
-                    id,
-                    object,
-                    created,
-                    owned_by,
-                    context_window: model_window(v),
+    let models: Vec<crate::types::ChatModel> =
+        if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
+            data.iter()
+                .filter_map(|v| {
+                    let id = v.get("id")?.as_str()?.to_string();
+                    let object = v
+                        .get("object")
+                        .and_then(|o| o.as_str())
+                        .unwrap_or("model")
+                        .to_string();
+                    let created = v.get("created").and_then(|c| c.as_i64()).unwrap_or(0);
+                    let owned_by = v
+                        .get("owned_by")
+                        .and_then(|o| o.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some(crate::types::ChatModel {
+                        id,
+                        object,
+                        created,
+                        owned_by,
+                        context_window: model_window(v),
+                    })
                 })
-            })
-            .collect()
-    } else if let Some(arr) = json.as_array() {
-        // Fallback: plain array of model IDs.
-        arr.iter()
-            .filter_map(|v| {
-                let id = v.as_str()?.to_string();
-                Some(crate::types::ChatModel {
-                    id,
-                    object: "model".to_string(),
-                    created: 0,
-                    owned_by: "".to_string(),
-                    context_window: None,
+                .collect()
+        } else if let Some(arr) = json.as_array() {
+            // Fallback: plain array of model IDs.
+            arr.iter()
+                .filter_map(|v| {
+                    let id = v.as_str()?.to_string();
+                    Some(crate::types::ChatModel {
+                        id,
+                        object: "model".to_string(),
+                        created: 0,
+                        owned_by: "".to_string(),
+                        context_window: None,
+                    })
                 })
-            })
-            .collect()
-    } else {
-        return Err("unexpected /v1/models response shape".to_string());
-    };
+                .collect()
+        } else {
+            return Err("unexpected /v1/models response shape".to_string());
+        };
 
     Ok(models)
 }
@@ -1559,32 +1426,33 @@ async fn gather_auto_snapshots(
         AUTO_PROVIDERS
             .iter()
             .map(|p| {
-                let base = db::get_setting(&conn, &format!("chat.{p}.base_url")).ok().flatten();
+                let base = db::get_setting(&conn, &format!("chat.{p}.base_url"))
+                    .ok()
+                    .flatten();
                 let key = secrets::get_chat_api_key(&conn, p).unwrap_or_default();
-                let preferred = db::get_setting(&conn, &format!("chat.{p}.model")).ok().flatten();
-                let curated: Option<Vec<ModelEntry>> = db::get_setting(
-                    &conn,
-                    &format!("chat.{p}.selected_models"),
-                )
-                .ok()
-                .flatten()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
-                .map(|list| {
-                    list.iter()
-                        .filter_map(|e| {
-                            let id = e.get("id")?.as_str()?.to_string();
-                            let context_window = e
-                                .get("contextWindow")
-                                .and_then(|w| w.as_u64())
-                                .filter(|w| *w > 0);
-                            Some(ModelEntry { id, context_window })
+                let preferred = db::get_setting(&conn, &format!("chat.{p}.model"))
+                    .ok()
+                    .flatten();
+                let curated: Option<Vec<ModelEntry>> =
+                    db::get_setting(&conn, &format!("chat.{p}.selected_models"))
+                        .ok()
+                        .flatten()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                        .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
+                        .map(|list| {
+                            list.iter()
+                                .filter_map(|e| {
+                                    let id = e.get("id")?.as_str()?.to_string();
+                                    let context_window = e
+                                        .get("contextWindow")
+                                        .and_then(|w| w.as_u64())
+                                        .filter(|w| *w > 0);
+                                    Some(ModelEntry { id, context_window })
+                                })
+                                .collect()
                         })
-                        .collect()
-                })
-                .filter(|l: &Vec<ModelEntry>| !l.is_empty());
-                let excluded_reason =
-                    crate::chat::model_health::provider_excluded(&conn, p, now);
+                        .filter(|l: &Vec<ModelEntry>| !l.is_empty());
+                let excluded_reason = crate::chat::model_health::provider_excluded(&conn, p, now);
                 AutoProviderCfg {
                     id: p,
                     has_key: !key.is_empty(),
@@ -1678,16 +1546,18 @@ async fn gather_auto_snapshots(
 /// resolver entries, overlaying the curated list's persisted context windows.
 type AutoModelEntry = crate::chat::auto_router::ModelEntry;
 
-async fn fetch_auto_models(
-    cfg: &AutoProviderCfg,
-) -> Result<Vec<AutoModelEntry>, String> {
+async fn fetch_auto_models(cfg: &AutoProviderCfg) -> Result<Vec<AutoModelEntry>, String> {
     let base = cfg
         .base
         .clone()
         .filter(|b| !b.trim().is_empty())
         .or_else(|| match cfg.id {
-            "openrouter" => Some(crate::chat::providers::OpenRouterProvider::DEFAULT_BASE.to_string()),
-            "anthropic" => Some(crate::chat::providers::AnthropicProvider::DEFAULT_BASE.to_string()),
+            "openrouter" => {
+                Some(crate::chat::providers::OpenRouterProvider::DEFAULT_BASE.to_string())
+            }
+            "anthropic" => {
+                Some(crate::chat::providers::AnthropicProvider::DEFAULT_BASE.to_string())
+            }
             "openai" => Some(crate::chat::providers::OpenAIProvider::DEFAULT_BASE.to_string()),
             _ => None,
         })
@@ -1695,7 +1565,10 @@ async fn fetch_auto_models(
     let list = fetch_models_list(cfg.id, base, cfg.key.clone()).await?;
     let live: Vec<AutoModelEntry> = list
         .into_iter()
-        .map(|m| AutoModelEntry { id: m.id, context_window: m.context_window })
+        .map(|m| AutoModelEntry {
+            id: m.id,
+            context_window: m.context_window,
+        })
         .collect();
     // Curated list wins when present (exactly like the picker's); entries
     // missing a persisted window fall back to the live fetch's figure.
@@ -1708,7 +1581,9 @@ async fn fetch_auto_models(
                     .iter()
                     .map(|c| AutoModelEntry {
                         context_window: c.context_window.or_else(|| {
-                            live.iter().find(|l| l.id == c.id).and_then(|l| l.context_window)
+                            live.iter()
+                                .find(|l| l.id == c.id)
+                                .and_then(|l| l.context_window)
                         }),
                         ..c.clone()
                     })
@@ -1837,7 +1712,7 @@ pub async fn send_chat_message(
         // and this read).
         let mut fallbacks: Vec<crate::chat::AutoFallback> = Vec::new();
         for cand in chain.iter().skip(1) {
-            let Some(pid) = chat_provider_id_from_str(&cand.provider) else {
+            let Some(pid) = parse_provider_id(&cand.provider) else {
                 continue;
             };
             let key = {
@@ -1924,8 +1799,16 @@ pub async fn send_chat_message(
     // 2. Persist the user message.
     {
         let conn = db.0.lock();
-        db::add_chat_message(&conn, &chat_session_id, "user", &content, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
-            .map_err(|e| e.to_string())?;
+        db::add_chat_message(
+            &conn,
+            db::NewChatMessage {
+                chat_session_id: &chat_session_id,
+                role: "user",
+                content: &content,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
         db::touch_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())?;
     }
 
@@ -1974,7 +1857,10 @@ pub async fn send_chat_message(
                 // through silently if the model file can't be found — the send
                 // then surfaces the real connection error to the user.
                 let want = model_str.trim();
-                eprintln!("[local-warmup] provider=local_gguf, session model name = {:?}", want);
+                eprintln!(
+                    "[local-warmup] provider=local_gguf, session model name = {:?}",
+                    want
+                );
                 if !want.is_empty() {
                     let mut files = crate::chat::local_models::scan_default_locations();
                     let seen: std::collections::HashSet<String> =
@@ -2050,7 +1936,8 @@ pub async fn send_chat_message(
                         // user's persisted runtime overrides (incl. last-good
                         // ngl) load here too, so warm-up respawns honor them
                         // instead of re-probing from scratch.
-                        let warm_model_id = g.meta.name.clone().unwrap_or_else(|| g.filename.clone());
+                        let warm_model_id =
+                            g.meta.name.clone().unwrap_or_else(|| g.filename.clone());
                         let warm_overrides = {
                             let conn = db.0.lock();
                             local_models::load_overrides(&conn, &warm_model_id)
@@ -2112,25 +1999,28 @@ pub async fn send_chat_message(
                             }
                             Err(e) => {
                                 eprintln!("[local-warmup] start FAILED: {e}");
-            // E-9a: paired clear for the "local_model_loading" status — the
-            // warmup finished (one way or another) and the first token may be
-            // seconds away or never come if the turn fails elsewhere; the
-            // pill must not outlive this block.
-            let _ = app.emit(
-                "chat:status",
-                crate::types::ChatStatusPayload {
-                    chat_session_id: chat_session_id.clone(),
-                    reason: String::new(),
-                    message: String::new(),
-                },
-            );
+                                // E-9a: paired clear for the "local_model_loading" status — the
+                                // warmup finished (one way or another) and the first token may be
+                                // seconds away or never come if the turn fails elsewhere; the
+                                // pill must not outlive this block.
+                                let _ = app.emit(
+                                    "chat:status",
+                                    crate::types::ChatStatusPayload {
+                                        chat_session_id: chat_session_id.clone(),
+                                        reason: String::new(),
+                                        message: String::new(),
+                                    },
+                                );
                                 return Err(format!(
                                     "The local model \"{want}\" could not be started after restart: {e}"
                                 ));
                             }
                         }
                     } else {
-                        eprintln!("[local-warmup] NO MATCH for {:?} — send will hit the stale URL", want);
+                        eprintln!(
+                            "[local-warmup] NO MATCH for {:?} — send will hit the stale URL",
+                            want
+                        );
                     }
                 }
             }
@@ -2217,19 +2107,27 @@ pub async fn send_chat_message(
     let session_plan_mode = {
         let plan_state = app.state::<crate::chat::plan::PlanState>();
         let persisted = mode_label == "plan";
-        plan_state.set_plan_mode(Some(&app), &chat_session_id, persisted, "restored from session", &mode_label);
+        plan_state.set_plan_mode(
+            Some(&app),
+            &chat_session_id,
+            persisted,
+            "restored from session",
+            &mode_label,
+        );
         tools_on && plan_state.plan_mode(&chat_session_id)
     };
     // Raw system-prompt inputs for Auto sessions: the turn loop rebuilds a
     // provider-appropriate prompt per fail-over candidate (the prebuilt
     // `system` below matches only the primary). Populated inside the 5b
     // block; the working-directory suffix is appended further down.
-    let mut auto_system_inputs: Option<crate::chat::SystemPromptInputs> =
-        if session_auto { Some(crate::chat::SystemPromptInputs::default()) } else { None };
+    let mut auto_system_inputs: Option<crate::chat::SystemPromptInputs> = if session_auto {
+        Some(crate::chat::SystemPromptInputs::default())
+    } else {
+        None
+    };
     let (mut system, prompt_audit) = {
         let conn = db.0.lock();
-        let custom = db::get_setting(&conn, "assistant.systemPrompt")
-            .map_err(|e| e.to_string())?;
+        let custom = db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
         let mut skills = parse_invoked_skills(&content);
         // Self-improving artifacts telemetry: one open run per invoked skill;
         // the turn lifecycle closes it (applied/failed/corrected). When a
@@ -2237,8 +2135,12 @@ pub async fn send_chat_message(
         // live traffic exercises the candidate (§9.2). Best-effort — telemetry
         // must never block a send.
         for (skill_name, skill_body) in skills.iter_mut() {
-            if let Ok(artifact) = db::improve::ensure_artifact(&conn, "skill", skill_name, skill_name, skill_body) {
-                if let Ok((_, Some(shadow_body))) = db::improve::start_run_shadow(&conn, &artifact.id, Some(&chat_session_id)) {
+            if let Ok(artifact) =
+                db::improve::ensure_artifact(&conn, "skill", skill_name, skill_name, skill_body)
+            {
+                if let Ok((_, Some(shadow_body))) =
+                    db::improve::start_run_shadow(&conn, &artifact.id, Some(&chat_session_id))
+                {
                     *skill_body = shadow_body;
                 }
             }
@@ -2326,8 +2228,8 @@ pub async fn send_chat_message(
     // mark the rows it folds into a summary.
     let mut messages: Vec<crate::chat::compaction::CompactionEntry> = {
         let conn = db.0.lock();
-        let records = db::list_active_chat_messages(&conn, &chat_session_id)
-            .map_err(|e| e.to_string())?;
+        let records =
+            db::list_active_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?;
         records
             .into_iter()
             .map(|r| crate::chat::compaction::CompactionEntry {
@@ -2379,7 +2281,11 @@ pub async fn send_chat_message(
             // per-turn inside the send task, so this estimate covers the
             // built-in set only; the slack is margin.
             let reserved_tokens: u32 = if tools_on {
-                let json = builtin_tool_specs_json(&provider_id, &model, code_exec_enabled.unwrap_or(false));
+                let json = builtin_tool_specs_json(
+                    &provider_id,
+                    &model,
+                    code_exec_enabled.unwrap_or(false),
+                );
                 // Cached (B1): the schema JSON is constant until tool flags
                 // change, so turns 2..N skip this /tokenize round-trip.
                 let n = crate::chat::compaction::count_json_tokens_cached(
@@ -2532,7 +2438,11 @@ pub async fn send_chat_message(
                 // Reuse the count above — identical assembly. When raw rows
                 // were injected the assembly changed, so pass None and let
                 // maybe_compact re-count.
-                if injected_raw { None } else { pre_count_result.ok() },
+                if injected_raw {
+                    None
+                } else {
+                    pre_count_result.ok()
+                },
                 &route,
             )
             .await;
@@ -2551,15 +2461,26 @@ pub async fn send_chat_message(
                         let conn = db.0.lock();
                         let row = db::add_chat_message(
                             &conn,
-                            &chat_session_id,
-                            "system",
-                            &summary_content,
-                            Some(o.summary_input_tokens),
-                            Some(o.summary_output_tokens),
-                            None,
-                            None, None, None, None, None, None,
-                            // started_at, completed_at, llm, tool, ttft, tok_s
-                            None, None, None, None, None, None,
+                            db::NewChatMessage {
+                                chat_session_id: &chat_session_id,
+                                role: "system",
+                                content: &summary_content,
+                                input_tokens: Some(o.summary_input_tokens),
+                                output_tokens: Some(o.summary_output_tokens),
+                                cost_usd: None,
+                                cache_creation_input_tokens: None,
+                                cache_read_input_tokens: None,
+                                reasoning_output_tokens: None,
+                                provider: None,
+                                model_key: None,
+                                pricing_estimated_usd: None,
+                                started_at: None,
+                                completed_at: None,
+                                llm_time_ms: None,
+                                tool_time_ms: None,
+                                ttft_ms: None,
+                                tokens_per_second: None,
+                            },
                         )
                         .map_err(|e| e.to_string())?;
                         if !o.superseded_ids.is_empty() {
@@ -2574,19 +2495,16 @@ pub async fn send_chat_message(
                     // If the post-count fails (sidecar hiccup), fall back to
                     // a coarse estimate from the pre-count minus the summary
                     // output tokens so the notice is never blank.
-                    let post_compact_tokens: u32 =
-                        crate::chat::compaction::count_tokens(
-                            &chat_mgr.client,
-                            &status.base_url,
-                            &system,
-                            &o.messages,
-                        )
-                        .await
-                        .unwrap_or_else(|_| {
-                            pre_compact_tokens.saturating_sub(
-                                o.summary_input_tokens as u32,
-                            )
-                        });
+                    let post_compact_tokens: u32 = crate::chat::compaction::count_tokens(
+                        &chat_mgr.client,
+                        &status.base_url,
+                        &system,
+                        &o.messages,
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        pre_compact_tokens.saturating_sub(o.summary_input_tokens as u32)
+                    });
 
                     eprintln!(
                         "[local-compaction] compacted {} exchange(s) into summary row {} ({}→{} tokens); {} messages now active",
@@ -2601,8 +2519,7 @@ pub async fn send_chat_message(
                         format_compact_token_count(pre_compact_tokens as i64),
                         format_compact_token_count(post_compact_tokens as i64),
                     );
-                    compacted_system_notice =
-                        Some(("context_compacted".to_string(), notice));
+                    compacted_system_notice = Some(("context_compacted".to_string(), notice));
                     o.messages
                 }
                 // Below threshold, nothing aged out, or compaction failed and
@@ -2786,9 +2703,7 @@ pub async fn send_chat_message(
                     run.messages
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[cloud-compaction] failed ({e}); sending history unchanged"
-                    );
+                    eprintln!("[cloud-compaction] failed ({e}); sending history unchanged");
                     let _ = app.emit(
                         "chat:status",
                         crate::types::ChatStatusPayload {
@@ -3028,15 +2943,15 @@ pub(crate) async fn run_prompt_warmup(
     let (custom, fs_rules, sandbox, attached_c) = {
         let db_state = app.state::<crate::DbState>();
         let conn = db_state.0.lock();
-        let custom = db::get_setting(&conn, "assistant.systemPrompt").ok().flatten();
-        let fs_rules: Vec<crate::chat::permission::ApprovalRule> = db::get_setting(
-            &conn,
-            "permissions.rules",
-        )
-        .ok()
-        .flatten()
-        .and_then(|j| serde_json::from_str(&j).unwrap_or_default())
-        .unwrap_or_default();
+        let custom = db::get_setting(&conn, "assistant.systemPrompt")
+            .ok()
+            .flatten();
+        let fs_rules: Vec<crate::chat::permission::ApprovalRule> =
+            db::get_setting(&conn, "permissions.rules")
+                .ok()
+                .flatten()
+                .and_then(|j| serde_json::from_str(&j).unwrap_or_default())
+                .unwrap_or_default();
         let (sandbox, attached_c) = chat_session_id
             .and_then(|sid| {
                 db::get_chat_session(&conn, sid)
@@ -3071,7 +2986,7 @@ pub(crate) async fn run_prompt_warmup(
         false,
         false,
         manifest.as_deref(),
-            None,
+        None,
     )
     .unwrap_or_default();
     // Replicate the send path's `## Working directory` tail — the section
@@ -3090,10 +3005,7 @@ pub(crate) async fn run_prompt_warmup(
         eprintln!("[prompt-warmup] no working directory — warmup covers the core+skills+manifest prefix only");
     }
     // Capability flags mirror chat/mod.rs send() exactly (see doc above).
-    let pcaps = crate::chat::prompts::provider_capabilities(
-        ChatProviderId::LocalGguf,
-        model_id,
-    );
+    let pcaps = crate::chat::prompts::provider_capabilities(ChatProviderId::LocalGguf, model_id);
     let local_docs = {
         let sidecar_up = app
             .try_state::<local_models::LocalModelState>()
@@ -3120,9 +3032,7 @@ pub(crate) async fn run_prompt_warmup(
         attachable_connectors: std::sync::Arc::new(
             avail_c.into_iter().map(|e| (e.id, e.name)).collect(),
         ),
-        attachable_mcp: std::sync::Arc::new(
-            avail_m.into_iter().map(|e| (e.id, e.name)).collect(),
-        ),
+        attachable_mcp: std::sync::Arc::new(avail_m.into_iter().map(|e| (e.id, e.name)).collect()),
         local_model: true,
     };
     let mut body = serde_json::json!({
@@ -3137,10 +3047,7 @@ pub(crate) async fn run_prompt_warmup(
     if tools_on {
         // Mirror the send's request shape: no `tools` key at all when the
         // composer toggle is off (an empty array renders differently).
-        let specs = crate::chat::tools::openai_tool_specs(
-            &caps,
-            sandbox,
-        );
+        let specs = crate::chat::tools::openai_tool_specs(&caps, sandbox);
         body["tools"] = serde_json::to_value(specs).unwrap_or_default();
     }
     // B-10: these are one-shot JSON calls — a total timeout is safe here and
@@ -3336,27 +3243,26 @@ pub fn persist_partial_chat_message(
         .and_then(crate::harness_adapters::canonical_model_key);
     let _ = db::add_chat_message(
         &conn,
-        &chat_session_id,
-        "assistant",
-        trimmed,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        provider_val,
-        model_key,
-        None,
-        // The abort command doesn't know the turn's start instant, so leave
-        // started_at null (UI falls back to a generic label) but stamp
-        // completed_at so the row still reads as finished.
-        None,
-        Some(db::now_ts()),
-        None, // llm_time_ms
-        None, // tool_time_ms
-        None, // ttft_ms
-        None, // tokens_per_second
+        db::NewChatMessage {
+            chat_session_id: &chat_session_id,
+            role: "assistant",
+            content: trimmed,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            provider: provider_val,
+            model_key: model_key,
+            pricing_estimated_usd: None,
+            started_at: None,
+            completed_at: Some(db::now_ts()),
+            llm_time_ms: None,
+            tool_time_ms: None,
+            ttft_ms: None,
+            tokens_per_second: None,
+        },
     );
     let _ = db::touch_chat_session(&conn, &chat_session_id);
     Ok(())
@@ -3384,8 +3290,12 @@ fn grant_directory_for_approved_tool(
     use crate::chat::tools;
     let mutating = matches!(
         tool,
-        tools::WRITE_FILE | tools::EDIT_FILE | tools::DELETE_FILE
-            | tools::MOVE_FILE | tools::COPY_FILE | tools::DOWNLOAD_FILE
+        tools::WRITE_FILE
+            | tools::EDIT_FILE
+            | tools::DELETE_FILE
+            | tools::MOVE_FILE
+            | tools::COPY_FILE
+            | tools::DOWNLOAD_FILE
     );
     if !mutating {
         return;
@@ -3396,7 +3306,10 @@ fn grant_directory_for_approved_tool(
     }
     let path = std::path::Path::new(&target);
     let Some(dir) = path.parent() else { return };
-    let dir = dir.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+    let dir = dir
+        .to_string_lossy()
+        .trim_end_matches(['/', '\\'])
+        .to_string();
     // Only absolute paths have a stable root to grant.
     if dir.is_empty() || !path.is_absolute() {
         return;
@@ -3451,7 +3364,10 @@ pub fn resolve_plan_proposal(
     plan_state: State<'_, crate::chat::plan::PlanState>,
 ) -> CmdResult<()> {
     if let Some(pending) = chat_state.0.take_pending_approval(&pending_id) {
-        if let Some(f) = feedback.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        if let Some(f) = feedback
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
             plan_state.store_feedback(&pending_id, f);
         }
         let _ = pending.response_tx.send(approved);
@@ -3476,9 +3392,20 @@ pub fn set_chat_session_plan_mode(
     // Persist first so the emitted event's label matches the stored row.
     let label = {
         let conn = db.0.lock();
-        crate::db::set_chat_session_plan(&conn, &chat_session_id, active).map_err(|e| e.to_string())?
+        crate::db::set_chat_session_plan(&conn, &chat_session_id, active)
+            .map_err(|e| e.to_string())?
     };
-    plan_state.set_plan_mode(Some(&app), &chat_session_id, active, if active { "user enabled plan mode" } else { "user disabled plan mode" }, &label);
+    plan_state.set_plan_mode(
+        Some(&app),
+        &chat_session_id,
+        active,
+        if active {
+            "user enabled plan mode"
+        } else {
+            "user disabled plan mode"
+        },
+        &label,
+    );
     Ok(())
 }
 
@@ -3504,7 +3431,9 @@ pub fn set_chat_session_permission_mode(
     db::update_chat_session_permission_mode(&db.0.lock(), &chat_session_id, &mode)
         .map_err(|e| e.to_string())?;
     if let Some(state) = app.try_state::<crate::agent_sessions::AgentSessionState>() {
-        let _ = state.0.apply_claude_permission_mode(&chat_session_id, &mode);
+        let _ = state
+            .0
+            .apply_claude_permission_mode(&chat_session_id, &mode);
     }
     Ok(())
 }
@@ -3532,7 +3461,11 @@ pub fn resolve_agent_question(
     let answers_for_ask = answers.clone();
     let response_for_ask = response.clone();
     if let Some(pending) = chat_state.0.take_pending_question(&pending_id) {
-        let answers = if answers.is_object() { answers } else { serde_json::json!({}) };
+        let answers = if answers.is_object() {
+            answers
+        } else {
+            serde_json::json!({})
+        };
         let _ = pending.response_tx.send(crate::chat::QuestionReply {
             answers,
             response: response.filter(|s| !s.trim().is_empty()),
@@ -3547,15 +3480,22 @@ pub fn resolve_agent_question(
         .0
         .take_pending_ask_if(&chat_session_id, &pending_id)
     {
-        let answers = if answers_for_ask.is_object() { answers_for_ask } else { serde_json::json!({}) };
-        let free = response_for_ask.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let skipped = free.is_none()
-            && answers
-                .as_object()
-                .map(|o| o.is_empty())
-                .unwrap_or(true);
+        let answers = if answers_for_ask.is_object() {
+            answers_for_ask
+        } else {
+            serde_json::json!({})
+        };
+        let free = response_for_ask
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let skipped = free.is_none() && answers.as_object().map(|o| o.is_empty()).unwrap_or(true);
         match pending.route {
-            crate::agent_sessions::PendingAskRoute::OpenCode { base_url, oc_session_id, request_id } => {
+            crate::agent_sessions::PendingAskRoute::OpenCode {
+                base_url,
+                oc_session_id,
+                request_id,
+            } => {
                 // Native opencode `question` tool: POST the answer (or
                 // the reject on skip) to the parked request. The turn is
                 // still in flight server-side and completes on its own.
@@ -3603,7 +3543,8 @@ pub fn resolve_agent_question(
                     // silently drop the answer. Wait for the asking turn to
                     // end, then dispatch. (The harness is PAUSED on the
                     // question; only its own trailing output remains.)
-                    let idle = manager.wait_for_turn_idle(&sid, std::time::Duration::from_secs(300));
+                    let idle =
+                        manager.wait_for_turn_idle(&sid, std::time::Duration::from_secs(300));
                     if !idle {
                         eprintln!("[agent] question follow-up: asking turn never went idle");
                         crate::agent_sessions::emit_error(
@@ -3668,8 +3609,7 @@ pub fn get_agent_actual_model(
 /// external consumer (it builds the data URI for the
 /// `browser_screenshot` tool's return payload).
 pub(crate) fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -3691,7 +3631,6 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
     }
     out
 }
-
 
 // ---- Artifact preview containment ----
 
@@ -3977,7 +3916,9 @@ pub async fn read_artifact_preview(
             // Encode raw file bytes for client-side rendering.
             let mime = match ext.as_str() {
                 "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "pptx" => {
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                }
                 "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 _ => "application/octet-stream",
             };
@@ -4022,10 +3963,8 @@ pub(crate) fn classify_text_ext(ext: &str) -> Option<&'static str> {
         "mmd" | "mermaid" => Some("mermaid"),
         "txt" | "log" | "text" => Some("text"),
         "tsx" | "jsx" => Some("jsx"),
-        "js" | "ts" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
-        | "sh" | "bash" | "yaml" | "yml" | "toml" | "xml" | "sql" | "rb" | "php" | "css" => {
-            Some("code")
-        }
+        "js" | "ts" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "sh" | "bash"
+        | "yaml" | "yml" | "toml" | "xml" | "sql" | "rb" | "php" | "css" => Some("code"),
         _ => None,
     }
 }
@@ -4065,8 +4004,7 @@ mod preview_tests {
 
         // A file written later has a >= mtime (same-second writes allowed).
         std::fs::write(&file, "<html>v2</html>").expect("rewrite");
-        let mtime2 = get_file_mtime_gated(&file.to_string_lossy(), &roots)
-            .expect("still exists");
+        let mtime2 = get_file_mtime_gated(&file.to_string_lossy(), &roots).expect("still exists");
         assert!(mtime2 >= mtime);
 
         assert_eq!(
@@ -4093,11 +4031,10 @@ mod preview_tests {
 
         // Sibling dir whose name merely extends the root (`root` vs `root2`):
         // a raw starts_with would allow it — the segment boundary must not.
-        let sibling = dir
-            .path()
-            .parent()
-            .unwrap()
-            .join(format!("{}2", dir.path().file_name().unwrap().to_string_lossy()));
+        let sibling = dir.path().parent().unwrap().join(format!(
+            "{}2",
+            dir.path().file_name().unwrap().to_string_lossy()
+        ));
         assert!(
             get_file_mtime_gated(&sibling.join("secret.txt").to_string_lossy(), &roots).is_none(),
             "sibling-root path must be refused"
@@ -4180,7 +4117,9 @@ pub async fn office_accurate_pdf(path: String) -> CmdResult<Option<String>> {
             )
         })
         .unwrap_or(false);
-    let size_ok = std::fs::metadata(p).map(|m| m.len() <= MAX_MEDIA).unwrap_or(false);
+    let size_ok = std::fs::metadata(p)
+        .map(|m| m.len() <= MAX_MEDIA)
+        .unwrap_or(false);
     if !ext_ok || !size_ok {
         return Ok(None);
     }
@@ -4199,13 +4138,17 @@ pub async fn office_accurate_pdf(path: String) -> CmdResult<Option<String>> {
 /// iframe and posts the produced file back as base64 (or an error message).
 /// Resolves the async waiter parked in `chat::jsdocgen::generate`.
 #[tauri::command]
-pub fn docgen_complete(request_id: String, data_b64: Option<String>, error: Option<String>) -> CmdResult<()> {
+pub fn docgen_complete(
+    request_id: String,
+    data_b64: Option<String>,
+    error: Option<String>,
+) -> CmdResult<()> {
     let result = match (data_b64, error) {
         (Some(b64), _) => crate::chat::jsdocgen::decode_base64(&b64),
         (None, Some(e)) => Err(e),
-        (None, None) => Err(
-            "the document runner returned neither file data nor an error".to_string(),
-        ),
+        (None, None) => {
+            Err("the document runner returned neither file data nor an error".to_string())
+        }
     };
     crate::chat::jsdocgen::complete(&request_id, result);
     Ok(())
@@ -4228,9 +4171,9 @@ pub fn docdesign_complete(
     let result = match (data_b64, error) {
         (Some(b64), _) => crate::chat::jsdocgen::decode_base64(&b64),
         (None, Some(e)) => Err(e),
-        (None, None) => Err(
-            "the document compiler returned neither file data nor an error".to_string(),
-        ),
+        (None, None) => {
+            Err("the document compiler returned neither file data nor an error".to_string())
+        }
     };
     crate::chat::docdesign::plan::complete(&request_id, result, issues_json, payload_kind);
     Ok(())
@@ -4322,7 +4265,14 @@ pub async fn find_file_by_basename(
 fn find_by_basename_walk(root: &std::path::Path, basename: &str) -> Option<String> {
     let needle = basename.to_lowercase();
     const SKIP_DIRS: [&str; 8] = [
-        "node_modules", ".git", "target", "dist", "build", ".next", ".venv", "__pycache__",
+        "node_modules",
+        ".git",
+        "target",
+        "dist",
+        "build",
+        ".next",
+        ".venv",
+        "__pycache__",
     ];
     const MAX_DEPTH: u8 = 6;
     const MAX_SCANNED: usize = 20_000;
@@ -4407,15 +4357,11 @@ pub async fn open_artifact_external(
     })
     .await
     .map_err(|e| e.to_string())?
-    .ok_or_else(|| {
-        "File not found on disk — it may have been moved or deleted.".to_string()
-    })?;
+    .ok_or_else(|| "File not found on disk — it may have been moved or deleted.".to_string())?;
     // The basename walk stays under the (already gated) recorded parent, but
     // gate the resolved target anyway — defense in depth before the OS opens it.
     if path_in_preview_scope(&resolved, &roots).is_none() {
-        return Err(
-            "Resolved file is outside the folders Relay can access.".to_string(),
-        );
+        return Err("Resolved file is outside the folders Relay can access.".to_string());
     }
     tauri_plugin_opener::open_path(&resolved, None::<&str>)
         .map(|_| resolved)
@@ -4481,9 +4427,11 @@ pub async fn download_artifacts_zip(
         use std::path::Path;
         use zip::write::SimpleFileOptions;
 
-        let file = std::fs::File::create(&dest).map_err(|e| format!("could not create zip: {e}"))?;
+        let file =
+            std::fs::File::create(&dest).map_err(|e| format!("could not create zip: {e}"))?;
         let mut zip = zip::ZipWriter::new(file);
-        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opts =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         for src in &allowed {
@@ -4508,7 +4456,8 @@ pub async fn download_artifacts_zip(
             used.insert(name.clone());
             zip.start_file(name, opts)
                 .map_err(|e| format!("zip error: {e}"))?;
-            zip.write_all(&data).map_err(|e| format!("zip error: {e}"))?;
+            zip.write_all(&data)
+                .map_err(|e| format!("zip error: {e}"))?;
         }
         zip.finish().map_err(|e| format!("zip error: {e}"))?;
         Ok(())
@@ -4557,8 +4506,7 @@ pub fn set_chat_api_key(
             .map_err(|e| e.to_string())?;
     }
     if let Some(m) = model {
-        db::set_setting(&conn, &format!("chat.{provider}.model"), &m)
-            .map_err(|e| e.to_string())?;
+        db::set_setting(&conn, &format!("chat.{provider}.model"), &m).map_err(|e| e.to_string())?;
     }
     // Remember the provider the user last configured so the app reopens on it
     // instead of falling back to the hardcoded priority order. See get_chat_config.
@@ -4613,8 +4561,7 @@ pub fn set_chat_default_model(
         return Err("provider must not be empty".to_string());
     }
     let conn = db.0.lock();
-    db::set_setting(&conn, &format!("chat.{provider}.model"), &model)
-        .map_err(|e| e.to_string())
+    db::set_setting(&conn, &format!("chat.{provider}.model"), &model).map_err(|e| e.to_string())
 }
 
 /// Returns non-secret config only — the API key value is NEVER returned.
@@ -4628,14 +4575,17 @@ pub fn set_chat_default_model(
 /// `has_key` field tells the API Keys panel whether Save is allowed without
 /// re-entering the key.
 #[tauri::command]
-pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResult<ChatConfigPayload> {
+pub fn get_chat_config(
+    provider: Option<String>,
+    db: State<DbState>,
+) -> CmdResult<ChatConfigPayload> {
     let conn = db.0.lock();
     match provider {
         Some(p) => {
-            let base_url = db::get_setting(&conn, &format!("chat.{p}.base_url"))
-                .map_err(|e| e.to_string())?;
-            let model = db::get_setting(&conn, &format!("chat.{p}.model"))
-                .map_err(|e| e.to_string())?;
+            let base_url =
+                db::get_setting(&conn, &format!("chat.{p}.base_url")).map_err(|e| e.to_string())?;
+            let model =
+                db::get_setting(&conn, &format!("chat.{p}.model")).map_err(|e| e.to_string())?;
             // local_gguf is keyless — always treat as having a "key" so the
             // frontend doesn't block on a missing API key.
             let has_key = if p == "local_gguf" {
@@ -4656,8 +4606,8 @@ pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResul
             // actually using, not whichever happens to come first in the
             // priority list below. Falls back to that priority scan only when no
             // active provider is remembered or its key was since removed.
-            if let Some(active) = db::get_setting(&conn, "chat.active_provider")
-                .map_err(|e| e.to_string())?
+            if let Some(active) =
+                db::get_setting(&conn, "chat.active_provider").map_err(|e| e.to_string())?
             {
                 // local_gguf is never honored as the reopen-on provider: the
                 // llama-server sidecar dies with the app, so by the time the
@@ -4786,10 +4736,7 @@ pub async fn scan_local_models(
         .map_err(|e| e.to_string())?
 }
 
-fn scan_local_models_blocking(
-    folder: Option<String>,
-    db: &DbState,
-) -> CmdResult<Vec<GgufModel>> {
+fn scan_local_models_blocking(folder: Option<String>, db: &DbState) -> CmdResult<Vec<GgufModel>> {
     use crate::chat::local_models::{memory_class, GgufFile};
 
     // When a specific folder is given, scan just that one. Otherwise scan the
@@ -4910,7 +4857,13 @@ pub async fn start_local_model(
     };
     let started = local
         .0
-        .start(model_id, &path, mmproj_path.as_deref(), Some(&ovr), user_llama_path)
+        .start(
+            model_id,
+            &path,
+            mmproj_path.as_deref(),
+            Some(&ovr),
+            user_llama_path,
+        )
         .await?;
 
     // Persist the base_url + model for the send path (chat.local_gguf.*).
@@ -4988,13 +4941,14 @@ pub struct LlamaServerPathResult {
 /// Set the user-configured llama-server path. Returns success with the
 /// new path, or an error if the path is invalid (binary not found).
 #[tauri::command]
-pub async fn set_llama_server_path(
-    path: String,
-    db: State<'_, DbState>,
-) -> CmdResult<String> {
+pub async fn set_llama_server_path(path: String, db: State<'_, DbState>) -> CmdResult<String> {
     // Validate: check if the path is a file or a directory with llama-server inside.
     let p = std::path::Path::new(&path);
-    let bin_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let bin_name = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
     let valid = if p.is_file() {
         true
     } else if cfg!(windows) && p.with_extension("exe").is_file() {
@@ -5029,23 +4983,33 @@ pub async fn set_llama_server_path(
 pub fn detect_llama_server_path(db: State<'_, DbState>) -> CmdResult<LlamaServerPathResult> {
     // Check if already configured via the UI
     let conn = db.0.lock();
-    if let Some(path) = db::get_setting(&conn, local_models::LLAMA_SERVER_PATH_KEY).unwrap_or(None) {
+    if let Some(path) = db::get_setting(&conn, local_models::LLAMA_SERVER_PATH_KEY).unwrap_or(None)
+    {
         if !path.is_empty() {
             return Ok(LlamaServerPathResult { path: Some(path) });
         }
     }
 
-    let bin_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let bin_name = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
 
     // 1. Check LLAMA_SERVER_PATH environment variable (highest priority)
     if let Ok(env_path) = std::env::var("LLAMA_SERVER_PATH") {
         let p = std::path::Path::new(&env_path);
-        if p.is_file() || p.with_extension("exe").is_file() || p.is_dir() && p.join(bin_name).is_file() {
-            return Ok(LlamaServerPathResult { path: Some(env_path) });
+        if p.is_file()
+            || p.with_extension("exe").is_file()
+            || p.is_dir() && p.join(bin_name).is_file()
+        {
+            return Ok(LlamaServerPathResult {
+                path: Some(env_path),
+            });
         }
     }
 
-if cfg!(windows) {
+    if cfg!(windows) {
         // On Windows, scan all drive letters (A-Z) for the source build.
         // Check both the MSVC multi-config layout and the single-config one,
         // plus common flat-drop layouts like legacy CUDA builds (llama-cuda).
@@ -5055,23 +5019,27 @@ if cfg!(windows) {
             for rel in [r"\llama.cpp\build\bin\Release", r"\llama.cpp\build\bin"] {
                 let candidate = format!("{drive}:{rel}\\{bin_name}");
                 if std::path::Path::new(&candidate).is_file() {
-                    return Ok(LlamaServerPathResult { path: Some(candidate) });
+                    return Ok(LlamaServerPathResult {
+                        path: Some(candidate),
+                    });
                 }
             }
             // Legacy CUDA drop / flat layouts
             for folder in ["llama-cuda", "llamacpp", "llama.cpp", "llama"] {
                 let candidate = format!("{drive}:\\{folder}\\{bin_name}");
                 if std::path::Path::new(&candidate).is_file() {
-                    return Ok(LlamaServerPathResult { path: Some(candidate)});
+                    return Ok(LlamaServerPathResult {
+                        path: Some(candidate),
+                    });
                 }
             }
         }
         // Also check common alternative locations
-        for alt in [
-            r"C:\Program Files\llama.cpp\bin\llama-server.exe",
-        ] {
+        for alt in [r"C:\Program Files\llama.cpp\bin\llama-server.exe"] {
             if std::path::Path::new(alt).is_file() {
-                return Ok(LlamaServerPathResult { path: Some(alt.to_string()) });
+                return Ok(LlamaServerPathResult {
+                    path: Some(alt.to_string()),
+                });
             }
         }
         // Check if llama-server is on PATH (Windows)
@@ -5082,7 +5050,9 @@ if cfg!(windows) {
             .output();
         if let Ok(out) = output {
             if out.status.success() {
-                return Ok(LlamaServerPathResult { path: Some(bin_name.to_string()) });
+                return Ok(LlamaServerPathResult {
+                    path: Some(bin_name.to_string()),
+                });
             }
         }
     } else {
@@ -5091,7 +5061,9 @@ if cfg!(windows) {
             for dir in path.split(':') {
                 let candidate = format!("{}/{}", dir, bin_name);
                 if std::path::Path::new(&candidate).is_file() {
-                    return Ok(LlamaServerPathResult { path: Some(bin_name.to_string()) });
+                    return Ok(LlamaServerPathResult {
+                        path: Some(bin_name.to_string()),
+                    });
                 }
             }
             None
@@ -5108,15 +5080,21 @@ if cfg!(windows) {
         ] {
             let p = std::path::Path::new(candidate);
             if p.is_file() {
-                return Ok(LlamaServerPathResult { path: Some(candidate.to_string()) });
+                return Ok(LlamaServerPathResult {
+                    path: Some(candidate.to_string()),
+                });
             }
             if p.is_dir() && p.join(bin_name).is_file() {
-                return Ok(LlamaServerPathResult { path: Some(candidate.to_string()) });
+                return Ok(LlamaServerPathResult {
+                    path: Some(candidate.to_string()),
+                });
             }
         }
         // If PATH lookup succeeded, return the binary name
         if let Some(()) = path_output {
-            return Ok(LlamaServerPathResult { path: Some(bin_name.to_string()) });
+            return Ok(LlamaServerPathResult {
+                path: Some(bin_name.to_string()),
+            });
         }
     }
 
@@ -5138,7 +5116,12 @@ if cfg!(windows) {
 /// id → context_window). 24h TTL — model catalogs change slowly, and the
 /// meter re-reads this on every resolve.
 static MODEL_WINDOWS_CACHE: std::sync::OnceLock<
-    parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, std::collections::HashMap<String, u32>)>>,
+    parking_lot::Mutex<
+        std::collections::HashMap<
+            String,
+            (std::time::Instant, std::collections::HashMap<String, u32>),
+        >,
+    >,
 > = std::sync::OnceLock::new();
 
 const MODEL_WINDOWS_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
@@ -5160,9 +5143,8 @@ pub async fn fetch_provider_model_windows(
     provider: String,
     db: State<'_, DbState>,
 ) -> CmdResult<std::collections::HashMap<String, u32>> {
-    let cache = MODEL_WINDOWS_CACHE.get_or_init(|| {
-        parking_lot::Mutex::new(std::collections::HashMap::new())
-    });
+    let cache = MODEL_WINDOWS_CACHE
+        .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
     if let Some((at, table)) = cache.lock().get(&provider) {
         if at.elapsed() < MODEL_WINDOWS_TTL {
             return Ok(table.clone());
@@ -5194,7 +5176,7 @@ pub async fn fetch_provider_model_windows(
             let resp = client
                 .get(format!("{base}/v1/models?limit=1000"))
                 .header("x-api-key", &api_key)
-                .header("anthropic-version", "2023-06-01")
+                .header("anthropic-version", ANTHROPIC_API_VERSION)
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
@@ -5203,20 +5185,30 @@ pub async fn fetch_provider_model_windows(
                 let body = resp.text().await.unwrap_or_default();
                 // Stale cache beats a live failure.
                 if let Some((_, table)) = cache.lock().get(&provider) {
-                    eprintln!("[context-windows] anthropic fetch failed ({status}); using stale cache");
+                    eprintln!(
+                        "[context-windows] anthropic fetch failed ({status}); using stale cache"
+                    );
                     return Ok(table.clone());
                 }
-                return Err(format!("models fetch returned {status}: {}", crate::util::truncate_chars(body.trim(), 300)));
+                return Err(format!(
+                    "models fetch returned {status}: {}",
+                    crate::util::truncate_chars(body.trim(), 300)
+                ));
             }
             let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
             let mut table = std::collections::HashMap::new();
             for m in v
                 .get("data")
                 .and_then(|d| d.as_array())
-                .into_iter().flatten()
+                .into_iter()
+                .flatten()
             {
-                let Some(id) = m.get("id").and_then(|i| i.as_str()) else { continue };
-                let Some(w) = m.get("context_window").and_then(|w| w.as_u64()) else { continue };
+                let Some(id) = m.get("id").and_then(|i| i.as_str()) else {
+                    continue;
+                };
+                let Some(w) = m.get("context_window").and_then(|w| w.as_u64()) else {
+                    continue;
+                };
                 if w > 0 {
                     table.insert(id.to_ascii_lowercase(), w as u32);
                 }
@@ -5233,7 +5225,9 @@ pub async fn fetch_provider_model_windows(
         _ => std::collections::HashMap::new(),
     };
 
-    cache.lock().insert(provider.clone(), (std::time::Instant::now(), table.clone()));
+    cache
+        .lock()
+        .insert(provider.clone(), (std::time::Instant::now(), table.clone()));
     Ok(table)
 }
 
@@ -5331,10 +5325,8 @@ pub(crate) fn effective_session_window(
     crate::chat::context_windows::effective_cloud_window(model, global_cap)
 }
 
-/// Parse a chat_sessions.provider string into the provider enum. The send
-/// path matches inline (it must hard-fail on unknown providers); the meter
-/// paths need the tolerant variant — they render for whatever the session
-/// store holds, including harness ids.
+/// Map a provider id string to the ChatProviderId enum (send-path dispatch,
+/// auto fail-over chain building, and the context-meter paths).
 pub(crate) fn parse_provider_id(s: &str) -> Option<ChatProviderId> {
     match s {
         "anthropic" => Some(ChatProviderId::Anthropic),
@@ -5390,9 +5382,18 @@ pub(crate) fn resolve_cloud_summarizer(
     conn: &rusqlite::Connection,
 ) -> Option<(ChatProviderId, String, String, String)> {
     for (p, default_base) in [
-        ("anthropic", crate::chat::providers::AnthropicProvider::DEFAULT_BASE),
-        ("openai", crate::chat::providers::OpenAIProvider::DEFAULT_BASE),
-        ("openrouter", crate::chat::providers::OpenRouterProvider::DEFAULT_BASE),
+        (
+            "anthropic",
+            crate::chat::providers::AnthropicProvider::DEFAULT_BASE,
+        ),
+        (
+            "openai",
+            crate::chat::providers::OpenAIProvider::DEFAULT_BASE,
+        ),
+        (
+            "openrouter",
+            crate::chat::providers::OpenRouterProvider::DEFAULT_BASE,
+        ),
     ] {
         if crate::secrets::get_chat_api_key(conn, p).is_none() {
             continue;
@@ -5457,7 +5458,12 @@ fn estimate_used_tokens(n_records: usize, total_and_tools: u32) -> Option<u32> {
 /// Harness sessions report the model their CLI LAST actually ran (persisted
 /// as `agent.actual_model.<harness>.<sid>`); falling back to the session's
 /// stored id keeps the window resolvable before the first harness turn.
-fn meter_model_for_session(conn: &rusqlite::Connection, provider_str: &str, model_str: &str, sid: &str) -> String {
+fn meter_model_for_session(
+    conn: &rusqlite::Connection,
+    provider_str: &str,
+    model_str: &str,
+    sid: &str,
+) -> String {
     if let Some(harness) = provider_str.strip_prefix("harness:") {
         let key = crate::agent_sessions::actual_model_key(harness, sid);
         if let Ok(Some(actual)) = crate::db::get_setting(conn, &key) {
@@ -5559,8 +5565,8 @@ pub async fn count_context_tokens(
             } else {
                 // LOCKING: never while another `conn` guard is held.
                 let conn = db.0.lock();
-                let custom = db::get_setting(&conn, "assistant.systemPrompt")
-                    .map_err(|e| e.to_string())?;
+                let custom =
+                    db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
                 let (c, m): (Vec<String>, Vec<String>) =
                     db::list_chat_session_connectors(&conn, &chat_session_id)
                         .unwrap_or_default()
@@ -5587,7 +5593,10 @@ pub async fn count_context_tokens(
             attached_m.hash(&mut h);
             format!("{:x}:{last_id}:{n_records}", h.finish())
         };
-        if let Some(tokens) = chat_state.0.cached_context_tokens(&chat_session_id, &fingerprint) {
+        if let Some(tokens) = chat_state
+            .0
+            .cached_context_tokens(&chat_session_id, &fingerprint)
+        {
             return Ok(crate::types::ContextUsagePayload {
                 used_tokens: estimate_used_tokens(n_records, tokens as u32),
                 max_tokens,
@@ -5604,7 +5613,8 @@ pub async fn count_context_tokens(
                 .filter_map(|r| r.strip_prefix("mcp:").map(|s| s.to_string()))
                 .collect();
             let system_str: String = {
-                let provider_id = parse_provider_id(&provider_str).unwrap_or(ChatProviderId::OpenAI);
+                let provider_id =
+                    parse_provider_id(&provider_str).unwrap_or(ChatProviderId::OpenAI);
                 let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
                 let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
                 crate::chat::build_system_prompt(
@@ -5616,7 +5626,7 @@ pub async fn count_context_tokens(
                     false,
                     false,
                     manifest.as_deref(),
-            None,
+                    None,
                 )
                 .unwrap_or_default()
             };
@@ -5649,7 +5659,9 @@ pub async fn count_context_tokens(
 
         let (total, _sys, _msgs, tools) =
             estimate_usage_parts(&system_str, &messages, &tool_specs_json);
-        chat_state.0.store_context_tokens(&chat_session_id, fingerprint, total + tools);
+        chat_state
+            .0
+            .store_context_tokens(&chat_session_id, fingerprint, total + tools);
         return Ok(crate::types::ContextUsagePayload {
             used_tokens: estimate_used_tokens(n_records, total + tools),
             max_tokens,
@@ -5677,8 +5689,7 @@ pub async fn count_context_tokens(
     // case for the frontend's 2 s idle poll.
     let records = {
         let conn = db.0.lock();
-        db::list_active_chat_messages(&conn, &chat_session_id)
-            .map_err(|e| e.to_string())?
+        db::list_active_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?
     };
 
     // Same cache-accounted figure as the cloud branch (local_gguf is an
@@ -5688,7 +5699,13 @@ pub async fn count_context_tokens(
         .iter()
         .rev()
         .find(|r| r.role == "assistant")
-        .map(|r| cache_accounted_tokens(Some("local_gguf"), r.cache_read_input_tokens.unwrap_or(0), r.cache_creation_input_tokens.unwrap_or(0)))
+        .map(|r| {
+            cache_accounted_tokens(
+                Some("local_gguf"),
+                r.cache_read_input_tokens.unwrap_or(0),
+                r.cache_creation_input_tokens.unwrap_or(0),
+            )
+        })
         .unwrap_or(0)
         .max(0) as u32;
 
@@ -5705,8 +5722,7 @@ pub async fn count_context_tokens(
     // deadlocked the whole app on model load.
     let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
         let conn = db.0.lock();
-        let custom = db::get_setting(&conn, "assistant.systemPrompt")
-            .map_err(|e| e.to_string())?;
+        let custom = db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
         let (c, m): (Vec<String>, Vec<String>) =
             db::list_chat_session_connectors(&conn, &chat_session_id)
                 .unwrap_or_default()
@@ -5747,9 +5763,16 @@ pub async fn count_context_tokens(
 
     // Cache hit: same transcript + prompt + model → same count. Skip the
     // /tokenize HTTP round-trip (and the message-vec build) entirely.
-    if let Some(tokens) = chat_state.0.cached_context_tokens(&chat_session_id, &fingerprint) {
+    if let Some(tokens) = chat_state
+        .0
+        .cached_context_tokens(&chat_session_id, &fingerprint)
+    {
         return Ok(crate::types::ContextUsagePayload {
-            used_tokens: if tokens > 0 || has_messages { Some(tokens) } else { None },
+            used_tokens: if tokens > 0 || has_messages {
+                Some(tokens)
+            } else {
+                None
+            },
             max_tokens: status.n_ctx,
             cached_tokens,
         });
@@ -5793,13 +5816,19 @@ pub async fn count_context_tokens(
         }
     };
 
-    chat_state.0.store_context_tokens(&chat_session_id, fingerprint, tokens);
+    chat_state
+        .0
+        .store_context_tokens(&chat_session_id, fingerprint, tokens);
 
     // 0 with no messages is a genuinely empty transcript → null; 0 WITH
     // messages on a SUCCESSFUL tokenize is real data (empty system + no
     // active rows) and stays Some(0).
     Ok(crate::types::ContextUsagePayload {
-        used_tokens: if tokens > 0 || has_messages { Some(tokens) } else { None },
+        used_tokens: if tokens > 0 || has_messages {
+            Some(tokens)
+        } else {
+            None
+        },
         max_tokens: status.n_ctx,
         cached_tokens,
     })
@@ -5861,8 +5890,8 @@ pub async fn count_context_breakdown(
             // locking rule).
             let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
                 let conn = db.0.lock();
-                let custom = db::get_setting(&conn, "assistant.systemPrompt")
-                    .map_err(|e| e.to_string())?;
+                let custom =
+                    db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
                 let (c, m): (Vec<String>, Vec<String>) =
                     db::list_chat_session_connectors(&conn, &chat_session_id)
                         .unwrap_or_default()
@@ -5875,7 +5904,8 @@ pub async fn count_context_breakdown(
                 .filter_map(|r| r.strip_prefix("mcp:").map(|s| s.to_string()))
                 .collect();
             let system_str: String = {
-                let provider_id = parse_provider_id(&provider_str).unwrap_or(ChatProviderId::OpenAI);
+                let provider_id =
+                    parse_provider_id(&provider_str).unwrap_or(ChatProviderId::OpenAI);
                 let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
                 let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
                 crate::chat::build_system_prompt(
@@ -5887,7 +5917,7 @@ pub async fn count_context_breakdown(
                     false,
                     false,
                     manifest.as_deref(),
-            None,
+                    None,
                 )
                 .unwrap_or_default()
             };
@@ -5904,12 +5934,10 @@ pub async fn count_context_breakdown(
                 local_model: false,
                 fs_rules: Vec::new(),
             };
-            let tool_specs_json = serde_json::to_string(
-                &crate::chat::tools::openai_tool_specs(
-                    &caps,
-                    crate::chat::permission::SandboxPolicy::WorkspaceWrite,
-                ),
-            )
+            let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(
+                &caps,
+                crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+            ))
             .unwrap_or_default();
             (system_str, tool_specs_json)
         };
@@ -5948,8 +5976,7 @@ pub async fn count_context_breakdown(
     //    count_context_tokens: never call it while `conn` is held.
     let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
         let conn = db.0.lock();
-        let custom = db::get_setting(&conn, "assistant.systemPrompt")
-            .map_err(|e| e.to_string())?;
+        let custom = db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
         let (c, m): (Vec<String>, Vec<String>) =
             db::list_chat_session_connectors(&conn, &chat_session_id)
                 .unwrap_or_default()
@@ -5977,9 +6004,10 @@ pub async fn count_context_breakdown(
         )
         .unwrap_or_default()
     };
-    let system_prompt_tokens = crate::chat::compaction::count_json_tokens(&client, base_url, &system_str)
-        .await
-        .unwrap_or(0);
+    let system_prompt_tokens =
+        crate::chat::compaction::count_json_tokens(&client, base_url, &system_str)
+            .await
+            .unwrap_or(0);
 
     // 2. Messages — assemble active history the same way count_context_tokens does.
     let messages: Vec<ChatMessage> = {
@@ -5995,9 +6023,14 @@ pub async fn count_context_breakdown(
             .collect()
     };
     // Total = system + messages (what the model actually sees).
-    let total_tokens = crate::chat::compaction::count_tokens(&client, base_url, &Some(system_str.clone()), &messages)
-        .await
-        .unwrap_or(0);
+    let total_tokens = crate::chat::compaction::count_tokens(
+        &client,
+        base_url,
+        &Some(system_str.clone()),
+        &messages,
+    )
+    .await
+    .unwrap_or(0);
     // Messages-only = total - system (approximate; tokenizer boundary is small).
     let messages_tokens = total_tokens.saturating_sub(system_prompt_tokens);
 
@@ -6017,9 +6050,15 @@ pub async fn count_context_breakdown(
         local_model: false,
         fs_rules: Vec::new(),
     };
-    let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite))
-        .unwrap_or_default();
-    let tool_specs_tokens = crate::chat::compaction::count_json_tokens(&client, base_url, &tool_specs_json).await.unwrap_or(0);
+    let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(
+        &caps,
+        crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+    ))
+    .unwrap_or_default();
+    let tool_specs_tokens =
+        crate::chat::compaction::count_json_tokens(&client, base_url, &tool_specs_json)
+            .await
+            .unwrap_or(0);
 
     // 4. Connector/MCP tools — we don't have live connector sessions here
     //    (they're per-turn); estimate from the DB's connector credential rows.
@@ -6029,12 +6068,22 @@ pub async fn count_context_breakdown(
     //    last user message (best effort: the breakdown fires on hover which is
     //    not message-aware, so we sample the latest user turn from history).
     let skills_tokens: u32 = {
-        let last_user_content = messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.as_str());
+        let last_user_content = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.as_str());
         if let Some(content) = last_user_content {
             let invoked = parse_invoked_skills(content);
             if !invoked.is_empty() {
-                let merged: String = invoked.iter().map(|(_, body)| body.as_str()).collect::<Vec<_>>().join("\n\n");
-                crate::chat::compaction::count_json_tokens(&client, base_url, &merged).await.unwrap_or(0)
+                let merged: String = invoked
+                    .iter()
+                    .map(|(_, body)| body.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                crate::chat::compaction::count_json_tokens(&client, base_url, &merged)
+                    .await
+                    .unwrap_or(0)
             } else {
                 0
             }
@@ -6046,8 +6095,15 @@ pub async fn count_context_breakdown(
     // 6. Metacontext — compacted-system summary row, if any.
     let metacontext_tokens: u32 = {
         let mut total = 0u32;
-        for m in messages.iter().filter(|m| m.role == "system" && m.content.trim_start().starts_with(crate::chat::compaction::COMPACTED_PREFIX)) {
-            total += crate::chat::compaction::count_json_tokens(&client, base_url, &m.content).await.unwrap_or(0);
+        for m in messages.iter().filter(|m| {
+            m.role == "system"
+                && m.content
+                    .trim_start()
+                    .starts_with(crate::chat::compaction::COMPACTED_PREFIX)
+        }) {
+            total += crate::chat::compaction::count_json_tokens(&client, base_url, &m.content)
+                .await
+                .unwrap_or(0);
         }
         total
     };
@@ -6140,8 +6196,7 @@ pub async fn chat_compact_now(
     };
     let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
         let conn = db.0.lock();
-        let custom =
-            db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
+        let custom = db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
         let (c, m): (Vec<String>, Vec<String>) =
             db::list_chat_session_connectors(&conn, &chat_session_id)
                 .unwrap_or_default()
@@ -6185,11 +6240,15 @@ pub async fn chat_compact_now(
                 false,
                 false,
                 manifest.as_deref(),
-            None,
+                None,
             )
             .unwrap_or_default()
         };
-        let system = if system.trim().is_empty() { None } else { Some(system) };
+        let system = if system.trim().is_empty() {
+            None
+        } else {
+            Some(system)
+        };
         // Honor the summarizer override here too — "Compact now" should
         // produce the same quality the automatic path would.
         let route = match {
@@ -6277,11 +6336,15 @@ pub async fn chat_compact_now(
                 false,
                 false,
                 manifest.as_deref(),
-            None,
+                None,
             )
             .unwrap_or_default()
         };
-        let system = if system.trim().is_empty() { None } else { Some(system) };
+        let system = if system.trim().is_empty() {
+            None
+        } else {
+            Some(system)
+        };
         crate::chat::cloud_compact::run_cloud_compaction(
             &chat_state.0.client,
             provider_id,
@@ -6334,11 +6397,15 @@ mod tests {
         let with_tool = "<tool>{\"title\":\"Running python code\"}</tool>The result is 42.";
         assert_eq!(strip_think_blocks(with_tool), "The result is 42.");
 
-        let mixed = "<think>plan</think><tool>{\"title\":\"x\"}</tool>Done.<tool>{\"title\":\"y\"}</tool>";
+        let mixed =
+            "<think>plan</think><tool>{\"title\":\"x\"}</tool>Done.<tool>{\"title\":\"y\"}</tool>";
         assert_eq!(strip_think_blocks(mixed), "Done.");
 
         // Unterminated trailing block (mid-stream) is dropped entirely.
-        assert_eq!(strip_think_blocks("Answer.<tool>{\"title\":\"partial"), "Answer.");
+        assert_eq!(
+            strip_think_blocks("Answer.<tool>{\"title\":\"partial"),
+            "Answer."
+        );
 
         // Plain content is untouched (aside from trimming).
         assert_eq!(strip_think_blocks("  just text  "), "just text");
@@ -6350,15 +6417,23 @@ mod tests {
         assert_eq!(estimate_tokens("abcd"), 1);
         assert_eq!(estimate_tokens("abcde"), 2); // 5 chars → ceil(1.25) = 2
         assert_eq!(estimate_tokens("    "), 1); // trimmed whitespace still counts
-        // Unicode counts by chars, not bytes (10 chars → ceil(2.5) = 3).
+                                                // Unicode counts by chars, not bytes (10 chars → ceil(2.5) = 3).
         assert_eq!(estimate_tokens("你好你你好你好你好"), 3);
     }
 
     #[test]
     fn estimate_usage_parts_sums_categories() {
         let msgs = vec![
-            ChatMessage { role: "user".into(), content: "abcd".into(), images: Vec::new() },      // 1
-            ChatMessage { role: "assistant".into(), content: "abcd".repeat(4).into(), images: Vec::new() }, // 4
+            ChatMessage {
+                role: "user".into(),
+                content: "abcd".into(),
+                images: Vec::new(),
+            }, // 1
+            ChatMessage {
+                role: "assistant".into(),
+                content: "abcd".repeat(4).into(),
+                images: Vec::new(),
+            }, // 4
         ];
         let (total, sys, msgs_tok, tools) = estimate_usage_parts("abcdabcd", &msgs, "abcd"); // 2 + 1
         assert_eq!(sys, 2);
@@ -6407,8 +6482,12 @@ mod tests {
     fn meter_model_prefers_harness_actual_model() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        crate::db::set_setting(&conn, "agent.actual_model.claude_code.s1", "claude-opus-4-8")
-            .unwrap();
+        crate::db::set_setting(
+            &conn,
+            "agent.actual_model.claude_code.s1",
+            "claude-opus-4-8",
+        )
+        .unwrap();
         assert_eq!(
             meter_model_for_session(&conn, "harness:claude_code", "claude-sonnet-4-5", "s1"),
             "claude-opus-4-8"
@@ -6429,7 +6508,8 @@ mod tests {
     fn meter_model_resolves_through_the_window_registry() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        let model = meter_model_for_session(&conn, "harness:claude_code", "claude-sonnet-4-5", "s9");
+        let model =
+            meter_model_for_session(&conn, "harness:claude_code", "claude-sonnet-4-5", "s9");
         let window = crate::chat::context_windows::cloud_window_for_model(&model);
         assert_eq!(window, 200_000);
     }
@@ -6438,10 +6518,22 @@ mod tests {
     fn slugify_command_matches_frontend_rules() {
         // The function lives in `installed_skills`; verify it produces the
         // same slugged names the frontend uses for slash-token matching.
-        assert_eq!(crate::installed_skills::slugify("Word documents (.docx)"), "word-documents-docx");
-        assert_eq!(crate::installed_skills::slugify("Slide decks (.pptx)"), "slide-decks-pptx");
-        assert_eq!(crate::installed_skills::slugify("PDF documents"), "pdf-documents");
-        assert_eq!(crate::installed_skills::slugify("  Report — Style!! "), "report-style");
+        assert_eq!(
+            crate::installed_skills::slugify("Word documents (.docx)"),
+            "word-documents-docx"
+        );
+        assert_eq!(
+            crate::installed_skills::slugify("Slide decks (.pptx)"),
+            "slide-decks-pptx"
+        );
+        assert_eq!(
+            crate::installed_skills::slugify("PDF documents"),
+            "pdf-documents"
+        );
+        assert_eq!(
+            crate::installed_skills::slugify("  Report — Style!! "),
+            "report-style"
+        );
         assert_eq!(crate::installed_skills::slugify("..."), "");
     }
 
@@ -6451,7 +6543,7 @@ mod tests {
         assert!(message_has_slash_token("please /docx this", "docx"));
         assert!(message_has_slash_token("/DOCX", "docx")); // case-insensitive
         assert!(message_has_slash_token("/docx", "docx")); // end of string
-        // Must not match as a prefix of a longer token or mid-word.
+                                                           // Must not match as a prefix of a longer token or mid-word.
         assert!(!message_has_slash_token("/docx2 please", "docx"));
         assert!(!message_has_slash_token("see a/docx file", "docx"));
         assert!(!message_has_slash_token("no command here", "docx"));
@@ -6469,7 +6561,11 @@ mod tests {
         // snapshot schema is the lightweight `(slug, name, body)` triple
         // used for prompt injection.
         let got = parse_invoked_skills("/docx write the report");
-        assert_eq!(got.len(), 1, "expected exactly 1 docx skill match, got: {got:?}");
+        assert_eq!(
+            got.len(),
+            1,
+            "expected exactly 1 docx skill match, got: {got:?}"
+        );
         assert_eq!(got[0].0, "docx", "expected the docx slug, got: {got:?}");
 
         // No invocation → nothing, even though skills are present.
@@ -6505,7 +6601,10 @@ mod tests {
         let l = parse_invoked_skills("/loop");
         assert_eq!(g.len(), 1);
         assert_eq!(l.len(), 1);
-        assert_eq!(g[0].1, l[0].1, "/goal and /loop should share the same skill body");
+        assert_eq!(
+            g[0].1, l[0].1,
+            "/goal and /loop should share the same skill body"
+        );
         // The whole goal text is never required to include the token again —
         // a bare /goal alone also injects.
         assert_eq!(parse_invoked_skills("/goal").len(), 1);

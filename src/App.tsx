@@ -14,6 +14,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ArrowLeft, ArrowRight, MessageCirclePlus } from "lucide-react";
 import { Modal } from "./components/common/Modal";
+import { startPointerDrag } from "./lib/pointerDrag";
 import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
 import { WorktreeNudgeBanner } from "./components/onboarding/WorktreeNudgeBanner";
@@ -131,8 +132,6 @@ export default function App() {
       e.preventDefault();
       const grid = chatGridRef.current;
       if (!grid) return;
-      const handle = e.currentTarget;
-      handle.setPointerCapture(e.pointerId);
       setSplitResizing(true);
       // PERF: pointermove fires at input frequency (up to ~1000 Hz) and every
       // raw setSplitRatio re-rendered the whole App tree. Keep the latest X in
@@ -148,20 +147,18 @@ export default function App() {
         const ratio = (latestX - left) / total;
         setSplitRatio(Math.min(0.8, Math.max(0.2, ratio)));
       };
-      const onMove = (ev: PointerEvent) => {
-        latestX = ev.clientX;
-        if (frame === null) frame = requestAnimationFrame(applyRatio);
-      };
-      const onUp = () => {
-        if (frame !== null) cancelAnimationFrame(frame);
-        setSplitResizing(false);
-        handle.removeEventListener("pointermove", onMove);
-        handle.removeEventListener("pointerup", onUp);
-        handle.removeEventListener("pointercancel", onUp);
-      };
-      handle.addEventListener("pointermove", onMove);
-      handle.addEventListener("pointerup", onUp);
-      handle.addEventListener("pointercancel", onUp);
+      startPointerDrag(
+        e,
+        (x) => {
+          latestX = x;
+          if (frame === null) frame = requestAnimationFrame(applyRatio);
+        },
+        () => {
+          if (frame !== null) cancelAnimationFrame(frame);
+          setSplitResizing(false);
+        },
+        { capture: true },
+      );
     },
     [setSplitRatio],
   );

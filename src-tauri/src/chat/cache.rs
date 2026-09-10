@@ -81,6 +81,25 @@ pub(crate) fn mark_last_message(messages: &mut [Value]) {
     }
 }
 
+/// The OpenAI-family cache marks, shared by the non-tool request builder
+/// (providers.rs) and the streaming tool-loop body builder (streaming.rs):
+/// the system message becomes a cached content-block array, and a breakpoint
+/// lands on the newest message — the same two marks the Anthropic loop sends
+/// natively (tools need no separate mark: Anthropic caches the whole prefix
+/// up to the system breakpoint, tools included).
+pub(crate) fn apply_openai_cache_marks(messages: &mut Vec<Value>) {
+    if let Some(sys) = messages.first_mut() {
+        if sys.get("role").and_then(|r| r.as_str()) == Some("system") {
+            if let Some(Value::String(text)) = sys.get_mut("content") {
+                if !text.is_empty() {
+                    sys["content"] = cached_system_block(text);
+                }
+            }
+        }
+    }
+    mark_last_message(messages);
+}
+
 /// Recursively remove every `cache_control` key from a request body. Used as
 /// the fallback when an Anthropic-compatible gateway rejects the field
 /// outright (HTTP 400 naming `cache_control`/`ephemeral`) — the turn then

@@ -128,7 +128,11 @@ pub fn slug(s: &str) -> String {
         }
     }
     let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() { "chat".to_string() } else { trimmed }
+    if trimmed.is_empty() {
+        "chat".to_string()
+    } else {
+        trimmed
+    }
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -150,8 +154,7 @@ fn serialize_chat(
     session: &crate::types::ChatSession,
 ) -> Result<ChatWithFiles, String> {
     let messages = db::list_chat_messages(conn, &session.id).map_err(|e| e.to_string())?;
-    let arts =
-        crate::db::list_artifacts_for_chat(conn, &session.id).map_err(|e| e.to_string())?;
+    let arts = crate::db::list_artifacts_for_chat(conn, &session.id).map_err(|e| e.to_string())?;
     let by_msg: HashMap<Option<i64>, Vec<&crate::types::ArtifactRecord>> = {
         let mut m: HashMap<Option<i64>, Vec<_>> = HashMap::new();
         for a in &arts {
@@ -232,16 +235,23 @@ fn build_zip(manifest: &ChatManifest, chats: &[ChatWithFiles]) -> Result<Vec<u8>
     {
         let mut zip = zip::ZipWriter::new(&mut buf);
         let mj = serde_json::to_vec(manifest).map_err(|e| e.to_string())?;
-        zip.start_file("manifest.json", opts).map_err(|e| e.to_string())?;
+        zip.start_file("manifest.json", opts)
+            .map_err(|e| e.to_string())?;
         zip.write_all(&mj).map_err(|e| e.to_string())?;
 
         for cwf in chats {
             let base = format!(
                 "chats/{}/",
-                slug(&cwf.chat.title.clone().unwrap_or_else(|| cwf.chat.id.clone()))
+                slug(
+                    &cwf.chat
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| cwf.chat.id.clone())
+                )
             );
             let cj = serde_json::to_vec(&cwf.chat).map_err(|e| e.to_string())?;
-            zip.start_file(format!("{base}chat.json"), opts).map_err(|e| e.to_string())?;
+            zip.start_file(format!("{base}chat.json"), opts)
+                .map_err(|e| e.to_string())?;
             zip.write_all(&cj).map_err(|e| e.to_string())?;
             for f in &cwf.files {
                 zip.start_file(format!("{base}artifacts/{}", f.internal_name), opts)
@@ -257,7 +267,8 @@ fn build_zip(manifest: &ChatManifest, chats: &[ChatWithFiles]) -> Result<Vec<u8>
 fn write_zip(dest: PathBuf, zip_bytes: Vec<u8>) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("could not create dest dir: {e}"))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("could not create dest dir: {e}"))?;
         }
     }
     std::fs::write(&dest, zip_bytes).map_err(|e| format!("could not write zip: {e}"))
@@ -338,7 +349,8 @@ fn read_zip_entry<R: Read + std::io::Seek>(
     match archive.by_name(path) {
         Ok(mut f) => {
             let mut buf = Vec::new();
-            f.read_to_end(&mut buf).map_err(|e| format!("read {path}: {e}"))?;
+            f.read_to_end(&mut buf)
+                .map_err(|e| format!("read {path}: {e}"))?;
             Ok(buf)
         }
         Err(zip::result::ZipError::FileNotFound) => Err(format!("missing entry {path}")),
@@ -368,8 +380,8 @@ fn import_zip_bytes(
 ) -> Result<Vec<String>, String> {
     use std::io::Cursor;
 
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
-        .map_err(|e| format!("not a zip archive: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a zip archive: {e}"))?;
 
     let mj_raw = read_zip_entry(&mut archive, "manifest.json")?;
     let manifest: ChatManifest =
@@ -402,7 +414,10 @@ fn import_zip_bytes(
             serde_json::from_slice(&raw).map_err(|e| format!("bad {chat_path}: {e}"))?;
 
         let new_id = db::new_id();
-        let title = chat.title.clone().unwrap_or_else(|| "Imported chat".to_string());
+        let title = chat
+            .title
+            .clone()
+            .unwrap_or_else(|| "Imported chat".to_string());
         // Only preserve the project binding if that project actually exists in
         // the target DB — importing into a fresh install can't satisfy the FK
         // otherwise, and silently dropping it keeps content importable.
@@ -449,24 +464,26 @@ fn import_zip_bytes(
         for msg in &chat.messages {
             let rec = db::add_chat_message(
                 conn,
-                &new_id,
-                &msg.role,
-                &msg.content,
-                msg.input_tokens,
-                msg.output_tokens,
-                msg.cost_usd,
-                msg.cache_creation_input_tokens,
-                msg.cache_read_input_tokens,
-                msg.reasoning_output_tokens,
-                msg.provider.as_deref(),
-                msg.model_key.as_deref(),
-                msg.pricing_estimated_usd,
-                msg.started_at,
-                msg.completed_at,
-                msg.llm_time_ms,
-                msg.tool_time_ms,
-                msg.ttft_ms,
-                msg.tokens_per_second,
+                db::NewChatMessage {
+                    chat_session_id: &new_id,
+                    role: &msg.role,
+                    content: &msg.content,
+                    input_tokens: msg.input_tokens,
+                    output_tokens: msg.output_tokens,
+                    cost_usd: msg.cost_usd,
+                    cache_creation_input_tokens: msg.cache_creation_input_tokens,
+                    cache_read_input_tokens: msg.cache_read_input_tokens,
+                    reasoning_output_tokens: msg.reasoning_output_tokens,
+                    provider: msg.provider.as_deref(),
+                    model_key: msg.model_key.as_deref(),
+                    pricing_estimated_usd: msg.pricing_estimated_usd,
+                    started_at: msg.started_at,
+                    completed_at: msg.completed_at,
+                    llm_time_ms: msg.llm_time_ms,
+                    tool_time_ms: msg.tool_time_ms,
+                    ttft_ms: msg.ttft_ms,
+                    tokens_per_second: msg.tokens_per_second,
+                },
             )
             .map_err(|e| format!("insert message: {e}"))?;
             old_to_new.insert(msg.id, rec.id);
@@ -530,7 +547,9 @@ fn import_zip_bytes(
         let mut art_iter = art_entries.into_iter();
         for msg in &chat.messages {
             for exp in &msg.artifacts {
-                let Some((_, bytes)) = art_iter.next() else { break };
+                let Some((_, bytes)) = art_iter.next() else {
+                    break;
+                };
                 // Dedupe filename collisions like the download command does.
                 let mut name = sanitize_name(&exp.filename);
                 if used.contains(&name) {
@@ -550,8 +569,7 @@ fn import_zip_bytes(
                 }
                 used.insert(name.clone());
                 let full = artifacts_dir.join(&name);
-                std::fs::write(&full, &bytes)
-                    .map_err(|e| format!("write artifact {name}: {e}"))?;
+                std::fs::write(&full, &bytes).map_err(|e| format!("write artifact {name}: {e}"))?;
                 let art_rec = crate::db::insert_artifact(
                     conn,
                     Some(&new_id),
@@ -595,14 +613,37 @@ mod tests {
         // Re-fetch so the returned session carries the updated title.
         let cs = db::get_chat_session(conn, &cs.id).unwrap().unwrap();
         db::add_chat_message(
-            conn, &cs.id, "user", "hello",
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            conn,
+            db::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "user",
+                content: "hello",
+                ..Default::default()
+            },
         )
         .unwrap();
         let m2 = db::add_chat_message(
-            conn, &cs.id, "assistant", "hi there",
-            Some(100), Some(50), Some(0.0015), Some(10), Some(20), Some(5),
-            None, None, None, Some(100), Some(130), Some(50), Some(20), Some(15), Some(7.5),
+            conn,
+            db::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "hi there",
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                cost_usd: Some(0.0015),
+                cache_creation_input_tokens: Some(10),
+                cache_read_input_tokens: Some(20),
+                reasoning_output_tokens: Some(5),
+                provider: None,
+                model_key: None,
+                pricing_estimated_usd: None,
+                started_at: Some(100),
+                completed_at: Some(130),
+                llm_time_ms: Some(50),
+                tool_time_ms: Some(20),
+                ttft_ms: Some(15),
+                tokens_per_second: Some(7.5),
+            },
         )
         .unwrap();
         // Create an artifact file in a temp dir so export actually copies bytes.
@@ -611,7 +652,14 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let afile = tmp.join("diagram.html");
         std::fs::write(&afile, "<h1>hi</h1>").unwrap();
-        db::insert_artifact(conn, Some(&cs.id), "diagram.html", &afile.to_string_lossy(), "html").unwrap();
+        db::insert_artifact(
+            conn,
+            Some(&cs.id),
+            "diagram.html",
+            &afile.to_string_lossy(),
+            "html",
+        )
+        .unwrap();
         // Attach to message m2.
         db::attach_artifacts_to_message(conn, &cs.id, m2.id).unwrap();
         (cs, tmp)
@@ -696,7 +744,10 @@ mod tests {
             version: EXPORT_VERSION,
             kind: "project".to_string(),
             exported_at: db::now_ts(),
-            scope: ManifestScope { session_ids: None, project_id: Some(proj1.id.clone()) },
+            scope: ManifestScope {
+                session_ids: None,
+                project_id: Some(proj1.id.clone()),
+            },
         };
         // Simulate what export_project_zip does: filter to proj1.id.
         let all = db::list_chat_sessions(&conn).unwrap();
@@ -765,7 +816,10 @@ mod tests {
             version: 999,
             kind: "chat".to_string(),
             exported_at: 0,
-            scope: ManifestScope { session_ids: None, project_id: None },
+            scope: ManifestScope {
+                session_ids: None,
+                project_id: None,
+            },
         };
         let bytes = build_zip(&manifest, &[]).unwrap();
         let res = import_zip_bytes(&conn, &bytes, &tmp);

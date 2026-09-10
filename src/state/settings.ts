@@ -7,6 +7,7 @@ import { DEFAULT_KEYBINDINGS, type KeybindingAction, type KeybindingMap } from "
 import { DEFAULT_BROWSER_URL } from "../lib/browserHistory";
 import { parseThemeList, type CustomTheme } from "../lib/themes";
 import { DEFAULT_MONO_FONT, DEFAULT_UI_FONT } from "../lib/fonts";
+import { CLOUD_PROVIDER_IDS } from "../lib/agents";
 
 export type ThemeSetting = "light" | "dark" | "system";
 
@@ -303,14 +304,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       // provider key — probe the known cloud ids as well so they self-heal.
       const indexRaw = await getSetting(SELECTED_MODELS_INDEX_KEY);
       const indexed: string[] = indexRaw ? JSON.parse(indexRaw) : [];
-      const known = [
-        "anthropic",
-        "openai",
-        "openrouter",
-        "anthropic_compatible",
-        "openai_compatible",
-      ];
-      const providers = Array.from(new Set([...indexed, ...known]));
+      const providers = Array.from(new Set([...indexed, ...CLOUD_PROVIDER_IDS]));
       for (const p of providers) {
         if (typeof p !== "string" || !p) continue;
         try {

@@ -1,0 +1,7 @@
+# Pin the toolchain so formatter/build behavior can't drift between
+# machines. `components` guarantees rustfmt is auto-installed with the
+# toolchain — its absence is what caused the one-time repo-wide rustfmt-1.9
+# style migration (see REFACTOR_PROGRESS.md).
+[toolchain]
+channel = "stable"
+components = ["rustfmt"]

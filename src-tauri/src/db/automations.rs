@@ -151,7 +151,11 @@ pub fn list_automations(conn: &Connection) -> DbResult<Vec<Automation>> {
     rows.collect()
 }
 
-pub fn set_automation_enabled(conn: &Connection, automation_id: &str, enabled: bool) -> DbResult<()> {
+pub fn set_automation_enabled(
+    conn: &Connection,
+    automation_id: &str,
+    enabled: bool,
+) -> DbResult<()> {
     conn.execute(
         "UPDATE automations SET enabled = ?2 WHERE id = ?1",
         params![automation_id, enabled as i64],
@@ -275,7 +279,8 @@ fn mirror_run_start(
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
-    let artifact = super::improve::ensure_artifact(conn, "automation", automation_id, &name, &prompt)?;
+    let artifact =
+        super::improve::ensure_artifact(conn, "automation", automation_id, &name, &prompt)?;
     let active = super::improve::channel_version(conn, &artifact.id, "active")?.unwrap_or(1);
     if let Some(active_body) = super::improve::version_body(conn, &artifact.id, active)? {
         if active_body != prompt {
@@ -288,12 +293,7 @@ fn mirror_run_start(
 
 /// Finalize a run (set finished_at + status + summary). Returns silently if
 /// the row was already finalized by another path (idempotent finalize).
-pub fn finish_run(
-    conn: &Connection,
-    run_id: &str,
-    status: &str,
-    summary: &str,
-) -> DbResult<()> {
+pub fn finish_run(conn: &Connection, run_id: &str, status: &str, summary: &str) -> DbResult<()> {
     conn.execute(
         "UPDATE automation_runs
            SET finished_at = ?2, status = ?3, summary = ?4
@@ -441,7 +441,6 @@ mod tests {
             .unwrap();
         assert_eq!(outcome2, "failed");
     }
-
 
     fn input(name: &str) -> AutomationInput {
         AutomationInput {

@@ -12,57 +12,117 @@ use super::*;
 pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) -> Vec<Value> {
     let mut specs: Vec<Value> = vec![];
     if caps.web_search {
-        specs.push(openai_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()));
+        specs.push(openai_fn(
+            WEB_SEARCH,
+            WEB_SEARCH_DESC,
+            web_search_parameters(),
+        ));
     }
     // Attach-on-demand meta-tools: advertised only while unattached sources
     // remain, with their ids as the enum (see ToolCaps). Connector/MCP tool
     // schemas join the request only AFTER an attach.
     specs_attach_tools_openai(caps, &mut specs);
     specs.extend(vec![
-        openai_fn(GENERATE_FILE, GENERATE_FILE_DESC, generate_file_parameters()),
+        openai_fn(
+            GENERATE_FILE,
+            GENERATE_FILE_DESC,
+            generate_file_parameters(),
+        ),
         openai_fn(
             GENERATE_DOCUMENT,
             GENERATE_DOCUMENT_DESC,
             generate_document_parameters(),
         ),
-        openai_fn(PLAN_DOCUMENT, PLAN_DOCUMENT_DESC, plan_document_parameters()),
-        openai_fn(REVISE_DOCUMENT, REVISE_DOCUMENT_DESC, revise_document_parameters()),
-        openai_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
+        openai_fn(
+            PLAN_DOCUMENT,
+            PLAN_DOCUMENT_DESC,
+            plan_document_parameters(),
+        ),
+        openai_fn(
+            REVISE_DOCUMENT,
+            REVISE_DOCUMENT_DESC,
+            revise_document_parameters(),
+        ),
+        openai_fn(
+            GENERATE_DIAGRAM,
+            GENERATE_DIAGRAM_DESC,
+            generate_diagram_parameters(),
+        ),
         openai_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         openai_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
         openai_fn(GET_SKILL, GET_SKILL_DESC, get_skill_parameters()),
         openai_fn(LIST_SKILLS, LIST_SKILLS_DESC, no_parameters()),
         // Live artifact listing (read-only, no gating) — answers "where does
         // the report live" from the DB, newest first, with absolute paths.
-        openai_fn(LIST_ARTIFACTS, LIST_ARTIFACTS_DESC, list_artifacts_parameters()),
+        openai_fn(
+            LIST_ARTIFACTS,
+            LIST_ARTIFACTS_DESC,
+            list_artifacts_parameters(),
+        ),
         // In-process availability introspection — always on (read-only, no
         // gating). Replaces shell probes for connector/MCP availability.
         openai_fn(GET_CAPABILITIES, GET_CAPABILITIES_DESC, no_parameters()),
         openai_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
         openai_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
         openai_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
-        openai_fn(BROWSER_SCROLL, BROWSER_SCROLL_DESC, browser_scroll_parameters()),
+        openai_fn(
+            BROWSER_SCROLL,
+            BROWSER_SCROLL_DESC,
+            browser_scroll_parameters(),
+        ),
         // Screenshot was dispatchable but never advertised (schema drift —
         // the model can't call what it can't see). No params: it shoots the
         // pane's current page and returns the artifact path.
         openai_fn(BROWSER_SCREENSHOT, BROWSER_SCREENSHOT_DESC, no_parameters()),
         openai_fn(BROWSER_OBSERVE, BROWSER_OBSERVE_DESC, no_parameters()),
-        openai_fn(BROWSER_EXTRACT, BROWSER_EXTRACT_DESC, browser_extract_parameters()),
+        openai_fn(
+            BROWSER_EXTRACT,
+            BROWSER_EXTRACT_DESC,
+            browser_extract_parameters(),
+        ),
         // Research source ledger — always on (state tools, not gated by permission mode).
-        openai_fn(ADD_SOURCE_NOTE, ADD_SOURCE_NOTE_DESC, add_source_note_parameters()),
-        openai_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, get_source_ledger_parameters()),
-        openai_fn(RESET_SOURCE_LEDGER, RESET_SOURCE_LEDGER_DESC, no_parameters()),
-        openai_fn(CHECK_SUFFICIENCY, CHECK_SUFFICIENCY_DESC, check_sufficiency_parameters()),
+        openai_fn(
+            ADD_SOURCE_NOTE,
+            ADD_SOURCE_NOTE_DESC,
+            add_source_note_parameters(),
+        ),
+        openai_fn(
+            GET_SOURCE_LEDGER,
+            GET_SOURCE_LEDGER_DESC,
+            get_source_ledger_parameters(),
+        ),
+        openai_fn(
+            RESET_SOURCE_LEDGER,
+            RESET_SOURCE_LEDGER_DESC,
+            no_parameters(),
+        ),
+        openai_fn(
+            CHECK_SUFFICIENCY,
+            CHECK_SUFFICIENCY_DESC,
+            check_sufficiency_parameters(),
+        ),
         // Plan tracking — always on (session-state tools, not gated by permission
         // mode; the plan gate, not the schema, decides what's blocked per mode).
         openai_fn(TODO_WRITE, TODO_WRITE_DESC, todo_items_parameters(true)),
-        openai_fn(ENTER_PLAN_MODE, ENTER_PLAN_MODE_DESC, enter_plan_mode_parameters()),
+        openai_fn(
+            ENTER_PLAN_MODE,
+            ENTER_PLAN_MODE_DESC,
+            enter_plan_mode_parameters(),
+        ),
         openai_fn(PRESENT_PLAN, PRESENT_PLAN_DESC, plan_text_parameters()),
         // Read-only filesystem tools — present in every mode.
-        openai_fn(LIST_DIRECTORY, LIST_DIRECTORY_DESC, list_directory_parameters()),
+        openai_fn(
+            LIST_DIRECTORY,
+            LIST_DIRECTORY_DESC,
+            list_directory_parameters(),
+        ),
         openai_fn(READ_FILE, READ_FILE_DESC, read_file_parameters()),
         openai_fn(SEARCH_FILES, SEARCH_FILES_DESC, search_files_parameters()),
-        openai_fn(SEARCH_CONTENT, SEARCH_CONTENT_DESC, search_content_parameters()),
+        openai_fn(
+            SEARCH_CONTENT,
+            SEARCH_CONTENT_DESC,
+            search_content_parameters(),
+        ),
         // Automations — list is read-only and always on; the CRUD/run tools
         // below follow the mutating-tool gating (see tools/mod.rs family
         // block). Without them the model denies an app capability it has.
@@ -71,8 +131,16 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         // registered; dispatch returns a clear error when the feature is
         // toggled off (same posture as list_automations).
         openai_fn(MEMORY_SAVE, MEMORY_SAVE_DESC, memory_save_parameters()),
-        openai_fn(MEMORY_RECALL, MEMORY_RECALL_DESC, memory_recall_parameters()),
-        openai_fn(MEMORY_FORGET, MEMORY_FORGET_DESC, memory_forget_parameters()),
+        openai_fn(
+            MEMORY_RECALL,
+            MEMORY_RECALL_DESC,
+            memory_recall_parameters(),
+        ),
+        openai_fn(
+            MEMORY_FORGET,
+            MEMORY_FORGET_DESC,
+            memory_forget_parameters(),
+        ),
     ]);
     // TOTP 2FA codes — read-only (the seed stays in the keychain / password
     // manager; only the code is returned), always registered.
@@ -80,11 +148,19 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
     // Local-docs search — only exposed when the embedding sidecar is up and at
     // least one corpus is indexed (computed per turn into ToolCaps.local_docs).
     if caps.local_docs {
-        specs.push(openai_fn(SEARCH_DOCS, SEARCH_DOCS_DESC, search_docs_parameters()));
+        specs.push(openai_fn(
+            SEARCH_DOCS,
+            SEARCH_DOCS_DESC,
+            search_docs_parameters(),
+        ));
     }
     // Mutating filesystem tools — stripped from the schema under read_only.
     if sandbox.allows_mutating_tools() {
-        specs.push(openai_fn(WRITE_FILE, WRITE_FILE_DESC, path_content_parameters()));
+        specs.push(openai_fn(
+            WRITE_FILE,
+            WRITE_FILE_DESC,
+            path_content_parameters(),
+        ));
         specs.push(openai_fn(EDIT_FILE, EDIT_FILE_DESC, edit_file_parameters()));
         specs.push(openai_fn(DELETE_FILE, DELETE_FILE_DESC, path_parameters()));
         specs.push(openai_fn(MOVE_FILE, MOVE_FILE_DESC, src_dest_parameters()));
@@ -94,7 +170,11 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
     // are stripped under read_only exactly like filesystem writes; the
     // read-only task tracking/cancelling tools are always present.
     if sandbox.allows_mutating_tools() {
-        specs.push(openai_fn(DOWNLOAD_FILE, DOWNLOAD_FILE_DESC, download_file_parameters()));
+        specs.push(openai_fn(
+            DOWNLOAD_FILE,
+            DOWNLOAD_FILE_DESC,
+            download_file_parameters(),
+        ));
         specs.push(openai_fn(RUN_SHELL, RUN_SHELL_DESC, run_shell_parameters()));
         specs.push(openai_fn(OPEN_FILE, OPEN_FILE_DESC, path_parameters()));
     }
@@ -103,14 +183,42 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
     // mirror commands::automation_cmds::validate so a call the model makes
     // cannot be rejected for shape reasons.
     if sandbox.allows_mutating_tools() {
-        specs.push(openai_fn(CREATE_AUTOMATION, CREATE_AUTOMATION_DESC, create_automation_parameters()));
-        specs.push(openai_fn(UPDATE_AUTOMATION, UPDATE_AUTOMATION_DESC, update_automation_parameters()));
-        specs.push(openai_fn(DELETE_AUTOMATION, DELETE_AUTOMATION_DESC, automation_id_parameters()));
-        specs.push(openai_fn(RUN_AUTOMATION_NOW, RUN_AUTOMATION_NOW_DESC, automation_id_parameters()));
+        specs.push(openai_fn(
+            CREATE_AUTOMATION,
+            CREATE_AUTOMATION_DESC,
+            create_automation_parameters(),
+        ));
+        specs.push(openai_fn(
+            UPDATE_AUTOMATION,
+            UPDATE_AUTOMATION_DESC,
+            update_automation_parameters(),
+        ));
+        specs.push(openai_fn(
+            DELETE_AUTOMATION,
+            DELETE_AUTOMATION_DESC,
+            automation_id_parameters(),
+        ));
+        specs.push(openai_fn(
+            RUN_AUTOMATION_NOW,
+            RUN_AUTOMATION_NOW_DESC,
+            automation_id_parameters(),
+        ));
     }
-    specs.push(openai_fn(DOWNLOAD_PROGRESS, DOWNLOAD_PROGRESS_DESC, task_id_parameters()));
-    specs.push(openai_fn(GET_TASK_STATUS, GET_TASK_STATUS_DESC, task_id_parameters()));
-    specs.push(openai_fn(CANCEL_TASK, CANCEL_TASK_DESC, task_id_parameters()));
+    specs.push(openai_fn(
+        DOWNLOAD_PROGRESS,
+        DOWNLOAD_PROGRESS_DESC,
+        task_id_parameters(),
+    ));
+    specs.push(openai_fn(
+        GET_TASK_STATUS,
+        GET_TASK_STATUS_DESC,
+        task_id_parameters(),
+    ));
+    specs.push(openai_fn(
+        CANCEL_TASK,
+        CANCEL_TASK_DESC,
+        task_id_parameters(),
+    ));
     specs.push(openai_fn(TASK, TASK_DESC, task_parameters()));
     if caps.code_exec {
         specs.push(openai_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
@@ -195,84 +303,216 @@ fn specs_attach_tools_anthropic(caps: &ToolCaps, specs: &mut Vec<Value>) {
 pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) -> Vec<Value> {
     let mut specs: Vec<Value> = vec![];
     if caps.web_search {
-        specs.push(anthropic_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()));
+        specs.push(anthropic_fn(
+            WEB_SEARCH,
+            WEB_SEARCH_DESC,
+            web_search_parameters(),
+        ));
     }
     // Attach-on-demand meta-tools (mirror of the OpenAI builder's call).
     specs_attach_tools_anthropic(caps, &mut specs);
     specs.extend(vec![
-        anthropic_fn(GENERATE_FILE, GENERATE_FILE_DESC, generate_file_parameters()),
+        anthropic_fn(
+            GENERATE_FILE,
+            GENERATE_FILE_DESC,
+            generate_file_parameters(),
+        ),
         anthropic_fn(
             GENERATE_DOCUMENT,
             GENERATE_DOCUMENT_DESC,
             generate_document_parameters(),
         ),
-        anthropic_fn(PLAN_DOCUMENT, PLAN_DOCUMENT_DESC, plan_document_parameters()),
-        anthropic_fn(REVISE_DOCUMENT, REVISE_DOCUMENT_DESC, revise_document_parameters()),
-        anthropic_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
+        anthropic_fn(
+            PLAN_DOCUMENT,
+            PLAN_DOCUMENT_DESC,
+            plan_document_parameters(),
+        ),
+        anthropic_fn(
+            REVISE_DOCUMENT,
+            REVISE_DOCUMENT_DESC,
+            revise_document_parameters(),
+        ),
+        anthropic_fn(
+            GENERATE_DIAGRAM,
+            GENERATE_DIAGRAM_DESC,
+            generate_diagram_parameters(),
+        ),
         anthropic_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         anthropic_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
         anthropic_fn(GET_SKILL, GET_SKILL_DESC, get_skill_parameters()),
         anthropic_fn(LIST_SKILLS, LIST_SKILLS_DESC, no_parameters()),
         // Mirror of the OpenAI block's live artifact listing.
-        anthropic_fn(LIST_ARTIFACTS, LIST_ARTIFACTS_DESC, list_artifacts_parameters()),
+        anthropic_fn(
+            LIST_ARTIFACTS,
+            LIST_ARTIFACTS_DESC,
+            list_artifacts_parameters(),
+        ),
         // In-process availability introspection (mirror of the OpenAI block).
         anthropic_fn(GET_CAPABILITIES, GET_CAPABILITIES_DESC, no_parameters()),
         anthropic_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
         anthropic_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
         anthropic_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
-        anthropic_fn(BROWSER_SCROLL, BROWSER_SCROLL_DESC, browser_scroll_parameters()),
+        anthropic_fn(
+            BROWSER_SCROLL,
+            BROWSER_SCROLL_DESC,
+            browser_scroll_parameters(),
+        ),
         // Mirror of the OpenAI block's screenshot fix (schema drift).
         anthropic_fn(BROWSER_SCREENSHOT, BROWSER_SCREENSHOT_DESC, no_parameters()),
         anthropic_fn(BROWSER_OBSERVE, BROWSER_OBSERVE_DESC, no_parameters()),
-        anthropic_fn(BROWSER_EXTRACT, BROWSER_EXTRACT_DESC, browser_extract_parameters()),
+        anthropic_fn(
+            BROWSER_EXTRACT,
+            BROWSER_EXTRACT_DESC,
+            browser_extract_parameters(),
+        ),
         // Research source ledger — always on (state tools, not gated by permission mode).
-        anthropic_fn(ADD_SOURCE_NOTE, ADD_SOURCE_NOTE_DESC, add_source_note_parameters()),
-        anthropic_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, get_source_ledger_parameters()),
-        anthropic_fn(RESET_SOURCE_LEDGER, RESET_SOURCE_LEDGER_DESC, no_parameters()),
-        anthropic_fn(CHECK_SUFFICIENCY, CHECK_SUFFICIENCY_DESC, check_sufficiency_parameters()),
+        anthropic_fn(
+            ADD_SOURCE_NOTE,
+            ADD_SOURCE_NOTE_DESC,
+            add_source_note_parameters(),
+        ),
+        anthropic_fn(
+            GET_SOURCE_LEDGER,
+            GET_SOURCE_LEDGER_DESC,
+            get_source_ledger_parameters(),
+        ),
+        anthropic_fn(
+            RESET_SOURCE_LEDGER,
+            RESET_SOURCE_LEDGER_DESC,
+            no_parameters(),
+        ),
+        anthropic_fn(
+            CHECK_SUFFICIENCY,
+            CHECK_SUFFICIENCY_DESC,
+            check_sufficiency_parameters(),
+        ),
         // Plan tracking — mirror of the OpenAI builder's block above.
         anthropic_fn(TODO_WRITE, TODO_WRITE_DESC, todo_items_parameters(true)),
-        anthropic_fn(ENTER_PLAN_MODE, ENTER_PLAN_MODE_DESC, enter_plan_mode_parameters()),
+        anthropic_fn(
+            ENTER_PLAN_MODE,
+            ENTER_PLAN_MODE_DESC,
+            enter_plan_mode_parameters(),
+        ),
         anthropic_fn(PRESENT_PLAN, PRESENT_PLAN_DESC, plan_text_parameters()),
-        anthropic_fn(LIST_DIRECTORY, LIST_DIRECTORY_DESC, list_directory_parameters()),
+        anthropic_fn(
+            LIST_DIRECTORY,
+            LIST_DIRECTORY_DESC,
+            list_directory_parameters(),
+        ),
         anthropic_fn(READ_FILE, READ_FILE_DESC, read_file_parameters()),
         anthropic_fn(SEARCH_FILES, SEARCH_FILES_DESC, search_files_parameters()),
-        anthropic_fn(SEARCH_CONTENT, SEARCH_CONTENT_DESC, search_content_parameters()),
+        anthropic_fn(
+            SEARCH_CONTENT,
+            SEARCH_CONTENT_DESC,
+            search_content_parameters(),
+        ),
         // Automations — read-only list always on (mirror of the OpenAI block).
         anthropic_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
         // Persistent memory (MEMORY_DESIGN_ARCHITECTURE.md §12.1) — always
         // registered; dispatch returns a clear error when the feature is
         // toggled off (same posture as list_automations).
         anthropic_fn(MEMORY_SAVE, MEMORY_SAVE_DESC, memory_save_parameters()),
-        anthropic_fn(MEMORY_RECALL, MEMORY_RECALL_DESC, memory_recall_parameters()),
-        anthropic_fn(MEMORY_FORGET, MEMORY_FORGET_DESC, memory_forget_parameters()),
+        anthropic_fn(
+            MEMORY_RECALL,
+            MEMORY_RECALL_DESC,
+            memory_recall_parameters(),
+        ),
+        anthropic_fn(
+            MEMORY_FORGET,
+            MEMORY_FORGET_DESC,
+            memory_forget_parameters(),
+        ),
     ]);
-    specs.push(anthropic_fn(TOTP_CODE, TOTP_CODE_DESC, totp_code_parameters()));
+    specs.push(anthropic_fn(
+        TOTP_CODE,
+        TOTP_CODE_DESC,
+        totp_code_parameters(),
+    ));
     if caps.local_docs {
-        specs.push(anthropic_fn(SEARCH_DOCS, SEARCH_DOCS_DESC, search_docs_parameters()));
+        specs.push(anthropic_fn(
+            SEARCH_DOCS,
+            SEARCH_DOCS_DESC,
+            search_docs_parameters(),
+        ));
     }
     if sandbox.allows_mutating_tools() {
-        specs.push(anthropic_fn(WRITE_FILE, WRITE_FILE_DESC, path_content_parameters()));
-        specs.push(anthropic_fn(EDIT_FILE, EDIT_FILE_DESC, edit_file_parameters()));
-        specs.push(anthropic_fn(DELETE_FILE, DELETE_FILE_DESC, path_parameters()));
-        specs.push(anthropic_fn(MOVE_FILE, MOVE_FILE_DESC, src_dest_parameters()));
-        specs.push(anthropic_fn(COPY_FILE, COPY_FILE_DESC, src_dest_parameters()));
+        specs.push(anthropic_fn(
+            WRITE_FILE,
+            WRITE_FILE_DESC,
+            path_content_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            EDIT_FILE,
+            EDIT_FILE_DESC,
+            edit_file_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            DELETE_FILE,
+            DELETE_FILE_DESC,
+            path_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            MOVE_FILE,
+            MOVE_FILE_DESC,
+            src_dest_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            COPY_FILE,
+            COPY_FILE_DESC,
+            src_dest_parameters(),
+        ));
     }
     if sandbox.allows_mutating_tools() {
-        specs.push(anthropic_fn(DOWNLOAD_FILE, DOWNLOAD_FILE_DESC, download_file_parameters()));
-        specs.push(anthropic_fn(RUN_SHELL, RUN_SHELL_DESC, run_shell_parameters()));
+        specs.push(anthropic_fn(
+            DOWNLOAD_FILE,
+            DOWNLOAD_FILE_DESC,
+            download_file_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            RUN_SHELL,
+            RUN_SHELL_DESC,
+            run_shell_parameters(),
+        ));
         specs.push(anthropic_fn(OPEN_FILE, OPEN_FILE_DESC, path_parameters()));
     }
     // Automation CRUD/run tools — mirror of the OpenAI block above.
     if sandbox.allows_mutating_tools() {
-        specs.push(anthropic_fn(CREATE_AUTOMATION, CREATE_AUTOMATION_DESC, create_automation_parameters()));
-        specs.push(anthropic_fn(UPDATE_AUTOMATION, UPDATE_AUTOMATION_DESC, update_automation_parameters()));
-        specs.push(anthropic_fn(DELETE_AUTOMATION, DELETE_AUTOMATION_DESC, automation_id_parameters()));
-        specs.push(anthropic_fn(RUN_AUTOMATION_NOW, RUN_AUTOMATION_NOW_DESC, automation_id_parameters()));
+        specs.push(anthropic_fn(
+            CREATE_AUTOMATION,
+            CREATE_AUTOMATION_DESC,
+            create_automation_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            UPDATE_AUTOMATION,
+            UPDATE_AUTOMATION_DESC,
+            update_automation_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            DELETE_AUTOMATION,
+            DELETE_AUTOMATION_DESC,
+            automation_id_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            RUN_AUTOMATION_NOW,
+            RUN_AUTOMATION_NOW_DESC,
+            automation_id_parameters(),
+        ));
     }
-    specs.push(anthropic_fn(DOWNLOAD_PROGRESS, DOWNLOAD_PROGRESS_DESC, task_id_parameters()));
-    specs.push(anthropic_fn(GET_TASK_STATUS, GET_TASK_STATUS_DESC, task_id_parameters()));
-    specs.push(anthropic_fn(CANCEL_TASK, CANCEL_TASK_DESC, task_id_parameters()));
+    specs.push(anthropic_fn(
+        DOWNLOAD_PROGRESS,
+        DOWNLOAD_PROGRESS_DESC,
+        task_id_parameters(),
+    ));
+    specs.push(anthropic_fn(
+        GET_TASK_STATUS,
+        GET_TASK_STATUS_DESC,
+        task_id_parameters(),
+    ));
+    specs.push(anthropic_fn(
+        CANCEL_TASK,
+        CANCEL_TASK_DESC,
+        task_id_parameters(),
+    ));
     specs.push(anthropic_fn(TASK, TASK_DESC, task_parameters()));
     if caps.code_exec {
         specs.push(anthropic_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
@@ -1183,7 +1423,6 @@ fn search_content_parameters() -> Value {
     })
 }
 
-
 // ---- Connector remote-tool schema merge ----
 //
 // The vendor's MCP server defines its own tools (e.g. Notion's search/create-
@@ -1320,9 +1559,7 @@ pub(crate) fn append_mcp_tools_openai(
     desc_cap: usize,
 ) {
     for entry in entries {
-        if !sandbox.allows_mutating_tools()
-            && entry.kind == permission::ConnectorToolKind::Write
-        {
+        if !sandbox.allows_mutating_tools() && entry.kind == permission::ConnectorToolKind::Write {
             continue;
         }
         specs.push(openai_fn(
@@ -1340,9 +1577,7 @@ pub(crate) fn append_mcp_tools_anthropic(
     desc_cap: usize,
 ) {
     for entry in entries {
-        if !sandbox.allows_mutating_tools()
-            && entry.kind == permission::ConnectorToolKind::Write
-        {
+        if !sandbox.allows_mutating_tools() && entry.kind == permission::ConnectorToolKind::Write {
             continue;
         }
         specs.push(anthropic_fn(
@@ -1378,7 +1613,10 @@ mod tests {
             println!("{len:>6}  {name}");
         }
         let total: usize = sizes.iter().map(|(l, _)| l).sum();
-        println!("total specs JSON: {total} chars across {} tools", sizes.len());
+        println!(
+            "total specs JSON: {total} chars across {} tools",
+            sizes.len()
+        );
         // The worst offenders as of the token-efficiency pass were the
         // document tools (~2.5k each). Anything past this needs a reason.
         if let Some((worst, name)) = sizes.first() {
@@ -1415,7 +1653,12 @@ mod tests {
 
         // FullAuto: both tools advertised, write tagged in the description.
         let mut specs = Vec::new();
-        append_mcp_tools_openai(&entries, permission::SandboxPolicy::WorkspaceWrite, &mut specs, 800);
+        append_mcp_tools_openai(
+            &entries,
+            permission::SandboxPolicy::WorkspaceWrite,
+            &mut specs,
+            800,
+        );
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0]["function"]["name"], "mcp_memory_search_nodes");
         assert!(specs[0]["function"]["description"]
@@ -1454,7 +1697,13 @@ mod tests {
         let sel = &params["properties"]["selector"];
         assert_eq!(sel["type"], "string");
         // No required fields (mode defaults, selector is optional)
-        assert!(params.get("required").is_none() || params["required"].as_array().map(|a| a.is_empty()).unwrap_or(true));
+        assert!(
+            params.get("required").is_none()
+                || params["required"]
+                    .as_array()
+                    .map(|a| a.is_empty())
+                    .unwrap_or(true)
+        );
     }
 
     #[test]
@@ -1468,8 +1717,21 @@ mod tests {
             .collect();
         assert_eq!(required, vec!["url", "title", "fact", "excerpt"]);
         let unavail = &params["properties"]["unavailable"];
-        let enums: Vec<&str> = unavail["enum"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-        assert_eq!(enums, vec!["paywalled", "login_required", "extraction_failed", "blocked"]);
+        let enums: Vec<&str> = unavail["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            enums,
+            vec![
+                "paywalled",
+                "login_required",
+                "extraction_failed",
+                "blocked"
+            ]
+        );
     }
 
     #[test]
@@ -1479,11 +1741,20 @@ mod tests {
         // never told it exists. Both wire formats must advertise it.
         let caps = ToolCaps::default();
         for (name, specs) in [
-            ("openai", openai_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite)),
-            ("anthropic", anthropic_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite)),
+            (
+                "openai",
+                openai_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite),
+            ),
+            (
+                "anthropic",
+                anthropic_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite),
+            ),
         ] {
             let found = specs.iter().any(|s| {
-                s["function"]["name"].as_str().or_else(|| s["name"].as_str()) == Some(crate::chat::tools::BROWSER_SCREENSHOT)
+                s["function"]["name"]
+                    .as_str()
+                    .or_else(|| s["name"].as_str())
+                    == Some(crate::chat::tools::BROWSER_SCREENSHOT)
             });
             assert!(found, "{name} tool specs must advertise browser_screenshot");
         }

@@ -183,7 +183,11 @@ pub async fn generate(
     };
 
     match produced {
-        Some((path, filename)) => Ok(Generated { path, filename, log }),
+        Some((path, filename)) => Ok(Generated {
+            path,
+            filename,
+            log,
+        }),
         None => {
             let hint = if !status.success() {
                 format!("The program exited with an error:\n{log}")
@@ -210,11 +214,7 @@ fn list_dir(dir: &Path) -> HashSet<PathBuf> {
 }
 
 /// The newest file in `dir` that is not in `before` and ends with `.ext`.
-fn newest_new_file(
-    dir: &Path,
-    before: &HashSet<PathBuf>,
-    ext: &str,
-) -> Option<(PathBuf, String)> {
+fn newest_new_file(dir: &Path, before: &HashSet<PathBuf>, ext: &str) -> Option<(PathBuf, String)> {
     let want = format!(".{}", ext.to_lowercase());
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for e in std::fs::read_dir(dir).ok()?.flatten() {

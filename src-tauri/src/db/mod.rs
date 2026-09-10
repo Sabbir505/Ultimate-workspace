@@ -317,7 +317,6 @@ fn migrate_chat_session_policies(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
-
 /// before the worktree-per-session feature (roadmap P0 §3.1.1). NULL = the
 /// chat works in its bound project's working tree; a path = the chat's
 /// isolated git worktree (branch `relay/<id>`, a sibling of the project).
@@ -1253,9 +1252,7 @@ pub use projects::{
 pub use settings::{delete_setting, get_setting, set_setting};
 
 // skills
-pub use skills::{
-    create_skill, delete_skill, list_skills, update_skill,
-};
+pub use skills::{create_skill, delete_skill, list_skills, update_skill};
 
 // quick_actions
 pub use skills::{
@@ -1263,34 +1260,27 @@ pub use skills::{
 };
 
 // secrets
-pub use secrets::{
-    delete_secret_row, get_secret_blob, list_secret_keys, upsert_secret_row,
-};
+pub use secrets::{delete_secret_row, get_secret_blob, list_secret_keys, upsert_secret_row};
 
 // cost
-pub use cost::{
-    get_cost_events, insert_cost_event,
-};
+pub use cost::{get_cost_events, insert_cost_event};
 pub use cost_v2::{get_cost_rollups_v2, read_rate_overrides};
 
 // chat
 pub use chat::{
-    add_chat_message, add_chat_session_connector, add_command_chat_message, create_chat_session,
-    delete_chat_message,
-    delete_chat_messages_after,
-    delete_chat_session, delete_chat_sessions_for_project, delete_empty_chat_sessions,
-    get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_messages_page,
-    list_chat_sessions, list_messages_superseded_by,
-    list_chat_session_connectors, latest_local_session_working_root,
-    mark_branch_superseded, mark_superseded, search_chat_messages,
-    chat_worktree_paths,
-    remove_chat_session_connector, set_chat_session_connectors,
-    permission_label_from_policies, set_chat_session_auto, set_chat_session_plan,
+    add_chat_message, add_chat_session_connector, add_command_chat_message, chat_worktree_paths,
+    create_chat_session, delete_chat_message, delete_chat_messages_after, delete_chat_session,
+    delete_chat_sessions_for_project, delete_empty_chat_sessions, get_chat_session,
+    latest_local_session_working_root, list_active_chat_messages, list_chat_messages,
+    list_chat_messages_page, list_chat_session_connectors, list_chat_sessions,
+    list_messages_superseded_by, mark_branch_superseded, mark_superseded,
+    permission_label_from_policies, remove_chat_session_connector, search_chat_messages,
+    set_chat_session_auto, set_chat_session_connectors, set_chat_session_plan,
     set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
-    set_chat_session_worktree,
-    touch_chat_session, update_chat_session_agent, update_chat_session_model,
-    update_chat_session_permission_mode, update_chat_session_policies, update_chat_session_provider,
-    update_chat_session_title, update_chat_session_watch_mode,
+    set_chat_session_worktree, touch_chat_session, update_chat_session_agent,
+    update_chat_session_model, update_chat_session_permission_mode, update_chat_session_policies,
+    update_chat_session_provider, update_chat_session_title, update_chat_session_watch_mode,
+    NewChatMessage,
 };
 
 // artifacts
@@ -1312,11 +1302,10 @@ pub use research_cache::{
 
 pub use docs::{
     add_corpus, any_searchable_corpus, attach_corpus_to_chat, attached_corpus_ids,
-    blob_to_f32_slice, count_chunks, delete_chunks_for_file,
-    delete_indexed_files_not_in, detach_corpus_from_chat, f32_slice_to_blob, finish_index,
-    get_corpus, get_corpus_by_path, list_corpora, list_indexed_files, remove_corpus,
-    replace_file_chunks, search_chunks, search_chunks_in_corpus,
-    set_corpus_enabled, upsert_indexed_file, ChunkHit, DocCorpus,
+    blob_to_f32_slice, count_chunks, delete_chunks_for_file, delete_indexed_files_not_in,
+    detach_corpus_from_chat, f32_slice_to_blob, finish_index, get_corpus, get_corpus_by_path,
+    list_corpora, list_indexed_files, remove_corpus, replace_file_chunks, search_chunks,
+    search_chunks_in_corpus, set_corpus_enabled, upsert_indexed_file, ChunkHit, DocCorpus,
 };
 
 // chat checkpoints (per-turn git working-tree snapshots)
@@ -1327,8 +1316,8 @@ pub use checkpoints::{
 
 // connector credentials (app-scoped OAuth tokens; values in keychain)
 pub use connector_credentials::{
-    delete_connector_credential_row, get_connector_credential_row,
-    list_connector_credential_rows, upsert_connector_credential_row, ConnectorCredentialRow,
+    delete_connector_credential_row, get_connector_credential_row, list_connector_credential_rows,
+    upsert_connector_credential_row, ConnectorCredentialRow,
 };
 
 // workspaces (pane layout save/restore)
@@ -1349,11 +1338,10 @@ pub use memory::{
     active_memories_for_scope, add_memory_evidence, bump_memory_access, count_active_memories,
     delete_memory, evidence_count_for_memory, evidence_for_memory, flag_unbacked_memories,
     get_cursor, get_memory, insert_document_version, insert_memory, list_document_versions,
-    list_memories, list_memory_ops, log_memory_op, mark_reflected,
-    memories_missing_embedding, purge_memories_for_profile, set_memory_embedding,
+    list_memories, list_memory_ops, log_memory_op, mark_reflected, memories_missing_embedding,
+    purge_memories_for_profile, search_memories_fts, set_memory_embedding, set_memory_status,
     similar_active_memories, supersede_memory, unreflected_sample, unreflected_stats,
-    update_memory_content, upsert_cursor, search_memories_fts, set_memory_status,
-    MemoryDocVersionRow, MemoryOpRow,
+    update_memory_content, upsert_cursor, MemoryDocVersionRow, MemoryOpRow,
 };
 
 // ---- test helpers ----
@@ -1433,10 +1421,14 @@ mod tests {
         // First run: the ALTER adds the column → pre-existing rows backfill.
         migrate_chat_session_agent(&conn).unwrap();
         let a1: String = conn
-            .query_row("SELECT agent FROM chat_sessions WHERE id = 1", [], |r| r.get(0))
+            .query_row("SELECT agent FROM chat_sessions WHERE id = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let a2: String = conn
-            .query_row("SELECT agent FROM chat_sessions WHERE id = 2", [], |r| r.get(0))
+            .query_row("SELECT agent FROM chat_sessions WHERE id = 2", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(a1, "builtin");
         assert_eq!(a2, "local");
@@ -1451,11 +1443,15 @@ mod tests {
         // backfilled values) alone.
         migrate_chat_session_agent(&conn).unwrap();
         let a3: Option<String> = conn
-            .query_row("SELECT agent FROM chat_sessions WHERE id = 3", [], |r| r.get(0))
+            .query_row("SELECT agent FROM chat_sessions WHERE id = 3", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(a3, None, "re-run clobbered an intentional NULL agent");
         let a1: String = conn
-            .query_row("SELECT agent FROM chat_sessions WHERE id = 1", [], |r| r.get(0))
+            .query_row("SELECT agent FROM chat_sessions WHERE id = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(a1, "builtin");
     }

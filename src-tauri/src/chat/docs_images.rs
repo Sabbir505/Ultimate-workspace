@@ -89,7 +89,10 @@ pub async fn vision_caption(base_url: &str, abs_path: &Path) -> Option<String> {
         .build()
         .ok()?;
     let resp = client
-        .post(format!("{}/v1/chat/completions", base_url.trim_end_matches('/')))
+        .post(format!(
+            "{}/v1/chat/completions",
+            base_url.trim_end_matches('/')
+        ))
         .json(&body)
         .send()
         .await
@@ -144,8 +147,8 @@ pub fn compose_surrogate(
 mod win_ocr {
     use windows::core::HSTRING;
     use windows::Graphics::Imaging::{
-        BitmapAlphaMode, BitmapDecoder, BitmapPixelFormat, BitmapTransform,
-        ColorManagementMode, ExifOrientationMode,
+        BitmapAlphaMode, BitmapDecoder, BitmapPixelFormat, BitmapTransform, ColorManagementMode,
+        ExifOrientationMode,
     };
     use windows::Media::Ocr::OcrEngine;
     use windows::Storage::{FileAccessMode, StorageFile};
@@ -235,7 +238,8 @@ mod tests {
 
     #[test]
     fn surrogate_with_both_orders_ocr_then_caption() {
-        let s = compose_surrogate("doc.png", Some("hello world"), Some("a scanned letter")).unwrap();
+        let s =
+            compose_surrogate("doc.png", Some("hello world"), Some("a scanned letter")).unwrap();
         assert_eq!(
             s,
             "Image file: doc.png\nOCR text: hello world\nDescription: a scanned letter"

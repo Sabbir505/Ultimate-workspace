@@ -36,6 +36,8 @@ import {
   type BranchChanges,
 } from "../../lib/ipc";
 import { parseUnifiedDiff } from "../../lib/diff";
+import { pathUnderChanged } from "../../lib/paths";
+import { startPointerDrag } from "../../lib/pointerDrag";
 import { useChatStore, selectContextSessionId } from "../../state/chat";
 import { usePanesStore } from "../../state/panes";
 import { useProjectsStore } from "../../state/projects";
@@ -328,12 +330,8 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     // fire on every mount in dev). Resolve it here and unsubscribe late.
     const listenReady = safeListen<string>("project:fs-changed", (changedPath) => {
       if (
-        changedPath === cwd ||
-        (projectPath && changedPath === projectPath) ||
-        changedPath.startsWith(cwd + "\\") ||
-        changedPath.startsWith(cwd + "/") ||
-        (projectPath && changedPath.startsWith(projectPath + "\\")) ||
-        (projectPath && changedPath.startsWith(projectPath + "/"))
+        pathUnderChanged(cwd, changedPath) ||
+        (projectPath && pathUnderChanged(projectPath, changedPath))
       ) {
         tick();
       }
@@ -380,18 +378,8 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
       const rect = panel.getBoundingClientRect();
       const startX = e.clientX;
       const startWidth = rect.width;
-      const onMove = (ev: PointerEvent) => {
-        const next = startWidth + (ev.clientX - startX);
-        setDiffPanelWidth(next);
-      };
-      const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onUp);
-      };
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
-      window.addEventListener("pointercancel", onUp);
+      // Panel is docked left, so width follows the pointer directly.
+      startPointerDrag(e, (x) => setDiffPanelWidth(startWidth + (x - startX)));
     },
     [setDiffPanelWidth],
   );
@@ -641,11 +629,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     // Promise-holding pattern — see the file-list effect above: call the
     // unlisten even if it resolves after this component already unmounted.
     const listenReady = safeListen<string>("project:fs-changed", (changedPath) => {
-      if (
-        changedPath === cwd ||
-        changedPath.startsWith(cwd + "\\") ||
-        changedPath.startsWith(cwd + "/")
-      ) {
+      if (pathUnderChanged(cwd, changedPath)) {
         tick();
       }
     });

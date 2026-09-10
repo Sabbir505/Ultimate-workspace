@@ -120,17 +120,15 @@ pub(crate) fn parse_probe_payload(issues_json: Option<String>, page_count: u32) 
 /// Ask the frontend to probe the rendered artifact. Returns `None` when no
 /// window is available (headless) or the round trip times out — the caller
 /// proceeds either way.
-pub async fn run_render_probes(
-    app: &AppHandle,
-    path: &Path,
-    format: &str,
-) -> Option<ProbeOutcome> {
+pub async fn run_render_probes(app: &AppHandle, path: &Path, format: &str) -> Option<ProbeOutcome> {
     let Some(window) = app.get_webview_window("main") else {
         return None;
     };
     let request_id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel::<ProbeOutcome>();
-    PENDING.lock().insert(request_id.clone(), PendingProbe { tx });
+    PENDING
+        .lock()
+        .insert(request_id.clone(), PendingProbe { tx });
 
     let emit = window.emit(
         QA_EVENT,
@@ -186,7 +184,10 @@ mod tests {
     #[test]
     fn probe_skip_is_flagged() {
         let out = parse_probe_payload(
-            Some(r#"[{"rule":"probe/skipped","message":"render probes could not run (no pdf)"}]"#.to_string()),
+            Some(
+                r#"[{"rule":"probe/skipped","message":"render probes could not run (no pdf)"}]"#
+                    .to_string(),
+            ),
             0,
         );
         assert!(out.skipped);

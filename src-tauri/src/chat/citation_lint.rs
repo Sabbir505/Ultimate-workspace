@@ -2,7 +2,7 @@
 //!
 //! The model writes `[n]` citation markers and a `## Sources` section into
 //! its report. Published audits (Tow Center 2025: >60% wrong attribution;
-   //! Liu et al. 2023: 74.5% citation precision) show self-reported citations
+//! Liu et al. 2023: 74.5% citation precision) show self-reported citations
 //! are wrong far too often to trust — but this app's source ledger captured
 //! the verbatim evidence, so every check below is mechanical:
 //!
@@ -123,11 +123,7 @@ pub fn parse_sources_section(content: &str) -> Vec<ReportSource> {
             continue;
         };
         let title = title_from_body(body, &url);
-        sources.push(ReportSource {
-            number,
-            url,
-            title,
-        });
+        sources.push(ReportSource { number, url, title });
     }
     sources
 }
@@ -208,7 +204,10 @@ fn title_from_body(body: &str, url: &str) -> String {
     if title.is_empty() {
         url::Url::parse(url)
             .ok()
-            .and_then(|u| u.host_str().map(|h| h.trim_start_matches("www.").to_string()))
+            .and_then(|u| {
+                u.host_str()
+                    .map(|h| h.trim_start_matches("www.").to_string())
+            })
             .unwrap_or_else(|| url.to_string())
     } else {
         title
@@ -353,7 +352,8 @@ pub fn lint_report(conn: &Connection, chat_session_id: &str, content: &str) -> C
     let notes = db::list_source_notes(conn, chat_session_id).unwrap_or_default();
 
     // number → url from the report's own Sources section.
-    let mut number_to_url: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut number_to_url: std::collections::HashMap<u32, String> =
+        std::collections::HashMap::new();
     for s in &sources {
         number_to_url.insert(s.number, s.url.clone());
     }
@@ -375,10 +375,7 @@ pub fn lint_report(conn: &Connection, chat_session_id: &str, content: &str) -> C
 
     // Sentences of the report body (before the Sources section, which is
     // naturally citation-free).
-    let body_end = content
-        .rfind("\n#")
-        .map(|i| i)
-        .unwrap_or(content.len());
+    let body_end = content.rfind("\n#").map(|i| i).unwrap_or(content.len());
     let body = &content[..body_end];
     let sentences = split_sentences(body);
 
@@ -527,7 +524,9 @@ fn extract_citation_numbers(sentence: &str) -> Vec<u32> {
             let close = if c == '[' { ']' } else { ')' };
             if let Some(end_rel) = sentence[i + 1..].find(close) {
                 let inner = &sentence[i + 1..i + 1 + end_rel];
-                if inner.chars().all(|ch| ch.is_ascii_digit() || ch == ',' || ch == ' ')
+                if inner
+                    .chars()
+                    .all(|ch| ch.is_ascii_digit() || ch == ',' || ch == ' ')
                     && inner.contains(|ch: char| ch.is_ascii_digit())
                 {
                     let numbers: Vec<u32> = inner
@@ -737,8 +736,8 @@ async closure feature [2]. Nothing else happened. See [9] for details.
     #[test]
     fn lint_flags_orphan_and_unavailable_citations() {
         let conn = crate::db::mem();
-        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None)
-            .unwrap();
+        let cs =
+            crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
         crate::db::add_source_note(
             &conn,
             &cs.id,
@@ -765,8 +764,8 @@ async closure feature [2]. Nothing else happened. See [9] for details.
     #[test]
     fn lint_counts_unused_ledger_rows_and_skips_unavailable() {
         let conn = crate::db::mem();
-        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None)
-            .unwrap();
+        let cs =
+            crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
         crate::db::add_source_note(
             &conn,
             &cs.id,
@@ -814,8 +813,8 @@ async closure feature [2]. Nothing else happened. See [9] for details.
     #[test]
     fn lint_flags_weak_attribution_for_unrelated_claim() {
         let conn = crate::db::mem();
-        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None)
-            .unwrap();
+        let cs =
+            crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
         crate::db::add_source_note(
             &conn,
             &cs.id,
@@ -843,8 +842,8 @@ async closure feature [2]. Nothing else happened. See [9] for details.
     #[test]
     fn lint_passes_well_attributed_report() {
         let conn = crate::db::mem();
-        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None)
-            .unwrap();
+        let cs =
+            crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
         crate::db::add_source_note(
             &conn,
             &cs.id,
@@ -874,8 +873,8 @@ async closure feature [2]. Nothing else happened. See [9] for details.
         // all-words heuristic flagged this shape as "weak" (44/63 on a real
         // report); the anchor tier must pass it.
         let conn = crate::db::mem();
-        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None)
-            .unwrap();
+        let cs =
+            crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
         crate::db::add_source_note(
             &conn,
             &cs.id,
@@ -899,8 +898,8 @@ async closure feature [2]. Nothing else happened. See [9] for details.
     #[test]
     fn lint_and_store_persists_and_reads_artifact_files() {
         let conn = crate::db::mem();
-        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None)
-            .unwrap();
+        let cs =
+            crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
         crate::db::add_source_note(
             &conn,
             &cs.id,

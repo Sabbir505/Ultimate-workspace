@@ -66,9 +66,24 @@ pub(crate) fn plan_sanity_errors(plan: &Value) -> Vec<String> {
     if kind != Some("deck") && kind != Some("doc") {
         errs.push("plan.kind must be \"deck\" or \"doc\"".to_string());
     }
-    match plan.get(if kind == Some("deck") { "slides" } else { "sections" }).and_then(|v| v.as_array()) {
-        None => errs.push(if kind == Some("deck") { "plan.slides must be an array".to_string() } else { "plan.sections must be an array".to_string() }),
-        Some(items) if items.is_empty() => errs.push(if kind == Some("deck") { "plan.slides must not be empty".to_string() } else { "plan.sections must not be empty".to_string() }),
+    match plan
+        .get(if kind == Some("deck") {
+            "slides"
+        } else {
+            "sections"
+        })
+        .and_then(|v| v.as_array())
+    {
+        None => errs.push(if kind == Some("deck") {
+            "plan.slides must be an array".to_string()
+        } else {
+            "plan.sections must be an array".to_string()
+        }),
+        Some(items) if items.is_empty() => errs.push(if kind == Some("deck") {
+            "plan.slides must not be empty".to_string()
+        } else {
+            "plan.sections must not be empty".to_string()
+        }),
         Some(_) => {}
     }
     errs
@@ -86,7 +101,10 @@ pub(crate) fn parse_issues(issues_json: Option<&str>) -> (Vec<String>, Vec<Strin
         return (errors, warnings);
     };
     for item in items {
-        let severity = item.get("severity").and_then(|v| v.as_str()).unwrap_or("warning");
+        let severity = item
+            .get("severity")
+            .and_then(|v| v.as_str())
+            .unwrap_or("warning");
         let rule = item.get("rule").and_then(|v| v.as_str()).unwrap_or("qa");
         let message = item.get("message").and_then(|v| v.as_str()).unwrap_or("");
         if message.is_empty() {
@@ -218,7 +236,9 @@ async fn compile_and_write(app: &tauri::AppHandle, job: &CompileJob<'_>) -> Tool
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel::<Result<CompiledDoc, String>>();
-    PENDING.lock().insert(request_id.clone(), PendingCompile { tx });
+    PENDING
+        .lock()
+        .insert(request_id.clone(), PendingCompile { tx });
 
     let emit_result = window.emit(
         COMPILE_EVENT,
@@ -233,7 +253,10 @@ async fn compile_and_write(app: &tauri::AppHandle, job: &CompileJob<'_>) -> Tool
     );
     if let Err(e) = emit_result {
         PENDING.lock().remove(&request_id);
-        return ToolOutcome::text(format!("{} failed: could not reach the document compiler: {e}", job.tool));
+        return ToolOutcome::text(format!(
+            "{} failed: could not reach the document compiler: {e}",
+            job.tool
+        ));
     }
 
     // The frontend resolves the waiter with (bytes, issuesJson).
@@ -287,8 +310,13 @@ async fn compile_and_write(app: &tauri::AppHandle, job: &CompileJob<'_>) -> Tool
                 ))
             }
         };
-        let title = plan.get("title").and_then(|v| v.as_str()).unwrap_or("Document");
-        if let Err(e) = crate::chat::pdfprint::render_html_to_pdf(app, &html, &out_path, title).await {
+        let title = plan
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Document");
+        if let Err(e) =
+            crate::chat::pdfprint::render_html_to_pdf(app, &html, &out_path, title).await
+        {
             return ToolOutcome::text(format!(
                 "{} failed: the PDF render engine reported: {e}. You can retry with \
                  generate_document (language=\"python\") which uses the ReportLab engine.",
@@ -296,7 +324,10 @@ async fn compile_and_write(app: &tauri::AppHandle, job: &CompileJob<'_>) -> Tool
             ));
         }
     } else if let Err(e) = std::fs::write(&out_path, &doc.bytes) {
-        return ToolOutcome::text(format!("{} failed: could not write the document: {e}", job.tool));
+        return ToolOutcome::text(format!(
+            "{} failed: could not write the document: {e}",
+            job.tool
+        ));
     }
 
     // Plan sidecar for targeted revisions — kept hidden (never registered as
@@ -325,10 +356,14 @@ async fn compile_and_write(app: &tauri::AppHandle, job: &CompileJob<'_>) -> Tool
         report.page_count = outcome.page_count;
         report.probes = outcome.issues;
         if outcome.skipped {
-            report.warnings.push("probe: render probes skipped — document saved unprobed".to_string());
+            report
+                .warnings
+                .push("probe: render probes skipped — document saved unprobed".to_string());
         }
     } else {
-        report.probes.push("probe: render probes unavailable (no window or timeout)".to_string());
+        report
+            .probes
+            .push("probe: render probes unavailable (no window or timeout)".to_string());
     }
 
     let _ = app.emit(
@@ -388,7 +423,11 @@ pub async fn revise_document(
         }
     };
 
-    let format = sidecar.get("format").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let format = sidecar
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let filename = sidecar
         .get("filename")
         .and_then(|v| v.as_str())
@@ -503,11 +542,10 @@ pub(crate) fn apply_patches(plan: &mut Value, patches: &[Value]) -> Result<usize
                 applied += 1;
                 continue;
             }
-            let block_idx = obj
-                .get("block")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| format!("{why}: section patch needs \"block\" (or \"heading\")"))?
-                as usize;
+            let block_idx =
+                obj.get("block").and_then(|v| v.as_u64()).ok_or_else(|| {
+                    format!("{why}: section patch needs \"block\" (or \"heading\")")
+                })? as usize;
             let blocks = section
                 .get_mut("blocks")
                 .and_then(|v| v.as_array_mut())
@@ -546,9 +584,7 @@ pub(crate) fn apply_patches(plan: &mut Value, patches: &[Value]) -> Result<usize
             continue;
         }
 
-        return Err(format!(
-            "{why}: needs a \"slide\" or \"section\" target"
-        ));
+        return Err(format!("{why}: needs a \"slide\" or \"section\" target"));
     }
     if applied == 0 {
         return Err("no patches were applied (empty patch list?)".to_string());
@@ -629,7 +665,11 @@ fn format_failure(error: &str, errors: &[String], warnings: &[String]) -> String
     text
 }
 
-fn format_success(filename: &str, path: &Path, report: &crate::chat::docdesign::qa::QaReport) -> String {
+fn format_success(
+    filename: &str,
+    path: &Path,
+    report: &crate::chat::docdesign::qa::QaReport,
+) -> String {
     let mut text = format!(
         "Created \"{filename}\" ({path}) via the plan compiler: the plan passed \
          layout/budget validation and the compiled program passed all design invariants \
@@ -713,7 +753,10 @@ mod tests {
         assert!(!plan_sanity_errors(&json!({"kind": "deck", "slides": []})).is_empty());
         assert!(!plan_sanity_errors(&json!({"kind": "deck"})).is_empty());
         assert!(!plan_sanity_errors(&json!("a deck about things")).is_empty());
-        assert!(plan_sanity_errors(&json!({"kind": "deck", "slides": [{"id": "s1", "layout": "cover"}]})).is_empty());
+        assert!(plan_sanity_errors(
+            &json!({"kind": "deck", "slides": [{"id": "s1", "layout": "cover"}]})
+        )
+        .is_empty());
     }
 
     #[test]
@@ -739,7 +782,10 @@ mod tests {
     fn planned_paths_add_extension() {
         let dir = Path::new("C:\\artifacts");
         assert_eq!(planned_path(dir, "pptx", "Review"), dir.join("Review.pptx"));
-        assert_eq!(planned_path(dir, "pptx", "deck.pptx"), dir.join("deck.pptx"));
+        assert_eq!(
+            planned_path(dir, "pptx", "deck.pptx"),
+            dir.join("deck.pptx")
+        );
     }
 
     #[test]
@@ -748,7 +794,11 @@ mod tests {
             passed: vec!["a".to_string(), "b".to_string()],
             ..Default::default()
         };
-        let text = format_success("Review.pptx", Path::new("C:\\artifacts\\Review.pptx"), &clean);
+        let text = format_success(
+            "Review.pptx",
+            Path::new("C:\\artifacts\\Review.pptx"),
+            &clean,
+        );
         assert!(text.contains("plan compiler"));
         assert!(text.contains("clean"));
         assert!(text.contains("2 check(s)"));
@@ -758,7 +808,11 @@ mod tests {
             probes: vec!["probe/overflow: page 2".to_string()],
             ..Default::default()
         };
-        let text = format_success("Review.pptx", Path::new("C:\\artifacts\\Review.pptx"), &flagged);
+        let text = format_success(
+            "Review.pptx",
+            Path::new("C:\\artifacts\\Review.pptx"),
+            &flagged,
+        );
         assert!(text.contains("2 warning(s)"));
         assert!(text.contains("(probe) probe/overflow"));
         assert!(text.contains("revised plan"));
@@ -787,8 +841,19 @@ mod tests {
     #[test]
     fn guide_lists_every_layout_and_budget_rule() {
         for layout in [
-            "cover", "section", "agenda", "bullets", "two-col", "chart-text",
-            "chart-full", "kpi", "quote", "timeline", "table", "statement", "closing",
+            "cover",
+            "section",
+            "agenda",
+            "bullets",
+            "two-col",
+            "chart-text",
+            "chart-full",
+            "kpi",
+            "quote",
+            "timeline",
+            "table",
+            "statement",
+            "closing",
         ] {
             assert!(PLAN_GUIDE.contains(layout), "guide missing layout {layout}");
         }
@@ -853,7 +918,11 @@ mod tests {
             "slides": [{"id": "s1", "layout": "cover", "slots": {}}]
         });
         // unknown slide
-        assert!(apply_patches(&mut plan, &[json!({"slide": "zz", "slot": "title", "value": "x"})]).is_err());
+        assert!(apply_patches(
+            &mut plan,
+            &[json!({"slide": "zz", "slot": "title", "value": "x"})]
+        )
+        .is_err());
         // missing slot
         assert!(apply_patches(&mut plan, &[json!({"slide": "s1", "value": "x"})]).is_err());
         // wrong target shape
@@ -867,7 +936,10 @@ mod tests {
                 {"type": "bullets", "items": ["a"]}
             ]}]
         });
-        let err = apply_patches(&mut doc_plan, &[json!({"section": "s", "block": 0, "value": "text"})]);
+        let err = apply_patches(
+            &mut doc_plan,
+            &[json!({"section": "s", "block": 0, "value": "text"})],
+        );
         assert!(err.is_err());
     }
 

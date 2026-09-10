@@ -318,21 +318,10 @@ export interface AcpAgentDef {
 }
 
 const ACP_AGENTS_KEY = "acp.agents";
+const jsonAcpAgentDefs = jsonSetting<AcpAgentDef>(ACP_AGENTS_KEY);
 
-export async function listAcpAgentDefs(): Promise<AcpAgentDef[]> {
-  try {
-    const raw = await getSetting(ACP_AGENTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as AcpAgentDef[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-export async function saveAcpAgentDefs(agents: AcpAgentDef[]): Promise<void> {
-  await setSetting(ACP_AGENTS_KEY, JSON.stringify(agents));
-}
+export const listAcpAgentDefs = jsonAcpAgentDefs.load;
+export const saveAcpAgentDefs = jsonAcpAgentDefs.save;
 
 // --- Git ---
 export const getGitStatus = (path: string) => safeInvoke<GitStatusInfo | null>("get_git_status", { path });
@@ -417,6 +406,27 @@ export const generateDiffReview = (path: string, chatSessionId?: string, filePat
 // --- Settings / skills / quick actions / secrets / cost ---
 export const getSetting = (key: string) => safeInvoke<string | null>("get_setting", { key });
 export const setSetting = (key: string, value: string) => safeInvoke<void>("set_setting", { key, value });
+
+/** JSON-array-valued app setting bound to a settings key. `load()` tolerates
+ *  missing/invalid stored values (empty array — the value is user-recoverable
+ *  configuration, not data), `save()` persists the full list. */
+export function jsonSetting<T>(key: string) {
+  return {
+    async load(): Promise<T[]> {
+      try {
+        const raw = await getSetting(key);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? (parsed as T[]) : [];
+      } catch {
+        return [];
+      }
+    },
+    async save(values: T[]): Promise<void> {
+      await setSetting(key, JSON.stringify(values));
+    },
+  };
+}
 /** Absolute path of the chat DB (read-only; fixed at the app data dir). */
 export const getChatDbPath = () => safeInvoke<string | null>("get_chat_db_path", {});
 

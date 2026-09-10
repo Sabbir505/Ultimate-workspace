@@ -42,6 +42,7 @@ import { sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
 import { linkCitations, parseChatSources } from "../../lib/chatCitations";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { startPointerDrag } from "../../lib/pointerDrag";
 import { MdLink } from "./MdLink";
 
 function formatSize(bytes: number): string {
@@ -727,21 +728,17 @@ export function ArtifactPreviewPaneInner({
   // Drag the left edge to resize the pane, mirroring the browser pane.
   const startResize = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
-    const handle = e.currentTarget as HTMLElement;
-    handle.setPointerCapture(e.pointerId);
-    const onMove = (ev: PointerEvent) => {
-      // Pane is docked right, so width grows as the pointer moves left.
-      const next = window.innerWidth - ev.clientX;
-      const max = window.innerWidth - 360;
-      setPaneWidth(Math.min(max, Math.max(MIN_PANE_WIDTH, next)));
-    };
-    const onUp = (ev: PointerEvent) => {
-      handle.releasePointerCapture(ev.pointerId);
-      handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onUp);
-    };
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onUp);
+    // Pane is docked right, so width grows as the pointer moves left.
+    startPointerDrag(
+      e,
+      (x) => {
+        const next = window.innerWidth - x;
+        const max = window.innerWidth - 360;
+        setPaneWidth(Math.min(max, Math.max(MIN_PANE_WIDTH, next)));
+      },
+      undefined,
+      { capture: true },
+    );
   }, []);
 
   const paneStyle = paneWidth != null ? { flex: `0 0 ${paneWidth}px` } : undefined;

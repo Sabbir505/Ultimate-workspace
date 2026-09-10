@@ -17,6 +17,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Globe, Terminal, FileDiff, GitPullRequest, Bot, FileCode, NotebookText, GitBranch } from "lucide-react";
 import { openBrowserPane, openShellTerminal, restoreMinimizedBrowser } from "../../lib/sessionLauncher";
+import { startPointerDrag } from "../../lib/pointerDrag";
 import {
   activeTerminalPair,
   terminalPanes,
@@ -268,18 +269,12 @@ export function ToolPanel() {
       const startX = e.clientX;
       const startWidth = panel.getBoundingClientRect().width;
       setResizing(true);
-      const onMove = (ev: PointerEvent) => {
-        setWidth(startWidth + (startX - ev.clientX));
-      };
-      const onUp = () => {
-        setResizing(false);
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onUp);
-      };
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
-      window.addEventListener("pointercancel", onUp);
+      // Pane is docked right, so width grows as the pointer moves left.
+      startPointerDrag(
+        e,
+        (x) => setWidth(startWidth + (startX - x)),
+        () => setResizing(false),
+      );
     },
     [setWidth],
   );

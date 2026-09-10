@@ -37,6 +37,7 @@ import {
 } from "../../lib/ipc";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { pathUnderChanged } from "../../lib/paths";
+import { startPointerDrag } from "../../lib/pointerDrag";
 import { useChatStore, selectContextSessionId } from "../../state/chat";
 import { usePanesStore } from "../../state/panes";
 import { useProjectsStore } from "../../state/projects";
@@ -377,18 +378,8 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
       const rect = panel.getBoundingClientRect();
       const startX = e.clientX;
       const startWidth = rect.width;
-      const onMove = (ev: PointerEvent) => {
-        const next = startWidth + (ev.clientX - startX);
-        setDiffPanelWidth(next);
-      };
-      const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onUp);
-      };
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
-      window.addEventListener("pointercancel", onUp);
+      // Panel is docked left, so width follows the pointer directly.
+      startPointerDrag(e, (x) => setDiffPanelWidth(startWidth + (x - startX)));
     },
     [setDiffPanelWidth],
   );

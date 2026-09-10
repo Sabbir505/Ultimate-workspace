@@ -810,13 +810,6 @@ async fn download_task<R: tauri::Runtime>(
 
         let resuming = status == reqwest::StatusCode::PARTIAL_CONTENT && resume_from > 0;
         let start = if resuming { resume_from } else { 0 };
-        let mut file = if resuming {
-            let mut opts = tokio::fs::OpenOptions::new();
-            opts.append(true).open(&partial_path).await
-        } else {
-            tokio::fs::File::create(&partial_path).await
-        }
-        .map_err(|e| format!("could not open .part file: {e}"))?;
 
         // Cumulative total (resumed downloads add the existing prefix).
         let total = if resuming {
@@ -837,84 +830,71 @@ async fn download_task<R: tauri::Runtime>(
         }
         TaskManager::emit(app, sid, entry);
 
-        let mut stream = resp.bytes_stream();
-        let mut downloaded: u64 = start;
-        let mut speed: u64;
+        // Shared body pump (download.rs): write + progress callback +
+        // cancel/stall watchdogs. Backdated last_emit so the first chunk
+        // emits immediately.
         let mut last_emit = Instant::now() - PROGRESS_EMIT_MIN;
         let mut last_downloaded = start;
-        let mut stream_failed: Option<String> = None;
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut cancel_rx => {
-                    // User cancelled: keep the .part for a future resume,
-                    // mark the task cancelled, and stop.
-                    drop(file);
+        let (outcome, downloaded) = crate::download::pump_body_to_file(
+            resp,
+            &partial_path,
+            start,
+            resuming,
+            DOWNLOAD_STALL_TIMEOUT,
+            &mut cancel_rx,
+            &mut |chunk, downloaded, total| {
+                if last_emit.elapsed() >= PROGRESS_EMIT_MIN {
+                    let dt = last_emit.elapsed().as_secs_f64().max(0.001);
+                    let speed = ((downloaded - last_downloaded) as f64 / dt) as u64;
+                    last_downloaded = downloaded;
+                    last_emit = Instant::now();
                     {
                         let mut snap = entry.snapshot.lock();
-                        snap.state = TaskState::Cancelled;
-                        snap.speed_bps = 0;
-                        snap.message = format!(
-                            "Cancelled at {} — the .part file was kept for resume.",
-                            human_bytes(downloaded)
-                        );
+                        snap.downloaded = downloaded;
+                        snap.speed_bps = speed;
+                        snap.total = total;
                     }
                     TaskManager::emit(app, sid, entry);
-                    return Ok(());
                 }
-                next = tokio::time::timeout(DOWNLOAD_STALL_TIMEOUT, stream.next()) => {
-                    match next {
-                        Err(_elapsed) => {
-                            // No bytes for DOWNLOAD_STALL_TIMEOUT — the peer
-                            // is hung. Treat like a stream error: keep the
-                            // .part and resume on the next attempt.
-                            stream_failed = Some(format!(
-                                "stalled (no data for {}s)",
-                                DOWNLOAD_STALL_TIMEOUT.as_secs()
-                            ));
-                            break;
-                        }
-                        Ok(Some(Ok(chunk))) => {
-                            if chunk.is_empty() { continue; }
-                            if let Err(e) = file.write_all(&chunk).await {
-                                return Err(format!("write error: {e}"));
-                            }
-                            downloaded = downloaded.saturating_add(chunk.len() as u64);
-                            if last_emit.elapsed() >= PROGRESS_EMIT_MIN {
-                                let dt = last_emit.elapsed().as_secs_f64().max(0.001);
-                                speed = ((downloaded - last_downloaded) as f64 / dt) as u64;
-                                last_downloaded = downloaded;
-                                last_emit = Instant::now();
-                                {
-                                    let mut snap = entry.snapshot.lock();
-                                    snap.downloaded = downloaded;
-                                    snap.speed_bps = speed;
-                                    snap.total = total;
-                                }
-                                TaskManager::emit(app, sid, entry);
-                            }
-                        }
-                        Ok(Some(Err(e))) => {
-                            stream_failed = Some(format!("stream error: {e}"));
-                            break;
-                        }
-                        Ok(None) => break,
-                    }
+                Ok(())
+            },
+        )
+        .await;
+
+        // Map the shared pump outcomes onto this task's policies: cancel
+        // and mid-stream failures keep the .part for a future resume (the
+        // retry loop resumes via Range); write failures are fatal.
+        match outcome {
+            crate::download::BodyPumpOutcome::Cancelled => {
+                // Scope the guard: TaskManager::emit re-locks the same
+                // std::sync::Mutex — holding it across emit deadlocks.
+                {
+                    let mut snap = entry.snapshot.lock();
+                    snap.state = TaskState::Cancelled;
+                    snap.speed_bps = 0;
+                    snap.message = format!(
+                        "Cancelled at {} — the .part file was kept for resume.",
+                        human_bytes(downloaded)
+                    );
                 }
+                TaskManager::emit(app, sid, entry);
+                return Ok(());
             }
+            crate::download::BodyPumpOutcome::Stalled => {
+                last_error =
+                    format!("stalled (no data for {}s)", DOWNLOAD_STALL_TIMEOUT.as_secs());
+                resume_from = downloaded;
+                continue;
+            }
+            crate::download::BodyPumpOutcome::ReadError(e) => {
+                last_error = format!("stream error: {e}");
+                resume_from = downloaded;
+                continue;
+            }
+            crate::download::BodyPumpOutcome::WriteError(e) => return Err(e),
+            crate::download::BodyPumpOutcome::Completed => {}
         }
 
-        // A mid-stream failure keeps the .part and retries from where it
-        // stopped (Range resume); a clean EOF finishes the download.
-        if let Some(msg) = stream_failed {
-            last_error = msg;
-            resume_from = downloaded;
-            continue;
-        }
-
-        file.flush().await.map_err(|e| format!("flush: {e}"))?;
-        drop(file);
         tokio::fs::rename(&partial_path, &dest_path)
             .await
             .map_err(|e| format!("rename to final path failed: {e}"))?;

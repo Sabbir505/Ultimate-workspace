@@ -3,8 +3,7 @@
 //! form fill/select/press-key, and page diagnostics. Pure string builders —
 //! extracted from browser.rs so the manager logic and the injected payloads
 //! can be reviewed independently.
-use crate::browser::{ActionOpts, ReadMode, BRIDGE_RESOLVE_JS, BRIDGE_SNAPSHOT_JS};
-use serde_json::json;
+use crate::browser::{ActionOpts, BRIDGE_RESOLVE_JS, BRIDGE_SNAPSHOT_JS};
 
 pub(crate) fn build_resolve_js(desc: &str, action: &str) -> String {
     let desc_js = serde_json::to_string(desc).unwrap_or_else(|_| "\"\"".to_string());

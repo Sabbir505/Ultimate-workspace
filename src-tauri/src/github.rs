@@ -661,8 +661,15 @@ Some body line");
 /// Local branches for the create-form pickers (name, current flag). Not
 /// GitHub-API — the candidate head branch is whichever local branch the user
 /// is about to push.
+///
+/// `async` + `spawn_blocking`: `git branch` is a subprocess wait. The lock was
+/// already scoped correctly here; what remained was running the git call on
+/// the IPC (UI) thread.
 #[tauri::command]
-pub fn github_local_branches(project_id: String, db: State<'_, DbState>) -> CmdResult<Vec<BranchOption>> {
+pub async fn github_local_branches(
+    project_id: String,
+    db: State<'_, DbState>,
+) -> CmdResult<Vec<BranchOption>> {
     let project_path = {
         let conn = db.0.lock();
         db::get_project(&conn, &project_id)
@@ -670,7 +677,9 @@ pub fn github_local_branches(project_id: String, db: State<'_, DbState>) -> CmdR
             .ok_or_else(|| "project not found".to_string())?
             .path
     };
-    let branches = crate::git::list_branches(Path::new(&project_path))?;
+    let branches = tokio::task::spawn_blocking(move || crate::git::list_branches(Path::new(&project_path)))
+        .await
+        .map_err(|e| e.to_string())??;
     Ok(branches
         .into_iter()
         .map(|b| BranchOption { name: b.name, is_current: b.is_current, is_remote: b.is_remote })

@@ -515,6 +515,29 @@ pub fn path_within_granted_roots(path: &str, granted_roots: &[String]) -> bool {
     })
 }
 
+/// Pin a bare Windows drive prefix ("C:", "d:") to its root ("C:\").
+///
+/// "C:" is a DRIVE-RELATIVE path: the OS resolves it against whichever
+/// directory the process last used on that drive, so `canonicalize("C:")`
+/// returns something like `C:\Windows\System32` — never the drive root. A
+/// granted-root entry of `["C:"]` (what the folder picker stores when the user
+/// grants a whole drive) therefore resolved to a random directory, and the
+/// filesystem containment check below then FAILED for every real path on C: —
+/// `read_artifact_preview` refused in-scope files and `get_file_mtime`
+/// reported them missing, both depending on the process's CWD. Pinning the
+/// prefix makes the grant mean what it says, deterministically.
+fn pin_bare_drive(p: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let s = p.to_string_lossy();
+        let b = s.as_bytes();
+        if b.len() == 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+            return std::path::PathBuf::from(format!("{s}\\"));
+        }
+    }
+    p.to_path_buf()
+}
+
 /// Resolve a path through the FILESYSTEM (junctions/symlinks included).
 /// Falls back to resolving only the existing parent chain and reattaching
 /// the leaf — write_file targets often don't exist yet, but their parent
@@ -522,6 +545,7 @@ pub fn path_within_granted_roots(path: &str, granted_roots: &[String]) -> bool {
 /// Returns None when neither the path nor its parent resolves (nothing on
 /// disk to consult — caller falls back to the lexical result).
 fn fs_resolved(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    let p = &pin_bare_drive(p);
     if let Ok(c) = std::fs::canonicalize(p) {
         return Some(c);
     }
@@ -774,6 +798,28 @@ mod tests {
 
     fn roots() -> Vec<String> {
         ROOTS.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Regression (bare drive roots): a granted root of `"C:"` is what the
+    /// folder picker stores for a whole drive, and it must resolve to the drive
+    /// ROOT. Before `pin_bare_drive`, `canonicalize("C:")` returned the drive's
+    /// CURRENT DIRECTORY — a process-global, so the filesystem containment
+    /// check passed or failed depending on where the app was started, refusing
+    /// in-scope artifacts on C: (and disabling their hot-reload) whenever that
+    /// directory wasn't an ancestor.
+    #[test]
+    #[cfg(windows)]
+    fn bare_drive_root_resolves_to_the_drive_root() {
+        let Some(root) = std::fs::canonicalize("C:\\").ok() else {
+            return; // no C: on this machine — nothing to pin
+        };
+        assert_eq!(pin_bare_drive(std::path::Path::new("C:")), std::path::PathBuf::from("C:\\"));
+        assert_eq!(pin_bare_drive(std::path::Path::new("c:")), std::path::PathBuf::from("c:\\"));
+        assert_eq!(fs_resolved(std::path::Path::new("C:")), Some(root));
+        // A path that merely STARTS with a drive letter is untouched.
+        let nested = std::path::Path::new("C:/projects/alpha");
+        assert_eq!(pin_bare_drive(nested), nested.to_path_buf());
+        assert_eq!(pin_bare_drive(std::path::Path::new("C:\\")), std::path::PathBuf::from("C:\\"));
     }
 
     // ---- reads run in every mode ----

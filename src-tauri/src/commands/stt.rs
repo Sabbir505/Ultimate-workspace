@@ -506,13 +506,13 @@ pub async fn stt_stop(stt: State<'_, SttState>) -> CmdResult<()> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stt_set_default(db: State<'_, DbState>, filename: String) -> CmdResult<()> {
     let conn = db.0.lock();
     db::set_setting(&conn, DEFAULT_MODEL_KEY, &filename).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stt_set_auto_start(db: State<'_, DbState>, auto_start: bool) -> CmdResult<()> {
     let conn = db.0.lock();
     db::set_setting(&conn, AUTO_START_KEY, if auto_start { "true" } else { "false" })
@@ -540,7 +540,7 @@ pub async fn stt_set_device(
     stt_status(db, stt).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stt_set_server_path(db: State<'_, DbState>, path: Option<String>) -> CmdResult<()> {
     let conn = db.0.lock();
     match path {

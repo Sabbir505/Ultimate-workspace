@@ -1126,7 +1126,7 @@ pub async fn tts_status(
     status_inner(&app, &db, &tts).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tts_set_model(db: State<'_, DbState>, tts: State<'_, TtsState>, id: String) -> CmdResult<()> {
     {
         let conn = db.0.lock();
@@ -1138,13 +1138,13 @@ pub fn tts_set_model(db: State<'_, DbState>, tts: State<'_, TtsState>, id: Strin
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tts_set_voice(db: State<'_, DbState>, voice: String) -> CmdResult<()> {
     let conn = db.0.lock();
     db::set_setting(&conn, VOICE_KEY, voice.trim()).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tts_set_speed(db: State<'_, DbState>, speed: f32) -> CmdResult<f32> {
     let speed = clamp_speed(speed);
     let conn = db.0.lock();
@@ -1152,7 +1152,7 @@ pub fn tts_set_speed(db: State<'_, DbState>, speed: f32) -> CmdResult<f32> {
     Ok(speed)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tts_set_auto_read(db: State<'_, DbState>, auto_read: bool) -> CmdResult<()> {
     let conn = db.0.lock();
     db::set_setting(&conn, AUTOREAD_KEY, if auto_read { "true" } else { "false" })

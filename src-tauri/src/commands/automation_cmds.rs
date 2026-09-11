@@ -52,20 +52,20 @@ pub(crate) fn is_allowed_automation_agent(harness: &str) -> bool {
     ALLOWED_AGENTS.contains(&harness) || harness == "local_gguf"
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_automations(db: State<'_, DbState>) -> Result<Vec<Automation>, String> {
     let conn = db.0.lock();
     db::list_automations(&conn).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_automation(db: State<'_, DbState>, input: AutomationInput) -> Result<Automation, String> {
     validate(&input)?;
     let conn = db.0.lock();
     db::create_automation(&conn, &input).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_automation(
     db: State<'_, DbState>,
     automation_id: String,
@@ -76,13 +76,13 @@ pub fn update_automation(
     db::update_automation(&conn, &automation_id, &input).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_automation(db: State<'_, DbState>, automation_id: String) -> Result<(), String> {
     let conn = db.0.lock();
     db::delete_automation(&conn, &automation_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_automation_enabled(
     db: State<'_, DbState>,
     automation_id: String,
@@ -94,7 +94,7 @@ pub fn set_automation_enabled(
 
 /// Fire one run immediately, on the same launch path the scheduler uses
 /// (overlap-guarded; the result lands in the automation's run-log chat).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_automation_now(
     app: AppHandle,
     db: State<'_, DbState>,
@@ -110,7 +110,7 @@ pub fn run_automation_now(
 }
 
 /// Newest-first run history for one automation (UI "Past runs" pane).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_automation_runs(
     db: State<'_, DbState>,
     automation_id: String,
@@ -125,7 +125,7 @@ pub fn list_automation_runs(
 }
 
 /// How many runs an automation has on file (sidebar list badge).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn count_automation_runs(
     db: State<'_, DbState>,
     automation_id: String,

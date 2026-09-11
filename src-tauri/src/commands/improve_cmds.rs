@@ -17,7 +17,7 @@ type CmdResult<T> = Result<T, String>;
 /// time a loop session is recorded.
 const GOAL_LOOP_SKILL_BODY: &str = include_str!("../../../skills/goal-loop-skill.md");
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_improve_artifacts(db: State<'_, DbState>) -> CmdResult<Vec<ImproveArtifact>> {
     let conn = db.0.lock();
     let mut stmt = conn
@@ -37,14 +37,14 @@ pub fn list_improve_artifacts(db: State<'_, DbState>) -> CmdResult<Vec<ImproveAr
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_improve_versions(db: State<'_, DbState>, artifact_id: String) -> CmdResult<Vec<ImproveVersion>> {
     let conn = db.0.lock();
     db::improve::list_versions(&conn, &artifact_id).map_err(|e| e.to_string())
 }
 
 /// Promote / rollback are the same operation: re-point a channel.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_improve_channel(
     db: State<'_, DbState>,
     artifact_id: String,
@@ -57,7 +57,7 @@ pub fn set_improve_channel(
 
 /// Record one execution of an artifact (frontend-known invocations, e.g.
 /// prompt-template fills). Skills are recorded backend-side in the send path.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn record_artifact_run(
     db: State<'_, DbState>,
     chat_session_id: String,
@@ -74,7 +74,7 @@ pub fn record_artifact_run(
 
 /// Close the session's open runs after a turn ends (`applied`) or errors
 /// (`failed` + error code from chat:error classification).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn finish_artifact_runs(
     db: State<'_, DbState>,
     chat_session_id: String,
@@ -86,7 +86,7 @@ pub fn finish_artifact_runs(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn record_artifact_feedback(
     db: State<'_, DbState>,
     chat_session_id: Option<String>,
@@ -131,7 +131,7 @@ pub fn record_artifact_feedback(
 
 // ---- goal-loop runtime persistence ----
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn loop_session_start(
     db: State<'_, DbState>,
     chat_session_id: String,
@@ -143,25 +143,25 @@ pub fn loop_session_start(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn loop_session_advance(db: State<'_, DbState>, loop_id: String, iteration: i64) -> CmdResult<()> {
     let conn = db.0.lock();
     db::improve::advance_loop_session(&conn, &loop_id, iteration).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn loop_session_finish(db: State<'_, DbState>, loop_id: String, status: String) -> CmdResult<()> {
     let conn = db.0.lock();
     db::improve::finish_loop_session(&conn, &loop_id, &status).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_loop_session(db: State<'_, DbState>, loop_id: String) -> CmdResult<Option<LoopSession>> {
     let conn = db.0.lock();
     db::improve::get_loop_session(&conn, &loop_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn latest_loop_session(db: State<'_, DbState>, chat_session_id: String) -> CmdResult<Option<LoopSession>> {
     let conn = db.0.lock();
     db::improve::latest_loop_session(&conn, &chat_session_id).map_err(|e| e.to_string())
@@ -169,7 +169,7 @@ pub fn latest_loop_session(db: State<'_, DbState>, chat_session_id: String) -> C
 
 // ---- P1: proposals + eval ----
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_improvement_proposals(
     db: State<'_, DbState>,
     status: Option<String>,
@@ -213,13 +213,13 @@ pub async fn apply_improvement_proposal(db: State<'_, DbState>, proposal_id: Str
         .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reject_improvement_proposal(db: State<'_, DbState>, proposal_id: String) -> CmdResult<()> {
     let db = std::sync::Arc::clone(&db.0);
     crate::improve_engine::reject_proposal(&db, &proposal_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_improve_eval_cases(
     db: State<'_, DbState>,
     artifact_id: String,
@@ -229,7 +229,7 @@ pub fn list_improve_eval_cases(
 }
 
 /// Set the per-artifact autonomy tier (§9.2): manual | auto | canary.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_improve_autonomy(db: State<'_, DbState>, artifact_id: String, tier: String) -> CmdResult<()> {
     if !matches!(tier.as_str(), "manual" | "auto" | "canary") {
         return Err(format!("unknown autonomy tier: {tier}"));
@@ -238,7 +238,7 @@ pub fn set_improve_autonomy(db: State<'_, DbState>, artifact_id: String, tier: S
     db::improve::set_autonomy(&conn, &artifact_id, &tier).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_improve_autonomy(db: State<'_, DbState>, artifact_id: String) -> CmdResult<String> {
     let conn = db.0.lock();
     db::improve::autonomy(&conn, &artifact_id).map_err(|e| e.to_string())

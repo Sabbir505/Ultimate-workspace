@@ -273,15 +273,15 @@ pub async fn git_push(path: String, db: State<'_, DbState>) -> CmdResult<String>
 
 /// Install a watcher for `path` (a project root or worktree path).
 /// Idempotent — re-installing an already-watched path is a no-op.
-#[tauri::command]
-pub fn install_git_watcher(path: String, app: AppHandle, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn install_git_watcher(path: String, app: AppHandle, db: State<'_, DbState>) -> CmdResult<()> {
     verify_project_path(Path::new(&path), &db)?;
     crate::git_watcher::install(&app, &db, Path::new(&path));
     Ok(())
 }
 
 /// Drop the watcher for `path`. No-op if the path isn't being watched.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn uninstall_git_watcher(path: String, app: AppHandle) -> CmdResult<()> {
     let state = app.state::<crate::git_watcher::WatcherState>();
     crate::git_watcher::uninstall(&state, Path::new(&path));
@@ -291,8 +291,8 @@ pub fn uninstall_git_watcher(path: String, app: AppHandle) -> CmdResult<()> {
 /// Re-scan the projects + worktrees tables and install watchers for any
 /// paths that don't have one yet. Called by the frontend after project
 /// add/remove and after the projects store reloads.
-#[tauri::command]
-pub fn refresh_git_watchers(app: AppHandle, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn refresh_git_watchers(app: AppHandle, db: State<'_, DbState>) -> CmdResult<()> {
     crate::git_watcher::install_all_known(&app, &db);
     Ok(())
 }

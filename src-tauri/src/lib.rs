@@ -264,6 +264,18 @@ pub fn run() {
             }
             Ok(())
         })
+        // MAIN-THREAD RULE (read before adding a command): a `#[tauri::command]`
+        // that is NOT `async` runs INLINE on the IPC thread — which is the UI
+        // thread. Every command here takes the single shared `DbState` mutex
+        // (and many shell out to git, walk directories, or exec a subprocess), so
+        // a non-async command turns any contention or slow work into a frozen
+        // window that Windows reports as "not responding". Two ways to stay off
+        // it, both invisible to the frontend (invoke always returns a promise):
+        //   * `#[tauri::command(async)]` on a plain `fn` — runs the body on the
+        //     async thread pool, body unchanged. Right answer for DB-only work.
+        //   * `async fn` + `tokio::task::spawn_blocking` for the blocking part —
+        //     right answer for subprocess/file/network work.
+        // Note `State<..>` args must be written `State<'_, ..>` either way.
         .invoke_handler(tauri::generate_handler![
             // OS toast under the app identity (Windows; dev runs only —
             // installed builds get this from the plugin's own AUMID path).

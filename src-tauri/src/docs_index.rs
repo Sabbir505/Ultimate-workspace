@@ -174,7 +174,7 @@ pub struct DocsEmbeddingStatus {
     pub base_url: Option<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docs_embedding_status(
     db: State<'_, DbState>,
     local: State<'_, LocalModelState>,
@@ -191,7 +191,7 @@ pub fn docs_embedding_status(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docs_add_corpus(
     db: State<'_, DbState>,
     path: String,
@@ -216,19 +216,19 @@ pub fn docs_add_corpus(
     docs_db::add_corpus(&conn, &canonical, &name).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docs_remove_corpus(db: State<'_, DbState>, corpus_id: String) -> CmdResult<()> {
     let conn = db.0.lock();
     docs_db::remove_corpus(&conn, &corpus_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docs_list_corpora(db: State<'_, DbState>) -> CmdResult<Vec<docs_db::DocCorpus>> {
     let conn = db.0.lock();
     docs_db::list_corpora(&conn).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docs_set_corpus_enabled(
     db: State<'_, DbState>,
     corpus_id: String,
@@ -240,7 +240,7 @@ pub fn docs_set_corpus_enabled(
 
 /// Pin a corpus to a chat session so its documents are ALWAYS in that chat's
 /// auto-retrieval context regardless of query (§3.1.7 per-chat attachment).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docs_attach_corpus_to_chat(
     db: State<'_, DbState>,
     chat_session_id: String,
@@ -251,7 +251,7 @@ pub fn docs_attach_corpus_to_chat(
 }
 
 /// Remove a corpus from a chat's pinned set.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docs_detach_corpus_from_chat(
     db: State<'_, DbState>,
     chat_session_id: String,
@@ -262,7 +262,7 @@ pub fn docs_detach_corpus_from_chat(
 }
 
 /// List the corpus ids pinned to a chat session (empty = none pinned).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docs_attached_corpus_ids(
     db: State<'_, DbState>,
     chat_session_id: String,
@@ -362,7 +362,7 @@ pub async fn docs_start_index(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docs_cancel_index(
     registry: State<'_, Arc<IndexRegistry>>,
     corpus_id: String,

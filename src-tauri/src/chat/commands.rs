@@ -45,8 +45,8 @@ fn strip_tagged_blocks(content: &str, tag: &str) -> String {
     out.trim().to_string()
 }
 
-#[tauri::command]
-pub fn list_chat_sessions(db: State<DbState>) -> CmdResult<Vec<ChatSession>> {
+#[tauri::command(async)]
+pub fn list_chat_sessions(db: State<'_, DbState>) -> CmdResult<Vec<ChatSession>> {
     let conn = db.0.lock();
     db::list_chat_sessions(&conn).map_err(|e| e.to_string())
 }
@@ -61,11 +61,11 @@ pub fn list_chat_sessions(db: State<DbState>) -> CmdResult<Vec<ChatSession>> {
 /// happens out-of-band, and a stale "/create …" in the model's view made it
 /// re-execute the command on every later send. Returning the inserted row
 /// gives the frontend a stable message id to anchor the proposal card to.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn persist_chat_command_message(
     chat_session_id: String,
     content: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<ChatMessageRecord> {
     let conn = db.0.lock();
     db::add_command_chat_message(&conn, &chat_session_id, &content, "artifact_command")
@@ -74,11 +74,11 @@ pub fn persist_chat_command_message(
 
 /// Full-text search across chat message content + session titles (powers the
 /// command palette "Chats" section).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search_chat_messages(
     query: String,
     limit: Option<u32>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<Vec<ChatSearchResult>> {
     let conn = db.0.lock();
     db::search_chat_messages(&conn, &query, limit.unwrap_or(20)).map_err(|e| e.to_string())
@@ -87,10 +87,10 @@ pub fn search_chat_messages(
 // ---- Checkpoints (per-turn git working-tree snapshots) ----
 
 /// All checkpoints for a chat session, oldest first (timeline order).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_chat_checkpoints(
     chat_session_id: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<Vec<ChatCheckpoint>> {
     let conn = db.0.lock();
     db::list_chat_checkpoints(&conn, &chat_session_id).map_err(|e| e.to_string())
@@ -102,12 +102,12 @@ pub fn list_chat_checkpoints(
 /// the checkpointed turn are deleted too (the tree restore is primary; a
 /// message-delete failure is logged and never fails the command). Emits
 /// `checkpoint:created` for the safety snapshot.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_chat_checkpoint(
     checkpoint_id: i64,
     rollback_messages: bool,
     app: AppHandle,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<RestoreCheckpointResult> {
     // Passes the shared handle, not a held guard: checkpoints::restore scopes
     // the lock itself so the seconds-long git snapshot/restore never pin the
@@ -119,32 +119,53 @@ pub fn restore_chat_checkpoint(
 // ---- Artifacts (30-day retention) ----
 
 /// All persisted artifacts, most recent first.
+///
+/// `async` (main-thread hazard): this is invoked by the sidebar/library UI, and
+/// a non-async command runs INLINE on the IPC thread — which is the UI thread.
+/// Every artifact command takes the single shared `DbState` mutex, so any
+/// concurrent long holder (a chat turn's writes, an automation run, a
+/// checkpoint) would freeze the window for its whole duration. Off the main
+/// thread the same wait is just a late promise.
 #[tauri::command]
-pub fn list_artifacts(db: State<DbState>) -> CmdResult<Vec<ArtifactRecord>> {
-    let conn = db.0.lock();
-    db::list_artifacts(&conn).map_err(|e| e.to_string())
+pub async fn list_artifacts(db: State<'_, DbState>) -> CmdResult<Vec<ArtifactRecord>> {
+    let records = {
+        let conn = db.0.lock();
+        db::list_artifacts(&conn)
+    };
+    records.map_err(|e| e.to_string())
 }
 
 /// Artifacts belonging to one chat session, oldest first, so a reopened chat
-/// can restore its inline diagrams / file chips.
+/// can restore its inline diagrams / file chips. `async` for the same
+/// main-thread reason as [`list_artifacts`].
 #[tauri::command]
-pub fn list_chat_artifacts(
+pub async fn list_chat_artifacts(
     chat_session_id: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<Vec<ArtifactRecord>> {
-    let conn = db.0.lock();
-    db::list_artifacts_for_chat(&conn, &chat_session_id).map_err(|e| e.to_string())
+    let records = {
+        let conn = db.0.lock();
+        db::list_artifacts_for_chat(&conn, &chat_session_id)
+    };
+    records.map_err(|e| e.to_string())
 }
 
-/// Delete an artifact (DB row + on-disk file).
+/// Delete an artifact (DB row + on-disk file). `async` for the same
+/// main-thread reason as [`list_artifacts`].
 #[tauri::command]
-pub fn delete_artifact(id: String, db: State<DbState>) -> CmdResult<()> {
+pub async fn delete_artifact(id: String, db: State<'_, DbState>) -> CmdResult<()> {
     let path = {
         let conn = db.0.lock();
         db::delete_artifact(&conn, &id).map_err(|e| e.to_string())?
     };
     if let Some(path) = path {
-        let _ = std::fs::remove_file(path);
+        // `spawn_blocking` so the unlink never occupies a runtime worker, and
+        // best-effort so a vanish-race or permission error cannot fail the row
+        // deletion that already landed.
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = std::fs::remove_file(path);
+        })
+        .await;
     }
     Ok(())
 }
@@ -211,12 +232,12 @@ pub fn sweep_expired_artifacts(db: &Arc<parking_lot::Mutex<rusqlite::Connection>
     n
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_chat_session(
     provider: String,
     model: String,
     project_id: Option<String>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<ChatSession> {
     let conn = db.0.lock();
     db::create_chat_session(&conn, &provider, &model, project_id.as_deref())
@@ -224,10 +245,10 @@ pub fn create_chat_session(
 }
 
 #[tauri::command]
-pub fn delete_chat_session(
+pub async fn delete_chat_session(
     chat_session_id: String,
-    db: State<DbState>,
-    agent_state: State<crate::agent_sessions::AgentSessionState>,
+    db: State<'_, DbState>,
+    agent_state: State<'_, crate::agent_sessions::AgentSessionState>,
     chat_state: State<'_, crate::ChatState>,
     plan_state: State<'_, crate::chat::plan::PlanState>,
 ) -> CmdResult<()> {
@@ -242,6 +263,26 @@ pub fn delete_chat_session(
     chat_state.0.invalidate_context_tokens(&chat_session_id);
     // Drop the session's plan state (todos, plan mode, pending feedback).
     plan_state.clear_session(&chat_session_id);
+    // The session's isolated worktree (roadmap P0 §3.1.1) is torn down
+    // OUTSIDE the DB critical section: `git worktree remove --force` deletes a
+    // whole tree (seconds), and this command used to run it on the IPC thread
+    // while holding the shared DB mutex. The `relay/<id>` branch stays in the
+    // repo, so committed work survives the delete either way.
+    let worktree = {
+        let conn = db.0.lock();
+        db::get_chat_session(&conn, &chat_session_id)
+            .ok()
+            .flatten()
+            .and_then(|sess| {
+                crate::commands::worktree_cmds::worktree_teardown_target(&conn, &sess)
+            })
+    };
+    if let Some((root, wt)) = worktree {
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::commands::worktree_cmds::remove_worktree_blocking(root, wt);
+        })
+        .await;
+    }
     let conn = db.0.lock();
     for harness in ["claude_code", "kimi_code", "opencode"] {
         let _ = db::delete_setting(
@@ -251,12 +292,6 @@ pub fn delete_chat_session(
     }
     // Prune this session's git checkpoint refs before the rows cascade away.
     crate::checkpoints::prune_session_refs(&conn, &chat_session_id);
-    // Best-effort remove the session's isolated worktree before its row is
-    // deleted (roadmap P0 §3.1.1) — the `relay/<id>` branch stays in the
-    // repo, so committed work survives the delete.
-    if let Ok(Some(sess)) = db::get_chat_session(&conn, &chat_session_id) {
-        crate::commands::worktree_cmds::remove_worktree_for_session(&conn, &sess);
-    }
     db::delete_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())
 }
 
@@ -267,19 +302,46 @@ pub fn delete_chat_session(
 /// project is removed best-effort and its pointer cleared (roadmap P0 §3.1.1):
 /// a worktree belongs to a specific project, so rebinding/unbinding orphans it
 /// — the `relay/<id>` branch stays in the repo, so nothing committed is lost.
+///
+/// `async` + a scoped guard for the same reason as [`delete_chat_session`]: the
+/// teardown shells out to git, and it must not run on the UI thread or under
+/// the DB mutex.
 #[tauri::command]
-pub fn set_chat_session_project(
+pub async fn set_chat_session_project(
     chat_session_id: String,
     project_id: Option<String>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
+    // Phase 1 (locked): decide what to tear down and collect paths only.
+    let (teardown, changed) = {
+        let conn = db.0.lock();
+        let before = db::get_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())?;
+        let changed = before
+            .as_ref()
+            .map(|s| s.project_id.as_deref() != project_id.as_deref())
+            .unwrap_or(false);
+        let teardown = if changed {
+            before.and_then(|sess| {
+                crate::commands::worktree_cmds::worktree_teardown_target(&conn, &sess)
+            })
+        } else {
+            None
+        };
+        (teardown, changed)
+    };
+    let had_worktree = teardown.is_some();
+    // Phase 2 (no lock): the slow git teardown, off the async runtime.
+    if let Some((root, wt)) = teardown {
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::commands::worktree_cmds::remove_worktree_blocking(root, wt);
+        })
+        .await;
+    }
     let conn = db.0.lock();
-    let before = db::get_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())?;
-    if let Some(sess) = &before {
-        let changed = sess.project_id.as_deref() != project_id.as_deref();
-        if changed && sess.worktree_path.is_some() {
-            crate::commands::worktree_cmds::remove_worktree_for_session(&conn, sess);
-        }
+    // The old binding's worktree is gone (or was never removable), so clear
+    // its pointer — same end state remove_worktree_for_session left behind.
+    if changed && had_worktree {
+        let _ = db::set_chat_session_worktree(&conn, &chat_session_id, None);
     }
     db::set_chat_session_project(&conn, &chat_session_id, project_id.as_deref())
         .map_err(|e| e.to_string())
@@ -290,8 +352,8 @@ pub fn set_chat_session_project(
 /// before the user typed anything. `keep` (when Some) protects a single
 /// session from the sweep; useful when the caller is about to select it.
 /// Returns the number of rows deleted.
-#[tauri::command]
-pub fn delete_empty_chat_sessions(keep: Option<String>, db: State<DbState>) -> CmdResult<usize> {
+#[tauri::command(async)]
+pub fn delete_empty_chat_sessions(keep: Option<String>, db: State<'_, DbState>) -> CmdResult<usize> {
     let conn = db.0.lock();
     db::delete_empty_chat_sessions(&conn, keep.as_deref()).map_err(|e| e.to_string())
 }
@@ -300,10 +362,14 @@ pub fn delete_empty_chat_sessions(keep: Option<String>, db: State<DbState>) -> C
 /// `delete_chat_session`, applying the exact same per-session cleanup (kill
 /// any backing harness process, drop the persisted CLI session ids, then the
 /// row). Returns the number of sessions deleted.
+///
+/// `async` because phase 3 prunes checkpoint refs and removes worktrees with
+/// git: that work is O(sessions × git) and used to run on the IPC thread (the
+/// UI thread) with the whole app serialized behind it.
 #[tauri::command]
-pub fn delete_all_chat_sessions(
-    db: State<DbState>,
-    agent_state: State<crate::agent_sessions::AgentSessionState>,
+pub async fn delete_all_chat_sessions(
+    db: State<'_, DbState>,
+    agent_state: State<'_, crate::agent_sessions::AgentSessionState>,
     chat_state: State<'_, crate::ChatState>,
 ) -> CmdResult<usize> {
     let sessions = {
@@ -338,26 +404,25 @@ pub fn delete_all_chat_sessions(
             for (repo, refs) in crate::checkpoints::collect_session_ref_groups(&conn, id) {
                 ref_groups.entry(repo).or_default().extend(refs);
             }
-            if let Some(wt) = &sess.worktree_path {
-                let proj_path = sess
-                    .project_id
-                    .as_deref()
-                    .and_then(|pid| db::get_project(&conn, pid).ok().flatten())
-                    .map(|p| p.path);
-                worktrees.push((id.clone(), Some(wt.clone()), proj_path));
+            if let Some((root, wt)) =
+                crate::commands::worktree_cmds::worktree_teardown_target(&conn, sess)
+            {
+                worktrees.push((id.clone(), Some(wt), root));
             }
         }
     }
-    // Phase 3 (no lock): the slow git + filesystem cleanup. Same contract as
-    // remove_worktree_for_session: best-effort removal rooted at the project
-    // (branches stay in the repo if git fails).
-    crate::checkpoints::prune_ref_groups(ref_groups);
-    for (_, worktree_path, proj_path) in &worktrees {
-        if let (Some(wt), Some(proj)) = (worktree_path, proj_path) {
-            let _ =
-                crate::git::remove_worktree(std::path::Path::new(proj), std::path::Path::new(wt));
+    // Phase 3 (no lock, off the runtime): the slow git + filesystem cleanup.
+    // Same contract as remove_worktree_for_session: best-effort removal rooted
+    // at the project (branches stay in the repo if git fails).
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::checkpoints::prune_ref_groups(ref_groups);
+        for (_, worktree_path, proj_path) in &worktrees {
+            if let Some(wt) = worktree_path {
+                crate::commands::worktree_cmds::remove_worktree_blocking(proj_path.clone(), wt.clone());
+            }
         }
-    }
+    })
+    .await;
     // Phase 4 (one lock): clear worktree pointers and delete the rows.
     let conn = db.0.lock();
     for sess in &sessions {
@@ -385,7 +450,7 @@ pub async fn delete_chat_message(message_id: i64, db: State<'_, DbState>) -> Cmd
 /// message and every later row of its session as superseded, so the model no
 /// longer sees the old tail. Returns how many rows were retired. The user then
 /// edits the fork-point message and re-sends to continue a fresh branch.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn supersede_chat_tail(message_id: i64, db: State<'_, DbState>) -> CmdResult<usize> {
     let conn = db.0.lock();
     let session_id: Option<String> = conn
@@ -401,11 +466,11 @@ pub fn supersede_chat_tail(message_id: i64, db: State<'_, DbState>) -> CmdResult
     db::mark_branch_superseded(&conn, &session_id, message_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_chat_session_model(
     chat_session_id: String,
     model: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::update_chat_session_model(&conn, &chat_session_id, &model).map_err(|e| e.to_string())
@@ -415,11 +480,11 @@ pub fn update_chat_session_model(
 /// a local model from the selector in a cloud session, or back to a cloud
 /// provider from a local one). The caller is expected to also set a model
 /// valid for the new provider.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_chat_session_provider(
     chat_session_id: String,
     provider: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     // Validate against the known providers so a bogus value can't be persisted.
     let provider = match provider.as_str() {
@@ -440,12 +505,12 @@ pub fn update_chat_session_provider(
 /// `"read_only"` | `"workspace_write"`; `approval` is `"on_request"` |
 /// `"auto_edit"` | `"full_access"`. The legacy `permission_mode` column is
 /// also updated (derived from the dual policies) for backward compat.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_chat_session_policies(
     chat_session_id: String,
     sandbox: String,
     approval: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let sandbox = match sandbox.as_str() {
         "read_only" | "workspace_write" => sandbox,
@@ -463,11 +528,11 @@ pub fn update_chat_session_policies(
 /// Update a chat session's watch-mode pacing override. Per-session; new sessions
 /// start with no override (NULL = inherit global setting). Valid values:
 /// `"on"` | `"off"` | null (clears the override, falls back to global).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_chat_session_watch_mode(
     chat_session_id: String,
     mode: Option<String>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     // Validate against the known modes when a value is provided.
     if let Some(ref m) = mode {
@@ -488,11 +553,11 @@ pub fn update_chat_session_watch_mode(
 /// session re-resolves (cloud providers only; see chat/auto_router.rs) and
 /// writes the concrete provider/model back to the row for the context meter,
 /// cost attribution, and next-turn stickiness.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_chat_session_auto(
     chat_session_id: String,
     auto: bool,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::set_chat_session_auto(&conn, &chat_session_id, auto).map_err(|e| e.to_string())
@@ -506,11 +571,11 @@ pub fn set_chat_session_auto(
 /// ACP agent (roadmap #20, e.g. `"acp:zed"`) | null (clears the selection).
 /// Harness/ACP sessions route sends to the headless CLI chat path
 /// (agent_sessions.rs), not the built-in provider path.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_chat_session_agent(
     chat_session_id: String,
     agent: Option<String>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     if let Some(ref a) = agent {
         let valid = a == "builtin"
@@ -532,11 +597,11 @@ pub fn update_chat_session_agent(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_chat_session_title(
     chat_session_id: String,
     title: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::update_chat_session_title(&conn, &chat_session_id, &title).map_err(|e| e.to_string())
@@ -994,27 +1059,27 @@ pub async fn generate_diff_review(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_chat_session_starred(
     chat_session_id: String,
     starred: bool,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::set_chat_session_starred(&conn, &chat_session_id, starred).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_chat_session_unread(
     chat_session_id: String,
     unread: bool,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::set_chat_session_unread(&conn, &chat_session_id, unread).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_chat_messages(
     chat_session_id: String,
     // M7: keyset pagination. `None`/`None` keeps the legacy behavior of the
@@ -1022,7 +1087,7 @@ pub fn get_chat_messages(
     // view now pages 200 at a time.
     before_id: Option<i64>,
     limit: Option<i64>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<Vec<ChatMessageRecord>> {
     let conn = db.0.lock();
     match (before_id, limit) {
@@ -1036,10 +1101,10 @@ pub fn get_chat_messages(
 /// averages the per-turn perf columns on `chat_messages` (assistant rows only
 /// — those carry `started_at`/`completed_at`/perf). Legacy rows with `NULL`
 /// perf fields contribute zero and don't weigh the averages.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_chat_session_metrics(
     chat_session_id: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<ChatSessionMetricsPayload> {
     let conn = db.0.lock();
     let all = db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?;
@@ -1157,8 +1222,8 @@ fn cache_accounted_tokens(provider: Option<&str>, cache_read: i64, cache_creatio
     }
 }
 
-#[tauri::command]
-pub fn touch_chat_session(chat_session_id: String, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn touch_chat_session(chat_session_id: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::touch_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())
 }
@@ -3199,7 +3264,7 @@ fn message_has_slash_token(message: &str, token: &str) -> bool {
     false
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cancel_chat_message(
     chat_session_id: String,
     chat_state: State<'_, crate::ChatState>,
@@ -3214,7 +3279,7 @@ pub fn cancel_chat_message(
 /// ships the streamed text it already rendered here. Best-effort: a cancelled
 /// turn with zero streamed tokens writes nothing meaningful, and failures are
 /// swallowed (the cancel itself already happened).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn persist_partial_chat_message(
     chat_session_id: String,
     content: String,
@@ -3330,7 +3395,7 @@ fn grant_directory_for_approved_tool(
     );
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resolve_tool_action(
     pending_id: String,
     approved: bool,
@@ -3355,7 +3420,7 @@ pub fn resolve_tool_action(
 /// PlanState BEFORE the oneshot is released (store-then-send ordering), so
 /// the paused `present_plan` handler reads it right after waking. Unknown /
 /// already-resolved `pending_id` is a no-op (card auto-dismissed on cancel).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resolve_plan_proposal(
     pending_id: String,
     approved: bool,
@@ -3381,7 +3446,7 @@ pub fn resolve_plan_proposal(
 /// gate flag, and emits `chat:plan-mode` so every window's mode selector
 /// agrees. Exiting restores the policies the session already had — plan mode
 /// never modified them.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_chat_session_plan_mode(
     chat_session_id: String,
     active: bool,
@@ -3421,7 +3486,7 @@ pub fn set_chat_session_plan_mode(
 /// change through the control protocol (`set_permission_mode`) — mid-turn
 /// switches then take effect immediately; the label-mismatch respawn on the
 /// next send remains the deterministic backstop.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_chat_session_permission_mode(
     chat_session_id: String,
     mode: String,
@@ -3446,7 +3511,7 @@ pub fn set_chat_session_permission_mode(
 /// turn on the harness's resumed session). `answers` maps question text →
 /// chosen option label (string, or an array for multiSelect); `response` is
 /// an optional free-text reply. Unknown / already-resolved ids are a no-op.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resolve_agent_question(
     chat_session_id: String,
     pending_id: String,
@@ -3575,7 +3640,7 @@ pub fn resolve_agent_question(
 /// (`claude-opus-4-8`, …) a lie — the composer's context meter and window
 /// math should reflect the real model. `None` for built-in/local sessions or
 /// before the first harness turn completes.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_agent_actual_model(
     chat_session_id: String,
     db: State<'_, DbState>,
@@ -3642,13 +3707,22 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
 /// the model: the artifacts dir, every registered project, its chat
 /// worktrees, roots the user granted from approval cards, and the remembered
 /// working folder.
-fn preview_scope_roots(conn: &rusqlite::Connection, app: &AppHandle) -> Vec<String> {
+fn preview_scope_roots<R: tauri::Runtime>(
+    conn: &rusqlite::Connection,
+    app: &tauri::AppHandle<R>,
+) -> Vec<String> {
     let mut roots: Vec<String> = db::list_projects(conn)
         .map(|ps| ps.into_iter().map(|p| p.path).collect())
         .unwrap_or_default();
     roots.extend(db::chat_worktree_paths(conn, None).unwrap_or_default());
+    // `artifacts_dir_locked`, NOT `artifacts_dir`: every caller of this function
+    // holds the `DbState` guard for `conn`, and `artifacts_dir(app)` locks that
+    // same (non-reentrant) mutex internally — calling it here self-deadlocked
+    // the global DB mutex on every artifact preview and every 2 s
+    // `get_file_mtime` poll, parking runtime workers until no IPC response
+    // could be delivered at all.
     roots.push(
-        crate::chat::dispatch::artifacts_dir(app)
+        crate::chat::dispatch::artifacts_dir_locked(conn, app)
             .to_string_lossy()
             .into_owned(),
     );
@@ -3701,10 +3775,7 @@ pub async fn read_artifact_preview(
 ) -> CmdResult<ArtifactPreview> {
     use std::path::Path;
 
-    let roots = {
-        let conn = db.0.lock();
-        preview_scope_roots(&conn, &app)
-    };
+    let roots = preview_scope_roots_blocking(&db, &app).await?;
     if path_in_preview_scope(&path, &roots).is_none() {
         return Err(format!(
             "Refusing to preview \"{path}\": it is outside the folders Relay can \
@@ -4092,8 +4163,11 @@ mod preview_tests {
 /// True when a LibreOffice `soffice` binary is reachable, which is what the
 /// pptx→pdf preview path needs. The frontend uses this to show a one-line
 /// install hint above pptx previews that fell back to the HTML converter.
+///
+/// `async` so the probe's filesystem/PATH lookups never run on the UI thread —
+/// the office preview mounts and calls this on every open.
 #[tauri::command]
-pub fn is_libreoffice_available() -> bool {
+pub async fn is_libreoffice_available() -> bool {
     crate::chat::office::libreoffice_available()
 }
 
@@ -4137,7 +4211,7 @@ pub async fn office_accurate_pdf(path: String) -> CmdResult<Option<String>> {
 /// frontend `DocCodeRunner` executes the model's program in a sandboxed
 /// iframe and posts the produced file back as base64 (or an error message).
 /// Resolves the async waiter parked in `chat::jsdocgen::generate`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docgen_complete(
     request_id: String,
     data_b64: Option<String>,
@@ -4160,7 +4234,7 @@ pub fn docgen_complete(
 /// sandboxed frame, and posts the produced file back as base64 (or an error)
 /// plus the JSON-encoded QA issue list. Resolves the waiter parked in
 /// `chat::docdesign::plan`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docdesign_complete(
     request_id: String,
     data_b64: Option<String>,
@@ -4183,7 +4257,7 @@ pub fn docdesign_complete(
 /// The frontend converts the artifact to PDF (LibreOffice bridge for office
 /// files) and inspects it with pdf.js; this resolves the waiter parked in
 /// `chat::docdesign::qa::run_render_probes`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docdesign_qa_complete(
     request_id: String,
     issues_json: Option<String>,
@@ -4198,17 +4272,47 @@ pub fn docdesign_qa_complete(
 /// edits an open artifact file. `None` when the file is gone (deleted while
 /// previewed) — the caller keeps showing the last good preview. Out-of-scope
 /// paths also report `None` (same observable behavior as a vanished file).
+///
+/// `async` is load-bearing, not cosmetic: this is the only command the UI
+/// polls on a timer (every 2 s per open artifact tab), it takes the shared
+/// `DbState` mutex to compute the preview scope, and a non-async command runs
+/// INLINE on the IPC thread — the UI thread. Opening an artifact therefore used
+/// to arm a repeating main-thread mutex acquisition: any concurrent long
+/// holder (a streaming turn's writes, an automation run, a checkpoint) stopped
+/// the window pumping messages for the whole hold, which Windows reports as
+/// "not responding". Run it off the main thread and the same contention
+/// degrades to a late promise the pane already ignores.
 #[tauri::command]
-pub fn get_file_mtime(
+pub async fn get_file_mtime(
     app: AppHandle,
     db: State<'_, DbState>,
     path: String,
 ) -> CmdResult<Option<u64>> {
-    let roots = {
-        let conn = db.0.lock();
-        preview_scope_roots(&conn, &app)
-    };
+    let roots = preview_scope_roots_blocking(&db, &app).await?;
     Ok(get_file_mtime_gated(&path, &roots))
+}
+
+/// [`preview_scope_roots`] evaluated on the BLOCKING pool instead of the async
+/// runtime's worker threads.
+///
+/// Every artifact IPC needs the preview scope, and computing it runs database
+/// queries under the shared `DbState` guard. On a runtime worker that wait
+/// consumes part of the async scheduler itself (only ~CPU-count workers exist),
+/// which is how one wedged lock in this path stopped *every* command in the app
+/// from ever answering. The blocking pool is separate and much larger, so a
+/// stuck wait here costs latency on this one call and nothing anywhere else.
+async fn preview_scope_roots_blocking(
+    db: &State<'_, DbState>,
+    app: &AppHandle,
+) -> Result<Vec<String>, String> {
+    let db = Arc::clone(&db.0);
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.lock();
+        preview_scope_roots(&conn, &app)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Scope-gated core of [`get_file_mtime`] — split out so the containment
@@ -4245,10 +4349,7 @@ pub async fn find_file_by_basename(
     if basename.trim().is_empty() {
         return Ok(None);
     }
-    let roots = {
-        let conn = db.0.lock();
-        preview_scope_roots(&conn, &app)
-    };
+    let roots = preview_scope_roots_blocking(&db, &app).await?;
     if path_in_preview_scope(&dir, &roots).is_none() {
         return Ok(None);
     }
@@ -4333,10 +4434,7 @@ pub async fn open_artifact_external(
     db: State<'_, DbState>,
     path: String,
 ) -> CmdResult<String> {
-    let roots = {
-        let conn = db.0.lock();
-        preview_scope_roots(&conn, &app)
-    };
+    let roots = preview_scope_roots_blocking(&db, &app).await?;
     if path_in_preview_scope(&path, &roots).is_none() {
         return Err(format!(
             "Refusing to open \"{path}\": it is outside the folders Relay can \
@@ -4380,10 +4478,7 @@ pub async fn download_artifact(
     src: String,
     dest: String,
 ) -> CmdResult<()> {
-    let roots = {
-        let conn = db.0.lock();
-        preview_scope_roots(&conn, &app)
-    };
+    let roots = preview_scope_roots_blocking(&db, &app).await?;
     if path_in_preview_scope(&src, &roots).is_none() {
         return Err(format!(
             "Refusing to save \"{src}\": it is outside the folders Relay can \
@@ -4414,10 +4509,7 @@ pub async fn download_artifacts_zip(
     paths: Vec<String>,
     dest: String,
 ) -> CmdResult<()> {
-    let roots = {
-        let conn = db.0.lock();
-        preview_scope_roots(&conn, &app)
-    };
+    let roots = preview_scope_roots_blocking(&db, &app).await?;
     let allowed: Vec<String> = paths
         .into_iter()
         .filter(|p| path_in_preview_scope(p, &roots).is_some())
@@ -4476,13 +4568,13 @@ pub async fn download_artifacts_zip(
 /// allows model-only / baseUrl-only changes without re-entering the key. When
 /// `key` is non-empty, it replaces the stored keychain entry. When both `key`
 /// is empty AND no key exists for this provider, we reject (nothing to save).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_chat_api_key(
     provider: String,
     key: String,
     base_url: Option<String>,
     model: Option<String>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     if provider.trim().is_empty() {
         return Err("provider must not be empty".to_string());
@@ -4514,8 +4606,8 @@ pub fn set_chat_api_key(
     Ok(())
 }
 
-#[tauri::command]
-pub fn delete_chat_api_key(provider: String, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn delete_chat_api_key(provider: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     secrets::delete_chat_api_key(&conn, &provider)?;
     // Clearing a provider removes its whole configuration, not just the key.
@@ -4550,11 +4642,11 @@ pub fn delete_chat_api_key(provider: String, db: State<DbState>) -> CmdResult<()
 /// CLI-specific and meaningless as provider defaults. local_gguf is also not
 /// written here — its default is owned by start_local_model (the id must
 /// match what llama-server was actually started with, or sends would 400).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_chat_default_model(
     provider: String,
     model: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let provider = provider.trim().to_string();
     if provider.is_empty() {
@@ -4574,10 +4666,10 @@ pub fn set_chat_default_model(
 /// only when no active provider is remembered or its key was since removed. The
 /// `has_key` field tells the API Keys panel whether Save is allowed without
 /// re-entering the key.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_chat_config(
     provider: Option<String>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<ChatConfigPayload> {
     let conn = db.0.lock();
     match provider {
@@ -4910,7 +5002,7 @@ pub async fn stop_local_model(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn local_model_status(
     local: State<'_, local_models::LocalModelState>,
 ) -> CmdResult<Option<ActiveLocalModel>> {
@@ -4925,7 +5017,7 @@ pub fn local_model_status(
 
 /// Get the user-configured llama-server path (if any). Written by the
 /// "One-click path setup" button in the Local Models settings panel.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_llama_server_path(db: State<'_, DbState>) -> CmdResult<LlamaServerPathResult> {
     let conn = db.0.lock();
     let path_opt = db::get_setting(&conn, local_models::LLAMA_SERVER_PATH_KEY).unwrap_or(None);
@@ -4979,17 +5071,31 @@ pub async fn set_llama_server_path(path: String, db: State<'_, DbState>) -> CmdR
 
 /// Detect and set common llama-server installation paths. Returns the
 /// detected path or null if none found. Used by "one-click setup".
+///
+/// `async` + `spawn_blocking`: the probe below walks every drive letter on
+/// Windows (a stat on an absent drive is a device query, not a cheap miss) and
+/// ends with a `llama-server --version` subprocess wait — seconds of blocking
+/// work that used to run on the IPC (UI) thread.
 #[tauri::command]
-pub fn detect_llama_server_path(db: State<'_, DbState>) -> CmdResult<LlamaServerPathResult> {
+pub async fn detect_llama_server_path(db: State<'_, DbState>) -> CmdResult<LlamaServerPathResult> {
     // Check if already configured via the UI
-    let conn = db.0.lock();
-    if let Some(path) = db::get_setting(&conn, local_models::LLAMA_SERVER_PATH_KEY).unwrap_or(None)
-    {
-        if !path.is_empty() {
-            return Ok(LlamaServerPathResult { path: Some(path) });
-        }
+    let configured = {
+        let conn = db.0.lock();
+        db::get_setting(&conn, local_models::LLAMA_SERVER_PATH_KEY).unwrap_or(None)
+    };
+    if let Some(path) = configured.filter(|p| !p.is_empty()) {
+        return Ok(LlamaServerPathResult { path: Some(path) });
     }
+    let path = tokio::task::spawn_blocking(detect_llama_server_path_blocking)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(LlamaServerPathResult { path })
+}
 
+/// The blocking half of [`detect_llama_server_path`] — pure filesystem probing
+/// plus one `--version` exec, with no DB access (the caller resolves the
+/// configured setting first).
+fn detect_llama_server_path_blocking() -> Option<String> {
     let bin_name = if cfg!(windows) {
         "llama-server.exe"
     } else {
@@ -5003,9 +5109,7 @@ pub fn detect_llama_server_path(db: State<'_, DbState>) -> CmdResult<LlamaServer
             || p.with_extension("exe").is_file()
             || p.is_dir() && p.join(bin_name).is_file()
         {
-            return Ok(LlamaServerPathResult {
-                path: Some(env_path),
-            });
+            return Some(env_path);
         }
     }
 
@@ -5019,27 +5123,21 @@ pub fn detect_llama_server_path(db: State<'_, DbState>) -> CmdResult<LlamaServer
             for rel in [r"\llama.cpp\build\bin\Release", r"\llama.cpp\build\bin"] {
                 let candidate = format!("{drive}:{rel}\\{bin_name}");
                 if std::path::Path::new(&candidate).is_file() {
-                    return Ok(LlamaServerPathResult {
-                        path: Some(candidate),
-                    });
+                    return Some(candidate);
                 }
             }
             // Legacy CUDA drop / flat layouts
             for folder in ["llama-cuda", "llamacpp", "llama.cpp", "llama"] {
                 let candidate = format!("{drive}:\\{folder}\\{bin_name}");
                 if std::path::Path::new(&candidate).is_file() {
-                    return Ok(LlamaServerPathResult {
-                        path: Some(candidate),
-                    });
+                    return Some(candidate);
                 }
             }
         }
         // Also check common alternative locations
         for alt in [r"C:\Program Files\llama.cpp\bin\llama-server.exe"] {
             if std::path::Path::new(alt).is_file() {
-                return Ok(LlamaServerPathResult {
-                    path: Some(alt.to_string()),
-                });
+                return Some(alt.to_string());
             }
         }
         // Check if llama-server is on PATH (Windows)
@@ -5050,20 +5148,16 @@ pub fn detect_llama_server_path(db: State<'_, DbState>) -> CmdResult<LlamaServer
             .output();
         if let Ok(out) = output {
             if out.status.success() {
-                return Ok(LlamaServerPathResult {
-                    path: Some(bin_name.to_string()),
-                });
+                return Some(bin_name.to_string());
             }
         }
     } else {
         // Unix: similar check for common locations
-        let path_output = if let Ok(path) = std::env::var("PATH") {
+        let path_output: Option<()> = if let Ok(path) = std::env::var("PATH") {
             for dir in path.split(':') {
                 let candidate = format!("{}/{}", dir, bin_name);
                 if std::path::Path::new(&candidate).is_file() {
-                    return Ok(LlamaServerPathResult {
-                        path: Some(bin_name.to_string()),
-                    });
+                    return Some(bin_name.to_string());
                 }
             }
             None
@@ -5080,25 +5174,19 @@ pub fn detect_llama_server_path(db: State<'_, DbState>) -> CmdResult<LlamaServer
         ] {
             let p = std::path::Path::new(candidate);
             if p.is_file() {
-                return Ok(LlamaServerPathResult {
-                    path: Some(candidate.to_string()),
-                });
+                return Some(candidate.to_string());
             }
             if p.is_dir() && p.join(bin_name).is_file() {
-                return Ok(LlamaServerPathResult {
-                    path: Some(candidate.to_string()),
-                });
+                return Some(candidate.to_string());
             }
         }
         // If PATH lookup succeeded, return the binary name
-        if let Some(()) = path_output {
-            return Ok(LlamaServerPathResult {
-                path: Some(bin_name.to_string()),
-            });
+        if path_output.is_some() {
+            return Some(bin_name.to_string());
         }
     }
 
-    Ok(LlamaServerPathResult { path: None })
+    None
 }
 
 /// Live context-window usage for the active local-model session. Asks the
@@ -5267,7 +5355,7 @@ pub(crate) fn load_selected_models(
 
 /// Persist a provider's curated model list (Settings → API provider →
 /// Model list). An empty list clears the curation.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_selected_models(
     provider: String,
     models: Vec<SelectedModel>,
@@ -6126,7 +6214,7 @@ pub async fn count_context_breakdown(
 /// summary is lossy, the rows are the restorable source). The summary row
 /// must belong to the given session; think/tool display blocks are stripped
 /// so the folded turns read like the rest of the timeline.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_compacted_messages(
     chat_session_id: String,
     summary_id: i64,
@@ -6150,7 +6238,7 @@ pub fn list_compacted_messages(
 /// Most recent citation-integrity verdict (full JSON detail) for a chat
 /// session — the "Fix citations" repair action reads it to tell the model
 /// exactly which claims to re-cite, source properly, or drop.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn research_citation_report(
     chat_session_id: String,
     db: State<'_, DbState>,
@@ -6608,5 +6696,46 @@ mod tests {
         // The whole goal text is never required to include the token again —
         // a bare /goal alone also injects.
         assert_eq!(parse_invoked_skills("/goal").len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod preview_scope_tests {
+    use super::*;
+    use tauri::Manager;
+
+    /// Regression (commit 3cd241c9): `preview_scope_roots` is always called with
+    /// the `DbState` guard held — every artifact IPC does `{ let conn =
+    /// db.0.lock(); preview_scope_roots(&conn, &app) }`. It used to resolve the
+    /// artifacts dir with `dispatch::artifacts_dir(app)`, which locks that same
+    /// mutex internally; `parking_lot::Mutex` is not reentrant, so the call
+    /// blocked on a guard its own thread held — forever. The global DB mutex
+    /// stayed owned by a thread that could never release it, every other DB
+    /// command queued behind it, and once each runtime worker was parked no IPC
+    /// response was ever delivered (empty chats, dead artifact previews, and a
+    /// window that looks frozen while the main thread kept pumping).
+    ///
+    /// Runs the call on a worker thread and fails on a timeout instead of
+    /// hanging the suite on the old behavior.
+    #[test]
+    fn preview_scope_roots_does_not_relock_the_db_mutex() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        app.manage(crate::DbState(std::sync::Arc::new(parking_lot::Mutex::new(
+            crate::db::mem(),
+        ))));
+        let db = app.state::<crate::DbState>().0.clone();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Exactly the shape every caller uses: guard held across the call.
+            let conn = db.lock();
+            let roots = preview_scope_roots(&conn, &handle);
+            let _ = tx.send(roots.len());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(n) => println!("preview_scope_roots returned {n} roots without deadlocking"),
+            Err(_) => panic!("preview_scope_roots deadlocked on the DbState mutex"),
+        }
     }
 }

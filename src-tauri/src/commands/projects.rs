@@ -12,59 +12,88 @@ use crate::DbState;
 type CmdResult<T> = Result<T, String>;
 
 #[tauri::command]
-pub fn list_projects(db: State<DbState>) -> CmdResult<Vec<Project>> {
-    let conn = db.0.lock();
-    db::list_projects(&conn).map_err(|e| e.to_string())
+pub async fn list_projects(db: State<'_, DbState>) -> CmdResult<Vec<Project>> {
+    let projects = {
+        let conn = db.0.lock();
+        db::list_projects(&conn)
+    };
+    projects.map_err(|e| e.to_string())
 }
 
+/// `async` + `spawn_blocking`: `canonicalize` is a filesystem round-trip and
+/// git detection SHELLS OUT (tens of ms to seconds on a cold or slow volume).
+/// On the IPC thread (the UI thread) that is a visible stall on every "add
+/// folder" — see the main-thread note on `list_artifacts` in chat/commands.rs.
 #[tauri::command]
-pub fn add_project(path: String, db: State<DbState>) -> CmdResult<Project> {
-    let p = Path::new(&path);
-    if !p.is_dir() {
-        return Err(format!("not a directory: {path}"));
-    }
-    // Canonicalize so the UNIQUE(path) constraint actually dedupes.
-    let canonical = p
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve path: {e}"))?;
-    // canonicalize() emits \\?\ extended-length paths on Windows, which
-    // cmd.exe rejects as "UNC" when used as a pty cwd — strip the prefix.
-    let path_str = crate::util::strip_unc_prefix(&canonical.to_string_lossy());
-    let name = canonical
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path_str.clone());
-    // Git detection shells out first, but a bare `.git` entry is proof even
-    // when the git binary is missing (PRD §4.1 needs the flag regardless).
-    let is_git = git::is_git_repo(&canonical) || canonical.join(".git").exists();
+pub async fn add_project(path: String, db: State<'_, DbState>) -> CmdResult<Project> {
+    let (path_str, name, is_git) =
+        tokio::task::spawn_blocking(move || -> Result<(String, String, bool), String> {
+            let p = Path::new(&path);
+            if !p.is_dir() {
+                return Err(format!("not a directory: {path}"));
+            }
+            // Canonicalize so the UNIQUE(path) constraint actually dedupes.
+            let canonical = p
+                .canonicalize()
+                .map_err(|e| format!("cannot resolve path: {e}"))?;
+            // canonicalize() emits \\?\ extended-length paths on Windows, which
+            // cmd.exe rejects as "UNC" when used as a pty cwd — strip the prefix.
+            let path_str = crate::util::strip_unc_prefix(&canonical.to_string_lossy());
+            let name = canonical
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path_str.clone());
+            // Git detection shells out first, but a bare `.git` entry is proof
+            // even when the git binary is missing (PRD §4.1 needs the flag
+            // regardless).
+            let is_git = git::is_git_repo(&canonical) || canonical.join(".git").exists();
+            Ok((path_str, name, is_git))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
     let conn = db.0.lock();
     db::add_project(&conn, &path_str, &name, is_git).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn remove_project(project_id: String, db: State<DbState>) -> CmdResult<()> {
-    let conn = db.0.lock();
-    // Best-effort remove the project's chat worktrees (roadmap P0 §3.1.1)
-    // before the rows cascade away — `git worktree remove --force` must run
-    // from the project root, which is still present here.
-    if let Ok(Some(proj)) = db::get_project(&conn, &project_id) {
-        if let Ok(wts) = db::chat_worktree_paths(&conn, Some(&project_id)) {
-            for wt in wts {
-                let _ = git::remove_worktree(Path::new(&proj.path), Path::new(&wt));
+pub async fn remove_project(project_id: String, db: State<'_, DbState>) -> CmdResult<()> {
+    // Collect the doomed worktrees under the lock; the `git worktree remove
+    // --force` calls (one whole tree each, seconds apiece) run after it drops
+    // — and this is an async command so they never touch the UI thread either.
+    // `git worktree remove --force` must run from the project root, which is
+    // still present here.
+    let teardown = {
+        let conn = db.0.lock();
+        match db::get_project(&conn, &project_id) {
+            Ok(Some(proj)) => {
+                let wts = db::chat_worktree_paths(&conn, Some(&project_id)).unwrap_or_default();
+                (!wts.is_empty()).then_some((proj.path, wts))
             }
+            _ => None,
         }
+    };
+    if let Some((root, wts)) = teardown {
+        let _ = tokio::task::spawn_blocking(move || {
+            for wt in wts {
+                let _ = git::remove_worktree(Path::new(&root), Path::new(&wt));
+            }
+        })
+        .await;
     }
+    let conn = db.0.lock();
     db::remove_project(&conn, &project_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn rename_project(project_id: String, name: String, db: State<DbState>) -> CmdResult<()> {
+pub async fn rename_project(project_id: String, name: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::rename_project(&conn, &project_id, &name).map_err(|e| e.to_string())
 }
 
+/// `async` + `spawn_blocking`: `git init` is a subprocess wait, and it used to
+/// hold the IPC (UI) thread for its whole duration.
 #[tauri::command]
-pub fn init_git_repo(project_id: String, db: State<DbState>) -> CmdResult<()> {
+pub async fn init_git_repo(project_id: String, db: State<'_, DbState>) -> CmdResult<()> {
     let path = {
         let conn = db.0.lock();
         db::get_project(&conn, &project_id)
@@ -72,36 +101,41 @@ pub fn init_git_repo(project_id: String, db: State<DbState>) -> CmdResult<()> {
             .ok_or_else(|| "project not found".to_string())?
             .path
     };
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("init").current_dir(&path);
-    // Suppress the console-window flash on Windows (GUI app shelling out to git).
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to run git init: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("init").current_dir(&path);
+        // Suppress the console-window flash on Windows (GUI app shelling out to git).
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let out = cmd
+            .output()
+            .map_err(|e| format!("failed to run git init: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     let conn = db.0.lock();
     db::set_git_repo(&conn, &project_id, true).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn list_sessions(project_id: Option<String>, db: State<DbState>) -> CmdResult<Vec<SessionRecord>> {
+#[tauri::command(async)]
+pub fn list_sessions(project_id: Option<String>, db: State<'_, DbState>) -> CmdResult<Vec<SessionRecord>> {
     let conn = db.0.lock();
     db::list_sessions(&conn, project_id.as_deref()).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_session(
     project_id: String,
     harness: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<SessionRecord> {
     let conn = db.0.lock();
     if db::get_project(&conn, &project_id)
@@ -116,20 +150,20 @@ pub fn create_session(
     db::create_session(&conn, &project_id, &harness).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn update_session_title(session_id: String, title: String, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn update_session_title(session_id: String, title: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::update_session_title(&conn, &session_id, &title).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn delete_session(session_id: String, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn delete_session(session_id: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::delete_session(&conn, &session_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn touch_session(session_id: String, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn touch_session(session_id: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::touch_session(&conn, &session_id).map_err(|e| e.to_string())
 }

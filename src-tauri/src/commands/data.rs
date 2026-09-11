@@ -18,14 +18,14 @@ const READ_FILE_CAP: u64 = 512 * 1024;
 
 // ---- settings ----
 
-#[tauri::command]
-pub fn get_setting(key: String, db: State<DbState>) -> CmdResult<Option<String>> {
+#[tauri::command(async)]
+pub fn get_setting(key: String, db: State<'_, DbState>) -> CmdResult<Option<String>> {
     let conn = db.0.lock();
     db::get_setting(&conn, &key).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn set_setting(key: String, value: String, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn set_setting(key: String, value: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::set_setting(&conn, &key, &value).map_err(|e| e.to_string())
 }
@@ -208,58 +208,58 @@ pub struct DataPaths {
 
 // ---- skills ----
 
-#[tauri::command]
-pub fn list_skills(project_id: Option<String>, db: State<DbState>) -> CmdResult<Vec<Skill>> {
+#[tauri::command(async)]
+pub fn list_skills(project_id: Option<String>, db: State<'_, DbState>) -> CmdResult<Vec<Skill>> {
     let conn = db.0.lock();
     db::list_skills(&conn, project_id.as_deref()).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_skill(
     name: String,
     slash_command: String,
     content: String,
     scope: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<Skill> {
     let conn = db.0.lock();
     db::create_skill(&conn, &name, &slash_command, &content, &scope).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_skill(
     id: String,
     name: String,
     slash_command: String,
     content: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::update_skill(&conn, &id, &name, &slash_command, &content).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn delete_skill(id: String, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn delete_skill(id: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::delete_skill(&conn, &id).map_err(|e| e.to_string())
 }
 
 // ---- quick actions ----
 
-#[tauri::command]
-pub fn list_quick_actions(project_id: String, db: State<DbState>) -> CmdResult<Vec<QuickAction>> {
+#[tauri::command(async)]
+pub fn list_quick_actions(project_id: String, db: State<'_, DbState>) -> CmdResult<Vec<QuickAction>> {
     let conn = db.0.lock();
     db::list_quick_actions(&conn, &project_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_quick_action(
     project_id: String,
     label: String,
     command: String,
     keybinding: Option<String>,
     run_on_worktree: Option<bool>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<QuickAction> {
     let conn = db.0.lock();
     db::create_quick_action(
@@ -273,14 +273,14 @@ pub fn create_quick_action(
     .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_quick_action(
     id: String,
     label: String,
     command: String,
     keybinding: Option<String>,
     run_on_worktree: Option<bool>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::update_quick_action(
@@ -294,20 +294,20 @@ pub fn update_quick_action(
     .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn delete_quick_action(id: String, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn delete_quick_action(id: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::delete_quick_action(&conn, &id).map_err(|e| e.to_string())
 }
 
 // ---- secrets (values live in the OS keychain — see secrets.rs) ----
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_secret(
     project_id: String,
     key: String,
     value: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     if key.trim().is_empty() {
         return Err("secret key must not be empty".to_string());
@@ -316,26 +316,26 @@ pub fn set_secret(
     secrets::set_secret(&conn, &project_id, &key, &value)
 }
 
-#[tauri::command]
-pub fn delete_secret(project_id: String, key: String, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn delete_secret(project_id: String, key: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     secrets::delete_secret(&conn, &project_id, &key)
 }
 
-#[tauri::command]
-pub fn list_secret_keys(project_id: String, db: State<DbState>) -> CmdResult<Vec<String>> {
+#[tauri::command(async)]
+pub fn list_secret_keys(project_id: String, db: State<'_, DbState>) -> CmdResult<Vec<String>> {
     let conn = db.0.lock();
     secrets::list_secret_keys(&conn, &project_id)
 }
 
 // ---- cost ----
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_cost_events(
     session_id: Option<String>,
     limit: Option<i64>,
     before_ts: Option<i64>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<Vec<CostEvent>> {
     let conn = db.0.lock();
     db::get_cost_events(&conn, session_id.as_deref(), limit, before_ts).map_err(|e| e.to_string())
@@ -391,8 +391,8 @@ pub fn export_session_markdown(pane_id: String, pty: State<PtyState>) -> CmdResu
 /// SECURITY: the path must resolve to a location inside a registered project
 /// root (or the app data dir). This prevents a compromised renderer from
 /// reading arbitrary files like ~/.ssh/id_rsa or other apps' credentials.
-#[tauri::command]
-pub fn read_file_text(path: String, app: AppHandle, db: State<DbState>) -> CmdResult<String> {
+#[tauri::command(async)]
+pub fn read_file_text(path: String, app: AppHandle, db: State<'_, DbState>) -> CmdResult<String> {
     let p = Path::new(&path);
     // Resolve to canonical form to dodge symlinks that escape the project root.
     let canon = p
@@ -499,18 +499,18 @@ fn is_path_allowed(path: &Path, app: &AppHandle, db: &DbState) -> bool {
 
 // ---- workspaces (pane layout save/restore) ----
 
-#[tauri::command]
-pub fn list_workspaces(project_id: String, db: State<DbState>) -> CmdResult<Vec<WorkspaceRecord>> {
+#[tauri::command(async)]
+pub fn list_workspaces(project_id: String, db: State<'_, DbState>) -> CmdResult<Vec<WorkspaceRecord>> {
     let conn = db.0.lock();
     db::list_workspaces(&conn, &project_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_workspace(
     project_id: String,
     name: String,
     data: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<WorkspaceRecord> {
     let conn = db.0.lock();
     // Upsert by (project_id, name): if a workspace with this name exists,
@@ -532,8 +532,8 @@ pub fn save_workspace(
     }
 }
 
-#[tauri::command]
-pub fn delete_workspace(id: String, db: State<DbState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn delete_workspace(id: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::delete_workspace(&conn, &id).map_err(|e| e.to_string())
 }

@@ -49,13 +49,13 @@ fn harness_update_cache_store(list: Vec<HarnessUpdateStatus>) {
 /// Spawns the harness bound to an existing session record: the resume command
 /// when a harness session id is already known, otherwise a fresh interactive
 /// session. cwd = worktreePath ?? project.path (CONTRACT.md).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn spawn_agent_session(
     pane_id: String,
     session_id: String,
     app: AppHandle,
-    db: State<DbState>,
-    pty: State<PtyState>,
+    db: State<'_, DbState>,
+    pty: State<'_, PtyState>,
 ) -> CmdResult<()> {
     let (session, project) = {
         let conn = db.0.lock();
@@ -182,14 +182,14 @@ fn append_config_flag(spec: &mut CommandSpec, flag: &str, cfg_path: &Path) {
 /// Spawns a login shell running `command` — used for quick actions and
 /// harness login flows. Project secrets are injected as env vars ONLY when
 /// `inject_secrets_project_id` is passed (PRD §7.16: explicit opt-in).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn spawn_shell(
     pane_id: String,
     cwd: String,
     command: String,
     inject_secrets_project_id: Option<String>,
-    db: State<DbState>,
-    pty: State<PtyState>,
+    db: State<'_, DbState>,
+    pty: State<'_, PtyState>,
 ) -> CmdResult<()> {
     if !Path::new(&cwd).is_dir() {
         return Err(format!("working directory does not exist: {cwd}"));
@@ -243,15 +243,15 @@ pub fn write_pty(pane_id: String, data: String, pty: State<PtyState>) -> CmdResu
     pty.0.write(&pane_id, &data)
 }
 
-#[tauri::command]
-pub fn resize_pty(pane_id: String, cols: u16, rows: u16, pty: State<PtyState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn resize_pty(pane_id: String, cols: u16, rows: u16, pty: State<'_, PtyState>) -> CmdResult<()> {
     pty.0.resize(&pane_id, cols, rows)
 }
 
 /// Explicit close — the ONLY user action (besides app quit) allowed to kill a
 /// pane's process. Unfocused panes keep running (PRD §6.5).
-#[tauri::command]
-pub fn kill_pty(pane_id: String, pty: State<PtyState>) -> CmdResult<()> {
+#[tauri::command(async)]
+pub fn kill_pty(pane_id: String, pty: State<'_, PtyState>) -> CmdResult<()> {
     pty.0.kill_pane(&pane_id);
     Ok(())
 }
@@ -264,8 +264,8 @@ pub fn kill_pty(pane_id: String, pty: State<PtyState>) -> CmdResult<()> {
 /// Returns 0 when the pane/PID is gone or memory can't be read (e.g. the
 /// process already exited). Intended for a dev-only header chip; not a
 /// production metric.
-#[tauri::command]
-pub fn pane_memory(pane_id: String, pty: State<PtyState>) -> CmdResult<u64> {
+#[tauri::command(async)]
+pub fn pane_memory(pane_id: String, pty: State<'_, PtyState>) -> CmdResult<u64> {
     use sysinfo::{get_current_pid, ProcessesToUpdate, ProcessRefreshKind, Pid, System};
 
     let pid = match pty.0.pane_pid(&pane_id) {
@@ -430,12 +430,12 @@ pub async fn check_harness_updates(force: Option<bool>) -> CmdResult<Vec<Harness
 }
 
 /// Spawns the harness's login flow in the given pane (PRD §9 onboarding).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_harness_login(
     pane_id: String,
     harness_id: String,
     cwd: String,
-    pty: State<PtyState>,
+    pty: State<'_, PtyState>,
 ) -> CmdResult<()> {
     let adapter =
         get_adapter(&harness_id).ok_or_else(|| format!("unknown harness: {harness_id}"))?;

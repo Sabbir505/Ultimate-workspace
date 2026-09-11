@@ -40,8 +40,8 @@ pub struct ConnectorStatusPayload {
     pub status: ConnectorStatus,
 }
 
-#[tauri::command]
-pub fn list_connectors(db: State<DbState>) -> CmdResult<Vec<ConnectorWithStatus>> {
+#[tauri::command(async)]
+pub fn list_connectors(db: State<'_, DbState>) -> CmdResult<Vec<ConnectorWithStatus>> {
     let conn = db.0.lock();
     let rows = db::list_connector_credential_rows(&conn).map_err(|e| e.to_string())?;
     let now = db::now_ts();
@@ -258,11 +258,11 @@ async fn revoke_token(app: &AppHandle, connector_id: &str, url: &str) -> Result<
 // ---- per-conversation connector attach (per-session opt-in) ----
 
 /// Set the connectors attached to a chat session. Replaces the prior set.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_session_connectors(
     chat_session_id: String,
     connector_ids: Vec<String>,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::set_chat_session_connectors(&conn, &chat_session_id, &connector_ids)
@@ -271,10 +271,10 @@ pub fn set_session_connectors(
 
 /// The connectors attached to a chat session (for rendering the composer's
 /// attach state when a session is selected).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_session_connectors(
     chat_session_id: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<Vec<String>> {
     let conn = db.0.lock();
     db::list_chat_session_connectors(&conn, &chat_session_id).map_err(|e| e.to_string())
@@ -283,11 +283,11 @@ pub fn list_session_connectors(
 /// Attach ONE connector / MCP server (`mcp:<id>` rows) to a session — the
 /// composer @-picker's click action. Append semantics (a replace here would
 /// drop every other attachment).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_session_connector(
     chat_session_id: String,
     connector_id: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::add_chat_session_connector(&conn, &chat_session_id, &connector_id)
@@ -296,11 +296,11 @@ pub fn add_session_connector(
 
 /// Detach one connector / MCP server from a session (the × on an attachment
 /// chip).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_session_connector(
     chat_session_id: String,
     connector_id: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::remove_chat_session_connector(&conn, &chat_session_id, &connector_id)

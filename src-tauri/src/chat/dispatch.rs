@@ -84,9 +84,30 @@ pub(crate) fn configured_artifacts_dir(conn: &rusqlite::Connection) -> Option<st
     }
 }
 
+/// The artifacts dir when no `storage.artifactsDir` is configured:
+/// `<Documents>/Relay` (falling back to home, then temp). Lock-free — it only
+/// touches the app's path resolver.
+///
+/// Generic over the runtime so the deadlock invariant below is unit-testable
+/// with Tauri's `MockRuntime`.
+pub(crate) fn default_artifacts_dir<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> std::path::PathBuf {
+    let base = app
+        .path()
+        .document_dir()
+        .or_else(|_| app.path().home_dir())
+        .unwrap_or_else(|_| std::env::temp_dir());
+    crate::user_dirs::branded_dir(&base)
+}
+
 /// Directory where generated artifacts are written: the configured
-/// `storage.artifactsDir` when set, else `<Documents>/Relay` (falling back
-/// to home, then temp). Created if missing.
+/// `storage.artifactsDir` when set, else [`default_artifacts_dir`]. Created if
+/// missing.
+///
+/// LOCKS `DbState` internally (to read the setting) — so a caller that already
+/// holds a `DbState` guard must call [`artifacts_dir_locked`] instead. See that
+/// function for why: this lock is not reentrant.
 pub(crate) fn artifacts_dir(app: &AppHandle) -> std::path::PathBuf {
     if let Some(db) = app.try_state::<crate::DbState>() {
         let configured = {
@@ -98,12 +119,30 @@ pub(crate) fn artifacts_dir(app: &AppHandle) -> std::path::PathBuf {
             return dir;
         }
     }
-    let base = app
-        .path()
-        .document_dir()
-        .or_else(|_| app.path().home_dir())
-        .unwrap_or_else(|_| std::env::temp_dir());
-    crate::user_dirs::branded_dir(&base)
+    default_artifacts_dir(app)
+}
+
+/// Same resolution as [`artifacts_dir`], for callers that ALREADY hold the DB
+/// connection. Reads `storage.artifactsDir` through the live `conn` instead of
+/// re-locking `DbState`.
+///
+/// This exists because the other shape is a self-deadlock: `parking_lot::Mutex`
+/// is not reentrant, so `artifacts_dir(app)` called with a `DbState` guard held
+/// blocks that thread forever on the global DB mutex. That is exactly what
+/// `preview_scope_roots` (called from every artifact IPC with the lock held) used
+/// to do — one artifact preview or one 2 s `get_file_mtime` poll later the
+/// mutex was owned by a thread that would never release it, every other DB
+/// command waited behind it, and once each runtime worker was parked the whole
+/// IPC surface stopped answering. Pass the connection you already hold.
+pub(crate) fn artifacts_dir_locked<R: tauri::Runtime>(
+    conn: &rusqlite::Connection,
+    app: &tauri::AppHandle<R>,
+) -> std::path::PathBuf {
+    if let Some(dir) = configured_artifacts_dir(conn) {
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
+    default_artifacts_dir(app)
 }
 
 /// The absolute target path a filesystem tool call intends to act on, used

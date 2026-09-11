@@ -201,24 +201,26 @@ export function DocumentsLibrary() {
     overscan: 3,
   });
 
-  // Same contract as the sidebar ArtifactLibrary: switch to the owning chat
-  // and WAIT for it, then open the preview — the file opens on top of the
-  // conversation that produced it, and a deleted source chat explains itself
-  // instead of looking like a dead click.
+  // Same contract as the sidebar ArtifactLibrary: open the preview and jump to
+  // the owning chat. The preview goes FIRST — it is app-global (the tool panel
+  // is not session-scoped), so a slow or wedged session switch can no longer
+  // make the click a no-op; the switch still reports a deleted source chat.
   const openArtifact = (a: ArtifactRecord) => {
     setActiveView("chat");
+    setPreviewArtifact({ path: a.path, filename: a.filename });
+    // Local const: `a.chatSessionId`'s null-check does not narrow inside the
+    // async closure below (the parameter is re-widened there).
+    const sessionId = a.chatSessionId;
+    if (!sessionId) return;
     void (async () => {
-      if (a.chatSessionId) {
-        try {
-          await selectSession(a.chatSessionId);
-        } catch {
-          /* fall through — the file itself is still viewable */
-        }
-        if (useChatStore.getState().activeChatSessionId !== a.chatSessionId) {
-          toastInfo("The chat that created this file no longer exists");
-        }
+      try {
+        await selectSession(sessionId);
+      } catch {
+        /* fall through — the file itself is still viewable */
       }
-      setPreviewArtifact({ path: a.path, filename: a.filename });
+      if (useChatStore.getState().activeChatSessionId !== sessionId) {
+        toastInfo("The chat that created this file no longer exists");
+      }
     })();
   };
 

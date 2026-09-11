@@ -182,14 +182,20 @@ fn run_schtasks(args: &[String]) -> Result<String, String> {
 }
 
 /// Whether the global run-due task is registered. Non-Windows: always false.
+///
+/// `async` + `spawn_blocking`: the query is a `schtasks` subprocess wait.
 #[tauri::command]
-pub fn get_run_while_closed() -> Result<bool, String> {
+pub async fn get_run_while_closed() -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     {
-        // Exit code 0 = the task exists. Any error (not found, scheduler
-        // service down) reads as "not registered" — the UI toggle stays off
-        // and the user can just flip it on to self-heal.
-        Ok(run_schtasks(&query_args()).is_ok())
+        tokio::task::spawn_blocking(|| {
+            // Exit code 0 = the task exists. Any error (not found, scheduler
+            // service down) reads as "not registered" — the UI toggle stays off
+            // and the user can just flip it on to self-heal.
+            run_schtasks(&query_args()).is_ok()
+        })
+        .await
+        .map_err(|e| e.to_string())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -198,8 +204,12 @@ pub fn get_run_while_closed() -> Result<bool, String> {
 }
 
 /// Register or unregister the global run-due task.
+///
+/// `async` + `spawn_blocking`: the Windows branch shells out to `schtasks`
+/// (up to three subprocess waits) and writes the VBS wrapper — seconds of
+/// blocking work that used to hold the IPC (UI) thread.
 #[tauri::command]
-pub fn set_run_while_closed(enabled: bool, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn set_run_while_closed(enabled: bool, app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = enabled;
@@ -207,31 +217,35 @@ pub fn set_run_while_closed(enabled: bool, app: tauri::AppHandle) -> Result<(), 
     }
     #[cfg(target_os = "windows")]
     {
-        if !enabled {
-            // Deleting a task that doesn't exist is fine — treat as off.
-            let _ = run_schtasks(&delete_args());
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            if !enabled {
+                // Deleting a task that doesn't exist is fine — treat as off.
+                let _ = run_schtasks(&delete_args());
+                let _ = run_schtasks(&legacy_delete_args());
+                return Ok(());
+            }
+            let binary = automation_binary_path().ok_or_else(|| {
+                "relay-automation binary not found next to the app — reinstall or run a full build".to_string()
+            })?;
+            // Write the hidden-window VBS wrapper next to the app's data. Task
+            // Scheduler fires it every minute; the binary is GUI-subsystem so
+            // `Run(..., 0, False)` keeps it fully invisible (a console exe would
+            // flash a terminal on every tick).
+            let data_dir = crate::user_dirs::app_data_dir(&app);
+            std::fs::create_dir_all(&data_dir)
+                .map_err(|e| format!("failed to create app data dir: {e}"))?;
+            let vbs = vbs_wrapper_path(&data_dir);
+            std::fs::write(&vbs, vbs_wrapper_contents(&binary))
+                .map_err(|e| format!("failed to write VBS wrapper: {e}"))?;
+            run_schtasks(&create_args(&vbs))?;
+            // Clean up the pre-rebrand task so it can't fire the removed
+            // conduit-automation binary every minute. Best-effort: absent or
+            // already-deleted tasks are not an error.
             let _ = run_schtasks(&legacy_delete_args());
-            return Ok(());
-        }
-        let binary = automation_binary_path().ok_or_else(|| {
-            "relay-automation binary not found next to the app — reinstall or run a full build".to_string()
-        })?;
-        // Write the hidden-window VBS wrapper next to the app's data. Task
-        // Scheduler fires it every minute; the binary is GUI-subsystem so
-        // `Run(..., 0, False)` keeps it fully invisible (a console exe would
-        // flash a terminal on every tick).
-        let data_dir = crate::user_dirs::app_data_dir(&app);
-        std::fs::create_dir_all(&data_dir)
-            .map_err(|e| format!("failed to create app data dir: {e}"))?;
-        let vbs = vbs_wrapper_path(&data_dir);
-        std::fs::write(&vbs, vbs_wrapper_contents(&binary))
-            .map_err(|e| format!("failed to write VBS wrapper: {e}"))?;
-        run_schtasks(&create_args(&vbs))?;
-        // Clean up the pre-rebrand task so it can't fire the removed
-        // conduit-automation binary every minute. Best-effort: absent or
-        // already-deleted tasks are not an error.
-        let _ = run_schtasks(&legacy_delete_args());
-        Ok(())
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 }
 

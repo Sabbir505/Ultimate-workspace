@@ -59,14 +59,14 @@ fn save_config(conn: &rusqlite::Connection, config: &[BudgetConfig]) -> Result<(
 
 // ---- Tauri commands ----
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_budgets(db: State<'_, DbState>) -> CmdResult<Vec<BudgetConfig>> {
     let conn = db.0.lock();
     Ok(load_config(&conn))
 }
 
 /// Upsert a budget for a project. Pass `monthly_usd <= 0` to clear it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_budget(
     db: State<'_, DbState>,
     project_id: String,
@@ -95,7 +95,7 @@ pub fn set_budget(
     Ok(cfg)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_budget(db: State<'_, DbState>, project_id: String) -> CmdResult<()> {
     let conn = db.0.lock();
     let mut config = load_config(&conn);
@@ -122,14 +122,14 @@ fn save_hidden_projects(conn: &rusqlite::Connection, ids: &[String]) -> Result<(
     db::set_setting(conn, HIDDEN_COST_PROJECTS_KEY, &json).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_hidden_cost_projects(db: State<'_, DbState>) -> CmdResult<Vec<String>> {
     let conn = db.0.lock();
     Ok(load_hidden_projects(&conn))
 }
 
 /// Hide a project from the Cost page's per-project list. Idempotent.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn hide_cost_project(db: State<'_, DbState>, project_id: String) -> CmdResult<()> {
     let conn = db.0.lock();
     let mut ids = load_hidden_projects(&conn);
@@ -140,7 +140,7 @@ pub fn hide_cost_project(db: State<'_, DbState>, project_id: String) -> CmdResul
     save_hidden_projects(&conn, &ids)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn unhide_cost_project(db: State<'_, DbState>, project_id: String) -> CmdResult<()> {
     let conn = db.0.lock();
     let mut ids = load_hidden_projects(&conn);

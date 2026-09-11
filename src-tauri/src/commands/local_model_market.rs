@@ -870,7 +870,7 @@ pub struct MarketSettings {
     pub has_hugging_face_token: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_market_settings(db: State<'_, DbState>) -> CmdResult<MarketSettings> {
     let conn = db.0.lock();
     Ok(MarketSettings {
@@ -882,7 +882,7 @@ pub fn get_market_settings(db: State<'_, DbState>) -> CmdResult<MarketSettings> 
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_models_directory(db: State<'_, DbState>, dir: String) -> CmdResult<()> {
     if dir.trim().is_empty() {
         return Err("empty path".to_string());
@@ -892,7 +892,7 @@ pub fn set_models_directory(db: State<'_, DbState>, dir: String) -> CmdResult<()
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_hugging_face_token(db: State<'_, DbState>, token: String) -> CmdResult<()> {
     let trimmed = token.trim().to_string();
     if trimmed.is_empty() {
@@ -903,7 +903,7 @@ pub fn set_hugging_face_token(db: State<'_, DbState>, token: String) -> CmdResul
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_hugging_face_token(db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     clear_hf_token(&conn);
@@ -1349,7 +1349,7 @@ async fn run_download(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cancel_model_download(
     registry: State<'_, Arc<DownloadRegistry>>,
     id: String,
@@ -1370,35 +1370,43 @@ pub fn cancel_model_download(
 // caller can't use this to delete arbitrary files because we
 // canonicalize the path and check the prefix.
 #[tauri::command]
-pub fn delete_downloaded_model(
+pub async fn delete_downloaded_model(
     db: State<'_, DbState>,
     path: String,
 ) -> CmdResult<()> {
-    let conn = db.0.lock();
-    let models_dir = resolve_models_dir(&conn)?;
-    drop(conn);
+    let models_dir = {
+        let conn = db.0.lock();
+        resolve_models_dir(&conn)?
+    };
+    // `async` + `spawn_blocking`: canonicalize and unlink are filesystem I/O on
+    // a path that is typically a multi-GB model, reached from a menu click —
+    // it must not block the IPC (UI) thread. The containment gate below is
+    // unchanged; only the thread it runs on differs.
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let target = std::path::PathBuf::from(&path);
+        let canon_models = std::fs::canonicalize(&models_dir)
+            .map_err(|e| format!("could not canonicalize models dir: {e}"))?;
+        let canon_target = std::fs::canonicalize(&target)
+            .map_err(|e| format!("could not find file: {e}"))?;
+        // Case-insensitive on Windows, component-wise everywhere — a same-prefix
+        // sibling dir (`models2\…`) must NOT pass this boundary.
+        let is_under_models = crate::util::path_starts_with_ci(&canon_target, &canon_models);
+        if !is_under_models {
+            return Err("path is outside the models directory".to_string());
+        }
+        std::fs::remove_file(&canon_target)
+            .map_err(|e| format!("could not delete model: {e}"))?;
 
-    let target = std::path::PathBuf::from(&path);
-    let canon_models = std::fs::canonicalize(&models_dir)
-        .map_err(|e| format!("could not canonicalize models dir: {e}"))?;
-    let canon_target = std::fs::canonicalize(&target)
-        .map_err(|e| format!("could not find file: {e}"))?;
-    // Case-insensitive on Windows, component-wise everywhere — a same-prefix
-    // sibling dir (`models2\…`) must NOT pass this boundary.
-    let is_under_models = crate::util::path_starts_with_ci(&canon_target, &canon_models);
-    if !is_under_models {
-        return Err("path is outside the models directory".to_string());
-    }
-    std::fs::remove_file(&canon_target)
-        .map_err(|e| format!("could not delete model: {e}"))?;
-
-    // Also delete the matching mmproj if present (same stem, .mmproj.gguf).
-    if let Some(stem) = canon_target.file_stem().and_then(|s| s.to_str()) {
-        let parent = canon_target.parent().unwrap_or(&canon_models);
-        let mmproj = parent.join(format!("{stem}.mmproj.gguf"));
-        let _ = std::fs::remove_file(mmproj);
-    }
-    Ok(())
+        // Also delete the matching mmproj if present (same stem, .mmproj.gguf).
+        if let Some(stem) = canon_target.file_stem().and_then(|s| s.to_str()) {
+            let parent = canon_target.parent().unwrap_or(&canon_models);
+            let mmproj = parent.join(format!("{stem}.mmproj.gguf"));
+            let _ = std::fs::remove_file(mmproj);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ---- mmproj auto-download ----

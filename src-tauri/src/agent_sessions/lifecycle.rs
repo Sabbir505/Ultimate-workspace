@@ -65,20 +65,33 @@ pub fn kill_one_shot_children() {
 /// live on `Child`), which unblocks the reader thread so it can observe the
 /// `cancelled` flag and exit without emitting a spurious `chat:done`.
 pub(crate) fn kill_child_tree(child: &mut Child) {
+    // A child that already exited needs no `taskkill`. Two reasons to check
+    // first, exactly as `kill_one_shot_children` does: (1) the PID lookup for
+    // an exited process fails, so taskkill writes `ERROR: The process "N" not
+    // found.` to OUR inherited stderr — every harness teardown that followed a
+    // natural exit (the common case: the CLI finished its turn, then the
+    // session is dropped) used to print that into the app's console; (2) the
+    // handle is what identifies our child, and only a live handle rules out a
+    // recycled PID, so a tree kill on a stale pid is the one way this can hit
+    // a process that is no longer ours.
+    let already_exited = matches!(child.try_wait(), Ok(Some(_)) | Err(_));
     #[cfg(windows)]
     {
-        // Kill the entire process tree first so no grandchildren survive.
-        let pid = child.id();
-        let mut cmd = Command::new("taskkill");
-        cmd.args(["/PID", pid.to_string().as_str(), "/T", "/F"]);
-        no_console_window(&mut cmd);
-        // Best-effort — taskkill can fail if the tree already exited, but
-        // the direct kill+wait below still reaps the handle either way.
-        let _ = cmd.status();
+        if !already_exited {
+            // Kill the entire process tree first so no grandchildren survive.
+            let pid = child.id();
+            let mut cmd = Command::new("taskkill");
+            cmd.args(["/PID", pid.to_string().as_str(), "/T", "/F"]);
+            no_console_window(&mut cmd);
+            // Best-effort — a failure here (access denied, tree gone between
+            // the check and the call) still ends in the direct kill below.
+            let _ = cmd.status();
+        }
     }
     // Kill the direct child (belt) and wait for it to be reaped (suspenders).
     // On non-Windows this is the only kill; on Windows it cleans up if
-    // taskkill failed or the child was already a zombie.
+    // taskkill failed or the child was already a zombie. `kill()` acts on the
+    // handle (never a pid), so it is safe for an exited child.
     let _ = child.kill();
     let _ = child.wait();
     // Explicitly take stdin so the reader thread's BufReader::lines() loop

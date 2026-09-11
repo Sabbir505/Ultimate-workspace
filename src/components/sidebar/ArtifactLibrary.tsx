@@ -256,31 +256,39 @@ export function ArtifactLibrary({
   // shared flag while this one is still open.
   useOcclusion("artifact-library", open);
 
-  // Open the artifact in the preview pane of the chat that produced it: switch
-  // to that session first and WAIT for the switch so the tab opens on top of
-  // the right conversation (the old fire-and-forget switch raced the tab and,
-  // when the source chat was deleted this run, silently did nothing — a dead
-  // click). useCallback so the memoized cards don't re-render on every parent
-  // render.
+  // Open the artifact in the preview pane, and jump to the chat that produced
+  // it.
+  //
+  // ORDER MATTERS: the preview is opened FIRST, the session switch second. The
+  // preview lives in the tool panel, which is app-global (not session-scoped),
+  // so nothing about it needs the switch to have landed — and gating it on the
+  // switch made "open artifact" able to do NOTHING AT ALL: the modal closed and
+  // then the file never appeared, because the awaited switch never resolved
+  // (a hung/slow chat load stalls the IPC round-trips it awaits). The switch is
+  // still waited for so the deleted-chat case can explain itself, but it can no
+  // longer take the click down with it. useCallback so the memoized cards don't
+  // re-render on every parent render.
   const openArtifact = useCallback((a: ArtifactRecord) => {
     setActiveView("chat");
     setOpen(false);
     onClose?.();
+    setPreviewArtifact({ path: a.path, filename: a.filename });
+    // Local const: `a.chatSessionId`'s null-check does not narrow inside the
+    // async closure below (the parameter is re-widened there).
+    const sessionId = a.chatSessionId;
+    if (!sessionId) return;
     void (async () => {
-      if (a.chatSessionId) {
-        try {
-          await selectSession(a.chatSessionId);
-        } catch {
-          /* fall through — the file itself is still viewable */
-        }
-        // selectSession returns silently for chats deleted this run; the
-        // active-session check catches that (and any IPC rejection) and says
-        // why no switch happened instead of leaving a dead click.
-        if (useChatStore.getState().activeChatSessionId !== a.chatSessionId) {
-          toastInfo("The chat that created this file no longer exists");
-        }
+      try {
+        await selectSession(sessionId);
+      } catch {
+        /* fall through — the file itself is still viewable */
       }
-      setPreviewArtifact({ path: a.path, filename: a.filename });
+      // selectSession returns silently for chats deleted this run; the
+      // active-session check catches that (and any IPC rejection) and says
+      // why no switch happened instead of leaving a dead click.
+      if (useChatStore.getState().activeChatSessionId !== sessionId) {
+        toastInfo("The chat that created this file no longer exists");
+      }
     })();
   }, [selectSession, setPreviewArtifact, setActiveView, setOpen, onClose]);
 

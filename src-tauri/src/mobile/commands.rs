@@ -37,7 +37,7 @@ pub fn stop_mobile_relay(relay_state: State<'_, MobileRelayState>) -> CmdResult<
 }
 
 /// Get the current relay status.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_mobile_relay_status(relay_state: State<'_, MobileRelayState>) -> CmdResult<MobileRelayStatus> {
     let port = *relay_state.0.port.lock();
     Ok(MobileRelayStatus {
@@ -202,10 +202,15 @@ pub async fn tailscale_serve_enable(
 }
 
 /// Disable `tailscale serve` (tears down ALL serve paths on this node).
+///
+/// `async` + `spawn_blocking`: `run_tailscale` is a subprocess wait, and it used
+/// to run on the IPC (UI) thread before the settings write.
 #[tauri::command]
-pub fn tailscale_serve_disable(db: State<'_, DbState>) -> CmdResult<()> {
+pub async fn tailscale_serve_disable(db: State<'_, DbState>) -> CmdResult<()> {
     let args = tailscale::serve_off_args();
-    let _ = tailscale::run_tailscale(&args)?;
+    let _ = tokio::task::spawn_blocking(move || tailscale::run_tailscale(&args))
+        .await
+        .map_err(|e| e.to_string())??;
     let conn = db.0.lock();
     let _ = crate::db::set_setting(&conn, "mobile.tailscale_url", "");
     Ok(())

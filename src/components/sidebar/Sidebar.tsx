@@ -35,6 +35,7 @@ import { useProjectsStore } from "../../state/projects";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { useArtifactsStore } from "../../state/artifacts";
+import { useAppearanceStore } from "../../state/appearance";
 import { useNewChatAction } from "../../hooks/useNewChatAction";
 import { useViewNav } from "../../hooks/useViewNav";
 import { ArtifactLibrary } from "./ArtifactLibrary";
@@ -42,6 +43,93 @@ import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from ".
 import { UpdateButton } from "./UpdateButton";
 import { seedFakeUpdate, SHOW_FAKE_UPDATE } from "../../state/updater";
 import { useOcclusion } from "../../hooks/useOcclusion";
+
+/** Sidebar header block: Relay wordmark (collapse control), back/forward,
+ *  and the search trigger — with the optional user-uploaded art behind it
+ *  (Settings → Appearance → Sidebar art). Extracted from Sidebar so the art
+ *  rendering can be tested without the full list machinery. */
+export function SidebarHeader() {
+  const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
+  const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  const { back: navBack, forward: navForward, canBack, canForward } = useViewNav();
+  const headerArt = useAppearanceStore((s) => s.artData);
+  // Load once per app boot; the Appearance panel refreshes the store after
+  // an import/clear so this picks the change up without a remount.
+  const refreshArt = useAppearanceStore((s) => s.refresh);
+  const artLoaded = useAppearanceStore((s) => s.loaded);
+  useEffect(() => {
+    if (!artLoaded) void refreshArt();
+  }, [artLoaded, refreshArt]);
+  return (
+    <div
+      data-tauri-drag-region
+      className={`relative overflow-hidden p-3${headerArt ? " sidebar-header-art" : " border-b border-gray-200 dark:border-white/20"}`}
+    >
+      {headerArt && (
+        // Art + scrim on their own masked layer: the mask feathers the whole
+        // composite to transparent at the bottom, so the art melts into the
+        // sidebar below instead of stopping at a hard header edge. The layer
+        // ignores pointers so the drag region keeps working through it.
+        <div
+          aria-hidden
+          className="sidebar-header-art-layer"
+          style={{
+            backgroundImage: `linear-gradient(180deg, rgba(8, 10, 14, 0.5), rgba(8, 10, 14, 0.72)), url(${headerArt})`,
+          }}
+        />
+      )}
+      <div className="relative">
+      {/* The brand doubles as the collapse control (no separate panel icon);
+          back/forward sit at the header's right edge. */}
+      <div className="flex items-center justify-between mb-2">
+        <button
+          type="button"
+          className="sidebar-brand-btn sidebar-wordmark select-none px-1.5 py-0.5 -ml-1.5 rounded-md"
+          onClick={toggleSidebar}
+          title="Collapse sidebar"
+          aria-label="Collapse sidebar"
+        >
+          Relay
+        </button>
+        <span className="flex items-center flex-shrink-0">
+          <UpdateButton />
+          <button
+            type="button"
+            className="sidebar-nav-btn"
+            onClick={navBack}
+            disabled={!canBack}
+            title="Back"
+            aria-label="Back"
+          >
+            <ArrowLeft size={14} strokeWidth={1.8} />
+          </button>
+          <button
+            type="button"
+            className="sidebar-nav-btn"
+            onClick={navForward}
+            disabled={!canForward}
+            title="Forward"
+            aria-label="Forward"
+          >
+            <ArrowRight size={14} strokeWidth={1.8} />
+          </button>
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        {/* Search / command palette trigger */}
+        <button
+          onClick={() => setPaletteOpen(true)}
+          className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-100 dark:bg-white/10 border border-gray-200 dark:border-white/20 text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white transition-all duration-150 active:scale-95"
+          title="Search (Cmd/Ctrl+K)"
+        >
+          <Search size={14} strokeWidth={1.8} />
+          <span className="text-xs font-medium">Search</span>
+        </button>
+      </div>
+      </div>
+    </div>
+  );
+}
 
 export function Sidebar() {
   const projects = useProjectsStore((s) => s.projects);
@@ -272,56 +360,7 @@ export function Sidebar() {
 
   return (
     <aside className="sidebar-glass flex flex-col h-full overflow-hidden select-none">
-      {/* â”€â”€ Consolidated Header: branding + search + collapse in one block â”€â”€ */}
-      <div data-tauri-drag-region className="p-3 border-b border-gray-200 dark:border-white/20">
-        {/* The brand doubles as the collapse control (no separate panel icon);
-            back/forward sit at the header's right edge. */}
-        <div className="flex items-center justify-between mb-2">
-          <button
-            type="button"
-            className="sidebar-brand-btn sidebar-wordmark select-none px-1.5 py-0.5 -ml-1.5 rounded-md"
-            onClick={toggleSidebar}
-            title="Collapse sidebar"
-            aria-label="Collapse sidebar"
-          >
-            Relay
-          </button>
-          <span className="flex items-center flex-shrink-0">
-            <UpdateButton />
-            <button
-              type="button"
-              className="sidebar-nav-btn"
-              onClick={navBack}
-              disabled={!canBack}
-              title="Back"
-              aria-label="Back"
-            >
-              <ArrowLeft size={14} strokeWidth={1.8} />
-            </button>
-            <button
-              type="button"
-              className="sidebar-nav-btn"
-              onClick={navForward}
-              disabled={!canForward}
-              title="Forward"
-              aria-label="Forward"
-            >
-              <ArrowRight size={14} strokeWidth={1.8} />
-            </button>
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          {/* Search / command palette trigger */}
-          <button
-            onClick={() => setPaletteOpen(true)}
-            className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-100 dark:bg-white/10 border border-gray-200 dark:border-white/20 text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white transition-all duration-150 active:scale-95"
-            title="Search (Cmd/Ctrl+K)"
-          >
-            <Search size={14} strokeWidth={1.8} />
-            <span className="text-xs font-medium">Search</span>
-          </button>
-        </div>
-      </div>
+      <SidebarHeader />
 
       {/* â”€â”€ Pinned upper block (non-scrolling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex-shrink-0">

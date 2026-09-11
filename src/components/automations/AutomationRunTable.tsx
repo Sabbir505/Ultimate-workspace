@@ -1,23 +1,43 @@
 // Past Runs table — one row per automation_runs entry. Click a row that has
 // a chat session attached to open the run log in the chat view.
+import { useEffect, useState } from "react";
 import {
   CheckCircle2,
   ExternalLink,
   Hourglass,
   Loader2,
+  Square,
   XCircle,
   Zap,
 } from "lucide-react";
 import type { AutomationRun } from "../../lib/ipc";
 import { formatDateTime, formatDuration } from "../../lib/format";
-import { friendlyRunError, isFailureStatus } from "./shared";
+import { friendlyRunError, isFailureStatus, STOPPED_STATUS } from "./shared";
 
-function runDuration(startSec: number, endSec: number | null): string {
-  if (!endSec) return "—";
+function runDuration(startSec: number, endSec: number | null, liveNowSec?: number): string {
+  if (!endSec) {
+    // An in-flight run has no finished_at yet — tick the elapsed time live
+    // from started_at instead of showing "—" until the run ends.
+    if (liveNowSec != null) return formatDuration(Math.max(0, liveNowSec - startSec));
+    return "—";
+  }
   const diff = endSec - startSec;
   // Failures can finish in well under a second; "0s" reads as broken.
   if (diff < 1) return "<1s";
   return formatDuration(diff);
+}
+
+/** Wall-clock seconds, re-rendered once a second while `active` — one timer
+ *  for the whole table, and only while a run is actually in flight. */
+function useNowSeconds(active: boolean): number {
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    if (!active) return;
+    setNow(Math.floor(Date.now() / 1000));
+    const t = window.setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    return () => window.clearInterval(t);
+  }, [active]);
+  return now;
 }
 
 function statusBadge(status: string): {
@@ -49,6 +69,14 @@ function statusBadge(status: string): {
       label: "Skipped",
     };
   }
+  if (status === STOPPED_STATUS) {
+    return {
+      className:
+        "bg-gray-100 dark:bg-white/10 text-gray-600 dark:text-slate-300",
+      icon: <Square size={8} strokeWidth={2.5} fill="currentColor" />,
+      label: "Stopped",
+    };
+  }
   return {
     className: "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300",
     icon: <XCircle size={11} strokeWidth={2.5} />,
@@ -60,10 +88,16 @@ export function AutomationRunTable({
   runs,
   loading,
   onOpenRunLog,
+  onStopRun,
+  stopping,
 }: {
   runs: AutomationRun[];
   loading: boolean;
   onOpenRunLog: (chatSessionId: string) => void;
+  /** Stop the automation's in-flight run — offered inline on the running
+   *  row. Absent (e.g. history-only listings) removes the button. */
+  onStopRun?: () => void;
+  stopping?: boolean;
 }) {
   if (loading && runs.length === 0) {
     return (
@@ -87,6 +121,9 @@ export function AutomationRunTable({
       </div>
     );
   }
+
+  const inFlight = runs.some((r) => r.status === "running");
+  const nowSec = useNowSeconds(inFlight);
 
   return (
     <div className="px-6 py-4">
@@ -144,7 +181,11 @@ export function AutomationRunTable({
                     {formatDateTime(r.startedAt)}
                   </td>
                   <td className="px-3 py-2 text-gray-700 dark:text-slate-200 whitespace-nowrap font-mono text-xs">
-                    {runDuration(r.startedAt, r.finishedAt)}
+                    {runDuration(
+                      r.startedAt,
+                      r.finishedAt,
+                      r.status === "running" ? nowSec : undefined,
+                    )}
                   </td>
                   <td className="px-3 py-2 text-gray-500 dark:text-slate-400 text-xs">
                     {r.source === "manual" ? "Manual" : "Scheduled"}
@@ -153,7 +194,28 @@ export function AutomationRunTable({
                     className="px-3 py-2 text-gray-700 dark:text-slate-200 text-xs max-w-[280px] truncate"
                     title={r.summary}
                   >
-                    {friendly ? friendly.text : (r.summary || (r.status === "running" ? "In progress…" : "—"))}
+                    <span className="inline-flex items-center gap-2">
+                      <span className="truncate">
+                        {friendly
+                          ? friendly.text
+                          : r.summary || (r.status === "running" ? "In progress…" : "—")}
+                      </span>
+                      {r.status === "running" && onStopRun && (
+                        <button
+                          onClick={onStopRun}
+                          disabled={stopping}
+                          title="Stop this run"
+                          className="inline-flex shrink-0 items-center gap-1 border-0 bg-transparent shadow-none text-[11px] text-red-600 dark:text-red-400 hover:underline disabled:opacity-50"
+                        >
+                          {stopping ? (
+                            <Loader2 size={10} className="animate-spin" strokeWidth={2.5} />
+                          ) : (
+                            <Square size={8} strokeWidth={2.5} fill="currentColor" />
+                          )}
+                          {stopping ? "Stopping…" : "Stop"}
+                        </button>
+                      )}
+                    </span>
                   </td>
                   <td className="px-3 py-2 text-right">
                     {r.chatSessionId ? (

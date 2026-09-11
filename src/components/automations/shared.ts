@@ -33,10 +33,20 @@ export function buildAutomationRunPrompt(spec: AutomationPromptSpec): string {
   return lines.join("\n");
 }
 
-/** A failure is any status that isn't one of the three sentinel values —
+/** Sentinel status recorded when the user stops an in-flight run — a neutral
+ *  outcome, not a failure (no failure banner, no failure toast/email). */
+export const STOPPED_STATUS = "stopped";
+
+/** A failure is any status that isn't one of the sentinel values —
  *  everything else is raw error text recorded by the runner. */
 export function isFailureStatus(status: string | null | undefined): boolean {
-  return !!status && status !== "ok" && status !== "skipped" && status !== "running";
+  return (
+    !!status &&
+    status !== "ok" &&
+    status !== "skipped" &&
+    status !== "running" &&
+    status !== STOPPED_STATUS
+  );
 }
 
 export interface FriendlyError {

@@ -45,6 +45,12 @@ export const setAutomationEnabled = (automationId: string, enabled: boolean) =>
   safeInvoke<void>("set_automation_enabled", { automationId, enabled });
 export const runAutomationNow = (automationId: string) =>
   safeInvoke<void>("run_automation_now", { automationId });
+/** Kill the in-flight run's process tree and record the row as "stopped".
+ *  Resolves false when no run of this automation is in flight in the app
+ *  (already ended, or running under Task Scheduler, which an in-app stop
+ *  can't reach). */
+export const stopAutomationRun = (automationId: string) =>
+  safeInvoke<boolean>("stop_automation_run", { automationId });
 
 /** Next fire time (unix seconds, local time) for a 5-field cron schedule,
  *  strictly after now — same math the scheduler uses for due-ness.

@@ -109,6 +109,19 @@ pub fn run_automation_now(
     automations::launch_run(Some(&app), &db.0, &automation, automations::RunSource::Manual)
 }
 
+/// Stop the automation's in-flight run: the CLI's process tree is killed, the
+/// run row is finalized as "stopped" (not a failure), and the overlap guards
+/// are released so the next scheduled slot fires normally.
+///
+/// Returns false when no run in flight belongs to THIS process — the run
+/// already ended, or it was started by the `relay-automation` Task Scheduler
+/// binary, which an in-app stop can't reach. The view reports that instead of
+/// showing a stop that will never happen.
+#[tauri::command(async)]
+pub fn stop_automation_run(automation_id: String) -> Result<bool, String> {
+    Ok(automations::stop_run(&automation_id))
+}
+
 /// Newest-first run history for one automation (UI "Past runs" pane).
 #[tauri::command(async)]
 pub fn list_automation_runs(

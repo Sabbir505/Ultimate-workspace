@@ -438,6 +438,7 @@ export * from "./ipc/voice";
 export * from "./ipc/prompts";
 export * from "./ipc/artifacts";
 export * from "./ipc/automations";
+export * from "./ipc/appearance";
 export * from "./ipc/localModels";
 export * from "./ipc/harnessChat";
 export * from "./ipc/exportImport";

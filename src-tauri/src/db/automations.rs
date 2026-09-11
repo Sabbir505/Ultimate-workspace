@@ -314,6 +314,9 @@ pub fn finish_run(conn: &Connection, run_id: &str, status: &str, summary: &str) 
         let (outcome, error_code) = match status {
             "ok" => ("applied", None),
             "skipped" => ("abandoned", None),
+            // A user stop is not an artifact failure — counting it as one
+            // would make the improve registry's failure stats meaningless.
+            "stopped" => ("abandoned", Some("stopped")),
             other => ("failed", Some(other)),
         };
         let _ = conn.execute(

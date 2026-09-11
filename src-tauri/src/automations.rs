@@ -22,8 +22,9 @@
 //! job (bin/relay_automation.rs) — it reuses the same `launch_run` path,
 //! so a Windows Task Scheduler entry is the only piece left to add.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,6 +49,48 @@ static RUNNING: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::
 /// turn made the automation look "already running" to every later tick and
 /// it silently stopped firing until the app restarted.
 const MAX_RUN_SECS: u64 = 2 * 60 * 60;
+
+/// Status recorded for a run the user stopped. Deliberately NOT a failure:
+/// the Past Runs table badges it neutrally, the failure banner stays down,
+/// and no failure notification (toast/mobile/webhook/email) fires.
+pub const STOPPED_STATUS: &str = "stopped";
+
+/// Error text a turn returns once its stop flag flipped, matched EXACTLY in
+/// `finalize` — a harness whose own failure output happens to contain these
+/// words must not be recorded as a user stop.
+pub const STOPPED_ERROR: &str = "stopped by user";
+
+/// Stop flags for runs in flight IN THIS PROCESS, keyed by automation id.
+/// `stop_run` flips the flag; the run's own thread polls it, kills the CLI's
+/// process tree, and finalizes the row as `STOPPED_STATUS`.
+///
+/// Runs owned by another process (the `relay-automation` Task Scheduler
+/// binary) have no entry here — a stop can't reach across processes, so
+/// `stop_run` reports "not ours" instead of pretending to have signalled.
+/// Lock order is RUNNING then CANCEL, and the two are never held together.
+static CANCEL: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Forget a run's stop flag. Called wherever a run leaves the RUNNING set —
+/// after finalize and on every pre-spawn failure path.
+fn release_cancel(automation_id: &str) {
+    CANCEL.lock().remove(automation_id);
+}
+
+/// Ask the in-flight run of `automation_id` to stop. Returns `false` when no
+/// run in this process holds the automation (already finished, or running
+/// under Task Scheduler) — the caller can then say so rather than reporting a
+/// stop that will never happen. Idempotent: a second press re-sets the flag.
+pub fn stop_run(automation_id: &str) -> bool {
+    let flag = CANCEL.lock().get(automation_id).map(Arc::clone);
+    match flag {
+        Some(flag) => {
+            flag.store(true, Ordering::SeqCst);
+            true
+        }
+        None => false,
+    }
+}
 
 /// Behavior rules appended to every automation prompt before a run. The turn
 /// executes as ONE headless, full-auto shot — there is no user to answer a
@@ -263,6 +306,9 @@ struct PreparedRun {
     lock_path: Option<std::path::PathBuf>,
     /// Row id in automation_runs — finalized with status/summary on completion.
     run_id: String,
+    /// Set by `stop_run` from the Automations view. Shared with the RUNNING
+    /// guard's lifetime: both are released together in `release_guards`.
+    cancel: Arc<AtomicBool>,
 }
 
 fn prepare_run(db: &Arc<Mutex<Connection>>, automation: &Automation, source: RunSource) -> Result<Option<PreparedRun>, String> {
@@ -276,6 +322,7 @@ fn prepare_run(db: &Arc<Mutex<Connection>>, automation: &Automation, source: Run
 /// permanently kills the automation.
 fn release_guards(automation_id: &str, lock_path: &Option<std::path::PathBuf>) {
     RUNNING.lock().remove(automation_id);
+    release_cancel(automation_id);
     if let Some(p) = lock_path {
         let _ = std::fs::remove_file(p);
     }
@@ -349,6 +396,11 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
             return Ok(None);
         }
     }
+    // Publish the stop flag for this run. Registered outside the RUNNING
+    // block (the two locks are never held together, so a stop can't queue
+    // behind a scheduler tick's snapshot).
+    let cancel = Arc::new(AtomicBool::new(false));
+    CANCEL.lock().insert(automation.id.clone(), Arc::clone(&cancel));
     // Guard 2: across processes (app vs relay-automation binary). The lock
     // file lives next to the DB and records the owning PID; create_new fails
     // atomically if another process holds it. Staleness (B-28): a lock whose
@@ -382,7 +434,7 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
                         None => age_stale,
                     };
                     drop(conn);
-                    RUNNING.lock().remove(&automation.id);
+                    release_guards(&automation.id, &None);
                     if stale {
                         let _ = std::fs::remove_file(&path);
                         // Recurse with depth limit to guard against a
@@ -471,7 +523,7 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
             }
         }
     };
-    Ok(Some(PreparedRun { chat_session_id, lock_path, run_id }))
+    Ok(Some(PreparedRun { chat_session_id, lock_path, run_id, cancel }))
 }
 
 /// `<db file>.automation-<id>.lock` — next to relay.db so every process
@@ -503,6 +555,12 @@ fn execute(
     automation: &Automation,
     prepared: &PreparedRun,
 ) -> Result<(), String> {
+    // A stop pressed while the run was still being prepared (run-log session
+    // bind, run-row insert) must not go on to spawn a process only to kill it
+    // a moment later.
+    if prepared.cancel.load(Ordering::SeqCst) {
+        return Err(STOPPED_ERROR.to_string());
+    }
     // Route based on agent type:
     // - CLI harnesses (claude_code, opencode, pi-lineage) → spawn CLI process
     // - API providers and local_gguf → chat HTTP API
@@ -518,6 +576,7 @@ fn execute(
                 &automation.model,
                 if automation.cwd.is_empty() { None } else { Some(automation.cwd.as_str()) },
                 Some(Duration::from_secs(MAX_RUN_SECS)),
+                Some(&prepared.cancel),
             )
         }
         _ => {
@@ -527,6 +586,7 @@ fn execute(
                 &prompt,
                 &automation.harness,
                 &automation.model,
+                Some(&prepared.cancel),
             )
         }
     }
@@ -542,6 +602,10 @@ fn finalize(
 ) {
     let status = match &result {
         Ok(()) => "ok".to_string(),
+        // A stop is its own outcome, not an error. Only the exact sentinel is
+        // translated — a run that happened to fail while the user was also
+        // pressing Stop keeps its real error.
+        Err(e) if e == STOPPED_ERROR => STOPPED_STATUS.to_string(),
         Err(e) => e.clone(),
     };
     let summary = summarize(&status);
@@ -572,10 +636,7 @@ fn finalize(
             );
         }
     }
-    if let Some(path) = &prepared.lock_path {
-        let _ = std::fs::remove_file(path);
-    }
-    RUNNING.lock().remove(&automation.id);
+    release_guards(&automation.id, &prepared.lock_path);
     notify_run_finished(app, db, automation, prepared, &status, &summary);
 }
 
@@ -594,9 +655,10 @@ fn finalize(
 //     works headless too (tokens refresh through the DB, no AppHandle).
 
 /// Which outcomes get an email: failures only. Success mail from a */15 cron
-/// is spam; "skipped" never reaches finalize (prepare returns early).
+/// is spam; "skipped" never reaches finalize (prepare returns early), and a
+/// user stop is expected — mailing it would be noise the user caused.
 fn should_email(status: &str) -> bool {
-    status != "ok" && status != "skipped"
+    status != "ok" && status != "skipped" && status != STOPPED_STATUS
 }
 
 /// The JSON body POSTed to the configured webhook for every completed run.
@@ -805,6 +867,9 @@ fn summarize(status: &str) -> String {
     if status == "skipped" {
         return "Skipped (previous run still in flight)".into();
     }
+    if status == STOPPED_STATUS {
+        return "Stopped".into();
+    }
     // Take CHARS, not bytes: `&status[..120]` panics when byte 120 lands on
     // a multibyte boundary, and status is arbitrary error text (provider
     // messages are full of non-ASCII). A panic here propagates out of
@@ -838,6 +903,20 @@ mod tests {
         assert!(!pid_alive(4_000_000_000));
         // The current process is obviously alive.
         assert!(pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn stopped_status_is_a_neutral_outcome() {
+        assert_eq!(summarize(STOPPED_STATUS), "Stopped");
+        // No failure email for a stop the user pressed themselves.
+        assert!(!should_email(STOPPED_STATUS));
+    }
+
+    #[test]
+    fn stop_run_without_a_live_run_is_false() {
+        // Nothing registered this id in this process — the stop must report
+        // that instead of pretending a signal was delivered.
+        assert!(!stop_run("no-such-automation-stop-test"));
     }
 
     #[test]

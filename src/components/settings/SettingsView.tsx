@@ -26,6 +26,7 @@ import { SttPanel } from "./SttPanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
 import { FontSettingsPanel } from "./FontSettingsPanel";
+import { SidebarArtPanel } from "./SidebarArtPanel";
 import { AcpAgentsPanel } from "./AcpAgentsPanel";
 import { McpGalleryPanel } from "./McpGalleryPanel";
 import { RemotePanel } from "./RemotePanel";
@@ -248,6 +249,9 @@ function AppearancePanel() {
           <ToggleSwitch checked={watchMode} onChange={setWatchMode} />
         </div>
       </div>
+
+      {/* Sidebar art: a user-uploaded image behind the header block. */}
+      <SidebarArtPanel />
 
       {/* Custom theme import/export + gallery (roadmap #19). */}
       <ThemeGalleryPanel />

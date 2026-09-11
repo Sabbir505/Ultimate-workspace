@@ -40,9 +40,10 @@
       .splash-logo {
         width: 96px;
         height: 96px;
-        animation: splash-pop 0.7s cubic-bezier(0.2, 0.9, 0.3, 1.2) both,
-          splash-glow 2.2s ease-in-out 0.5s;
+        animation: splash-pop 0.7s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
       }
+      /* The name reveals letter by letter: each span rises in on its own
+         staggered delay (--i = letter index, set inline). */
       .splash-name {
         font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
         font-weight: 700;
@@ -50,7 +51,13 @@
         letter-spacing: 0.16em;
         text-transform: uppercase;
         color: #f5efe6;
-        animation: splash-rise 0.6s ease 0.3s both;
+      }
+      .splash-name span {
+        display: inline-block;
+        opacity: 0;
+        transform: translateY(12px);
+        animation: splash-letter 0.4s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+        animation-delay: calc(0.25s + var(--i) * 0.09s);
       }
       .splash-bar {
         width: 128px;
@@ -78,19 +85,10 @@
           transform: scale(1);
         }
       }
-      @keyframes splash-glow {
-        0%,
-        100% {
-          filter: drop-shadow(0 6px 28px rgba(245, 158, 11, 0.25));
-        }
-        50% {
-          filter: drop-shadow(0 6px 44px rgba(245, 158, 11, 0.55));
-        }
-      }
-      @keyframes splash-rise {
+      @keyframes splash-letter {
         from {
           opacity: 0;
-          transform: translateY(10px);
+          transform: translateY(12px);
         }
         to {
           opacity: 1;
@@ -115,10 +113,14 @@
       }
       @media (prefers-reduced-motion: reduce) {
         .splash-logo,
-        .splash-name,
+        .splash-name span,
         .splash-bar,
         .splash-bar span {
           animation: none;
+        }
+        .splash-name span {
+          opacity: 1;
+          transform: none;
         }
       }
     </style>
@@ -131,7 +133,8 @@
         <!-- The real brand asset (public/logo.png — same file AppLogo.tsx
              renders; copied from src-tauri/icons/128x128@2x.png). -->
         <img class="splash-logo" src="/logo.png" alt="" />
-        <div class="splash-name">Relay</div>
+        <div class="splash-name"
+          ><span style="--i: 0">R</span><span style="--i: 1">e</span><span style="--i: 2">l</span><span style="--i: 3">a</span><span style="--i: 4">y</span></div>
         <div class="splash-bar"><span></span></div>
       </div>
     </div>

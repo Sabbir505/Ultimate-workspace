@@ -803,3 +803,28 @@ button.sidebar-section-label:hover {
   box-shadow: var(--glass-rim), var(--glass-drop);
   animation: branch-popover-fade 0.15s var(--ease);
 }
+
+/* Sidebar art (Settings → Appearance → Sidebar art): a bundled stock image or
+   a user upload, painted on its own layer inside the header. The layer is
+   MASKED so the art + scrim feather to transparent across the header's lower
+   third — the image melts into the sidebar below instead of stopping at a
+   hard line. pointer-events: none keeps the header's drag region usable. */
+.sidebar-header-art-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-size: cover;
+  background-position: center;
+  pointer-events: none;
+  transition: opacity 0.35s var(--ease);
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 58%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, #000 58%, transparent 100%);
+}
+/* The scrim can't fully quiet busy/bright art under light text. */
+.sidebar-header-art,
+.sidebar-header-art .sidebar-wordmark,
+.sidebar-header-art .sidebar-nav-btn,
+.sidebar-header-art button {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+

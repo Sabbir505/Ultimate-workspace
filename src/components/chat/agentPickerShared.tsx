@@ -134,3 +134,39 @@ export function highlight(text: string, res: FuzzyResult | null): JSX.Element {
   if (chunk) out.push(chunk);
   return <>{out}</>;
 }
+
+// ---- effort label tables (moved from AgentModelPicker) ---------------------
+
+/** Effort options in display order — High first, Default last (the footer
+ *  renders Object.entries of this map top-to-bottom). */
+export const EFFORT_LABELS: Record<string, string> = {
+  high: "High",
+  low: "Low",
+  medium: "Medium",
+  "": "Default",
+};
+
+/** Harness effort tiers (claude `--effort`, omp/pi `--thinking`, kimi env
+ *  override): compact stop labels for the harness pane's slider — up to 7
+ *  tiers + Default must fit the pane, so the spellings stay short. */
+export const HARNESS_EFFORT_LABELS: Record<string, string> = {
+  off: "Off",
+  minimal: "Min",
+  low: "Low",
+  medium: "Med",
+  high: "High",
+  xhigh: "XHigh",
+  max: "Max",
+};
+
+/** Stop colors, coolest → hottest; the SegmentedSlider gives the LAST stop
+ *  (Max) a pulse/shimmer of its own, so the top tier reads as deliberate. */
+export const HARNESS_EFFORT_COLORS: Record<string, string> = {
+  off: "var(--text-dim)",
+  minimal: "#38bdf8",
+  low: "#22c55e",
+  medium: "#f59e0b",
+  high: "#ef4444",
+  xhigh: "#a855f7",
+  max: "#ec4899",
+};

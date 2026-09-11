@@ -28,6 +28,7 @@ import { useUiStore } from "../../state/ui";
 import { BranchDropdown } from "./BranchDropdown";
 import { CommitModal } from "./CommitModal";
 import { usePlanTracker } from "../../hooks/usePlanTracker";
+import { useOcclusion } from "../../hooks/useOcclusion";
 
 // Typed with the store's value types, NOT `unknown`: these fallbacks flow
 // through the zustand selectors below, and an `unknown` fallback unions the
@@ -212,7 +213,6 @@ export function GitToolsSidebar() {
   const openAgentsTab = useUiStore((s) => s.openAgentsTab);
   const gitSidebarCollapsed = useUiStore((s) => s.gitSidebarCollapsed);
   const toggleGitSidebar = useUiStore((s) => s.toggleGitSidebar);
-  const setModalOpen = useUiStore((s) => s.setModalOpen);
   // Per-section disclosure state. Defaults to open (see ui.ts). The
   // collapse/expand is animated via a grid-template-rows 0fr→1fr wrapper,
   // matching the Projects disclosure in the main sidebar (sidebar.css).
@@ -256,9 +256,7 @@ export function GitToolsSidebar() {
   const [commitModalOpen, setCommitModalOpen] = useState(false);
 
   // Register the commit modal with the UI store so native webviews hide.
-  useEffect(() => {
-    setModalOpen("git:commit-modal", commitModalOpen);
-  }, [commitModalOpen, setModalOpen]);
+  useOcclusion("git:commit-modal", commitModalOpen);
 
   // Poll changed files and branches — gated on `path`. Event-driven via the
   // FS watcher with a 2s debounce so a burst of FS events doesn't thrash the

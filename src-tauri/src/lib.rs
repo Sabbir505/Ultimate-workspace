@@ -19,6 +19,7 @@ mod chat;
 mod commands;
 mod connectors;
 pub mod db;
+mod download;
 mod docs_index;
 mod git;
 mod github;

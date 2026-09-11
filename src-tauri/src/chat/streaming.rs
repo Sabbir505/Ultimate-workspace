@@ -267,12 +267,12 @@ pub(crate) fn sanitize_stream_text(s: &str) -> String {
     out
 }
 
-async fn openai_stream_round(
+async fn openai_stream_round<R: tauri::Runtime>(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
     body: &Value,
-    app: &AppHandle,
+    app: &AppHandle<R>,
     sid: &str,
     full: &mut String,
 ) -> Result<(Value, RoundUsage), String> {
@@ -598,12 +598,12 @@ async fn openai_stream_round(
 /// Emits assistant text (and `thinking`, wrapped in `<think>…</think>`) live as
 /// it streams, accumulates `tool_use` blocks (id/name/input), and returns the
 /// reconstructed `content` block array plus the round's [`RoundUsage`].
-async fn anthropic_stream_round(
+async fn anthropic_stream_round<R: tauri::Runtime>(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
     body: &Value,
-    app: &AppHandle,
+    app: &AppHandle<R>,
     sid: &str,
     full: &mut String,
 ) -> Result<(Vec<Value>, RoundUsage), String> {
@@ -1305,10 +1305,10 @@ pub(crate) async fn run_openai_tool_loop(
         // round, or the already-streamed text would be duplicated.
         let full_len_before = full.len();
         let (message, round_usage) =
-            match openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await {
+            match openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full).await {
                 Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
                     cache::strip_cache_control(&mut body);
-                    openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?
+                    openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full).await?
                 }
                 other => other?,
             };
@@ -1601,11 +1601,13 @@ pub(crate) async fn run_anthropic_tool_loop(
         // those words must not re-run the round and duplicate the text.
         let full_len_before = full.len();
         let (content, round_usage) =
-            match anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await {
+            match anthropic_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full).await {
                 Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
                     cache::strip_cache_control(&mut body);
-                    anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full)
-                        .await?
+                    anthropic_stream_round::<tauri::Wry>(
+                        client, &url, api_key, &body, app, sid, &mut full,
+                    )
+                    .await?
                 }
                 other => other?,
             };
@@ -1831,6 +1833,148 @@ pub(crate) fn resolve_provider(id: &ChatProviderId) -> Box<dyn ChatProvider> {
         ChatProviderId::OpenRouter => Box::new(OpenRouterProvider),
         ChatProviderId::LocalGguf => Box::new(LocalGgufProvider),
     }
+}
+
+// ---- round-parser delta-accumulation pins --------------------------------
+// These pin the wire-format accumulation contracts of both stream rounds —
+// the regression guards required before any round/loop merging
+// (REFACTOR_PROGRESS.md). Each test drives a scripted SSE body over a local
+// socket and asserts the ACCUMULATED result: tool-call arguments split
+// across chunks must reassemble in order, text deltas must concatenate, and
+// the loop must stop on the terminal event.
+
+/// Serve `body` verbatim to every connection; returns the base URL. Spawned
+/// on the test's own runtime via tokio::spawn; holds each socket open after
+/// writing (SSE style) so a terminal event isn't followed by a reset.
+async fn spawn_sse_server(body: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            if sock.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            if sock.write_all(body.as_bytes()).await.is_err() {
+                return;
+            }
+            // Hold the socket open, draining client reads, SSE style.
+            loop {
+                let mut drain = [0u8; 512];
+                match sock.read(&mut drain).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[tokio::test]
+async fn openai_round_accumulates_split_tool_call_deltas() {
+    let app = tauri::test::mock_app().handle().clone();
+    let client = reqwest::Client::new();
+    let url = spawn_sse_server(concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Checking files\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"command\\\":\\\"ls\\\"}\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    ))
+    .await;
+    let body = serde_json::json!({ "model": "test", "messages": [] });
+    let mut full = String::new();
+
+    let (message, _) = openai_stream_round(
+        &client, &url, "key", &body, &app, "sid-pin", &mut full,
+    )
+    .await
+    .expect("round succeeds");
+
+    // Streamed text landed in `full` and echoed into the message content.
+    assert_eq!(full, "Checking files");
+    assert_eq!(message["content"].as_str(), Some("Checking files"));
+    // Tool-call arguments split across two deltas reassemble in order.
+    let args = message["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .expect("arguments accumulate as a string");
+    assert_eq!(args, "{\"command\":\"ls\"}");
+    assert_eq!(message["tool_calls"][0]["id"], "call_1");
+}
+
+#[tokio::test]
+async fn openai_round_index_clamp_drops_hostile_far_indices() {
+    let app = tauri::test::mock_app().handle().clone();
+    let client = reqwest::Client::new();
+    // A hostile endpoint sends a tool_call at a far-past-MAX index; the round
+    // must drop it instead of growing an unbounded map.
+    let url = spawn_sse_server(concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":999999,\"id\":\"evil\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    ))
+    .await;
+    let body = serde_json::json!({ "model": "test", "messages": [] });
+    let mut full = String::new();
+
+    let (message, _) = openai_stream_round(
+        &client, &url, "key", &body, &app, "sid", &mut full,
+    )
+    .await
+    .expect("round succeeds");
+    assert!(
+        message["tool_calls"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true),
+        "hostile far-index tool_call must be dropped, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_round_accumulates_text_and_tool_input_json() {
+    let app = tauri::test::mock_app().handle().clone();
+    let client = reqwest::Client::new();
+    let url = spawn_sse_server(concat!(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"web_search\",\"input\":{}}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"cats\\\"}\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    ))
+    .await;
+    let body = serde_json::json!({ "model": "test" });
+    let mut full = String::new();
+
+    let (blocks, _) = anthropic_stream_round(
+        &client, &url, "key", &body, &app, "sid-pin", &mut full,
+    )
+    .await
+    .expect("round succeeds");
+
+    assert_eq!(full, "Hello");
+    let text = blocks
+        .iter()
+        .find(|b| b["type"] == "text")
+        .and_then(|b| b["text"].as_str());
+    assert_eq!(text, Some("Hello"));
+    let tool = blocks
+        .iter()
+        .find(|b| b["type"] == "tool_use")
+        .expect("tool_use block accumulated");
+    assert_eq!(tool["id"], "tu_1");
+    assert_eq!(tool["name"], "web_search");
+    // input_json_delta pieces split mid-key must reassemble into valid JSON.
+    assert_eq!(tool["input"]["q"], "cats");
 }
 
 #[cfg(test)]

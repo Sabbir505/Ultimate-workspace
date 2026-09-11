@@ -27,6 +27,31 @@ Prior context:
 - Autoreview (code-review subagent) after each significant step; findings fixed or logged before moving on.
 - One conventional commit per step.
 
+## Steps — session 8: resumable-download engine + a caught deadlock (2026-09-11)
+
+| # | Step | Outcome | Verification | Commit |
+|---|---|---|---|---|
+| 8 | **Resumable-download consolidation.** New `src/download.rs`: `pump_body_to_file(resp, partial, start, resuming, stall, &mut cancel_rx, on_chunk)` owns the body→file loop with cancel + data-stall watchdogs, returning a `BodyPumpOutcome` (Completed/Cancelled/Stalled/ReadError/WriteError) + byte count. Migrated: `download_task` (model tool — keeps .part on cancel/stall, retries via Range) and `run_download` (HF market — removes .partial on cancel, maps outcomes to DownloadAbort::Failed, gains a 500-char error snippet where bodies were untruncated). **Bonus find:** migrating exposed a REAL deadlock — download_task's cancelled arm held the `entry.snapshot` std-Mutex guard across `TaskManager::emit`, which re-locks the same mutex. Original code scoped the guard; the pump-migration version had hoisted it. Fixed with an inner scope + a comment explaining why the guard must die before emit | cargo check 0 errors · warnings 61 (< 62 baseline) · cargo test --lib **1021 ✓** incl. `cancel_keeps_part_file_for_resume` 0.36s | n/a (test IS the verification) | `refactor(download): market run_download onto the shared body pump; fix cancel deadlock` |
+
+**Debugging war-story (documented for future sessions):** the hang initially looked like a slow build. Actual chain: (1) the deadlock genuinely hung the test binary; (2) every later `cargo test` hit LNK1104 — Windows keeps the .exe locked while the hung process lives — which masqueraded as "could not compile" churn; (3) `git checkout` of sources didn't help while the process lived. Fix: kill `relay_lib*` processes, then scope the guard. Also: the user's dev `relay.exe` + the auto-format watcher share `target/`, so expect lock waits when editing rs files while the app runs.
+
+### Still open (final audit 2026-09-11, amended after a carve attempt)
+
+Everything prioritized in the original survey and subsequent sessions is done. The remainder is the deep-tail. One carve attempt (MessageBubble activity-steps → ActivitySteps.tsx) was executed and **reverted by compile-evidence**: the region is not a leaf module — ActivityStepRow/ProcessSummary/FoldedStepGroup/EditFileRow reach into MessageBubble's Markdown rendering context (Markdown, citeUrlTransform, InsidePreContext, useCopyToClipboard, readArtifactPreview, defaultUrlTransform, ChatPerfPayload, SmoothReveal, useProjectsStore/useUiStore). A clean extraction requires moving the Markdown rendering system with it, or accepting bidirectional MessageBubble ↔ ActivitySteps imports (works in ESM but a design smell). The dependency map below is the accurate starting point:
+
+- **MessageBubble.tsx (2,278)** — carve region [Per-tool-kind icon doc ≈ line 533 → groupSegments end ≈ line 1719] plus co-dependencies OUTSIDE the region: iconProps + FileIcon (116/167), SearchIcon/MemoryIcon/GlobeIcon/TerminalIcon/WrenchIcon/CheckIcon (488-535), useLazyComponent (60), SyntaxHighlighterComponent type (54), useSyntaxTheme (46), and Markdown-context items listed above that stay put. Verified markers and a working end_of_item brace-counter are in git history (scripts/mb_carve.py at the reverted state).
+
+- **ChatComposer.tsx (3,098)** — ✅ voice engine done (session 8: `lib/voiceRecording.ts` — joinSamples/encodeWav16k/blobToBase64); remainder is one ~2,800-line component body; candidate seams: attachment classifier, queued-message rows, text-command parsing.
+- **Streaming-map quartet** — ✅ done (session 8: `clearStreamState` helper + regression tests).
+- **Round-parser pins** — ✅ done (session 9): tauri "test" dev-feature + mock AppHandle; 3 pins cover openai text/tool_call delta accumulation incl. mid-key argument splits, hostile far-index clamp, and anthropic text + input_json accumulation. Unblocks the round-parser unification.
+- **ChatView.tsx (2,246)** — welcome screen extracted (ChatWelcome.tsx); remainder is one 2,100-line component; candidate seams: message-list scroll logic, split-pane wiring.
+- **chat/commands.rs** — `send_chat_message` (1,199 lines) split; broader commands.rs section split.
+- **browser.rs** — ~490 lines of injected JS builders → `browser_js.rs`; 2,454-line impl split.
+- **mobile/relay.rs** — `handle_connection` (~918 lines) split; provider-catalog triplication vs providers.rs.
+- **AgentModelPicker remainder** — helpers/caches now in agentPickerShared.tsx; the 900-line component body (rail/popup/gear sub-modal) could split further.
+
+---
+
 ## Steps — session 7: agent_sessions split completed (2026-09-11)
 
 | # | Step | Outcome | Verification | Commit |

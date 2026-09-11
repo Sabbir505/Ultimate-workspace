@@ -41,6 +41,7 @@ import { ArtifactLibrary } from "./ArtifactLibrary";
 import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
 import { UpdateButton } from "./UpdateButton";
 import { seedFakeUpdate, SHOW_FAKE_UPDATE } from "../../state/updater";
+import { useOcclusion } from "../../hooks/useOcclusion";
 
 export function Sidebar() {
   const projects = useProjectsStore((s) => s.projects);
@@ -139,12 +140,7 @@ export function Sidebar() {
   // The pairing QR popover isn't a Modal, so it must register itself with the
   // webview-occlusion system (M22) — a native browser webview would otherwise
   // paint on top of it.
-  const setModalOpen = useUiStore((s) => s.setModalOpen);
-  useEffect(() => {
-    if (!pairingModalOpen) return;
-    setModalOpen("sidebar:pairing-qr", true);
-    return () => setModalOpen("sidebar:pairing-qr", false);
-  }, [pairingModalOpen, setModalOpen]);
+  useOcclusion("sidebar:pairing-qr", pairingModalOpen);
 
   // DEV-ONLY mock update for visual review (see SHOW_FAKE_UPDATE in state/updater).
   useEffect(() => {

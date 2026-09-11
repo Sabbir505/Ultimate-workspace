@@ -66,6 +66,7 @@ import { useSettingsStore } from "./state/settings";
 import { useSkillsStore } from "./state/skills";
 import { useUiStore } from "./state/ui";
 import { useUpdaterStore, wireUpdaterEvents, SHOW_FAKE_UPDATE } from "./state/updater";
+import { useOcclusion } from "./hooks/useOcclusion";
 
 // Lazy-loaded overlay views. They're only fetched the first time the user
 // opens them, so the initial chat page skips downloading ~700 KB of
@@ -277,11 +278,8 @@ export default function App() {
   // Sync modal states into the UI store so native webviews know to hide.
   // Each modal registers its OWN id (M22) — closing one must not re-expose
   // webviews while another is still open.
-  const setModalOpen = useUiStore((s) => s.setModalOpen);
-  useEffect(() => {
-    setModalOpen("app:pending-replace", !!pendingReplace);
-    setModalOpen("app:git-prompt", !!gitPromptProject);
-  }, [pendingReplace, gitPromptProject, setModalOpen]);
+  useOcclusion("app:pending-replace", !!pendingReplace);
+  useOcclusion("app:git-prompt", !!gitPromptProject);
 
   const pendingSession = pendingReplace
     ? useProjectsStore.getState().sessions.find((s) => s.id === pendingReplace.sessionId)

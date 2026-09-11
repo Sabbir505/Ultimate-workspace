@@ -1,7 +1,7 @@
 // Extracted domain of lib/ipc.ts (see its header). Command names and
 // payload shapes are binding (CONTRACT.md).
 import { safeInvoke, safeListen } from "../ipcCore";
-import { getSetting, setSetting } from "../ipc";
+import { jsonSetting } from "../ipc";
 import type { CostRollups, CostEvent, QuickAction, Skill } from "../../types";
 
 // ---- Approval rules (roadmap #8) ----
@@ -17,23 +17,13 @@ export interface ApprovalRule {
 }
 
 const RULES_KEY = "permissions.rules";
+const jsonRules = jsonSetting<ApprovalRule>(RULES_KEY);
 
 /** Load the current approval rules (empty array when unset/invalid). */
-export async function getPermissionsRules(): Promise<ApprovalRule[]> {
-  try {
-    const raw = await getSetting(RULES_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as ApprovalRule[]) : [];
-  } catch {
-    return [];
-  }
-}
+export const getPermissionsRules = jsonRules.load;
 
 /** Persist the full approval-rules list. */
-export async function setPermissionsRules(rules: ApprovalRule[]): Promise<void> {
-  await setSetting(RULES_KEY, JSON.stringify(rules));
-}
+export const setPermissionsRules = jsonRules.save;
 
 export interface DataPaths {
   chatDbPath: string;

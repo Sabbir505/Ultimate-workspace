@@ -1,7 +1,7 @@
 // Extracted domain of lib/ipc.ts (see its header). Command names and
 // payload shapes are binding (CONTRACT.md).
 import { safeInvoke, safeListen } from "../ipcCore";
-import { ChatAttachmentInput, getSetting, setSetting } from "../ipc";
+import { ChatAttachmentInput, jsonSetting } from "../ipc";
 import type { AvailableSkill, InstalledSkill } from "../../types";
 
 // ---- Prompt templates (roadmap #14) ----
@@ -20,21 +20,10 @@ export interface PromptTemplate {
 }
 
 const PROMPT_TEMPLATES_KEY = "prompts.templates";
+const jsonTemplates = jsonSetting<PromptTemplate>(PROMPT_TEMPLATES_KEY);
 
-export async function listPromptTemplates(): Promise<PromptTemplate[]> {
-  try {
-    const raw = await getSetting(PROMPT_TEMPLATES_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as PromptTemplate[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-export async function savePromptTemplates(templates: PromptTemplate[]): Promise<void> {
-  await setSetting(PROMPT_TEMPLATES_KEY, JSON.stringify(templates));
-}
+export const listPromptTemplates = jsonTemplates.load;
+export const savePromptTemplates = jsonTemplates.save;
 
 /** Extract `{{var}}` placeholders from a template body (deduped, in order). */
 export function templateVariables(body: string): string[] {

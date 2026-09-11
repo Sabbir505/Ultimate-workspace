@@ -11,6 +11,7 @@ import { Modal } from "../common/Modal";
 import { SessionRow } from "./SessionRow";
 import type { HarnessId, Project } from "../../types";
 import { harnessShortName } from "../../types";
+import { useOcclusion } from "../../hooks/useOcclusion";
 
 interface Props {
   project: Project;
@@ -28,7 +29,6 @@ export function ProjectItem({ project }: Props) {
   const removeProjectById = useProjectsStore((s) => s.removeProjectById);
   const openPeek = useUiStore((s) => s.openPeek);
   const setProjectSettingsFor = useUiStore((s) => s.setProjectSettingsFor);
-  const setModalOpen = useUiStore((s) => s.setModalOpen);
 
   const installed = harnesses.filter((h) => h.installed);
   const [harness, setHarness] = useState<HarnessId>("claude_code");
@@ -41,10 +41,7 @@ export function ProjectItem({ project }: Props) {
 
   // Sync worktree modal state into UI store so native webviews hide.
   // Registered under OUR id (M22) — see ui.ts setModalOpen.
-  useEffect(() => {
-    setModalOpen("project-item:worktree", worktreeOpen);
-    return () => { setModalOpen("project-item:worktree", false); };
-  }, [worktreeOpen, setModalOpen]);
+  useOcclusion("project-item:worktree", worktreeOpen);
 
   useEffect(() => {
     if (installed.length === 1) setHarness(installed[0].id);

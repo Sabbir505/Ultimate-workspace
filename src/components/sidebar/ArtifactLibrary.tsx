@@ -14,6 +14,7 @@ import { useUiStore } from "../../state/ui";
 import { Modal } from "../common/Modal";
 import { readArtifactPreview, toastInfo, type ArtifactPreview, type ArtifactRecord } from "../../lib/ipc";
 import { relativeTime } from "../../lib/relativeTime";
+import { useOcclusion } from "../../hooks/useOcclusion";
 
 /** Kinds (the normalized preview kind returned by readArtifactPreview) whose
  *  content is text we can show as a faint snippet preview. The file's
@@ -237,7 +238,6 @@ export function ArtifactLibrary({
   const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
   const selectSession = useChatStore((s) => s.selectSession);
   const setActiveView = useUiStore((s) => s.setActiveView);
-  const setModalOpen = useUiStore((s) => s.setModalOpen);
   const [internalOpen, setInternalOpen] = useState(false);
 
   // When externalOpen is provided, it overrides the internal toggle state.
@@ -254,10 +254,7 @@ export function ArtifactLibrary({
   // Sync modal-open state into the UI store so native webviews know to hide.
   // Registered under OUR id (M22) — another modal closing must not flip the
   // shared flag while this one is still open.
-  useEffect(() => {
-    setModalOpen("artifact-library", open);
-    return () => { setModalOpen("artifact-library", false); };
-  }, [open, setModalOpen]);
+  useOcclusion("artifact-library", open);
 
   // Open the artifact in the preview pane of the chat that produced it: switch
   // to that session first and WAIT for the switch so the tab opens on top of

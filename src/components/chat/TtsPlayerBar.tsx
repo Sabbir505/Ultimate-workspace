@@ -21,7 +21,10 @@ export function TtsPlayerBar() {
   if (phase === "idle" && !error) return null;
 
   const loading = phase === "loading";
-  const playing = phase === "playing";
+  // Buffering keeps the transport live: the read is parked on the engine
+  // between sentences, so pause/skip/stop all still mean something.
+  const buffering = phase === "buffering";
+  const playing = phase === "playing" || buffering;
 
   return (
     <div className="tts-bar" role="status" aria-live="polite">
@@ -34,7 +37,11 @@ export function TtsPlayerBar() {
         ) : (
           <>
             <span className="tts-bar-title">
-              {loading ? "Preparing…" : (label ?? "Reading")}
+              {loading
+                ? "Preparing…"
+                : buffering
+                  ? "Buffering…"
+                  : (label ?? "Reading")}
             </span>
             {total > 1 && (
               <span className="tts-bar-progress">

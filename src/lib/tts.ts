@@ -35,7 +35,23 @@ const MAX_SENTENCE_CHARS = 240;
  *  4.5s loading for every couple of seconds of audio, so GPU mode groups
  *  sentences into as few, as large, calls as the engine accepts. */
 const CPU_CHUNK_CHARS = MAX_SENTENCE_CHARS;
-const GPU_CHUNK_CHARS = 1200;
+/** Kept under the backend's own 1200-character guard (commands/tts.rs truncates
+ *  there), which a group has to clear with its join spaces included. */
+const GPU_CHUNK_CHARS = 1100;
+
+/** Budget for the FIRST GPU call. This one is on the critical path — the
+ *  listener is waiting for the first word — so it stays near a sentence instead
+ *  of a whole paragraph. A paragraph-sized call costs ~4.5s of process start
+ *  plus its synthesis before anything is audible; the rest of the text is
+ *  voiced in the background while this plays. */
+const GPU_WARMUP_CHARS = 260;
+
+/** Shortest GPU group worth a process of its own. A heading or a one-line note
+ *  is a paragraph, so grouping bounded strictly by paragraphs would spend a
+ *  ~4.5s process start on a few words — "Buffering…" after every heading, which
+ *  is exactly where a document's short paragraphs sit. Below this size the
+ *  paragraph joins the one after it instead. */
+const GPU_MIN_GROUP_CHARS = 200;
 
 /** Silence inserted before the first sentence of a new paragraph. Sentence
  *  transitions rely on the trailing silence the model already renders, but a
@@ -43,20 +59,68 @@ const GPU_CHUNK_CHARS = 1200;
  *  points reads as one continuous run-on. */
 const PARAGRAPH_PAUSE_MS = 280;
 
-/** How many sentences ahead to synthesize while one is playing. `undefined`
- *  means "prefetch the rest of the text", which is what GPU mode wants: its
- *  chunks are already large, and one extra call in flight hides the next model
- *  load behind the audio already playing. */
-function prefetchAhead(device: string | null): number {
-  return device === "gpu" ? 1 : 4;
-}
+/** Audio the player wants buffered ahead of the playhead before a read starts.
+ *
+ *  Synthesis only runs at ~1.5x realtime on CPU (TTS_FEATURE_RESEARCH.md) while
+ *  playback consumes at 1x, so a queue thin enough to drain is silence in the
+ *  middle of the read — and it is the FIRST read of a text that feels it, since
+ *  every later read comes back from the engine's cache and never waits. A lead
+ *  measured in audio seconds (rather than "the next chunk is ready") is what
+ *  keeps a run of short headings and list items fed, and building it once up
+ *  front is what keeps the rest of the read free of boundary stalls.
+ *
+ *  Kept as small as the rule allows: this is the wait before the FIRST word,
+ *  and the background walk is already filling the queue while it is spent, so
+ *  the read does not need a deep lead to start — only enough that the sentence
+ *  after the opening one is not a surprise. */
+const LEAD_SECS = 6;
+
+/** Mid-read the queue is only ever WAITED on when it is nearly dry; everything
+ *  after it is voiced in the background while the read runs. Waiting at every
+ *  boundary would turn an engine running at ~1x into a stutter of small waits. */
+const LEAD_FLOOR_SECS = 4;
+
+/** Synthesis requests the background walk keeps in flight. Two is enough to
+ *  keep a serial engine fed across the request round-trip, and low enough that
+ *  GPU mode never has more than a couple of engine processes alive at once. */
+const MAX_INFLIGHT = 2;
 
 // ---- Text preparation ----
+
+/** A rule: what to match, and either the replacement text or a function that
+ *  builds one from the match's groups (the date rule needs to resolve a month
+ *  number to a name). */
+type SpeechRule = [RegExp, string | ((match: string, ...groups: string[]) => string)];
+
+/** What the B/K/M/T suffixes on a parameter count mean. */
+const UNIT_WORDS: Record<string, string> = {
+  B: "billion",
+  M: "million",
+  K: "thousand",
+  T: "trillion",
+};
+
+/** Month names for the ISO-date rule; an out-of-range month is left as the
+ *  digits the document wrote. */
+const MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
 
 /** Symbols and abbreviations that are read badly or not at all. Applied before
  *  the markdown pass, because several of them (`&`, `→`) also appear inside
  *  constructs the markdown pass has to see intact. */
-const SPEECH_SUBSTITUTIONS: [RegExp, string][] = [
+const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
   // Latin abbreviations: the letters get spelled out one by one otherwise.
   [/\be\.g\.,?\s*/gi, "for example, "],
   [/\bi\.e\.,?\s*/gi, "that is, "],
@@ -66,13 +130,81 @@ const SPEECH_SUBSTITUTIONS: [RegExp, string][] = [
   [/\bapprox\./gi, "approximately"],
   [/\bw\/o\b/gi, "without"],
   [/\bw\//gi, "with "],
+  // Dates first: "2024-01-05" is a date, and the number-range rule below would
+  // otherwise read it as two ranges ("2024 to 01 to 05").
+  [
+    /\b(\d{4})-(\d{2})-(\d{2})\b/g,
+    (_m, y: string, m: string, d: string) =>
+      `${MONTHS[Number(m) - 1] ?? m} ${Number(d)}, ${y}`,
+  ],
+  // Numbers: the engine reads the punctuation around them literally.
+  //   "1/4"        → "1 slash 4"
+  //   "10-20 mins" → "10, 20 mins" (the em/en-dash rule below treats every
+  //                  dash as an aside, which is wrong between numbers)
+  // The leading `(^|[^\w.])` keeps both rules out of the middle of a token:
+  // without it "Qwen3-30B" is a "3 to 30" range. No lookbehind — it is a parse
+  // error on older WKWebView (see the module header).
+  [/(^|[^\w.])(\d+)\s*\/\s*(\d+)\b/g, "$1$2 over $3"],
+  [/(^|[^\w.])(\d+)\s*[-–—]\s*(\d+)\b/g, "$1$2 to $3"],
+  [/(\d)\s*\+\s*(\d)/g, "$1 plus $2"],
+  [/(\d)\s*x\b/g, "$1 times"],
+  // Units per unit ("MB/s", "km/h"). Both sides must be 2+ characters: a
+  // single-letter pair is far more likely to be a path component ("src/m/s")
+  // than a rate, and `\b` alone cannot tell them apart.
+  [
+    /\b(km|cm|mm|kg|mg|MB|GB|KB|TB|ms|fps|mi|ft|lb|kW|kHz|MHz|Hz|W|V)\s*\/\s*(hr|h|sec|min|day|wk|mo|yr|s|d)\b/g,
+    "$1 per $2",
+  ],
+  // Version and issue numbers: "v0.4.2" and "#7" are spoken words, not a letter
+  // and a hash. `\b` keeps "rev2" and "#ff0000" out of it.
+  [/\bv(\d[\d.]*)/g, "version $1"],
+  [/#(\d)/g, "number $1"],
+  [/\bNo\.\s*(\d)/g, "number $1"],
+  // "1.5B parameters" — the B/K/M/T convention from model cards, spoken as the
+  // number it stands for. Narrow on purpose: "Qwen3-30B-A3B" and "256B of RAM"
+  // are not this shape, and reading them as "billion" would be wrong.
+  [
+    /\b(\d+(?:\.\d+)?)\s*([BMKT])\b(?=\s+(?:parameters?|params?|tokens?|context))/g,
+    (_m, num: string, unit: string) => `${num} ${UNIT_WORDS[unit] ?? unit}`,
+  ],
+  // "30 billion (B) parameters": the parenthesis repeats the word it follows,
+  // so reading it adds a stray letter ("billion, bee, parameters"). Only the
+  // matching-initial case is dropped — "grade (B)" keeps its B.
+  [
+    /\b([A-Za-z]+)\s*\(([A-Z])\)/g,
+    (match, word: string, letter: string) =>
+      word[0]?.toUpperCase() === letter ? word : match,
+  ],
+  // Initialisms read as letters: the engine says "llm" as a word and "MoE" as
+  // "moe", where everyone who writes them says the letters.
+  [
+    /\(([A-Z]{2,5})\)/g,
+    (_m, letters: string) => `(${letters.toUpperCase().split("").join(" ")})`,
+  ],
+  [
+    /\b([A-Z][a-z][A-Z])(s?)\b/g,
+    (_m, letters: string, plural: string) =>
+      `${letters.toUpperCase().split("").join(" ")}${plural}`,
+  ],
   // Symbols the engine either skips or mispronounces.
   [/→/g, " to "],
   [/←/g, " from "],
   [/≥/g, " greater than or equal to "],
   [/≤/g, " less than or equal to "],
   [/≈/g, " approximately "],
+  [/≠/g, " not equal to "],
+  [/±/g, " plus or minus "],
+  [/÷/g, " divided by "],
+  [/√/g, " square root of "],
+  [/∞/g, " infinity "],
   [/×/g, " times "],
+  [/°C/g, " degrees Celsius"],
+  [/°F/g, " degrees Fahrenheit"],
+  [/°/g, " degrees"],
+  [/[µμ]/g, "micro"],
+  // "~~struck out~~" is emphasis the engine would read as "approximately".
+  [/~~([^~]+)~~/g, "$1"],
+  [/~(\d)/g, "approximately $1"],
   [/&/g, " and "],
   [/%/g, " percent"],
 ];
@@ -104,7 +236,9 @@ function speakableIdentifiers(text: string): string {
 export function markdownToSpeech(md: string): string {
   let out = md;
   for (const [pattern, replacement] of SPEECH_SUBSTITUTIONS) {
-    out = out.replace(pattern, replacement);
+    // Split rather than passing the union to `replace`, whose two overloads do
+    // not accept one.
+    out = typeof replacement === "function" ? out.replace(pattern, replacement) : out.replace(pattern, replacement);
   }
   // Fenced code (``` and ~~~), including unterminated fences while streaming.
   out = out.replace(/```[\s\S]*?(?:```|$)/g, " ");
@@ -205,6 +339,42 @@ export function splitSentences(text: string, maxChars = MAX_SENTENCE_CHARS): Spe
   return chunks.filter((c) => c.text.length > 0);
 }
 
+/** Merge sentences back into as few chunks as the budget allows.
+ *
+ *  This is the GPU path's whole reason for existing: a GPU call is a child
+ *  process, so it pays ~4.5s of startup before it voices anything, and a call
+ *  per sentence spends that on every couple of seconds of audio. `maxChars` is
+ *  a budget to FILL, not a limit to split at — splitting is `splitSentences`'
+ *  job, and doing only that is what left GPU reads stalling between sentences.
+ *
+ *  Paragraph boundaries are where the pause between paragraphs comes from, so
+ *  they survive grouping — unless the paragraph so far is still shorter than
+ *  `minChars`, in which case the next one joins it (a heading is not worth a
+ *  process start of its own). */
+export function groupSentences(
+  chunks: SpeechChunk[],
+  maxChars: number,
+  minChars = 0,
+  firstMaxChars = maxChars,
+): SpeechChunk[] {
+  const out: SpeechChunk[] = [];
+  let group: SpeechChunk | null = null;
+  for (const chunk of chunks) {
+    // The first call is the one being waited on, so it gets its own (smaller)
+    // budget; everything after it uses the full one.
+    const budget = out.length === 0 ? firstMaxChars : maxChars;
+    const startsParagraph = chunk.paragraphStart && (group?.text.length ?? 0) >= minChars;
+    if (group && !startsParagraph && group.text.length + 1 + chunk.text.length <= budget) {
+      group = { text: `${group.text} ${chunk.text}`, paragraphStart: group.paragraphStart };
+      continue;
+    }
+    if (group) out.push(group);
+    group = { ...chunk };
+  }
+  if (group) out.push(group);
+  return out;
+}
+
 /** Break a too-long sentence at its last clause boundary, falling back to a
  *  space and finally to a hard cut (a single unbroken run — a long token that
  *  survived cleanup). */
@@ -260,20 +430,38 @@ class TtsPlayer {
    *  changing the voice in Settings must not replay the previous voice. */
   private cachePrefix = "";
   private buffers = new Map<string, AudioBuffer>();
+  /** Audio seconds per decoded sentence, keyed like `buffers`. The lead rule
+   *  needs durations for sentences it has not started playing, and the decoded
+   *  buffer is the only place that knows them. */
+  private durations = new Map<string, number>();
+  /** Synthesis calls in flight, keyed like `buffers`. The lookahead rule below
+   *  awaits a chunk the prefetch already asked for, and the same chunk is
+   *  re-requested every time the queue runs dry — without this, each of those
+   *  was another engine call for text already being voiced, queued behind
+   *  everything else, which lengthened the stall it was meant to cover. */
+  private pending = new Map<string, Promise<AudioBuffer | null>>();
   private source: AudioBufferSourceNode | null = null;
   private index = 0;
   /** Resume point inside `sentences[index]`, in seconds. */
   private offset = 0;
   private startedAt = 0;
   private currentOffset = 0;
-  private pauseRequested = false;
   /** Set by next()/prev() while a sentence is playing; pump applies the jump
-   *  when that sentence reports back. */
+   *  when that sentence reports back. Also set between sentences, where the
+   *  pump picks it up before starting the one it was already loading. */
   private skipTarget: number | null = null;
+  /** Pause asked for while nothing was sounding (a lookahead wait or a
+   *  synthesis in flight): the pump stops before starting the next sentence
+   *  instead of the click being dropped. */
+  private pausePending = false;
+  /** Settles the in-flight sentence's promise when `stopSource` cuts it short
+   *  (see there for why the `onended` path cannot). */
+  private settle: ((result: SentenceResult) => void) | null = null;
   private voice: string | null = null;
   private speed = 1;
   private device: string | null = null;
-  private ahead = 4;
+  /** Synthesis requests in flight (see topUp). */
+  private inflight = 0;
   /** Invalidates in-flight work after stop()/replay — every async step checks
    *  it before touching the audio graph or the store. */
   private token = 0;
@@ -282,18 +470,26 @@ class TtsPlayer {
   async play({ key, label, text }: PlayTextOptions): Promise<void> {
     const my = (this.token += 1);
     this.skipTarget = null;
-    this.pauseRequested = false;
-    this.stopSource();
+    this.pausePending = false;
+    this.inflight = 0; // a new read starts a fresh pipeline
+    this.stopSource("stopped");
     const store = useTtsStore.getState();
     store.set({ key, label: label ?? null, error: null, phase: "loading", index: 0, total: 0 });
 
     const status = await this.resolveSettings();
     if (my !== this.token) return;
     if (!status) return;
-    const chunks = splitSentences(
+    const sentences = splitSentences(
       markdownToSpeech(text),
       this.device === "gpu" ? GPU_CHUNK_CHARS : CPU_CHUNK_CHARS,
     );
+    // CPU voices in-process, where a call costs nothing — sentence-sized chunks
+    // there keep skip/prev fine-grained. GPU pays a process per call, so it
+    // fills each call with as many sentences as the budget holds.
+    const chunks =
+      this.device === "gpu"
+        ? groupSentences(sentences, GPU_CHUNK_CHARS, GPU_MIN_GROUP_CHARS, GPU_WARMUP_CHARS)
+        : sentences;
     if (chunks.length === 0) {
       store.set({ phase: "idle", key: null, label: null, error: "Nothing to read here" });
       return;
@@ -331,21 +527,36 @@ class TtsPlayer {
   }
 
   pause(): void {
-    if (!this.source) return;
     const ctx = sharedAudioContext();
-    // Remember the resume point BEFORE stopping — `onended` fires async and
-    // `ctx.currentTime` has moved on by the time it would be read there.
+    if (!this.source) {
+      // Between sentences: the lead is being built, or the next sentence is
+      // still being voiced. Nothing is sounding, so the request has to be
+      // remembered for the pump rather than dropped — otherwise Pause looked
+      // dead for as long as the queue was being filled, which is most of a
+      // cold read's first minutes.
+      const phase = useTtsStore.getState().phase;
+      if (phase === "playing" || phase === "buffering") {
+        this.pausePending = true;
+        useTtsStore.getState().set({ phase: "paused" });
+      }
+      return;
+    }
+    // Remember the resume point BEFORE stopping: the source stops here, so
+    // this is the last moment `currentTime` still describes the audio position.
     if (ctx) this.offset = this.currentOffset + (ctx.currentTime - this.startedAt);
-    this.pauseRequested = true;
-    this.stopSource();
+    // Report the pause from here, not on the pump's next turn: the button must
+    // flip to Resume on the click, and resume() refuses while the store still
+    // says "playing".
+    useTtsStore.getState().set({ phase: "paused" });
+    this.stopSource("paused");
   }
 
   /** Stop and clear. The store returns to idle so the play button reverts. */
   stop(): void {
     this.token += 1;
     this.skipTarget = null;
-    this.pauseRequested = false;
-    this.stopSource();
+    this.pausePending = false;
+    this.stopSource("stopped");
     this.chunks = [];
     this.index = 0;
     this.offset = 0;
@@ -372,11 +583,14 @@ class TtsPlayer {
     const clamped = Math.max(0, Math.min(target, this.chunks.length - 1));
     this.offset = 0;
     const phase = useTtsStore.getState().phase;
-    if (phase === "playing") {
+    if (phase === "playing" || phase === "buffering") {
       // The running sentence is interrupted; pump sees `skipTarget` and lands on
-      // it instead of advancing.
+      // it instead of advancing. While buffering there is nothing sounding to
+      // stop — `playSentence` picks the target up before it starts the audio.
       this.skipTarget = clamped;
-      this.stopSource();
+      // "ended", not "stopped": the pump applies the jump on its continue
+      // path, so a "stopped" result here would swallow it.
+      this.stopSource("ended");
       return;
     }
     this.index = clamped;
@@ -412,7 +626,6 @@ class TtsPlayer {
     this.voice = status.voice ?? status.voices[0]?.name ?? null;
     this.speed = status.speed ?? 1;
     this.device = status.device;
-    this.ahead = prefetchAhead(status.device);
     // The device is part of the prefix because the two paths produce different
     // bytes for the same sentence — a cached CPU buffer must never be replayed
     // as if it came from the GPU (or vice versa).
@@ -420,16 +633,30 @@ class TtsPlayer {
     return status;
   }
 
-  private stopSource(): void {
+  /** Stop the running sentence and settle the promise `pump` is awaiting.
+   *
+   *  The `onended` handler is detached before the stop — a handler left on a
+   *  cancelled source would race the decision already taken here — so the
+   *  promise has to be resolved explicitly. Leaving it pending parked `pump`
+   *  at its `await` forever: pause never reached the store's "paused" phase
+   *  (so the bar kept offering Pause and a second click was a no-op), and
+   *  next/prev stopped the audio without ever advancing to the target. */
+  private stopSource(result: SentenceResult): void {
     const src = this.source;
     this.source = null;
-    if (!src) return;
-    src.onended = null;
-    try {
-      src.stop();
-    } catch {
-      /* never started, or already stopped */
+    const settle = this.settle;
+    if (src) {
+      src.onended = null;
+      try {
+        src.stop();
+      } catch {
+        /* never started, or already stopped */
+      }
     }
+    // `settle` clears the slot itself — that is how it claims the resolution.
+    // Clearing it here first made the claim fail, so the promise stayed
+    // pending and this whole fix did nothing.
+    settle?.(result);
   }
 
   private async pump(my: number, ctx: AudioContext): Promise<void> {
@@ -462,7 +689,10 @@ class TtsPlayer {
 
   private async playSentence(my: number, ctx: AudioContext): Promise<SentenceResult> {
     const index = this.index;
-    this.prefetch(ctx, index);
+    // The chunk about to be PLAYED is requested before the lookahead: the
+    // backend voices one chunk at a time behind a single engine lock, so
+    // issuing the prefetch first put the sentence the user is waiting for at
+    // the BACK of that queue — behind everything the lookahead asked for.
     const buffer = await this.bufferFor(ctx, index);
     if (my !== this.token) return "stopped";
     if (!buffer) {
@@ -471,24 +701,131 @@ class TtsPlayer {
       useTtsStore.getState().set({ error: "Could not synthesize part of this text" });
       return "ended";
     }
+    this.topUp(ctx, index);
+    await this.awaitLead(my, ctx, index, buffer);
+    if (my !== this.token) return "stopped";
+    // A next/prev/pause that arrived while this chunk was being fetched or
+    // waited on: report it instead of starting audio the user has moved past.
+    // "ended" hands the skip to the pump, which is the only place that applies
+    // it; pausePending is consumed here because the pump would re-enter with it.
+    if (this.skipTarget != null) return "ended";
+    if (this.pausePending) {
+      this.pausePending = false;
+      return "paused";
+    }
     useTtsStore.getState().set({ phase: "playing", index: index + 1, error: null });
     return this.startSource(ctx, buffer, this.offset);
   }
 
-  private prefetch(ctx: AudioContext, index: number): void {
-    for (let n = index + 1; n <= index + this.ahead && n < this.chunks.length; n += 1) {
-      void this.bufferFor(ctx, n);
+  /** Seconds of decoded audio from `index` on: the contiguous run of buffered
+   *  sentences starting at the playhead. Contiguous is the whole point — a
+   *  sentence already voiced five chunks ahead is no use to playback arriving
+   *  at a hole now. */
+  private leadSecs(index: number, current: AudioBuffer): number {
+    let secs = Math.max(current.duration - this.offset, 0);
+    for (let j = index + 1; j < this.chunks.length; j += 1) {
+      const text = this.chunks[j]?.text;
+      const buffered = text ? this.durations.get(`${this.cachePrefix}|${text}`) : undefined;
+      if (buffered == null) break;
+      secs += buffered;
+    }
+    return secs;
+  }
+
+  /** Build the queue before a sentence starts, one sentence at a time so the
+   *  first word arrives as soon as the lead is met rather than after the whole
+   *  text is voiced. A replay is served from the engine's cache, so this costs
+   *  a few IPC hops and nothing else — which is why the first read of a text is
+   *  the one the lead exists for. */
+  private async awaitLead(my: number, ctx: AudioContext, index: number, buffer: AudioBuffer): Promise<void> {
+    const target = index === 0 ? LEAD_SECS : LEAD_FLOOR_SECS;
+    let lead = this.leadSecs(index, buffer);
+    if (lead >= target) return;
+    // A wait the listener can see coming: the bar reports `buffering` rather
+    // than pretending a silent read is a playing one.
+    useTtsStore.getState().set({ phase: "buffering" });
+    for (let j = index + 1; j < this.chunks.length && lead < target; j += 1) {
+      // Superseded (a replay, a stop): stop asking for sentences of a read
+      // nobody is listening to — the engine is serial, so those requests would
+      // sit in front of the new read's first word.
+      if (my !== this.token) return;
+      const next = await this.bufferFor(ctx, j);
+      // A sentence that failed to voice is the pump's to report; waiting on it
+      // here would hold the whole read hostage to one bad chunk.
+      if (!next) return;
+      lead += next.duration;
+    }
+  }
+
+  /** Keep the engine working on what comes AFTER the playhead — all the way to
+   *  the end of the text, one call at a time.
+   *
+   *  A cap here is what broke GPU reads: the queue was filled to "a couple of
+   *  paragraphs ahead" and then left alone, which on an engine whose chunk IS a
+   *  paragraph meant the target was met by the chunk already playing, the next
+   *  one was never requested, and the engine idled through the whole paragraph.
+   *  Playback then hit the boundary, the call started from cold, and the read
+   *  waited. There is no useful stopping point: whatever is left unvoiced is
+   *  audio the reader may reach, so the walk runs to the end and the cached
+   *  chunks make every later read of the same text instant. */
+  private topUp(ctx: AudioContext, index: number): void {
+    const my = this.token;
+    for (let j = index + 1; j < this.chunks.length; j += 1) {
+      if (this.inflight >= MAX_INFLIGHT) return;
+      const text = this.chunks[j]?.text;
+      if (!text) return;
+      const key = `${this.cachePrefix}|${text}`;
+      // Voiced already, or being voiced right now — either way this walk is not
+      // the thing that will make it ready, so it moves on.
+      if (this.buffers.has(key) || this.pending.has(key)) continue;
+      this.inflight += 1;
+      void this.bufferForText(ctx, text).finally(() => {
+        // A stalled request must not leave the counter stuck above zero: a new
+        // read resets it, and the decrement cannot go negative.
+        this.inflight = Math.max(0, this.inflight - 1);
+        // Only while the read is live: a paused or stopped read should not keep
+        // grinding through the rest of the artifact.
+        if (my !== this.token) return;
+        const phase = useTtsStore.getState().phase;
+        if (phase === "playing" || phase === "buffering") this.topUp(ctx, this.index);
+      });
     }
   }
 
   /** Decoded audio for one sentence — from the in-memory cache, else the
-   *  backend (which has its own disk cache, so a replay is a fast IPC hop). */
-  private async bufferFor(ctx: AudioContext, index: number): Promise<AudioBuffer | null> {
-    const text = this.chunks[index]?.text;
-    if (!text) return null;
+   *  backend (which has its own disk cache, so a replay is a fast IPC hop).
+   *  Concurrent asks for the same sentence share one synthesis. */
+  private bufferFor(ctx: AudioContext, index: number): Promise<AudioBuffer | null> {
+    return this.bufferForText(ctx, this.chunks[index]?.text);
+  }
+
+  /** The same, keyed by the sentence itself — what the background pipeline holds
+   *  in flight, which knows the text but not where it sits in the queue. */
+  private bufferForText(ctx: AudioContext, text: string | undefined): Promise<AudioBuffer | null> {
+    if (!text) return Promise.resolve(null);
     const key = `${this.cachePrefix}|${text}`;
     const hit = this.buffers.get(key);
-    if (hit) return hit;
+    if (hit) return Promise.resolve(hit);
+    const inFlight = this.pending.get(key);
+    if (inFlight) return inFlight;
+    const job = this.fetchBuffer(ctx, key, text).finally(() => {
+      this.pending.delete(key);
+    });
+    this.pending.set(key, job);
+    // The lead rule reads durations by text, so record one as soon as a
+    // sentence is decoded — including for chunks the prefetch raced ahead on.
+    void job.then((decoded) => {
+      if (decoded) this.durations.set(key, decoded.duration);
+      return undefined;
+    });
+    return job;
+  }
+
+  private async fetchBuffer(
+    ctx: AudioContext,
+    key: string,
+    text: string,
+  ): Promise<AudioBuffer | null> {
     try {
       const audio = await ttsSpeak(text, this.voice, this.speed);
       if (!audio?.audioBase64) return null;
@@ -508,25 +845,35 @@ class TtsPlayer {
   private trimBuffers(): void {
     if (this.buffers.size <= 150) return;
     const keys = [...this.buffers.keys()];
-    for (const key of keys.slice(0, keys.length - 100)) this.buffers.delete(key);
+    for (const key of keys.slice(0, keys.length - 100)) {
+      this.buffers.delete(key);
+      this.durations.delete(key);
+    }
   }
 
-  /** Start one buffer and resolve when it finishes, pauses, or is stopped. */
+  /** Start one buffer and resolve when it finishes, pauses, or is stopped.
+   *
+   *  Exactly one of the two paths resolves: a natural end through `onended`, or
+   *  an interruption (pause / skip / stop / replay) through `stopSource`, which
+   *  claims `this.settle` first. Whoever claims it wins — that is what keeps an
+   *  `ended` event queued behind a pause from overwriting the pause. */
   private startSource(ctx: AudioContext, buffer: AudioBuffer, offset: number): Promise<SentenceResult> {
     return new Promise<SentenceResult>((resolve) => {
       const src = ctx.createBufferSource();
       src.buffer = buffer;
       src.connect(ctx.destination);
       const startAt = Math.min(Math.max(offset, 0), Math.max(buffer.duration - 0.02, 0));
+      const done = (result: SentenceResult) => {
+        if (this.settle !== done) return;
+        this.settle = null;
+        resolve(result);
+      };
       src.onended = () => {
         if (this.source === src) this.source = null;
-        // A `paused` resolution is driven by pauseRequested/stopSource; a stop()
-        // or replay already resolved this promise through its own path, and a
-        // second resolve is a no-op.
-        resolve(this.pauseRequested ? "paused" : "ended");
+        done("ended");
       };
+      this.settle = done;
       this.source = src;
-      this.pauseRequested = false;
       this.startedAt = ctx.currentTime;
       this.currentOffset = startAt;
       try {
@@ -534,7 +881,7 @@ class TtsPlayer {
       } catch (err) {
         console.warn("[relay] TTS playback failed", err);
         this.source = null;
-        resolve("ended");
+        done("ended");
       }
     });
   }

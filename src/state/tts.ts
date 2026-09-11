@@ -4,7 +4,11 @@
 // the one currently speaking (to render Stop instead of Play).
 import { create } from "zustand";
 
-export type TtsPhase = "idle" | "loading" | "playing" | "paused";
+/** `buffering` is a read parked on the voice engine *between* sentences, after
+ *  playback has started. Distinct from `loading` (nothing has played yet)
+ *  because the transport stays live, and distinct from `playing` because the
+ *  bar must not claim to be speaking through a silence it can explain. */
+export type TtsPhase = "idle" | "loading" | "buffering" | "playing" | "paused";
 
 export interface TtsPlaybackState {
   /** Identity of whatever is being read (`msg:<id>`, `artifact:<path>`, …).

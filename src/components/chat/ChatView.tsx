@@ -1205,6 +1205,9 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   });
   itemsRef.current = items;
   virtualizerRef.current = virtualizer;
+  // The scroll hook's follow/pin pass reads the virtualizer through this ref
+  // (assigned every render, so it is always populated before effects run) —
+  // do not make this assignment conditional, stick-to-bottom depends on it.
   virtualizerImplRef.current = virtualizer;
 
   // Structural changes to the timeline (proposal cards mounting or flipping

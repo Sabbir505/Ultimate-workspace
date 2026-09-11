@@ -2572,6 +2572,14 @@ location.reload();
         self.active.lock().as_ref().map(|(p, _)| p.to_string())
     }
 
+    /// Cheap liveness probe for the tool-schema gate: is a page open in the
+    /// built-in browser pane right now? (`ToolCaps.browser` — the interaction
+    /// tools are only advertised when there is something to act on, or once
+    /// the session has used the browser at all.)
+    pub fn has_active_page(&self) -> bool {
+        self.active.lock().is_some()
+    }
+
     /// Eval a JS action body (an IIFE-able block that `return`s a string) in the
     /// active page and await the string it reports back. Times out so a stuck
     /// or navigating page can't wedge the chat turn.

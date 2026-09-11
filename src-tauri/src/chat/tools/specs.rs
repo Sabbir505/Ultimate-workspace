@@ -62,24 +62,10 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         // In-process availability introspection — always on (read-only, no
         // gating). Replaces shell probes for connector/MCP availability.
         openai_fn(GET_CAPABILITIES, GET_CAPABILITIES_DESC, no_parameters()),
+        // browser_read is always advertised (with open_url it is the entry
+        // point to whatever page is open); the interaction tools need a live
+        // page and are gated on caps.browser below.
         openai_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
-        openai_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
-        openai_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
-        openai_fn(
-            BROWSER_SCROLL,
-            BROWSER_SCROLL_DESC,
-            browser_scroll_parameters(),
-        ),
-        // Screenshot was dispatchable but never advertised (schema drift —
-        // the model can't call what it can't see). No params: it shoots the
-        // pane's current page and returns the artifact path.
-        openai_fn(BROWSER_SCREENSHOT, BROWSER_SCREENSHOT_DESC, no_parameters()),
-        openai_fn(BROWSER_OBSERVE, BROWSER_OBSERVE_DESC, no_parameters()),
-        openai_fn(
-            BROWSER_EXTRACT,
-            BROWSER_EXTRACT_DESC,
-            browser_extract_parameters(),
-        ),
         // Research source ledger — always on (state tools, not gated by permission mode).
         openai_fn(
             ADD_SOURCE_NOTE,
@@ -127,21 +113,50 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         // below follow the mutating-tool gating (see tools/mod.rs family
         // block). Without them the model denies an app capability it has.
         openai_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
-        // Persistent memory (MEMORY_DESIGN_ARCHITECTURE.md §12.1) — always
-        // registered; dispatch returns a clear error when the feature is
-        // toggled off (same posture as list_automations).
-        openai_fn(MEMORY_SAVE, MEMORY_SAVE_DESC, memory_save_parameters()),
-        openai_fn(
-            MEMORY_RECALL,
-            MEMORY_RECALL_DESC,
-            memory_recall_parameters(),
-        ),
-        openai_fn(
-            MEMORY_FORGET,
-            MEMORY_FORGET_DESC,
-            memory_forget_parameters(),
-        ),
     ]);
+    // Browser interaction tools — advertised only when the built-in pane has
+    // a page (ToolCaps.browser is sticky per session, so a turn that opened
+    // a page mid-turn advertises these from the next round on — see the
+    // caps refresh in streaming.rs). Saves ~2.9k chars on turns that never
+    // touch the browser.
+    if caps.browser {
+        specs.extend(vec![
+            openai_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
+            openai_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
+            openai_fn(
+                BROWSER_SCROLL,
+                BROWSER_SCROLL_DESC,
+                browser_scroll_parameters(),
+            ),
+            // Screenshot: no params — it shoots the pane's current page and
+            // returns the artifact path.
+            openai_fn(BROWSER_SCREENSHOT, BROWSER_SCREENSHOT_DESC, no_parameters()),
+            openai_fn(BROWSER_OBSERVE, BROWSER_OBSERVE_DESC, no_parameters()),
+            openai_fn(
+                BROWSER_EXTRACT,
+                BROWSER_EXTRACT_DESC,
+                browser_extract_parameters(),
+            ),
+        ]);
+    }
+    // Persistent memory (MEMORY_DESIGN_ARCHITECTURE.md §12.1) — gated by the
+    // Settings toggle the way search_docs is gated by its sidecar; dispatch
+    // still returns a clear error as a backstop.
+    if caps.memory {
+        specs.extend(vec![
+            openai_fn(MEMORY_SAVE, MEMORY_SAVE_DESC, memory_save_parameters()),
+            openai_fn(
+                MEMORY_RECALL,
+                MEMORY_RECALL_DESC,
+                memory_recall_parameters(),
+            ),
+            openai_fn(
+                MEMORY_FORGET,
+                MEMORY_FORGET_DESC,
+                memory_forget_parameters(),
+            ),
+        ]);
+    }
     // TOTP 2FA codes — read-only (the seed stays in the keychain / password
     // manager; only the code is returned), always registered.
     specs.push(openai_fn(TOTP_CODE, TOTP_CODE_DESC, totp_code_parameters()));
@@ -347,22 +362,10 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         ),
         // In-process availability introspection (mirror of the OpenAI block).
         anthropic_fn(GET_CAPABILITIES, GET_CAPABILITIES_DESC, no_parameters()),
+        // browser_read is always advertised (with open_url it is the entry
+        // point to whatever page is open); the interaction tools need a live
+        // page and are gated on caps.browser below.
         anthropic_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
-        anthropic_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
-        anthropic_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
-        anthropic_fn(
-            BROWSER_SCROLL,
-            BROWSER_SCROLL_DESC,
-            browser_scroll_parameters(),
-        ),
-        // Mirror of the OpenAI block's screenshot fix (schema drift).
-        anthropic_fn(BROWSER_SCREENSHOT, BROWSER_SCREENSHOT_DESC, no_parameters()),
-        anthropic_fn(BROWSER_OBSERVE, BROWSER_OBSERVE_DESC, no_parameters()),
-        anthropic_fn(
-            BROWSER_EXTRACT,
-            BROWSER_EXTRACT_DESC,
-            browser_extract_parameters(),
-        ),
         // Research source ledger — always on (state tools, not gated by permission mode).
         anthropic_fn(
             ADD_SOURCE_NOTE,
@@ -406,21 +409,43 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         ),
         // Automations — read-only list always on (mirror of the OpenAI block).
         anthropic_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
-        // Persistent memory (MEMORY_DESIGN_ARCHITECTURE.md §12.1) — always
-        // registered; dispatch returns a clear error when the feature is
-        // toggled off (same posture as list_automations).
-        anthropic_fn(MEMORY_SAVE, MEMORY_SAVE_DESC, memory_save_parameters()),
-        anthropic_fn(
-            MEMORY_RECALL,
-            MEMORY_RECALL_DESC,
-            memory_recall_parameters(),
-        ),
-        anthropic_fn(
-            MEMORY_FORGET,
-            MEMORY_FORGET_DESC,
-            memory_forget_parameters(),
-        ),
     ]);
+    // Browser interaction tools — mirror of the OpenAI block's caps.browser
+    // gate (sticky per session; refreshed mid-turn by streaming.rs).
+    if caps.browser {
+        specs.extend(vec![
+            anthropic_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
+            anthropic_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
+            anthropic_fn(
+                BROWSER_SCROLL,
+                BROWSER_SCROLL_DESC,
+                browser_scroll_parameters(),
+            ),
+            anthropic_fn(BROWSER_SCREENSHOT, BROWSER_SCREENSHOT_DESC, no_parameters()),
+            anthropic_fn(BROWSER_OBSERVE, BROWSER_OBSERVE_DESC, no_parameters()),
+            anthropic_fn(
+                BROWSER_EXTRACT,
+                BROWSER_EXTRACT_DESC,
+                browser_extract_parameters(),
+            ),
+        ]);
+    }
+    // Persistent memory — mirror of the OpenAI block's caps.memory gate.
+    if caps.memory {
+        specs.extend(vec![
+            anthropic_fn(MEMORY_SAVE, MEMORY_SAVE_DESC, memory_save_parameters()),
+            anthropic_fn(
+                MEMORY_RECALL,
+                MEMORY_RECALL_DESC,
+                memory_recall_parameters(),
+            ),
+            anthropic_fn(
+                MEMORY_FORGET,
+                MEMORY_FORGET_DESC,
+                memory_forget_parameters(),
+            ),
+        ]);
+    }
     specs.push(anthropic_fn(
         TOTP_CODE,
         TOTP_CODE_DESC,
@@ -1596,8 +1621,10 @@ mod tests {
     /// (every turn, every tool round), so a single bloated spec taxes every
     /// turn forever. Run with `--nocapture` to see the distribution; the
     /// assertions keep any one spec — and the whole registry — from silently
-    /// re-bloating. The total budget was set after the token-diet pass
-    /// trimmed description/schema duplication (45.0k → 39.4k chars).
+    /// re-bloating. The budgets were set after the token-diet pass trimmed
+    /// description/schema duplication and gated the browser interaction tools
+    /// on `ToolCaps.browser` / memory on `ToolCaps.memory` (default surface
+    /// 45.0k → 36.5k chars; every-tool-on 39.4k).
     #[test]
     fn no_single_tool_spec_blows_its_budget() {
         let caps = ToolCaps::default();
@@ -1627,13 +1654,29 @@ mod tests {
                 "tool spec `{name}` bloated to {worst} chars — trim the description/schema or raise the budget deliberately"
             );
         }
-        // Whole-registry budget for the default hosted surface (web search on,
-        // no connectors/MCP, no local docs, no code exec). Tool specs are
-        // re-sent on every request and every tool round, so sum creep is a
-        // per-turn tax forever. HEADROOM ≈ 1.5% above the size at the diet pass.
+        // Whole-registry budgets. DEFAULT: the fresh-turn surface (web search
+        // + memory on; no live browser pane, no connectors/MCP, no local docs,
+        // no code exec). ALL-ON: same but with the browser interaction tools
+        // advertised. Tool specs are re-sent on every request and every tool
+        // round, so sum creep is a per-turn tax forever. HEADROOM ≈ 4% above
+        // the measured sizes at the diet pass — a deliberate bump needs a
+        // reason in the PR.
         assert!(
-            total < 40_000,
-            "tool specs total {total} chars (budget 40_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            total < 38_000,
+            "default tool specs total {total} chars (budget 38_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+        );
+        let all_on_caps = ToolCaps {
+            browser: true,
+            ..ToolCaps::default()
+        };
+        let all_on: usize = openai_tool_specs(&all_on_caps, permission::SandboxPolicy::WorkspaceWrite)
+            .iter()
+            .map(|s| serde_json::to_string(s).unwrap_or_default().len())
+            .sum();
+        println!("all-on specs JSON: {all_on} chars");
+        assert!(
+            all_on < 41_000,
+            "all-on tool specs total {all_on} chars (budget 41_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 
@@ -1748,8 +1791,12 @@ mod tests {
     fn browser_screenshot_advertised_in_both_wire_formats() {
         // Schema-drift regression: browser_screenshot was dispatchable in the
         // dispatcher but missing from BOTH spec builders, so the model was
-        // never told it exists. Both wire formats must advertise it.
-        let caps = ToolCaps::default();
+        // never told it exists. Both wire formats must advertise it when the
+        // browser gate is live.
+        let caps = ToolCaps {
+            browser: true,
+            ..ToolCaps::default()
+        };
         for (name, specs) in [
             (
                 "openai",
@@ -1767,6 +1814,48 @@ mod tests {
                     == Some(crate::chat::tools::BROWSER_SCREENSHOT)
             });
             assert!(found, "{name} tool specs must advertise browser_screenshot");
+        }
+    }
+
+    #[test]
+    fn browser_and_memory_tools_gated_by_caps_in_both_wire_formats() {
+        // The browser interaction tools ride caps.browser (default off: an
+        // idle session shouldn't pay ~2.9k chars for tools there's nothing to
+        // click on), while browser_read stays always-on as the entry point.
+        // The memory tools ride caps.memory (default on; the Settings toggle
+        // strips them like search_docs' sidecar gate does).
+        let default_caps = ToolCaps::default();
+        let mut no_memory = ToolCaps::default();
+        no_memory.memory = false;
+        let mut browser_on = ToolCaps::default();
+        browser_on.browser = true;
+        for (name, build) in [
+            ("openai", openai_tool_specs as fn(&ToolCaps, permission::SandboxPolicy) -> Vec<Value>),
+            ("anthropic", anthropic_tool_specs as fn(&ToolCaps, permission::SandboxPolicy) -> Vec<Value>),
+        ] {
+            let names = |caps: &ToolCaps| -> Vec<String> {
+                build(caps, permission::SandboxPolicy::WorkspaceWrite)
+                    .iter()
+                    .map(|s| {
+                        s["function"]["name"]
+                            .as_str()
+                            .or_else(|| s["name"].as_str())
+                            .unwrap_or("?")
+                            .to_string()
+                    })
+                    .collect()
+            };
+            let d = names(&default_caps);
+            assert!(!d.iter().any(|n| n == crate::chat::tools::BROWSER_CLICK),
+                "{name}: browser_click must be absent while no page is open");
+            assert!(d.iter().any(|n| n == crate::chat::tools::BROWSER_READ),
+                "{name}: browser_read must stay advertised (entry point)");
+            assert!(d.iter().any(|n| n == crate::chat::tools::MEMORY_RECALL),
+                "{name}: memory tools default to advertised (feature unset = on)");
+            assert!(!names(&no_memory).iter().any(|n| n == crate::chat::tools::MEMORY_RECALL),
+                "{name}: memory tools must be stripped when the feature is off");
+            assert!(names(&browser_on).iter().any(|n| n == crate::chat::tools::BROWSER_CLICK),
+                "{name}: browser_click must be advertised once the pane is live");
         }
     }
 }

@@ -321,6 +321,18 @@ pub struct ToolCaps {
     /// descriptions are hard-truncated (see specs.rs) so an attached source
     /// can't blow the window the attach-on-demand design just saved.
     pub local_model: bool,
+    /// Whether the persistent-memory feature is enabled (Settings → Memory;
+    /// `memory.enabled`, unset = on). False strips the memory tools from the
+    /// schema like `local_docs` does for search_docs; dispatch still returns
+    /// a clear error as a backstop.
+    pub memory: bool,
+    /// Whether the browser INTERACTION tools (click/type/scroll/screenshot/
+    /// observe/extract) are advertised this turn: true when a page is open
+    /// in the built-in browser pane, or sticky-true once the session has used
+    /// the browser at all (so open_url → click works within one turn — the
+    /// mid-round caps refresh in streaming.rs picks the flag up). When false
+    /// only `open_url` + `browser_read` are advertised.
+    pub browser: bool,
 }
 
 impl Default for ToolCaps {
@@ -340,6 +352,8 @@ impl Default for ToolCaps {
             attachable_connectors: std::sync::Arc::new(Vec::new()),
             attachable_mcp: std::sync::Arc::new(Vec::new()),
             local_model: false,
+            memory: true,
+            browser: false,
         }
     }
 }

@@ -3099,6 +3099,13 @@ pub(crate) async fn run_prompt_warmup(
         ),
         attachable_mcp: std::sync::Arc::new(avail_m.into_iter().map(|e| (e.id, e.name)).collect()),
         local_model: true,
+        // Mirror the send path's gates (chat/mod.rs) — the warmup prompt must
+        // stay byte-identical to the real send so the provider cache warms.
+        memory: crate::memory::memory_enabled_conn(&app.state::<crate::DbState>().0),
+        browser: chat_session_id
+            .map(|sid| app.state::<crate::ChatState>().0.browser_session_live(sid))
+            .unwrap_or(false)
+            || app.state::<crate::BrowserState>().0.has_active_page(),
     };
     let mut body = serde_json::json!({
         "model": model_id,
@@ -5474,6 +5481,9 @@ fn builtin_tool_specs_json(provider_id: &ChatProviderId, model: &str, code_exec:
         attachable_connectors: std::sync::Arc::new(Vec::new()),
         attachable_mcp: std::sync::Arc::new(Vec::new()),
         local_model: false,
+        // Mirror the fresh-turn gates: memory on, browser interaction tools off.
+        memory: true,
+        browser: false,
         fs_rules: Vec::new(),
     };
     serde_json::to_string(&crate::chat::tools::openai_tool_specs(
@@ -5757,6 +5767,9 @@ pub async fn count_context_tokens(
                             attachable_connectors: std::sync::Arc::new(Vec::new()),
                             attachable_mcp: std::sync::Arc::new(Vec::new()),
                             local_model: false,
+                            // Mirror the fresh-turn gates: memory on, browser interaction tools off.
+                            memory: true,
+                            browser: false,
                             fs_rules: Vec::new(),
                         },
                         crate::chat::permission::SandboxPolicy::WorkspaceWrite,
@@ -6042,6 +6055,9 @@ pub async fn count_context_breakdown(
                 attachable_connectors: std::sync::Arc::new(Vec::new()),
                 attachable_mcp: std::sync::Arc::new(Vec::new()),
                 local_model: false,
+                // Mirror the fresh-turn gates: memory on, browser interaction tools off.
+                memory: true,
+                browser: false,
                 fs_rules: Vec::new(),
             };
             let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(
@@ -6158,6 +6174,9 @@ pub async fn count_context_breakdown(
         attachable_connectors: std::sync::Arc::new(Vec::new()),
         attachable_mcp: std::sync::Arc::new(Vec::new()),
         local_model: false,
+        // Mirror the fresh-turn gates: memory on, browser interaction tools off.
+        memory: true,
+        browser: false,
         fs_rules: Vec::new(),
     };
     let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(

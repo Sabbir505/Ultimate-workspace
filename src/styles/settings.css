@@ -2712,3 +2712,80 @@
   padding: 16px 4px;
   font-size: 13px;
 }
+
+/* Second-level tabs inside a settings tab (STT vs TTS under "STT & TTS").
+   Visually subordinate to the outer .tab-bar: smaller, pill-shaped, and
+   sitting on the panel background rather than sharing its underline — so the
+   two levels never read as the same kind of choice. */
+.settings-subtabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  margin-bottom: 14px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.settings-subtab {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+.settings-subtab:hover {
+  color: var(--text);
+}
+.settings-subtab.active {
+  color: var(--text);
+  background: var(--surface-1, var(--surface-2));
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+/* Segmented choice row (reading-speed presets, and any small either/or pick).
+   These were plain `.ghost` buttons, where the selected one was visually
+   identical to the rest — you could not see which pace was in effect. The
+   active state mirrors the sub-tab treatment so "selected" reads the same way
+   everywhere in Settings. */
+.settings-choice-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.settings-choice {
+  padding: 5px 14px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), color 0.15s var(--ease);
+}
+.settings-choice:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.settings-choice.active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--accent-soft);
+  box-shadow: var(--glass-rim-soft);
+}
+
+/* Full-width variant of the glass dropdown: the voice list is long and the
+   trigger should span the settings column like every other control there. */
+.glass-select:has(> .tts-voice-trigger) {
+  width: 100%;
+}
+.glass-select-trigger.tts-voice-trigger {
+  width: 100%;
+  /* A touch taller than the default chip: this one shows a label plus a
+     language subtitle, and the default 5px padding crowds them. */
+  padding: 8px 11px 8px 12px;
+}

@@ -43,6 +43,9 @@ import { isInteractiveHtml } from "../../lib/interactiveHtml";
 import { linkCitations, parseChatSources } from "../../lib/chatCitations";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { startPointerDrag } from "../../lib/pointerDrag";
+import { SpeakerIcon, StopIcon } from "../../lib/icons";
+import { toggleReadAloud } from "../../lib/tts";
+import { useTtsStore } from "../../state/tts";
 import { MdLink } from "./MdLink";
 
 function formatSize(bytes: number): string {
@@ -855,6 +858,22 @@ export function ArtifactPreviewPaneInner({
       effectivePreview.text != null &&
       isInteractiveHtml(effectivePreview.text));
 
+  // Read-aloud applies only to artifacts that are actually text. Images, PDFs,
+  // diagrams and live HTML/JSX have nothing to say — offering the control there
+  // would just produce a "nothing to read" error.
+  const speakableText =
+    effectivePreview?.text != null &&
+    (effectivePreview.kind === "markdown" ||
+      effectivePreview.kind === "text" ||
+      effectivePreview.kind === "code" ||
+      effectivePreview.kind === "json" ||
+      effectivePreview.kind === "csv" ||
+      effectivePreview.kind === "office")
+      ? effectivePreview.text
+      : null;
+  const speakKey = `artifact:${artifact.path}`;
+  const speaking = useTtsStore((s) => s.key === speakKey && s.phase !== "idle");
+
   return (
     <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
       {resizer}
@@ -865,6 +884,23 @@ export function ArtifactPreviewPaneInner({
         <div className="artifact-preview-header">
           <div className="artifact-preview-header-actions">
             {pannable && <ZoomControls zoom={zoom} setZoom={setZoom} />}
+            {speakableText && (
+              <button
+                type="button"
+                className={`artifact-preview-header-btn${speaking ? " active" : ""}`}
+                title={speaking ? "Stop reading" : "Read aloud"}
+                aria-label={speaking ? "Stop reading aloud" : "Read aloud"}
+                onClick={() =>
+                  toggleReadAloud({
+                    key: speakKey,
+                    label: artifact.filename,
+                    text: speakableText,
+                  })
+                }
+              >
+                {speaking ? <StopIcon /> : <SpeakerIcon />}
+              </button>
+            )}
             {effectivePreview &&
             (effectivePreview.kind === "diagram" ||
               effectivePreview.kind === "html" ||

@@ -164,6 +164,10 @@ pub fn run() {
             // sidecar (Settings → Knowledge manages it; the composer mic uses
             // it for transcription).
             app.manage(commands::stt::SttState::default());
+            // Text-to-speech: Kokoro-82M runs in-process (no sidecar to reap) —
+            // the state holds the loaded ONNX session, dropped on model switch
+            // and on app exit.
+            app.manage(commands::tts::TtsState::default());
             app.manage(std::sync::Arc::new(docs_index::IndexRegistry::default()));
             // Git filesystem watcher — drives the `project:fs-changed` Tauri
             // event that replaces the 4-8s polling loops in
@@ -192,6 +196,9 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                     commands::stt::maybe_autostart(&app_handle, &db_state);
+                    // Read-aloud: load the voice model up front when the user
+                    // chose "keep loaded" (otherwise the first play pays for it).
+                    commands::tts::maybe_preload(&app_handle, &db_state);
                 });
             }
 
@@ -557,6 +564,22 @@ pub fn run() {
             commands::stt::stt_set_default,
             commands::stt::stt_set_auto_start,
             commands::stt::stt_set_server_path,
+            commands::stt::stt_set_device,
+            // Local text-to-speech (Kokoro-82M, in-process) — reads assistant
+            // answers and text artifacts aloud.
+            commands::tts::tts_status,
+            commands::tts::tts_speak,
+            commands::tts::tts_preload,
+            commands::tts::tts_unload,
+            commands::tts::tts_install_model,
+            commands::tts::tts_set_model,
+            commands::tts::tts_set_voice,
+            commands::tts::tts_set_speed,
+            commands::tts::tts_set_auto_read,
+            commands::tts::tts_set_device,
+            commands::tts::tts_set_keep_loaded,
+            commands::tts_gpu::tts_gpu_status,
+            commands::tts_gpu::tts_install_gpu,
             commands::worktree_cmds::ensure_chat_session_worktree,
             commands::worktree_cmds::set_chat_session_worktree,
             mcp_gallery::mcp_gallery_list,
@@ -649,6 +672,12 @@ pub fn run() {
                         eprintln!("[stt] sidecar kill timed out at exit; exiting anyway");
                     }
                 });
+            }
+            // Drop the Kokoro TTS engine. Nothing is orphaned (synthesis is
+            // in-process), but the ONNX session holds ~100 MB of weights plus
+            // its arena; releasing it makes a fast restart cheap.
+            if let Some(state) = handle.try_state::<commands::tts::TtsState>() {
+                commands::tts::unload(&state);
             }
             // Stop the mobile relay server.
             if let Some(state) = handle.try_state::<MobileRelayState>() {

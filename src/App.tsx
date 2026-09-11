@@ -30,6 +30,7 @@ import { AppLogo } from "./components/common/AppLogo";
 import { NotificationBell } from "./components/common/NotificationBell";
 import { ModelDownloadIndicator } from "./components/settings/ModelDownloadIndicator";
 import { ChatView } from "./components/chat/ChatView";
+import { TtsPlayerBar } from "./components/chat/TtsPlayerBar";
 import { ChatSelectionToolbar } from "./components/chat/ChatSelectionToolbar";
 // In-app JS document engine (generate_document language:"javascript"): must
 // be mounted wherever a chat can run, including the pop-out chat window.
@@ -44,6 +45,7 @@ import { useChatStore } from "./state/chat";
 import { GitToolsSidebar } from "./components/chat/GitToolsSidebar";
 const CommandPalette = lazy(() => import("./components/command-palette/CommandPalette").then((m) => ({ default: m.CommandPalette })));
 import { useChatEvents } from "./hooks/useChatEvents";
+import { useTtsAutoRead } from "./hooks/useTtsAutoRead";
 import { useAutomationEvents } from "./hooks/useAutomationEvents";
 import { useBudgetEvents } from "./hooks/useBudgetEvents";
 import { useMemoryEvents } from "./hooks/useMemoryEvents";
@@ -234,6 +236,9 @@ export default function App() {
   useKeybindings();
   usePtyEvents();
   useChatEvents();
+  // Mirrors the persisted read-aloud preference so a finishing turn can honour
+  // it without an IPC round-trip (see hooks/useTtsAutoRead).
+  useTtsAutoRead();
   useAutomationEvents();
   useBudgetEvents();
   useMemoryEvents();
@@ -501,6 +506,10 @@ export default function App() {
           <Suspense fallback={null}>
             <ToolPanel />
           </Suspense>
+          {/* Read-aloud transport. Mounted at the shell, not inside ChatView:
+              playback is global, so an artifact voiced from the tools pane must
+              keep its controls here. */}
+          <TtsPlayerBar />
         </div>
       ) : activeView === "automations" ? (
         <div className="grid-wrap chat-grid-wrap">
@@ -510,6 +519,7 @@ export default function App() {
           <Suspense fallback={null}>
             <ToolPanel />
           </Suspense>
+          <TtsPlayerBar />
         </div>
       ) : null}
       </div>

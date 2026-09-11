@@ -8,6 +8,8 @@ import {
   listAutomations,
   runAutomationNow,
   setAutomationEnabled,
+  stopAutomationRun,
+  toastError,
   updateAutomation,
   type Automation,
   type AutomationInput,
@@ -18,6 +20,8 @@ interface AutomationsState {
   automations: Automation[];
   /** id -> a run was just kicked off via run-now (button spinner). */
   runningNow: Record<string, boolean>;
+  /** id -> a stop was just requested (Stop button spinner). */
+  stoppingNow: Record<string, boolean>;
 
   load: () => Promise<void>;
   create: (input: AutomationInput) => Promise<Automation | null>;
@@ -25,12 +29,14 @@ interface AutomationsState {
   remove: (id: string) => Promise<void>;
   setEnabled: (id: string, enabled: boolean) => Promise<void>;
   runNow: (id: string) => Promise<void>;
+  stopRun: (id: string) => Promise<void>;
 }
 
 export const useAutomationsStore = create<AutomationsState>((set, get) => ({
   loaded: false,
   automations: [],
   runningNow: {},
+  stoppingNow: {},
 
   load: async () => {
     const automations = await listAutomations();
@@ -71,6 +77,31 @@ export const useAutomationsStore = create<AutomationsState>((set, get) => ({
         const runningNow = { ...s.runningNow };
         delete runningNow[id];
         return { runningNow };
+      });
+    }
+  },
+
+  stopRun: async (id) => {
+    set((s) => ({ stoppingNow: { ...s.stoppingNow, [id]: true } }));
+    try {
+      const stopped = await stopAutomationRun(id);
+      if (!stopped) {
+        // No run in flight in this process: it already ended, or it belongs
+        // to the run-while-closed Task Scheduler binary, which an in-app
+        // stop can't reach.
+        toastError(
+          "Couldn't stop the run",
+          "It isn't active in Relay — it may have just finished, or it's running outside the app (run while closed).",
+        );
+      }
+      // The kill path finalizes the row within moments; refresh so the
+      // stopped status lands without waiting for the 5 s poll.
+      setTimeout(() => void get().load().catch(() => {}), 800);
+    } finally {
+      set((s) => {
+        const stoppingNow = { ...s.stoppingNow };
+        delete stoppingNow[id];
+        return { stoppingNow };
       });
     }
   },

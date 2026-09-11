@@ -439,13 +439,25 @@
 .automations-btn.primary:hover:not(:disabled) {
   filter: brightness(1.1);
 }
-.automations-btn.outline {
+.automations-btn.secondary {
   background: transparent;
-  border-color: var(--border);
+  /* A whisper of a rim, derived from --text rather than --border: themes set
+     --border inline per palette and several run far too bright for a button
+     this size — the rim used to out-shout the label next to the filled
+     primary button (the same shout the banner action below fixes). ~16% of
+     --text matches the runs table's subtle white/20 border in dark and stays
+     visible-but-quiet in light. box-shadow off: the global button sheen read
+     as a second border line. NOTE: deliberately NOT named "outline" — that
+     collides with Tailwind's .outline utility (outline-style: solid), which
+     painted a 3px text-colored ring around every button using it. */
+  border-width: 1px;
+  border-color: color-mix(in srgb, var(--text) 16%, transparent);
+  box-shadow: none;
   color: var(--text);
 }
-.automations-btn.outline:hover:not(:disabled) {
+.automations-btn.secondary:hover:not(:disabled) {
   background: var(--bg-elevated);
+  border-color: color-mix(in srgb, var(--text) 30%, transparent);
 }
 .automations-btn.success {
   background: rgba(76, 175, 125, 0.15);

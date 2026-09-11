@@ -23,6 +23,11 @@ pub fn run_one_shot(
     // scheduled automations always pass a bound so a hung CLI can't wedge
     // the automation's overlap guards and silently kill its schedule.
     max_duration: Option<Duration>,
+    // Set from outside (the Automations view's Stop button, via
+    // automations::stop_run) to abort the turn: the process tree is killed
+    // and the turn returns `automations::STOPPED_ERROR`. `None` for callers
+    // with nothing to cancel it.
+    cancel: Option<&Arc<AtomicBool>>,
 ) -> Result<(), String> {
     {
         let conn = db.lock();
@@ -215,11 +220,18 @@ pub fn run_one_shot(
         "commandcode" => PerTurn::CommandCode,
         _ => PerTurn::Kimi,
     };
+    // The reader shares the caller's stop flag so a stopped run discards its
+    // partial reply and skips the terminal `chat:done` (same rule as a
+    // cancelled chat turn) instead of persisting a truncated log. Without a
+    // stop flag it gets a throwaway that is never set.
+    let reader_cancel = cancel
+        .map(Arc::clone)
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let reader = std::thread::spawn(move || {
-        // One-shot turns are never cancelled (they block the caller) and never
-        // resumed, so both cells are throwaway; the readers still persist any
-        // captured id, which is harmless (keyed by harness + chat id).
-        let never_cancelled = AtomicBool::new(false);
+        // One-shot turns are never resumed, so the session-id cell is a
+        // throwaway; the reader still persists any captured id, which is
+        // harmless (keyed by harness + chat id).
+        let cancelled_flag = reader_cancel.as_ref();
         // One-shot readers have no respawn race: the generation cell is a
         // throwaway that always "matches" (E-5 helper needs the params).
         let generation = AtomicU64::new(1);
@@ -233,7 +245,7 @@ pub fn run_one_shot(
                 stdout,
                 &in_flight2,
                 &cell,
-                &never_cancelled,
+                cancelled_flag,
                 dummy_stdin,
                 watches,
                 &generation,
@@ -249,7 +261,7 @@ pub fn run_one_shot(
                 &in_flight2,
                 &cell,
                 per_turn_kind,
-                &never_cancelled,
+                cancelled_flag,
                 watches,
                 &generation,
                 1,
@@ -269,6 +281,9 @@ pub fn run_one_shot(
     // restarted. On expiry we kill the process tree; the blocking wait then
     // unblocks, the reader hits EOF, and the caller finalizes with an error.
     let deadline = max_duration.map(|d| std::time::Instant::now() + d);
+    // Tracked separately from `wait`'s error: a stop is not a wait failure,
+    // so it must not be dressed up as one by the match below.
+    let mut stopped = false;
     let wait = loop {
         {
             let mut guard = match child.lock() {
@@ -284,6 +299,17 @@ pub fn run_one_shot(
                 Ok(Some(status)) => break Ok(status),
                 Ok(None) => {}
                 Err(e) => break Err(e),
+            }
+            // A stop pressed at any point in the run kills the tree here, on
+            // the same path as the time limit — the process tree is the only
+            // way to end an unattended CLI turn.
+            if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+                kill_child_tree(&mut guard);
+                stopped = true;
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    crate::automations::STOPPED_ERROR,
+                ));
             }
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 kill_child_tree(&mut guard);
@@ -301,6 +327,9 @@ pub fn run_one_shot(
     // drain, then surface its tail on every failure path.
     let stderr_tail = erx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
     let suffix = stderr_suffix(&stderr_tail);
+    if stopped {
+        return Err(crate::automations::STOPPED_ERROR.to_string());
+    }
     // M2: `one_shot_guard` unregisters on drop — this return included.
     match wait {
         Ok(status) if status.success() => Ok(()),

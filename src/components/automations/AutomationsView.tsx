@@ -20,6 +20,7 @@ import {
   Plus,
   Power,
   RefreshCw,
+  Square,
   Trash2,
   XCircle,
   Zap,
@@ -58,6 +59,7 @@ import {
   friendlyRunError,
   harnessNeedsInstall,
   isFailureStatus,
+  STOPPED_STATUS,
   type AutomationStateKey,
 } from "./shared";
 
@@ -163,6 +165,7 @@ function statusColor(status: string | null): string {
   if (status === "ok") return "var(--green, #4caf7d)";
   if (status === "skipped") return "var(--yellow, #f0ad4e)";
   if (status === "running") return "var(--blue, #2196f3)";
+  if (status === STOPPED_STATUS) return "var(--text-dim)";
   if (status) return "var(--red, #ff6b6b)";
   return "var(--text-dim)";
 }
@@ -171,6 +174,7 @@ function statusLabel(status: string | null): string {
   if (status === "ok") return "OK";
   if (status === "skipped") return "Skipped";
   if (status === "running") return "Running";
+  if (status === STOPPED_STATUS) return "Stopped";
   if (status) return "Error";
   return "—";
 }
@@ -555,7 +559,9 @@ function AutomationDetail({
   const remove = useAutomationsStore((s) => s.remove);
   const setEnabled = useAutomationsStore((s) => s.setEnabled);
   const runNow = useAutomationsStore((s) => s.runNow);
+  const stopRun = useAutomationsStore((s) => s.stopRun);
   const runningNow = useAutomationsStore((s) => s.runningNow);
+  const stoppingNow = useAutomationsStore((s) => s.stoppingNow);
   const setActiveView = useUiStore((s) => s.setActiveView);
   const selectSession = useChatStore((s) => s.selectSession);
   const loadSessions = useChatStore((s) => s.loadSessions);
@@ -629,6 +635,11 @@ function AutomationDetail({
     return n;
   }, [runs, automation.lastStatus]);
 
+  // A run is in flight when either signal says so: the automation-level
+  // lastStatus, or an actual runs row (either can lag the other by a poll).
+  const runInFlight =
+    automation.lastStatus === "running" || runs.some((r) => r.status === "running");
+
   const handleRunNow = useCallback(async () => {
     setRunError(null);
     try {
@@ -638,6 +649,16 @@ function AutomationDetail({
       setRunError(String(e));
     }
   }, [automation.id, runNow, refreshRuns]);
+
+  const handleStopRun = useCallback(async () => {
+    setRunError(null);
+    try {
+      await stopRun(automation.id);
+      window.setTimeout(() => void refreshRuns(), 500);
+    } catch (e) {
+      setRunError(String(e));
+    }
+  }, [automation.id, stopRun, refreshRuns]);
 
   const handleInstallHarness = useCallback(async () => {
     setRunError(null);
@@ -742,7 +763,7 @@ function AutomationDetail({
       <div className="automation-detail-controls">
         <button
           onClick={() => void handleToggleEnabled()}
-          className={`automations-btn ${automation.enabled ? "outline" : "success"}`}
+          className={`automations-btn ${automation.enabled ? "secondary" : "success"}`}
         >
           {automation.enabled ? (
             <><Pause size={13} strokeWidth={2} /> Pause</>
@@ -761,6 +782,20 @@ function AutomationDetail({
             <><Play size={13} strokeWidth={2} /> Run now</>
           )}
         </button>
+        {runInFlight && (
+          <button
+            onClick={() => void handleStopRun()}
+            disabled={stoppingNow[automation.id]}
+            className="automations-btn secondary danger"
+            title="Stop the in-flight run"
+          >
+            {stoppingNow[automation.id] ? (
+              <><Loader2 size={13} strokeWidth={2} className="animate-spin" /> Stopping…</>
+            ) : (
+              <><Square size={11} strokeWidth={2.5} fill="currentColor" /> Stop</>
+            )}
+          </button>
+        )}
         <button onClick={onEdit} className="automations-btn ghost" title="Edit">
           <Edit3 size={14} strokeWidth={1.8} />
         </button>
@@ -871,6 +906,8 @@ function AutomationDetail({
             runs={runs}
             loading={runsLoading}
             onOpenRunLog={handleOpenRunLog}
+            onStopRun={runInFlight ? () => void handleStopRun() : undefined}
+            stopping={!!stoppingNow[automation.id]}
           />
         </Suspense>
       </div>

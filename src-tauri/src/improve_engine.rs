@@ -81,7 +81,7 @@ pub fn run_artifact_turn(
             .id
     };
     let prompt = format!("{body}\n\n---\n\nUser request: {input}");
-    crate::chat::run_one_shot_chat(db, &session_id, &prompt, &provider, &model)?;
+    crate::chat::run_one_shot_chat(db, &session_id, &prompt, &provider, &model, None)?;
     let conn = db.lock();
     conn.query_row(
         "SELECT content FROM chat_messages

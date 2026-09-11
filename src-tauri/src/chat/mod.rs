@@ -41,6 +41,7 @@ pub mod totp;
 pub mod turn_perf;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -1797,6 +1798,10 @@ pub fn run_one_shot_chat(
     prompt: &str,
     provider_str: &str,
     model_str: &str,
+    // Set from outside (the Automations view's Stop button) to abandon the
+    // request mid-flight; the turn returns `automations::STOPPED_ERROR`.
+    // `None` for callers with nothing to cancel it.
+    cancel: Option<&AtomicBool>,
 ) -> Result<(), String> {
     let (api_key, base_url) = {
         let conn = db.lock();
@@ -1861,7 +1866,11 @@ pub fn run_one_shot_chat(
         .map_err(|e| format!("tokio runtime: {e}"))?;
 
     let started_at = crate::db::now_ts();
-    let (response_text, _usage) = rt.block_on(async {
+    // The turn is one blocking HTTP request on a current-thread runtime, so a
+    // stop can only be honoured by racing the request against the flag:
+    // `select!` drops the losing branch, aborting the request and closing the
+    // connection rather than letting it stream to completion first.
+    let call = async {
         match provider_str {
             "openai" | "openrouter" => {
                 let base = base_url.as_deref().unwrap_or(if provider_str == "openrouter" {
@@ -1897,7 +1906,17 @@ pub fn run_one_shot_chat(
             }
             other => Err(format!("unsupported provider for one-shot: {other}")),
         }
-    })?;
+    };
+    let outcome = match cancel {
+        Some(flag) => rt.block_on(async {
+            tokio::select! {
+                r = call => r,
+                _ = wait_for_stop(flag) => Err(crate::automations::STOPPED_ERROR.to_string()),
+            }
+        }),
+        None => rt.block_on(call),
+    };
+    let (response_text, _usage) = outcome?;
 
     // Persist the assistant response
     {
@@ -1929,6 +1948,15 @@ pub fn run_one_shot_chat(
         crate::db::touch_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Resolve once `flag` is set — the losing branch of the stop race in
+/// `run_one_shot_chat`. Polled rather than channel-driven because the flag is
+/// written by whoever owns the run, not by a task in this runtime.
+async fn wait_for_stop(flag: &AtomicBool) {
+    while !flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ import { relayNotify } from "../lib/notifyCenter";
 import { useEventSubscription } from "./useTauriEvent";
 import { useAutomationsStore } from "../state/automations";
 import { useChatStore } from "../state/chat";
+import { STOPPED_STATUS } from "../components/automations/shared";
 
 export function useAutomationEvents(): void {
   useEventSubscription<AutomationRunStartedPayload>(
@@ -46,12 +47,19 @@ export function useAutomationEvents(): void {
       void useChatStore.getState().endRemoteTurn(p.chatSessionId);
 
       // Toast policy: failures only — a healthy */15 cron toasting every
-      // success would be noise. "skipped" is informational, not a failure.
-      // Successes/skips still land in the bell panel (no toast, no chime).
-      if (p.status === "ok" || p.status === "skipped") {
+      // success would be noise. "skipped" is informational, not a failure,
+      // and neither is a run the user stopped themselves. Successes/skips/
+      // stops still land in the bell panel (no toast, no chime).
+      if (p.status === "ok" || p.status === "skipped" || p.status === STOPPED_STATUS) {
+        const title =
+          p.status === "skipped"
+            ? `Automation ${p.name} skipped`
+            : p.status === STOPPED_STATUS
+              ? `Automation ${p.name} stopped`
+              : `Automation ${p.name} finished`;
         relayNotify({
           kind: "automation",
-          title: `Automation ${p.name} ${p.status === "skipped" ? "skipped" : "finished"}`,
+          title,
           body: p.summary,
           view: "automations",
           chatSessionId: p.chatSessionId || undefined,

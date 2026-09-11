@@ -3,7 +3,7 @@
 // list as a floating glass popover. Keyboard-accessible (Enter/Space to open,
 // Arrow keys to move, Enter to pick, Esc to close) and closes on outside click
 // or blur. Used for the CLI harness chooser and the theme chooser.
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export interface SelectOption<T extends string> {
   value: T;
@@ -23,6 +23,12 @@ interface Props<T extends string> {
   className?: string;
   /** Width the popover should match: "trigger" (default) or "content". */
   matchWidth?: "trigger" | "content";
+  /** Per-row control rendered after the label (e.g. audition a voice). Its
+   *  clicks select nothing and leave the list open, so a row can be tried out
+   *  without committing to it. Keyboard navigation still belongs to the
+   *  trigger — the action is a pointer affordance, so it stays out of the tab
+   *  order and off the arrow-key path. */
+  optionAction?: (option: SelectOption<T>) => React.ReactNode;
 }
 
 export function GlassSelect<T extends string>({
@@ -32,6 +38,7 @@ export function GlassSelect<T extends string>({
   title,
   className,
   matchWidth = "trigger",
+  optionAction,
 }: Props<T>) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(() =>
@@ -144,15 +151,18 @@ export function GlassSelect<T extends string>({
           style={matchWidth === "trigger" ? { minWidth: "100%" } : undefined}
         >
           {options.map((o, i) => (
-            <button
+            // A div, not a button: a row can carry an action of its own (the
+            // voice audition), and a button inside a button is invalid HTML
+            // that browsers resolve by dropping the inner one.
+            <div
               key={o.value}
-              type="button"
               role="option"
               aria-selected={o.value === value}
-              disabled={o.disabled}
+              aria-disabled={o.disabled}
+              tabIndex={-1}
               className={`glass-select-option${o.value === value ? " selected" : ""}${
                 i === activeIndex ? " active" : ""
-              }`}
+              }${o.disabled ? " disabled" : ""}`}
               onPointerMove={() => setActiveIndex(i)}
               onClick={() => !o.disabled && choose(o.value)}
             >
@@ -161,7 +171,18 @@ export function GlassSelect<T extends string>({
                 {o.hint && <span className="glass-select-option-hint">{o.hint}</span>}
               </span>
               {o.value === value && <span className="glass-select-check" aria-hidden="true">✓</span>}
-            </button>
+              {optionAction && (
+                // Keeps the row's own action from selecting it (or closing the
+                // list): auditioning a voice is not choosing it.
+                <span
+                  className="glass-select-option-action"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  {optionAction(o)}
+                </span>
+              )}
+            </div>
           ))}
         </div>
       )}

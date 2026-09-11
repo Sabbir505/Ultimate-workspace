@@ -2789,3 +2789,43 @@
      language subtitle, and the default 5px padding crowds them. */
   padding: 8px 11px 8px 12px;
 }
+
+/* Voice audition, one per row of the voice dropdown. Kept as a flat icon
+   square rather than a chip: a raised button on every row of a 50-voice list
+   reads as noise. */
+.tts-voice-preview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Fixed square with the padding reset, for the reason every icon button
+     needs it: the base `button` rule pads 5px 11px, which leaves a 2px content
+     box and flattens the glyph to a smudge (see tokens.css). */
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.tts-voice-preview:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.tts-voice-preview:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/* Voicing a sample: the wait is short but real, and a spinner says "working"
+   where a greyed-out play glyph says "unavailable". Reuses the app's spinner
+   keyframes (pickers.css). */
+.tts-voice-preview-spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--text-dim);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: local-spin 0.7s linear infinite;
+}

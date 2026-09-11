@@ -80,6 +80,11 @@ pub(super) fn spawn_per_turn(
         None
     };
     let mut prompt_env: Option<(String, String)> = None;
+    // Harness effort tier (session's `effort_level`): applied per harness —
+    // env override for kimi (its config.toml is user-owned, never written),
+    // a CLI flag for the pi-lineage CLIs. Empty = "Default", nothing applied.
+    let effort = chat_effort_level(db, sid);
+    let mut harness_env: Vec<(String, String)> = Vec::new();
     // Set when turn_spec chose the stdin transport: the prompt is piped to
     // the child after spawn (pi-lineage print mode reads stdin).
     let mut stdin_payload: Option<String> = None;
@@ -104,6 +109,12 @@ pub(super) fn spawn_per_turn(
                 // Verified against `kimi --help` (v0.31): `-S, --session <id>`.
                 flags.push("--session".into());
                 flags.push(id.clone());
+            }
+            // Thinking effort rides the documented env override (the CLI
+            // forwards it on the request) — writing the user's config.toml
+            // would destroy their comments. Tiers: low | medium | high.
+            if !effort.is_empty() {
+                harness_env.push(("KIMI_MODEL_THINKING_EFFORT".into(), effort.clone()));
             }
             // Bundle args cover --mcp-config-file, --agent-file (fresh only),
             // and --add-dir. kimi_bundle_args skips --agent-file when resuming
@@ -230,6 +241,14 @@ End your reply with the plan and wait for the user's approval.]"
                 }
                 flags.push(id.clone());
             }
+            // Thinking level: both CLIs document the same vocabulary
+            // (off|minimal|low|medium|high|xhigh|max) — pi `--thinking <level>`,
+            // omp `--thinking=<level>` (sade accepts the space form, same as
+            // the --model flag above). Empty = "Default", no flag.
+            if !effort.is_empty() {
+                flags.push("--thinking".into());
+                flags.push(effort.clone());
+            }
             // Like Kimi, the pi-lineage CLIs reject a dedicated plan flag in
             // prompt mode — the read-only posture rides as a prompt directive.
             let turn_content = if chat_permission_mode_label(db, sid) == "plan" {
@@ -297,6 +316,11 @@ End your reply with the plan and wait for the user's approval.]"
     // The prompt travels in the process env block (never cmd-parsed) when the
     // Windows wrapper transport is active — see turn_spec.
     if let Some((k, v)) = &prompt_env {
+        cmd.env(k, v);
+    }
+    // Harness effort overrides (kimi's env knob; the pi-lineage tiers ride
+    // argv flags above).
+    for (k, v) in &harness_env {
         cmd.env(k, v);
     }
     // OpenCode only: point the CLI at the Relay-owned opencode.json that

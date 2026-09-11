@@ -7,6 +7,8 @@
 //! - Claude Code: `~/.claude/settings.json` — `model`, plus `env` overrides
 //!   (`ANTHROPIC_BASE_URL`, `ANTHROPIC_DEFAULT_<ALIAS>_MODEL(_NAME)`) used by
 //!   relay setups to remap the built-in aliases to custom upstream models.
+//!   The same env block carries the CLI's own effort level
+//!   (`CLAUDE_CODE_EFFORT_LEVEL`), read read-only for the picker.
 //! - Kimi CLI: `~/.kimi-code/config.toml` — `default_model`, `[providers.*]`
 //!   with `base_url`, `[models."<id>"]` entries with `display_name`.
 //! - OpenCode: `~/.config/opencode/opencode.json` — `model` ("provider/id"),
@@ -17,6 +19,8 @@
 
 use serde::Serialize;
 use serde_json::Value;
+
+use crate::agent_sessions::EFFORT_TIERS;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +33,23 @@ pub struct HarnessModelInfo {
     /// the CLI itself (e.g. `opencode models`: Zen + free registry models);
     /// "builtin" = CLI default.
     pub source: &'static str,
+    /// Thinking levels THIS model supports, as reported by the CLI
+    /// (omp's `models --json` dump). Empty = no per-model report; the picker
+    /// then falls back to the harness-wide `effort_options`. Ordered by
+    /// [`tier_rank`] so the slider reads weakest → strongest.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub thinking: Vec<String>,
+}
+
+impl HarnessModelInfo {
+    fn new(id: String, label: String, source: &'static str) -> Self {
+        Self {
+            id,
+            label,
+            source,
+            thinking: Vec::new(),
+        }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -39,6 +60,16 @@ pub struct HarnessModelConfig {
     /// Custom endpoint the CLI is pointed at (ANTHROPIC_BASE_URL / base_url /
     /// baseURL), shown in the dropdown so relay setups are visible.
     pub endpoint: Option<String>,
+    /// Reasoning-effort level the CLI will run with, READ-ONLY — surfaced in
+    /// the agent picker so the harness pane shows what turns will actually
+    /// use. Only some CLIs publish one (Claude Code via its settings' env
+    /// block); None just means "the CLI doesn't expose a level".
+    pub effort: Option<String>,
+    /// Effort/thinking tiers the CLI can be SPAWNED with (the session's
+    /// per-session tier is applied by agent_sessions at each spawn: claude
+    /// `--effort`, omp/pi `--thinking`, kimi env). Ordered weakest →
+    /// strongest; the picker prepends "Default". Empty = no knob.
+    pub effort_options: Vec<String>,
     pub models: Vec<HarnessModelInfo>,
 }
 
@@ -52,21 +83,71 @@ pub fn harness_model_config(harness_id: &str) -> HarnessModelConfig {
         "commandcode" => commandcode_config(),
         _ => HarnessModelConfig::default(),
     };
+    // Spawn-time effort tiers this CLI accepts (agent_sessions applies the
+    // session's pick). Empty = the harness exposes no knob and the picker
+    // keeps its pane slider-free.
+    cfg.effort_options = effort_options_for(harness_id)
+        .unwrap_or(&[])
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     // The default model always appears in the list, even if the config names
     // one we didn't otherwise discover.
     if let Some(def) = cfg.default_model.clone() {
         if !cfg.models.iter().any(|m| m.id == def) {
             cfg.models.insert(
                 0,
-                HarnessModelInfo {
-                    label: def.clone(),
-                    id: def,
-                    source: "config",
-                },
+                HarnessModelInfo::new(def.clone(), def, "config"),
             );
         }
     }
     cfg
+}
+
+/// Per-harness effort vocabulary, weakest → strongest — exactly what each CLI
+/// documents and what `agent_sessions` passes at spawn:
+/// - claude `--effort low|medium|high|xhigh|max` (native flag, verified
+///   against `claude --help`)
+/// - kimi `KIMI_MODEL_THINKING_EFFORT low|medium|high` — the CLI migrated
+///   "max" away (`migrations-effort.json: thinking-effort-max-to-high`), so
+///   "high" is its ceiling
+/// - omp/pi `--thinking off|minimal|low|medium|high|xhigh|max` (identical
+///   vocabularies, both documented in `--help`)
+fn effort_options_for(harness_id: &str) -> Option<&'static [&'static str]> {
+    match harness_id {
+        "claude_code" => Some(&["low", "medium", "high", "xhigh", "max"]),
+        "kimi_code" => Some(&["low", "medium", "high"]),
+        "omp" | "pi" => Some(&[
+            "off", "minimal", "low", "medium", "high", "xhigh", "max",
+        ]),
+        _ => None,
+    }
+}
+
+/// Canonical ordering position of a thinking tier (weakest → strongest).
+/// Unknown tiers sort last, preserving their relative order — a CLI adding a
+/// tier we don't know yet must still render, just at the end.
+fn tier_rank(tier: &str) -> usize {
+    EFFORT_TIERS
+        .iter()
+        .position(|t| *t == tier)
+        .unwrap_or(EFFORT_TIERS.len())
+}
+
+/// The union of every model's reported thinking tiers, deduped and ordered
+/// weakest → strongest — the slider offer when the session's exact model has
+/// no per-model report of its own.
+pub fn union_thinking_tiers(models: &[HarnessModelInfo]) -> Vec<String> {
+    let mut tiers: Vec<String> = Vec::new();
+    for m in models {
+        for t in &m.thinking {
+            if !tiers.iter().any(|x| x == t) {
+                tiers.push(t.clone());
+            }
+        }
+    }
+    tiers.sort_by_key(|t| tier_rank(t));
+    tiers
 }
 
 impl Default for HarnessModelConfig {
@@ -74,6 +155,8 @@ impl Default for HarnessModelConfig {
         Self {
             default_model: None,
             endpoint: None,
+            effort: None,
+            effort_options: vec![],
             models: vec![],
         }
     }
@@ -114,32 +197,45 @@ fn claude_config() -> HarnessModelConfig {
     let env = j.get("env").cloned().unwrap_or(Value::Null);
     let env_s = |k: &str| env.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
     cfg.endpoint = env_s("ANTHROPIC_BASE_URL");
+    cfg.effort = claude_effort_from_env(&env);
 
     for alias in ["fable", "opus", "sonnet", "haiku"] {
         let up = alias.to_uppercase();
         let mapped = env_s(&format!("ANTHROPIC_DEFAULT_{up}_MODEL"));
         let name = env_s(&format!("ANTHROPIC_DEFAULT_{up}_MODEL_NAME"));
         match (&mapped, &name) {
-            (Some(m), Some(n)) => cfg.models.push(HarnessModelInfo {
-                id: alias.to_string(),
-                label: remap_label(n, m),
-                source: "config",
-            }),
-            (Some(m), None) => cfg.models.push(HarnessModelInfo {
-                id: alias.to_string(),
-                label: m.clone(),
-                source: "config",
-            }),
+            (Some(m), Some(n)) => cfg.models.push(HarnessModelInfo::new(
+                alias.to_string(),
+                remap_label(n, m),
+                "config",
+            )),
+            (Some(m), None) => cfg.models.push(HarnessModelInfo::new(
+                alias.to_string(),
+                m.clone(),
+                "config",
+            )),
             // No remap: the alias is a CLI built-in pointing at Anthropic's
             // latest of that family.
-            _ => cfg.models.push(HarnessModelInfo {
-                id: alias.to_string(),
-                label: capitalize(alias),
-                source: "builtin",
-            }),
+            _ => cfg.models.push(HarnessModelInfo::new(
+                alias.to_string(),
+                capitalize(alias),
+                "builtin",
+            )),
         }
     }
     cfg
+}
+
+/// The CLI's configured effort level, read from its settings' `env` block.
+/// Kept stringly (the CLI owns the vocabulary — "max" is a real value here,
+/// which doesn't map onto the provider slider's low/medium/high tiers); the
+/// frontend shows it verbatim, read-only.
+fn claude_effort_from_env(env: &Value) -> Option<String> {
+    env.get("CLAUDE_CODE_EFFORT_LEVEL")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
 // ---------------------------------------------------------------- Kimi CLI
@@ -182,11 +278,7 @@ fn kimi_config() -> HarnessModelConfig {
                     .and_then(|p| p.as_str())
                     .and_then(base_url_of);
             }
-            cfg.models.push(HarnessModelInfo {
-                id: id.clone(),
-                label,
-                source: "config",
-            });
+            cfg.models.push(HarnessModelInfo::new(id.clone(), label, "config"));
         }
     }
     cfg
@@ -275,11 +367,11 @@ fn opencode_config() -> HarnessModelConfig {
                         .and_then(|n| n.as_str())
                         .unwrap_or(mid)
                         .to_string();
-                    cfg.models.push(HarnessModelInfo {
-                        id: format!("{pid}/{mid}"),
+                    cfg.models.push(HarnessModelInfo::new(
+                        format!("{pid}/{mid}"),
                         label,
-                        source: "config",
-                    });
+                        "config",
+                    ));
                 }
             }
         }
@@ -293,11 +385,11 @@ fn opencode_config() -> HarnessModelConfig {
         cfg.models.iter().map(|m| m.id.clone()).collect();
     for id in opencode_live_models() {
         if !known.contains(&id) {
-            cfg.models.push(HarnessModelInfo {
-                label: id.rsplit('/').next().unwrap_or(&id).to_string(),
-                id,
-                source: "cli",
-            });
+            cfg.models.push(HarnessModelInfo::new(
+                id.rsplit('/').next().unwrap_or(&id).to_string(),
+                id.clone(),
+                "cli",
+            ));
         }
     }
     cfg
@@ -362,11 +454,11 @@ fn pi_config() -> HarnessModelConfig {
                             .and_then(|n| n.as_str())
                             .unwrap_or(mid)
                             .to_string();
-                        cfg.models.push(HarnessModelInfo {
-                            id: format!("{pid}/{mid}"),
+                        cfg.models.push(HarnessModelInfo::new(
+                            format!("{pid}/{mid}"),
                             label,
-                            source: "config",
-                        });
+                            "config",
+                        ));
                     }
                 }
             }
@@ -380,11 +472,7 @@ fn pi_config() -> HarnessModelConfig {
     if let Some(out) = capture_cli_stdout("pi", &["--list-models"], 100) {
         for (id, label) in parse_pi_models_table(&out) {
             if !known.contains(&id) {
-                cfg.models.push(HarnessModelInfo {
-                    id,
-                    label,
-                    source: "cli",
-                });
+                cfg.models.push(HarnessModelInfo::new(id, label, "cli"));
             }
         }
     }
@@ -453,27 +541,27 @@ fn commandcode_config_from(out: &str) -> HarnessModelConfig {
         if label == "(default)" {
             // Empty description, only the marker — still list the model.
             cfg.default_model = Some(id.to_string());
-            cfg.models.push(HarnessModelInfo {
-                id: id.to_string(),
-                label: id.rsplit('/').next().unwrap_or(id).to_string(),
-                source: "cli",
-            });
+            cfg.models.push(HarnessModelInfo::new(
+                id.to_string(),
+                id.rsplit('/').next().unwrap_or(id).to_string(),
+                "cli",
+            ));
             continue;
         }
         if let Some(base) = label.strip_suffix(" (default)") {
             cfg.default_model = Some(id.to_string());
-            cfg.models.push(HarnessModelInfo {
-                id: id.to_string(),
-                label: base.trim().to_string(),
-                source: "cli",
-            });
+            cfg.models.push(HarnessModelInfo::new(
+                id.to_string(),
+                base.trim().to_string(),
+                "cli",
+            ));
             continue;
         }
-        cfg.models.push(HarnessModelInfo {
-            id: id.to_string(),
-            label: label.to_string(),
-            source: "cli",
-        });
+        cfg.models.push(HarnessModelInfo::new(
+            id.to_string(),
+            label.to_string(),
+            "cli",
+        ));
     }
     cfg
 }
@@ -481,7 +569,9 @@ fn commandcode_config_from(out: &str) -> HarnessModelConfig {
 /// Parse `omp models --json` into model rows. omp's own provider config is
 /// YAML (`~/.omp/agent/models.yml`), which we deliberately don't parse — the
 /// live dump already reflects it. Unparseable output yields an empty list
-/// rather than garbage rows.
+/// rather than garbage rows. Each model's reported `thinking` tier array
+/// rides along (ordered weakest → strongest) — the picker narrows its slider
+/// to the selected model's own offer when the dump provides one.
 fn parse_omp_models_json(out: &str) -> Vec<HarnessModelInfo> {
     let Ok(j) = serde_json::from_str::<serde_json::Value>(out) else {
         return Vec::new();
@@ -505,11 +595,16 @@ fn parse_omp_models_json(out: &str) -> Vec<HarnessModelInfo> {
                 .and_then(|n| n.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| id.rsplit('/').next().unwrap_or(&id).to_string());
-            Some(HarnessModelInfo {
-                id,
-                label,
-                source: "cli",
-            })
+            let mut info = HarnessModelInfo::new(id, label, "cli");
+            if let Some(tiers) = m.get("thinking").and_then(|t| t.as_array()) {
+                let mut names: Vec<String> = tiers
+                    .iter()
+                    .filter_map(|t| t.as_str().map(String::from))
+                    .collect();
+                names.sort_by_key(|t| tier_rank(t));
+                info.thinking = names;
+            }
+            Some(info)
         })
         .collect()
 }
@@ -639,6 +734,34 @@ mod tests {
     }
 
     #[test]
+    fn claude_effort_reads_the_settings_env_block() {
+        // Shape mirrors a real settings.json (this machine carries "max").
+        let env: Value = serde_json::from_str(
+            r#"{"ANTHROPIC_BASE_URL":"https://relay.example","CLAUDE_CODE_EFFORT_LEVEL":"max"}"#,
+        )
+        .unwrap();
+        assert_eq!(claude_effort_from_env(&env).as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn claude_effort_absent_or_blank_is_none() {
+        // No env block at all — the common case — must read as "no level",
+        // not an error.
+        assert_eq!(claude_effort_from_env(&Value::Null), None);
+        assert_eq!(claude_effort_from_env(&serde_json::json!({})), None);
+        // A blank string is as good as unset.
+        assert_eq!(
+            claude_effort_from_env(&serde_json::json!({"CLAUDE_CODE_EFFORT_LEVEL": "  "})),
+            None
+        );
+        // Non-string values are ignored rather than stringified.
+        assert_eq!(
+            claude_effort_from_env(&serde_json::json!({"CLAUDE_CODE_EFFORT_LEVEL": 3})),
+            None
+        );
+    }
+
+    #[test]
     fn parse_pi_models_table_real_listing() {
         // Captured verbatim from `pi --list-models` on a configured machine
         // (relay provider + three models).
@@ -670,13 +793,62 @@ mod tests {
     #[test]
     fn parse_omp_models_json_real_dump() {
         // Shape captured verbatim from `omp models --json` ( Bun 1.4 / omp 18).
-        let out = r#"{"models":[{"provider":"sharkai","id":"glm-5.2","selector":"sharkai/glm-5.2","name":"GLM 5.2","contextWindow":1048576,"maxTokens":131072,"reasoning":true,"thinking":["minimal","low"],"input":["text"],"cost":{"input":0.14,"output":0.28}}"#;
+        let out = r#"{"models":[{"provider":"sharkai","id":"glm-5.2","selector":"sharkai/glm-5.2","name":"GLM 5.2","contextWindow":1048576,"maxTokens":131072,"reasoning":true,"thinking":["max","low","minimal"],"input":["text"],"cost":{"input":0.14,"output":0.28}}"#;
         let out = format!("{out}]}}");
         let rows = parse_omp_models_json(&out);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "sharkai/glm-5.2");
         assert_eq!(rows[0].label, "GLM 5.2");
         assert_eq!(rows[0].source, "cli");
+        // The dump's per-model thinking tiers ride along, reordered weakest →
+        // strongest for the slider (the dump itself is unordered).
+        assert_eq!(rows[0].thinking, vec!["minimal", "low", "max"]);
+    }
+
+    #[test]
+    fn effort_options_follow_the_documented_cli_vocabularies() {
+        assert_eq!(
+            effort_options_for("claude_code"),
+            Some(&["low", "medium", "high", "xhigh", "max"][..])
+        );
+        // kimi retired "max" (migrations-effort.json: max-to-high) — "high"
+        // is its ceiling.
+        assert_eq!(
+            effort_options_for("kimi_code"),
+            Some(&["low", "medium", "high"][..])
+        );
+        // pi and omp document the identical --thinking vocabulary.
+        assert_eq!(effort_options_for("omp"), effort_options_for("pi"));
+        // No knob → no options → the picker keeps the pane slider-free.
+        assert_eq!(effort_options_for("opencode"), None);
+        assert_eq!(effort_options_for("commandcode"), None);
+        assert_eq!(effort_options_for("nonexistent"), None);
+    }
+
+    #[test]
+    fn union_thinking_tiers_dedupes_and_orders() {
+        let models = vec![
+            {
+                let mut m = HarnessModelInfo::new("a/x".into(), "X".into(), "cli");
+                m.thinking = vec!["high".into(), "minimal".into()];
+                m
+            },
+            {
+                let mut m = HarnessModelInfo::new("b/y".into(), "Y".into(), "cli");
+                m.thinking = vec!["off".into(), "high".into(), "unknown-tier".into()];
+                m
+            },
+            HarnessModelInfo::new("c/z".into(), "Z".into(), "cli"),
+        ];
+        assert_eq!(
+            union_thinking_tiers(&models),
+            vec![
+                "off".to_string(),
+                "minimal".to_string(),
+                "high".to_string(),
+                "unknown-tier".to_string(),
+            ]
+        );
     }
 
     #[test]

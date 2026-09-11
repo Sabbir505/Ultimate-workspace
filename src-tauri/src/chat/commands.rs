@@ -3503,6 +3503,28 @@ pub fn set_chat_session_permission_mode(
     Ok(())
 }
 
+/// Persist a HARNESS chat's reasoning-effort tier (the agent picker's harness
+/// slider). `""` = "Default" — no flag at spawn; the CLI's own configured
+/// effort stands. Applied per harness at spawn: claude `--effort`, omp/pi
+/// `--thinking`, kimi `KIMI_MODEL_THINKING_EFFORT`. Per-turn CLIs pick it up
+/// on the next send; claude respawns (send_claude_turn compares the spawned
+/// tier, same contract as the permission-mode label).
+#[tauri::command(async)]
+pub fn update_chat_session_effort(
+    chat_session_id: String,
+    effort: String,
+    db: State<'_, DbState>,
+) -> CmdResult<()> {
+    if !crate::agent_sessions::is_valid_effort(&effort) {
+        return Err(format!(
+            "unknown effort tier: {effort} (expected one of {:?} or \"\")",
+            crate::agent_sessions::EFFORT_TIERS
+        ));
+    }
+    db::update_chat_session_effort(&db.0.lock(), &chat_session_id, effort.trim())
+        .map_err(|e| e.to_string())
+}
+
 /// Answer a pending harness question. Two producers share this command:
 /// a Claude Code `AskUserQuestion` (can_use_tool control protocol — the
 /// answer resolves the oneshot the blocked reader thread awaits), and a

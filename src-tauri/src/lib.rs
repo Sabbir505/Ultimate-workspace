@@ -434,6 +434,7 @@ pub fn run() {
             commands::chat_cmds::set_chat_session_starred,
             commands::chat_cmds::set_chat_session_unread,
             commands::chat_cmds::update_chat_session_model,
+            commands::chat_cmds::update_chat_session_effort,
             commands::chat_cmds::update_chat_session_provider,
             commands::chat_cmds::update_chat_session_watch_mode,
             commands::chat_cmds::update_chat_session_policies,

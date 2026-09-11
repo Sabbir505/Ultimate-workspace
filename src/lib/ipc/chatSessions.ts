@@ -42,6 +42,11 @@ export interface ChatSession {
   /** Legacy per-session permission posture — superseded by the dual
    *  sandbox/approval policies below. Retained for backward compat. */
   permissionMode?: string;
+  /** Per-session reasoning-effort tier for HARNESS chats, applied at each
+   *  spawn (claude `--effort`, omp/pi `--thinking`, kimi env override).
+   *  Empty/null = "Default" — no flag, the CLI's own configured effort
+   *  stands. */
+  effortLevel?: string | null;
   /** Per-session sandbox scope: "read_only" | "workspace_write". Decides
    *  which tools are visible to the model. Defaults to "workspace_write". */
   sandboxPolicy?: string;
@@ -310,6 +315,11 @@ export const updateChatSessionAgent = (
   agent: string | null,
 ) =>
   safeInvoke<void>("update_chat_session_agent", { chatSessionId, agent });
+/** Persist a HARNESS chat's reasoning-effort tier ("" = "Default" — no spawn
+ *  flag; the CLI's own configured effort stands). Per-turn CLIs apply it on
+ *  the next send; claude respawns with the new `--effort` flag. */
+export const updateChatSessionEffort = (chatSessionId: string, effort: string) =>
+  safeInvoke<void>("update_chat_session_effort", { chatSessionId, effort });
 export const cancelChatMessage = (chatSessionId: string) =>
   safeInvoke<void>("cancel_chat_message", { chatSessionId });
 /** Resolve a pending per-action tool approval card. `approved` lets the paused

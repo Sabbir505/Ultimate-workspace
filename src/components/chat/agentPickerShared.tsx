@@ -58,10 +58,18 @@ export function fetchAgentStatuses(
  *  back and forth is instant, and a provider's list survives popup closes. */
 export interface PaneData {
   status: "loading" | "ready" | "error";
-  /** Rows in list order; label is what's rendered/searched. */
-  rows: { id: string; label: string }[];
+  /** Rows in list order; label is what's rendered/searched. `thinking` is
+   *  the model's own supported effort tiers (omp) — narrows the pane's
+   *  effort slider when present. */
+  rows: { id: string; label: string; thinking?: string[] }[];
   /** Custom endpoint footnote (harness config relay / provider base URL). */
   endpoint?: string | null;
+  /** Harness-derived reasoning effort (read-only — the CLI's own config owns
+   *  it; only Claude Code publishes one). Harness panes only. */
+  effort?: string | null;
+  /** Effort tiers the harness can be spawned with (weakest → strongest).
+   *  Empty/undefined = no knob — the pane stays slider-free. */
+  effortOptions?: string[];
   error?: string;
 }
 export const paneCache = new Map<string, PaneData>();

@@ -22,6 +22,10 @@ pub(super) fn send_claude_turn(
     // via set_permission_mode where the running CLI supports it; this is the
     // deterministic backstop for that best-effort path.)
     let current_mode = chat_permission_mode_label(db, sid);
+    // The session's effort tier rides the same contract: `--effort` is baked
+    // into the CLI invocation, so a changed tier must respawn exactly like a
+    // changed model or mode does — the long-lived process never re-reads it.
+    let current_effort = chat_effort_level(db, sid);
     // B-5: a CLI that died between turns leaves `child` Some holding a dead
     // pipe — its reader's RAII guard dropped `reader_alive`, so respawn on
     // that too instead of failing every later send with a broken-pipe error
@@ -30,6 +34,7 @@ pub(super) fn send_claude_turn(
         || !entry.reader_alive.load(Ordering::SeqCst)
         || entry.spawned_model.as_deref() != Some(entry.model.as_str())
         || entry.spawned_mode.as_deref() != Some(current_mode.as_str())
+        || entry.spawned_effort.as_deref() != Some(current_effort.as_str())
     {
         if let Some(mut old) = entry.child.take() {
             kill_child_tree(&mut old);
@@ -50,7 +55,7 @@ pub(super) fn send_claude_turn(
         // inherit the previous process's `true`.
         let cancelled = Arc::new(AtomicBool::new(false));
         entry.cancelled = Arc::clone(&cancelled);
-        let (child, spawned_mode) = spawn_claude(
+        let (child, spawned_mode, spawned_effort) = spawn_claude(
             app,
             db,
             sid,
@@ -67,6 +72,7 @@ pub(super) fn send_claude_turn(
         )?;
         entry.child = Some(child);
         entry.spawned_mode = Some(spawned_mode);
+        entry.spawned_effort = Some(spawned_effort);
         entry.spawned_model = Some(entry.model.clone());
     }
 

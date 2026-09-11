@@ -147,6 +147,8 @@ dom_smoothie = "0.18"
 
 [dev-dependencies]
 tempfile = "3"
+# mock_app()/MockRuntime for unit-testing emit-path fns without a window.
+tauri = { version = "2", features = ["test"] }
 # OS keychain for per-project secrets (PRD §7.16). Target-specific features:
 # every shipped platform (Windows, macOS via the default feature set, Linux
 # below) gets a native keyring backend; the XOR fallback in secrets.rs is

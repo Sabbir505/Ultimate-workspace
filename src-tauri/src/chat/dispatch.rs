@@ -34,7 +34,7 @@ use crate::types::{
 /// registered by the frontend's `chat_token_subscribe` IPC command. Falls
 /// back to `app.emit("chat:token", ...)` when no consumer is registered
 /// (tests, headless dev, transient drops).
-pub(crate) fn emit_token(app: &AppHandle, sid: &str, token: &str, full: &mut String) {
+pub(crate) fn emit_token<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, token: &str, full: &mut String) {
     emit_chunk(app, sid, token, full, true);
 }
 
@@ -43,11 +43,11 @@ pub(crate) fn emit_token(app: &AppHandle, sid: &str, token: &str, full: &mut Str
 /// NOT feed the perf accumulator — markers are UI scaffolding, not model
 /// tokens, so counting them inflated the live OUT/tok/s and could capture
 /// TTFT at a tool-card render instead of the model's first token.
-pub(crate) fn emit_marker(app: &AppHandle, sid: &str, token: &str, full: &mut String) {
+pub(crate) fn emit_marker<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, token: &str, full: &mut String) {
     emit_chunk(app, sid, token, full, false);
 }
 
-fn emit_chunk(app: &AppHandle, sid: &str, token: &str, full: &mut String, record: bool) {
+fn emit_chunk<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, token: &str, full: &mut String, record: bool) {
     if token.is_empty() {
         return;
     }

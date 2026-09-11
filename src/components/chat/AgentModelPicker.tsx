@@ -50,7 +50,6 @@ import {
 // Split-boundary re-exports: the effort label tables are public surface of
 // this module (moved to agentPickerShared with the footer parts).
 export { EFFORT_LABELS, HARNESS_EFFORT_LABELS } from "./agentPickerShared";
-import { EFFORT_LABELS, HARNESS_EFFORT_COLORS, HARNESS_EFFORT_LABELS } from "./agentPickerShared";
 import {
   ClaudeIcon,
   AnthropicIcon,

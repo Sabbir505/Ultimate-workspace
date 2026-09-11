@@ -137,8 +137,7 @@ export function highlight(text: string, res: FuzzyResult | null): JSX.Element {
 
 // ---- effort label tables (moved from AgentModelPicker) ---------------------
 
-/** Effort options in display order — High first, Default last (the footer
- *  renders Object.entries of this map top-to-bottom). */
+/** Reasoning-effort display labels, keyed by the wire value ("" = Default). */
 export const EFFORT_LABELS: Record<string, string> = {
   high: "High",
   low: "Low",

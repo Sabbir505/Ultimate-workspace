@@ -417,6 +417,7 @@ On first launch (and available anytime from Settings):
 1. Detect whether `claude` and `kimi` binaries are on `PATH`.
 2. For each detected binary, show install/auth status (installed & authenticated / installed & not authenticated / not installed), with a direct "Run login" button that spawns the harness's login flow in a temporary pane (`claude auth login`, or `kimi` then guiding the user to run `/login`).
 3. If neither harness is installed, show install instructions/links rather than blocking the rest of the app — the sidebar/project management should still be usable.
+4. **First-run welcome wizard:** a single skippable overlay on a true first launch, gated by the `onboarding.completed` KV (`src/state/onboarding.ts`). Profiles with existing projects or sessions auto-complete the flag on upgrade, so existing installs never see it. Steps: welcome + live theme choice → chat model (cloud API key — live-verified via `list_chat_models` for OpenRouter/compatible endpoints only — or a deep-link to the local Model Market) → agent-harness presence check with copyable install commands (non-blocking, per rule 3) → finish (add-project CTA + pointers to connectors/mobile). Leaving past the model step also writes `localModels.onboarded`, suppressing the standalone local-model nudge. Replayable via the command palette ("Replay Welcome Setup") or Settings → Data → "Replay welcome".
 
 ---
 

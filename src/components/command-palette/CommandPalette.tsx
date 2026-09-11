@@ -10,6 +10,7 @@ import { relativeTime } from "../../lib/relativeTime";
 import { sessionDisplayTitle } from "../../lib/sessionTitle";
 import { defaultHarness, newSessionFlow, openSession } from "../../lib/sessionLauncher";
 import { useChatStore } from "../../state/chat";
+import { openOnboarding } from "../../state/onboarding";
 import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
 import type { SessionRecord } from "../../types";
@@ -154,6 +155,15 @@ export function CommandPalette() {
         run: () => {
           close();
           ui.setActiveView("cost");
+        },
+      },
+      {
+        id: "action:replay-onboarding",
+        section: "Actions",
+        label: "Replay Welcome Setup",
+        run: () => {
+          close();
+          openOnboarding();
         },
       },
     ];

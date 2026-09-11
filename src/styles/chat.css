@@ -1695,7 +1695,11 @@ div[data-index]:has(.chat-session-row.menu-open) {
 
 /* Selection toolbar — floats above a text selection inside a chat message:
    Copy the raw text, or "Ask" to prefill the composer with the selection
-   quoted as a follow-up. Fixed positioning tracks the selection rect. */
+   quoted as a follow-up. Fixed positioning tracks the selection rect.
+   The entrance animation must NOT touch `transform` — the base transform
+   does the above-the-selection placement (translate(-50%, -100%-8px)), and
+   a keyframe that animates transform (like chat-bubble-in) would override
+   it for the animation's duration and drop the toolbar onto the text. */
 .chat-selection-toolbar {
   position: fixed;
   transform: translate(-50%, calc(-100% - 8px));
@@ -1708,7 +1712,11 @@ div[data-index]:has(.chat-session-row.menu-open) {
   border: 1px solid var(--tooltip-border, var(--border-strong));
   box-shadow: var(--glass-shadow);
   z-index: 60;
-  animation: chat-bubble-in 0.15s var(--ease);
+  animation: chat-selection-toolbar-in 0.15s var(--ease);
+}
+@keyframes chat-selection-toolbar-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 .chat-selection-btn {
   display: inline-flex;

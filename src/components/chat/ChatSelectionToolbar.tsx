@@ -8,6 +8,15 @@
 // serves every message on screen and any open markdown file. Selections
 // elsewhere (composer, terminal, browser pane) never summon it.
 //
+// Appear timing: the toolbar is evaluated ONLY when a selection gesture ends —
+// pointerup for mouse/touch selections, a short debounce for keyboard
+// selections (shift+arrows, Ctrl+A). selectionchange merely hides while the
+// drag is in flight, so the toolbar never chases the mouse mid-select.
+// Position: ALWAYS just above the selection's top edge, horizontally clamped
+// to the window. Chat text scrolls under the title bar, so a selection near
+// the window top has a small rect.top — the anchor clamps to keep the toolbar
+// on-screen rather than flipping below the text.
+//
 // NOTE: native browser webviews (browser panes) float above all DOM, so the
 // toolbar can overlay DOM content only — the same limitation every popover in
 // the app has.
@@ -39,6 +48,22 @@ function SendIcon() {
 const SELECTION_HOST_SELECTOR =
   ".chat-bubble-inner, .artifact-preview-md, .canvas-plan-body";
 
+// Geometry: the toolbar is ~30px tall with an 8px gap (see .chat-selection-
+// toolbar's translate). Half-width bounds the horizontal clamp (Copy | Ask
+// measures ~110px); MARGIN keeps it off the window edge.
+const TOOLBAR_H = 32;
+const TOOLBAR_GAP = 8;
+const TOOLBAR_HALF_W = 60;
+const EDGE_MARGIN = 6;
+/** Keyboard selections (no pointerup) show after this quiet period. */
+const KEYBOARD_SHOW_DELAY_MS = 250;
+
+interface ToolbarAnchor {
+  x: number;
+  y: number;
+  text: string;
+}
+
 /** Quote the selection as a markdown blockquote so the model sees it as cited
  *  context; the user types their question after it. */
 function quoteSelection(text: string): string {
@@ -49,8 +74,39 @@ function quoteSelection(text: string): string {
     .join("\n")}\n\n`;
 }
 
+/** Current selection as a toolbar anchor, or null when there is nothing to
+ *  summon the toolbar for (collapsed, whitespace, wrong surface, no box). */
+function computeAnchor(): ToolbarAnchor | null {
+  const s = window.getSelection();
+  if (!s || s.isCollapsed || s.rangeCount === 0) return null;
+  const text = s.toString();
+  if (!text.trim()) return null;
+  const anchor = s.anchorNode;
+  const el = anchor instanceof Element ? anchor : anchor?.parentElement ?? null;
+  // Only chat message bodies and markdown document surfaces summon the
+  // toolbar — not the composer, terminals, panes or inputs.
+  if (!el?.closest(SELECTION_HOST_SELECTOR)) return null;
+  const rect = s.getRangeAt(0).getBoundingClientRect();
+  if (!rect || (rect.width === 0 && rect.height === 0)) return null;
+  // The app supports root-level CSS zoom (app.zoom, Ctrl +/-). gBCR returns
+  // VISUAL pixels, but a position:fixed element's left/top resolve in the
+  // ZOOMED coordinate space — without dividing out the zoom the toolbar
+  // drifts down-right by (zoom-1)×position and lands on/below the text.
+  const zoom = Number(getComputedStyle(document.documentElement).zoom) || 1;
+  // Clamp in visual space (window.innerWidth is visual), then convert.
+  const xVisual = Math.min(
+    Math.max(rect.left + rect.width / 2, EDGE_MARGIN + TOOLBAR_HALF_W),
+    window.innerWidth - EDGE_MARGIN - TOOLBAR_HALF_W,
+  );
+  // Always above: the CSS translate(-50%, calc(-100% - 8px)) lifts the
+  // toolbar above this anchor. The floor keeps it on-screen when the
+  // selection sits under the title bar (scrolled-under text is selectable).
+  const yVisual = Math.max(rect.top, TOOLBAR_H + TOOLBAR_GAP + EDGE_MARGIN);
+  return { x: xVisual / zoom, y: yVisual / zoom, text };
+}
+
 export function ChatSelectionToolbar() {
-  const [sel, setSel] = useState<{ x: number; y: number; text: string } | null>(null);
+  const [sel, setSel] = useState<ToolbarAnchor | null>(null);
   const [copied, setCopied] = useState(false);
   const selRef = useRef<typeof sel>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -62,65 +118,113 @@ export function ChatSelectionToolbar() {
 
   useEffect(() => {
     let raf = 0;
-    const readSelection = () => {
-      raf = 0;
-      const s = window.getSelection();
-      if (!s || s.isCollapsed || s.rangeCount === 0) {
-        if (selRef.current) hide();
-        return;
+    let showTimer = 0;
+
+    const cancelPending = () => {
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
       }
-      const text = s.toString();
-      if (!text.trim()) {
-        if (selRef.current) hide();
-        return;
+      if (showTimer) {
+        window.clearTimeout(showTimer);
+        showTimer = 0;
       }
-      const anchor = s.anchorNode;
-      const el = anchor instanceof Element ? anchor : anchor?.parentElement ?? null;
-      // Only chat message bodies and markdown document surfaces summon the
-      // toolbar — not the composer, terminals, panes or inputs.
-      if (!el?.closest(SELECTION_HOST_SELECTOR)) {
-        if (selRef.current) hide();
-        return;
-      }
-      const rect = s.getRangeAt(0).getBoundingClientRect();
-      if (!rect || (rect.width === 0 && rect.height === 0)) {
-        if (selRef.current) hide();
-        return;
-      }
-      const next = { x: rect.left + rect.width / 2, y: rect.top, text };
-      selRef.current = next;
-      setCopied(false);
-      setSel(next);
     };
-    // selectionchange fires per keystroke of a drag; one rAF coalesces it.
+
+    const evaluate = () => {
+      const next = computeAnchor();
+      selRef.current = next;
+      if (next) {
+        setCopied(false);
+        setSel(next);
+      } else {
+        hide();
+      }
+    };
+
+    // selectionchange fires per keystroke of a drag: hide a visible toolbar
+    // immediately, and for still-valid selections only re-arm the debounce —
+    // keyboard selections (shift+arrows, Ctrl+A) have no pointerup, so the
+    // quiet-period timer is what summons the toolbar for them. A re-report
+    // of the SAME selection (Chromium can fire a trailing selectionchange
+    // right after pointerup) keeps the shown toolbar instead of hiding and
+    // re-showing it 250ms later.
     const onSelChange = () => {
       if (raf) cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(readSelection);
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const next = computeAnchor();
+        if (!next) {
+          cancelPending();
+          hide();
+          return;
+        }
+        const cur = selRef.current;
+        if (
+          cur &&
+          cur.text === next.text &&
+          Math.abs(cur.x - next.x) < 2 &&
+          Math.abs(cur.y - next.y) < 2
+        ) {
+          return;
+        }
+        if (showTimer) {
+          window.clearTimeout(showTimer);
+          showTimer = 0;
+        }
+        if (cur) hide();
+        showTimer = window.setTimeout(() => {
+          showTimer = 0;
+          evaluate();
+        }, KEYBOARD_SHOW_DELAY_MS);
+      });
+    };
+    // End of a mouse/touch selection: show immediately (one rAF so the
+    // browser has settled the final range). Double- and triple-click land
+    // here too — their last pointerup is the completed gesture.
+    const onPointerUp = (e: PointerEvent) => {
+      if (toolbarRef.current?.contains(e.target as Node)) return;
+      cancelPending();
+      raf = requestAnimationFrame(evaluate);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && selRef.current) hide();
+      if (e.key === "Escape" && selRef.current) {
+        cancelPending();
+        hide();
+      }
     };
     // Any press outside the toolbar dismisses it. Popups (model/agent picker,
     // menus, modals) preventDefault their mousedown to keep focus, which also
     // keeps the DOM selection alive — so "selection still exists" used to
     // leave the toolbar floating next to an open picker. Capture phase: run
     // before the popup's own handler. A fresh drag-select elsewhere re-summons
-    // the toolbar via selectionchange; clicking Copy/Ask targets the toolbar
+    // the toolbar on its pointerup; clicking Copy/Ask targets the toolbar
     // and is excluded.
     const onPointerDown = (e: MouseEvent) => {
-      if (selRef.current && !toolbarRef.current?.contains(e.target as Node)) hide();
+      if (selRef.current && !toolbarRef.current?.contains(e.target as Node)) {
+        cancelPending();
+        hide();
+      }
     };
+    const onScroll = () => {
+      if (!selRef.current && !showTimer) return;
+      cancelPending();
+      hide();
+    };
+
     document.addEventListener("selectionchange", onSelChange);
+    document.addEventListener("pointerup", onPointerUp, true);
     document.addEventListener("pointerdown", onPointerDown, true);
-    window.addEventListener("scroll", hide, true); // any scroll dismisses
-    window.addEventListener("resize", hide);
+    window.addEventListener("scroll", onScroll, true); // any scroll dismisses
+    window.addEventListener("resize", onScroll);
     window.addEventListener("keydown", onKey);
     return () => {
-      if (raf) cancelAnimationFrame(raf);
+      cancelPending();
       document.removeEventListener("selectionchange", onSelChange);
+      document.removeEventListener("pointerup", onPointerUp, true);
       document.removeEventListener("pointerdown", onPointerDown, true);
-      window.removeEventListener("scroll", hide, true);
-      window.removeEventListener("resize", hide);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
       window.removeEventListener("keydown", onKey);
     };
   }, [hide]);

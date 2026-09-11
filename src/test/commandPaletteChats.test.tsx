@@ -115,10 +115,19 @@ describe("CommandPalette Chats (FTS) section", () => {
     const input = container.querySelector<HTMLInputElement>(".palette input")!;
     fireEvent.change(input, { target: { value: "relay" } });
 
+    // Wait for the CHAT hit specifically — action items (which fuzzy-match
+    // most queries, e.g. "Replay Welcome Setup" matches "relay") can render
+    // before the debounced FTS search resolves.
     await waitFor(() => {
-      expect(container.querySelector(".item")).not.toBeNull();
+      const chatItem = [...container.querySelectorAll(".item")].find((el) =>
+        el.textContent?.includes("Relay debugging"),
+      );
+      expect(chatItem).toBeDefined();
     });
-    fireEvent.click(container.querySelector(".item")!);
+    const chatItem = [...container.querySelectorAll(".item")].find((el) =>
+      el.textContent?.includes("Relay debugging"),
+    )!;
+    fireEvent.click(chatItem);
 
     expect(selectSession).toHaveBeenCalledWith("chat-9");
   });

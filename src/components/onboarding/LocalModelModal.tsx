@@ -6,8 +6,14 @@
 // overlay click) — and the first successful market download completing (see
 // ModelMarket's onDownloadComplete → runScan path) — persists via the
 // `localModels.onboarded` KV, so it shows at most once per install.
+//
+// Suppressed while the welcome wizard is open (or deciding): the wizard's
+// chat-model step covers the same choice, and finishing/skipping past it
+// writes this KV itself. The probe therefore waits for initOnboarding()
+// first, and the component hides on any wizard visibility change.
 import { useEffect, useState } from "react";
 import { getGpuVram, getSetting, scanLocalModels, setSetting, type GpuVramInfo } from "../../lib/ipc";
+import { initOnboarding, useOnboardingStore } from "../../state/onboarding";
 import { useUiStore } from "../../state/ui";
 import { Modal } from "../common/Modal";
 
@@ -20,10 +26,15 @@ function fmtGb(bytes: number | undefined | null): string | null {
 export function LocalModelModal() {
   const [state, setState] = useState<"pending" | "hidden" | "show">("pending");
   const [vram, setVram] = useState<GpuVramInfo | null>(null);
+  const wizardVisible = useOnboardingStore((s) => s.visible);
 
   useEffect(() => {
     let stale = false;
     void (async () => {
+      // The wizard's gate must resolve first — on a first run it wins and
+      // this modal stays hidden (the wizard's finish writes our KV itself).
+      await initOnboarding().catch(() => {});
+      if (useOnboardingStore.getState().visible) return;
       const [seen, models, gpu] = await Promise.all([
         getSetting("localModels.onboarded").catch(() => null),
         scanLocalModels().catch(() => null),
@@ -44,7 +55,9 @@ export function LocalModelModal() {
     };
   }, []);
 
-  if (state !== "show") return null;
+  // The wizard re-opening (replay) or its gate resolving visible wins over
+  // an already-decided "show".
+  if (wizardVisible || state !== "show") return null;
 
   const vramGb = fmtGb(vram?.totalVramBytes);
   const dismiss = () => {

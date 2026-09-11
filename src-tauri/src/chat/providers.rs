@@ -133,6 +133,16 @@ pub const REASONING_PREFIX: char = '\u{E000}';
 /// every Messages-API request (streaming, one-shot, metering, model listing).
 pub(crate) const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
+// ---- Default model ids ----------------------------------------------------
+// Single source for every "which model does this provider use by default"
+// answer: the provider impls below, ChatProviderId::default_model_id, and the
+// mobile relay's provider catalog all reference these.
+
+pub const ANTHROPIC_DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
+pub const OPENAI_DEFAULT_MODEL: &str = "gpt-4o";
+pub const OPENROUTER_DEFAULT_MODEL: &str = "openai/gpt-4o";
+pub const LOCAL_GGUF_DEFAULT_MODEL: &str = "local";
+
 // ---- Provider trait ----
 
 #[async_trait::async_trait]
@@ -459,7 +469,7 @@ impl ChatProvider for AnthropicProvider {
     }
 
     fn default_model(&self) -> &'static str {
-        "claude-sonnet-4-5-20250929"
+        ANTHROPIC_DEFAULT_MODEL
     }
 
     fn build_request(
@@ -648,7 +658,7 @@ impl ChatProvider for OpenAIProvider {
     }
 
     fn default_model(&self) -> &'static str {
-        "gpt-4o"
+        OPENAI_DEFAULT_MODEL
     }
 
     fn build_request(
@@ -809,7 +819,7 @@ impl ChatProvider for AnthropicCompatibleProvider {
     }
 
     fn default_model(&self) -> &'static str {
-        "claude-sonnet-4-5-20250929"
+        ANTHROPIC_DEFAULT_MODEL
     }
 
     fn build_request(
@@ -847,7 +857,7 @@ impl ChatProvider for OpenAICompatibleProvider {
     }
 
     fn default_model(&self) -> &'static str {
-        "gpt-4o"
+        OPENAI_DEFAULT_MODEL
     }
 
     fn build_request(
@@ -899,7 +909,7 @@ impl ChatProvider for OpenRouterProvider {
     }
 
     fn default_model(&self) -> &'static str {
-        "openai/gpt-4o"
+        OPENROUTER_DEFAULT_MODEL
     }
 
     fn build_request(
@@ -950,7 +960,7 @@ impl ChatProvider for LocalGgufProvider {
     }
 
     fn default_model(&self) -> &'static str {
-        "local"
+        LOCAL_GGUF_DEFAULT_MODEL
     }
 
     fn build_request(

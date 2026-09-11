@@ -2365,12 +2365,26 @@ pub async fn build_available_providers(
     // Native providers (anthropic, openai) don't expose /v1/models — only
     // compatible providers and OpenRouter do. For native providers, we use
     // the default model name as a fallback.
+    // Defaults the desktop providers own are referenced from providers.rs so
+    // the two catalogs can't drift; deepseek/kimi are mobile-only additions.
     let api_providers: &[(&str, &str, &[&str])] = &[
-        ("anthropic", "Anthropic", &["claude-sonnet-4-5-20250929"]),
-        ("openai", "OpenAI", &["gpt-4o"]),
+        (
+            "anthropic",
+            "Anthropic",
+            &[crate::chat::providers::ANTHROPIC_DEFAULT_MODEL],
+        ),
+        (
+            "openai",
+            "OpenAI",
+            &[crate::chat::providers::OPENAI_DEFAULT_MODEL],
+        ),
         ("deepseek", "DeepSeek", &["deepseek-chat"]),
         ("kimi", "Kimi", &["kimi-k2-5"]),
-        ("openrouter", "OpenRouter", &["openai/gpt-4o"]),
+        (
+            "openrouter",
+            "OpenRouter",
+            &[crate::chat::providers::OPENROUTER_DEFAULT_MODEL],
+        ),
         ("anthropic_compatible", "Anthropic Compatible", &[]),
         ("openai_compatible", "OpenAI Compatible", &[]),
     ];

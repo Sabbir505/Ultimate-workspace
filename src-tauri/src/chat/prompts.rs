@@ -170,11 +170,11 @@ pub(crate) fn core_prompt_base() -> String {
      for large, ambiguous, or hard-to-reverse tasks prefer `enter_plan_mode` first, then \
      `present_plan` — the user's approval unlocks changes.\n\n\
      ## In-app browser pane\n\
-     Drive the embedded browser (`open_url` + `browser_*` tools) as an observe→act loop: \
-     open the page, `browser_read` to get numbered element refs, act by ref \
-     (`browser_click`/`browser_type`), then `browser_read` again — refs expire when the \
-     page changes, so always re-read after a click or navigation. Triage with mode \
-     \"summary_only\" before committing to full reads. A \
+     Drive the embedded browser (`open_url` + `browser_read`) as an observe→act loop: \
+     open the page, `browser_read` to get numbered element refs, act by ref with the \
+     browser interaction tools in your tool list, then `browser_read` again — refs \
+     expire when the page changes, so always re-read after a click or navigation. \
+     Triage with mode \"summary_only\" before committing to full reads. A \
      failureReason (paywalled/login_required/blocked) means unreadable — report it, don't \
      treat as empty. Prefer open_url + browser_read over fetch_url when the user should see \
      the page live. Preview a web app you built by opening its files directly: static apps \

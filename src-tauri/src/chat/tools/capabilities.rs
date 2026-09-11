@@ -105,7 +105,11 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
             "connect_on_demand": !caps.attachable_connectors.is_empty()
                 || !caps.attachable_mcp.is_empty(),
             "filesystem_tools": true,
-            "browser_pane_tools": true,
+            // Interaction tools (click/type/scroll/screenshot/observe/extract)
+            // need a live page or prior browser use this session; browser_read
+            // and open_url are always available.
+            "browser_pane_tools": caps.browser,
+            "memory": caps.memory,
             "automations": true,
             "subagents": true,
             "skills": "listed under '## Available skills' in the system prompt; get_skill(slug) loads one",

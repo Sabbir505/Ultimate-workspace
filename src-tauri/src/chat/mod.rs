@@ -40,7 +40,7 @@ pub mod tools;
 pub mod totp;
 pub mod turn_perf;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -163,6 +163,13 @@ pub struct ChatManager {
     /// let it keep spending provider tokens for up to SUBAGENT_MAX_ROUNDS
     /// more with no way to stop it. `cancel` aborts these too.
     child_tasks: Mutex<HashMap<String, Vec<tokio::task::AbortHandle>>>,
+    /// Sessions that have used the built-in browser (`open_url` or any
+    /// browser_* tool). Sticky for the session's lifetime: the browser
+    /// interaction tools (click/type/scroll/screenshot/observe/extract) are
+    /// schema-gated on `ToolCaps.browser`, and this flag flips it on from the
+    /// next round even when the pane was empty at turn start. Cleared on
+    /// session delete alongside the token cache.
+    browser_live: Mutex<HashSet<String>>,
 }
 
 /// Sources attached mid-turn by the `attach_connector` / `attach_mcp_server`
@@ -192,6 +199,7 @@ impl ChatManager {
             context_token_cache: Mutex::new(HashMap::new()),
             late_attach: Mutex::new(HashMap::new()),
             child_tasks: Mutex::new(HashMap::new()),
+            browser_live: Mutex::new(HashSet::new()),
         }
     }
 
@@ -246,6 +254,18 @@ impl ChatManager {
         self.late_attach.lock().remove(sid);
     }
 
+    /// Mark a session as having used the built-in browser (sticky — see the
+    /// `browser_live` field). Called from the tool dispatcher when open_url
+    /// or a browser_* tool runs.
+    pub(crate) fn mark_browser_live(&self, sid: &str) {
+        self.browser_live.lock().insert(sid.to_string());
+    }
+
+    /// Whether this session already used the built-in browser.
+    pub(crate) fn browser_session_live(&self, sid: &str) -> bool {
+        self.browser_live.lock().contains(sid)
+    }
+
     /// Look up a memoized token count for the given fingerprint.
     pub(crate) fn cached_context_tokens(
         &self,
@@ -280,6 +300,7 @@ impl ChatManager {
     /// Drop the memoized count for a session (called on session delete).
     pub(crate) fn invalidate_context_tokens(&self, chat_session_id: &str) {
         self.context_token_cache.lock().remove(chat_session_id);
+        self.browser_live.lock().remove(chat_session_id);
     }
 
     /// Register a pending approval and return its synthetic id + the receiver
@@ -511,6 +532,13 @@ impl ChatManager {
                 attachable_connectors: Arc::new(attachable_c),
                 attachable_mcp: Arc::new(attachable_m),
                 local_model,
+                // Memory feature toggle (Settings → Memory); unset = on.
+                memory: crate::memory::memory_enabled_conn(&app.state::<crate::DbState>().0),
+                // Browser interaction tools: sticky per session, or live
+                // right now when any pane has a page open (covers the user
+                // browsing manually before asking the model to act).
+                browser: self.browser_session_live(&sid)
+                    || app.state::<crate::BrowserState>().0.has_active_page(),
             }
         };
         // Fresh late-attach slot for this turn (replaces any stale one).

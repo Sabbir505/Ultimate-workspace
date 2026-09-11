@@ -998,6 +998,21 @@ fn fold_late_attaches(mgr: &Arc<ChatManager>, sid: &str, live_caps: &mut tools::
     changed
 }
 
+/// Sticky browser-flag drain: when `open_url` or a browser_* tool ran in an
+/// earlier round of THIS turn, the dispatcher marked the session
+/// browser-live (ChatManager::mark_browser_live). Flip `live_caps.browser`
+/// so the rebuilt specs advertise the browser interaction tools from the
+/// next round on. Returns true when flipped → the caller must rebuild its
+/// tool-spec array. Never flips back off mid-turn: the flag is sticky for
+/// the session, mirroring the attach-on-demand one-way contract.
+fn refresh_browser_caps(mgr: &Arc<ChatManager>, sid: &str, live_caps: &mut tools::ToolCaps) -> bool {
+    if live_caps.browser || !mgr.browser_session_live(sid) {
+        return false;
+    }
+    live_caps.browser = true;
+    true
+}
+
 /// Tool results from earlier rounds of the SAME turn are re-sent on every
 /// subsequent round, and a long agentic turn can therefore carry hundreds of
 /// KB of stale output (a single `browser_read`/`read_file` result is 32-50k
@@ -1518,7 +1533,9 @@ pub(crate) async fn run_openai_tool_loop(
             // Attach-on-demand drain: fold anything the attach meta-tools
             // registered into the live caps + specs so the NEXT round can
             // call the new tools.
-            if fold_late_attaches(mgr, sid, &mut live_caps) {
+            if fold_late_attaches(mgr, sid, &mut live_caps)
+                || refresh_browser_caps(mgr, sid, &mut live_caps)
+            {
                 tool_specs = tools::openai_tool_specs(&live_caps, sandbox);
                 eprintln!(
                     "[prompt-audit] late-attach: specs now {} ({} chars JSON)",
@@ -1727,7 +1744,9 @@ pub(crate) async fn run_anthropic_tool_loop(
             }
             messages.push(json!({ "role": "user", "content": results }));
             // Attach-on-demand drain — mirror of the OpenAI loop.
-            if fold_late_attaches(mgr, sid, &mut live_caps) {
+            if fold_late_attaches(mgr, sid, &mut live_caps)
+                || refresh_browser_caps(mgr, sid, &mut live_caps)
+            {
                 tool_specs = tools::anthropic_tool_specs(&live_caps, sandbox);
             }
             continue;

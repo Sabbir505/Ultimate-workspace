@@ -670,7 +670,7 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
             let id = tasks.0.start_download(Some(app), sid, url, dest);
             format!(
                 "Download started (task {id}) — downloading {url} to {dest} in the background. \
-                 Poll download_progress with task_id=\"{id}\" to track it, and report the final \
+                 Poll get_task_status with task_id=\"{id}\" to track it, and report the final \
                  result to the user when it completes."
             )
         }
@@ -2132,6 +2132,10 @@ pub(crate) async fn run_tool(
         );
     }
     if let Some(url) = outcome.browse_url {
+        // The model just opened a page in the built-in pane: mark the session
+        // browser-live so the NEXT round's specs advertise the browser
+        // interaction tools (click/type/... were absent at turn start).
+        app.state::<crate::ChatState>().0.mark_browser_live(sid);
         let _ = app.emit(
             "chat:open-browser",
             ChatOpenBrowserPayload {
@@ -2199,6 +2203,9 @@ async fn run_browser_tool(
     // Surface the Browser tab so the user can watch the agent work (same
     // auto-open contract as generated artifacts and the harness MCP path).
     let _ = app.emit("browser:activity", serde_json::json!({ "pane_id": null }));
+    // Any browser tool use marks the session browser-live (sticky), so the
+    // interaction tools stay advertised for the rest of the session.
+    app.state::<crate::ChatState>().0.mark_browser_live(sid);
     let browser = app.state::<crate::BrowserState>();
     let mgr = browser.0.clone();
 

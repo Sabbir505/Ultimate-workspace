@@ -787,7 +787,7 @@ pub struct ChatQuestionRequestPayload {
 
 /// Emitted while a background chat task (download_file / run_shell) makes
 /// progress. The UI renders a live progress card; the model polls the same
-/// state via `get_task_status` / `download_progress`.
+/// state via `get_task_status`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatTaskProgressPayload {

@@ -44,6 +44,21 @@ Prior context:
 | Provider defaults single-sourced | `ANTHROPIC/OPENAI/OPENROUTER/LOCAL_GGUF_DEFAULT_MODEL` consts own every default-model answer; all `default_model()` impls + the mobile relay catalog reference them (the two catalogs can no longer drift) | cargo 1024 ✓ | `refactor(providers): single-source the default model ids…` |
 | ChatComposer carve | **3,032 → 2,746 lines.** Size limits, slash-command parsers, ChatAttachment + classify/encode/readAsBase64, ext tables, chrome icons, voice cadence constants + flattenVoiceText/chunkSeconds, AttachmentCard → **composerShared.tsx (330 lines)**; public names re-exported (ChatAttachment for ChatView, parsers for tests) | tsc clean · vitest 869 ✓ · build ok | `refactor(composer): extract helpers + attachment plumbing…` |
 
+## Steps — session 11: the deep-tail carves (2026-09-12)
+
+Branch note: session runs on `feat/onboarding-wizard` (the user's active branch — onboarding work landed here mid-session as 1322b85c/bd219929). Baseline at session start: tsc clean · vitest 983/983 after the onboarding commits (the 3-4 pre-existing localModelAdvanced/commandPaletteChats failures present with the uncommitted onboarding work resolved themselves once those landed) · cargo check clean, 73 pre-existing warnings (feature work merged since session 10).
+
+| Step | Outcome | Verification | Review | Commit |
+|---|---|---|---|---|
+| ChatComposer carve | **2,756 → 1,635 lines** across three commits: (1) chrome components (QueuedMessageRow, QuotedSelectionRow, FolderNotch, GitHubNotch, ThinkingIcon, ThinkingToggle) → **composerChrome.tsx (490)**, FolderNotch/GitHubNotch re-exported for App.tsx; (2) the whole voice-dictation engine (state, refs, capture/segment-commit chain, hold-Alt push-to-talk) → **useVoiceDictation.ts (587)** hook taking setContent/textareaRef/setCaret/effectiveSessionId; (3) template-picker + broadcast modals → **composerModals.tsx** (state deliberately kept in the parent — hoisting would reset drafts on close/reopen, a behavior change). The slash/@ decks stay: 54 lines with a placement-sensitive CSS anchoring contract and keyboard-nav coupling | tsc clean · vite build ok · vitest **983/983** | **PASS** (conditional, resolved: pre-carve `renderVoiceText`/`removeVoiceSpan` deps verified `[]` in git — parity holds). Review follow-ups: dead selectContextSessionId import (fixed, 4ab6e5c); pre-existing stale-closure pattern (dictation write path + Alt-gate freeze on session switch without remount) logged below | 953351b7 + 0b823fe1 + cbe0c26a + 4ab6e5c |
+
+### Review follow-ups (pre-existing, deliberately not mixed into mechanical carves)
+
+- `useVoiceDictation` write path freezes `setContent`/`effectiveSessionId` at mount (`renderVoiceText`/`removeVoiceSpan` `[]` deps, Alt-talk effect deps exclude `effectiveSessionId`) — after a session switch that doesn't remount the composer, dictation can splice into the previous chat's draft and hold-Alt can no-op until `transcribing` flips. House style predates the carve (same pattern in `replaceTokenSpan`); fixing it is a small behavior fix: add `setContent` to those deps.
+- `ThinkingToggle` in composerChrome has no consumers (dead pre-carve too; kept as exported chrome).
+
+---
+
 ### Still open (final audit 2026-09-11, amended after a carve attempt)
 
 Everything prioritized in the original survey and subsequent sessions is done. The remainder is the deep-tail. One carve attempt (MessageBubble activity-steps → ActivitySteps.tsx) was executed and **reverted by compile-evidence**: the region is not a leaf module — ActivityStepRow/ProcessSummary/FoldedStepGroup/EditFileRow reach into MessageBubble's Markdown rendering context (Markdown, citeUrlTransform, InsidePreContext, useCopyToClipboard, readArtifactPreview, defaultUrlTransform, ChatPerfPayload, SmoothReveal, useProjectsStore/useUiStore). A clean extraction requires moving the Markdown rendering system with it, or accepting bidirectional MessageBubble ↔ ActivitySteps imports (works in ESM but a design smell). The dependency map below is the accurate starting point:

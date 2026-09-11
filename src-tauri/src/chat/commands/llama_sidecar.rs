@@ -1,4 +1,4 @@
-//! `commands::local_models` — carved verbatim from the former commands.rs
+//! `commands::llama_sidecar` — carved verbatim from the former commands.rs
 //! monolith (mechanical split; see REFACTOR_PROGRESS.md).
 
 use super::*;

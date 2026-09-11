@@ -114,6 +114,12 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  /* The global `button` rule in tokens.css pads 5px 11px, which this fixed-size
+     button inherits: border-box 26px minus 22px leaves a 4px content box, and
+     the 15px read-aloud SVG (a flex item) shrank to fit it — the icon rendered
+     as a 2px smudge. Text glyphs (↗ ✕ − +) overflow instead of shrinking, which
+     is why only the icon buttons went invisible. */
+  padding: 0;
   border: none;
   background: transparent;
   color: var(--text-dim);

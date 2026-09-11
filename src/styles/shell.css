@@ -129,9 +129,17 @@
 .glass-select-option.selected {
   color: var(--accent);
 }
-.glass-select-option:disabled {
+.glass-select-option:disabled,
+.glass-select-option.disabled {
   opacity: 0.4;
   cursor: default;
+}
+/* Row action slot (e.g. the voice audition button): its clicks belong to it,
+   not to the row that selects. */
+.glass-select-option-action {
+  display: flex;
+  align-items: center;
+  flex: none;
 }
 .glass-select-option-label {
   flex: 1;

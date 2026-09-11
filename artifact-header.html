@@ -1,0 +1,15 @@
+<!doctype html>
+<!-- Dev-only harness (not part of the app build): renders the artifact-preview
+     header with the real components + CSS so the read-aloud button can be
+     measured/inspected in a real engine. Serve with `npx vite`. -->
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Artifact header harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/dev/artifactHeaderHarness.tsx"></script>
+  </body>
+</html>

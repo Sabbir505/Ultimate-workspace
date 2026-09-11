@@ -16,28 +16,41 @@ export function startPointerDrag(
   opts?: { capture?: boolean },
 ): void {
   const handle = e.currentTarget as HTMLElement;
-  const onMoveEv = (ev: PointerEvent) => onMove(ev.clientX);
-  const end = (ev: PointerEvent) => {
+  // Subscribe and UNSUBSCRIBE on the same target. Cleaning up on `handle` while
+  // listening on `window` removed nothing: the released drag kept its
+  // pointermove listener for the life of the window, so the panel resized
+  // itself on every later mouse move — the "keeps moving after I let go" bug.
+  const target: EventTarget = opts?.capture ? handle : window;
+  // Typed as the widest listener so one pair of handlers serves both targets
+  // (window's overloads and the element's differ).
+  const onMoveEv: EventListener = (ev) => onMove((ev as PointerEvent).clientX);
+  // A drag ends once. The capture path can see two endings in a row (a release
+  // that also emits lostpointercapture), and `onEnd` must not run twice.
+  let done = false;
+  const end: EventListener = (ev) => {
+    if (done) return;
+    done = true;
     if (opts?.capture) {
       try {
-        handle.releasePointerCapture(ev.pointerId);
+        handle.releasePointerCapture((ev as PointerEvent).pointerId);
       } catch {
         // Already released (e.g. a pointercancel raced the pointerup).
       }
     }
-    handle.removeEventListener("pointermove", onMoveEv);
-    handle.removeEventListener("pointerup", end);
-    handle.removeEventListener("pointercancel", end);
+    target.removeEventListener("pointermove", onMoveEv);
+    target.removeEventListener("pointerup", end);
+    target.removeEventListener("pointercancel", end);
+    handle.removeEventListener("lostpointercapture", end);
     onEnd?.();
   };
   if (opts?.capture) {
     handle.setPointerCapture(e.pointerId);
-    handle.addEventListener("pointermove", onMoveEv);
-    handle.addEventListener("pointerup", end);
-    handle.addEventListener("pointercancel", end);
-  } else {
-    window.addEventListener("pointermove", onMoveEv);
-    window.addEventListener("pointerup", end);
-    window.addEventListener("pointercancel", end);
+    // Capture can be lost without a pointerup — the handle re-mounting
+    // mid-drag, or the browser dropping it. Ending there keeps the drag's
+    // listeners from outliving it when the element they live on is gone.
+    handle.addEventListener("lostpointercapture", end);
   }
+  target.addEventListener("pointermove", onMoveEv);
+  target.addEventListener("pointerup", end);
+  target.addEventListener("pointercancel", end);
 }

@@ -2,7 +2,11 @@
 // analog of SttPanel. Kokoro-82M runs in-process (no server to start), so this
 // panel is: pick a bundle, pick a voice, set the pace. Backend contract:
 // src-tauri/src/commands/tts.rs.
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { PauseIcon, PlayIcon } from "../../lib/icons";
+import { ttsPlayer } from "../../lib/tts";
+import { useVoicePreviewStore, voicePreview } from "../../lib/ttsPreview";
+import { useTtsStore } from "../../state/tts";
 import {
   cancelModelDownload,
   onModelDownloadProgress,
@@ -25,6 +29,62 @@ import {
 } from "../../lib/ipc";
 import { formatBytes } from "../../lib/format";
 import { GlassSelect } from "../common/GlassSelect";
+
+/** One row's audition button.
+ *
+ *  Hover voices the sample ahead of the click (hover intent: a pointer
+ *  sweeping the list fires nothing, a pointer that settles on a row gets it
+ *  ready), and while the engine works the button shows a spinner rather than a
+ *  dead play glyph — the wait is real and worth showing. */
+function VoiceAuditionButton({ voice }: { voice: string }) {
+  const previewVoice = useVoicePreviewStore((s) => s.voice);
+  const phase = useVoicePreviewStore((s) => s.phase);
+  const loading = phase === "loading" && previewVoice === voice;
+  const playing = phase === "playing" && previewVoice === voice;
+  const timer = useRef<number | null>(null);
+  const cancel = useCallback(() => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current);
+      timer.current = null;
+    }
+  }, []);
+  useEffect(() => cancel, [cancel]);
+  return (
+    <button
+      type="button"
+      className="tts-voice-preview"
+      disabled={loading}
+      tabIndex={-1}
+      aria-label={
+        loading ? `Voicing ${voice}` : playing ? `Pause the ${voice} preview` : `Preview ${voice}`
+      }
+      title={playing ? "Pause preview" : "Preview"}
+      onPointerEnter={() => {
+        cancel();
+        timer.current = window.setTimeout(() => {
+          timer.current = null;
+          voicePreview.prefetch(voice);
+        }, 300);
+      }}
+      onPointerLeave={cancel}
+      onClick={() => {
+        cancel();
+        // A preview over a read in progress would put two voices on top of each
+        // other; the preview is the deliberate action, so the read yields.
+        if (useTtsStore.getState().phase !== "idle") ttsPlayer.stop();
+        voicePreview.toggle(voice);
+      }}
+    >
+      {loading ? (
+        <span className="tts-voice-preview-spinner" aria-hidden="true" />
+      ) : playing ? (
+        <PauseIcon />
+      ) : (
+        <PlayIcon />
+      )}
+    </button>
+  );
+}
 
 /** 1x is the model's natural pace; the backend clamps to the same range. */
 const SPEED_PRESETS = [0.75, 1, 1.25, 1.5, 2];
@@ -49,6 +109,8 @@ export function TtsPanel() {
       .catch(() => {});
   };
   useEffect(refresh, []);
+  // Each visit to the picker gets a fresh speculative budget (see prefetch).
+  useEffect(() => voicePreview.resetPrefetchBudget, []);
 
   // Model downloads ride the shared progress stream, keyed by the catalog id
   // (so the Cancel button is the same `cancelModelDownload` the market uses).
@@ -140,6 +202,10 @@ export function TtsPanel() {
   };
 
   const handleVoice = async (name: string) => {
+    // Switching voices invalidates the sample in flight — leaving it playing
+    // would make the next preview sound like the voice just switched away from.
+    // Choosing the voice already auditioning leaves it alone.
+    if (useVoicePreviewStore.getState().voice !== name) voicePreview.stop();
     try {
       await ttsSetVoice(name);
       setTts((prev) => (prev ? { ...prev, voice: name } : prev));
@@ -195,6 +261,8 @@ export function TtsPanel() {
         })),
     [tts?.voices],
   );
+
+  const selectedVoice = tts?.voice ?? tts?.voices[0]?.name ?? "";
 
   if (!tts) {
     return (
@@ -288,15 +356,19 @@ export function TtsPanel() {
         <div className="settings-note" style={{ marginTop: 4 }}>
           <div style={{ fontWeight: 600, marginBottom: 8 }}>Voice</div>
           <GlassSelect
-            value={tts.voice ?? tts.voices[0]?.name ?? ""}
+            value={selectedVoice}
             options={voiceOptions}
             onChange={(name) => void handleVoice(name)}
             title="Reading voice"
             className="tts-voice-trigger"
+            // Auditioning sits ON each row: the picker shows names, and
+            // "af_heart" says nothing about how it sounds — the fastest way to
+            // choose is to click down the list and listen.
+            optionAction={(o) => <VoiceAuditionButton voice={o.value} />}
           />
           <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 6 }}>
             {tts.voices.length} voices, from the model itself. The subtitle is the
-            language each one speaks.
+            language each one speaks. Press play on a row to hear that voice.
           </div>
         </div>
       )}

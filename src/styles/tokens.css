@@ -465,6 +465,16 @@ button.ghost:hover {
 button.danger {
   color: var(--danger);
 }
+/* Glyphs never shrink. An icon button is a flex row of one item, so the base
+   padding above (5px 11px) turns a 24-26px square into a ~4px content box and
+   flexbox squashes the SVG to match — a 15px icon painted as a 2px smudge
+   (the artifact header's read-aloud button). Fixed per-button padding is the
+   real fix; this keeps the next icon button from repeating the mistake.
+   Text children are unaffected: inline text overflows a tiny content box
+   rather than shrinking, which is why the ↗ / ✕ buttons never looked wrong. */
+button > svg {
+  flex-shrink: 0;
+}
 
 input,
 textarea,

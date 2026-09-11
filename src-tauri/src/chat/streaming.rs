@@ -187,28 +187,73 @@ fn last_user_text(messages: &[crate::chat::providers::ChatMessage]) -> String {
 /// reqwest's interactive client has no overall timeout, so a half-open
 /// connection (proxy blackhole, upstream idle after headers) parks the read
 /// forever: the turn task never finishes, no `chat:done`/`chat:error` fires,
-/// and the UI spinner spins until the user restarts. `openai_stream_round`
-/// inlined this guard; this is the shared form used by the Anthropic round,
-/// the non-tool path, and the subagent loop. The timeout covers
-/// connect+headers+next-chunk only — long streams between chunks are fine as
-/// long as bytes keep flowing.
+/// and the UI spinner spins until the user restarts. This is the shared form
+/// used by both tool-loop rounds, the non-tool path, and the subagent loop.
+/// The timeout covers connect+headers+next-chunk only — long streams between
+/// chunks are fine as long as bytes keep flowing.
+///
+/// `ping` (see `chat/reconnect.rs`) upgrades the flat `grace` deadline into a
+/// probed one: silence is checked against the wire every
+/// [`reconnect::IDLE_PROBE`], and while the endpoint keeps ANSWERING a probe
+/// the wait extends to `grace.max(IDLE_HARD_CAP)` — a model that is thinking
+/// hard is not a lost connection. The moment the probe stops answering, the
+/// read fails immediately with a connection-loss error, which is what puts
+/// the turn on the reconnect ladder instead of leaving it to spin out the
+/// full window. Callers with no endpoint to probe (subagent rounds) pass
+/// `None` and get the original one-shot deadline.
 pub(crate) async fn stream_next_with_watchdog<S, E, T>(
     stream: &mut S,
     grace: std::time::Duration,
+    ping: Option<&crate::chat::reconnect::PingTarget>,
 ) -> Result<Option<T>, String>
 where
     S: futures_util::Stream<Item = Result<T, E>> + Unpin,
     E: std::fmt::Display,
 {
-    match tokio::time::timeout(grace, futures_util::StreamExt::next(stream)).await {
-        Ok(Some(chunk)) => chunk
-            .map(Some)
-            .map_err(|e| format!("stream read error: {e}")),
-        Ok(None) => Ok(None),
-        Err(_) => Err(format!(
-            "stream stalled: no data received for {}s",
-            grace.as_secs()
-        )),
+    // Only the full-length windows are worth probing. The 2 s post-`stop`
+    // read grace is a "usage chunk may still be coming" courtesy — pinging
+    // through it would stretch every turn's tail to IDLE_PROBE.
+    let ping = ping.filter(|_| grace >= crate::chat::reconnect::IDLE_PROBE);
+    let Some(ping) = ping else {
+        return match tokio::time::timeout(grace, futures_util::StreamExt::next(stream)).await {
+            Ok(Some(chunk)) => chunk
+                .map(Some)
+                .map_err(|e| format!("stream read error: {e}")),
+            Ok(None) => Ok(None),
+            Err(_) => Err(format!(
+                "stream stalled: no data received for {}s",
+                grace.as_secs()
+            )),
+        };
+    };
+
+    let hard_cap = grace.max(crate::chat::reconnect::IDLE_HARD_CAP);
+    let mut silent = std::time::Duration::ZERO;
+    loop {
+        match tokio::time::timeout(crate::chat::reconnect::IDLE_PROBE, futures_util::StreamExt::next(stream))
+            .await
+        {
+            Ok(Some(chunk)) => {
+                return chunk
+                    .map(Some)
+                    .map_err(|e| format!("stream read error: {e}"))
+            }
+            Ok(None) => return Ok(None),
+            Err(_) => {
+                silent += crate::chat::reconnect::IDLE_PROBE;
+                if !ping.ping().await {
+                    return Err(
+                        "stream stalled: connection lost (endpoint unreachable)".to_string()
+                    );
+                }
+                if silent >= hard_cap {
+                    return Err(format!(
+                        "stream stalled: no data received for {}s",
+                        silent.as_secs()
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -275,8 +320,10 @@ async fn openai_stream_round<R: tauri::Runtime>(
     app: &AppHandle<R>,
     sid: &str,
     full: &mut String,
+    ping: &crate::chat::reconnect::PingTarget,
 ) -> Result<(Value, RoundUsage), String> {
-    use futures_util::StreamExt;
+    // (B-9 moved stream reads onto stream_next_with_watchdog, which brings
+    // its own StreamExt — no local import needed.)
 
     // B-10: bound time-to-headers (send() resolves at the header) WITHOUT a
     // total request timeout — reqwest's `.timeout()` covers the whole body
@@ -346,29 +393,32 @@ async fn openai_stream_round<R: tauri::Runtime>(
     let mut stop_seen = false;
 
     'outer: while let Some(chunk) = {
-        // Watchdog: 60s with no bytes from the provider means the connection
-        // stalled (half-open proxy, OpenRouter routing hang, upstream idle).
+        // Watchdog: no bytes from the provider means the connection stalled
+        // (half-open proxy, OpenRouter routing hang, upstream idle).
         // reqwest's interactive client has no overall timeout, so without
         // this guard a stalled stream blocks forever — the frontend's
         // `streaming[chatSessionId]` entry never clears and the stop button
         // spins indefinitely. A timeout here returns Err → chat:error.
-        // After `finish_reason: "stop"` the grace shrinks to 2s: only the
-        // usage chunk (and [DONE]) should follow.
+        // With `ping`, silence is probed rather than timed out: a slow model
+        // that keeps the endpoint answering is allowed to finish (see
+        // stream_next_with_watchdog). After `finish_reason: "stop"` the grace
+        // shrinks to 2s — only the usage chunk (and [DONE]) should follow, so
+        // that window is never probed and a miss just ends the round.
         let grace = if stop_seen {
             std::time::Duration::from_secs(2)
         } else {
             std::time::Duration::from_secs(60)
         };
-        match tokio::time::timeout(grace, stream.next()).await {
+        match stream_next_with_watchdog(&mut stream, grace, Some(ping)).await {
             Ok(Some(chunk)) => Some(chunk),
             Ok(None) => None,
-            Err(_elapsed) if stop_seen => None,
-            Err(_elapsed) => {
-                return Err("stream stalled: no data received for 60s".to_string());
-            }
+            // Post-stop silence is the expected end of the round; a real read
+            // error still fails it.
+            Err(e) if stop_seen && e.starts_with("stream stalled") => None,
+            Err(e) => return Err(e),
         }
     } {
-        let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
+        // (`stream_next_with_watchdog` already mapped the transport error.)
         for line in pending.push(&chunk) {
             let line = line.trim_end();
             // Tolerate `data:[DONE]` (no space) and trailing `\r` from some
@@ -606,6 +656,7 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
     app: &AppHandle<R>,
     sid: &str,
     full: &mut String,
+    ping: &crate::chat::reconnect::PingTarget,
 ) -> Result<(Vec<Value>, RoundUsage), String> {
     // (B-9 moved stream reads onto stream_next_with_watchdog, which brings
     // its own StreamExt — no local import needed.)
@@ -652,15 +703,20 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
     let mut pending = crate::util::SseLineBuffer::new();
 
     'outer: loop {
-        // B-9: 60s stall watchdog — a half-open connection must fail the
-        // turn (surfaced as chat:error), not park it forever.
-        let chunk = match stream_next_with_watchdog(&mut stream, std::time::Duration::from_secs(60))
-            .await
-        {
-            Ok(Some(c)) => c,
-            Ok(None) => break 'outer,
-            Err(e) => return Err(e),
-        };
+        // B-9: stall watchdog — a half-open connection must fail the turn
+        // (surfaced as chat:error), not park it forever. With `ping`, silence
+        // is probed: a slow model on a live endpoint is allowed to finish,
+        // and a dead endpoint fails the read immediately (see
+        // stream_next_with_watchdog), which is what starts the reconnect
+        // ladder in `send`.
+        let chunk =
+            match stream_next_with_watchdog(&mut stream, std::time::Duration::from_secs(60), Some(ping))
+                .await
+            {
+                Ok(Some(c)) => c,
+                Ok(None) => break 'outer,
+                Err(e) => return Err(e),
+            };
         // B-14: byte-buffered line assembly — lossy-converting each raw chunk
         // independently corrupted multi-byte chars split across TCP reads.
         for line in pending.push(&chunk) {
@@ -1154,6 +1210,10 @@ async fn run_round_tool(
         emit_marker(app, sid, &open, full);
     }
     perf.begin_tool();
+    // Counted separately from the timing window above (which is idempotent):
+    // this is the "has this turn touched anything yet" flag `send` reads
+    // before allowing a reconnected turn to replay its round.
+    perf.note_tool_ran();
     let result = if let Some(handle) = deferred.take() {
         handle
             .await
@@ -1204,6 +1264,9 @@ pub(crate) async fn run_openai_tool_loop(
     perf: crate::chat::turn_perf::TurnPerf,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/chat/completions");
+    // Reachability probe for this round's endpoint — the stall watchdog pings
+    // it instead of killing a merely slow stream (chat/reconnect.rs).
+    let ping = crate::chat::reconnect::PingTarget::new(client, base, api_key, false);
     // Mutable working copy (owned — see fold_late_attaches for why the loops
     // take ToolCaps by value): the late-attach drain folds model-initiated
     // `attach_connector` / `attach_mcp_server` results into the live caps +
@@ -1305,10 +1368,10 @@ pub(crate) async fn run_openai_tool_loop(
         // round, or the already-streamed text would be duplicated.
         let full_len_before = full.len();
         let (message, round_usage) =
-            match openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full).await {
+            match openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping).await {
                 Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
                     cache::strip_cache_control(&mut body);
-                    openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full).await?
+                    openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping).await?
                 }
                 other => other?,
             };
@@ -1558,6 +1621,8 @@ pub(crate) async fn run_anthropic_tool_loop(
     perf: crate::chat::turn_perf::TurnPerf,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/messages");
+    // Reachability probe for this round's endpoint — see the OpenAI loop.
+    let ping = crate::chat::reconnect::PingTarget::new(client, base, api_key, true);
     // Mutable working copy (owned) — see the OpenAI loop's late-attach drain.
     let mut live_caps = caps;
     let mut tool_specs = tools::anthropic_tool_specs(&live_caps, sandbox);
@@ -1601,11 +1666,11 @@ pub(crate) async fn run_anthropic_tool_loop(
         // those words must not re-run the round and duplicate the text.
         let full_len_before = full.len();
         let (content, round_usage) =
-            match anthropic_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full).await {
+            match anthropic_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping).await {
                 Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
                     cache::strip_cache_control(&mut body);
                     anthropic_stream_round::<tauri::Wry>(
-                        client, &url, api_key, &body, app, sid, &mut full,
+                        client, &url, api_key, &body, app, sid, &mut full, &ping,
                     )
                     .await?
                 }
@@ -1892,7 +1957,7 @@ async fn openai_round_accumulates_split_tool_call_deltas() {
     let mut full = String::new();
 
     let (message, _) = openai_stream_round(
-        &client, &url, "key", &body, &app, "sid-pin", &mut full,
+        &client, &url, "key", &body, &app, "sid-pin", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
     )
     .await
     .expect("round succeeds");
@@ -1924,7 +1989,7 @@ async fn openai_round_index_clamp_drops_hostile_far_indices() {
     let mut full = String::new();
 
     let (message, _) = openai_stream_round(
-        &client, &url, "key", &body, &app, "sid", &mut full,
+        &client, &url, "key", &body, &app, "sid", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
     )
     .await
     .expect("round succeeds");
@@ -1956,7 +2021,7 @@ async fn anthropic_round_accumulates_text_and_tool_input_json() {
     let mut full = String::new();
 
     let (blocks, _) = anthropic_stream_round(
-        &client, &url, "key", &body, &app, "sid-pin", &mut full,
+        &client, &url, "key", &body, &app, "sid-pin", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
     )
     .await
     .expect("round succeeds");

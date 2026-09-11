@@ -1371,6 +1371,18 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   // a local model is cold-starting after an app restart. When present, render
   // its message next to a spinner instead of the generic thinking dots.
   const statusNotice = activeChatSessionId ? chatStatus[activeChatSessionId] : undefined;
+  // Reconnect notice (backend "reconnecting" / "reconnect_restart"): the
+  // connection dropped and is being re-dialed, with the attempt counter
+  // pre-formatted into the message ("Reconnecting… (3/10)"). It renders on
+  // the assistant bubble when the turn already has text on screen — that is
+  // what the user is watching, and the answer restarts from zero under it.
+  // With nothing streamed yet there is no bubble to hang it on, so the
+  // pre-token notice slot below carries the same line instead.
+  const reconnectNotice =
+    statusNotice &&
+    (statusNotice.reason === "reconnecting" || statusNotice.reason === "reconnect_restart")
+      ? statusNotice.message
+      : undefined;
 
   const handleSend = useCallback(
     (content: string, attachments: ChatAttachment[], forceResearch?: boolean) => {
@@ -1971,7 +1983,16 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
                         onUpdateSpec={handleUpdateArtifactSpec}
                       />
                     ) : item.typing ? (
-                      statusNotice && statusNotice.message ? (
+                      // A reconnect line looks the same in both slots — bare,
+                      // no pill — so the notice doesn't change appearance
+                      // mid-sequence just because a restart cleared the
+                      // buffer. Other pre-token notices keep their pill.
+                      reconnectNotice ? (
+                        <div className="chat-reconnect-notice" role="status">
+                          <span className="local-spinner" aria-hidden="true" />
+                          <span>{reconnectNotice}</span>
+                        </div>
+                      ) : statusNotice && statusNotice.message ? (
                         <div className="chat-status-notice" role="status">
                           <span className="local-spinner" aria-hidden="true" />
                           <span>{statusNotice.message}</span>
@@ -1980,25 +2001,38 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
                         <TypingIndicator />
                       )
                     ) : (
-                      <MessageBubble
-                        message={item}
-                        live={item.live}
-                        enter={item.enter}
-                        msgId={item.id}
-                        chatSessionId={activeChatSessionId}
-                        onEdit={item.role === "user" ? item.onEdit : undefined}
-                        onRepeat={
-                          item.role === "assistant" && item.key === lastAssistantKey
-                            ? handleRepeat
-                            : undefined
-                        }
-                        onDelete={!item.live ? item.onDelete : undefined}
-                        artifacts={item.id != null ? artifactsByMessage[item.id] : undefined}
-                        onPreviewArtifact={setPreviewArtifact}
-                        superseded={item.superseded}
-                        segmentStart={item.segmentStart}
-                        livePerf={item.live ? currentLivePerf : item.livePerf}
-                      />
+                      <>
+                        <MessageBubble
+                          message={item}
+                          live={item.live}
+                          enter={item.enter}
+                          msgId={item.id}
+                          chatSessionId={activeChatSessionId}
+                          onEdit={item.role === "user" ? item.onEdit : undefined}
+                          onRepeat={
+                            item.role === "assistant" && item.key === lastAssistantKey
+                              ? handleRepeat
+                              : undefined
+                          }
+                          onDelete={!item.live ? item.onDelete : undefined}
+                          artifacts={item.id != null ? artifactsByMessage[item.id] : undefined}
+                          onPreviewArtifact={setPreviewArtifact}
+                          superseded={item.superseded}
+                          segmentStart={item.segmentStart}
+                          livePerf={item.live ? currentLivePerf : item.livePerf}
+                        />
+                        {/* Reconnect line, in the slot the hover action bar
+                            occupies once the turn ends. Only under a bubble
+                            that has text: with an empty buffer the typing
+                            row's notice already carries it (and a second copy
+                            here would just double the line). */}
+                        {item.live && item.content.length > 0 && reconnectNotice && (
+                          <div className="chat-reconnect-notice" role="status">
+                            <span className="local-spinner" aria-hidden="true" />
+                            <span>{reconnectNotice}</span>
+                          </div>
+                        )}
+                      </>
                     )}
                   </Suspense>
                 </div>

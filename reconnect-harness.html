@@ -1,0 +1,16 @@
+<!doctype html>
+<!-- Dev-only harness (not part of the app build): renders the reconnect line
+     under a live assistant bubble with the REAL MessageBubble + the real CSS
+     cascade, so the recovery UX can be seen/measured in a real engine. Serve
+     with `npx vite` and open /reconnect-harness.html. -->
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reconnect line harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/dev/reconnectHarness.tsx"></script>
+  </body>
+</html>

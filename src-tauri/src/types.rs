@@ -580,11 +580,19 @@ pub struct ChatTokenPayload {
 /// cold-starting after an app restart, so the wait can be tens of seconds).
 /// The frontend shows this as a subtle loading line in place of the generic
 /// thinking dots until the first `chat:token` arrives.
+///
+/// Reconnect notices ("reconnecting" / "reconnect_restart" / "reconnected" —
+/// see `chat/reconnect.rs`) reuse the same event, with the attempt counter
+/// already formatted into `message` ("Reconnecting… (3/10)"). They render as
+/// a line under the assistant bubble, mid-answer included: a turn whose
+/// connection dropped already has content on screen, where the pre-token
+/// notice never applies.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatStatusPayload {
     pub chat_session_id: String,
-    /// Machine-readable reason tag: "local_model_loading" | "thinking".
+    /// Machine-readable reason tag: "local_model_loading" | "thinking" |
+    /// "reconnecting" | "reconnect_restart" | "reconnected".
     pub reason: String,
     /// Human-facing line shown next to the spinner.
     pub message: String,

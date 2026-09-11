@@ -32,6 +32,7 @@ pub mod proto;
 pub mod providers;
 pub mod pygen;
 pub mod python_runtime;
+pub mod reconnect;
 pub mod stream_events;
 pub mod streaming;
 pub mod tasks;
@@ -731,52 +732,95 @@ impl ChatManager {
                 // model names what actually ran (cost attribution below).
                 chat_req.model = cand.model.clone();
                 chat_req.system = cand_system.clone().or(chat_req.system.take());
+                let notify_reconnect = |reason: &str, message: String| {
+                    let _ = app.emit(
+                        "chat:status",
+                        ChatStatusPayload {
+                            chat_session_id: sid.clone(),
+                            reason: reason.to_string(),
+                            message,
+                        },
+                    );
+                };
                 let attempt = loop {
-                    let attempt = if tools_enabled && cand_is_openai {
-                        run_openai_tool_loop(
+                    // Scoped so the attempt closure's borrow of `chat_req`
+                    // ends with this block: a compaction retry below replaces
+                    // the request (`chat_req = rebuilt`), and the closure must
+                    // be rebuilt against the new one anyway.
+                    let mut attempt = {
+                        // Reachability probe for this candidate's endpoint —
+                        // the stall watchdog pings it instead of killing a
+                        // merely slow stream.
+                        let cand_ping = reconnect::PingTarget::new(
                             &client,
                             &cand_tool_base,
                             &cand.api_key,
-                            &chat_req,
-                            caps.clone(),
-                            sandbox,
-                            approval,
-                            &mgr,
-                            &sid,
-                            &app,
-                            research_mode,
-                            cand_cache_marks,
-                            perf.clone(),
-                        )
-                        .await
-                    } else if tools_enabled && cand_is_anthropic {
-                        run_anthropic_tool_loop(
-                            &client,
-                            &cand_tool_base,
-                            &cand.api_key,
-                            &chat_req,
-                            caps.clone(),
-                            sandbox,
-                            approval,
-                            &mgr,
-                            &sid,
-                            &app,
-                            research_mode,
-                            perf.clone(),
-                        )
-                        .await
-                    } else {
-                        run_chat_stream(
-                            &client,
-                            cand_provider.as_ref(),
-                            &sid,
-                            &chat_req,
-                            &cand.api_key,
-                            cand.base_url.as_deref(),
-                            Some(&app),
-                            &perf,
-                        )
-                        .await
+                            cand_is_anthropic,
+                        );
+                        // One attempt at this candidate, re-callable: the
+                        // reconnect ladder re-issues exactly this (same
+                        // model, same request) rather than rebuilding
+                        // anything. Its `chat:status` notices are the
+                        // "Reconnecting… (n/10)" line the UI shows under the
+                        // assistant bubble.
+                        let mut run_attempt = || {
+                            async {
+                                run_turn_attempt(
+                                    &client,
+                                    cand,
+                                    cand_is_openai,
+                                    cand_is_anthropic,
+                                    cand_cache_marks,
+                                    &cand_tool_base,
+                                    cand_provider.as_ref(),
+                                    &chat_req,
+                                    tools_enabled,
+                                    caps.clone(),
+                                    sandbox,
+                                    approval,
+                                    &mgr,
+                                    &sid,
+                                    &app,
+                                    research_mode,
+                                    &perf,
+                                    Some(&cand_ping),
+                                )
+                                .await
+                            }
+                        };
+                        let mut attempt = run_attempt().await;
+                        // A dropped connection is re-dialed in place before
+                        // the turn is allowed to fail: the same model, the
+                        // same request, up to ten pinged attempts, with the
+                        // counter on screen. Only while the turn has caused
+                        // nothing yet (`tools_ran == 0`) — replaying a round
+                        // that already wrote a file or ran a command would do
+                        // it twice, so a stall after a tool keeps the plain
+                        // fail-the-turn path.
+                        let lost = match &attempt {
+                            Err(e)
+                                if perf.tools_ran() == 0 && reconnect::is_connection_loss(e) =>
+                            {
+                                Some(e.clone())
+                            }
+                            _ => None,
+                        };
+                        if let Some(first_error) = lost {
+                            attempt = reconnect::reconnect(
+                                &cand_ping,
+                                &reconnect::Config::default(),
+                                &notify_reconnect,
+                                first_error,
+                                // A cancel (or a superseding send) drops this
+                                // session's stream entry before it aborts the
+                                // task, so this gate sees it even if the abort
+                                // lands mid-ladder.
+                                &|| mgr.is_current_stream(&sid, tokio::task::id()),
+                                &mut run_attempt,
+                            )
+                            .await;
+                        }
+                        attempt
                     };
                     let overflow = matches!(&attempt, Err(e) if crate::chat::error_class::classify_error(e) == Some(crate::chat::error_class::CODE_CONTEXT_OVERFLOW));
                     if overflow
@@ -1244,6 +1288,25 @@ impl ChatManager {
             .insert(chat_session_id.clone(), handle.abort_handle());
     }
 
+    /// Whether `task_id` is still the registered stream for this session.
+    ///
+    /// The turn task's own id, so a cancelled turn (whose entry
+    /// `ChatManager::cancel` removes before aborting the task) and a
+    /// superseded one (whose entry a newer `send` replaces) both read as
+    /// "not current". The reconnect ladder polls this between attempts: it is
+    /// the one gate that still sees a cancel landing while the ladder is
+    /// parked between awaits, before the abort tears the task down.
+    pub(crate) fn is_current_stream(
+        &self,
+        chat_session_id: &str,
+        task_id: tokio::task::Id,
+    ) -> bool {
+        self.streams
+            .lock()
+            .get(chat_session_id)
+            .is_some_and(|h| h.id() == task_id)
+    }
+
     /// Remove the abort-handle registry entry for a finished stream — but only
     /// if the entry still maps to that stream's own handle (identified by its
     /// task id). A superseding `send` for the same session replaces the entry;
@@ -1409,6 +1472,82 @@ pub(crate) async fn compute_docs_retrieval(
     std::iter::once(prefix).chain(body).collect()
 }
 
+/// One attempt at a turn for a single candidate: the tool loop matching the
+/// candidate's wire format, or the plain streaming path when tools are off.
+///
+/// Factored out of `send` so the reconnect ladder can re-issue it verbatim
+/// (`chat/reconnect.rs`): a retry must be the SAME request the lost attempt
+/// was, or the ladder would quietly change provider, model or prompt.
+#[allow(clippy::too_many_arguments)]
+async fn run_turn_attempt(
+    client: &reqwest::Client,
+    cand: &AutoFallback,
+    cand_is_openai: bool,
+    cand_is_anthropic: bool,
+    cand_cache_marks: bool,
+    cand_tool_base: &str,
+    cand_provider: &dyn ChatProvider,
+    chat_req: &ChatRequest,
+    tools_enabled: bool,
+    caps: tools::ToolCaps,
+    sandbox: permission::SandboxPolicy,
+    approval: permission::ApprovalPolicy,
+    mgr: &Arc<ChatManager>,
+    sid: &str,
+    app: &AppHandle,
+    research_mode: bool,
+    perf: &turn_perf::TurnPerf,
+    ping: Option<&reconnect::PingTarget>,
+) -> Result<(String, Option<ChatUsage>), String> {
+    if tools_enabled && cand_is_openai {
+        run_openai_tool_loop(
+            client,
+            cand_tool_base,
+            &cand.api_key,
+            chat_req,
+            caps,
+            sandbox,
+            approval,
+            mgr,
+            sid,
+            app,
+            research_mode,
+            cand_cache_marks,
+            perf.clone(),
+        )
+        .await
+    } else if tools_enabled && cand_is_anthropic {
+        run_anthropic_tool_loop(
+            client,
+            cand_tool_base,
+            &cand.api_key,
+            chat_req,
+            caps,
+            sandbox,
+            approval,
+            mgr,
+            sid,
+            app,
+            research_mode,
+            perf.clone(),
+        )
+        .await
+    } else {
+        run_chat_stream(
+            client,
+            cand_provider,
+            sid,
+            chat_req,
+            &cand.api_key,
+            cand.base_url.as_deref(),
+            Some(app),
+            perf,
+            ping,
+        )
+        .await
+    }
+}
+
 /// Runs the full SSE stream lifecycle for one chat request.
 /// Returns the accumulated assistant text and optional usage info.
 /// `app` may be `None` in headless tests (token events then flow only
@@ -1423,6 +1562,10 @@ pub(crate) async fn run_chat_stream(
     base_url: Option<&str>,
     app: Option<&AppHandle>,
     perf: &turn_perf::TurnPerf,
+    // Endpoint probe for the stall watchdog: while the endpoint answers, a
+    // silent round is treated as a slow model rather than a lost connection
+    // (chat/reconnect.rs). `None` keeps the old flat deadline.
+    ping: Option<&reconnect::PingTarget>,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let request = provider
         .build_request(client, req, api_key, base_url)
@@ -1488,11 +1631,15 @@ pub(crate) async fn run_chat_stream(
     // The `'read` label makes `[DONE]` terminal for the whole loop; usage is
     // parsed from the accumulated buffer below either way.
     'read: loop {
-        // B-9: 60s stall watchdog — a silent connection must fail the turn,
-        // not park it forever.
+        // B-9: stall watchdog — a silent connection must fail the turn, not
+        // park it forever. With `ping`, silence is probed: a slow model on a
+        // live endpoint is allowed to finish, and a dead endpoint fails the
+        // read immediately (see streaming::stream_next_with_watchdog), which
+        // is what starts the reconnect ladder in `send`.
         let chunk = match crate::chat::streaming::stream_next_with_watchdog(
             &mut stream,
             std::time::Duration::from_secs(60),
+            ping,
         )
         .await
         {
@@ -2324,7 +2471,7 @@ mod tests {
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             run_chat_stream(
-                &client, &provider, "sid-done", &req, "key", None, None, &perf,
+                &client, &provider, "sid-done", &req, "key", None, None, &perf, None,
             ),
         )
         .await

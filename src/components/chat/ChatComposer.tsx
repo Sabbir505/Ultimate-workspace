@@ -589,6 +589,12 @@ interface Props {
   /** True while a local model is loading onto the GPU (see ChatView). */
   modelLoading?: boolean;
   onEffortChange?: (effort: string) => void;
+  /** HARNESS session's reasoning-effort tier ("" = "Default"). Undefined =
+   *  no harness session (the provider effort slider above covers those). */
+  harnessEffort?: string;
+  /** Change the harness session's effort tier — persisted per session and
+   *  applied by the backend at each spawn. */
+  onHarnessEffortChange?: (effort: string) => void;
   /** Auto routing bias + setter (picker's Auto pane footer), wired from the
    *  settings store by ChatView. */
   autoBias?: string;
@@ -651,6 +657,8 @@ export function ChatComposer({
   localCtx,
   modelLoading,
   onEffortChange,
+  harnessEffort,
+  onHarnessEffortChange,
   autoBias,
   onAutoBiasChange,
   onEjectLocalModel,
@@ -2566,6 +2574,8 @@ export function ChatComposer({
                 onPick={onAgentModelPick}
                 effort={effort}
                 onEffortChange={onEffortChange}
+                harnessEffort={harnessEffort}
+                onHarnessEffortChange={onHarnessEffortChange}
                 autoBias={autoBias}
                 onAutoBiasChange={onAutoBiasChange}
                 onEjectLocalModel={onEjectLocalModel}

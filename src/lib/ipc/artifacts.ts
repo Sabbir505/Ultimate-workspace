@@ -599,10 +599,21 @@ export interface HarnessModelInfo {
   id: string;
   label: string;
   source: "config" | "builtin";
+  /** Thinking tiers THIS model supports (omp's models dump), ordered weakest
+   *  → strongest. Absent when the CLI reports no per-model tiers. */
+  thinking?: string[];
 }
 export interface HarnessModelConfig {
   defaultModel: string | null;
   endpoint: string | null;
+  /** Reasoning-effort level derived READ-ONLY from the harness's own config
+   *  (Claude Code's settings env `CLAUDE_CODE_EFFORT_LEVEL`). Null = the CLI
+   *  doesn't publish a level — the picker shows nothing rather than guessing. */
+  effort: string | null;
+  /** Effort tiers the CLI can be spawned with (the session's pick rides the
+   *  spawn flags), weakest → strongest. Empty = no knob — the pane stays
+   *  slider-free. */
+  effortOptions: string[];
   models: HarnessModelInfo[];
 }
 export const listHarnessModels = (harnessId: string) =>

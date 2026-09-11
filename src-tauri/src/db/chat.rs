@@ -48,6 +48,11 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
             .unwrap_or_else(|| "on_request".to_string()),
         // Auto model routing: 1 = every send re-resolves provider+model.
         auto_model: row.get::<_, i64>("auto_model")? != 0,
+        // Per-session harness effort tier; NULL/empty = "Default" (the CLI's
+        // own configured effort stands — no spawn flag).
+        effort_level: row
+            .get::<_, Option<String>>("effort_level")?
+            .filter(|s| !s.is_empty()),
     })
 }
 
@@ -269,6 +274,23 @@ pub fn update_chat_session_model(
     conn.execute(
         "UPDATE chat_sessions SET model = ?2 WHERE id = ?1",
         params![chat_session_id, model],
+    )?;
+    Ok(())
+}
+
+/// Persist a harness chat's reasoning-effort tier (`""` stores NULL =
+/// "Default"). The value is applied at each harness spawn; the spawn paths
+/// re-read it per turn (per-turn CLIs) or respawn on change (claude), so no
+/// live channel is needed here.
+pub fn update_chat_session_effort(
+    conn: &Connection,
+    chat_session_id: &str,
+    effort: &str,
+) -> DbResult<()> {
+    let effort = effort.trim();
+    conn.execute(
+        "UPDATE chat_sessions SET effort_level = ?2 WHERE id = ?1",
+        params![chat_session_id, if effort.is_empty() { None } else { Some(effort) }],
     )?;
     Ok(())
 }

@@ -364,6 +364,12 @@ pub struct ChatSession {
     /// unchanged; manual picks clear this flag.
     #[serde(default)]
     pub auto_model: bool,
+    /// Per-session reasoning-effort/thinking tier for HARNESS chats, applied
+    /// at each spawn (`--effort` for claude_code, `--thinking` for omp/pi,
+    /// `KIMI_MODEL_THINKING_EFFORT` for kimi_code). Empty/None = "Default" —
+    /// no flag is passed and the CLI's own configured effort stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_level: Option<String>,
 }
 
 fn default_permission_mode() -> String {

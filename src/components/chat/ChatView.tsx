@@ -750,6 +750,16 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   const planModeSupported = !harnessAgent && !acpAgent && toolsEnabled;
   const setSessionPlanMode = useChatStore((s) => s.setSessionPlanMode);
   const setSessionPermissionMode = useChatStore((s) => s.setSessionPermissionMode);
+  const setSessionEffort = useChatStore((s) => s.setSessionEffort);
+  // Harness effort slider: persist the tier; the spawn applies it per harness
+  // (claude --effort, omp/pi --thinking, kimi env) on the next send.
+  const handleHarnessEffortChange = useCallback(
+    (tier: string) => {
+      if (!activeChatSessionId) return;
+      void setSessionEffort(activeChatSessionId, tier);
+    },
+    [activeChatSessionId, setSessionEffort],
+  );
   // CLI-harness sessions get the HARNESS'S OWN postures in the mode menu
   // (OpenCode build/plan, Claude Code default/acceptEdits/plan/bypass) —
   // no mapping to our dual policies; the pick rides to the CLI verbatim.
@@ -2233,10 +2243,12 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         modes={harnessModeOptions}
         agentLoading={harnessAgent ? harnessLoading : false}
         effort={effort}
+        onEffortChange={setEffort}
+        harnessEffort={harnessAgent ? (activeSession?.effortLevel ?? "") : undefined}
+        onHarnessEffortChange={handleHarnessEffortChange}
         provider={activeSession?.autoModel ? "auto" : activeSession?.provider}
         modelLoading={localLoading}
         localCtx={localCtx}
-        onEffortChange={setEffort}
         autoBias={autoBias}
         onAutoBiasChange={(b) => setAutoBias(b as "quality" | "balanced" | "economy")}
         onEjectLocalModel={ejectLocalModel}

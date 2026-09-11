@@ -187,6 +187,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_session_permission_mode(conn)?;
     migrate_chat_session_policies(conn)?;
     migrate_chat_session_worktree(conn)?;
+    migrate_chat_session_effort(conn)?;
     migrate_artifacts_message_id(conn)?;
     migrate_chat_messages_superseded(conn)?;
     migrate_cost_v2(conn)?;
@@ -325,6 +326,20 @@ fn migrate_chat_session_policies(conn: &Connection) -> DbResult<()> {
 /// (PTY harness sessions) for the older sibling of this concept.
 fn migrate_chat_session_worktree(conn: &Connection) -> DbResult<()> {
     let sql = "ALTER TABLE chat_sessions ADD COLUMN worktree_path TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Add the `effort_level` column to `chat_sessions` (per-session harness
+/// reasoning-effort tier). Nullable on purpose: NULL reads as "Default" in
+/// `map_chat_session` — no effort flag is passed at spawn and the CLI's own
+/// configured effort stands.
+fn migrate_chat_session_effort(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN effort_level TEXT";
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
@@ -697,7 +712,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           worktree_path TEXT,
           sandbox_policy TEXT,
           approval_policy TEXT,
-          auto_model INTEGER NOT NULL DEFAULT 0
+          auto_model INTEGER NOT NULL DEFAULT 0,
+          effort_level TEXT
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -1278,9 +1294,9 @@ pub use chat::{
     set_chat_session_auto, set_chat_session_connectors, set_chat_session_plan,
     set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
     set_chat_session_worktree, touch_chat_session, update_chat_session_agent,
-    update_chat_session_model, update_chat_session_permission_mode, update_chat_session_policies,
-    update_chat_session_provider, update_chat_session_title, update_chat_session_watch_mode,
-    NewChatMessage,
+    update_chat_session_effort, update_chat_session_model, update_chat_session_permission_mode,
+    update_chat_session_policies, update_chat_session_provider, update_chat_session_title,
+    update_chat_session_watch_mode, NewChatMessage,
 };
 
 // artifacts

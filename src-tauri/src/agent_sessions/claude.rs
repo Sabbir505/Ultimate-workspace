@@ -17,24 +17,32 @@ pub(super) fn spawn_claude(
     proc_generation: &Arc<AtomicU64>,
     shared_stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>,
     connectors: &[crate::connectors::HarnessMcpServer],
-) -> Result<(Child, String), String> {
+) -> Result<(Child, String, String), String> {
     let alias = claude_model_alias(model);
     // Per-session dual permission policies. full_access approval keeps the
     // historical bypass-everything spawn; every other posture routes the CLI's
     // permission prompts to the reader thread over the stdio control protocol
     // (`--permission-prompt-tool stdio` — Claude Code 2.x), where they become
     // the same chat:approval-request cards the built-in chat uses.
-    let (sandbox_str, approval_str, harness_mode) = {
+    let (sandbox_str, approval_str, harness_mode, effort_str) = {
         let conn = db.0.lock();
         crate::db::get_chat_session(&conn, sid)
             .ok()
             .flatten()
-            .map(|cs| (cs.sandbox_policy, cs.approval_policy, cs.permission_mode))
+            .map(|cs| {
+                (
+                    cs.sandbox_policy,
+                    cs.approval_policy,
+                    cs.permission_mode,
+                    cs.effort_level.unwrap_or_default(),
+                )
+            })
             .unwrap_or_else(|| {
                 (
                     "workspace_write".to_string(),
                     "on_request".to_string(),
                     "manual".to_string(),
+                    String::new(),
                 )
             })
     };
@@ -78,6 +86,14 @@ pub(super) fn spawn_claude(
     }
     args.push("--model".into());
     args.push(alias);
+    // Session effort tier ("low" | "medium" | "high" | "xhigh" | "max" — the
+    // CLI validates; empty = "Default", no flag). Baked into the invocation
+    // like --model: a later change respawns (send_claude_turn compares
+    // `spawned_effort`).
+    if !effort_str.is_empty() {
+        args.push("--effort".into());
+        args.push(effort_str.clone());
+    }
     // Respawning (after a cancel, model change, or app restart) would
     // start a blank conversation — resume the captured CLI session instead.
     let resume = session_cell.lock().ok().and_then(|g| g.clone());
@@ -191,8 +207,9 @@ pub(super) fn spawn_claude(
         );
     });
     // The mode label the flags above were built from — the caller records it
-    // on the entry so a later label change can respawn (or live-apply).
-    Ok((child, harness_mode))
+    // on the entry so a later label change can respawn (or live-apply). The
+    // effort tier rides the same contract.
+    Ok((child, harness_mode, effort_str))
 }
 
 /// The chat session's persisted permission-mode label (the harness mode menu
@@ -204,6 +221,17 @@ pub(super) fn chat_permission_mode_label(db: &DbState, sid: &str) -> String {
         .ok()
         .flatten()
         .map(|cs| cs.permission_mode)
+        .unwrap_or_default()
+}
+
+/// The chat session's persisted effort tier. Empty = "Default" (no flag —
+/// the CLI's own configured effort stands).
+pub(super) fn chat_effort_level(db: &DbState, sid: &str) -> String {
+    let conn = db.0.lock();
+    crate::db::get_chat_session(&conn, sid)
+        .ok()
+        .flatten()
+        .and_then(|cs| cs.effort_level)
         .unwrap_or_default()
 }
 

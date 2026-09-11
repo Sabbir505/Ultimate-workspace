@@ -69,6 +69,31 @@ export const EFFORT_LABELS: Record<string, string> = {
   "": "Default",
 };
 
+/** Harness effort tiers (claude `--effort`, omp/pi `--thinking`, kimi env
+ *  override): compact stop labels for the harness pane's slider — up to 7
+ *  tiers + Default must fit the pane, so the spellings stay short. */
+export const HARNESS_EFFORT_LABELS: Record<string, string> = {
+  off: "Off",
+  minimal: "Min",
+  low: "Low",
+  medium: "Med",
+  high: "High",
+  xhigh: "XHigh",
+  max: "Max",
+};
+
+/** Stop colors, coolest → hottest; the SegmentedSlider gives the LAST stop
+ *  (Max) a pulse/shimmer of its own, so the top tier reads as deliberate. */
+const HARNESS_EFFORT_COLORS: Record<string, string> = {
+  off: "var(--text-dim)",
+  minimal: "#38bdf8",
+  low: "#22c55e",
+  medium: "#f59e0b",
+  high: "#ef4444",
+  xhigh: "#a855f7",
+  max: "#ec4899",
+};
+
 /** The five cloud providers from Settings → API Keys — each is its own
  *  endpoint, so each gets its own rail entry. */
 type ProviderId = (typeof PROVIDER_IDS)[number];
@@ -113,6 +138,13 @@ interface Props {
   // --- Effort (harness + cloud panes) ---
   effort?: string;
   onEffortChange?: (effort: string) => void;
+  /** HARNESS session's effort tier ("" = "Default"). Undefined = session
+   *  isn't a harness chat — the harness panes then render slider-free (there
+   *  is no session to persist a tier onto). */
+  harnessEffort?: string;
+  /** Change the harness session's tier — persisted per session, applied at
+   *  the next spawn (claude respawns with the new flag). */
+  onHarnessEffortChange?: (effort: string) => void;
   // --- Auto routing bias (Auto pane): Quality / Balanced / Economy, the
   // cost-vs-quality dial the backend resolver ranks with. ---
   autoBias?: string;
@@ -152,6 +184,8 @@ export function AgentModelPickerInner({
   onPick,
   effort,
   onEffortChange,
+  harnessEffort,
+  onHarnessEffortChange,
   onAutoBiasChange,
   autoBias,
   onEjectLocalModel,
@@ -203,14 +237,25 @@ export function AgentModelPickerInner({
       void listHarnessModels(id)
         .then((cfg: HarnessModelConfig | null) => {
           // Config-discovered models first, then static-catalog entries the
-          // config didn't mention (same merge ChatView uses).
+          // config didn't mention (same merge ChatView uses). Per-model
+          // thinking tiers ride along when the CLI reports them (omp).
+          const toRow = (m: { id: string; label: string; thinking?: string[] }) => ({
+            id: m.id,
+            label: m.label || m.id,
+            ...(m.thinking?.length ? { thinking: m.thinking } : {}),
+          });
           const fromCfg = cfg?.models ?? [];
           const cfgIds = new Set(fromCfg.map((m) => m.id));
           const extra = harnessModelCatalog(id).filter((m) => !cfgIds.has(m.id));
           settle({
             status: "ready",
-            rows: [...fromCfg, ...extra].map((m) => ({ id: m.id, label: m.label || m.id })),
+            rows: [...fromCfg.map(toRow), ...extra.map(toRow)],
             endpoint: cfg?.endpoint ?? null,
+            // Read-only effort level the CLI publishes in its own config
+            // (Claude Code's settings env today; null = nothing published).
+            effort: cfg?.effort ?? null,
+            // Spawn-able tiers (claude/kimi/omp/pi); [] = no knob.
+            effortOptions: cfg?.effortOptions ?? [],
           });
         })
         .catch((err: unknown) =>
@@ -454,9 +499,18 @@ export function AgentModelPickerInner({
     // must show up on the next open, not after an app restart (the pane used
     // to cache its first scan for the whole run, which read as "local models
     // are detected only if a custom folder is added"). Harness panes keep
-    // their cache outright (CLI configs change far less often).
+    // their cache outright (CLI configs change far less often) — EXCEPT panes
+    // cached before the effort feature / by an older backend: their payload
+    // has no `effortOptions` at all (vs [] for "no knob"), so they'd keep the
+    // effort slider hidden for the whole run. Mark those for one revalidate.
     for (const key of paneCache.keys()) {
       if (key.startsWith("provider:") || key === "local") refreshOnOpen.current.add(key);
+      else if (key.startsWith("harness:")) {
+        const cached = paneCache.get(key);
+        if (cached?.status === "ready" && cached.effortOptions === undefined) {
+          refreshOnOpen.current.add(key);
+        }
+      }
     }
     // Default to the session's entry; fall back to the first enabled one so
     // the right pane is never empty on first open.
@@ -667,12 +721,38 @@ export function AgentModelPickerInner({
   // and "" filters to nothing at the send boundary). The Auto pane is bias
   // slider ONLY — stacking a second slider there read as clutter, and a
   // manual effort is ambiguous when the model changes per message.
-  // Harness/ACP panes stay slider-free: the CLI/agent owns its own
-  // reasoning config and its send path has no effort channel.
+  // Harness/ACP panes keep the PROVIDER slider off: the CLI/agent owns its
+  // own reasoning config. Harness panes get their OWN slider instead —
+  // the session tier (showHarnessEffort) — on every pane with tiers.
   const showEffort =
     !!onEffortChange &&
     effort !== undefined &&
     (railKey.startsWith("provider:") || railKey === "local");
+
+  // Harness effort SLIDER tiers: the CLI's spawn-able vocabulary, narrowed to
+  // the selected model's own report when the CLI provides one (omp's models
+  // dump) — glm-5.2 has no "xhigh", and the slider shouldn't offer tiers the
+  // model can't honor.
+  const harnessEffortTiers = useMemo(() => {
+    if (!railKey.startsWith("harness:") || pane?.status !== "ready") return [] as string[];
+    const opts = pane.effortOptions ?? [];
+    if (opts.length === 0) return [] as string[];
+    const bare = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model;
+    const row = pane.rows.find(
+      (r) => r.id === model || r.id.endsWith(`/${bare}`),
+    );
+    return row?.thinking?.length ? row.thinking : opts;
+  }, [railKey, pane?.status, pane?.effortOptions, pane?.rows, model]);
+
+  // The slider shows on EVERY harness pane with tiers, not just the session's
+  // own: the tier is stored per chat session and applied to whichever harness
+  // spawns, so setting it on a pane the user is browsing still lands on the
+  // session (and matters the moment they switch to that harness). Needs a
+  // setter; "" (Default) is a legitimate value.
+  const showHarnessEffort =
+    typeof harnessEffort === "string" &&
+    !!onHarnessEffortChange &&
+    harnessEffortTiers.length > 0;
 
   return (
     <div className="agent-menu" ref={rootRef}>
@@ -932,6 +1012,41 @@ export function AgentModelPickerInner({
                         title: "Prefer the strongest model per provider",
                         color: "#a78bfa",
                       },
+                    ]}
+                  />
+                </div>
+              </>
+            )}
+
+            {/* Harness effort SLIDER (every harness pane with tiers):
+                persists a tier on the chat session; the backend applies it
+                at spawn — claude `--effort`, omp/pi `--thinking`, kimi env
+                override. "Default" passes no flag, so the CLI's own
+                configured level stands (its tooltip names that level when
+                the CLI publishes one). */}
+            {showHarnessEffort && (
+              <>
+                <div className="model-effort-divider" />
+                <div className="agent-model-effort">
+                  <SegmentedSlider
+                    ariaLabel="Harness effort"
+                    value={(harnessEffort ?? "") as string}
+                    onChange={(v) => onHarnessEffortChange?.(v)}
+                    options={[
+                      {
+                        value: "",
+                        label: "Def",
+                        title: pane?.effort
+                          ? `Use the CLI's own configured effort (currently ${pane.effort}) — no flag is passed`
+                          : "Use the CLI's own configured effort — no flag is passed",
+                        color: "var(--text-dim)",
+                      },
+                      ...harnessEffortTiers.map((t) => ({
+                        value: t,
+                        label: HARNESS_EFFORT_LABELS[t] ?? t,
+                        title: `${t} — applied at the next spawn`,
+                        color: HARNESS_EFFORT_COLORS[t] ?? "#ef4444",
+                      })),
                     ]}
                   />
                 </div>

@@ -125,6 +125,23 @@ impl Default for SendCtx {
     }
 }
 
+/// Every reasoning-effort/thinking tier ANY harness accepts (claude `--effort`
+/// low|medium|high|xhigh|max; omp/pi `--thinking` off|minimal|low|medium|high|
+/// xhigh|max; kimi's `KIMI_MODEL_THINKING_EFFORT` low|medium|high — its
+/// "max-to-high" migration retired "max"). The union is the session-tier
+/// whitelist: one stored vocabulary, filtered per harness in the picker.
+pub const EFFORT_TIERS: &[&str] = &[
+    "off", "minimal", "low", "medium", "high", "xhigh", "max",
+];
+
+/// Session-effort validation for the command layer. Empty = "Default" (clears
+/// the tier). Anything outside [`EFFORT_TIERS`] is rejected — the value later
+/// rides spawn argv/env, so junk never reaches a CLI.
+pub fn is_valid_effort(effort: &str) -> bool {
+    let e = effort.trim();
+    e.is_empty() || EFFORT_TIERS.contains(&e)
+}
+
 struct AgentChild {
     harness: String,
     /// Model the session was last spawned with — a model change respawns
@@ -142,6 +159,11 @@ struct AgentChild {
     /// request where possible and otherwise respawns on the next send —
     /// without this the mode menu's pick silently never reached the CLI.
     spawned_mode: Option<String>,
+    /// claude_code: the effort tier the persistent process was spawned with
+    /// (`--effort` is baked into the CLI invocation; None = "Default", no
+    /// flag). A changed tier respawns on the next send — same contract as
+    /// `spawned_mode`.
+    spawned_effort: Option<String>,
     /// The CLI's own session id, captured from turn output and passed back
     /// to continue the conversation (kimi `--session`, opencode `-s`,
     /// claude `--resume` on respawn). Shared with the reader thread, which
@@ -400,6 +422,7 @@ impl AgentSessionManager {
                             child: None,
                             spawned_model: None,
                             spawned_mode: None,
+                            spawned_effort: None,
                             cli_session_id: Arc::new(Mutex::new(stored)),
                             turn_in_flight: Arc::new(AtomicBool::new(false)),
                             reader_alive: Arc::new(AtomicBool::new(false)),
@@ -437,6 +460,7 @@ impl AgentSessionManager {
             entry.harness = harness.to_string();
             entry.spawned_model = None;
             entry.spawned_mode = None;
+            entry.spawned_effort = None;
             if let Ok(mut g) = entry.cli_session_id.lock() {
                 *g = None;
             }

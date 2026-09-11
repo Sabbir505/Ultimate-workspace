@@ -43,6 +43,7 @@ import {
   resolveAgentQuestion,
   setChatSessionPlanMode,
   setChatSessionPermissionMode,
+  updateChatSessionEffort,
   setChatSessionAuto,
   type ChatPlanAcceptedPayload,
   type ChatPlanRecord,
@@ -1106,6 +1107,9 @@ export interface ChatState {
   setSessionPlanMode: (chatSessionId: string, active: boolean) => Promise<void>;
   /** Set a HARNESS session's native permission mode (harness-mode menu). */
   setSessionPermissionMode: (chatSessionId: string, mode: string) => Promise<void>;
+  /** Persist a harness chat's reasoning-effort tier (picker's harness
+   *  slider). "" = "Default" — no spawn flag. */
+  setSessionEffort: (chatSessionId: string, effort: string) => Promise<void>;
   /** Surface/clear a present_plan proposal card (chat:plan-proposal). */
   onPlanProposal: (payload: ChatPlanProposalPayload) => void;
   onPlanProposalResolved: (chatSessionId: string) => void;
@@ -3473,6 +3477,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await setChatSessionPermissionMode(chatSessionId, mode);
     } catch (err) {
       toastError("Couldn't switch the harness mode", err);
+    }
+  },
+
+  setSessionEffort: async (chatSessionId, effort) => {
+    // Optimistic tier; the backend applies it at spawn (per-turn CLIs on the
+    // next send, claude via respawn) — no live channel, mirroring the mode.
+    set((s) => ({
+      sessions: patchSessions(s.sessions, chatSessionId, { effortLevel: effort }),
+    }));
+    try {
+      await updateChatSessionEffort(chatSessionId, effort);
+    } catch (err) {
+      toastError("Couldn't change the effort level", err);
     }
   },
 

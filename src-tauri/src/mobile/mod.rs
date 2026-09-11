@@ -12,6 +12,7 @@ pub mod protocol;
 pub mod push;
 pub mod relay;
 pub mod relay_crypto;
+pub(crate) mod relay_requests;
 pub mod relay_owner;
 pub mod relay_ws;
 pub mod session_chat;

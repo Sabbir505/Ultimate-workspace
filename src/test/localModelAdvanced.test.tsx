@@ -33,6 +33,15 @@ vi.mock("../lib/ipc", async (importOriginal) => {
   };
 });
 
+// The modal defers to the welcome wizard's gate before showing; these tests
+// exercise the modal in isolation, so the gate always reports "not visible".
+vi.mock("../state/onboarding", () => ({
+  initOnboarding: vi.fn().mockResolvedValue(undefined),
+  useOnboardingStore: Object.assign((selector: (s: { visible: boolean }) => unknown) => selector({ visible: false }), {
+    getState: () => ({ visible: false }),
+  }),
+}));
+
 import { AgentModelPicker } from "../components/chat/AgentModelPicker";
 import { LlamaAdvancedFields } from "../components/chat/LlamaAdvancedFields";
 import { LocalModelModal } from "../components/onboarding/LocalModelModal";

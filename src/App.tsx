@@ -19,6 +19,7 @@ import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
 import { WorktreeNudgeBanner } from "./components/onboarding/WorktreeNudgeBanner";
 import { LocalModelModal } from "./components/onboarding/LocalModelModal";
+import { initOnboarding, useOnboardingStore } from "./state/onboarding";
 // ToolPanel (right-side tool/agents/artifact panel) statically imports
 // react-markdown via SubagentPanel — lazy so it leaves the entry chunk
 // (PERFORMANCE_AUDIT.md item 12).
@@ -77,10 +78,17 @@ const SettingsView = lazy(() => import("./components/settings/SettingsView").the
 const SkillsLibrary = lazy(() => import("./components/skills-library/SkillsLibrary").then((m) => ({ default: m.SkillsLibrary })));
 const CostDashboard = lazy(() => import("./components/cost-dashboard/CostDashboard").then((m) => ({ default: m.CostDashboard })));
 const AutomationsView = lazy(() => import("./components/automations/AutomationsView").then((m) => ({ default: m.AutomationsView })));
+// Welcome wizard (PRD §9): lazy like the overlays — existing users never see
+// it, so its chunk shouldn't ride along with the entry bundle.
+const WelcomeWizard = lazy(() => import("./components/onboarding/WelcomeWizard").then((m) => ({ default: m.WelcomeWizard })));
 
 export default function App() {
   const activeView = useUiStore((s) => s.activeView);
   const setActiveView = useUiStore((s) => s.setActiveView);
+  // First-run welcome wizard: visibility is decided by initOnboarding() in
+  // the bootstrap effect below (after projects load), and replays re-open it
+  // through the same store flag.
+  const onboardingVisible = useOnboardingStore((s) => s.visible);
   const pendingReplace = useUiStore((s) => s.pendingReplace);
   const setPendingReplace = useUiStore((s) => s.setPendingReplace);
   const setGitPromptProjectId = useUiStore((s) => s.setGitPromptProjectId);
@@ -207,11 +215,15 @@ export default function App() {
     void useSettingsStore.getState().load();
     // Workspace persistence wires its subscriptions and re-selects the last
     // project (which restores its saved pane layout) — it must run AFTER the
-    // projects list exists, hence the loadAll().then chaining.
+    // projects list exists, hence the loadAll().then chaining. The welcome
+    // wizard's first-run gate also needs the loaded project/session counts.
     void useProjectsStore
       .getState()
       .loadAll()
-      .then(() => void initWorkspacePersistence());
+      .then(() => {
+        void initOnboarding();
+        void initWorkspacePersistence();
+      });
     void useSkillsStore.getState().load();
     // Harness update check (quiet, once per app open): an out-of-date harness
     // CLI lands a bell-panel row that deep-links to Settings → Agent
@@ -466,6 +478,12 @@ export default function App() {
         <WorktreeNudgeBanner />
 
         <LocalModelModal />
+
+        {onboardingVisible && (
+          <Suspense fallback={null}>
+            <WelcomeWizard />
+          </Suspense>
+        )}
 
 {/* Settings/Skills/Cost are OVERLAYS mounted on top of the chat — the chat
     grid must stay MOUNTED for those views (only "automations" is a real

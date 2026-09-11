@@ -31,6 +31,7 @@ import {
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import type { HarnessId } from "../../types";
 import { useProjectsStore } from "../../state/projects";
+import { openOnboarding } from "../../state/onboarding";
 import { formatBytes } from "../../lib/format";
 import { useChatStore } from "../../state/chat";
 import { useArtifactsStore } from "../../state/artifacts";
@@ -185,6 +186,17 @@ export function DataPanel() {
       </div>
 
       {note && <div className="settings-note">{note}</div>}
+
+      {/* Welcome setup replay (PRD §9): the first-run wizard, on demand. */}
+      <div className="settings-section">
+        <div className="settings-section-title">Welcome</div>
+        <p className="settings-section-hint">
+          Replay the first-run welcome setup — theme, chat model, and agent harness checks.
+        </p>
+        <button className="ghost" onClick={openOnboarding}>
+          Replay welcome
+        </button>
+      </div>
 
       {/* Backup / Restore — roadmap #7 local-first backup story */}
       <div className="settings-section">

@@ -1,0 +1,493 @@
+/* Welcome wizard (first-run onboarding, PRD §9). Appended per the
+   global.css aggregator rule. Design language: quiet chrome, generous
+   whitespace, hairline dividers, one accent — closer to a Claude/ChatGPT
+   first-run screen than a settings panel. Everything is token-driven, so
+   the card follows the active theme. */
+
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(16px) saturate(1.1);
+  -webkit-backdrop-filter: blur(16px) saturate(1.1);
+  animation: onboarding-fade-in 0.22s var(--ease);
+}
+@keyframes onboarding-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.onboarding-card {
+  width: min(480px, calc(100vw - 48px));
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background: var(--surface-glass);
+  border: 1px solid var(--border);
+  box-shadow: var(--glass-shadow-lg);
+  animation: onboarding-card-in 0.24s var(--ease);
+  outline: none;
+}
+@keyframes onboarding-card-in {
+  /* Opacity only — a transform here would fight the flex centering. */
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Header: wordmark left, Skip right. Hairline comes from the progress bar.
+   Fixed content height — the header must not collapse when Skip (last step)
+   or other children disappear, or the card size would change per step. */
+.onboarding-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* Fixed: the header must not shrink when Skip (last step) is absent, or
+     the card height would differ per step. */
+  height: 40px;
+  padding: 0 20px;
+}
+.onboarding-brand {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.26em;
+  color: var(--text-dim);
+  user-select: none;
+}
+.onboarding-skip {
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 0 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.onboarding-skip:hover { color: var(--text); background: var(--glass-hover); }
+
+/* Thin progress bar doubling as the header's bottom hairline. */
+.onboarding-progress {
+  height: 2px;
+  background: var(--border);
+  flex: none;
+}
+.onboarding-progress-fill {
+  height: 100%;
+  background: var(--link);
+  transition: width 0.3s var(--ease);
+}
+
+/* Body: FIXED height (sized to the tallest step) so the card keeps one
+   constant size across all steps — no jumping as content changes. Steps
+   stretch to fill it (see min-height below) so shorter steps distribute
+   their slack instead of dumping it under the content; shrinks only on
+   very short windows, where it scrolls. */
+.onboarding-body {
+  height: min(496px, max(320px, calc(100vh - 260px)));
+  overflow-y: auto;
+  padding: 26px 30px 22px;
+}
+/* Every step stretches and centers its content: steps shorter than the
+   fixed body split the slack above/below (reads as whitespace), matching
+   the wizard pattern of a consistent frame with balanced short steps. */
+.onboarding-body > .onboarding-step {
+  min-height: 100%;
+  justify-content: center;
+}
+.onboarding-body > .onboarding-step {
+  animation: onboarding-step-in 0.2s var(--ease);
+}
+@keyframes onboarding-step-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.onboarding-step { display: flex; flex-direction: column; gap: 12px; }
+/* Centered steps (welcome / finish) balance slack above and below instead
+   of piling it under the content. */
+.onboarding-step-center {
+  align-items: center;
+  text-align: center;
+  padding-top: 6px;
+  justify-content: center;
+}
+
+.onboarding-title {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+.onboarding-sub {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  max-width: 52ch;
+}
+.onboarding-step-center .onboarding-sub { margin: 0 auto; }
+.onboarding-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+.onboarding-error {
+  margin: 0;
+  font-size: 12px;
+  color: #e06c60;
+}
+.onboarding-success {
+  margin: 0;
+  font-size: 12px;
+  color: var(--link);
+}
+
+/* Buttons: pill primary inverts the theme; the rest are quiet text. */
+.onboarding-btn {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 7px 14px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.onboarding-btn:hover { color: var(--text); background: var(--glass-hover); }
+.onboarding-btn:disabled { opacity: 0.45; cursor: default; }
+.onboarding-btn-primary {
+  background: var(--text);
+  color: var(--surface-glass);
+  font-weight: 600;
+  padding: 8px 22px;
+}
+.onboarding-btn-primary:hover {
+  background: var(--text);
+  color: var(--surface-glass);
+  opacity: 0.88;
+}
+.onboarding-btn-primary:disabled { opacity: 0.4; }
+.onboarding-card :is(button, input, [role="radio"]):focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 2px;
+}
+
+/* Step 1 — centered intro. */
+.onboarding-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: var(--surface-glass-2);
+  border: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+.onboarding-features {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  gap: 2px;
+  margin-top: 10px;
+}
+.onboarding-feature {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 4px;
+}
+.onboarding-feature + .onboarding-feature { border-top: 1px solid var(--border); }
+.onboarding-feature-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 9px;
+  background: var(--surface-glass-2);
+  color: var(--link);
+}
+.onboarding-feature-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  text-align: left;
+}
+.onboarding-feature-title { font-size: 12.5px; font-weight: 600; }
+.onboarding-feature-text { font-size: 11.5px; color: var(--text-dim); line-height: 1.45; }
+
+/* Theme previews: mini mockups rather than text buttons. */
+.onboarding-theme-row { margin-top: 10px; }
+.onboarding-themes {
+  display: inline-flex;
+  gap: 8px;
+}
+.onboarding-theme-swatch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 5px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.onboarding-swatch {
+  width: 62px;
+  height: 40px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  padding: 7px 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: center;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+.onboarding-swatch-bar {
+  display: block;
+  height: 6px;
+  border-radius: 3px;
+  background: currentColor;
+  opacity: 0.55;
+}
+.onboarding-swatch-bar.short { width: 60%; opacity: 0.3; }
+.onboarding-swatch-light { background: #f2f0eb; color: #6b6b6b; }
+.onboarding-swatch-dark { background: #1e1e1e; color: #a3a3a3; }
+.onboarding-swatch-system {
+  background: linear-gradient(105deg, #f2f0eb 0 50%, #1e1e1e 50% 100%);
+  color: #9a9a9a;
+}
+.onboarding-theme-swatch:hover .onboarding-swatch { border-color: var(--border-strong); }
+.onboarding-theme-swatch.active .onboarding-swatch {
+  border-color: var(--link);
+  box-shadow: 0 0 0 2px var(--link);
+}
+.onboarding-swatch-label { font-size: 11.5px; color: var(--text-dim); }
+.onboarding-theme-swatch.active .onboarding-swatch-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Step 2 — radio options with progressive disclosure. */
+.onboarding-option {
+  display: flex;
+  gap: 11px;
+  align-items: flex-start;
+  padding: 11px 13px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.onboarding-option:hover { border-color: var(--border-strong); }
+.onboarding-option.selected {
+  border-color: var(--link);
+  background: var(--accent-soft);
+}
+.onboarding-radio-dot {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  position: relative;
+}
+.onboarding-option.selected .onboarding-radio-dot {
+  border-color: var(--link);
+}
+.onboarding-option.selected .onboarding-radio-dot::after {
+  content: "";
+  position: absolute;
+  inset: 2.5px;
+  border-radius: 50%;
+  background: var(--link);
+}
+.onboarding-option-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.onboarding-option-title { font-size: 12.5px; font-weight: 600; }
+.onboarding-option-hint { font-size: 11.5px; color: var(--text-dim); line-height: 1.5; }
+
+.onboarding-model-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: -4px 0 0 38px;
+  padding: 12px 13px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-glass-2);
+  animation: onboarding-step-in 0.18s var(--ease);
+}
+/* Provider + key share one row; Base URL spans full width below. */
+.onboarding-form-row {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 10px;
+}
+.onboarding-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+/* Explicit label class — element-only inheritance proved flaky under the
+   app's root zoom, so every field label carries this directly. */
+.onboarding-label,
+.onboarding-field label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.onboarding-field input {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.onboarding-form-row .glass-select {
+  width: 100%;
+}
+.onboarding-form-row .glass-select-trigger {
+  width: 100%;
+  justify-content: space-between;
+  font-size: 12px;
+}
+.onboarding-model-form .onboarding-btn-primary { align-self: flex-start; }
+.onboarding-market-btn { align-self: flex-start; border: 1px solid var(--border-strong); }
+.onboarding-market-btn:hover { color: var(--text); }
+
+/* Step 3 — harness ledger: hairline rows, no boxes. */
+.onboarding-harness-list {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  margin-top: 4px;
+}
+.onboarding-harness-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 2px;
+  flex-wrap: wrap;
+}
+.onboarding-harness-row + .onboarding-harness-row { border-top: 1px solid var(--border); }
+.onboarding-harness-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  flex: none;
+}
+.onboarding-harness-dot.ok { background: var(--link); }
+.onboarding-harness-name { font-size: 12.5px; font-weight: 600; }
+.onboarding-harness-status { font-size: 11.5px; color: var(--text-dim); }
+.onboarding-harness-status.ok { color: var(--link); }
+.onboarding-harness-install {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+}
+.onboarding-harness-install code {
+  font-size: 10.5px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--surface-glass-2);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.onboarding-copy-btn {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.onboarding-copy-btn:hover { color: var(--text); background: var(--glass-hover); }
+.onboarding-harness-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+/* Step 4 — centered close. */
+.onboarding-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--link);
+  color: var(--link);
+  margin-bottom: 2px;
+}
+.onboarding-add-project { margin-top: 2px; font-size: 12.5px; padding: 8px 24px; }
+.onboarding-pointers {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 16px;
+  align-self: stretch;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  text-align: left;
+}
+.onboarding-pointer-title { font-size: 11.5px; font-weight: 650; margin-bottom: 3px; }
+.onboarding-pointer-text { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+
+/* Footer: step counter left, Back / Continue right. */
+.onboarding-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 20px 13px;
+  border-top: 1px solid var(--border);
+}
+.onboarding-step-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+.onboarding-foot-spacer { flex: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .onboarding-overlay,
+  .onboarding-card,
+  .onboarding-body > .onboarding-step,
+  .onboarding-model-form {
+    animation: none;
+  }
+}

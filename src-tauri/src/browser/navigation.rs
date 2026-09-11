@@ -366,10 +366,4 @@ location.reload();
             pane.eval_js(&js)
         }
     }
-
-    // --- Agentic browser control ---------------------------------------
-    // The chat's `browser_*` tools drive whatever page is active. Because
-    // `webview.eval` is fire-and-forget, each action's JS reports its result
-    // back by invoking the `browser_action_result` command with a request id;
-    // `resolve_action` (below) matches it to the pending oneshot.
 }

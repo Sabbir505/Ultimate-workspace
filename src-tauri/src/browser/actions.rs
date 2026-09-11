@@ -6,6 +6,12 @@ use super::*;
 
 impl BrowserManager {
 
+    // --- Agentic browser control ---------------------------------------
+    // The chat's `browser_*` tools drive whatever page is active. Because
+    // `webview.eval` is fire-and-forget, each action's JS reports its result
+    // back by invoking the `browser_action_result` command with a request id;
+    // `resolve_action` (below) matches it to the pending oneshot.
+
     /// Resolve a pending agentic action (called by the `browser_action_result`
     /// command from the injected JS). Unknown ids are ignored (already timed
     /// out or resolved). NOTE: unverified — prefer `resolve_action_verified`
@@ -710,9 +716,4 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
             .map_err(|e| format!("browser_read: serialization failed: {e}"))?;
         Ok(format!("EXTRACTED CONTENT (mode={}):\n```json\n{}\n```", content.mode, json))
     }
-
-    // --- Pane registry + MCP roundtrip helpers ---------------------------
-    // The MCP WebSocket server (Task #4) needs to target a specific browser
-    // pane by pane_id, or resolve a project_id to the best pane via a
-    // frontend roundtrip. These methods wire that resolution path.
 }

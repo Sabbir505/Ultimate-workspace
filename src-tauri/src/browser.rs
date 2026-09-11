@@ -2174,12 +2174,12 @@ mod navigation;
 mod tabs;
 
 
-/// Build the description-resolution JS body for `run_action_for_pane`. The
-/// bridge reads `DESC` (the selector/description) and `ACTION` ("click" |
-/// "type") as interpolated literals — JSON-escaped so special characters in a
-/// CSS selector or a label can't break out of the string. Returns the bridge's
-/// JSON: `{"ok":true,"ref":..,"tag":..,"label":..,"matchType":..,"confidence":..}`
-/// or `{"ok":false,"error":"not_found","desc":..,"suggestions":[..]}`.
+// Build the description-resolution JS body for `run_action_for_pane`. The
+// bridge reads `DESC` (the selector/description) and `ACTION` ("click" |
+// "type") as interpolated literals — JSON-escaped so special characters in a
+// CSS selector or a label can't break out of the string. Returns the bridge's
+// JSON: `{"ok":true,"ref":..,"tag":..,"label":..,"matchType":..,"confidence":..}`
+// or `{"ok":false,"error":"not_found","desc":..,"suggestions":[..]}`.
 
 // ---- Page capture (browser_screenshot) ------------------------------------
 

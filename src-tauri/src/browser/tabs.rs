@@ -6,6 +6,11 @@ use super::*;
 
 impl BrowserManager {
 
+    // --- Pane registry + MCP roundtrip helpers ---------------------------
+    // The MCP WebSocket server (Task #4) needs to target a specific browser
+    // pane by pane_id, or resolve a project_id to the best pane via a
+    // frontend roundtrip. These methods wire that resolution path.
+
     /// True if the pane is currently visible (set via `set_visible`; defaults
     /// to true on create). Backgrounded panes skip watch-mode pacing.
     pub fn pane_is_visible(&self, pane_id: &str) -> bool {

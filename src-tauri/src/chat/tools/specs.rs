@@ -204,11 +204,9 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             automation_id_parameters(),
         ));
     }
-    specs.push(openai_fn(
-        DOWNLOAD_PROGRESS,
-        DOWNLOAD_PROGRESS_DESC,
-        task_id_parameters(),
-    ));
+    // download_progress is deliberately NOT advertised: get_task_status
+    // returns the same report for any background task (the legacy name stays
+    // dispatchable in dispatch.rs so old conversation histories replay).
     specs.push(openai_fn(
         GET_TASK_STATUS,
         GET_TASK_STATUS_DESC,
@@ -498,11 +496,7 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             automation_id_parameters(),
         ));
     }
-    specs.push(anthropic_fn(
-        DOWNLOAD_PROGRESS,
-        DOWNLOAD_PROGRESS_DESC,
-        task_id_parameters(),
-    ));
+    // download_progress not advertised here either (see the OpenAI builder).
     specs.push(anthropic_fn(
         GET_TASK_STATUS,
         GET_TASK_STATUS_DESC,
@@ -588,18 +582,18 @@ fn generate_document_parameters() -> Value {
             "language": {
                 "type": "string",
                 "enum": ["javascript", "html", "python"],
-                "description": "Engine for `code`. javascript (default for docx/pptx): \
-                    program against the preloaded `docx` / `PptxGenJS` globals, delivers via \
-                    `await relay.save(...)`. html (default for pdf): a complete styled HTML \
-                    document rendered to PDF by a real browser engine (CSS/SVG/Unicode). \
-                    python: python-docx / python-pptx / openpyxl / reportlab on the bundled \
-                    interpreter, saving to the RELAY_OUTPUT path.",
+                "description": "Engine for `code`. javascript (default docx/pptx): \
+                    program against the preloaded `docx` / `PptxGenJS` globals, \
+                    deliver via `await relay.save(...)`. html (default pdf): a \
+                    complete styled HTML document rendered by a real browser \
+                    engine. python (fallback): python-docx / python-pptx / \
+                    openpyxl / reportlab, saving to the RELAY_OUTPUT path.",
             },
             "code": {
                 "type": "string",
-                "description": "Complete program/source for the chosen `language` that builds \
-                    the document. The style guide and engine cheatsheet arrive with the tool \
-                    result.",
+                "description": "Complete program/source for the chosen `language` \
+                    that builds the document. The style guide and engine \
+                    cheatsheet arrive with the tool result.",
             }
         },
         "required": ["format", "filename", "code"],
@@ -631,7 +625,7 @@ fn plan_document_parameters() -> Value {
             },
             "plan": {
                 "type": "object",
-                "description": "The deck plan: { v: 1, kind: \"deck\", title, theme?, slides: [{ id, layout, slots, notes? }] }.                     Layouts: cover, section, agenda, bullets, two-col, chart-text, chart-full, kpi, quote, timeline, table, statement, closing.                     The full planner guide (slot budgets, chart schema, rules) is returned with any validation error.",
+                "description": "The deck plan: { v: 1, kind: \"deck\", title, theme?, slides: [{ id, layout, slots, notes? }] }. Layouts: cover, section, agenda, bullets, two-col, chart-text, chart-full, kpi, quote, timeline, table, statement, closing.",
             }
         },
         "required": ["format", "filename", "plan"],
@@ -787,21 +781,28 @@ fn totp_code_parameters() -> Value {
         "properties": {
             "key": {
                 "type": "string",
-                "description": "Which seed to use: the project secret key                     (source 'keyring', default), a Bitwarden item name/id                     (source 'bitwarden'), or a full op:// secret reference                     (source '1password')."
+                "description": "Which seed to use: the project secret key \
+                    (source 'keyring', default), a Bitwarden item name/id \
+                    (source 'bitwarden'), or a full op:// secret reference \
+                    (source '1password')."
             },
             "source": {
                 "type": "string",
                 "enum": ["keyring", "bitwarden", "1password"],
-                "description": "Where the seed lives. Default 'keyring'                     (project secrets). 'bitwarden' shells to `bw get totp`;                     '1password' shells to `op read`."
+                "description": "Where the seed lives. Default 'keyring' \
+                    (project secrets). 'bitwarden' shells to `bw get totp`; \
+                    '1password' shells to `op read`."
             },
             "digits": {
                 "type": "integer",
                 "enum": [6, 8],
-                "description": "Code length for keyring seeds. Default 6;                     ignored for CLI sources (they return the code directly)."
+                "description": "Code length for keyring seeds. Default 6; \
+                    ignored for CLI sources (they return the code directly)."
             },
             "period": {
                 "type": "integer",
-                "description": "Rotation period in seconds for keyring seeds.                     Default 30."
+                "description": "Rotation period in seconds for keyring seeds. \
+                    Default 30."
             },
         },
     })
@@ -870,7 +871,7 @@ fn browser_read_parameters() -> Value {
                 "type": "string",
                 "enum": ["full", "summary_only", "section"],
                 "default": "full",
-                "description": "'full' = complete cleaned article (default); \
+                "description": "'full' = complete cleaned article; \
                     'summary_only' = headings + first ~1500 chars (cheap triage); \
                     'section' = content under the given selector/heading."
             },
@@ -932,7 +933,7 @@ fn add_source_note_parameters() -> Value {
         "properties": {
             "url": {
                 "type": "string",
-                "description": "The source page's URL (take from the browser_read/fetch_url result; prefer canonicalUrl when cleaner)."
+                "description": "The source page's URL (prefer canonicalUrl when cleaner)."
             },
             "title": {
                 "type": "string",
@@ -949,15 +950,15 @@ fn add_source_note_parameters() -> Value {
             "unavailable": {
                 "type": "string",
                 "enum": ["paywalled", "login_required", "extraction_failed", "blocked"],
-                "description": "Set this to the browser_read failureReason when the source could not be read; omit when usable."
+                "description": "Set to the browser_read failureReason when the source could not be read; omit when usable."
             },
             "publisher": {
                 "type": "string",
-                "description": "The source's publisher/site name when the page metadata shows one (e.g. 'Nature', 'Rust Blog'). Used to weight conflicting claims."
+                "description": "Publisher/site name (e.g. 'Nature') — used to weight conflicting claims."
             },
             "publishedAt": {
                 "type": "string",
-                "description": "The page's publish date when shown (e.g. '2026-05-14'). Used to prefer fresher sources when they conflict."
+                "description": "Publish date when shown (e.g. '2026-05-14') — used to prefer fresher sources."
             }
         },
         "required": ["url", "title", "fact", "excerpt"]
@@ -989,7 +990,7 @@ fn check_sufficiency_parameters() -> Value {
                         },
                         "opposing_view_found": {
                             "type": "boolean",
-                            "description": "Whether you looked for and found dissenting/outdated views worth reporting."
+                            "description": "Whether you found dissenting/outdated views worth reporting."
                         },
                         "gaps": {
                             "type": "string",
@@ -1095,9 +1096,8 @@ fn run_shell_parameters() -> Value {
             "timeout_secs": {
                 "type": "integer",
                 "description": "TEMPORARY processes only: auto-kill at this \
-                    deadline (5–3600; foreground calls are capped at the 120s \
-                    ceiling). The task is marked failed with a timeout notice \
-                    when it fires.",
+                    deadline (5–3600). The task is marked failed with a \
+                    timeout notice when it fires.",
             }
         },
         "required": ["command"],
@@ -1118,12 +1118,12 @@ fn task_parameters() -> Value {
             },
             "subagent_type": {
                 "type": "string",
-                "description": "Role label for the panel. Use 'explore' for codebase browsing, 'edit' for generating code changes, or any other concise label.",
+                "description": "Role label for the Agents panel.",
                 "enum": ["explore", "edit", "analyze", "research", "write", "test", "refactor"],
             },
             "background": {
                 "type": "boolean",
-                "description": "Run WITHOUT blocking the main conversation.                     Returns a task id immediately; poll get_task_status with it                     (the result message lands there when the subagent finishes)                     and cancel_task to abort. Prefer this for anything long                     (deep research, big explorations) so the main turn keeps                     making progress — Claude-Code-style background delegation."
+                "description": "Run WITHOUT blocking the main conversation. Returns a task id immediately; poll get_task_status with it (the result lands there when the subagent finishes) and cancel_task to abort. Prefer this for anything long."
             },
         },
         "required": ["description", "prompt", "subagent_type"],
@@ -1315,7 +1315,7 @@ fn edit_file_parameters() -> Value {
             "all_occurrences": {
                 "type": "boolean",
                 "default": false,
-                "description": "If true, replace every occurrence of 'find' (bulk rename / refactor). If false (default), the find must be unique OR match expected_matches exactly — a multi-match is an error so you don't silently mis-edit.",
+                "description": "If true, replace every occurrence of 'find' (bulk rename / refactor).",
             }
         },
         "required": ["path"],
@@ -1397,7 +1397,7 @@ fn search_content_parameters() -> Value {
             "regex": {
                 "type": "boolean",
                 "default": false,
-                "description": "If true, query is a regex (regex crate syntax). Otherwise the query is matched as a literal substring.",
+                "description": "If true, query is a regex (regex crate syntax).",
             },
             "glob": {
                 "type": "string",
@@ -1411,12 +1411,12 @@ fn search_content_parameters() -> Value {
             "max_results": {
                 "type": "integer",
                 "default": 100,
-                "description": "Cap on matches returned. Set higher for broad sweeps, lower for tight loops.",
+                "description": "Cap on matches returned.",
             },
             "include_hidden": {
                 "type": "boolean",
                 "default": false,
-                "description": "Include dotfile/dotdir entries. Note: build/cache dirs (node_modules, .git, target, etc.) are skipped regardless.",
+                "description": "Include dotfile/dotdir entries (build/cache dirs stay skipped regardless).",
             }
         },
         "required": ["path", "query"],
@@ -1595,7 +1595,9 @@ mod tests {
     /// Per-spec size report + regression guard. Tool specs ride EVERY request
     /// (every turn, every tool round), so a single bloated spec taxes every
     /// turn forever. Run with `--nocapture` to see the distribution; the
-    /// assertion keeps any one spec from silently re-bloating.
+    /// assertions keep any one spec — and the whole registry — from silently
+    /// re-bloating. The total budget was set after the token-diet pass
+    /// trimmed description/schema duplication (45.0k → 39.4k chars).
     #[test]
     fn no_single_tool_spec_blows_its_budget() {
         let caps = ToolCaps::default();
@@ -1625,6 +1627,14 @@ mod tests {
                 "tool spec `{name}` bloated to {worst} chars — trim the description/schema or raise the budget deliberately"
             );
         }
+        // Whole-registry budget for the default hosted surface (web search on,
+        // no connectors/MCP, no local docs, no code exec). Tool specs are
+        // re-sent on every request and every tool round, so sum creep is a
+        // per-turn tax forever. HEADROOM ≈ 1.5% above the size at the diet pass.
+        assert!(
+            total < 40_000,
+            "tool specs total {total} chars (budget 40_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+        );
     }
 
     #[test]

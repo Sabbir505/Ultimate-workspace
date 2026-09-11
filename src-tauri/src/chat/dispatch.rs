@@ -670,7 +670,7 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
             let id = tasks.0.start_download(Some(app), sid, url, dest);
             format!(
                 "Download started (task {id}) — downloading {url} to {dest} in the background. \
-                 Poll download_progress with task_id=\"{id}\" to track it, and report the final \
+                 Poll get_task_status with task_id=\"{id}\" to track it, and report the final \
                  result to the user when it completes."
             )
         }

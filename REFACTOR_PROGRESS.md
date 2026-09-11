@@ -43,7 +43,7 @@ Everything prioritized in the original survey and subsequent sessions is done. T
 
 - **ChatComposer.tsx (3,098)** — ✅ voice engine done (session 8: `lib/voiceRecording.ts` — joinSamples/encodeWav16k/blobToBase64); remainder is one ~2,800-line component body; candidate seams: attachment classifier, queued-message rows, text-command parsing.
 - **Streaming-map quartet** — ✅ done (session 8: `clearStreamState` helper + regression tests).
-- **Round-parser pins** — still open: mock-server delta-accumulation pins for openai/anthropic_stream_round. Approach: point `url` at a scripted local SSE server (pattern: spawn_done_then_hang_server in chat/mod.rs tests), assert accumulated tool_calls/text. Needs a mock AppHandle (tauri test feature) since rounds take `app: &AppHandle`.
+- **Round-parser pins** — ✅ done (session 9): tauri "test" dev-feature + mock AppHandle; 3 pins cover openai text/tool_call delta accumulation incl. mid-key argument splits, hostile far-index clamp, and anthropic text + input_json accumulation. Unblocks the round-parser unification.
 - **ChatView.tsx (2,246)** — welcome screen extracted (ChatWelcome.tsx); remainder is one 2,100-line component; candidate seams: message-list scroll logic, split-pane wiring.
 - **chat/commands.rs** — `send_chat_message` (1,199 lines) split; broader commands.rs section split.
 - **browser.rs** — ~490 lines of injected JS builders → `browser_js.rs`; 2,454-line impl split.

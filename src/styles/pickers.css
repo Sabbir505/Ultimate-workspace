@@ -649,6 +649,22 @@
   border-radius: var(--radius-sm);
   max-width: max-content;
 }
+
+/* "Reconnecting… (3/10)" under a live assistant bubble whose connection
+   dropped (chat/reconnect.rs). Deliberately BARE — no pill background, border
+   or padding: it reports a wait on a turn that is still in flight, so it
+   reads as a quiet line in the answer's own left margin (the slot the hover
+   action bar occupies once the turn ends) rather than as a status chip
+   competing with the text it is rescuing. */
+.chat-reconnect-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  max-width: max-content;
+}
 .model-effort-empty {
   padding: 8px 10px;
   font-size: 12px;

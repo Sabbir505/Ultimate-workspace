@@ -303,6 +303,11 @@ struct Inner {
     ru_cache_read: i64,
     ru_cache_creation: i64,
     ru_seen: bool,
+    /// How many tools this turn has executed. `send` reads it before letting
+    /// a lost connection reconnect: a re-issued request replays the round
+    /// from scratch, so it may only run while the turn has no side effects
+    /// to repeat (see `chat/reconnect.rs`).
+    tools_ran: u32,
 }
 
 impl Inner {
@@ -324,6 +329,7 @@ impl Inner {
             ru_cache_read: 0,
             ru_cache_creation: 0,
             ru_seen: false,
+            tools_ran: 0,
         }
     }
 }
@@ -453,6 +459,19 @@ impl TurnPerf {
         if let Some(start) = g.tool_start.take() {
             g.tool_time_ms += start.elapsed().as_millis() as i64;
         }
+    }
+
+    /// Note that a tool actually ran. Separate from `begin_tool` because that
+    /// one is idempotent (it guards a timing window, not a count) while this
+    /// one must count every execution: it is the "has this turn touched
+    /// anything" test the reconnect ladder gates on.
+    pub fn note_tool_ran(&self) {
+        self.inner.lock().tools_ran += 1;
+    }
+
+    /// How many tools this turn has executed (0 = no side effects yet).
+    pub fn tools_ran(&self) -> u32 {
+        self.inner.lock().tools_ran
     }
 
     /// Fold one round's provider usage into the running live totals (called

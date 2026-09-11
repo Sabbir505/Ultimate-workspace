@@ -619,6 +619,8 @@ function clearSessionState(s: ChatState, chatSessionId: string): Partial<ChatSta
   delete lastTurnPerf[chatSessionId];
   const stoppedPartial = { ...s.stoppedPartial };
   delete stoppedPartial[chatSessionId];
+  const supersededPartial = { ...s.supersededPartial };
+  delete supersededPartial[chatSessionId];
   const citationReports = { ...s.citationReports };
   delete citationReports[chatSessionId];
   let artifactsByMessage = s.artifactsByMessage;
@@ -655,6 +657,7 @@ function clearSessionState(s: ChatState, chatSessionId: string): Partial<ChatSta
     artifactProposals,
     lastTurnPerf,
     stoppedPartial,
+    supersededPartial,
     citationReports,
     artifactsByMessage,
     checkpointsByMessage,
@@ -682,8 +685,15 @@ export interface ChatState {
   streamingChatSessionId: string | null;
   /** Pre-token status notice per session (chatSessionId -> reason+message),
    *  e.g. a local model cold-starting after a restart. Cleared on the first
-   *  token / done / error. */
+   *  token / done / error. Reconnect notices ("reconnecting" /
+   *  "reconnect_restart") use it too, rendered as an attempt-counted line
+   *  under the assistant bubble rather than in the pre-token slot. */
   chatStatus: Record<string, { reason: string; message: string }>;
+  /** Text that WAS streaming when a reconnect restarted the answer, kept
+   *  per session so a ladder that never lands can still persist it: onError
+   *  prefers the live buffer but falls back here when the restarted attempt
+   *  produced nothing (see the `reconnect_restart` branch in onStatus). */
+  supersededPartial: Record<string, string>;
   config: ChatConfigPayload | null;
   /** Last committed composer pick (every selection kind — builtin, harness,
    *  ACP, local). Loaded with the config; new chats seed from it so reopening
@@ -1272,6 +1282,9 @@ export function clearStreamState(s: ChatState, id: string): Partial<ChatState> {
   return {
     streaming: omitKey(s.streaming, id),
     chatStatus: omitKey(s.chatStatus, id),
+    // The turn is over: a superseded partial has either been persisted (error
+    // path) or replaced by a completed answer (done path).
+    supersededPartial: omitKey(s.supersededPartial, id),
     streamingChatSessionId: s.streamingChatSessionId === id ? null : s.streamingChatSessionId,
   };
 }
@@ -1291,6 +1304,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streaming: {},
   streamingChatSessionId: null,
   chatStatus: {},
+  supersededPartial: {},
   config: null,
   lastSelection: null,
   error: null,
@@ -2965,6 +2979,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // post-turn session relist. Fail-over hand-offs use "auto_failover" and
     // DO render (rare, and the user should know the model switched).
     if (reason === "auto_route") return;
+    // Reconnect notices (chat/reconnect.rs) ride this same event, and two of
+    // the three need more than the notice line:
+    // - "reconnect_restart" means the pending request is being re-issued, so
+    //   the answer restarts from zero. The live buffer is DROPPED here or
+    //   the restarted text would append to the old partial. Dropped, not
+    //   discarded: it moves to `supersededPartial`, which `onError` falls
+    //   back to when a ladder that ultimately fails never produced text of
+    //   its own — the user watched that text, so it still has to persist.
+    // - "reconnected" retires the line (the first token of the recovered
+    //   stream normally does it, via onToken; this covers a retry that ends
+    //   the turn without emitting another token).
+    // "reconnecting" is display-only: the partial stays put under the
+    // "Reconnecting… (n/10)" line while the ladder backs off.
+    if (reason === "reconnect_restart") {
+      set((s) => ({
+        streaming: { ...s.streaming, [chatSessionId]: "" },
+        supersededPartial: {
+          ...s.supersededPartial,
+          [chatSessionId]: s.streaming[chatSessionId] ?? "",
+        },
+        chatStatus: { ...s.chatStatus, [chatSessionId]: { reason, message } },
+      }));
+      return;
+    }
+    if (reason === "reconnected") {
+      set((s) => ({ chatStatus: omitKey(s.chatStatus, chatSessionId) }));
+      return;
+    }
     set((s) => {
       // An empty reason is the backend's "clear this notice" signal — used
       // when compaction was a no-op or errored so the "Compacting earlier
@@ -3276,7 +3318,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // the key synchronously, so a duplicate chat:error for one turn cannot
     // double-persist (the backend never persists on error, so there is no
     // other dedupe to race with).
-    const partial = get().streaming[chatSessionId] ?? "";
+    //
+    // A reconnect that restarted the answer left the buffer empty and the
+    // text it replaced in `supersededPartial`: when the restarted attempt
+    // produced nothing of its own, that superseded text is what the user
+    // actually watched, so it is the partial to keep.
+    const live = get().streaming[chatSessionId] ?? "";
+    const partial =
+      live.trim().length > 0 ? live : (get().supersededPartial[chatSessionId] ?? "");
     const hadPartial = chatSessionId in get().streaming && partial.trim().length > 0;
     // Clear streaming state and surface the error for the active session.
     // Also drop this session's live-perf chip and pending-artifact buffer —

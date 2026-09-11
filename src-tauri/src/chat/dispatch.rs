@@ -1203,10 +1203,13 @@ async fn run_subagent_loop(
 
         loop {
             // B-9: same 60s stall watchdog as the main loops — a stuck
-            // subagent stream must not wedge the parent turn.
+            // subagent stream must not wedge the parent turn. No ping target
+            // here: a subagent round has no reconnect ladder behind it, so it
+            // keeps the flat deadline.
             let chunk = match crate::chat::streaming::stream_next_with_watchdog(
                 &mut stream,
                 std::time::Duration::from_secs(60),
+                None,
             )
             .await
             {

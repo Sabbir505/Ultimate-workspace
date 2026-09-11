@@ -31,6 +31,15 @@ function ensureCtx(): AudioContext | null {
   return ctx;
 }
 
+/** The shared, lazily-created AudioContext. Exported so other audio features
+ *  (the TTS player in lib/tts) reuse this one context rather than creating a
+ *  second — browsers cap how many a page may hold, and sharing it means the
+ *  user gesture that unlocks audio for a chime also unlocks it for read-aloud.
+ *  Returns null when Web Audio is unavailable. */
+export function sharedAudioContext(): AudioContext | null {
+  return ensureCtx();
+}
+
 /** Play a short, soft two-note chime suitable for a "task finished /
  *  needs input" notification. No-op when Web Audio is unavailable. */
 export function playNotifyChime(): void {

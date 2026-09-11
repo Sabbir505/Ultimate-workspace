@@ -506,6 +506,13 @@ function MessageBubbleInner({
               ? new Date(message.createdAt > 1e12 ? message.createdAt : message.createdAt * 1000).toLocaleString()
               : undefined
           }
+          // Read-aloud is offered on assistant answers only, and only when the
+          // turn produced prose: `plainText` excludes think/tool markup, so
+          // gating on it keeps the button off turns whose "content" is nothing
+          // but process scaffolding (which must never be voiced). When it is
+          // truthy, the `content` prop above IS plainText.
+          speakKey={!isUser && msgId != null && plainText ? `msg:${chatSessionId ?? ""}:${msgId}` : undefined}
+          speakLabel="Answer"
         />
       )}
     </div>

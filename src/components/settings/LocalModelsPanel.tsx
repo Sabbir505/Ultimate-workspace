@@ -31,6 +31,7 @@ import { useUiStore } from "../../state/ui";
 import { ModelMarket, FitBadge } from "./ModelMarket";
 import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { SttPanel } from "./SttPanel";
+import { TtsPanel } from "./TtsPanel";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { GlassSelect } from "../common/GlassSelect";
 import { Modal } from "../common/Modal";
@@ -56,8 +57,14 @@ export function LocalModelsPanel() {
   const [overridesMap, setOverridesMap] = useState<Record<string, LlamaOverrides>>({});
   const overridesMapRef = useRef<Record<string, LlamaOverrides>>({});
   const overridesPersistTimer = useRef<number | null>(null);
-  // Panel tabs: "models" = on-disk GGUF list, "market" = Hugging Face browser.
+  // Panel tabs: "models" = on-disk GGUF list, "market" = Hugging Face browser,
+  // "speech" = both directions of local speech (STT + TTS).
   const [tab, setTab] = useState<"models" | "market" | "speech">("models");
+  // Speech splits into sub-tabs rather than stacking two panels: STT and TTS
+  // are independent setups (one may be configured and the other not at all),
+  // and scrolling past a fully configured one to reach the other made both
+  // feel like one long form.
+  const [speechTab, setSpeechTab] = useState<"stt" | "tts">("stt");
   // Dense-row UX state: name filter (shown past 8 models), per-row overflow
   // menu, two-click delete confirmation, inline Advanced expansion, and the
   // dismissible first-run info callout.
@@ -413,7 +420,7 @@ export function LocalModelsPanel() {
           className={`tab${tab === "speech" ? " active" : ""}`}
           onClick={() => setTab("speech")}
         >
-          Speech
+          STT &amp; TTS
         </button>
         <button
           className={`tab${tab === "market" ? " active" : ""}`}
@@ -704,7 +711,34 @@ export function LocalModelsPanel() {
       </div>
       </>
       )}
-      {tab === "speech" && <SttPanel />}
+      {tab === "speech" && (
+        <>
+          {/* Sub-tabs: one direction of speech at a time. `role=tablist` +
+              aria-selected so screen readers announce the pair as a set, the
+              same contract the outer tab bar relies on. */}
+          <div className="settings-subtabs" role="tablist" aria-label="Speech direction">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={speechTab === "stt"}
+              className={`settings-subtab${speechTab === "stt" ? " active" : ""}`}
+              onClick={() => setSpeechTab("stt")}
+            >
+              Speech-to-text
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={speechTab === "tts"}
+              className={`settings-subtab${speechTab === "tts" ? " active" : ""}`}
+              onClick={() => setSpeechTab("tts")}
+            >
+              Text-to-speech
+            </button>
+          </div>
+          {speechTab === "stt" ? <SttPanel /> : <TtsPanel />}
+        </>
+      )}
       {tab === "market" && (
         <ModelMarket
           onDownloadComplete={handleDownloadComplete}

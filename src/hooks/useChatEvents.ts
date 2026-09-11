@@ -39,6 +39,7 @@ import { openInBrowserPane } from "../lib/openBrowserPane";
 import { isAppFocused } from "../lib/appFocus";
 import { relayNotify } from "../lib/notifyCenter";
 import { sessionDisplayTitle } from "../lib/sessionTitle";
+import { autoReadFinishedTurn } from "./useTtsAutoRead";
 import { useChatStore } from "../state/chat";
 import { useDocQaStore } from "../state/docQa";
 import { useUiStore } from "../state/ui";
@@ -99,7 +100,11 @@ export function useChatEvents(): void {
             payload.ttftMs ?? null,
             payload.tokensPerSecond ?? null,
             payload.cacheHitRate ?? null,
-          );
+          )
+          // Read the finalized answer aloud, when the user opted in. Chained
+          // off `onDone` because the persisted row (and its id, which keys the
+          // play button) only exists once the store has merged it.
+          .then(() => autoReadFinishedTurn(chatSessionId));
         const ownerSessionId = useChatStore.getState().getOwnerSessionId(chatSessionId);
         if (ownerSessionId) {
           void emitMobileSessionChatEvent(ownerSessionId, "done", payload);

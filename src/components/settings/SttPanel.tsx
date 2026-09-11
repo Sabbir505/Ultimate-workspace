@@ -11,6 +11,7 @@ import {
   sttInstallServer,
   sttSetAutoStart,
   sttSetDefault,
+  sttSetDevice,
   sttSetServerPath,
   sttStart,
   sttStatus,
@@ -106,6 +107,17 @@ export function SttPanel() {
       toastError("Could not stop the speech server", err);
     } finally {
       setBusy(false);
+      refresh();
+    }
+  };
+
+  const handleDevice = async (device: "cpu" | "gpu") => {
+    try {
+      // The backend stops any running server: the live process belongs to the
+      // previous device, and leaving it up would contradict the toggle.
+      setStt(await sttSetDevice(device));
+    } catch (err) {
+      toastError("Could not switch the speech device", err);
       refresh();
     }
   };
@@ -323,6 +335,63 @@ export function SttPanel() {
                 </button>
               </div>
             )}
+          </div>
+
+          <div className="settings-note" style={{ marginTop: 4 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
+              <span style={{ fontSize: 12, fontWeight: 600 }}>Use the GPU (CUDA)</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={stt.device === "gpu"}
+                aria-label="Use the GPU for speech-to-text"
+                className={`settings-toggle${stt.device === "gpu" ? " on" : ""}`}
+                // No CUDA build on disk means the switch cannot be honoured, so
+                // it is disabled rather than flipping into a state the backend
+                // would refuse to start.
+                disabled={busy || !stt.gpuAvailable}
+                onClick={() => void handleDevice(stt.device === "gpu" ? "cpu" : "gpu")}
+              >
+                <span className="settings-toggle-thumb" />
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 6 }}>
+              {stt.gpuAvailable ? (
+                stt.device === "gpu" ? (
+                  <>
+                    Transcription runs on a CUDA build of whisper.cpp —{" "}
+                    <code className="mono" style={{ fontSize: 10 }}>
+                      {shortName(stt.binaryPath ?? "")}
+                    </code>
+                  </>
+                ) : (
+                  <>
+                    A CUDA build of whisper.cpp is installed — switch to GPU for
+                    faster transcription, or stay on CPU to keep the GPU free for
+                    a loaded model.
+                  </>
+                )
+              ) : stt.device === "gpu" ? (
+                <span style={{ color: "var(--warn, #d29922)" }}>
+                  GPU is selected but no CUDA whisper.cpp build was found. Put one
+                  in the app&apos;s bin/whisper-cpp-cuda folder, or switch back to
+                  CPU — the CPU build the installer provides is used for CPU mode.
+                </span>
+              ) : (
+                <>
+                  No CUDA build of whisper.cpp found, so only CPU is available.
+                  CPU transcription is fast for short dictation and leaves the GPU
+                  free for a loaded model.
+                </>
+              )}
+            </div>
           </div>
 
           <div className="settings-note" style={{ marginTop: 4 }}>

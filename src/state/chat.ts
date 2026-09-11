@@ -1046,7 +1046,11 @@ export interface ChatState {
     ttftMs?: number | null,
     tokensPerSecond?: number | null,
     cacheHitRate?: number | null,
-  ) => void;
+    // The implementation is async (it persists the final row and clears the
+    // streaming state). Typed as a Promise so callers that must run AFTER the
+    // turn is merged can chain off it — the `chat:done` listener uses this to
+    // read the finished answer aloud.
+  ) => Promise<void>;
   /** Update the live per-turn perf snapshot for a session (from `chat:perf`). */
   onPerf: (payload: ChatPerfPayload) => void;
   /** Record the end-of-turn citation-integrity verdict (research turns). */

@@ -36,6 +36,13 @@ pub const STT_SUBDIR: &str = "stt";
 const DEFAULT_MODEL_KEY: &str = "stt.defaultModel";
 const AUTO_START_KEY: &str = "stt.autoStart";
 const SERVER_PATH_KEY: &str = "stt.whisperServerPath";
+/// `"cpu"` or `"gpu"` — which whisper.cpp build to run. GPU needs a CUDA
+/// build of whisper-server on disk; the CPU build is what the one-click
+/// installer provides, so the CUDA build is located separately.
+const DEVICE_KEY: &str = "stt.device";
+/// Directory a CUDA whisper.cpp build is expected in (sibling of the CPU
+/// install the one-click installer manages).
+pub const CUDA_SUBDIR: &str = "whisper-cpp-cuda";
 
 /// One curated whisper.cpp model. `size_bytes` is approximate (the download
 /// engine streams the real content-length; this only powers the UI label).
@@ -109,6 +116,10 @@ pub struct SttStatus {
     pub model_path: Option<String>,
     /// Resolved whisper-server binary, when found.
     pub binary_path: Option<String>,
+    /// `"cpu"` or `"gpu"` — which build the user chose.
+    pub device: String,
+    /// A CUDA whisper.cpp build is on disk, so `"gpu"` is actually usable.
+    pub gpu_available: bool,
     pub default_model: Option<String>,
     pub auto_start: bool,
     /// Absolute dir downloads target (`<models dir>/stt`).
@@ -143,10 +154,44 @@ fn get_setting(conn: &rusqlite::Connection, key: &str) -> Option<String> {
 /// Resolve the whisper-server binary: user-set path (file or directory) →
 /// `WHISPER_SERVER` env → PATH → bundled sidecar dir (future-proof: shipped
 /// alongside llama-server) → common build locations.
-fn resolve_binary(conn: &rusqlite::Connection) -> Option<PathBuf> {
+/// Whether the user's stored preference is GPU. A helper so the resolution
+/// chain and the start-time guard can never disagree about what "gpu" means.
+fn prefer_gpu(conn: &rusqlite::Connection) -> bool {
+    get_setting(conn, DEVICE_KEY).as_deref() == Some("gpu")
+}
+
+/// The CUDA whisper.cpp build, when one is installed.
+fn cuda_binary() -> Option<PathBuf> {
+    const EXE: &str = if cfg!(windows) { "whisper-server.exe" } else { "whisper-server" };
+    let path = crate::user_dirs::app_data_dir_default()
+        .join("bin")
+        .join(CUDA_SUBDIR)
+        .join(EXE);
+    path.is_file().then_some(path)
+}
+
+/// True when the user's GPU choice can actually be honoured.
+pub fn gpu_available() -> bool {
+    cuda_binary().is_some()
+}
+
+/// Resolve the whisper-server binary: user-set path (file or directory) →
+/// `WHISPER_SERVER` env → PATH → bundled sidecar dir (future-proof: shipped
+/// alongside llama-server) → common build locations.
+///
+/// `prefer_gpu` puts a CUDA build at the front of that chain. It is a
+/// preference, not a guarantee — `start_sidecar_core` refuses to fall back to
+/// CPU when the user explicitly chose GPU, because silently running on the CPU
+/// after that choice would be a lie about which hardware is in use.
+fn resolve_binary(conn: &rusqlite::Connection, prefer_gpu: bool) -> Option<PathBuf> {
     const EXE: &str = if cfg!(windows) { "whisper-server.exe" } else { "whisper-server" };
 
     let mut candidates: Vec<PathBuf> = Vec::new();
+    if prefer_gpu {
+        if let Some(path) = cuda_binary() {
+            candidates.push(path);
+        }
+    }
     if let Some(p) = get_setting(conn, SERVER_PATH_KEY).filter(|s| !s.trim().is_empty()) {
         let path = PathBuf::from(p.trim());
         if path.is_file() {
@@ -185,13 +230,14 @@ fn model_file(stt_dir: &Path, filename: &str) -> PathBuf {
 /// default + sidecar state + binary resolution.
 #[tauri::command]
 pub async fn stt_status(db: State<'_, DbState>, stt: State<'_, SttState>) -> CmdResult<SttStatus> {
-    let (dir, default_model, auto_start, binary) = {
+    let (dir, default_model, auto_start, binary, prefer_gpu_here) = {
         let conn = db.0.lock();
         (
             stt_dir(&conn),
             get_setting(&conn, DEFAULT_MODEL_KEY),
             get_setting(&conn, AUTO_START_KEY).as_deref() == Some("true"),
-            resolve_binary(&conn),
+            resolve_binary(&conn, prefer_gpu(&conn)),
+            prefer_gpu(&conn),
         )
     };
     let running_guard = stt.0.lock();
@@ -222,6 +268,8 @@ pub async fn stt_status(db: State<'_, DbState>, stt: State<'_, SttState>) -> Cmd
         port: running_guard.as_ref().map(|h| h.port),
         model_path: running_guard.as_ref().map(|h| h.model_path.clone()),
         binary_path: binary.map(|p| p.to_string_lossy().into_owned()),
+        device: if prefer_gpu_here { "gpu".into() } else { "cpu".into() },
+        gpu_available: gpu_available(),
         default_model,
         auto_start,
         stt_dir: dir.map(|d| d.to_string_lossy().into_owned()),
@@ -287,17 +335,26 @@ pub async fn start_sidecar_core(db: &DbState, stt: &SttState) -> CmdResult<u16> 
     if let Some(running) = stt.0.lock().as_ref() {
         return Ok(running.port);
     }
-    let (dir, default_model, binary) = {
+    let (dir, default_model, binary, gpu_selected) = {
         let conn = db.0.lock();
         (
             stt_dir(&conn).ok_or("Models directory is not configured")?,
             get_setting(&conn, DEFAULT_MODEL_KEY),
-            resolve_binary(&conn),
+            resolve_binary(&conn, prefer_gpu(&conn)),
+            prefer_gpu(&conn),
         )
     };
-    let binary = binary.ok_or(
-        "whisper-server is not installed — open Settings → Local Models → Speech and click Install",
-    )?;
+    let binary = binary.ok_or_else(|| {
+        if gpu_selected {
+            // Falling back to the CPU build here would silently use hardware the
+            // user did not choose, and the UI would keep claiming GPU.
+            "GPU is selected for speech-to-text, but no CUDA build of whisper-server was found. Put one in the app's bin/whisper-cpp-cuda folder (or set the binary path below), or switch the device back to CPU."
+                .to_string()
+        } else {
+            "whisper-server is not installed — open Settings → Local Models → Speech and click Install"
+                .to_string()
+        }
+    })?;
     let model_path = resolve_default_model_path(&dir, default_model.as_deref()).ok_or(
         "No speech model installed — download one in Settings → Local Models → Speech first",
     )?;
@@ -462,6 +519,27 @@ pub fn stt_set_auto_start(db: State<'_, DbState>, auto_start: bool) -> CmdResult
         .map_err(|e| e.to_string())
 }
 
+/// Choose which whisper.cpp build runs: the CPU one the one-click installer
+/// provides, or a CUDA build found on disk. Switching while a server is running
+/// leaves the current process alone — stop and start to apply it, which the
+/// settings panel does for the user.
+#[tauri::command]
+pub async fn stt_set_device(
+    db: State<'_, DbState>,
+    stt: State<'_, SttState>,
+    device: String,
+) -> CmdResult<SttStatus> {
+    let device = if device == "gpu" { "gpu" } else { "cpu" };
+    {
+        let conn = db.0.lock();
+        db::set_setting(&conn, DEVICE_KEY, device).map_err(|e| e.to_string())?;
+    }
+    // A running server belongs to the previous device; leaving it up would make
+    // the status line contradict the toggle.
+    stop_sidecar(&stt).await;
+    stt_status(db, stt).await
+}
+
 #[tauri::command]
 pub fn stt_set_server_path(db: State<'_, DbState>, path: Option<String>) -> CmdResult<()> {
     let conn = db.0.lock();
@@ -583,7 +661,7 @@ pub fn maybe_autostart(app: &tauri::AppHandle, db: &DbState) {
             get_setting(&conn, AUTO_START_KEY).as_deref() == Some("true"),
             stt_dir(&conn),
             get_setting(&conn, DEFAULT_MODEL_KEY),
-            resolve_binary(&conn),
+            resolve_binary(&conn, prefer_gpu(&conn)),
         )
     };
     if !auto_start {
@@ -715,8 +793,14 @@ pub async fn stt_install_server(
 
             // Stream to a temp file next to the destination with throttled
             // progress events (same 150ms cadence as the model downloader).
+            // NOT `.no_proxy()`: this fetches from github.com, and bypassing
+            // the system proxy makes the download fail outright on proxied
+            // networks (verified against a local 127.0.0.1 proxy setup). The
+            // no-proxy rule is right for talking to our own loopback sidecar,
+            // wrong for reaching the internet.
             let client = reqwest::Client::builder()
-                .no_proxy()
+                .user_agent(concat!("Relay/", env!("CARGO_PKG_VERSION"), " (desktop)"))
+                .connect_timeout(std::time::Duration::from_secs(15))
                 .timeout(std::time::Duration::from_secs(300))
                 .build()
                 .map_err(|e| e.to_string())?;

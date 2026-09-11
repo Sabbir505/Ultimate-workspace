@@ -24,6 +24,12 @@ import { useProjectsStore } from "../../state/projects";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { formatDuration } from "../../lib/format";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { useTtsStore } from "../../state/tts";
+import { toggleReadAloud } from "../../lib/tts";
+// Transport glyphs live in lib/icons so the player bar can use them without
+// importing this module (and its markdown stack) into the entry chunk.
+import { PlayIcon } from "../../lib/icons";
+export { SpeakerIcon, StopIcon, PlayIcon } from "../../lib/icons";
 import { MdLink } from "./MdLink";
 import { DiffCard, editLineStats, type EditPayload } from "./DiffCard";
 import { parseSegments, type Segment, type ToolData } from "../../lib/segments";
@@ -230,6 +236,8 @@ export function MessageActions({
   onDelete,
   timestamp,
   timestampTitle,
+  speakKey,
+  speakLabel,
 }: {
   content: string;
   onEdit?: (content: string) => void;
@@ -238,6 +246,11 @@ export function MessageActions({
   /** Preformatted end-of-turn time ("14:32") — rendered beside the buttons. */
   timestamp?: string | null;
   timestampTitle?: string;
+  /** Identity of the text for read-aloud (`msg:<id>`). Omitted where speaking
+   *  makes no sense (the optimistic in-flight bubble), which hides the button. */
+  speakKey?: string;
+  /** Label shown in the player bar while this text is being read. */
+  speakLabel?: string;
 }) {
   const [copied, copyToClipboard] = useCopyToClipboard(1800);
   const copy = useCallback(
@@ -249,6 +262,10 @@ export function MessageActions({
     },
     [content, copyToClipboard],
   );
+
+  // Is THIS message the one being read aloud? A selector returning a boolean
+  // keeps the other bubbles from re-rendering on every sentence tick.
+  const speaking = useTtsStore((s) => !!speakKey && s.key === speakKey && s.phase !== "idle");
 
   return (
     <div className="chat-msg-actions">
@@ -265,6 +282,25 @@ export function MessageActions({
       >
         {copied ? <CheckIcon /> : <CopyIcon />}
       </button>
+      {speakKey && content.trim() && (
+        <button
+          className={`chat-msg-action${speaking ? " chat-msg-action-active" : ""}`}
+          onClick={(e) => {
+            e.currentTarget.blur();
+            toggleReadAloud({ key: speakKey, label: speakLabel, text: content });
+          }}
+          // A play triangle, not a speaker: the speaker read as "audio settings"
+          // rather than "start reading". No stop square and no sentence counter
+          // here either — the player bar at the bottom right owns the transport
+          // (pause, stop, progress), and duplicating it in a hover bar was
+          // noise. The active tint is the one thing this button still carries,
+          // because the bar cannot say WHICH message is being read.
+          title={speaking ? "Stop reading" : "Read aloud"}
+          aria-label={speaking ? "Stop reading aloud" : "Read aloud"}
+        >
+          <PlayIcon />
+        </button>
+      )}
       {onRepeat && (
         <button
           className="chat-msg-action"

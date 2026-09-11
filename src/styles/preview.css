@@ -125,6 +125,13 @@
   color: var(--text);
   background: var(--surface-1, var(--surface-2));
 }
+/* Read-aloud engaged on this artifact — accent-tinted so the header shows at a
+   glance which pane is currently speaking (the bar reports it globally, but the
+   pane can be scrolled away from the bar's context). */
+.artifact-preview-header-btn.active {
+  color: var(--accent, #4a9eff);
+  background: color-mix(in srgb, var(--accent, #4a9eff) 16%, transparent);
+}
 .artifact-preview-download-btn {
   display: inline-flex;
   align-items: center;

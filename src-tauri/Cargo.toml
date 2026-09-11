@@ -144,6 +144,19 @@ hkdf = "0.12"
 # Same RustCrypto family as hkdf/chacha20poly1305.
 hmac = "0.12"
 dom_smoothie = "0.18"
+# Local text-to-speech: hexgrad/Kokoro-82M (Apache-2.0) runs in-process through
+# sherpa-onnx — no sidecar process, no cloud, no API key. The -sys crate
+# downloads its prebuilt static libraries on first build (they are cached in
+# OUT_DIR afterwards), so the only build requirement is network access once.
+# NOTE: those prebuilt libraries are CPU-only (verified at runtime: setting a
+# CUDA provider logs "Please compile with -DSHERPA_ONNX_ENABLE_GPU=ON" and falls
+# back to CPU), so GPU synthesis is not reachable through this dependency.
+sherpa-onnx = "1.13.8"
+# The optional GPU runtime is a tar.bz2 of CLI binaries from the same release
+# (the crate itself cannot link CUDA — see commands/tts.rs). `zip` (already a
+# dependency) covers the cuDNN wheel.
+bzip2 = "0.4"
+tar = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

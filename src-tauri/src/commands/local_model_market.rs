@@ -255,7 +255,9 @@ fn token_allowed_for_url(url: &str) -> bool {
     }
 }
 
-fn get_hf_token(conn: &rusqlite::Connection) -> Option<String> {
+/// Also used by the TTS installer, which downloads from HF and benefits from
+/// the same token (rate limits, and gated repos if a model ever moves).
+pub(crate) fn get_hf_token(conn: &rusqlite::Connection) -> Option<String> {
     secrets::platform_load(conn, HF_TOKEN_NAMESPACE, HF_TOKEN_KEY)
 }
 

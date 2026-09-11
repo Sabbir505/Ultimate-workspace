@@ -16,6 +16,8 @@ pub mod projects;
 pub mod pty_cmds;
 pub mod skills_cmds;
 pub mod stt;
+pub mod tts;
+pub mod tts_gpu;
 pub mod budget;
 pub mod memory_cmds;
 pub mod speech;

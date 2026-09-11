@@ -22,7 +22,7 @@ import { ComposerMetrics } from "./ComposerMetrics";
 import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
 import { useSettingsStore } from "../../state/settings";
-import { useChatStore, selectContextSessionId } from "../../state/chat";
+import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
 import { useVoiceDictation } from "./useVoiceDictation";
 import { TemplatePickerModal, BroadcastModal } from "./composerModals";

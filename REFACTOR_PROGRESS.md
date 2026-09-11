@@ -46,7 +46,7 @@ Everything prioritized in the original survey and subsequent sessions is done. T
 - **Round-parser pins** — ✅ done (session 9): tauri "test" dev-feature + mock AppHandle; 3 pins cover openai text/tool_call delta accumulation incl. mid-key argument splits, hostile far-index clamp, and anthropic text + input_json accumulation. Unblocks the round-parser unification.
 - **ChatView.tsx (2,246)** — welcome screen extracted (ChatWelcome.tsx); remainder is one 2,100-line component; candidate seams: message-list scroll logic, split-pane wiring.
 - **chat/commands.rs** — `send_chat_message` (1,199 lines) split; broader commands.rs section split.
-- **browser.rs** — ~490 lines of injected JS builders → `browser_js.rs`; 2,454-line impl split.
+- **browser.rs** — ✅ injected-JS builders done (session 10): 13 builders + their embedded script consts moved to `browser_js.rs` (491 lines); browser.rs 5,032 → 4,550 and re-exports the module for browser_mcp.rs. Remaining: the 2,454-line impl split (navigation/actions/tabs/screenshots seams).
 - **mobile/relay.rs** — `handle_connection` (~918 lines) split; provider-catalog triplication vs providers.rs.
 - **AgentModelPicker remainder** — helpers/caches now in agentPickerShared.tsx; the 900-line component body (rail/popup/gear sub-modal) could split further.
 

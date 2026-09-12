@@ -1268,7 +1268,7 @@ export function ChatComposer({
       )}
       {/* Companion pet's second home — strolls along the top edge of the
           composer card, reacting to the same events as the sidebar twin. */}
-      <PetStrip home="composer" />
+      <PetStrip myHome="composer" />
       <div
         className={`chat-composer-card${modeGlowClass}${filesDragOver ? " is-drop-target" : ""}`}
         onDragOver={composerDragOver}

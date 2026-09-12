@@ -25,11 +25,19 @@
   width: 48px;
   height: 48px;
   margin-left: -24px; /* centre on the x fraction */
-  cursor: pointer;
+  /* clicks are taken by .pet-hit (art-sized) so the pet never swallows
+     clicks meant for the paw button or things it walks over */
+  pointer-events: none;
   z-index: 5;
 }
-.pet-actor:active .pet-sprite {
-  transform-origin: 50% 100%;
+.pet-hit {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 10px;
+  bottom: 0;
+  pointer-events: auto;
+  cursor: pointer;
 }
 .pet-sprite,
 .pet-hat {
@@ -66,6 +74,77 @@
 @keyframes pet-breathe {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-1px); }
+}
+
+/* ── Slot (position anchor inside the strip) ───────────────────────────── */
+.pet-slot {
+  position: absolute;
+  bottom: 0;
+  width: 0;
+  height: 100%;
+}
+
+/* ── Teleport: vanish (leaving home) / appear (arriving home) ──────────── */
+.pet-slot-vanish .pet-actor {
+  animation: pet-vanish 390ms cubic-bezier(0.5, 0, 0.9, 0.4) forwards;
+}
+.pet-slot-appear .pet-actor {
+  /* delayed to the second half of the teleport window; `backwards` keeps
+     the pet invisible until its turn */
+  animation: pet-appear 340ms cubic-bezier(0.2, 0.9, 0.3, 1.3) 390ms backwards;
+}
+@keyframes pet-vanish {
+  0% { opacity: 1; transform: scale(1) rotate(0deg); filter: brightness(1); }
+  55% { opacity: 0.9; transform: scale(0.75) rotate(-8deg); filter: brightness(1.6); }
+  100% { opacity: 0; transform: scale(0.05) rotate(14deg); filter: brightness(2.4); }
+}
+@keyframes pet-appear {
+  0% { opacity: 0; transform: scale(0.05) rotate(-12deg); filter: brightness(2.4); }
+  60% { opacity: 1; transform: scale(1.12) rotate(4deg); filter: brightness(1.5); }
+  100% { opacity: 1; transform: scale(1) rotate(0deg); filter: brightness(1); }
+}
+/* pixel sparkles riding the teleport, on both the leaving and arriving slot */
+.pet-slot-vanish::after,
+.pet-slot-appear::after {
+  content: "";
+  position: absolute;
+  bottom: 12px;
+  left: -24px;
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: #7ef0dc;
+  box-shadow:
+    10px -8px 0 #ffd166,
+    34px -2px 0 #ff6f91,
+    44px -16px 0 #7ef0dc,
+    18px -22px 0 #b7c3d6;
+  animation: pet-sparkle 390ms ease-out forwards;
+  pointer-events: none;
+  z-index: 7;
+}
+.pet-slot-appear::after {
+  animation-delay: 390ms;
+}
+@keyframes pet-sparkle {
+  0% { opacity: 0; transform: translate(0, 6px) scale(0.4); }
+  40% { opacity: 1; }
+  100% { opacity: 0; transform: translate(0, -14px) scale(1.2); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-slot-vanish .pet-actor {
+    animation: pet-vanish-quiet 200ms ease-in forwards;
+  }
+  .pet-slot-appear .pet-actor {
+    animation: pet-appear-quiet 200ms ease-out 390ms backwards;
+  }
+  @keyframes pet-vanish-quiet {
+    to { opacity: 0; }
+  }
+  @keyframes pet-appear-quiet {
+    from { opacity: 0; }
+  }
 }
 
 /* ── Speech bubble ─────────────────────────────────────────────────────── */
@@ -149,24 +228,32 @@
 }
 
 /* ── Panel open button ─────────────────────────────────────────────────── */
+/* Frosted dark chip: stays readable on the sidebar header art (dark) and on
+   plain light chrome alike — the old grey hover vanished into the art. */
 .pet-panel-btn {
   position: absolute;
   right: 2px;
   top: 50%;
   transform: translateY(-50%);
   padding: 4px;
-  border-radius: 6px;
-  color: rgba(120, 128, 148, 0.75);
-  background: transparent;
+  border-radius: 7px;
+  color: rgba(240, 244, 252, 0.92);
+  background: rgba(24, 28, 42, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(4px);
+  box-shadow: 0 1px 4px rgba(8, 10, 20, 0.35);
   transition: all 0.15s ease;
   z-index: 6;
 }
 .pet-panel-btn:hover {
-  color: #5b6379;
-  background: rgba(120, 128, 148, 0.14);
+  color: #ffffff;
+  background: rgba(70, 82, 118, 0.75);
+  border-color: rgba(255, 255, 255, 0.34);
+  box-shadow: 0 2px 8px rgba(8, 10, 20, 0.45);
 }
-[data-theme="dark"] .pet-panel-btn { color: rgba(200, 208, 226, 0.5); }
-[data-theme="dark"] .pet-panel-btn:hover { color: #e8ecf5; background: rgba(255, 255, 255, 0.12); }
+.pet-panel-btn:active {
+  transform: translateY(-50%) scale(0.92);
+}
 
 /* ── Panel popover ─────────────────────────────────────────────────────── */
 .pet-panel {
@@ -181,7 +268,19 @@
   backdrop-filter: blur(12px);
   z-index: 60;
   color: #23283a;
-  animation: pet-bubble-in 140ms ease-out;
+  transform-origin: top right;
+  animation: pet-panel-in 180ms cubic-bezier(0.2, 0.9, 0.3, 1.15);
+}
+.pet-panel-closing {
+  animation: pet-panel-out 150ms ease-in forwards;
+}
+@keyframes pet-panel-in {
+  from { opacity: 0; transform: scale(0.9) translateY(-4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes pet-panel-out {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.92) translateY(-4px); }
 }
 [data-theme="dark"] .pet-panel {
   background: rgba(26, 29, 41, 0.97);
@@ -366,6 +465,39 @@
   color: #8a92a8;
 }
 .pet-panel-close:hover { color: inherit; background: rgba(120, 128, 148, 0.14); }
+
+/* ── Settings preview row: the three pets mid-animation ───────────────── */
+.pet-settings-previews {
+  display: flex;
+  gap: 10px;
+  margin: 10px 0 12px;
+  flex-wrap: wrap;
+}
+.pet-settings-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 16px 6px;
+  margin: 0;
+  border-radius: 10px;
+  background:
+    linear-gradient(45deg, rgba(120, 128, 148, 0.07) 25%, transparent 25%, transparent 75%, rgba(120, 128, 148, 0.07) 75%),
+    linear-gradient(45deg, rgba(120, 128, 148, 0.07) 25%, transparent 25%, transparent 75%, rgba(120, 128, 148, 0.07) 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+  border: 1px solid rgba(120, 128, 148, 0.2);
+}
+.pet-settings-preview .pet-sprite {
+  image-rendering: pixelated;
+}
+.pet-settings-preview figcaption {
+  font-size: 10px;
+  color: #8a92a8;
+}
+[data-theme="dark"] .pet-settings-preview figcaption {
+  color: #9aa3ba;
+}
 
 /* ── Reduced motion ────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {

@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef } from "react";
 
 import { listenAutomationRunFinished } from "../lib/ipc";
 import { isFailureStatus } from "../components/automations/shared";
+import { petLine } from "../lib/pets/lines";
 import { useChatStore } from "../state/chat";
 import { useNotificationsStore } from "../state/notifications";
 import { usePanesStore } from "../state/panes";
@@ -35,7 +36,16 @@ export function usePetEvents(): void {
   // ── Built-in chat streaming → watching ────────────────────────────────
   // The sidebar lights rows from this same map; the pet watches whenever ANY
   // session streams (background chats count — the agent is still working).
+  // A fresh stream also pulls the pet to the composer home so it can watch
+  // from there (teleport animation plays).
   const streamingCount = useChatStore(useCallback((s) => Object.keys(s.streaming).length, []));
+  const prevStreaming = useRef(0);
+  useEffect(() => {
+    if (streamingCount > 0 && prevStreaming.current === 0) {
+      usePetStore.getState().teleportTo("composer");
+    }
+    prevStreaming.current = streamingCount;
+  }, [streamingCount]);
   useRefreshSignal(streamingCount > 0, () => pet().event({ type: "chatToken" }), STREAM_REFRESH_MS);
 
   // ── Agent panes working → working ─────────────────────────────────────
@@ -114,12 +124,18 @@ export function usePetEvents(): void {
     return () => mq.removeEventListener("change", onChange);
   }, []);
 
-  // ── Morning report: greet long absences with unseen news ──────────────
+  // ── App-open greeting: "while you were away" if long absence + news,
+  //    otherwise a simple species hello ──────────────────────────────────
   useEffect(() => {
     const t = window.setTimeout(() => {
+      const s = usePetStore.getState();
       const unseen = useNotificationsStore.getState().items.some((n) => n.unseen);
-      usePetStore.getState().morningReport(unseen);
-    }, 2500);
+      const line = s.morningReport(unseen);
+      if (!line) {
+        const greet = petLine(s.species, "greet", s.name);
+        if (greet) s.showBubble(greet);
+      }
+    }, 1600);
     return () => window.clearTimeout(t);
   }, []);
 

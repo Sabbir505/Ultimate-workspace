@@ -1,12 +1,13 @@
 // PetPanel — the companion's control popover: rename, species, level/XP,
-// cosmetic hats (level-locked), per-home visibility, lifetime stats, and the
-// all-important "pet the pet" button. Everything here is also how you turn
-// the pet off entirely (one click — the guardrail from the design doc).
+// cosmetic hats (level-locked), lifetime stats, and the all-important
+// "pet the pet" button. "dismiss pet" is the one-click off switch (the
+// guardrail from the design doc).
 //
 // Rendered through a portal to document.body with fixed positioning, for the
 // same reason as the pairing QR modal: the sidebar header's overflow-hidden
 // (and its backdrop-filter containing block) would clip/trap an in-flow
-// popover anchored inside the pet strip.
+// popover anchored inside the pet strip. Open/close run scale+fade
+// animations; `closing` keeps the card mounted for the exit animation.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Heart, Lock, X } from "lucide-react";
@@ -47,12 +48,15 @@ function HatChip({ hat }: { hat: PetHatKey }) {
 export function PetPanel({
   anchor,
   toggleRef,
+  closing,
   onClose,
 }: {
   /** viewport-space point the panel hangs from (paw button's bottom-right) */
   anchor: { x: number; y: number };
   /** the strip's paw button — clicks on it must not count as "outside" */
   toggleRef: React.RefObject<HTMLButtonElement | null>;
+  /** true while the exit animation plays */
+  closing: boolean;
   onClose: () => void;
 }) {
   const species = usePetStore((s) => s.species);
@@ -61,13 +65,10 @@ export function PetPanel({
   const enabled = usePetStore((s) => s.enabled);
   const xp = usePetStore((s) => s.core.xp);
   const stats = usePetStore((s) => s.core.stats);
-  const showInSidebar = usePetStore((s) => s.showInSidebar);
-  const showInComposer = usePetStore((s) => s.showInComposer);
   const setSpecies = usePetStore((s) => s.setSpecies);
   const setName = usePetStore((s) => s.setName);
   const setHat = usePetStore((s) => s.setHat);
   const setEnabled = usePetStore((s) => s.setEnabled);
-  const setShowHome = usePetStore((s) => s.setShowHome);
   const petThePet = usePetStore((s) => s.petThePet);
   const [nameDraft, setNameDraft] = useState(name);
   // Adopting a different species renames the pet (to that species' default) —
@@ -79,6 +80,7 @@ export function PetPanel({
   // Dismiss on any mousedown outside the card or the paw toggle, and on
   // Escape. The toggle is excluded so its own click can toggle us closed.
   useEffect(() => {
+    if (closing) return;
     const onDown = (e: MouseEvent) => {
       const t = e.target as Node;
       if (rootRef.current?.contains(t)) return;
@@ -94,7 +96,7 @@ export function PetPanel({
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
     };
-  }, [onClose, toggleRef]);
+  }, [onClose, toggleRef, closing]);
 
   const commitName = useCallback(() => setName(nameDraft), [setName, nameDraft]);
 
@@ -108,7 +110,7 @@ export function PetPanel({
   return createPortal(
     <div
       ref={rootRef}
-      className="pet-panel"
+      className={`pet-panel${closing ? " pet-panel-closing" : ""}`}
       role="dialog"
       aria-label={`Companion pet ${name}`}
       style={{
@@ -187,34 +189,6 @@ export function PetPanel({
               </button>
             );
           })}
-        </div>
-
-        <div className="pet-panel-section">Show pet</div>
-        <div className="pet-panel-toggles">
-          <label className="pet-panel-toggle">
-            <input
-              type="checkbox"
-              checked={showInSidebar}
-              onChange={(e) => setShowHome("sidebar", e.target.checked)}
-            />
-            In the sidebar
-          </label>
-          <label className="pet-panel-toggle">
-            <input
-              type="checkbox"
-              checked={showInComposer}
-              onChange={(e) => setShowHome("composer", e.target.checked)}
-            />
-            Above the composer
-          </label>
-          <label className="pet-panel-toggle">
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
-            />
-            Enabled
-          </label>
         </div>
 
         <div className="pet-panel-stats">

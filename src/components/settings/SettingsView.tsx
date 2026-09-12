@@ -39,48 +39,42 @@ import { ConnectorsPanel } from "./ConnectorsPanel";
 import { DataPanel } from "./DataPanel";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { usePetStore } from "../../state/pet";
+import { AnimatedSprite } from "../pet/PetActor";
 
-/** Companion pet section (Appearance): the on/off + placement switches.
- *  Species, name and hats are managed in the pet panel next to the pet. */
+/** Companion pet section (Appearance): the single on/off switch plus a live
+ *  preview of the three pets, each mid-animation. Placement is automatic —
+ *  the pet teleports between the sidebar and the composer on its own. */
 function CompanionPetSection() {
   const enabled = usePetStore((s) => s.enabled);
   const setEnabled = usePetStore((s) => s.setEnabled);
-  const showInSidebar = usePetStore((s) => s.showInSidebar);
-  const showInComposer = usePetStore((s) => s.showInComposer);
-  const setShowHome = usePetStore((s) => s.setShowHome);
   return (
     <div className="settings-section">
       <div className="settings-section-title">Companion pet</div>
       <p className="settings-section-hint">
         A small pixel companion that reacts to your agents — strolls, watches chats, celebrates
-        finished turns and automations, naps when you're away. It never nags and costs nothing.
+        finished turns and automations, naps when you're away. It lives above the search or above
+        the composer and teleports between them. It never nags and costs nothing.
       </p>
+      <div className="pet-settings-previews">
+        <figure className="pet-settings-preview">
+          <AnimatedSprite species="cat" mood="walk" />
+          <figcaption>cat · strolling</figcaption>
+        </figure>
+        <figure className="pet-settings-preview">
+          <AnimatedSprite species="axolotl" mood="celebrate" />
+          <figcaption>axolotl · celebrating</figcaption>
+        </figure>
+        <figure className="pet-settings-preview">
+          <AnimatedSprite species="robot" mood="work" />
+          <figcaption>robot · working</figcaption>
+        </figure>
+      </div>
       <div className="settings-toggle-row">
         <div className="settings-toggle-label">
           <span className="settings-toggle-name">Enabled</span>
           <span className="settings-toggle-desc">Show the companion in Relay.</span>
         </div>
         <ToggleSwitch checked={enabled} onChange={setEnabled} />
-      </div>
-      <div className="settings-toggle-row">
-        <div className="settings-toggle-label">
-          <span className="settings-toggle-name">In the sidebar</span>
-          <span className="settings-toggle-desc">Walk the strip above the search box.</span>
-        </div>
-        <ToggleSwitch
-          checked={showInSidebar}
-          onChange={(v) => setShowHome("sidebar", v)}
-        />
-      </div>
-      <div className="settings-toggle-row">
-        <div className="settings-toggle-label">
-          <span className="settings-toggle-name">Above the composer</span>
-          <span className="settings-toggle-desc">Walk the top edge of the message box.</span>
-        </div>
-        <ToggleSwitch
-          checked={showInComposer}
-          onChange={(v) => setShowHome("composer", v)}
-        />
       </div>
     </div>
   );

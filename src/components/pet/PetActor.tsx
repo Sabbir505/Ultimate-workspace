@@ -122,6 +122,9 @@ export function PetActor() {
         }}
       />
       {hatStyle && <div className="pet-hat" style={hatStyle} />}
+      {/* Hit box hugs the art, not the 16×16 frame — so the pet never swallows
+          clicks meant for things it overlaps (the paw button, the search). */}
+      <div className="pet-hit" />
       {mood === "doze" && !reduced && (
         <>
           <span className="pet-zzz">z</span>
@@ -162,3 +165,39 @@ export function PetActorMini({ species, size = 32 }: { species: PetActorSpecies;
   );
 }
 type PetActorSpecies = keyof typeof PET_SPECIES;
+
+/** A looping, mood-driven sprite for preview rows (Settings, harness). */
+export function AnimatedSprite({
+  species,
+  mood,
+  size = PET_FRAME * PET_SCALE,
+}: {
+  species: PetActorSpecies;
+  mood: PetMood;
+  size?: number;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 100);
+    return () => window.clearInterval(id);
+  }, []);
+  const phase = useRef({ mood, at: now });
+  if (phase.current.mood !== mood) phase.current = { mood, at: now };
+  const def = PET_SPECIES[species];
+  const anim = PET_ANIMS[MOOD_ANIM[mood]];
+  const frame = Math.floor((now - phase.current.at) / (1000 / anim.fps)) % anim.frames;
+  return (
+    <div
+      className="pet-sprite"
+      style={{
+        position: "relative",
+        inset: "auto",
+        width: size,
+        height: size,
+        backgroundImage: `url(${def.sheet})`,
+        backgroundSize: `${PET_SHEET_COLS * size}px ${PET_SHEET_ROWS * size}px`,
+        backgroundPosition: `-${frame * size}px -${anim.row * size}px`,
+      }}
+    />
+  );
+}

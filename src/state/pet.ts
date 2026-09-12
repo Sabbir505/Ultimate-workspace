@@ -64,11 +64,18 @@ export interface PetSettings {
   name: string;
   hat: PetHatKey | null;
   enabled: boolean;
-  showInSidebar: boolean;
-  showInComposer: boolean;
+  /** Which home the pet currently lives in — it teleports between them. */
+  home: "sidebar" | "composer";
   /** Epoch ms of the last app session — powers the "while you were away"
    *  morning bubble. */
   lastSeen: number;
+}
+
+/** Active teleport: the pet is vanishing from `from` (first half of the
+ *  window) and materialising in `home` (second half). Ephemeral. */
+export interface PetTeleport {
+  from: "sidebar" | "composer";
+  until: number;
 }
 
 // ── Tuning constants ─────────────────────────────────────────────────────────
@@ -82,6 +89,8 @@ const WORK_MS = 3000; // refreshed continuously while panes emit output
 export const PET_DOZE_AFTER_MS = 4 * 60_000;
 const WALK_MIN_MS = 9_000;
 const WALK_RANGE_MS = 14_000;
+/** Total vanish→appear window for a home-to-home teleport. */
+export const PET_TELEPORT_MS = 780;
 const BUBBLE_MS = 3600;
 const BUBBLE_GAP_MS = 50_000; // min spacing between speech bubbles
 const BUBBLE_CHANCE = 0.35;
@@ -149,7 +158,7 @@ export function initialPetCore(now: number): PetCore {
     moodUntil: 0,
     lastEventAt: now,
     facing: 1,
-    x: 0.7,
+    x: 0.85,
     targetX: null,
     nextWalkAt: now + WALK_MIN_MS,
     xp: 0,
@@ -203,10 +212,11 @@ export function reducePet(core: PetCore, event: PetEvent, now: number): PetCore 
       return next;
     }
     case "pet": {
-      if (!active || rank <= MOOD_RANK.happy) {
-        next.mood = "happy";
-        next.moodUntil = now + HAPPY_MS;
-      }
+      // Direct user intent always wins — even mid-celebration or an error
+      // reaction, a pet must visibly respond (a pet that ignores you reads
+      // as broken and takes "two clicks").
+      next.mood = "happy";
+      next.moodUntil = now + HAPPY_MS;
       next.stats = { ...core.stats, pets: core.stats.pets + 1 };
       next.xp = core.xp + XP_AWARD.pet;
       return next;
@@ -249,9 +259,10 @@ export function tickPet(
     return { ...core, mood: "doze", targetX: null };
   }
 
-  // Stroll: pick a target and walk there.
+  // Stroll: pick a target and walk there. Targets favour the right side of
+  // the strip — the pet's "spot" is next to the paw button.
   if (core.mood === "idle" && core.targetX === null && !petReducedMotion && now >= core.nextWalkAt) {
-    return { ...core, mood: "walk", targetX: 0.06 + rng() * 0.88, moodUntil: 0 };
+    return { ...core, mood: "walk", targetX: 0.4 + rng() * 0.54, moodUntil: 0 };
   }
   if (core.mood === "walk" && core.targetX !== null) {
     const dx = core.targetX - core.x;
@@ -281,8 +292,7 @@ function loadPersistedSettings(): PetSettings {
     name: PET_SPECIES.cat.defaultName,
     hat: null,
     enabled: true,
-    showInSidebar: true,
-    showInComposer: true,
+    home: "sidebar",
     lastSeen: Date.now(),
   };
   try {
@@ -299,8 +309,7 @@ function loadPersistedSettings(): PetSettings {
           : PET_SPECIES[species].defaultName,
       hat: typeof parsed.hat === "string" ? (parsed.hat as PetHatKey) : null,
       enabled: parsed.enabled !== false,
-      showInSidebar: parsed.showInSidebar !== false,
-      showInComposer: parsed.showInComposer !== false,
+      home: parsed.home === "composer" ? "composer" : "sidebar",
       lastSeen: typeof parsed.lastSeen === "number" ? parsed.lastSeen : Date.now(),
     };
   } catch {
@@ -333,8 +342,7 @@ function persist(settings: PetSettings, core: PetCore): void {
         name: settings.name,
         hat: settings.hat,
         enabled: settings.enabled,
-        showInSidebar: settings.showInSidebar,
-        showInComposer: settings.showInComposer,
+        home: settings.home,
         lastSeen: settings.lastSeen,
         xp: core.xp,
         stats: core.stats,
@@ -349,14 +357,19 @@ function persist(settings: PetSettings, core: PetCore): void {
 
 interface PetStoreState extends PetSettings {
   core: PetCore;
-  /** Ephemeral: active speech bubble, heart-burst timestamp, bubble pacing.
-   *  Not persisted. */
+  /** Ephemeral: active speech bubble, heart-burst timestamp, bubble pacing,
+   *  in-flight teleport. Not persisted. */
   bubble: { text: string; until: number } | null;
   heartAt: number;
   lastBubbleAt: number;
+  teleport: PetTeleport | null;
+  nextTeleportAt: number;
 
   event: (e: PetEvent) => void;
   tick: (now: number, dtSec: number) => void;
+  /** Move the pet to a home with the teleport animation (default: the other
+   *  one). Called by the scheduler and when chat starts streaming. */
+  teleportTo: (home: "sidebar" | "composer") => void;
   showBubble: (text: string) => void;
   /** Morning greeting: queues a "while you were away" bubble when the last
    *  session is >6h old and `hasUnseenNews`; returns the line or null. */
@@ -365,7 +378,6 @@ interface PetStoreState extends PetSettings {
   setName: (name: string) => void;
   setHat: (hat: PetHatKey | null) => void;
   setEnabled: (v: boolean) => void;
-  setShowHome: (home: "sidebar" | "composer", v: boolean) => void;
   petThePet: () => void;
   /** DEV-only mood forcing for live testing (window.__pet). */
   debugForceMood: (mood: PetMood) => void;
@@ -407,6 +419,8 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
   bubble: null,
   heartAt: 0,
   lastBubbleAt: 0,
+  teleport: null,
+  nextTeleportAt: Date.now() + 90_000,
 
   event: (e) => {
     const prev = get().core;
@@ -421,9 +435,54 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
   tick: (now, dtSec) => {
     const prev = get().core;
     const core = tickPet(prev, now, dtSec);
-    if (core !== prev) set({ core });
+    const patch: Partial<PetStoreState> = {};
+    let changed = false;
+    if (core !== prev) {
+      patch.core = core;
+      changed = true;
+    }
     const bubble = get().bubble;
-    if (bubble && bubble.until <= now) set({ bubble: null });
+    if (bubble && bubble.until <= now) {
+      patch.bubble = null;
+      changed = true;
+    }
+    // Teleport lifecycle: clear the window when it lapses, and schedule a new
+    // hop when the timer fires (only while the pet is between activities —
+    // vanishing mid-celebration reads wrong).
+    const teleport = get().teleport;
+    if (teleport && now >= teleport.until) {
+      patch.teleport = null;
+      changed = true;
+    }
+    if (!teleport && now >= get().nextTeleportAt) {
+      const s = get();
+      const calm = s.core.mood === "idle" || s.core.mood === "walk" || s.core.mood === "doze";
+      if (calm) {
+        const to = s.home === "sidebar" ? "composer" : "sidebar";
+        patch.home = to;
+        patch.teleport = { from: s.home, until: now + PET_TELEPORT_MS };
+        patch.nextTeleportAt = now + 120_000 + Math.random() * 120_000;
+        changed = true;
+        persist({ ...s, home: to }, s.core);
+      } else {
+        // busy — try again shortly
+        patch.nextTeleportAt = now + 15_000;
+        changed = true;
+      }
+    }
+    if (changed) set(patch);
+  },
+
+  teleportTo: (home) => {
+    const s = get();
+    if (s.home === home || !s.enabled) return;
+    const now = Date.now();
+    set({
+      home,
+      teleport: { from: s.home, until: now + PET_TELEPORT_MS },
+      nextTeleportAt: now + 120_000 + Math.random() * 120_000,
+    });
+    persist(get(), s.core);
   },
 
   showBubble: (text) => queueBubble(get, set, text),
@@ -463,10 +522,6 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
     set({ enabled });
     persist(get(), get().core);
   },
-  setShowHome: (home, v) => {
-    set(home === "sidebar" ? { showInSidebar: v } : { showInComposer: v });
-    persist(get(), get().core);
-  },
   petThePet: () => {
     get().event({ type: "pet" });
     set({ heartAt: Date.now() });
@@ -483,7 +538,13 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
     } catch {
       /* ignore */
     }
-    set({ ...loadPersistedSettings(), core: initialPetCore(Date.now()), bubble: null });
+    set({
+      ...loadPersistedSettings(),
+      core: initialPetCore(Date.now()),
+      bubble: null,
+      teleport: null,
+      nextTeleportAt: Date.now() + 90_000,
+    });
   },
 }));
 

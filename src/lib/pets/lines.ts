@@ -12,6 +12,7 @@ export type PetLineTrigger =
   | "idle"
   | "doze"
   | "morning"
+  | "greet"
   | "pet"
   | "adopt";
 
@@ -41,6 +42,7 @@ const LINES: Record<string, Record<PetLineTrigger, string[]>> = {
       "i heard a Merge. was it a dream?",
     ],
     doze: ["zzz… (dreaming of merged PRs)", "*loaf mode* zzz…", "zzz… four hours of sleep, tops."],
+    greet: ["you're here. the lap— i mean, the terminal is warm.", "mrrp. good to see you.", "i kept your tabs warm."],
     morning: [
       "the automations behaved. mostly.",
       "good morning. the cron ran. you're welcome.",
@@ -69,6 +71,7 @@ const LINES: Record<string, Record<PetLineTrigger, string[]>> = {
       "smol pet, big support.",
     ],
     doze: ["*sleepy float* blb…", "zzz… (still smiling)", "*drifts* blblb…"],
+    greet: ["blb!! you're back!", "*happy wiggle* hello again!", "the tank missed you."],
     morning: [
       "morning! the automations swam well.",
       "blb! i counted the runs for you.",
@@ -97,6 +100,7 @@ const LINES: Record<string, Record<PetLineTrigger, string[]>> = {
       "battery: full. snark: charging.",
     ],
     doze: ["charging… do not disturb.", "sleep mode. dreams in binary.", "zzz… (fan off)"],
+    greet: ["SYSTEM ONLINE. hello.", "beep. resuming companionship.", "you have returned. logging joy."],
     morning: [
       "overnight report: robots win again.",
       "good morning. 0 crashes detected. impressive.",

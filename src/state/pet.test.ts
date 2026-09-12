@@ -79,6 +79,13 @@ describe("reducePet", () => {
     expect(petted.xp).toBe(1);
   });
 
+  it("petting always shows the happy mood, even mid-celebration or concern", () => {
+    const celebrating = reducePet(core(), { type: "celebrate", source: "turn" }, T0);
+    expect(reducePet(celebrating, { type: "pet" }, T0 + 100).mood).toBe("happy");
+    const concerned = reducePet(core(), { type: "concerned", source: "error" }, T0);
+    expect(reducePet(concerned, { type: "pet" }, T0 + 100).mood).toBe("happy");
+  });
+
   it("any event wakes a dozing pet", () => {
     const asleep = core({ mood: "doze", lastEventAt: T0 - PET_DOZE_AFTER_MS * 2 });
     expect(reducePet(asleep, { type: "activity" }, T0).mood).toBe("idle");
@@ -113,7 +120,8 @@ describe("tickPet", () => {
     const idle = core({ nextWalkAt: T0 });
     const start = tickPet(idle, T0 + 1, 0.016, fixedRng);
     expect(start.mood).toBe("walk");
-    expect(start.targetX).toBeCloseTo(0.5, 5);
+    // fixedRng 0.5 → right-biased target 0.4 + 0.5 * 0.54 = 0.67
+    expect(start.targetX).toBeCloseTo(0.67, 5);
 
     // walking right: x advances by speed*dt each tick toward the target
     let c = start;
@@ -123,9 +131,9 @@ describe("tickPet", () => {
       c = tickPet(c, now, 0.1, fixedRng);
     }
     expect(c.mood).toBe("idle");
-    expect(c.x).toBeCloseTo(0.5, 5);
+    expect(c.x).toBeCloseTo(0.67, 5);
     expect(c.targetX).toBeNull();
-    // target 0.5 < start x 0.7 — the pet walked left
+    // target 0.67 < start x 0.85 — the pet walked left
     expect(c.facing).toBe(-1);
   });
 
@@ -204,6 +212,40 @@ describe("store", () => {
     expect(raw.name).toBe("Bloop Jr");
     expect(raw.xp).toBe(10);
     expect(raw.stats.automations).toBe(1);
+    expect(raw.home).toBe("sidebar");
+  });
+
+  it("teleports to the other home when the schedule fires while calm", () => {
+    const s = usePetStore.getState();
+    expect(s.home).toBe("sidebar");
+    usePetStore.setState({ nextTeleportAt: Date.now() - 1 });
+    usePetStore.getState().tick(Date.now(), 0.016);
+    const after = usePetStore.getState();
+    expect(after.home).toBe("composer");
+    expect(after.teleport).not.toBeNull();
+    expect(after.teleport?.from).toBe("sidebar");
+  });
+
+  it("waits when busy — no teleport mid-work", () => {
+    usePetStore.setState({
+      nextTeleportAt: Date.now() - 1,
+      core: { ...usePetStore.getState().core, mood: "work", moodUntil: Date.now() + 5000 },
+    });
+    usePetStore.getState().tick(Date.now(), 0.016);
+    const after = usePetStore.getState();
+    expect(after.home).toBe("sidebar");
+    expect(after.teleport).toBeNull();
+    expect(after.nextTeleportAt).toBeGreaterThan(Date.now());
+  });
+
+  it("teleportTo moves the pet immediately with an animation window", () => {
+    usePetStore.getState().teleportTo("composer");
+    const s = usePetStore.getState();
+    expect(s.home).toBe("composer");
+    expect(s.teleport?.from).toBe("sidebar");
+    // no-op when already there
+    usePetStore.getState().teleportTo("composer");
+    expect(usePetStore.getState().teleport?.from).toBe("sidebar");
   });
 
   it("morningReport speaks only after a long absence with unseen news", () => {

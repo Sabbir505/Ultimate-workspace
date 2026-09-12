@@ -118,7 +118,7 @@ export function SidebarHeader() {
       </div>
       {/* Companion pet — strolls along its strip directly above the search
           box (its other home is above the chat composer). */}
-      <PetStrip home="sidebar" />
+      <PetStrip myHome="sidebar" />
       <div className="flex items-center gap-2">
         {/* Search / command palette trigger */}
         <button

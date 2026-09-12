@@ -717,6 +717,7 @@ const ANIMS = [
   { key: "happy", frames: 2, fps: 4 },
   { key: "teleout", frames: 4, fps: 10 },
   { key: "telein", frames: 4, fps: 10 },
+  { key: "zoomies", frames: 2, fps: 10 },
 ];
 
 function manifestSource() {
@@ -737,7 +738,8 @@ function manifestSource() {
   | "doze"
   | "happy"
   | "teleout"
-  | "telein";`);
+  | "telein"
+  | "zoomies";`);
   lines.push(``);
   lines.push(`export interface PetAnim { row: number; frames: number; fps: number }`);
   lines.push(``);

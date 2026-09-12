@@ -34,8 +34,10 @@ export default defineConfig(async () => ({
     strictPort: true,
     host: "localhost",
     watch: {
-      // tell vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // tell vite to ignore watching `src-tauri`, plus scratch dirs whose
+      // transient locked files (browser profiles, logs) crash the watcher
+      // with EBUSY and take the whole dev server down
+      ignored: ["**/src-tauri/**", "**/.playwright-mcp/**", "**/target/**", "**/logs/**"],
     },
   },
   test: {

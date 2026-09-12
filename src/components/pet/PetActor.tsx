@@ -96,18 +96,19 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
   const sheetW = PET_SHEET_COLS * SIZE;
   const sheetH = PET_SHEET_ROWS * SIZE;
 
-  // Hat overlay: same 16×16 box, raised so the hat's lowest art row lands on
-  // the species' hat anchor (its head top). Headphones stay unmoved — their
-  // pads wrap the face at frame rows 4-7 for every species.
+  // Hat overlay: same 16×16 box. Sit-on-head hats are raised so the hat's
+  // lowest art row lands on the species' head-top anchor (negative Y = up).
+  // Headphones are the exception — their pads wrap the face at the frame's
+  // natural rows for every species, so they stay unmoved.
   let hatStyle: React.CSSProperties | undefined;
   if (hat) {
     const hatIndex = PET_HATS.keys.indexOf(hat as PetHatKey);
-    const raise = PET_HAT_BOTTOM[hat] - def.hatAnchor.y;
+    const raiseRows = hat === "headphones" ? 0 : def.hatAnchor.y - PET_HAT_BOTTOM[hat];
     hatStyle = {
       backgroundImage: `url(${PET_HATS.sheet})`,
       backgroundSize: `${PET_HATS.frame * PET_SCALE * PET_HATS.keys.length}px ${PET_HATS.frame * PET_SCALE}px`,
       backgroundPosition: `-${hatIndex * PET_HATS.frame * PET_SCALE}px 0px`,
-      transform: `translateY(${raise * PET_SCALE}px)`,
+      transform: `translateY(${raiseRows * PET_SCALE}px)`,
       transformOrigin: "center bottom",
     };
   }

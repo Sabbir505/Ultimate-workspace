@@ -261,9 +261,10 @@ export function tickPet(
   }
 
   // Stroll: pick a target and walk there. Targets favour the right side of
-  // the strip — the pet's "spot" is next to the paw button.
+  // the strip — the pet's "spot" is next to the paw button — but stop short
+  // enough that the 48px actor box stays inside the narrow sidebar.
   if (core.mood === "idle" && core.targetX === null && !petReducedMotion && now >= core.nextWalkAt) {
-    return { ...core, mood: "walk", targetX: 0.4 + rng() * 0.54, moodUntil: 0 };
+    return { ...core, mood: "walk", targetX: 0.4 + rng() * 0.48, moodUntil: 0 };
   }
   if (core.mood === "walk" && core.targetX !== null) {
     const dx = core.targetX - core.x;

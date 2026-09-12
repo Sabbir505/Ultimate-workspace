@@ -189,7 +189,7 @@
     if (actor.hatEl) {
       if (showHats && actor.hat != null) {
         const hi = HATS.indexOf(actor.hat);
-        const raise = HAT_BOTTOM[actor.hat] - HAT_ANCHOR[actor.species];
+        const raise = actor.hat === "headphones" ? 0 : HAT_ANCHOR[actor.species] - HAT_BOTTOM[actor.hat];
         actor.hatEl.style.display = "block";
         actor.hatEl.style.width = FRAME * s + "px";
         actor.hatEl.style.height = FRAME * s + "px";

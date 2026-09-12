@@ -130,6 +130,40 @@
   to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
 }
 
+/* Sidebar home: the strip sits at the very top of the window, so a bubble
+   above the pet gets clipped by the window edge and runs past the sidebar
+   into the chat view. There it hangs BELOW the pet instead, anchored to its
+   right edge so it grows leftward and stays inside the rail; the tail
+   points up at the pet. */
+.pet-strip-sidebar .pet-bubble {
+  top: calc(100% + 4px);
+  bottom: auto;
+  left: auto;
+  right: 0;
+  transform: none;
+  max-width: 176px;
+  white-space: normal;
+  text-align: left;
+  line-height: 1.3;
+  animation: pet-bubble-in-side 160ms ease-out;
+}
+.pet-strip-sidebar .pet-bubble::after {
+  top: auto;
+  bottom: 100%;
+  left: auto;
+  right: 14px;
+  transform: none;
+  border: 4px solid transparent;
+  border-bottom-color: rgba(255, 255, 255, 0.96);
+}
+[data-theme="dark"] .pet-strip-sidebar .pet-bubble::after {
+  border-bottom-color: rgba(30, 34, 48, 0.97);
+}
+@keyframes pet-bubble-in-side {
+  from { opacity: 0; transform: translateY(-3px) scale(0.94); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 /* ── Zzz particles (dozing) ────────────────────────────────────────────── */
 .pet-zzz {
   position: absolute;

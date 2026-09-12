@@ -121,7 +121,7 @@ describe("tickPet", () => {
     const start = tickPet(idle, T0 + 1, 0.016, fixedRng);
     expect(start.mood).toBe("walk");
     // fixedRng 0.5 → right-biased target 0.4 + 0.5 * 0.54 = 0.67
-    expect(start.targetX).toBeCloseTo(0.67, 5);
+    expect(start.targetX).toBeCloseTo(0.64, 5);
 
     // walking right: x advances by speed*dt each tick toward the target
     let c = start;
@@ -131,9 +131,9 @@ describe("tickPet", () => {
       c = tickPet(c, now, 0.1, fixedRng);
     }
     expect(c.mood).toBe("idle");
-    expect(c.x).toBeCloseTo(0.67, 5);
+    expect(c.x).toBeCloseTo(0.64, 5);
     expect(c.targetX).toBeNull();
-    // target 0.67 < start x 0.85 — the pet walked left
+    // target 0.64 < start x 0.85 — the pet walked left
     expect(c.facing).toBe(-1);
   });
 

@@ -8,6 +8,7 @@ import {
   levelThreshold,
   petLevel,
   PET_DOZE_AFTER_MS,
+  PET_MILESTONES,
   PET_WALK_SPEED,
   reducePet,
   setPetReducedMotion,
@@ -120,8 +121,8 @@ describe("tickPet", () => {
     const idle = core({ nextWalkAt: T0 });
     const start = tickPet(idle, T0 + 1, 0.016, fixedRng);
     expect(start.mood).toBe("walk");
-    // fixedRng 0.5 → right-biased target 0.4 + 0.5 * 0.54 = 0.67
-    expect(start.targetX).toBeCloseTo(0.64, 5);
+    // fixedRng 0.5 → stroll wanders around the spot (0.85): midpoint 0.805
+    expect(start.targetX).toBeCloseTo(0.805, 5);
 
     // walking right: x advances by speed*dt each tick toward the target
     let c = start;
@@ -131,9 +132,9 @@ describe("tickPet", () => {
       c = tickPet(c, now, 0.1, fixedRng);
     }
     expect(c.mood).toBe("idle");
-    expect(c.x).toBeCloseTo(0.64, 5);
+    expect(c.x).toBeCloseTo(0.805, 5);
     expect(c.targetX).toBeNull();
-    // target 0.64 < start x 0.85 — the pet walked left
+    // target 0.805 < start x 0.85 — the pet walked left
     expect(c.facing).toBe(-1);
   });
 
@@ -168,6 +169,124 @@ describe("tickPet", () => {
       lastEventAt: T0 - PET_DOZE_AFTER_MS * 3,
     });
     expect(tickPet(strolling, T0 + 100, 0.1, fixedRng).mood).toBe("walk");
+  });
+});
+
+describe("zoomies", () => {
+  it("runs at 4× stroll speed toward the far side of the strip", () => {
+    const z = reducePet(core({ x: 0.3 }), { type: "zoomies" }, T0);
+    expect(z.mood).toBe("zoomies");
+    expect(z.targetX).toBe(0.92);
+    expect(z.facing).toBe(1);
+    const stepped = tickPet(z, T0 + 100, 0.1, fixedRng);
+    expect(stepped.x).toBeCloseTo(0.3 + PET_WALK_SPEED * 4 * 0.1, 6);
+  });
+
+  it("fires from the store when a pet combo completes, and resets the combo", () => {
+    const store = usePetStore.getState();
+    store.petThePet();
+    store.petThePet();
+    usePetStore.getState().petThePet();
+    expect(usePetStore.getState().core.mood).toBe("zoomies");
+    expect(usePetStore.getState().petTimes).toHaveLength(0);
+  });
+});
+
+describe("focus buddy", () => {
+  it("meditates: ambient streams don't break focus", () => {
+    usePetStore.getState().startFocus();
+    const focused = usePetStore.getState();
+    expect(focused.core.mood).toBe("focus");
+    focused.event({ type: "chatToken" });
+    focused.event({ type: "agentOutput" });
+    expect(usePetStore.getState().core.mood).toBe("focus");
+    // …but a real celebration breaks through
+    focused.event({ type: "celebrate", source: "turn" });
+    expect(usePetStore.getState().core.mood).toBe("celebrate");
+    usePetStore.getState().stopFocus();
+  });
+
+  it("pays off with a celebration + XP when the session completes", () => {
+    const before = usePetStore.getState().core.xp;
+    usePetStore.getState().startFocus();
+    usePetStore.setState({ focusUntil: Date.now() - 1 });
+    usePetStore.getState().tick(Date.now(), 0.016);
+    const after = usePetStore.getState();
+    expect(after.focusUntil).toBe(0);
+    expect(after.core.mood).toBe("celebrate");
+    expect(after.core.xp).toBe(before + 8);
+  });
+});
+
+describe("drag", () => {
+  it("moves the pet within bounds and remembers the new spot", () => {
+    usePetStore.getState().beginDrag();
+    expect(usePetStore.getState().dragging).toBe(true);
+    usePetStore.getState().dragTo(2);
+    expect(usePetStore.getState().core.x).toBeLessThanOrEqual(0.97);
+    usePetStore.getState().dragTo(0.3);
+    usePetStore.getState().endDrag();
+    const s = usePetStore.getState();
+    expect(s.dragging).toBe(false);
+    expect(s.core.spotX).toBeCloseTo(0.3, 5);
+    expect(JSON.parse(localStorage.getItem("relay.pet.v1") ?? "{}").spotX).toBeCloseTo(0.3, 5);
+  });
+
+  it("strolls stay near the pet's spot", () => {
+    usePetStore.setState({ core: { ...usePetStore.getState().core, spotX: 0.5, nextWalkAt: T0 } });
+    const started = tickPet(usePetStore.getState().core, T0 + 1, 0.016, fixedRng);
+    // fixedRng 0.5 → 0.4 + 0.5 * 0.22 = 0.51 — right around the spot
+    expect(started.targetX).toBeCloseTo(0.51, 5);
+  });
+});
+
+describe("budget concern", () => {
+  it("worries about budget alerts without counting them as errors", () => {
+    const before = usePetStore.getState().core.stats.errors;
+    usePetStore.getState().event({ type: "concerned", source: "budget" });
+    const s = usePetStore.getState();
+    expect(s.core.mood).toBe("concerned");
+    expect(s.core.stats.errors).toBe(before);
+  });
+});
+
+describe("level-up party", () => {
+  it("extends the celebration and marks the burst on a level crossing", () => {
+    usePetStore.setState({ core: { ...usePetStore.getState().core, xp: 45 } });
+    usePetStore.getState().event({ type: "celebrate", source: "turn" });
+    const s = usePetStore.getState();
+    expect(s.core.xp).toBe(51);
+    expect(petLevel(s.core.xp)).toBe(2);
+    expect(s.levelUpAt).toBeGreaterThan(0);
+    expect(s.core.moodUntil).toBeGreaterThan(Date.now() + 8000);
+  });
+});
+
+describe("teleport stat", () => {
+  it("counts scheduled and requested teleports", () => {
+    usePetStore.setState({
+      core: {
+        ...usePetStore.getState().core,
+        mood: "idle",
+        moodUntil: 0,
+        nextWalkAt: Date.now() + 999_000, // keep the stroll from racing the hop
+      },
+      nextTeleportAt: Date.now() - 1,
+    });
+    usePetStore.getState().tick(Date.now(), 0.016);
+    expect(usePetStore.getState().core.stats.teleports).toBe(1);
+    usePetStore.setState({ nextTeleportAt: Date.now() + 999_000, teleport: null });
+    usePetStore.getState().teleportTo("sidebar");
+    expect(usePetStore.getState().core.stats.teleports).toBe(2);
+  });
+});
+
+describe("milestones", () => {
+  it("unlock from stats and never un-earn", () => {
+    const stats = { turns: 25, automations: 10, errors: 10, pets: 50, teleports: 1 };
+    for (const m of PET_MILESTONES) expect(m.met(stats)).toBe(true);
+    const fresh = { turns: 0, automations: 0, errors: 0, pets: 0, teleports: 0 };
+    for (const m of PET_MILESTONES) expect(m.met(fresh)).toBe(false);
   });
 });
 

@@ -200,6 +200,47 @@
   100% { opacity: 0; transform: translateY(-18px) scale(1.1); }
 }
 
+/* ── Level-up confetti burst ───────────────────────────────────────────── */
+.pet-confetti {
+  position: absolute;
+  top: -6px;
+  left: 0;
+  right: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 7;
+}
+.pet-confetti i {
+  position: absolute;
+  top: 0;
+  width: 3px;
+  height: 5px;
+  border-radius: 1px;
+  animation: pet-confetti-fall 1.6s ease-in forwards;
+}
+.pet-confetti i:nth-child(even) {
+  animation-name: pet-confetti-fall-alt;
+  animation-duration: 1.9s;
+}
+@keyframes pet-confetti-fall {
+  0% { opacity: 0; transform: translateY(-4px) rotate(0deg); }
+  15% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(46px) rotate(320deg); }
+}
+@keyframes pet-confetti-fall-alt {
+  0% { opacity: 0; transform: translateY(-2px) rotate(180deg); }
+  15% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(54px) rotate(-200deg); }
+}
+
+/* ── Dragging ──────────────────────────────────────────────────────────── */
+.pet-slot-dragging .pet-hit {
+  cursor: grabbing;
+}
+.pet-slot-dragging .pet-actor {
+  animation: none;
+}
+
 /* ── Panel open button ─────────────────────────────────────────────────── */
 /* Frosted dark chip: stays readable on the sidebar header art (dark) and on
    plain light chrome alike — the old grey hover vanished into the art. */
@@ -472,12 +513,70 @@
   color: #9aa3ba;
 }
 
+/* ── Focus buddy ───────────────────────────────────────────────────────── */
+.pet-focus-btn {
+  display: block;
+  width: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 128, 148, 0.3);
+  background: rgba(120, 128, 148, 0.08);
+  color: inherit;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+.pet-focus-btn:hover {
+  background: rgba(120, 128, 148, 0.16);
+}
+.pet-focus-btn.is-active {
+  border-color: #5fd4c4;
+  background: rgba(95, 212, 196, 0.12);
+  color: #2c7a70;
+}
+[data-theme="dark"] .pet-focus-btn.is-active {
+  color: #7ef0dc;
+}
+
+/* Milestone chips — earned badges are gold-trimmed, unearned stay quiet */
+.pet-milestones {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.pet-milestone {
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(120, 128, 148, 0.25);
+  color: #8a92a8;
+  opacity: 0.55;
+}
+.pet-milestone.is-earned {
+  border-color: #ffd166;
+  background: rgba(255, 209, 102, 0.14);
+  color: #8a6d1a;
+  opacity: 1;
+  font-weight: 600;
+}
+[data-theme="dark"] .pet-milestone {
+  color: #9aa3ba;
+}
+[data-theme="dark"] .pet-milestone.is-earned {
+  color: #ffd166;
+}
+
 /* ── Reduced motion ────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .pet-strip .pet-actor,
   .pet-zzz,
   .pet-heart,
+  .pet-confetti i,
   .pet-bubble {
     animation: none !important;
+  }
+  .pet-confetti {
+    display: none;
   }
 }

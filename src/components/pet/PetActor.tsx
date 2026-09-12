@@ -34,6 +34,8 @@ const MOOD_ANIM: Record<PetMood, PetAnimKey> = {
   concerned: "concerned",
   doze: "doze",
   happy: "happy",
+  zoomies: "zoomies",
+  focus: "idle",
 };
 
 function useReducedMotion(): boolean {
@@ -66,6 +68,7 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
   const mood = usePetStore((s) => s.core.mood);
   const bubble = usePetStore((s) => s.bubble);
   const heartAt = usePetStore((s) => s.heartAt);
+  const levelUpAt = usePetStore((s) => s.levelUpAt);
   const reduced = useReducedMotion();
 
   // Free-running 10fps clock for frame selection + particle lifetime.
@@ -85,12 +88,15 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
   const rawFrame = Math.floor(elapsed / (1000 / anim.fps));
   // Teleport animations play ONCE and hold their last frame (a scanline
   // dissolve that loops would never finish vanishing); moods loop forever —
-  // except under reduced motion, where they hold a single pose.
+  // except under reduced motion, where they hold a single pose. Focus is the
+  // standing pose frozen on its closed-eyes frame: meditation.
   const frame = animOverride
     ? Math.min(rawFrame, anim.frames - 1)
-    : reduced
-      ? 0
-      : rawFrame % anim.frames;
+    : mood === "focus"
+      ? 1
+      : reduced
+        ? 0
+        : rawFrame % anim.frames;
   const facing = usePetStore((s) => s.core.facing);
 
   const sheetW = PET_SHEET_COLS * SIZE;
@@ -122,6 +128,7 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
   }
 
   const heartsActive = now - heartAt < 1300 && heartAt > 0;
+  const levelUpActive = now - levelUpAt < 1800 && levelUpAt > 0;
   const bubbleVisible = bubble !== null && bubble.until > now;
 
   return (
@@ -155,6 +162,15 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
           <span className="pet-heart" key={`h2${heartAt}`}>♥</span>
           <span className="pet-heart" key={`h3${heartAt}`}>♥</span>
         </>
+      )}
+      {levelUpActive && (
+        <span className="pet-confetti" key={`c${levelUpAt}`} aria-hidden>
+          {["#ff8fae", "#ffd166", "#5fd4c4", "#7b68d9", "#ff8fae", "#ffd166", "#5fd4c4", "#7b68d9"].map(
+            (c, i) => (
+              <i key={i} style={{ background: c, left: 2 + i * 6 }} />
+            ),
+          )}
+        </span>
       )}
       {bubbleVisible && (
         <div className="pet-bubble" role="status">{bubble!.text}</div>

@@ -14,7 +14,9 @@ export type PetLineTrigger =
   | "morning"
   | "greet"
   | "pet"
-  | "adopt";
+  | "adopt"
+  | "levelup"
+  | "zoomies";
 
 const LINES: Record<string, Record<PetLineTrigger, string[]>> = {
   cat: {
@@ -50,6 +52,12 @@ const LINES: Record<string, Record<PetLineTrigger, string[]>> = {
     ],
     pet: ["prrrrrb.", "*slow blink* acceptable.", "more. exactly like that."],
     adopt: ["fine, i'll supervise.", "*claims the warm laptop spot*", "you may pet the supervisor."],
+    levelup: [
+      "new hat unlocked. i look incredible.",
+      "LEVEL UP. the loaf ascends.",
+      "growth detected. fashion increased.",
+    ],
+    zoomies: ["ZOOMIES!!", "*attacks the invisible mouse*", "wait for me— ok you wait for ME."],
   },
   axolotl: {
     celebrate: [
@@ -79,6 +87,8 @@ const LINES: Record<string, Record<PetLineTrigger, string[]>> = {
     ],
     pet: ["blblblb!! *wiggle*", "*gills perk up*", "smol happy sounds."],
     adopt: ["blb! new tank!", "*immediately smiles*", "i will regenerate your motivation."],
+    levelup: ["blb!! new hat!! *wiggle intensifies*", "growing! smol to slightly less smol!", "level up! still smiling!"],
+    zoomies: ["BLB BLB BLB *zoom*", "*swims in circles very fast*", "smol pet, BIG speed."],
   },
   robot: {
     celebrate: [
@@ -108,6 +118,8 @@ const LINES: Record<string, Record<PetLineTrigger, string[]>> = {
     ],
     pet: ["*happy fan noise*", "affection received. logging it.", "beep! beep! beep!"],
     adopt: ["BOOT SEQUENCE: friendship.", "new chassis smell.", "i will run forever for you."],
+    levelup: ["FIRMWARE UPDATED. hat acquired.", "level up. confidence at 100%.", "upgrade complete. beep."],
+    zoomies: ["TURBO MODE.", "*wheels spinning at maximum*", "beepbeepbeepbeep—"],
   },
 };
 

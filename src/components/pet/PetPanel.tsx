@@ -10,7 +10,7 @@
 // animations; `closing` keeps the card mounted for the exit animation.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Heart, Lock, X } from "lucide-react";
+import { Heart, Lock, Timer, X } from "lucide-react";
 
 import { PetActorMini } from "./PetActor";
 import {
@@ -22,6 +22,7 @@ import {
   levelThreshold,
   petLevel,
   PET_HAT_UNLOCKS,
+  PET_MILESTONES,
   unlockedHats,
   usePetStore,
   type PetSpecies,
@@ -70,10 +71,23 @@ export function PetPanel({
   const setHat = usePetStore((s) => s.setHat);
   const setEnabled = usePetStore((s) => s.setEnabled);
   const petThePet = usePetStore((s) => s.petThePet);
+  const focusUntil = usePetStore((s) => s.focusUntil);
+  const startFocus = usePetStore((s) => s.startFocus);
+  const stopFocus = usePetStore((s) => s.stopFocus);
   const [nameDraft, setNameDraft] = useState(name);
   // Adopting a different species renames the pet (to that species' default) —
   // keep the input draft in sync so it doesn't show the previous name.
   useEffect(() => setNameDraft(name), [name]);
+  // Focus countdown needs a per-second re-render while active.
+  const [, setClock] = useState(0);
+  const focusing = focusUntil > Date.now();
+  useEffect(() => {
+    if (!focusing) return;
+    const id = window.setInterval(() => setClock((c) => c + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [focusing]);
+  const focusLeftMs = Math.max(0, focusUntil - Date.now());
+  const focusLabel = `${Math.floor(focusLeftMs / 60_000)}:${String(Math.floor((focusLeftMs % 60_000) / 1000)).padStart(2, "0")}`;
 
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -197,6 +211,35 @@ export function PetPanel({
           <span><b>{stats.errors}</b> survived</span>
           <span><b>{stats.pets}</b> pets</span>
         </div>
+
+        <div className="pet-panel-section">Milestones</div>
+        <div className="pet-milestones">
+          {PET_MILESTONES.map((m) => {
+            const earned = m.met(stats);
+            return (
+              <span
+                key={m.key}
+                className={`pet-milestone${earned ? " is-earned" : ""}`}
+                title={earned ? m.label : `${m.hint} — not yet`}
+              >
+                {m.label}
+              </span>
+            );
+          })}
+        </div>
+
+        <div className="pet-panel-section">Focus buddy</div>
+        {focusing ? (
+          <button type="button" className="pet-focus-btn is-active" onClick={stopFocus}>
+            <Timer size={12} style={{ verticalAlign: "-2px", marginRight: 5 }} />
+            Focusing… {focusLabel} left — tap to stop
+          </button>
+        ) : (
+          <button type="button" className="pet-focus-btn" onClick={startFocus}>
+            <Timer size={12} style={{ verticalAlign: "-2px", marginRight: 5 }} />
+            Focus 25 min — the {species === "robot" ? "unit" : "pet"} meditates with you
+          </button>
+        )}
       </div>
 
       <div className="pet-panel-foot">

@@ -5,10 +5,11 @@
 // backend surface.
 import { useCallback, useEffect, useRef } from "react";
 
-import { listenAutomationRunFinished } from "../lib/ipc";
+import { listenAutomationRunFinished, onBudgetAlert, safeListen } from "../lib/ipc";
 import { isFailureStatus } from "../components/automations/shared";
 import { petLine } from "../lib/pets/lines";
 import { useChatStore } from "../state/chat";
+import type { PtyOutputPayload } from "../types";
 import { useNotificationsStore } from "../state/notifications";
 import { usePanesStore } from "../state/panes";
 import { installPetDebugHook, setPetReducedMotion, usePetStore } from "../state/pet";
@@ -88,6 +89,46 @@ export function usePetEvents(): void {
       }
     });
   }, [pet]);
+
+    // ── Test-run reactions: watch pane output for pass/fail summaries ─────
+  // A conservative scan of each pane's rolling tail — "N passed" celebrates,
+  // "N failed" worries (counts ≥ 1 only, so a green "0 failed" never reads
+  // as a failure). Throttled so a re-running suite doesn't spam moods.
+  const lastTestReact = useRef(0);
+  useEffect(() => {
+    const tails = new Map<string, string>();
+    const unlisten = safeListen<PtyOutputPayload>("pty:output", ({ paneId, data }) => {
+      if (!data) return;
+      const tail = ((tails.get(paneId) ?? "") + data).slice(-600);
+      tails.set(paneId, tail);
+      const now = Date.now();
+      if (now - lastTestReact.current < 30_000) return;
+      const failed =
+        tail.match(/(?:^|\s)([1-9]\d*)\s+(?:tests?\s+)?(?:failed|failing)\b/i) ??
+        tail.match(/\btests?\s+failed\b/i);
+      const passed =
+        tail.match(/\b\d+\s+(?:tests?\s+)?(?:passed|passing)\b/i) ??
+        tail.match(/\ball tests passed\b/i);
+      if (failed) {
+        lastTestReact.current = now;
+        usePetStore.getState().event({ type: "concerned", source: "error" });
+      } else if (passed) {
+        lastTestReact.current = now;
+        usePetStore.getState().event({ type: "celebrate", source: "turn" });
+      }
+    });
+    return () => {
+      void unlisten.then((u) => u());
+      tails.clear();
+    };
+  }, []);
+
+  // ── Budget alerts share the concerned look — but aren't failures ──────
+  useEventSubscription(
+    onBudgetAlert,
+    () => usePetStore.getState().event({ type: "concerned", source: "budget" }),
+    [],
+  );
 
   // ── User presence: real input wakes and keeps the pet out of doze ─────
   useEffect(() => {

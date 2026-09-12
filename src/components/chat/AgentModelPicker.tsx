@@ -41,8 +41,15 @@ import {
   paneInFlight,
   type PaneData,
 } from "./agentPickerShared";
-import { SegmentedSlider } from "./SegmentedSlider";
-import { LlamaAdvancedFields } from "./LlamaAdvancedFields";
+import {
+  AutoBiasFooter,
+  GearSubModal,
+  HarnessEffortFooter,
+  ProviderEffortFooter,
+} from "./agentPickerParts";
+// Split-boundary re-exports: the effort label tables are public surface of
+// this module (moved to agentPickerShared with the footer parts).
+export { EFFORT_LABELS, HARNESS_EFFORT_LABELS } from "./agentPickerShared";
 import {
   ClaudeIcon,
   AnthropicIcon,
@@ -60,39 +67,6 @@ import {
   railIcon,
 } from "./agentIcons";
 
-/** Effort options in display order — High first, Default last (the footer
- *  renders Object.entries of this map top-to-bottom). */
-export const EFFORT_LABELS: Record<string, string> = {
-  high: "High",
-  low: "Low",
-  medium: "Medium",
-  "": "Default",
-};
-
-/** Harness effort tiers (claude `--effort`, omp/pi `--thinking`, kimi env
- *  override): compact stop labels for the harness pane's slider — up to 7
- *  tiers + Default must fit the pane, so the spellings stay short. */
-export const HARNESS_EFFORT_LABELS: Record<string, string> = {
-  off: "Off",
-  minimal: "Min",
-  low: "Low",
-  medium: "Med",
-  high: "High",
-  xhigh: "XHigh",
-  max: "Max",
-};
-
-/** Stop colors, coolest → hottest; the SegmentedSlider gives the LAST stop
- *  (Max) a pulse/shimmer of its own, so the top tier reads as deliberate. */
-const HARNESS_EFFORT_COLORS: Record<string, string> = {
-  off: "var(--text-dim)",
-  minimal: "#38bdf8",
-  low: "#22c55e",
-  medium: "#f59e0b",
-  high: "#ef4444",
-  xhigh: "#a855f7",
-  max: "#ec4899",
-};
 
 /** The five cloud providers from Settings → API Keys — each is its own
  *  endpoint, so each gets its own rail entry. */
@@ -983,74 +957,17 @@ export function AgentModelPickerInner({
               )}
             </div>
 
-            {/* ---- Auto bias footer (Auto pane): Quality/Balanced/Economy
-                 as an animated slider. ---- */}
             {isAutoPane && onAutoBiasChange && (
-              <>
-                <div className="model-effort-divider" />
-                <div className="agent-model-effort">
-                  <SegmentedSlider
-                    ariaLabel="Auto routing bias"
-                    value={(autoBias ?? "balanced") as "quality" | "balanced" | "economy"}
-                    onChange={(v) => onAutoBiasChange(v)}
-                    options={[
-                      {
-                        value: "economy",
-                        label: "Economy",
-                        title: "Prefer free and cheap models when they fit",
-                        color: "#22c55e",
-                      },
-                      {
-                        value: "balanced",
-                        label: "Balanced",
-                        title: "Provider preference, cost as a tiebreaker",
-                        color: "#3b82f6",
-                      },
-                      {
-                        value: "quality",
-                        label: "Quality",
-                        title: "Prefer the strongest model per provider",
-                        color: "#a78bfa",
-                      },
-                    ]}
-                  />
-                </div>
-              </>
+              <AutoBiasFooter autoBias={autoBias} onAutoBiasChange={onAutoBiasChange} />
             )}
 
-            {/* Harness effort SLIDER (every harness pane with tiers):
-                persists a tier on the chat session; the backend applies it
-                at spawn — claude `--effort`, omp/pi `--thinking`, kimi env
-                override. "Default" passes no flag, so the CLI's own
-                configured level stands (its tooltip names that level when
-                the CLI publishes one). */}
             {showHarnessEffort && (
-              <>
-                <div className="model-effort-divider" />
-                <div className="agent-model-effort">
-                  <SegmentedSlider
-                    ariaLabel="Harness effort"
-                    value={(harnessEffort ?? "") as string}
-                    onChange={(v) => onHarnessEffortChange?.(v)}
-                    options={[
-                      {
-                        value: "",
-                        label: "Def",
-                        title: pane?.effort
-                          ? `Use the CLI's own configured effort (currently ${pane.effort}) — no flag is passed`
-                          : "Use the CLI's own configured effort — no flag is passed",
-                        color: "var(--text-dim)",
-                      },
-                      ...harnessEffortTiers.map((t) => ({
-                        value: t,
-                        label: HARNESS_EFFORT_LABELS[t] ?? t,
-                        title: `${t} — applied at the next spawn`,
-                        color: HARNESS_EFFORT_COLORS[t] ?? "#ef4444",
-                      })),
-                    ]}
-                  />
-                </div>
-              </>
+              <HarnessEffortFooter
+                harnessEffort={harnessEffort}
+                onHarnessEffortChange={onHarnessEffortChange}
+                paneEffort={pane?.effort}
+                tiers={harnessEffortTiers}
+              />
             )}
 
             {/* Endpoint footnote — PINNED under the list (not inside the
@@ -1062,101 +979,26 @@ export function AgentModelPickerInner({
               </div>
             )}
 
-            {/* ---- effort footer (provider + local panes): reasoning effort as an
-                 animated slider, strongest → provider default ---- */}
             {showEffort && (
-              <>
-                <div className="model-effort-divider" />
-                <div className="agent-model-effort">
-                  <SegmentedSlider
-                    ariaLabel="Reasoning effort"
-                    value={(effort ?? "") as string}
-                    onChange={(v) => onEffortChange!(v)}
-                    options={[
-                      {
-                        value: "",
-                        label: EFFORT_LABELS[""],
-                        title: "Provider default reasoning effort",
-                        color: "var(--text-dim)",
-                      },
-                      {
-                        value: "low",
-                        label: EFFORT_LABELS.low,
-                        title: "Prefer low reasoning effort",
-                        color: "#22c55e",
-                      },
-                      {
-                        value: "medium",
-                        label: EFFORT_LABELS.medium,
-                        title: "Prefer medium reasoning effort",
-                        color: "#f59e0b",
-                      },
-                      {
-                        value: "high",
-                        label: EFFORT_LABELS.high,
-                        title: "Prefer high reasoning effort",
-                        color: "#ef4444",
-                      },
-                    ]}
-                  />
-                </div>
-              </>
+              <ProviderEffortFooter effort={effort} onEffortChange={onEffortChange} />
             )}
           </div>
           </div>,
           document.body,
       )}
 
-      {/* Advanced runtime settings SUB-MODAL — opened by a local row's gear.
-          Portaled to <body> so the composer's stacking contexts (backdrop
-          filters, popups) can't clip or trap it. */}
-      {gearFor &&
-        onLoadLocalModel &&
-        createPortal(
-          <div
-            className="agent-model-gear-scrim"
-            onPointerDown={(e) => {
-              if (e.target === e.currentTarget) setGearFor(null);
-            }}
-          >
-            <div
-              className="agent-model-gear-modal"
-              role="dialog"
-              aria-modal="true"
-              aria-label={`Advanced runtime settings — ${gearFor}`}
-            >
-              <div className="agent-model-gear-head">
-                <span className="agent-model-gear-title" title={gearFor}>
-                  {shortModelName(gearFor)} — runtime settings
-                </span>
-                <button
-                  type="button"
-                  className="agent-model-gear-close"
-                  aria-label="Close advanced settings"
-                  onClick={() => setGearFor(null)}
-                >
-                  ✕
-                </button>
-              </div>
-              <div className="agent-model-gear-body">
-                <LlamaAdvancedFields overrides={gearDraft} onChange={setGearDraft} />
-                <button
-                  type="button"
-                  className="model-effort-llama-apply"
-                  title="Persist these settings, load the model with them, and switch the chat to it"
-                  onClick={() => {
-                    onLoadLocalModel(gearFor, gearDraft);
-                    setGearFor(null);
-                    setOpen(false);
-                  }}
-                >
-                  Load model
-                </button>
-              </div>
-            </div>
-          </div>,
-          document.body,
-        )}
+      {/* Advanced runtime settings SUB-MODAL — opened by a local row's gear;
+          the portaled dialog lives in agentPickerParts.tsx. */}
+      {gearFor && onLoadLocalModel && (
+        <GearSubModal
+          gearFor={gearFor}
+          gearDraft={gearDraft}
+          setGearDraft={setGearDraft}
+          onClose={() => setGearFor(null)}
+          onLoadLocalModel={onLoadLocalModel}
+          closePopup={() => setOpen(false)}
+        />
+      )}
     </div>
   );
 }

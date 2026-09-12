@@ -10,8 +10,14 @@
   flex-shrink: 0;
 }
 .pet-strip-sidebar {
-  height: 46px;
-  margin: 2px 0 1px;
+  height: 44px;
+  margin: 2px 0 0;
+}
+/* Sidebar pets sit directly on the search bar's top edge — the 48px actor
+   already pokes ~4px above the strip, so the default 2px lift read as
+   floating (and pushed dozing hats into the wordmark row). */
+.pet-strip-sidebar .pet-actor {
+  bottom: 0;
 }
 .pet-strip-composer {
   height: 54px;

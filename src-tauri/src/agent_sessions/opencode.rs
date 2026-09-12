@@ -131,6 +131,7 @@ pub(super) fn send_opencode_turn(
     let cancelled2 = Arc::clone(&cancelled);
     let in_flight_gen = Arc::clone(&proc_generation);
     let reader_alive2 = Arc::clone(&entry.oc_reader_alive);
+    let requested_model = entry.model.clone();
     let watch_dirs = turn_watch_dirs(cwd, &db.0);
     let started_at = crate::db::now_ts();
     std::thread::spawn(move || {
@@ -169,6 +170,15 @@ pub(super) fn send_opencode_turn(
                     return;
                 }
             },
+        };
+
+        // A bare id the local config couldn't qualify used to be dropped
+        // (model: None → the SERVER's configured default), silently running
+        // a different provider than the one the user picked. Ask the
+        // server's live catalog before giving up.
+        let model_body = match model_body {
+            Some(m) => Some(m),
+            None => opencode_qualify_model(&base2, &requested_model),
         };
 
         match opencode_post_message(&base2, &oc_sid2, model_body, agent_body, &content2) {
@@ -476,6 +486,89 @@ pub(super) fn split_opencode_model(model: &str) -> Option<Value> {
     Some(json!({ "providerID": provider, "modelID": name }))
 }
 
+/// Qualify a BARE model id ("mimo-v2.5-free") against the server's LIVE
+/// provider catalog (`GET /config/providers` — built-in gateways like
+/// OpenCode Zen merged with the user's opencode.json providers). The
+/// persistent-server equivalent of `opencode models`.
+///
+/// This is the rescue path for selections the local config can't qualify: a
+/// bare unknown id used to be dropped entirely (`model: None` → the SERVER's
+/// configured default), silently running a different — possibly unfunded —
+/// provider than the one the user picked. Only runs when
+/// [`split_opencode_model`] already failed, so it costs one GET on
+/// previously-broken turns and nothing on healthy ones. `None` = nothing
+/// usable → server default (as before).
+pub(super) fn opencode_qualify_model(base_url: &str, model: &str) -> Option<Value> {
+    let model = model.trim();
+    if model.is_empty() || model.contains('/') {
+        return None;
+    }
+    let resp: Option<Value> = tauri::async_runtime::block_on(async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .ok()?;
+        let resp = client
+            .get(format!("{base_url}/config/providers"))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        resp.json::<Value>().await.ok()
+    });
+    resp.and_then(|r| qualify_model_in(&r, model))
+        .and_then(|qualified| {
+            let (provider, name) = qualified.split_once('/')?;
+            Some(json!({ "providerID": provider, "modelID": name }))
+        })
+}
+
+/// Pure core of [`opencode_qualify_model`]: bare id → "provider/id" over the
+/// `/config/providers` response (`{"providers":[{id, models{…}}]}`). Ties
+/// (several providers know the id) resolve alphabetically — the same stable
+/// pick as `resolve_opencode_model_in`; the default-provider preference is
+/// already handled upstream (config hits never reach this path).
+fn qualify_model_in(resp: &Value, model: &str) -> Option<String> {
+    let providers = resp.get("providers")?.as_array()?;
+    let mut hits: Vec<String> = providers
+        .iter()
+        .filter_map(|p| {
+            let id = p.get("id")?.as_str()?;
+            let has = p.get("models")?.as_object()?.contains_key(model);
+            has.then(|| id.to_string())
+        })
+        .collect();
+    hits.sort();
+    hits.first().map(|pid| format!("{pid}/{model}"))
+}
+
+/// Extract a human-readable message from a completed turn's `info.error`
+/// field (observed shape: `{"name":"APIError","data":{"message":"…",
+/// "statusCode":403,…}}`; successful turns carry `"error": null`). The POST
+/// resolves HTTP-200 even on this failure, so without this check a dead
+/// provider produced a "successful" turn with zero output.
+fn provider_error_message(info: &Value) -> Option<String> {
+    let err = info.get("error")?;
+    if err.is_null() {
+        return None;
+    }
+    let name = err
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("provider error");
+    let detail = err
+        .pointer("/data/message")
+        .and_then(|m| m.as_str())
+        .map(truncate_output);
+    Some(match detail {
+        Some(m) => format!("{name}: {m}"),
+        None => name.to_string(),
+    })
+}
+
 /// POST one turn. Resolves when the TURN completes (the endpoint blocks until
 /// then) and carries final usage + cost; streaming arrives via SSE meanwhile.
 /// `agent` selects OpenCode's built-in agent ("plan" for plan mode — the
@@ -526,6 +619,13 @@ pub(super) fn opencode_post_message(
         let v: Value =
             serde_json::from_str(&text).map_err(|e| format!("message response parse: {e}"))?;
         let info = v.get("info").cloned().unwrap_or(json!({}));
+        // An HTTP-200 turn can still carry a PROVIDER failure (e.g. an
+        // unfunded provider 403s mid-turn with zero output). Surfacing it
+        // here turns the old silence — message sent, nothing ever comes
+        // back, no error — into a visible error card.
+        if let Some(msg) = provider_error_message(&info) {
+            return Err(msg);
+        }
         let input = info.pointer("/tokens/input").and_then(|t| t.as_i64());
         let output = info.pointer("/tokens/output").and_then(|t| t.as_i64());
         // OpenCode nests cache reads/writes under tokens.cache when the
@@ -997,5 +1097,56 @@ pub(super) fn emit_opencode_tool(
             emit_token(app, sid, &marker);
         }
         tool_states.insert(pid, 2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shape observed from `GET /config/providers` on opencode 1.18.7:
+    /// built-in OpenCode Zen alongside the user's opencode.json providers.
+    fn catalog() -> Value {
+        serde_json::json!({
+            "providers": [
+                { "id": "opencode", "models": { "mimo-v2.5-free": {}, "nemotron-3-ultra-free": {} } },
+                { "id": "sharkai", "models": { "glm-5.2": {}, "deepseek-v4-flash": {} } }
+            ]
+        })
+    }
+
+    #[test]
+    fn bare_id_qualifies_against_the_live_catalog() {
+        // The reported failure: a bare free-model id that opencode.json
+        // doesn't know must resolve to its gateway provider.
+        assert_eq!(
+            qualify_model_in(&catalog(), "mimo-v2.5-free").as_deref(),
+            Some("opencode/mimo-v2.5-free")
+        );
+        // Catalog-known ids resolve too; alphabetical tie-break is stable.
+        assert_eq!(
+            qualify_model_in(&catalog(), "glm-5.2").as_deref(),
+            Some("sharkai/glm-5.2")
+        );
+        assert_eq!(qualify_model_in(&catalog(), "not-a-model"), None);
+        assert_eq!(qualify_model_in(&serde_json::json!({}), "glm"), None);
+    }
+
+    #[test]
+    fn provider_error_is_extracted_from_a_completed_turn() {
+        // The real 403 shape from an unfunded provider (HTTP 200 overall).
+        let info: Value = serde_json::from_str(
+            r#"{"modelID":"glm-5.2","providerID":"sharkai","tokens":{"input":0,"output":0},
+                "error":{"name":"APIError","data":{"message":"用户额度不足, 剩余额度: ＄0.000000","statusCode":403}}}"#,
+        )
+        .unwrap();
+        let msg = provider_error_message(&info).unwrap();
+        assert!(msg.starts_with("APIError:"), "{msg}");
+        assert!(msg.contains("用户额度不足"), "{msg}");
+
+        // Successful turns carry a null error; no field at all is also fine.
+        let ok: Value = serde_json::from_str(r#"{"error":null,"modelID":"m"}"#).unwrap();
+        assert_eq!(provider_error_message(&ok), None);
+        assert_eq!(provider_error_message(&serde_json::json!({"cost":0})), None);
     }
 }

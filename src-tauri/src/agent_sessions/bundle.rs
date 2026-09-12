@@ -87,8 +87,9 @@ pub(super) fn harness_context_section(
         let conn = db.0.lock();
         if crate::memory::memory_enabled(&conn) {
             // Static bundle → no per-turn query, so this carries the
-            // standing identity core only; the harness CLIs load more via
-            // their own memory channels/tools.
+            // standing identity core (or the stored document when no core
+            // facts qualify — see on_demand_injection); the harness CLIs
+            // load more via their own memory channels/tools.
             if let Some(rendered) = crate::memory::on_demand_injection(
                 &conn,
                 None,

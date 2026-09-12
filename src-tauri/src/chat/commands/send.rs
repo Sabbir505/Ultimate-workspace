@@ -988,9 +988,10 @@ pub async fn send_chat_message(
         // Memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11, amended):
         // ON DEMAND — the turn's query loads only matching records (plus a
         // tiny standing identity core), budgeted at 800 tokens in render.rs.
-        // The full 2200-token document is the store, no longer injected
-        // wholesale. Empty store or feature-off → None → the prompt part is
-        // omitted byte-neutral.
+        // The full 2200-token document is the store, not injected wholesale;
+        // it rides along only as the fallback when nothing qualifies (see
+        // `memory::on_demand_injection`). Feature-off → None → the prompt
+        // part is omitted byte-neutral.
         let project_id = db::get_chat_session(&conn, &chat_session_id)
             .ok()
             .flatten()

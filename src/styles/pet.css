@@ -395,7 +395,7 @@
   background: transparent;
   transition: all 0.15s ease;
 }
-.pet-panel-species-btn:hover { background: rgba(120, 128, 148, 0.12); }
+button.pet-panel-species-btn:hover { background: rgba(120, 128, 148, 0.12); }
 .pet-panel-species-btn.is-active {
   border-color: #5fd4c4;
   background: rgba(95, 212, 196, 0.12);
@@ -415,7 +415,7 @@
   position: relative;
   transition: all 0.15s ease;
 }
-.pet-panel-hat-btn:hover:not(:disabled) { background: rgba(120, 128, 148, 0.12); }
+button.pet-panel-hat-btn:hover:not(:disabled) { background: rgba(120, 128, 148, 0.12); }
 .pet-panel-hat-btn.is-active {
   border-color: #5fd4c4;
   background: rgba(95, 212, 196, 0.12);
@@ -463,16 +463,24 @@
   padding: 8px 12px 10px;
   border-top: 1px solid rgba(120, 128, 148, 0.16);
 }
-.pet-panel-pet-btn {
+/* `button.` prefix bumps specificity past the global button:hover skin in
+   tokens.css, which otherwise swaps this gradient for dark glass and leaves
+   the dark label invisible on hover. */
+button.pet-panel-pet-btn {
   font-size: 11px;
   font-weight: 600;
   padding: 5px 12px;
   border-radius: 8px;
   background: linear-gradient(135deg, #5fd4c4, #4bb8aa);
   color: #08302b;
-  transition: transform 0.12s ease;
+  transition: transform 0.12s ease, filter 0.12s ease;
 }
-.pet-panel-pet-btn:active { transform: scale(0.94); }
+button.pet-panel-pet-btn:hover {
+  background: linear-gradient(135deg, #7ef0dc, #5fd4c4);
+  color: #08302b;
+  filter: saturate(1.1);
+}
+button.pet-panel-pet-btn:active { transform: scale(0.94); }
 .pet-panel-close {
   padding: 4px;
   border-radius: 6px;
@@ -514,29 +522,51 @@
 }
 
 /* ── Focus buddy ───────────────────────────────────────────────────────── */
-.pet-focus-btn {
+/* Explicit theme-aware colors — `inherit` + a whisper of hover bg left the
+   label unreadable over the dark panel. */
+button.pet-focus-btn {
   display: block;
   width: 100%;
   font-size: 11px;
   font-weight: 600;
   padding: 7px 10px;
   border-radius: 8px;
-  border: 1px solid rgba(120, 128, 148, 0.3);
-  background: rgba(120, 128, 148, 0.08);
-  color: inherit;
+  border: 1px solid rgba(60, 66, 88, 0.45);
+  background: rgba(120, 128, 148, 0.16);
+  color: #23283a;
   text-align: left;
   transition: all 0.15s ease;
 }
-.pet-focus-btn:hover {
-  background: rgba(120, 128, 148, 0.16);
+button.pet-focus-btn:hover {
+  background: rgba(120, 128, 148, 0.3);
+  border-color: rgba(60, 66, 88, 0.7);
 }
-.pet-focus-btn.is-active {
-  border-color: #5fd4c4;
-  background: rgba(95, 212, 196, 0.12);
-  color: #2c7a70;
+[data-theme="dark"] button.pet-focus-btn {
+  color: #e8ecf5;
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.28);
 }
-[data-theme="dark"] .pet-focus-btn.is-active {
-  color: #7ef0dc;
+[data-theme="dark"] button.pet-focus-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+button.pet-focus-btn.is-active {
+  color: #0d3b34;
+  background: rgba(95, 212, 196, 0.32);
+  border-color: rgba(95, 212, 196, 0.65);
+}
+button.pet-focus-btn.is-active:hover {
+  background: rgba(95, 212, 196, 0.45);
+}
+[data-theme="dark"] button.pet-focus-btn.is-active {
+  color: #05302a;
+  background: #5fd4c4;
+  border-color: #7ef0dc;
+}
+[data-theme="dark"] button.pet-focus-btn.is-active:hover {
+  background: #7ef0dc;
+  border-color: #a5f5ea;
 }
 
 /* Milestone chips — earned badges are gold-trimmed, unearned stay quiet */

@@ -5,7 +5,10 @@
 //! carried identity core (so "who is the user" never depends on retrieval)
 //! plus the records the turn's query actually retrieved, as one budgeted
 //! block (default 800 tokens, enforced here in code — P6). The document's
-//! 2200-token budget still governs the stored document itself.
+//! 2200-token budget still governs the stored document itself. One fallback:
+//! when a turn qualifies nothing (no core, no hits), the stored document is
+//! injected after all — at the same per-turn budget — so a hand-typed
+//! profile is never invisible to the model.
 
 use crate::memory::model::{MemoryRecord, MIN_CONFIDENCE};
 use crate::memory::scoring::Scored;
@@ -73,9 +76,10 @@ pub fn enforce_budget(body: String) -> (String, bool) {
 /// Render the per-turn ON-DEMAND memory block: the identity core (facts that
 /// ride every prompt) plus the records this turn's query retrieved, ranked
 /// best-first. Prose, no headers/bullets (same style rule as the document).
-/// `None` = nothing to carry this turn (no core, no hits) → the prompt part
-/// is omitted byte-neutral. `recall_hint` adds the "more is available via
-/// memory_recall" tail — pass false where the tool isn't attached.
+/// `None` = nothing to carry AND no hint to add → the prompt part is omitted
+/// byte-neutral. `recall_hint` adds the "more is available via memory_recall"
+/// tail — and with an empty core/hit set it IS the block, telling the model
+/// the store is searchable; pass false where the tool isn't attached.
 pub fn render_on_demand_block(
     core: &[MemoryRecord],
     hits: &[Scored],
@@ -103,7 +107,11 @@ pub fn render_on_demand_block(
         );
         lines.push(s);
     }
-    if lines.is_empty() {
+    // Nothing to carry is omitted byte-neutral — unless the recall hint is
+    // on, in which case the hint alone ships: a store with facts but no
+    // match this turn must still point the model at memory_recall instead of
+    // letting it claim ignorance.
+    if lines.is_empty() && !recall_hint {
         return None;
     }
     if recall_hint {
@@ -125,6 +133,32 @@ pub fn render_on_demand_block(
     out.push('\n');
     out.push_str(HEADER_NOTE);
     out.push_str(&body);
+    Some(out)
+}
+
+/// The stored document as the ON-DEMAND fallback: when a turn qualifies
+/// nothing else (no identity core, no query hits), the user's saved profile
+/// is injected after all — truncated to the per-turn on-demand budget, not
+/// the 2200-token store budget (a single turn must never pay more than the
+/// on-demand block, P6). This is the only path by which document text the
+/// user typed by hand — which has no record, embedding, or importance — ever
+/// reaches the model. `None` = nothing usable to inject.
+pub fn render_document_fallback(doc: &str) -> Option<String> {
+    let body = doc.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let (body, trimmed) = fit_to_budget(body.to_string(), ON_DEMAND_TOKEN_BUDGET);
+    if body.is_empty() {
+        return None;
+    }
+    let mut out = String::from(HEADER);
+    out.push('\n');
+    out.push_str(HEADER_NOTE);
+    out.push_str(&body);
+    if trimmed {
+        out.push_str("\n\n(earlier detail trimmed to fit the per-turn memory budget)");
+    }
     Some(out)
 }
 
@@ -336,10 +370,35 @@ mod tests {
         assert!(block.len() <= ON_DEMAND_TOKEN_BUDGET * CHARS_PER_TOKEN + HEADER.len() + 160);
     }
 
+    /// Nothing to carry: the block is omitted byte-neutral without the
+    /// recall hint; with it, the hint alone ships so the model knows the
+    /// store is searchable instead of claiming ignorance.
     #[test]
     fn on_demand_block_omitted_when_nothing_to_carry() {
         let now = crate::db::now_ts();
-        assert!(render_on_demand_block(&[], &[], now, true).is_none());
+        assert!(render_on_demand_block(&[], &[], now, false).is_none());
+        let hint = render_on_demand_block(&[], &[], now, true).unwrap();
+        assert!(hint.starts_with(HEADER));
+        assert!(hint.contains("Nothing in memory matched"));
+    }
+
+    /// The stored-document fallback: same fence, per-turn budget — a short
+    /// document passes whole, a long one is trimmed, empty is nothing.
+    #[test]
+    fn document_fallback_respects_the_per_turn_budget() {
+        let short = "User's name is Sabbir Hossain. They prefer concise answers.";
+        let block = render_document_fallback(short).unwrap();
+        assert!(block.starts_with(HEADER));
+        assert!(block.contains("Sabbir Hossain"));
+        assert!(!block.contains("trimmed"));
+
+        let sentence = "The user prefers concise answers about Rust — especially lifetimes. ";
+        let long = sentence.repeat(300); // ~19k chars vs the 800-token per-turn ceiling
+        let block = render_document_fallback(&long).unwrap();
+        assert!(block.len() <= ON_DEMAND_TOKEN_BUDGET * CHARS_PER_TOKEN + HEADER.len() + 160);
+        assert!(block.contains("trimmed"));
+
+        assert!(render_document_fallback("   ").is_none());
     }
 
     /// Core-only turn (nothing retrieved): the block still carries the

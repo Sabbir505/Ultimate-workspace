@@ -62,12 +62,20 @@ const ON_DEMAND_TOP_K: usize = 4;
 /// Per-turn ON-DEMAND memory load (the caller holds the DB lock; FTS-only —
 /// no embedding roundtrip on the send path, same low-latency trade the
 /// `memory_recall` tool makes). Returns the budgeted block to inject, or
-/// `None` when nothing qualifies:
+/// `None` when there is truly nothing to say:
 /// - identity core: the top few high-importance identity facts, carried every
 ///   turn so "who is the user" never depends on keyword retrieval;
 /// - retrieved hits: records matching the turn's query (empty/None query or
-///   zero matches → core-only block).
-/// Injected ids get their access counters bumped here (the recency decay
+///   zero matches → core-only block);
+/// - stored-document fallback: when NEITHER qualifies but a stored memory
+///   document exists (user-saved or LLM-merged), the document itself is
+///   injected, truncated to the same per-turn budget — its text has no
+///   record, embedding, or importance, so without this it would be invisible
+///   to retrieval;
+/// - recall hint: records exist but nothing matched → a hint-only block (only
+///   when the `memory_recall` tool is attached) so the model searches instead
+///   of claiming ignorance.
+/// Injected record ids get their access counters bumped here (the recency decay
 /// reads them), replacing the old always-on injection site's bump pass.
 pub fn on_demand_injection(
     conn: &rusqlite::Connection,
@@ -77,9 +85,6 @@ pub fn on_demand_injection(
     recall_hint: bool,
 ) -> Option<String> {
     let all = crate::db::active_memories_for_scope(conn, "default", project_id).unwrap_or_default();
-    if all.is_empty() {
-        return None;
-    }
     let mut core: Vec<crate::memory::model::MemoryRecord> = all
         .iter()
         .filter(|m| {
@@ -103,13 +108,24 @@ pub fn on_demand_injection(
         .unwrap_or_default(),
         None => Vec::new(),
     };
-    if core.is_empty() && hits.is_empty() {
-        return None;
+    if !core.is_empty() || !hits.is_empty() {
+        let mut injected: Vec<String> = hits.iter().map(|h| h.record.id.clone()).collect();
+        injected.extend(core.iter().map(|m| m.id.clone()));
+        let _ = crate::db::bump_memory_access(conn, &injected);
+        return crate::memory::render::render_on_demand_block(&core, &hits, now, recall_hint);
     }
-    let mut injected: Vec<String> = hits.iter().map(|h| h.record.id.clone()).collect();
-    injected.extend(core.iter().map(|m| m.id.clone()));
-    let _ = crate::db::bump_memory_access(conn, &injected);
-    crate::memory::render::render_on_demand_block(&core, &hits, now, recall_hint)
+    // Nothing qualified this turn — fall back to the stored document (a
+    // hand-typed profile may be the ONLY memory there is), then to the
+    // search hint, and only then to silence.
+    if let Some(doc) = crate::memory::document::stored_document(conn) {
+        if let Some(block) = crate::memory::render::render_document_fallback(&doc) {
+            return Some(block);
+        }
+    }
+    if !all.is_empty() && recall_hint {
+        return crate::memory::render::render_on_demand_block(&[], &[], now, recall_hint);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -239,5 +255,62 @@ mod pipeline_tests {
         // Access counters moved for whatever was injected.
         let touched = crate::db::get_memory(&conn, "mem_pref").unwrap().unwrap();
         assert!(touched.access_count > 0 || touched.last_accessed_at.is_some());
+    }
+
+    /// The two previously-silent turns now have fallbacks: a hand-typed
+    /// stored document with NO records at all still reaches the model, and a
+    /// record store with no core facts and no query matches ships the recall
+    /// hint instead of letting the model claim ignorance.
+    #[test]
+    fn silent_turns_fall_back_to_document_then_hint() {
+        // A saved document and an EMPTY record store: the document is the
+        // only memory there is, and it must be injected.
+        let conn = crate::db::mem();
+        document::set_document(
+            &conn,
+            Some("User's name is Sabbir Hossain. They are building a Tauri app called Relay."),
+            "user",
+        )
+        .unwrap();
+        let block = crate::memory::on_demand_injection(
+            &conn,
+            Some("what do you know about me"),
+            None,
+            crate::db::now_ts(),
+            true,
+        )
+        .unwrap();
+        assert!(block.contains("Sabbir Hossain"), "{block}");
+
+        // Records exist but none are core-worthy (importance 6 preference)
+        // and the query matches none of them: the hint-only block ships when
+        // tools are attached — never the unrelated facts themselves.
+        let conn = crate::db::mem();
+        crate::db::insert_memory(
+            &conn,
+            &crate::memory::model::MemoryRecord::new_extracted(
+                "mem_pref", "preference", None, "user", "Builds with pnpm workspaces", 6, None,
+            ),
+        )
+        .unwrap();
+        let block = crate::memory::on_demand_injection(
+            &conn,
+            Some("quantum chromodynamics"),
+            None,
+            crate::db::now_ts(),
+            true,
+        )
+        .unwrap();
+        assert!(block.contains("memory_recall"), "{block}");
+        assert!(!block.contains("pnpm"), "{block}");
+        // No tools attached → the hint block is omitted byte-neutral.
+        assert!(crate::memory::on_demand_injection(
+            &conn,
+            Some("quantum chromodynamics"),
+            None,
+            crate::db::now_ts(),
+            false,
+        )
+        .is_none());
     }
 }

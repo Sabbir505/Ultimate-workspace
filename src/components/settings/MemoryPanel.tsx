@@ -419,10 +419,11 @@ export function MemoryPanel() {
         </div>
         <p className="muted memory-doc-note">
           New memories are merged into this document automatically — duplicates
-          folded, contradictions resolved. It is no longer injected wholesale:
-          each turn loads only the facts relevant to your request, plus a few
-          standing identity facts. Edit it freely; this is the pool the
-          assistant loads from.
+          folded, contradictions resolved. Each turn loads the facts relevant
+          to your request, plus a few standing identity facts; when nothing
+          matches, this document itself is what the assistant sees (trimmed to
+          fit the turn). Edit it freely; this is the pool the assistant loads
+          from.
         </p>
         <textarea
           className="memory-doc-editor"

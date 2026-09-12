@@ -99,8 +99,16 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
         : rawFrame % anim.frames;
   const facing = usePetStore((s) => s.core.facing);
 
-  const sheetW = PET_SHEET_COLS * SIZE;
-  const sheetH = PET_SHEET_ROWS * SIZE;
+  // Sheet slicing uses PERCENTAGES, not pixels: pixel offsets accumulate
+  // rounding error whenever the effective scale isn't an integer (app zoom,
+  // Windows display scaling), which tears a frame into offset slices — the
+  // "head detached from body" rendering bug. Percent positions are resolved
+  // by the compositor at device precision and can't drift.
+  // X spans the FULL sheet width (4 columns) even when an animation uses
+  // fewer frames — frame N lives in column N, so the denominator is
+  // COLS-1, not the animation's frame count.
+  const posX = (frame / (PET_SHEET_COLS - 1)) * 100;
+  const posY = (anim.row / (PET_SHEET_ROWS - 1)) * 100;
 
   // Hat overlay: same 16×16 box, anchored to whichever pose is playing —
   // the curled doze and crouched celebrate silhouettes carry the head much
@@ -140,8 +148,8 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
           width: SIZE,
           height: SIZE,
           backgroundImage: `url(${def.sheet})`,
-          backgroundSize: `${sheetW}px ${sheetH}px`,
-          backgroundPosition: `-${frame * SIZE}px -${anim.row * SIZE}px`,
+          backgroundSize: `${PET_SHEET_COLS * 100}% ${PET_SHEET_ROWS * 100}%`,
+          backgroundPosition: `${posX}% ${posY}%`,
           transform: facing === -1 ? "scaleX(-1)" : undefined,
         }}
       />
@@ -190,8 +198,8 @@ export function PetActorMini({ species, size = 32 }: { species: PetActorSpecies;
           width: size,
           height: size,
           backgroundImage: `url(${def.sheet})`,
-          backgroundSize: `${PET_SHEET_COLS * size}px ${PET_SHEET_ROWS * size}px`,
-          backgroundPosition: "0 0",
+          backgroundSize: `${PET_SHEET_COLS * 100}% ${PET_SHEET_ROWS * 100}%`,
+          backgroundPosition: "0% 0%",
         }}
       />
     </div>
@@ -228,8 +236,8 @@ export function AnimatedSprite({
         width: size,
         height: size,
         backgroundImage: `url(${def.sheet})`,
-        backgroundSize: `${PET_SHEET_COLS * size}px ${PET_SHEET_ROWS * size}px`,
-        backgroundPosition: `-${frame * size}px -${anim.row * size}px`,
+        backgroundSize: `${PET_SHEET_COLS * 100}% ${PET_SHEET_ROWS * 100}%`,
+        backgroundPosition: `${(frame / (PET_SHEET_COLS - 1)) * 100}% ${(anim.row / (PET_SHEET_ROWS - 1)) * 100}%`,
       }}
     />
   );

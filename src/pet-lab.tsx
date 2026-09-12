@@ -10,7 +10,9 @@ import "../src/styles/global.css";
 import "../src/styles/pet.css";
 import { PetStrip } from "../src/components/pet/PetStrip";
 import { PetTicker } from "../src/components/pet/PetTicker";
-import { usePetStore } from "../src/state/pet";
+import { installPetDebugHook, usePetStore } from "../src/state/pet";
+
+installPetDebugHook();
 
 declare module "react" {
   // noop — keeps JSX-free createElement calls type-friendly below

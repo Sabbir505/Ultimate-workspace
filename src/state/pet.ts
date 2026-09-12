@@ -313,11 +313,15 @@ export function tickPet(
     core.mood !== "doze" &&
     !(core.mood === "zoomies" && core.moodUntil > now);
   if (expiredTransient) {
+    // A transient that interrupted a stroll keeps its target — RESUME the
+    // walk instead of idling with a stale target (which would deadlock the
+    // stroll starter, freezing the pet mid-strip forever).
+    const resumeWalk = core.targetX !== null;
     return {
       ...core,
-      mood: "idle",
+      mood: resumeWalk ? "walk" : "idle",
       moodUntil: 0,
-      nextWalkAt: now + WALK_MIN_MS + rng() * WALK_RANGE_MS,
+      nextWalkAt: resumeWalk ? core.nextWalkAt : now + WALK_MIN_MS + rng() * WALK_RANGE_MS,
     };
   }
 
@@ -784,6 +788,14 @@ export function installPetDebugHook(): void {
     zoomies: () => usePetStore.getState().zoomies(),
     focus: () => usePetStore.getState().startFocus(),
     unfocus: () => usePetStore.getState().stopFocus(),
+    teleport: () => usePetStore.getState().teleportTo(
+      usePetStore.getState().home === "sidebar" ? "composer" : "sidebar",
+    ),
+    addXp: (n: number) => {
+      const s = usePetStore.getState();
+      usePetStore.setState({ core: { ...s.core, xp: s.core.xp + n } });
+      persist(s, { ...s.core, xp: s.core.xp + n });
+    },
     debug: (mood: PetMood) => usePetStore.getState().debugForceMood(mood),
     pet: () => usePetStore.getState().petThePet(),
     state: () => usePetStore.getState(),

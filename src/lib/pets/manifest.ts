@@ -3,7 +3,7 @@
 
 export const PET_FRAME = 16;
 export const PET_SHEET_COLS = 4;
-export const PET_SHEET_ROWS = 10;
+export const PET_SHEET_ROWS = 9;
 
 export type PetAnimKey =
   | "idle"
@@ -20,8 +20,8 @@ export type PetAnimKey =
 export interface PetAnim { row: number; frames: number; fps: number }
 
 export const PET_ANIMS: Record<PetAnimKey, PetAnim> = {
-  idle: { row: 0, frames: 2, fps: 1.2 },
-  walk: { row: 1, frames: 2, fps: 5 },
+  idle: { row: 0, frames: 4, fps: 4 },
+  walk: { row: 1, frames: 2, fps: 6 },
   work: { row: 2, frames: 2, fps: 4 },
   celebrate: { row: 3, frames: 4, fps: 6 },
   concerned: { row: 4, frames: 2, fps: 2 },
@@ -29,7 +29,7 @@ export const PET_ANIMS: Record<PetAnimKey, PetAnim> = {
   happy: { row: 6, frames: 2, fps: 4 },
   teleout: { row: 7, frames: 4, fps: 10 },
   telein: { row: 8, frames: 4, fps: 10 },
-  zoomies: { row: 9, frames: 2, fps: 10 },
+  zoomies: { row: 1, frames: 2, fps: 10 },
 };
 
 export interface PetSpeciesDef {

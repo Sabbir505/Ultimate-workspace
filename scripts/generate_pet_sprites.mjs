@@ -534,18 +534,23 @@ function buildTele(S, spark) {
   return frames;
 }
 
-function buildSpecies(S, fns, confetti) {
+function buildSpecies(S, fns, confetti, walk) {
   const { blink, happyEyes, sad, sadB, workA, workB } = fns;
-  const hop = vshift(S.stand, -1);
   const air = vshift(S.stand, -2);
   // Cheer: airborne + a sparkle of confetti down both sides.
   const cheer = patch(patch(air, 1, 2, [confetti, ".", confetti]), 14, 2, [confetti, ".", confetti]);
   const happyBounce = vshift(happyEyes(S.stand), -1);
   const teleOut = buildTele(S, confetti);
   const teleIn = teleOut.slice().reverse();
+  // Walk: body stays grounded, the paws alternate fore/aft — the old
+  // whole-body hop read as vibration, not walking.
+  const walkA = patch(S.stand, walk.a[0], 13, ["oo".padEnd(walk.a[1], ".").slice(0, walk.a[1])]);
+  const walkB = patch(S.stand, walk.b[0], 13, ["oo".padEnd(walk.b[1], ".").slice(0, walk.b[1])]);
   return [
-    [S.stand, blink(S.stand)], // 0 idle
-    [S.stand, hop], // 1 walk
+    // 0 idle: 4-frame blink cycle — brief close, mostly open (a 50% duty
+    // cycle read as constant squinting).
+    [S.stand, S.stand, blink(S.stand), S.stand],
+    [walkA, walkB], // 1 walk
     [workA, workB], // 2 work
     [S.crouch, air, cheer, S.crouch], // 3 celebrate
     [sad, sadB], // 4 concerned
@@ -559,17 +564,17 @@ function buildSpecies(S, fns, confetti) {
 const catFrames = buildSpecies(CAT, {
   blink: catBlink, happyEyes: catHappyEyes, sad: catSad, sadB: catSadB,
   workA: catWorkA2, workB: catWorkB2,
-}, "p");
+}, "p", { a: [3, 9], b: [5, 6] });
 const axyFrames = buildSpecies(
   { stand: axyStand, crouch: axyCrouch, curl: axyCurl },
   { blink: axyBlink, happyEyes: axyHappyEyes, sad: axySad, sadB: axySadB,
     workA: axyWorkA2, workB: axyWorkB2 },
-  "g",
+  "g", { a: [4, 10], b: [6, 6] },
 );
 const botFrames = buildSpecies(BOT, {
   blink: botBlink, happyEyes: botHappyEyes, sad: botSad, sadB: botSadB,
   workA: botWorkA2, workB: botWorkB2,
-}, "a");
+}, "a", { a: [3, 9], b: [5, 6] });
 
 // ── Hats (shared overlay sheet, one 16×16 frame each) ────────────────────────
 const HAT = {
@@ -707,17 +712,20 @@ function renderContactSheet() {
 }
 
 // ── Manifest ─────────────────────────────────────────────────────────────────
+// `row` is EXPLICIT, not the array index: zoomies reuses walk's frames
+// (row 1) while living at the end of this list — an index-derived row
+// pointed past the physical sheet and rendered empty/dark.
 const ANIMS = [
-  { key: "idle", frames: 2, fps: 1.2 },
-  { key: "walk", frames: 2, fps: 5 },
-  { key: "work", frames: 2, fps: 4 },
-  { key: "celebrate", frames: 4, fps: 6 },
-  { key: "concerned", frames: 2, fps: 2 },
-  { key: "doze", frames: 1, fps: 1 },
-  { key: "happy", frames: 2, fps: 4 },
-  { key: "teleout", frames: 4, fps: 10 },
-  { key: "telein", frames: 4, fps: 10 },
-  { key: "zoomies", frames: 2, fps: 10 },
+  { key: "idle", row: 0, frames: 4, fps: 4 },
+  { key: "walk", row: 1, frames: 2, fps: 6 },
+  { key: "work", row: 2, frames: 2, fps: 4 },
+  { key: "celebrate", row: 3, frames: 4, fps: 6 },
+  { key: "concerned", row: 4, frames: 2, fps: 2 },
+  { key: "doze", row: 5, frames: 1, fps: 1 },
+  { key: "happy", row: 6, frames: 2, fps: 4 },
+  { key: "teleout", row: 7, frames: 4, fps: 10 },
+  { key: "telein", row: 8, frames: 4, fps: 10 },
+  { key: "zoomies", row: 1, frames: 2, fps: 10 },
 ];
 
 function manifestSource() {
@@ -727,7 +735,10 @@ function manifestSource() {
   lines.push(``);
   lines.push(`export const PET_FRAME = ${FW};`);
   lines.push(`export const PET_SHEET_COLS = 4;`);
-  lines.push(`export const PET_SHEET_ROWS = ${ANIMS.length};`);
+  // PHYSICAL sheet rows (buildSpecies output). NOT ANIMS.length — zoomies
+  // reuses walk's row, and claiming a row that isn't in the PNG skews every
+  // sprite slice vertically (the great "broken sequence" bug).
+  lines.push(`export const PET_SHEET_ROWS = ${catFrames.length};`);
   lines.push(``);
   lines.push(`export type PetAnimKey =
   | "idle"
@@ -744,7 +755,7 @@ function manifestSource() {
   lines.push(`export interface PetAnim { row: number; frames: number; fps: number }`);
   lines.push(``);
   lines.push(`export const PET_ANIMS: Record<PetAnimKey, PetAnim> = {`);
-  ANIMS.forEach((a, i) => lines.push(`  ${a.key}: { row: ${i}, frames: ${a.frames}, fps: ${a.fps} },`));
+  ANIMS.forEach((a) => lines.push(`  ${a.key}: { row: ${a.row}, frames: ${a.frames}, fps: ${a.fps} },`));
   lines.push(`};`);
   lines.push(``);
   lines.push(`export interface PetSpeciesDef {`);

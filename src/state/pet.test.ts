@@ -19,6 +19,7 @@ import {
 } from "./pet";
 
 const T0 = 1_000_000;
+const CELEBRATE_TEST_MS = 4_000;
 
 function core(overrides: Partial<PetCore> = {}): PetCore {
   return { ...initialPetCore(T0), ...overrides };
@@ -159,6 +160,26 @@ describe("tickPet", () => {
     } finally {
       setPetReducedMotion(false);
     }
+  });
+
+  it("resumes an interrupted stroll after a transient expires (no deadlock)", () => {
+    // strolling toward a target when a celebration interrupts mid-walk
+    const walking = core({ mood: "walk", x: 0.5, targetX: 0.8, nextWalkAt: T0 });
+    const celebrated = reducePet(walking, { type: "celebrate", source: "turn" }, T0 + 10);
+    expect(celebrated.targetX).toBe(0.8);
+    // celebration expires — the stroll must RESUME, not freeze mid-strip
+    const expired = tickPet(celebrated, T0 + 10 + CELEBRATE_TEST_MS, 0.016, fixedRng);
+    expect(expired.mood).toBe("walk");
+    expect(expired.targetX).toBe(0.8);
+    // and it still arrives
+    let c = expired;
+    let now = T0 + 10 + CELEBRATE_TEST_MS;
+    for (let i = 0; i < 200 && c.mood === "walk"; i++) {
+      now += 100;
+      c = tickPet(c, now, 0.1, fixedRng);
+    }
+    expect(c.mood).toBe("idle");
+    expect(c.x).toBeCloseTo(0.8, 5);
   });
 
   it("does not nap while walking", () => {

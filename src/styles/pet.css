@@ -1,0 +1,378 @@
+/* Companion pet — strip, sprite stage, speech bubbles, particles.
+   The pet renders a 16×16 pixel sprite sheet at 3× (48px) with
+   image-rendering: pixelated. Both homes (sidebar strip, composer strip)
+   render the same store state, so the pet is "bi-located" but synchronized. */
+
+.pet-strip {
+  position: relative;
+  height: 52px;
+  user-select: none;
+  flex-shrink: 0;
+}
+.pet-strip-sidebar {
+  height: 46px;
+  margin: 2px 0 1px;
+}
+.pet-strip-composer {
+  height: 54px;
+  margin-bottom: 2px;
+}
+
+/* ── Actor ─────────────────────────────────────────────────────────────── */
+.pet-actor {
+  position: absolute;
+  bottom: 2px;
+  width: 48px;
+  height: 48px;
+  margin-left: -24px; /* centre on the x fraction */
+  cursor: pointer;
+  z-index: 5;
+}
+.pet-actor:active .pet-sprite {
+  transform-origin: 50% 100%;
+}
+.pet-sprite,
+.pet-hat {
+  position: absolute;
+  inset: 0;
+  image-rendering: pixelated;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+.pet-hat {
+  will-change: transform;
+}
+/* soft ground shadow */
+.pet-actor::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: -1px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.28);
+  filter: blur(1px);
+  pointer-events: none;
+}
+[data-theme="dark"] .pet-actor::after {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+/* subtle idle breathing on the whole actor (sprite anim carries the rest) */
+.pet-strip:not(.pet-static) .pet-actor {
+  animation: pet-breathe 3.4s ease-in-out infinite;
+}
+@keyframes pet-breathe {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1px); }
+}
+
+/* ── Speech bubble ─────────────────────────────────────────────────────── */
+.pet-bubble {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 230px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 4px 9px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #23283a;
+  border: 1px solid rgba(35, 40, 58, 0.18);
+  box-shadow: 0 3px 12px rgba(10, 12, 24, 0.22);
+  pointer-events: none;
+  z-index: 8;
+  animation: pet-bubble-in 160ms ease-out;
+}
+[data-theme="dark"] .pet-bubble {
+  background: rgba(30, 34, 48, 0.97);
+  color: #e8ecf5;
+  border-color: rgba(255, 255, 255, 0.22);
+}
+.pet-bubble::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: rgba(255, 255, 255, 0.96);
+}
+[data-theme="dark"] .pet-bubble::after {
+  border-top-color: rgba(30, 34, 48, 0.97);
+}
+@keyframes pet-bubble-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(3px) scale(0.94); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
+
+/* ── Zzz particles (dozing) ────────────────────────────────────────────── */
+.pet-zzz {
+  position: absolute;
+  right: -2px;
+  bottom: 60%;
+  font-size: 11px;
+  font-weight: 700;
+  color: #9aa3ba;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  animation: pet-zzz-float 2.4s ease-out infinite;
+}
+.pet-zzz:nth-child(2 of .pet-zzz) { animation-delay: 0.8s; font-size: 13px; }
+.pet-zzz:nth-child(3 of .pet-zzz) { animation-delay: 1.6s; font-size: 15px; }
+@keyframes pet-zzz-float {
+  0% { opacity: 0; transform: translate(0, 0); }
+  25% { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(7px, -16px); }
+}
+
+/* ── Heart particles (petted) ──────────────────────────────────────────── */
+.pet-heart {
+  position: absolute;
+  top: -4px;
+  font-size: 12px;
+  pointer-events: none;
+  animation: pet-heart-float 1.1s ease-out forwards;
+}
+.pet-heart:nth-child(2 of .pet-heart) { left: 26px; animation-delay: 0.15s; }
+.pet-heart:nth-child(3 of .pet-heart) { left: -2px; animation-delay: 0.3s; font-size: 10px; }
+@keyframes pet-heart-float {
+  0% { opacity: 0; transform: translateY(4px) scale(0.6); }
+  30% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-18px) scale(1.1); }
+}
+
+/* ── Panel open button ─────────────────────────────────────────────────── */
+.pet-panel-btn {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 4px;
+  border-radius: 6px;
+  color: rgba(120, 128, 148, 0.75);
+  background: transparent;
+  transition: all 0.15s ease;
+  z-index: 6;
+}
+.pet-panel-btn:hover {
+  color: #5b6379;
+  background: rgba(120, 128, 148, 0.14);
+}
+[data-theme="dark"] .pet-panel-btn { color: rgba(200, 208, 226, 0.5); }
+[data-theme="dark"] .pet-panel-btn:hover { color: #e8ecf5; background: rgba(255, 255, 255, 0.12); }
+
+/* ── Panel popover ─────────────────────────────────────────────────────── */
+.pet-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 264px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid rgba(35, 40, 58, 0.14);
+  box-shadow: 0 12px 32px rgba(10, 12, 24, 0.22);
+  backdrop-filter: blur(12px);
+  z-index: 60;
+  color: #23283a;
+  animation: pet-bubble-in 140ms ease-out;
+}
+[data-theme="dark"] .pet-panel {
+  background: rgba(26, 29, 41, 0.97);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: #e8ecf5;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.pet-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 6px;
+}
+.pet-panel-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  background: rgba(120, 128, 148, 0.1);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 4px 8px;
+  color: inherit;
+  outline: none;
+}
+.pet-panel-name:focus {
+  border-color: rgba(120, 128, 148, 0.45);
+  background: transparent;
+}
+.pet-panel-level {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #ffd166, #ffb347);
+  color: #4a3208;
+  flex-shrink: 0;
+}
+
+.pet-panel-stage {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 6px;
+}
+.pet-panel-stage .pet-actor {
+  position: relative;
+  bottom: auto;
+  left: auto;
+  margin: 0;
+}
+
+.pet-panel-body { padding: 0 12px 10px; }
+
+.pet-panel-xp {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(120, 128, 148, 0.18);
+  overflow: hidden;
+  margin: 2px 0 10px;
+}
+.pet-panel-xp-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #7ed09e, #5fd4c4);
+  transition: width 300ms ease;
+}
+.pet-panel-xp-label {
+  font-size: 10px;
+  color: #8a92a8;
+  margin-bottom: 3px;
+}
+[data-theme="dark"] .pet-panel-xp-label { color: #9aa3ba; }
+
+.pet-panel-section {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #8a92a8;
+  margin: 8px 0 5px;
+}
+[data-theme="dark"] .pet-panel-section { color: #9aa3ba; }
+
+.pet-panel-species {
+  display: flex;
+  gap: 6px;
+}
+.pet-panel-species-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 0;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 128, 148, 0.25);
+  background: transparent;
+  transition: all 0.15s ease;
+}
+.pet-panel-species-btn:hover { background: rgba(120, 128, 148, 0.12); }
+.pet-panel-species-btn.is-active {
+  border-color: #5fd4c4;
+  background: rgba(95, 212, 196, 0.12);
+}
+.pet-panel-species-btn .pet-actor { position: relative; bottom: auto; left: auto; margin: 0; }
+
+.pet-panel-hats { display: flex; gap: 6px; flex-wrap: wrap; }
+.pet-panel-hat-btn {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 128, 148, 0.25);
+  background: transparent;
+  position: relative;
+  transition: all 0.15s ease;
+}
+.pet-panel-hat-btn:hover:not(:disabled) { background: rgba(120, 128, 148, 0.12); }
+.pet-panel-hat-btn.is-active {
+  border-color: #5fd4c4;
+  background: rgba(95, 212, 196, 0.12);
+}
+.pet-panel-hat-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pet-panel-hat-chip {
+  width: 22px;
+  height: 22px;
+  image-rendering: pixelated;
+  background-repeat: no-repeat;
+}
+
+.pet-panel-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pet-panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 3px 2px;
+}
+.pet-panel-toggle:hover { background: rgba(120, 128, 148, 0.08); }
+.pet-panel-toggle input { accent-color: #5fd4c4; }
+
+.pet-panel-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: #8a92a8;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+[data-theme="dark"] .pet-panel-stats { color: #9aa3ba; }
+.pet-panel-stats b { color: inherit; font-weight: 700; }
+
+.pet-panel-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px 10px;
+  border-top: 1px solid rgba(120, 128, 148, 0.16);
+}
+.pet-panel-pet-btn {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #5fd4c4, #4bb8aa);
+  color: #08302b;
+  transition: transform 0.12s ease;
+}
+.pet-panel-pet-btn:active { transform: scale(0.94); }
+.pet-panel-close {
+  padding: 4px;
+  border-radius: 6px;
+  color: #8a92a8;
+}
+.pet-panel-close:hover { color: inherit; background: rgba(120, 128, 148, 0.14); }
+
+/* ── Reduced motion ────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .pet-strip .pet-actor,
+  .pet-zzz,
+  .pet-heart,
+  .pet-bubble {
+    animation: none !important;
+  }
+}

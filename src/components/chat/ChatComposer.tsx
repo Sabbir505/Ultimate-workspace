@@ -26,6 +26,7 @@ import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
 import { useVoiceDictation } from "./useVoiceDictation";
 import { TemplatePickerModal, BroadcastModal } from "./composerModals";
+import { PetStrip } from "../pet/PetStrip";
 import {
   listChatSkills,
   listPromptTemplates,
@@ -1265,6 +1266,9 @@ export function ChatComposer({
           ))}
         </div>
       )}
+      {/* Companion pet's second home — strolls along the top edge of the
+          composer card, reacting to the same events as the sidebar twin. */}
+      <PetStrip home="composer" />
       <div
         className={`chat-composer-card${modeGlowClass}${filesDragOver ? " is-drop-target" : ""}`}
         onDragOver={composerDragOver}

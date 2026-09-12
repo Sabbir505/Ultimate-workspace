@@ -43,6 +43,7 @@ import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from ".
 import { UpdateButton } from "./UpdateButton";
 import { seedFakeUpdate, SHOW_FAKE_UPDATE } from "../../state/updater";
 import { useOcclusion } from "../../hooks/useOcclusion";
+import { PetStrip } from "../pet/PetStrip";
 
 /** Sidebar header block: Relay wordmark (collapse control), back/forward,
  *  and the search trigger — with the optional user-uploaded art behind it
@@ -115,6 +116,9 @@ export function SidebarHeader() {
           </button>
         </span>
       </div>
+      {/* Companion pet — strolls along its strip directly above the search
+          box (its other home is above the chat composer). */}
+      <PetStrip home="sidebar" />
       <div className="flex items-center gap-2">
         {/* Search / command palette trigger */}
         <button

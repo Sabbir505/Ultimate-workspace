@@ -36,7 +36,16 @@ export const PET_SPECIES: Record<"cat" | "axolotl" | "robot", PetSpeciesDef> = {
 export const PET_HATS = {
   sheet: "/pets/hats.png",
   frame: 16,
-  keys: ["party", "headphones", "wizard", "crown"] as const;
+  keys: ["party", "headphones", "wizard", "crown"] as const,
 };
 
 export type PetHatKey = (typeof PET_HATS.keys)[number];
+
+/** Lowest art row of each hat within its 16×16 frame — runtime raises
+ *  each hat so this row lands on the species hatAnchor.y. */
+export const PET_HAT_BOTTOM: Record<PetHatKey, number> = {
+  party: 8,
+  headphones: 7,
+  wizard: 9,
+  crown: 9,
+};

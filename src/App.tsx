@@ -58,6 +58,8 @@ import { usePtyEvents } from "./hooks/usePtyEvents";
 import { usePaneMemory } from "./hooks/usePaneMemory";
 import { useNewChatAction } from "./hooks/useNewChatAction";
 import { useViewNav } from "./hooks/useViewNav";
+import { usePetEvents } from "./hooks/usePetEvents";
+import { PetTicker } from "./components/pet/PetTicker";
 import { useTheme } from "./hooks/useTheme";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
 import { checkAndNotifyHarnessUpdates } from "./lib/harnessUpdates";
@@ -258,6 +260,9 @@ export default function App() {
   useModelDownloadEvents();
   useBrowserMcpEvents();
   useGitStatusPolling();
+  // Companion pet: event wiring (chat/panes/automations/notifications) plus
+  // the single rAF ticker that ages its mood state.
+  usePetEvents();
 
   // Focus tracking (module singleton) — drives the "notify only when Relay
   // is in the background" rules for completion sounds + OS toasts.
@@ -326,6 +331,7 @@ export default function App() {
       </Suspense>
       <ChatSelectionToolbar />
       <ToastHost />
+      <PetTicker />
       {/* Kept mounted so collapse/expand animates as a width slide instead
           of an unmount flash; the collapsed class hides it after the
           transition (visibility) so it can't be interacted with. */}

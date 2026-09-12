@@ -6,21 +6,35 @@
 // Shell behavior mirrors Modal.tsx: portal to <body>, focus trap with focus
 // restore, its own webview-occlusion id (M22). Escape = skip, and like Skip
 // it persists the completed flag — the wizard never blocks or re-nags.
+//
+// Visuals port the approved onboarding-redesign.html mock: fixed 680px navy
+// card, header = real logo + "N / 5" + clickable progress dots, directional
+// step transitions (forward slides in from the right, back from the left),
+// and a staggered rise on each step's content. The card carries its own
+// palette so it renders identically in both app themes.
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useOcclusion } from "../../hooks/useOcclusion";
+import { AppLogo } from "../common/AppLogo";
 import {
   closeOnboarding,
   goToStep,
   ONBOARDING_STEP_COUNT,
   useOnboardingStore,
 } from "../../state/onboarding";
-import { StepChatModel } from "./steps/StepChatModel";
-import { StepFinish } from "./steps/StepFinish";
-import { StepHarnesses } from "./steps/StepHarnesses";
-import { StepWelcome } from "./steps/StepWelcome";
+import { StepAgents } from "./steps/StepAgents";
+import { StepDefaults } from "./steps/StepDefaults";
+import { StepMeet } from "./steps/StepMeet";
+import { StepPath } from "./steps/StepPath";
+import { StepWorkspace } from "./steps/StepWorkspace";
 
-const STEPS = [StepWelcome, StepChatModel, StepHarnesses, StepFinish];
+const STEPS = [
+  { Component: StepMeet, label: "Get Started", hasBack: false },
+  { Component: StepPath, label: "Next", hasBack: true },
+  { Component: StepAgents, label: "Next", hasBack: true },
+  { Component: StepWorkspace, label: "Continue", hasBack: true },
+  { Component: StepDefaults, label: "Finish", hasBack: true },
+];
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -28,6 +42,11 @@ const FOCUSABLE =
 export function WelcomeWizard() {
   const step = useOnboardingStore((s) => s.step);
   const boxRef = useRef<HTMLDivElement>(null);
+  // Previous step ref → transition direction. The entering step's CSS reads
+  // it via the data-dir attribute on the body wrapper.
+  const prevStepRef = useRef(step);
+  const dir = step >= prevStepRef.current ? "fwd" : "back";
+  prevStepRef.current = step;
   // Occlusion (M22): native browser panes must hide at the OS level while
   // the wizard is up, each popup under its own id.
   useOcclusion("app:onboarding-wizard", true);
@@ -78,7 +97,7 @@ export function WelcomeWizard() {
   }, []);
 
   const isLast = step === STEPS.length - 1;
-  const Current = STEPS[step];
+  const { Component, label, hasBack } = STEPS[step];
 
   return createPortal(
     <div className="onboarding-overlay">
@@ -91,52 +110,57 @@ export function WelcomeWizard() {
         tabIndex={-1}
       >
         <header className="onboarding-head">
-          <span className="onboarding-brand">RELAY</span>
-          {!isLast && (
-            <button type="button" className="onboarding-skip" onClick={closeOnboarding}>
-              Skip
-            </button>
-          )}
+          <span className="onboarding-brand">
+            <AppLogo size={26} />
+            <span>Relay</span>
+          </span>
+          <div className="onboarding-head-right">
+            {!isLast && (
+              <button type="button" className="onboarding-skip" onClick={closeOnboarding}>
+                Skip
+              </button>
+            )}
+            <span className="onboarding-progress-label">
+              {step + 1} / {ONBOARDING_STEP_COUNT}
+            </span>
+            <div className="onboarding-dots" role="group" aria-label="Setup progress">
+              {STEPS.map((_, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className={`onboarding-dot${i === step ? " current" : ""}${i < step ? " done" : ""}`}
+                  aria-label={`Go to step ${i + 1}`}
+                  aria-current={i === step ? "step" : undefined}
+                  onClick={() => goToStep(i)}
+                />
+              ))}
+            </div>
+          </div>
         </header>
 
-        <div
-          className="onboarding-progress"
-          role="progressbar"
-          aria-valuemin={1}
-          aria-valuemax={ONBOARDING_STEP_COUNT}
-          aria-valuenow={step + 1}
-          aria-label="Setup progress"
-        >
-          <div
-            className="onboarding-progress-fill"
-            style={{ width: `${((step + 1) / ONBOARDING_STEP_COUNT) * 100}%` }}
-          />
+        {/* key={step} re-runs the step's entrance animation on navigation;
+            data-dir picks the slide direction. */}
+        <div className="onboarding-body" key={step} data-dir={dir}>
+          <div className="onboarding-step" data-step={step + 1}>
+            <Component />
+          </div>
         </div>
 
-        {/* key={step} re-runs the step's entrance animation on navigation. */}
-        <div className="onboarding-body" key={step}>
-          <Current />
-        </div>
-
-        <footer className="onboarding-foot">
-          <span className="onboarding-step-label">
-            Step {step + 1} of {ONBOARDING_STEP_COUNT}
-          </span>
+        <footer className={`onboarding-foot${step === 0 ? " foot-end" : ""}`}>
+          {hasBack && (
+            <button type="button" className="onboarding-btn onboarding-btn-ghost" onClick={() => goToStep(step - 1)}>
+              <span aria-hidden="true">←</span> Back
+            </button>
+          )}
           <span className="onboarding-foot-spacer" />
-          {step > 0 && (
-            <button type="button" className="onboarding-btn" onClick={() => goToStep(step - 1)}>
-              Back
-            </button>
-          )}
-          {isLast ? (
-            <button type="button" className="onboarding-btn onboarding-btn-primary" onClick={closeOnboarding}>
-              Done
-            </button>
-          ) : (
-            <button type="button" className="onboarding-btn onboarding-btn-primary" onClick={() => goToStep(step + 1)}>
-              Continue
-            </button>
-          )}
+          <button
+            type="button"
+            className="onboarding-btn onboarding-btn-primary"
+            onClick={() => (isLast ? closeOnboarding() : goToStep(step + 1))}
+          >
+            {label}
+            <span aria-hidden="true">→</span>
+          </button>
         </footer>
       </div>
     </div>,

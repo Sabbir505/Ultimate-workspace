@@ -1,6 +1,7 @@
-// Welcome wizard (PRD §9): first-run gating, navigation, skip/finish flag
-// write-through, model-step verify/save, harness rescan, and the Model
-// Market deep-link exit.
+// Welcome wizard (PRD §9): first-run gating, 5-step navigation, skip/finish
+// flag write-through, live harness detection, the Model Market deep-link
+// exit, the defaults step's real settings writes (chat.defaultApproval KV +
+// per-provider default model), and the first-task send.
 //
 // Module instances matter here: initOnboarding() is a singleton promise, so
 // every test resets the module registry (vi.resetModules) and dynamically
@@ -8,18 +9,19 @@
 // entry per test, keeping the store the component reads and the one the
 // test asserts against identical.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, act } from "@testing-library/react";
 
 const mocks = vi.hoisted(() => ({
   getSetting: vi.fn(),
   setSetting: vi.fn(),
-  listChatModels: vi.fn(),
+  getChatConfig: vi.fn(),
   setChatApiKey: vi.fn(),
+  setChatDefaultModel: vi.fn(),
   toastSuccess: vi.fn(),
-  loadConfig: vi.fn(),
+  newChat: vi.fn(),
+  sendMessage: vi.fn(),
   refreshHarnesses: vi.fn(),
   addProjectAtPath: vi.fn(),
-  setTheme: vi.fn(),
   setActiveView: vi.fn(),
   setSettingsCategory: vi.fn(),
   setLocalModelsOpenMarket: vi.fn(),
@@ -41,8 +43,9 @@ const projectsState = vi.hoisted(() => ({
 vi.mock("../lib/ipc", () => ({
   getSetting: (...a: unknown[]) => mocks.getSetting(...a),
   setSetting: (...a: unknown[]) => mocks.setSetting(...a),
-  listChatModels: (...a: unknown[]) => mocks.listChatModels(...a),
+  getChatConfig: (...a: unknown[]) => mocks.getChatConfig(...a),
   setChatApiKey: (...a: unknown[]) => mocks.setChatApiKey(...a),
+  setChatDefaultModel: (...a: unknown[]) => mocks.setChatDefaultModel(...a),
   toastSuccess: (...a: unknown[]) => mocks.toastSuccess(...a),
 }));
 
@@ -54,12 +57,12 @@ vi.mock("../state/projects", () => ({
 }));
 
 vi.mock("../state/chat", () => ({
-  useChatStore: { getState: () => ({ loadConfig: mocks.loadConfig }) },
-}));
-
-vi.mock("../state/settings", () => ({
-  useSettingsStore: (selector: (s: Record<string, unknown>) => unknown) =>
-    selector({ theme: "dark", setTheme: mocks.setTheme }),
+  useChatStore: {
+    getState: () => ({
+      newChat: mocks.newChat,
+      sendMessage: mocks.sendMessage,
+    }),
+  },
 }));
 
 vi.mock("../state/ui", () => ({
@@ -71,27 +74,19 @@ vi.mock("../state/ui", () => ({
         setLocalModelsOpenMarket: mocks.setLocalModelsOpenMarket,
         setModalOpen: mocks.setModalOpen,
       }),
-    { getState: () => ({ setActiveView: mocks.setActiveView, setSettingsCategory: mocks.setSettingsCategory, setLocalModelsOpenMarket: mocks.setLocalModelsOpenMarket, setModalOpen: mocks.setModalOpen }) },
+    {
+      getState: () => ({
+        setActiveView: mocks.setActiveView,
+        setSettingsCategory: mocks.setSettingsCategory,
+        setLocalModelsOpenMarket: mocks.setLocalModelsOpenMarket,
+        setModalOpen: mocks.setModalOpen,
+      }),
+    },
   ),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: (...a: unknown[]) => mocks.dialogOpen(...a),
-}));
-
-vi.mock("../components/common/GlassSelect", () => ({
-  GlassSelect: (props: { value: string; options: Array<{ value: string; label: string }>; onChange: (v: string) => void; title?: string }) => (
-    <select
-      value={props.value}
-      title={props.title}
-      onChange={(e) => props.onChange(e.target.value)}
-      data-testid="glass-select"
-    >
-      {props.options.map((o) => (
-        <option key={o.value} value={o.value}>{o.label}</option>
-      ))}
-    </select>
-  ),
 }));
 
 beforeEach(() => {
@@ -102,9 +97,11 @@ beforeEach(() => {
   projectsState.harnesses = [];
   mocks.getSetting.mockResolvedValue(null);
   mocks.setSetting.mockResolvedValue(undefined);
-  mocks.listChatModels.mockResolvedValue([]);
+  mocks.getChatConfig.mockResolvedValue({ provider: null, baseUrl: null, model: null, hasKey: false });
   mocks.setChatApiKey.mockResolvedValue(undefined);
-  mocks.loadConfig.mockResolvedValue(undefined);
+  mocks.setChatDefaultModel.mockResolvedValue(undefined);
+  mocks.newChat.mockResolvedValue({ id: "cs1" });
+  mocks.sendMessage.mockResolvedValue(undefined);
   mocks.refreshHarnesses.mockResolvedValue(undefined);
   mocks.addProjectAtPath.mockResolvedValue(null);
 });
@@ -160,24 +157,36 @@ describe("onboarding gating", () => {
 describe("welcome wizard flow", () => {
   async function mountWizard() {
     const [{ WelcomeWizard }, store] = await freshModules();
-    store.useOnboardingStore.setState({ loaded: true, visible: true, step: 0, maxStep: 0, completed: false });
+    store.useOnboardingStore.setState({ loaded: true, visible: true, step: 0, maxStep: 0, completed: false, path: null });
     render(<WelcomeWizard />);
     return store;
   }
 
-  it("renders the welcome step with a live theme choice", async () => {
+  /** Walk from the Meet step to step index `n` via the footer primaries.
+   *  Role+name queries because the buttons carry an arrow glyph span. */
+  async function advanceTo(n: number) {
+    const names = [/^Get Started/, /^Next/, /^Next/, /^Continue/];
+    for (let i = 0; i < n; i++) {
+      fireEvent.click(screen.getByRole("button", { name: names[i] }));
+    }
+  }
+
+  it("step 1 renders the Meet hero and advances to Choose your path", async () => {
     await mountWizard();
-    expect(screen.getByText("Welcome to Relay")).toBeTruthy();
-    fireEvent.click(screen.getByRole("radio", { name: "Light" }));
-    expect(mocks.setTheme).toHaveBeenCalledWith("light");
+    expect(screen.getByText(/Meet/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /^Get Started/ }));
+    expect(screen.getByText("Choose your path")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Back/ }));
+    expect(screen.getByText(/Meet/)).toBeTruthy();
   });
 
-  it("Continue advances to the chat-model step and Back returns", async () => {
-    await mountWizard();
-    fireEvent.click(screen.getByText("Continue"));
-    expect(screen.getByText("Pick a chat model")).toBeTruthy();
-    fireEvent.click(screen.getByText("Back"));
-    expect(screen.getByText("Welcome to Relay")).toBeTruthy();
+  it("step 2 records the experience path in memory", async () => {
+    const store = await mountWizard();
+    await advanceTo(1);
+    expect(screen.getByText("I'm new to AI coding agents")).toBeTruthy();
+    expect(store.useOnboardingStore.getState().path).toBeNull();
+    fireEvent.click(screen.getByText("I'm new to AI coding agents"));
+    expect(store.useOnboardingStore.getState().path).toBe("newcomer");
   });
 
   it("Skip persists the completed flag but not the local-model nudge at step 1", async () => {
@@ -188,9 +197,9 @@ describe("welcome wizard flow", () => {
     expect(mocks.setSetting).not.toHaveBeenCalledWith("localModels.onboarded", "1");
   });
 
-  it("skipping after seeing the model step also suppresses the local-model nudge", async () => {
+  it("skipping after reaching the agent step also suppresses the local-model nudge", async () => {
     const store = await mountWizard();
-    fireEvent.click(screen.getByText("Continue")); // → model step
+    await advanceTo(2); // → agent step (maxStep 2)
     fireEvent.click(screen.getByText("Skip"));
     expect(mocks.setSetting).toHaveBeenCalledWith("onboarding.completed", "1");
     expect(mocks.setSetting).toHaveBeenCalledWith("localModels.onboarded", "1");
@@ -202,46 +211,32 @@ describe("welcome wizard flow", () => {
     expect(store.useOnboardingStore.getState().visible).toBe(false);
   });
 
-  it("native provider: saves the key directly without a live verify", async () => {
+  it("agent step reveals statuses from the real probe and re-scans on demand", async () => {
+    projectsState.harnesses = [
+      { id: "claude_code", displayName: "Claude Code", installed: true },
+      { id: "opencode", displayName: "OpenCode", installed: false },
+    ];
     await mountWizard();
-    fireEvent.click(screen.getByText("Continue"));
-    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-test" } });
-    fireEvent.click(screen.getByText("Save key"));
-    await waitFor(() => expect(mocks.setChatApiKey).toHaveBeenCalledWith("anthropic", "sk-test"));
-    expect(mocks.listChatModels).not.toHaveBeenCalled();
-    expect(await screen.findByText("Key saved to your OS keychain.")).toBeTruthy();
+    await advanceTo(2);
+    expect(screen.getByText("1 of 2 agents detected on this machine — connect one or skip ahead.")).toBeTruthy();
+    expect(screen.getByText("Claude Code")).toBeTruthy();
+    expect(screen.getByText("Ready")).toBeTruthy();
+    expect(screen.getByText("Local Model")).toBeTruthy();
+    fireEvent.click(screen.getByText("↻ Re-scan"));
+    await waitFor(() => expect(mocks.refreshHarnesses).toHaveBeenCalledWith(true));
   });
 
-  it("compatible provider: verifies via list_chat_models before saving", async () => {
-    mocks.listChatModels.mockResolvedValue([{ id: "m1", ownedBy: "x", created: 1, object: "model" }]);
+  it("agent step shows the skeleton while the probe is pending", async () => {
     await mountWizard();
-    fireEvent.click(screen.getByText("Continue"));
-    fireEvent.change(screen.getByTestId("glass-select"), { target: { value: "openai_compatible" } });
-    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "k-1" } });
-    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://api.example.com/v1" } });
-    fireEvent.click(screen.getByText("Verify & save"));
-    await waitFor(() =>
-      expect(mocks.setChatApiKey).toHaveBeenCalledWith("openai_compatible", "k-1", "https://api.example.com/v1"),
-    );
-    expect(mocks.listChatModels).toHaveBeenCalledWith("openai_compatible", "https://api.example.com/v1", "k-1");
+    await advanceTo(2);
+    expect(screen.getByText("Scanning this machine for installed agents…")).toBeTruthy();
   });
 
-  it("failed verification shows the error and never saves the key", async () => {
-    mocks.listChatModels.mockRejectedValue(new Error("401 unauthorized"));
+  it("Local Model row deep-links into the Model Market and finishes the wizard", async () => {
+    projectsState.harnesses = [{ id: "claude_code", displayName: "Claude Code", installed: true }];
     await mountWizard();
-    fireEvent.click(screen.getByText("Continue"));
-    fireEvent.change(screen.getByTestId("glass-select"), { target: { value: "openrouter" } });
-    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "bad" } });
-    fireEvent.click(screen.getByText("Verify & save"));
-    expect(await screen.findByText("401 unauthorized")).toBeTruthy();
-    expect(mocks.setChatApiKey).not.toHaveBeenCalled();
-  });
-
-  it("Model Market deep-link finishes the wizard and links into Settings", async () => {
-    await mountWizard();
-    fireEvent.click(screen.getByText("Continue"));
-    fireEvent.click(screen.getByText("Local model")); // select the local option
-    fireEvent.click(screen.getByText("Browse the Model Market"));
+    await advanceTo(2);
+    fireEvent.click(screen.getByText("Setup"));
     expect(mocks.setSettingsCategory).toHaveBeenCalledWith("localmodels");
     expect(mocks.setLocalModelsOpenMarket).toHaveBeenCalledWith(true);
     expect(mocks.setActiveView).toHaveBeenCalledWith("settings");
@@ -250,46 +245,76 @@ describe("welcome wizard flow", () => {
     expect(store.getState().visible).toBe(false);
   });
 
-  it("harness step lists statuses and re-scans on demand", async () => {
-    projectsState.harnesses = [
-      { id: "claude_code", displayName: "Claude Code", installed: true },
-      { id: "opencode", displayName: "OpenCode", installed: false },
-    ];
-    await mountWizard();
-    fireEvent.click(screen.getByText("Continue"));
-    fireEvent.click(screen.getByText("Continue"));
-    expect(screen.getByText("Agent harnesses")).toBeTruthy();
-    expect(screen.getByText("Claude Code")).toBeTruthy();
-    expect(screen.getByText("Installed")).toBeTruthy();
-    expect(screen.getByText("npm install -g opencode-ai")).toBeTruthy();
-    fireEvent.click(screen.getByText("Re-scan"));
-    await waitFor(() => expect(mocks.refreshHarnesses).toHaveBeenCalledWith(true));
-  });
-
-  it("finish step: adding a project closes the wizard", async () => {
+  it("workspace step: picking a folder adds the project and previews the real git state", async () => {
     mocks.dialogOpen.mockResolvedValue("/tmp/proj");
+    projectsState.projects = [];
+    mocks.addProjectAtPath.mockResolvedValue({ id: "p1", name: "proj", path: "/tmp/proj", isGitRepo: true });
     await mountWizard();
-    fireEvent.click(screen.getByText("Continue"));
-    fireEvent.click(screen.getByText("Continue"));
-    fireEvent.click(screen.getByText("Continue"));
-    fireEvent.click(screen.getByText("Add your first project"));
+    await advanceTo(3);
+    fireEvent.click(screen.getByText("Open a project"));
     await waitFor(() => expect(mocks.addProjectAtPath).toHaveBeenCalledWith("/tmp/proj"));
-    const store = (await import("../state/onboarding")).useOnboardingStore;
-    await waitFor(() => expect(store.getState().visible).toBe(false));
-    expect(mocks.setSetting).toHaveBeenCalledWith("onboarding.completed", "1");
+    expect(await screen.findByText("Git repository detected")).toBeTruthy();
+    expect(screen.getByText("proj")).toBeTruthy();
   });
 
-  it("finish step: cancelling the folder picker keeps the wizard open", async () => {
-    mocks.dialogOpen.mockResolvedValue(null);
+  it("workspace step: 'later' defers without opening the picker", async () => {
     await mountWizard();
-    fireEvent.click(screen.getByText("Continue"));
-    fireEvent.click(screen.getByText("Continue"));
-    fireEvent.click(screen.getByText("Continue"));
-    fireEvent.click(screen.getByText("Add your first project"));
-    await waitFor(() => expect(mocks.dialogOpen).toHaveBeenCalled());
-    expect(mocks.addProjectAtPath).not.toHaveBeenCalled();
+    await advanceTo(3);
+    fireEvent.click(screen.getByText("I'll do this later"));
+    expect(mocks.dialogOpen).not.toHaveBeenCalled();
+    expect(screen.getByText(/add a project/)).toBeTruthy();
+  });
+
+  it("defaults step: permission choice writes chat.defaultApproval immediately", async () => {
+    await mountWizard();
+    await advanceTo(4);
+    fireEvent.click(screen.getByText("Ask first"));
+    expect(mocks.setSetting).toHaveBeenCalledWith("chat.defaultApproval", "manual");
+  });
+
+  it("defaults step: a provider tile with a key sets the default model directly", async () => {
+    mocks.getChatConfig.mockImplementation((provider: string) =>
+      Promise.resolve({ provider, baseUrl: null, model: null, hasKey: provider === "anthropic" }),
+    );
+    await mountWizard();
+    await advanceTo(4);
+    // Let the hasKey probe (useEffect → getChatConfig) settle before clicking.
+    await act(async () => {});
+    fireEvent.click(screen.getByText("Claude Sonnet"));
+    await waitFor(() =>
+      expect(mocks.setChatDefaultModel).toHaveBeenCalledWith("anthropic", "claude-sonnet-4-5-20250929"),
+    );
+    expect(mocks.setChatApiKey).not.toHaveBeenCalled();
+  });
+
+  it("defaults step: a tile without a key expands the key form and saves it", async () => {
+    await mountWizard();
+    await advanceTo(4);
+    fireEvent.click(screen.getByText("Claude Sonnet"));
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-test" } });
+    fireEvent.click(screen.getByText("Save key"));
+    await waitFor(() => expect(mocks.setChatApiKey).toHaveBeenCalledWith("anthropic", "sk-test"));
+    await waitFor(() =>
+      expect(mocks.setChatDefaultModel).toHaveBeenCalledWith("anthropic", "claude-sonnet-4-5-20250929"),
+    );
+  });
+
+  it("defaults step: a suggestion genuinely starts the first chat", async () => {
+    await mountWizard();
+    await advanceTo(4);
+    fireEvent.click(screen.getByText("Explain this project structure"));
+    await waitFor(() => expect(mocks.newChat).toHaveBeenCalledWith("auto", "auto"));
+    await waitFor(() => expect(mocks.sendMessage).toHaveBeenCalledWith("Explain this project structure"));
     const store = (await import("../state/onboarding")).useOnboardingStore;
-    expect(store.getState().visible).toBe(true);
+    expect(store.getState().visible).toBe(false);
+  });
+
+  it("Finish persists the completed flag", async () => {
+    const store = await mountWizard();
+    await advanceTo(4);
+    fireEvent.click(screen.getByRole("button", { name: /^Finish/ }));
+    expect(store.useOnboardingStore.getState().visible).toBe(false);
+    expect(mocks.setSetting).toHaveBeenCalledWith("onboarding.completed", "1");
   });
 
   it("replay entry (openOnboarding) resets to step 1 after completion", async () => {

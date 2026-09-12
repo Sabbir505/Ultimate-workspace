@@ -2,7 +2,13 @@
 // cosmetic hats (level-locked), per-home visibility, lifetime stats, and the
 // all-important "pet the pet" button. Everything here is also how you turn
 // the pet off entirely (one click — the guardrail from the design doc).
-import { useState } from "react";
+//
+// Rendered through a portal to document.body with fixed positioning, for the
+// same reason as the pairing QR modal: the sidebar header's overflow-hidden
+// (and its backdrop-filter containing block) would clip/trap an in-flow
+// popover anchored inside the pet strip.
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Heart, Lock, X } from "lucide-react";
 
 import { PetActorMini } from "./PetActor";
@@ -21,6 +27,7 @@ import {
 } from "../../state/pet";
 
 const SPECIES: PetSpecies[] = ["cat", "axolotl", "robot"];
+const PANEL_W = 264;
 
 function HatChip({ hat }: { hat: PetHatKey }) {
   const index = PET_HATS.keys.indexOf(hat);
@@ -37,7 +44,17 @@ function HatChip({ hat }: { hat: PetHatKey }) {
   );
 }
 
-export function PetPanel({ onClose }: { onClose: () => void }) {
+export function PetPanel({
+  anchor,
+  toggleRef,
+  onClose,
+}: {
+  /** viewport-space point the panel hangs from (paw button's bottom-right) */
+  anchor: { x: number; y: number };
+  /** the strip's paw button — clicks on it must not count as "outside" */
+  toggleRef: React.RefObject<HTMLButtonElement | null>;
+  onClose: () => void;
+}) {
   const species = usePetStore((s) => s.species);
   const name = usePetStore((s) => s.name);
   const hat = usePetStore((s) => s.hat);
@@ -53,6 +70,33 @@ export function PetPanel({ onClose }: { onClose: () => void }) {
   const setShowHome = usePetStore((s) => s.setShowHome);
   const petThePet = usePetStore((s) => s.petThePet);
   const [nameDraft, setNameDraft] = useState(name);
+  // Adopting a different species renames the pet (to that species' default) —
+  // keep the input draft in sync so it doesn't show the previous name.
+  useEffect(() => setNameDraft(name), [name]);
+
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // Dismiss on any mousedown outside the card or the paw toggle, and on
+  // Escape. The toggle is excluded so its own click can toggle us closed.
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t)) return;
+      if (toggleRef.current?.contains(t)) return;
+      onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose, toggleRef]);
+
+  const commitName = useCallback(() => setName(nameDraft), [setName, nameDraft]);
 
   const level = petLevel(xp);
   const cur = levelThreshold(level);
@@ -61,8 +105,18 @@ export function PetPanel({ onClose }: { onClose: () => void }) {
   const unlocked = unlockedHats(xp);
   const unlockLevel = (h: PetHatKey) => PET_HAT_UNLOCKS.find((u) => u.hat === h)?.level ?? 99;
 
-  return (
-    <div className="pet-panel" role="dialog" aria-label={`Companion pet ${name}`}>
+  return createPortal(
+    <div
+      ref={rootRef}
+      className="pet-panel"
+      role="dialog"
+      aria-label={`Companion pet ${name}`}
+      style={{
+        position: "fixed",
+        top: anchor.y + 6,
+        left: Math.max(8, Math.min(anchor.x - PANEL_W, window.innerWidth - PANEL_W - 8)),
+      }}
+    >
       <div className="pet-panel-head">
         <input
           className="pet-panel-name"
@@ -70,7 +124,7 @@ export function PetPanel({ onClose }: { onClose: () => void }) {
           maxLength={24}
           aria-label="Pet name"
           onChange={(e) => setNameDraft(e.target.value)}
-          onBlur={() => setName(nameDraft)}
+          onBlur={commitName}
           onKeyDown={(e) => {
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
@@ -188,6 +242,7 @@ export function PetPanel({ onClose }: { onClose: () => void }) {
           dismiss pet
         </button>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

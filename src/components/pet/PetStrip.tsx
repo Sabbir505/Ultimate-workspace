@@ -31,6 +31,13 @@ export function PetStrip({ myHome }: { myHome: "sidebar" | "composer" }) {
   const endDrag = usePetStore((s) => s.endDrag);
   const petThePet = usePetStore((s) => s.petThePet);
   const [panel, setPanel] = useState<"closed" | "open" | "closing">("closed");
+  // Mirror of `panel` for event handlers (the outside-click closer and the
+  // paw toggle both need the live value without going through setState).
+  const panelRef = useRef<"closed" | "open" | "closing">("closed");
+  const setPanelBoth = useCallback((state: "closed" | "open" | "closing") => {
+    panelRef.current = state;
+    setPanel(state);
+  }, []);
   const [anchor, setAnchor] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [appearReady, setAppearReady] = useState(false);
   const pawRef = useRef<HTMLButtonElement>(null);
@@ -57,21 +64,27 @@ export function PetStrip({ myHome }: { myHome: "sidebar" | "composer" }) {
     return () => window.clearTimeout(t);
   }, [phase]);
 
-  const togglePanel = useCallback(() => {
-    setPanel((state) => {
-      if (state !== "closed") return state;
-      const r = pawRef.current?.getBoundingClientRect();
-      if (r) setAnchor({ x: r.right, y: r.bottom });
-      return "open";
-    });
-  }, []);
   const closePanel = useCallback(() => {
-    setPanel((state) => {
-      if (state !== "open") return state;
-      window.setTimeout(() => setPanel("closed"), PANEL_CLOSE_MS);
-      return "closing";
-    });
+    if (panelRef.current === "closing" || panelRef.current === "closed") return;
+    panelRef.current = "closing";
+    setPanel("closing");
+    window.setTimeout(() => {
+      panelRef.current = "closed";
+      setPanel("closed");
+    }, PANEL_CLOSE_MS);
   }, []);
+  // The paw genuinely toggles: open when closed, close when open (the paw is
+  // excluded from the panel's outside-click closer, so this is its job).
+  const togglePanel = useCallback(() => {
+    if (panelRef.current === "open") {
+      closePanel();
+      return;
+    }
+    if (panelRef.current === "closing") return;
+    const r = pawRef.current?.getBoundingClientRect();
+    if (r) setAnchor({ x: r.right, y: r.bottom });
+    setPanelBoth("open");
+  }, [closePanel, setPanelBoth]);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {

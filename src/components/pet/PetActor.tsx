@@ -132,7 +132,7 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
   const bubbleVisible = bubble !== null && bubble.until > now;
 
   return (
-    <div className="pet-actor" title={name}>
+    <div className="pet-actor" data-mood={mood} title={name}>
       <div
         className="pet-sprite"
         data-mood={mood}

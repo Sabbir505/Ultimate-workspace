@@ -67,8 +67,9 @@
   background: rgba(0, 0, 0, 0.5);
 }
 
-/* subtle idle breathing on the whole actor (sprite anim carries the rest) */
-.pet-strip:not(.pet-static) .pet-actor {
+/* Subtle idle breathing — stationary moods only. Stacking it on the walk
+   hop or the typing animation reads as jitter ("weird animation"). */
+.pet-strip .pet-actor:not([data-mood="walk"]):not([data-mood="zoomies"]):not([data-mood="work"]) {
   animation: pet-breathe 3.4s ease-in-out infinite;
 }
 @keyframes pet-breathe {

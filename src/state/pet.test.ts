@@ -226,6 +226,23 @@ describe("store", () => {
     expect(after.teleport?.from).toBe("sidebar");
   });
 
+  it("never teleports a sleeping pet — the nap is sacred", () => {
+    usePetStore.setState({
+      nextTeleportAt: Date.now() - 1,
+      core: { ...usePetStore.getState().core, mood: "doze", lastEventAt: Date.now() - PET_DOZE_AFTER_MS * 2 },
+    });
+    usePetStore.getState().tick(Date.now(), 0.016);
+    const after = usePetStore.getState();
+    expect(after.home).toBe("sidebar");
+    expect(after.teleport).toBeNull();
+    // and it doesn't teleport the instant it wakes, either
+    after.event({ type: "activity" });
+    const awake = usePetStore.getState();
+    expect(awake.core.mood).toBe("idle");
+    expect(awake.teleport).toBeNull();
+    expect(awake.nextTeleportAt).toBeGreaterThan(Date.now());
+  });
+
   it("waits when busy — no teleport mid-work", () => {
     usePetStore.setState({
       nextTeleportAt: Date.now() - 1,

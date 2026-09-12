@@ -34,14 +34,18 @@ export interface PetSpeciesDef {
   sheet: string;
   /** Frame-space point the hat overlay is centred on (hat sits above it). */
   hatAnchor: { x: number; y: number };
+  /** Silhouette-specific anchors: the curled doze and crouched celebrate
+   *  poses carry the head much lower than the standing pose. */
+  hatAnchorDoze: { x: number; y: number };
+  hatAnchorCelebrate: { x: number; y: number };
   /** Display name used as the default pet name. */
   defaultName: string;
 }
 
 export const PET_SPECIES: Record<"cat" | "axolotl" | "robot", PetSpeciesDef> = {
-  cat: { sheet: "/pets/cat.png", hatAnchor: { x: 8, y: 2 }, defaultName: "Mochi" },
-  axolotl: { sheet: "/pets/axolotl.png", hatAnchor: { x: 8, y: 3 }, defaultName: "Bloop" },
-  robot: { sheet: "/pets/robot.png", hatAnchor: { x: 8, y: 1 }, defaultName: "Bolt" },
+  cat: { sheet: "/pets/cat.png", hatAnchor: { x: 8, y: 2 }, hatAnchorDoze: { x: 8, y: 8 }, hatAnchorCelebrate: { x: 8, y: 5 }, defaultName: "Mochi" },
+  axolotl: { sheet: "/pets/axolotl.png", hatAnchor: { x: 8, y: 3 }, hatAnchorDoze: { x: 8, y: 8 }, hatAnchorCelebrate: { x: 8, y: 6 }, defaultName: "Bloop" },
+  robot: { sheet: "/pets/robot.png", hatAnchor: { x: 8, y: 1 }, hatAnchorDoze: { x: 8, y: 6 }, hatAnchorCelebrate: { x: 8, y: 4 }, defaultName: "Bolt" },
 };
 
 export const PET_HATS = {

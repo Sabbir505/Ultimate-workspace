@@ -96,14 +96,22 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
   const sheetW = PET_SHEET_COLS * SIZE;
   const sheetH = PET_SHEET_ROWS * SIZE;
 
-  // Hat overlay: same 16×16 box. Sit-on-head hats are raised so the hat's
-  // lowest art row lands on the species' head-top anchor (negative Y = up).
-  // Headphones are the exception — their pads wrap the face at the frame's
-  // natural rows for every species, so they stay unmoved.
+  // Hat overlay: same 16×16 box, anchored to whichever pose is playing —
+  // the curled doze and crouched celebrate silhouettes carry the head much
+  // lower than standing, so they get their own anchors. While teleporting
+  // the hat is hidden (the pet dissolves without it); while dozing the
+  // headphones come off.
   let hatStyle: React.CSSProperties | undefined;
-  if (hat) {
+  const anchor = animOverride
+    ? null
+    : mood === "doze"
+      ? def.hatAnchorDoze
+      : mood === "celebrate"
+        ? def.hatAnchorCelebrate
+        : def.hatAnchor;
+  if (hat && anchor && !(mood === "doze" && hat === "headphones")) {
     const hatIndex = PET_HATS.keys.indexOf(hat as PetHatKey);
-    const raiseRows = hat === "headphones" ? 0 : def.hatAnchor.y - PET_HAT_BOTTOM[hat];
+    const raiseRows = hat === "headphones" ? 0 : anchor.y - PET_HAT_BOTTOM[hat];
     hatStyle = {
       backgroundImage: `url(${PET_HATS.sheet})`,
       backgroundSize: `${PET_HATS.frame * PET_SCALE * PET_HATS.keys.length}px ${PET_HATS.frame * PET_SCALE}px`,

@@ -427,7 +427,13 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
   event: (e) => {
     const prev = get().core;
     const core = reducePet(prev, e, Date.now());
-    set({ core });
+    const patch: Partial<PetStoreState> = { core };
+    // A fresh wake already had its teleport slot pass while asleep — push it
+    // out so the pet doesn't vanish the moment it opens its eyes.
+    if (prev.mood === "doze" && core.mood !== "doze") {
+      patch.nextTeleportAt = Date.now() + 60_000;
+    }
+    set(patch);
     // Tokens/output can stream hundreds of times a minute — only durable
     // changes (xp, counters) hit localStorage.
     if (core.xp !== prev.xp || core.stats !== prev.stats) persist(get(), core);
@@ -449,8 +455,8 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
       changed = true;
     }
     // Teleport lifecycle: clear the window when it lapses, and schedule a new
-    // hop when the timer fires (only while the pet is between activities —
-    // vanishing mid-celebration reads wrong).
+    // hop when the timer fires. Only a pet that is plainly idle teleports —
+    // never mid-walk, and NEVER out of its sleep (a nap is sacred).
     const teleport = get().teleport;
     if (teleport && now >= teleport.until) {
       patch.teleport = null;
@@ -458,8 +464,7 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
     }
     if (!teleport && now >= get().nextTeleportAt) {
       const s = get();
-      const calm = s.core.mood === "idle" || s.core.mood === "walk" || s.core.mood === "doze";
-      if (calm) {
+      if (s.core.mood === "idle") {
         const to = s.home === "sidebar" ? "composer" : "sidebar";
         patch.home = to;
         patch.teleport = { from: s.home, until: now + PET_TELEPORT_MS };
@@ -467,7 +472,7 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
         changed = true;
         persist({ ...s, home: to }, s.core);
       } else {
-        // busy — try again shortly
+        // busy, walking or asleep — try again shortly
         patch.nextTeleportAt = now + 15_000;
         changed = true;
       }

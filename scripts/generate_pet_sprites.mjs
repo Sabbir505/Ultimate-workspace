@@ -64,6 +64,16 @@ function patch(map, x, y, rows) {
   return validate("patch", grid.map((r) => r.join("")));
 }
 
+/** Horizontal shift (trembles, sways); vacated columns fill with '.'. */
+function hshift(map, dx) {
+  const out = map.map((row) => {
+    if (dx > 0) return (".".repeat(dx) + row).slice(0, FW);
+    if (dx < 0) return (row + ".".repeat(-dx)).slice(-FW);
+    return row;
+  });
+  return validate("hshift", out);
+}
+
 const KEEP = "\u0000";
 
 // ── PNG encoder (RGBA8, no deps) ─────────────────────────────────────────────
@@ -150,6 +160,8 @@ const CAT = {
     p: "#f3b7c9", // pink — ears, nose
     e: "#2e2a44", // eye
     w: "#ffffff", // glint
+    x: "#ff8fae", // effect — hearts
+    c: "#7ec8e8", // effect — sweat
   },
   stand: validate("cat.stand", [
     "................",
@@ -227,11 +239,33 @@ const CAT = {
 
 // Cat frame derivations (eyes sit at x5-6 and x9-10, rows y5-y6)
 const catBlink = (m) => patch(patch(m, 5, 5, ["bb", "oo"]), 9, 5, ["bb", "oo"]);
-const catHappyEyes = (m) => patch(patch(m, 5, 4, ["e.", ".e"]), 9, 4, ["e.", ".e"]);
-// Concerned: slump 1px + ears folded flat (tips and inners to shade colour).
-const catSad = patch(patch(vshift(CAT.stand, 1), 4, 2, ["d......d"]), 4, 3, ["d......d"]);
-const catWorkA = patch(CAT.workBase, 5, 11, ["p........b"]);
-const catWorkB = patch(CAT.workBase, 5, 11, ["b........p"]);
+// Happy: ^_^ eyes, a drawn smile, and hearts floating beside the head.
+const catHappyEyes = (m) => {
+  const eyes = patch(patch(m, 5, 4, ["e.", ".e"]), 9, 4, ["e.", ".e"]);
+  const smile = patch(eyes, 6, 8, ["oo"]);
+  return patch(patch(smile, 1, 3, ["x.", "xx", "x."]), 14, 2, ["xx", "x."]);
+};
+// Concerned: slump 1px + ears folded flat + sweat drip + a small worried
+// mouth; frame B trembles 1px and the drip moves down.
+const catSadBase = patch(
+  patch(patch(vshift(CAT.stand, 1), 4, 2, ["d......d"]), 4, 3, ["d......d"]),
+  6, 8, ["oo"],
+);
+const catSad = patch(catSadBase, 14, 4, ["c", "c", "c"]);
+const catSadB = hshift(patch(catSadBase, 14, 5, ["c", "c", "c"]), 1);
+// Working: half-closed "focusing" eyes, both paws on the keyboard with one
+// raised per frame, and an accent key lighting up under them.
+const catWorkLid = (m) => patch(patch(m, 5, 5, ["dd", "dd"]), 10, 5, ["dd", "dd"]);
+const catWorkA = patch(
+  patch(catWorkLid(CAT.workBase), 4, 10, ["pp....pp"]),
+  4, 11, ["pp......"],
+);
+const catWorkB = patch(
+  patch(catWorkLid(CAT.workBase), 4, 10, ["pp....pp"]),
+  4, 11, ["......pp"],
+);
+const catWorkA2 = patch(catWorkA, 7, 12, ["x"]);
+const catWorkB2 = patch(catWorkB, 8, 12, ["x"]);
 
 // ── AXOLOTL — pink, coral gill frills, big happy eyes, wide smile ───────────
 const AXY = {
@@ -244,6 +278,8 @@ const AXY = {
     e: "#4a2c3e", // eye
     w: "#ffffff", // glint
     m: "#d96a92", // smile
+    x: "#ff5f85", // effect — hearts
+    c: "#a8dcf5", // effect — sweat
   },
   stand: validate("axy.stand", [
     "................",
@@ -319,7 +355,11 @@ const AXY = {
   ]),
 };
 const axyBlink = (m) => patch(patch(m, 5, 4, ["bb", "oo"]), 9, 4, ["bb", "oo"]);
-const axyHappyEyes = (m) => patch(patch(m, 5, 3, ["e.", ".e"]), 9, 3, ["e.", ".e"]);
+// Happy: ^_^ eyes + hearts flanking the head (the wide smile is already there).
+const axyHappyEyes = (m) => {
+  const eyes = patch(patch(m, 5, 3, ["e.", ".e"]), 9, 3, ["e.", ".e"]);
+  return patch(patch(eyes, 0, 2, ["x.", "xx", "x."]), 14, 2, ["xx", "x."]);
+};
 // Gill frills: three attached 1px nubs per side, staggered down the head
 // edge (a frill that doesn't touch the head reads as floating confetti).
 const axyNubs = (map, dy) =>
@@ -331,10 +371,25 @@ const axyStand = axyNubs(AXY.stand, 0);
 const axyCrouch = axyNubs(AXY.crouch, 3);
 // Dozing: frills rest — one relaxed pair at the widest head row.
 const axyCurl = patch(patch(AXY.curl, 1, 10, ["g"]), 14, 10, ["g"]);
-// Concerned: slump 1px, top frill pair droops off.
-const axySad = patch(patch(vshift(axyStand, 1), 1, 5, ["."]), 14, 5, ["."]);
-const axyWorkA = patch(axyNubs(AXY.workBase, 0), 5, 12, ["d........b"]);
-const axyWorkB = patch(axyNubs(AXY.workBase, 0), 5, 12, ["b........d"]);
+// Concerned: slump, top frills droop off, wavy mouth, sweat drip + tremble.
+const axySadBase = patch(
+  patch(patch(vshift(axyStand, 1), 1, 5, ["."]), 14, 5, ["."]),
+  6, 7, ["m....m"],
+);
+const axySad = patch(axySadBase, 14, 4, ["c", "c", "c"]);
+const axySadB = hshift(patch(axySadBase, 14, 5, ["c", "c", "c"]), 1);
+// Working: half-lidded eyes, tapping paws, one lit key per frame.
+const axyWorkLid = (m) => patch(patch(m, 5, 4, ["dd", "dd"]), 10, 4, ["dd", "dd"]);
+const axyWorkA = patch(
+  patch(axyWorkLid(axyNubs(AXY.workBase, 0)), 5, 10, ["dd..dd"]),
+  5, 11, ["dd...."],
+);
+const axyWorkB = patch(
+  patch(axyWorkLid(axyNubs(AXY.workBase, 0)), 5, 10, ["dd..dd"]),
+  5, 11, ["....dd"],
+);
+const axyWorkA2 = patch(axyWorkA, 7, 12, ["x"]);
+const axyWorkB2 = patch(axyWorkB, 8, 12, ["x"]);
 
 // ── ROBOT — steel chassis, dark screen face, teal glow ──────────────────────
 const BOT = {
@@ -347,6 +402,8 @@ const BOT = {
     s: "#232838", // screen
     e: "#7ef0dc", // eye glow
     w: "#ffffff", // glint
+    x: "#ff8fae", // effect — hearts
+    c: "#6fb8e8", // effect — sweat
   },
   stand: validate("bot.stand", [
     "........a.......",
@@ -422,45 +479,96 @@ const BOT = {
   ]),
 };
 const botBlink = (m) => patch(patch(m, 5, 4, ["ss", "ss"]), 9, 4, ["ss", "ss"]);
-// Happy robot: eyes stay lit, the mouth glow widens into a grin.
-const botHappyEyes = (m) => patch(m, 7, 6, ["eeee"]);
-// Concerned robot: dim the eye glow and slump.
-const botSad = patch(patch(vshift(BOT.stand, 1), 5, 4, ["dd", "dd"]), 9, 4, ["dd", "dd"]);
-const botWorkA = patch(BOT.workBase, 5, 11, ["a........b"]);
-const botWorkB = patch(BOT.workBase, 5, 11, ["b........a"]);
+// Happy robot: eyes stay lit, the mouth glow widens into a grin, hearts beside
+// the antenna.
+const botHappyEyes = (m) => {
+  const grin = patch(m, 7, 6, ["eeee"]);
+  return patch(patch(grin, 1, 1, ["x.", "xx", "x."]), 14, 2, ["xx", "x."]);
+};
+// Concerned robot: dim the eye glow, slump, sweat drip off the chassis edge +
+// a 1px tremble between frames.
+const botSadBase = patch(patch(vshift(BOT.stand, 1), 5, 5, ["dd", "dd"]), 10, 5, ["dd", "dd"]);
+const botSad = patch(botSadBase, 14, 3, ["c", "c", "c"]);
+const botSadB = hshift(patch(botSadBase, 14, 4, ["c", "c", "c"]), 1);
+// Working: gaze lowered on the screen, tapping accent arms, one lit key.
+const botWorkLid = (m) => patch(patch(m, 5, 4, ["ss", "ss"]), 10, 4, ["ss", "ss"]);
+const botWorkA = patch(
+  patch(botWorkLid(BOT.workBase), 5, 10, ["aa..aa"]),
+  5, 11, ["aa...."],
+);
+const botWorkB = patch(
+  patch(botWorkLid(BOT.workBase), 5, 10, ["aa..aa"]),
+  5, 11, ["....aa"],
+);
+const botWorkA2 = patch(botWorkA, 7, 12, ["x"]);
+const botWorkB2 = patch(botWorkB, 8, 12, ["x"]);
 
 // ── Animation assembly ───────────────────────────────────────────────────────
 // Row order is fixed and shared by every species (matches PetMood):
 // 0 idle · 1 walk · 2 work · 3 celebrate · 4 concerned · 5 doze · 6 happy
+// 7 teleport-out · 8 teleport-in
+
+/** Scanline-dissolve teleport: the standing pose breaks into horizontal
+ *  slices while pixels of it stream upward, ending in a scattered column +
+ *  a pile at the feet. Classic, and reads instantly at 48px. */
+function buildTele(S, spark) {
+  const blank = ".".repeat(FW);
+  const frames = [];
+  for (let i = 1; i <= 3; i++) {
+    const rows = S.stand.map((row, y) => ((y + i) % 4 < 4 - i ? row : blank));
+    const m = rows.map((r) => r.split(""));
+    const spots = [[7, 3], [9, 1], [5, 5], [11, 2], [8, 4]];
+    for (let k = 0; k <= i; k++) {
+      const [sx, sy] = spots[k];
+      const ty = sy - i;
+      if (ty >= 0 && sy < FW) m[ty][sx] = k % 2 === 0 ? spark : "w";
+    }
+    frames.push(validate(`tele-out-${i}`, m.map((r) => r.join(""))));
+  }
+  const last = Array.from({ length: FW }, () => blank);
+  const pile = [[5, 13], [7, 13], [9, 13], [11, 13], [8, 10], [7, 7], [9, 4], [7, 1]];
+  pile.forEach(([px, py], k) => {
+    last[py] = last[py].substring(0, px) + (k % 2 ? "w" : spark) + last[py].substring(px + 1);
+  });
+  frames.push(validate("tele-out-4", last));
+  return frames;
+}
 
 function buildSpecies(S, fns, confetti) {
-  const { blink, happyEyes, sad, workA, workB } = fns;
+  const { blink, happyEyes, sad, sadB, workA, workB } = fns;
   const hop = vshift(S.stand, -1);
   const air = vshift(S.stand, -2);
   // Cheer: airborne + a sparkle of confetti down both sides.
   const cheer = patch(patch(air, 1, 2, [confetti, ".", confetti]), 14, 2, [confetti, ".", confetti]);
   const happyBounce = vshift(happyEyes(S.stand), -1);
+  const teleOut = buildTele(S, confetti);
+  const teleIn = teleOut.slice().reverse();
   return [
-    [S.stand, blink(S.stand)], // idle
-    [S.stand, hop], // walk
-    [workA, workB], // work
-    [S.crouch, air, cheer, S.crouch], // celebrate
-    [sad, blink(sad)], // concerned
-    [S.curl], // doze
-    [happyEyes(S.stand), happyBounce], // happy
+    [S.stand, blink(S.stand)], // 0 idle
+    [S.stand, hop], // 1 walk
+    [workA, workB], // 2 work
+    [S.crouch, air, cheer, S.crouch], // 3 celebrate
+    [sad, sadB], // 4 concerned
+    [S.curl], // 5 doze
+    [happyEyes(S.stand), happyBounce], // 6 happy
+    teleOut, // 7 teleport-out
+    teleIn, // 8 teleport-in
   ];
 }
 
 const catFrames = buildSpecies(CAT, {
-  blink: catBlink, happyEyes: catHappyEyes, sad: catSad, workA: catWorkA, workB: catWorkB,
+  blink: catBlink, happyEyes: catHappyEyes, sad: catSad, sadB: catSadB,
+  workA: catWorkA2, workB: catWorkB2,
 }, "p");
 const axyFrames = buildSpecies(
   { stand: axyStand, crouch: axyCrouch, curl: axyCurl },
-  { blink: axyBlink, happyEyes: axyHappyEyes, sad: axySad, workA: axyWorkA, workB: axyWorkB },
+  { blink: axyBlink, happyEyes: axyHappyEyes, sad: axySad, sadB: axySadB,
+    workA: axyWorkA2, workB: axyWorkB2 },
   "g",
 );
 const botFrames = buildSpecies(BOT, {
-  blink: botBlink, happyEyes: botHappyEyes, sad: botSad, workA: botWorkA, workB: botWorkB,
+  blink: botBlink, happyEyes: botHappyEyes, sad: botSad, sadB: botSadB,
+  workA: botWorkA2, workB: botWorkB2,
 }, "a");
 
 // ── Hats (shared overlay sheet, one 16×16 frame each) ────────────────────────
@@ -557,7 +665,7 @@ function renderContactSheet() {
   const scale = 6;
   const pad = 8;
   const sheetCols = 4;
-  const rowsPerSpecies = 7;
+  const rowsPerSpecies = 9;
   const sheets = [
     ["cat", catFrames, CAT.palette],
     ["axolotl", axyFrames, AXY.palette],
@@ -607,6 +715,8 @@ const ANIMS = [
   { key: "concerned", frames: 2, fps: 2 },
   { key: "doze", frames: 1, fps: 1 },
   { key: "happy", frames: 2, fps: 4 },
+  { key: "teleout", frames: 4, fps: 10 },
+  { key: "telein", frames: 4, fps: 10 },
 ];
 
 function manifestSource() {
@@ -618,7 +728,16 @@ function manifestSource() {
   lines.push(`export const PET_SHEET_COLS = 4;`);
   lines.push(`export const PET_SHEET_ROWS = ${ANIMS.length};`);
   lines.push(``);
-  lines.push(`export type PetAnimKey = "idle" | "walk" | "work" | "celebrate" | "concerned" | "doze" | "happy";`);
+  lines.push(`export type PetAnimKey =
+  | "idle"
+  | "walk"
+  | "work"
+  | "celebrate"
+  | "concerned"
+  | "doze"
+  | "happy"
+  | "teleout"
+  | "telein";`);
   lines.push(``);
   lines.push(`export interface PetAnim { row: number; frames: number; fps: number }`);
   lines.push(``);
@@ -643,10 +762,19 @@ function manifestSource() {
   lines.push(`export const PET_HATS = {`);
   lines.push(`  sheet: "/pets/hats.png",`);
   lines.push(`  frame: ${FW},`);
-  lines.push(`  keys: ["party", "headphones", "wizard", "crown"] as const;`);
+  lines.push(`  keys: ["party", "headphones", "wizard", "crown"] as const,`);
   lines.push(`};`);
   lines.push(``);
   lines.push(`export type PetHatKey = (typeof PET_HATS.keys)[number];`);
+  lines.push(``);
+  lines.push(`/** Lowest art row of each hat within its 16×16 frame — runtime raises`);
+  lines.push(` *  each hat so this row lands on the species hatAnchor.y. */`);
+  lines.push(`export const PET_HAT_BOTTOM: Record<PetHatKey, number> = {`);
+  lines.push(`  party: 8,`);
+  lines.push(`  headphones: 7,`);
+  lines.push(`  wizard: 9,`);
+  lines.push(`  crown: 9,`);
+  lines.push(`};`);
   return lines.join("\n") + "\n";
 }
 

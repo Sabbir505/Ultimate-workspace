@@ -155,10 +155,12 @@
     concerned: { row: 4, frames: 2, fps: 2 },
     doze:      { row: 5, frames: 1, fps: 1 },
     happy:     { row: 6, frames: 2, fps: 4 },
+    teleout:   { row: 7, frames: 4, fps: 10, once: true },
+    telein:    { row: 8, frames: 4, fps: 10, once: true },
   };
   const HAT_BOTTOM = { party: 8, headphones: 7, wizard: 9, crown: 9 };
   const HAT_ANCHOR = { cat: 2, axolotl: 3, robot: 1 };
-  const SHEET_COLS = 4, SHEET_ROWS = 7, FRAME = 16;
+  const SHEET_COLS = 4, SHEET_ROWS = 9, FRAME = 16;
   const HATS = ["party", "headphones", "wizard", "crown"];
 
   let scale = 3;
@@ -169,7 +171,12 @@
   function draw(actor) {
     const s = scale;
     const anim = actor.anim;
-    const idx = paused ? actor.frozenFrame ?? 0 : Math.floor((performance.now() - actor.t0) / (1000 / anim.fps)) % anim.frames;
+    const raw = Math.floor((performance.now() - actor.t0) / (1000 / anim.fps));
+    // one-shot anims replay on a cycle in the harness so tiles never sit empty
+    const cycle = anim.once ? anim.frames + 9 : anim.frames;
+    const idx = anim.once
+      ? Math.min(raw % cycle, anim.frames - 1)
+      : (paused ? actor.frozenFrame ?? 0 : raw % anim.frames);
     if (paused && actor.frozenFrame == null) actor.frozenFrame = idx;
     if (!paused) actor.frozenFrame = null;
     const f = paused ? (actor.frozenFrame ?? 0) : idx;
@@ -247,21 +254,27 @@
     grid.appendChild(row);
   }
 
-  // teleport demo
+  // teleport demo — sprite-based, same sequencing as the app:
+  // old home plays teleout (390ms), then the new home plays telein (400ms).
   let tpHome = "sidebar";
   let tpTimer = null;
   const slotS = document.getElementById("slotSidebar");
   const slotC = document.getElementById("slotComposer");
   const tpStatus = document.getElementById("tpStatus");
-  const tpActor = makeActor(SPECIES.axolotl.sheet, "idle", null);
-  tpActor.species = "axolotl";
+  function mountPet(slot, animKey) {
+    slot.innerHTML = "";
+    const el = document.createElement("div");
+    el.className = "sprite pet";
+    slot.appendChild(el);
+    const actor = { el, sheet: SPECIES.axolotl.sheet, anim: ANIMS[animKey], t0: performance.now(), frozenFrame: null, hat: null };
+    actors.push(actor);
+    // prune old one-shot actors so the array doesn't grow forever
+    if (actors.length > 40) actors.splice(0, actors.length - 40);
+    draw(actor);
+  }
   function renderTp() {
-    const showS = tpHome === "sidebar" || (slotS.classList.contains("vanish"));
-    tpActor.el.className = "sprite pet";
     slotS.innerHTML = ""; slotC.innerHTML = "";
-    const holder = tpHome === "sidebar" ? slotS : slotC;
-    holder.appendChild(tpActor.el);
-    draw(tpActor);
+    if (tpHome === "sidebar") mountPet(slotS, "idle");
     tpStatus.textContent = "pet is in: " + tpHome;
   }
   function teleport() {
@@ -269,20 +282,13 @@
     const fromSlot = from === "sidebar" ? slotS : slotC;
     const toSlot = from === "sidebar" ? slotC : slotS;
     tpHome = from === "sidebar" ? "composer" : "sidebar";
-    // leaving: clone a frozen pet into the old slot for the vanish
-    const ghost = document.createElement("div");
-    ghost.className = "sprite pet";
-    fromSlot.appendChild(ghost);
-    const ghostActor = { el: ghost, sheet: tpActor.sheet, anim: ANIMS.idle, t0: 0, frozenFrame: 0, hat: null };
-    draw(ghostActor);
-    fromSlot.classList.remove("appear");
-    void fromSlot.offsetWidth;
-    fromSlot.classList.add("vanish");
-    toSlot.classList.remove("vanish");
-    void toSlot.offsetWidth;
-    toSlot.classList.add("appear");
-    renderTp();
-    setTimeout(() => { fromSlot.classList.remove("vanish"); fromSlot.innerHTML = ""; }, 780);
+    fromSlot.innerHTML = "";
+    mountPet(fromSlot, "teleout");           // dissolve now
+    setTimeout(() => {
+      fromSlot.innerHTML = "";
+      mountPet(toSlot, "telein");            // materialise in the second half
+    }, 390);
+    setTimeout(renderTp, 820);               // settle to idle in the new home
   }
   document.getElementById("tpBtn").onclick = teleport;
   document.getElementById("tpAuto").onchange = (e) => {

@@ -77,74 +77,13 @@
 }
 
 /* ── Slot (position anchor inside the strip) ───────────────────────────── */
+/* Teleporting is drawn by the sprite itself (teleout/telein rows: scanline
+   dissolve with rising pixels) — the app only sequences the two halves. */
 .pet-slot {
   position: absolute;
   bottom: 0;
   width: 0;
   height: 100%;
-}
-
-/* ── Teleport: vanish (leaving home) / appear (arriving home) ──────────── */
-.pet-slot-vanish .pet-actor {
-  animation: pet-vanish 390ms cubic-bezier(0.5, 0, 0.9, 0.4) forwards;
-}
-.pet-slot-appear .pet-actor {
-  /* delayed to the second half of the teleport window; `backwards` keeps
-     the pet invisible until its turn */
-  animation: pet-appear 340ms cubic-bezier(0.2, 0.9, 0.3, 1.3) 390ms backwards;
-}
-@keyframes pet-vanish {
-  0% { opacity: 1; transform: scale(1) rotate(0deg); filter: brightness(1); }
-  55% { opacity: 0.9; transform: scale(0.75) rotate(-8deg); filter: brightness(1.6); }
-  100% { opacity: 0; transform: scale(0.05) rotate(14deg); filter: brightness(2.4); }
-}
-@keyframes pet-appear {
-  0% { opacity: 0; transform: scale(0.05) rotate(-12deg); filter: brightness(2.4); }
-  60% { opacity: 1; transform: scale(1.12) rotate(4deg); filter: brightness(1.5); }
-  100% { opacity: 1; transform: scale(1) rotate(0deg); filter: brightness(1); }
-}
-/* pixel sparkles riding the teleport, on both the leaving and arriving slot */
-.pet-slot-vanish::after,
-.pet-slot-appear::after {
-  content: "";
-  position: absolute;
-  bottom: 12px;
-  left: -24px;
-  width: 4px;
-  height: 4px;
-  border-radius: 1px;
-  background: #7ef0dc;
-  box-shadow:
-    10px -8px 0 #ffd166,
-    34px -2px 0 #ff6f91,
-    44px -16px 0 #7ef0dc,
-    18px -22px 0 #b7c3d6;
-  animation: pet-sparkle 390ms ease-out forwards;
-  pointer-events: none;
-  z-index: 7;
-}
-.pet-slot-appear::after {
-  animation-delay: 390ms;
-}
-@keyframes pet-sparkle {
-  0% { opacity: 0; transform: translate(0, 6px) scale(0.4); }
-  40% { opacity: 1; }
-  100% { opacity: 0; transform: translate(0, -14px) scale(1.2); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .pet-slot-vanish .pet-actor {
-    animation: pet-vanish-quiet 200ms ease-in forwards;
-  }
-  .pet-slot-appear .pet-actor {
-    animation: pet-appear-quiet 200ms ease-out 390ms backwards;
-  }
-  @keyframes pet-vanish-quiet {
-    to { opacity: 0; }
-  }
-  @keyframes pet-appear-quiet {
-    from { opacity: 0; }
-  }
 }
 
 /* ── Speech bubble ─────────────────────────────────────────────────────── */

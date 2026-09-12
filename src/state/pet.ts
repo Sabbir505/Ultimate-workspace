@@ -89,8 +89,9 @@ const WORK_MS = 3000; // refreshed continuously while panes emit output
 export const PET_DOZE_AFTER_MS = 4 * 60_000;
 const WALK_MIN_MS = 9_000;
 const WALK_RANGE_MS = 14_000;
-/** Total vanish→appear window for a home-to-home teleport. */
-export const PET_TELEPORT_MS = 780;
+/** Total vanish→appear window for a home-to-home teleport (390ms dissolve +
+ *  400ms materialise, plus a little settle room). */
+export const PET_TELEPORT_MS = 820;
 const BUBBLE_MS = 3600;
 const BUBBLE_GAP_MS = 50_000; // min spacing between speech bubbles
 const BUBBLE_CHANCE = 0.35;

@@ -59,7 +59,7 @@ function useReducedMotion(): boolean {
   return reduced;
 }
 
-export function PetActor() {
+export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein" }) {
   const species = usePetStore((s) => s.species);
   const name = usePetStore((s) => s.name);
   const hat = usePetStore((s) => s.hat);
@@ -80,9 +80,17 @@ export function PetActor() {
   if (phase.current.mood !== mood) phase.current = { mood, at: now };
 
   const def = PET_SPECIES[species];
-  const anim = PET_ANIMS[MOOD_ANIM[mood]];
+  const anim = PET_ANIMS[animOverride ?? MOOD_ANIM[mood]];
   const elapsed = now - phase.current.at;
-  const frame = reduced ? 0 : Math.floor(elapsed / (1000 / anim.fps)) % anim.frames;
+  const rawFrame = Math.floor(elapsed / (1000 / anim.fps));
+  // Teleport animations play ONCE and hold their last frame (a scanline
+  // dissolve that loops would never finish vanishing); moods loop forever —
+  // except under reduced motion, where they hold a single pose.
+  const frame = animOverride
+    ? Math.min(rawFrame, anim.frames - 1)
+    : reduced
+      ? 0
+      : rawFrame % anim.frames;
   const facing = usePetStore((s) => s.core.facing);
 
   const sheetW = PET_SHEET_COLS * SIZE;

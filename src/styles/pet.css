@@ -20,8 +20,21 @@
   bottom: 0;
 }
 .pet-strip-composer {
-  height: 54px;
-  margin-bottom: 2px;
+  /* Zero-height OVERLAY: the pet stands ON the composer card's top edge and
+     paints over whatever stacks there — the harness question card, queued
+     messages, quotes, approvals — instead of consuming a 54px row that
+     wedged empty space between the composer and the cards fused onto it.
+     The 48px actor overflows upward from the zero-height strip; the strip
+     itself takes no layout space. z-index clears the dock's fused cards
+     (.plan-preview sits at z-index 1). */
+  height: 0;
+  margin: 0;
+  z-index: 6;
+}
+.pet-strip-composer .pet-actor {
+  /* Feet ON the seam (the card's top edge), same treatment as the sidebar
+     home on the search bar — the ground shadow tucks 1px over the border. */
+  bottom: 0;
 }
 
 /* ── Actor ─────────────────────────────────────────────────────────────── */

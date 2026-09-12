@@ -351,7 +351,10 @@ export function tickPet(
         x: core.targetX,
         targetX: null,
         mood: "idle",
-        nextWalkAt: now + WALK_MIN_MS + rng() * WALK_RANGE_MS,
+        // Arriving from a zoomies sprint at the strip edge, head home soon —
+        // settling at the far edge looks lost.
+        nextWalkAt:
+          core.mood === "zoomies" ? now + 2_000 + rng() * 2_000 : now + WALK_MIN_MS + rng() * WALK_RANGE_MS,
       };
     }
     return { ...core, x: core.x + Math.sign(dx) * step, facing: dx > 0 ? 1 : -1 };

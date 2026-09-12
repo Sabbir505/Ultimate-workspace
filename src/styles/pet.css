@@ -66,6 +66,13 @@
 [data-theme="dark"] .pet-actor::after {
   background: rgba(0, 0, 0, 0.5);
 }
+/* The curled doze pose is 7 rows shorter than standing — tuck the ground
+   shadow up under the loaf so the pet doesn't read as floating. */
+.pet-actor[data-mood="doze"]::after {
+  left: 9px;
+  right: 9px;
+  bottom: 2px;
+}
 
 /* Subtle idle breathing — stationary moods only. Stacking it on the walk
    hop or the typing animation reads as jitter ("weird animation"). */

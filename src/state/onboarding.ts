@@ -9,20 +9,34 @@
 // Skipping and finishing persist the same flag: the wizard never re-nags,
 // and replays go through the command palette / Settings → Data.
 //
-// Finishing (or skipping past) the chat-model step also writes
-// `localModels.onboarded`, so the standalone local-model nudge doesn't fire
-// right after the user just made (or deferred) exactly that choice.
+// Reaching the agent step (or finishing) also writes `localModels.onboarded`,
+// so the standalone local-model nudge doesn't fire right after the user just
+// saw — or deliberately opened — exactly that choice.
+//
+// The 5-step flow (matching the approved onboarding-redesign.html mock):
+// 0 Meet Relay · 1 Choose your path · 2 Pick an agent · 3 Workspace ·
+// 4 Set your defaults. The defaults step writes two REAL settings directly
+// on selection: `chat.defaultApproval` (new-session posture — read back by
+// db::create_chat_session) and the provider default model
+// (set_chat_default_model).
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/ipc";
 import { useProjectsStore } from "./projects";
 
 export const K_ONBOARDING_COMPLETED = "onboarding.completed";
 export const K_LOCAL_MODELS_ONBOARDED = "localModels.onboarded";
+/** New-session approval posture ("manual" | "read_only" | "full_auto" — the
+ *  legacy PermissionMode vocabulary). Read by create_chat_session; unset
+ *  keeps the historical full-auto default. */
+export const K_DEFAULT_APPROVAL = "chat.defaultApproval";
 
-/** Step indices. The model step suppresses the standalone local-model nudge
- *  once seen (maxStep >= ONBOARDING_MODEL_STEP). */
-export const ONBOARDING_MODEL_STEP = 1;
-export const ONBOARDING_STEP_COUNT = 4;
+/** Step indices. The agent step carries the Local Model row, so reaching it
+ *  suppresses the standalone local-model nudge (maxStep >= ONBOARDING_AGENT_STEP). */
+export const ONBOARDING_AGENT_STEP = 2;
+export const ONBOARDING_STEP_COUNT = 5;
+
+/** Step 2 radio choice — in-memory tailoring only (not persisted). */
+export type OnboardingPath = "experienced" | "newcomer";
 
 interface OnboardingState {
   /** Gating resolved (flag read + upgrade heuristic done). */
@@ -32,6 +46,7 @@ interface OnboardingState {
   /** Highest step reached — skips write-through per-step nudges. */
   maxStep: number;
   completed: boolean;
+  path: OnboardingPath | null;
 }
 
 export const useOnboardingStore = create<OnboardingState>(() => ({
@@ -40,6 +55,7 @@ export const useOnboardingStore = create<OnboardingState>(() => ({
   step: 0,
   maxStep: 0,
   completed: false,
+  path: null,
 }));
 
 let initPromise: Promise<void> | null = null;
@@ -60,18 +76,18 @@ async function doInit(): Promise<void> {
     useOnboardingStore.setState({ loaded: true, completed: true, visible: false });
     return;
   }
-  useOnboardingStore.setState({ loaded: true, visible: true, step: 0, maxStep: 0, completed: false });
+  useOnboardingStore.setState({ loaded: true, visible: true, step: 0, maxStep: 0, completed: false, path: null });
 }
 
 /** Replay entry (command palette / Settings → Data). Always starts over. */
 export function openOnboarding(): void {
-  useOnboardingStore.setState({ visible: true, step: 0, maxStep: 0 });
+  useOnboardingStore.setState({ visible: true, step: 0, maxStep: 0, path: null });
 }
 
 function persistCompletion(): void {
   const { maxStep } = useOnboardingStore.getState();
   void setSetting(K_ONBOARDING_COMPLETED, "1").catch(() => {});
-  if (maxStep >= ONBOARDING_MODEL_STEP) {
+  if (maxStep >= ONBOARDING_AGENT_STEP) {
     void setSetting(K_LOCAL_MODELS_ONBOARDED, "1").catch(() => {});
   }
 }
@@ -94,4 +110,8 @@ export function goToStep(step: number): void {
     step,
     maxStep: Math.max(s.maxStep, step),
   }));
+}
+
+export function setOnboardingPath(path: OnboardingPath): void {
+  useOnboardingStore.setState({ path });
 }

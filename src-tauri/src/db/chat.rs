@@ -125,6 +125,20 @@ pub fn create_chat_session(
     // (--dangerously-skip-permissions / prompt auto-approve / --auto /
     // --yolo). read_only / plan / auto_edit remain one switch away in the
     // mode menu.
+    //
+    // Exception: the `chat.defaultApproval` app-setting (written by
+    // onboarding's "Set your defaults" step) may pin a softer NEW-session
+    // posture, using the legacy PermissionMode vocabulary. Unset keeps
+    // full-auto, so installs that never touched onboarding see no change.
+    let default_posture = match super::settings::get_setting(conn, "chat.defaultApproval")
+        .unwrap_or(None)
+        .as_deref()
+    {
+        Some("read_only") => ("read_only", "read_only", "on_request"),
+        Some("manual") => ("manual", "workspace_write", "on_request"),
+        Some("auto_edit") => ("auto_edit", "workspace_write", "auto_edit"),
+        _ => ("full_auto", "workspace_write", "full_access"),
+    };
     let now = now_ts();
     let id = new_id();
     // provider "auto" ⟺ auto-routed session (fresh Auto chats from the
@@ -133,8 +147,18 @@ pub fn create_chat_session(
     let auto_model = provider == "auto";
     conn.execute(
         "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode, project_id, permission_mode, sandbox_policy, approval_policy, auto_model)
-         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL, ?5, 'full_auto', 'workspace_write', 'full_access', ?6)",
-        params![id, provider, model, now, project_id, auto_model as i64],
+         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            id,
+            provider,
+            model,
+            now,
+            project_id,
+            default_posture.0,
+            default_posture.1,
+            default_posture.2,
+            auto_model as i64
+        ],
     )?;
     conn.query_row(
         "SELECT * FROM chat_sessions WHERE id = ?1",
@@ -1106,6 +1130,32 @@ mod tests {
         set_chat_session_plan(&conn, &cs.id, true).unwrap();
         let label = set_chat_session_plan(&conn, &cs.id, false).unwrap();
         assert_eq!(label, "auto_edit");
+    }
+
+    #[test]
+    fn default_approval_kv_pins_new_session_posture() {
+        let conn = super::super::mem();
+        // Onboarding's "Ask first" choice → every NEW session starts
+        // on_request (workspace_write), while full-auto stays the default
+        // when the KV is unset (covered by plan_mode_label test above).
+        super::super::set_setting(&conn, "chat.defaultApproval", "manual").unwrap();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        assert_eq!(cs.permission_mode, "manual");
+        assert_eq!(cs.sandbox_policy, "workspace_write");
+        assert_eq!(cs.approval_policy, "on_request");
+
+        // "Read only" also scopes the sandbox.
+        super::super::set_setting(&conn, "chat.defaultApproval", "read_only").unwrap();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        assert_eq!(cs.permission_mode, "read_only");
+        assert_eq!(cs.sandbox_policy, "read_only");
+        assert_eq!(cs.approval_policy, "on_request");
+
+        // Unknown values fall back to full-auto rather than breaking create.
+        super::super::set_setting(&conn, "chat.defaultApproval", "bogus").unwrap();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        assert_eq!(cs.permission_mode, "full_auto");
+        assert_eq!(cs.approval_policy, "full_access");
     }
 
     #[test]

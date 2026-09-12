@@ -1,0 +1,626 @@
+/* Companion pet — strip, sprite stage, speech bubbles, particles.
+   The pet renders a 16×16 pixel sprite sheet at 3× (48px) with
+   image-rendering: pixelated. Both homes (sidebar strip, composer strip)
+   render the same store state, so the pet is "bi-located" but synchronized. */
+
+.pet-strip {
+  position: relative;
+  height: 52px;
+  user-select: none;
+  flex-shrink: 0;
+}
+.pet-strip-sidebar {
+  height: 44px;
+  margin: 2px 0 0;
+}
+/* Sidebar pets sit directly on the search bar's top edge — the 48px actor
+   already pokes ~4px above the strip, so the default 2px lift read as
+   floating (and pushed dozing hats into the wordmark row). */
+.pet-strip-sidebar .pet-actor {
+  bottom: 0;
+}
+.pet-strip-composer {
+  height: 54px;
+  margin-bottom: 2px;
+}
+
+/* ── Actor ─────────────────────────────────────────────────────────────── */
+.pet-actor {
+  position: absolute;
+  bottom: 2px;
+  width: 48px;
+  height: 48px;
+  margin-left: -24px; /* centre on the x fraction */
+  /* clicks are taken by .pet-hit (art-sized) so the pet never swallows
+     clicks meant for the paw button or things it walks over */
+  pointer-events: none;
+  z-index: 5;
+}
+.pet-hit {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 10px;
+  bottom: 0;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.pet-sprite,
+.pet-hat {
+  position: absolute;
+  inset: 0;
+  image-rendering: pixelated;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+.pet-hat {
+  will-change: transform;
+}
+/* soft ground shadow */
+.pet-actor::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: -1px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.28);
+  filter: blur(1px);
+  pointer-events: none;
+}
+[data-theme="dark"] .pet-actor::after {
+  background: rgba(0, 0, 0, 0.5);
+}
+/* The curled doze pose is 7 rows shorter than standing — tuck the ground
+   shadow up under the loaf so the pet doesn't read as floating. */
+.pet-actor[data-mood="doze"]::after {
+  left: 9px;
+  right: 9px;
+  bottom: 2px;
+}
+
+/* Subtle idle breathing — stationary moods only. Stacking it on the walk
+   hop or the typing animation reads as jitter ("weird animation"). */
+.pet-strip .pet-actor:not([data-mood="walk"]):not([data-mood="zoomies"]):not([data-mood="work"]) {
+  animation: pet-breathe 3.4s ease-in-out infinite;
+}
+@keyframes pet-breathe {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1px); }
+}
+
+/* ── Slot (position anchor inside the strip) ───────────────────────────── */
+/* Teleporting is drawn by the sprite itself (teleout/telein rows: scanline
+   dissolve with rising pixels) — the app only sequences the two halves. */
+.pet-slot {
+  position: absolute;
+  bottom: 0;
+  width: 0;
+  height: 100%;
+}
+
+/* ── Speech bubble ─────────────────────────────────────────────────────── */
+.pet-bubble {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 230px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 4px 9px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #23283a;
+  border: 1px solid rgba(35, 40, 58, 0.18);
+  box-shadow: 0 3px 12px rgba(10, 12, 24, 0.22);
+  pointer-events: none;
+  z-index: 8;
+  animation: pet-bubble-in 160ms ease-out;
+}
+[data-theme="dark"] .pet-bubble {
+  background: rgba(30, 34, 48, 0.97);
+  color: #e8ecf5;
+  border-color: rgba(255, 255, 255, 0.22);
+}
+.pet-bubble::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: rgba(255, 255, 255, 0.96);
+}
+[data-theme="dark"] .pet-bubble::after {
+  border-top-color: rgba(30, 34, 48, 0.97);
+}
+@keyframes pet-bubble-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(3px) scale(0.94); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
+
+/* Sidebar home: the strip sits at the very top of the window, so a bubble
+   above the pet gets clipped by the window edge and runs past the sidebar
+   into the chat view. There it hangs BELOW the pet instead, anchored to its
+   right edge so it grows leftward and stays inside the rail; the tail
+   points up at the pet. */
+.pet-strip-sidebar .pet-bubble {
+  top: calc(100% + 4px);
+  bottom: auto;
+  left: auto;
+  right: 0;
+  transform: none;
+  max-width: 176px;
+  white-space: normal;
+  text-align: left;
+  line-height: 1.3;
+  animation: pet-bubble-in-side 160ms ease-out;
+}
+.pet-strip-sidebar .pet-bubble::after {
+  top: auto;
+  bottom: 100%;
+  left: auto;
+  right: 14px;
+  transform: none;
+  border: 4px solid transparent;
+  border-bottom-color: rgba(255, 255, 255, 0.96);
+}
+[data-theme="dark"] .pet-strip-sidebar .pet-bubble::after {
+  border-bottom-color: rgba(30, 34, 48, 0.97);
+}
+@keyframes pet-bubble-in-side {
+  from { opacity: 0; transform: translateY(-3px) scale(0.94); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ── Zzz particles (dozing) ────────────────────────────────────────────── */
+.pet-zzz {
+  position: absolute;
+  right: -2px;
+  bottom: 60%;
+  font-size: 11px;
+  font-weight: 700;
+  color: #9aa3ba;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  animation: pet-zzz-float 2.4s ease-out infinite;
+}
+.pet-zzz:nth-child(2 of .pet-zzz) { animation-delay: 0.8s; font-size: 13px; }
+.pet-zzz:nth-child(3 of .pet-zzz) { animation-delay: 1.6s; font-size: 15px; }
+@keyframes pet-zzz-float {
+  0% { opacity: 0; transform: translate(0, 0); }
+  25% { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(7px, -16px); }
+}
+
+/* ── Heart particles (petted) ──────────────────────────────────────────── */
+.pet-heart {
+  position: absolute;
+  top: -4px;
+  font-size: 12px;
+  pointer-events: none;
+  animation: pet-heart-float 1.1s ease-out forwards;
+}
+.pet-heart:nth-child(2 of .pet-heart) { left: 26px; animation-delay: 0.15s; }
+.pet-heart:nth-child(3 of .pet-heart) { left: -2px; animation-delay: 0.3s; font-size: 10px; }
+@keyframes pet-heart-float {
+  0% { opacity: 0; transform: translateY(4px) scale(0.6); }
+  30% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-18px) scale(1.1); }
+}
+
+/* ── Level-up confetti burst ───────────────────────────────────────────── */
+.pet-confetti {
+  position: absolute;
+  top: -6px;
+  left: 0;
+  right: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 7;
+}
+.pet-confetti i {
+  position: absolute;
+  top: 0;
+  width: 3px;
+  height: 5px;
+  border-radius: 1px;
+  animation: pet-confetti-fall 1.6s ease-in forwards;
+}
+.pet-confetti i:nth-child(even) {
+  animation-name: pet-confetti-fall-alt;
+  animation-duration: 1.9s;
+}
+@keyframes pet-confetti-fall {
+  0% { opacity: 0; transform: translateY(-4px) rotate(0deg); }
+  15% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(46px) rotate(320deg); }
+}
+@keyframes pet-confetti-fall-alt {
+  0% { opacity: 0; transform: translateY(-2px) rotate(180deg); }
+  15% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(54px) rotate(-200deg); }
+}
+
+/* ── Dragging ──────────────────────────────────────────────────────────── */
+.pet-slot-dragging .pet-hit {
+  cursor: grabbing;
+}
+.pet-slot-dragging .pet-actor {
+  animation: none;
+}
+
+/* ── Panel open button ─────────────────────────────────────────────────── */
+/* Frosted dark chip: stays readable on the sidebar header art (dark) and on
+   plain light chrome alike — the old grey hover vanished into the art. */
+.pet-panel-btn {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 4px;
+  border-radius: 7px;
+  color: rgba(240, 244, 252, 0.92);
+  background: rgba(24, 28, 42, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(4px);
+  box-shadow: 0 1px 4px rgba(8, 10, 20, 0.35);
+  transition: all 0.15s ease;
+  z-index: 6;
+}
+.pet-panel-btn:hover {
+  color: #ffffff;
+  background: rgba(70, 82, 118, 0.75);
+  border-color: rgba(255, 255, 255, 0.34);
+  box-shadow: 0 2px 8px rgba(8, 10, 20, 0.45);
+}
+.pet-panel-btn:active {
+  transform: translateY(-50%) scale(0.92);
+}
+
+/* ── Panel popover ─────────────────────────────────────────────────────── */
+.pet-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 264px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid rgba(35, 40, 58, 0.14);
+  box-shadow: 0 12px 32px rgba(10, 12, 24, 0.22);
+  backdrop-filter: blur(12px);
+  z-index: 60;
+  color: #23283a;
+  transform-origin: top right;
+  animation: pet-panel-in 180ms cubic-bezier(0.2, 0.9, 0.3, 1.15);
+}
+.pet-panel-closing {
+  animation: pet-panel-out 150ms ease-in forwards;
+}
+@keyframes pet-panel-in {
+  from { opacity: 0; transform: scale(0.9) translateY(-4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes pet-panel-out {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.92) translateY(-4px); }
+}
+[data-theme="dark"] .pet-panel {
+  background: rgba(26, 29, 41, 0.97);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: #e8ecf5;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.pet-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 6px;
+}
+.pet-panel-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  background: rgba(120, 128, 148, 0.1);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 4px 8px;
+  color: inherit;
+  outline: none;
+}
+.pet-panel-name:focus {
+  border-color: rgba(120, 128, 148, 0.45);
+  background: transparent;
+}
+.pet-panel-level {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #ffd166, #ffb347);
+  color: #4a3208;
+  flex-shrink: 0;
+}
+
+.pet-panel-stage {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 6px;
+}
+.pet-panel-stage .pet-actor {
+  position: relative;
+  bottom: auto;
+  left: auto;
+  margin: 0;
+}
+
+.pet-panel-body { padding: 0 12px 10px; }
+
+.pet-panel-xp {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(120, 128, 148, 0.18);
+  overflow: hidden;
+  margin: 2px 0 10px;
+}
+.pet-panel-xp-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #7ed09e, #5fd4c4);
+  transition: width 300ms ease;
+}
+.pet-panel-xp-label {
+  font-size: 10px;
+  color: #8a92a8;
+  margin-bottom: 3px;
+}
+[data-theme="dark"] .pet-panel-xp-label { color: #9aa3ba; }
+
+.pet-panel-section {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #8a92a8;
+  margin: 8px 0 5px;
+}
+[data-theme="dark"] .pet-panel-section { color: #9aa3ba; }
+
+.pet-panel-species {
+  display: flex;
+  gap: 6px;
+}
+.pet-panel-species-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 0;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 128, 148, 0.25);
+  background: transparent;
+  transition: all 0.15s ease;
+}
+button.pet-panel-species-btn:hover { background: rgba(120, 128, 148, 0.12); }
+.pet-panel-species-btn.is-active {
+  border-color: #5fd4c4;
+  background: rgba(95, 212, 196, 0.12);
+}
+.pet-panel-species-btn .pet-actor { position: relative; bottom: auto; left: auto; margin: 0; }
+
+.pet-panel-hats { display: flex; gap: 6px; flex-wrap: wrap; }
+.pet-panel-hat-btn {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 128, 148, 0.25);
+  background: transparent;
+  position: relative;
+  transition: all 0.15s ease;
+}
+button.pet-panel-hat-btn:hover:not(:disabled) { background: rgba(120, 128, 148, 0.12); }
+.pet-panel-hat-btn.is-active {
+  border-color: #5fd4c4;
+  background: rgba(95, 212, 196, 0.12);
+}
+.pet-panel-hat-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pet-panel-hat-chip {
+  width: 22px;
+  height: 22px;
+  image-rendering: pixelated;
+  background-repeat: no-repeat;
+}
+
+.pet-panel-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pet-panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 3px 2px;
+}
+.pet-panel-toggle:hover { background: rgba(120, 128, 148, 0.08); }
+.pet-panel-toggle input { accent-color: #5fd4c4; }
+
+.pet-panel-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: #8a92a8;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+[data-theme="dark"] .pet-panel-stats { color: #9aa3ba; }
+.pet-panel-stats b { color: inherit; font-weight: 700; }
+
+.pet-panel-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px 10px;
+  border-top: 1px solid rgba(120, 128, 148, 0.16);
+}
+/* `button.` prefix bumps specificity past the global button:hover skin in
+   tokens.css, which otherwise swaps this gradient for dark glass and leaves
+   the dark label invisible on hover. */
+button.pet-panel-pet-btn {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #5fd4c4, #4bb8aa);
+  color: #08302b;
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+button.pet-panel-pet-btn:hover {
+  background: linear-gradient(135deg, #7ef0dc, #5fd4c4);
+  color: #08302b;
+  filter: saturate(1.1);
+}
+button.pet-panel-pet-btn:active { transform: scale(0.94); }
+.pet-panel-close {
+  padding: 4px;
+  border-radius: 6px;
+  color: #8a92a8;
+}
+.pet-panel-close:hover { color: inherit; background: rgba(120, 128, 148, 0.14); }
+
+/* ── Settings preview row: the three pets mid-animation ───────────────── */
+.pet-settings-previews {
+  display: flex;
+  gap: 10px;
+  margin: 10px 0 12px;
+  flex-wrap: wrap;
+}
+.pet-settings-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 16px 6px;
+  margin: 0;
+  border-radius: 10px;
+  background:
+    linear-gradient(45deg, rgba(120, 128, 148, 0.07) 25%, transparent 25%, transparent 75%, rgba(120, 128, 148, 0.07) 75%),
+    linear-gradient(45deg, rgba(120, 128, 148, 0.07) 25%, transparent 25%, transparent 75%, rgba(120, 128, 148, 0.07) 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+  border: 1px solid rgba(120, 128, 148, 0.2);
+}
+.pet-settings-preview .pet-sprite {
+  image-rendering: pixelated;
+}
+.pet-settings-preview figcaption {
+  font-size: 10px;
+  color: #8a92a8;
+}
+[data-theme="dark"] .pet-settings-preview figcaption {
+  color: #9aa3ba;
+}
+
+/* ── Focus buddy ───────────────────────────────────────────────────────── */
+/* Explicit theme-aware colors — `inherit` + a whisper of hover bg left the
+   label unreadable over the dark panel. */
+button.pet-focus-btn {
+  display: block;
+  width: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(60, 66, 88, 0.45);
+  background: rgba(120, 128, 148, 0.16);
+  color: #23283a;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+button.pet-focus-btn:hover {
+  background: rgba(120, 128, 148, 0.3);
+  border-color: rgba(60, 66, 88, 0.7);
+}
+[data-theme="dark"] button.pet-focus-btn {
+  color: #e8ecf5;
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+[data-theme="dark"] button.pet-focus-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+button.pet-focus-btn.is-active {
+  color: #0d3b34;
+  background: rgba(95, 212, 196, 0.32);
+  border-color: rgba(95, 212, 196, 0.65);
+}
+button.pet-focus-btn.is-active:hover {
+  background: rgba(95, 212, 196, 0.45);
+}
+[data-theme="dark"] button.pet-focus-btn.is-active {
+  color: #05302a;
+  background: #5fd4c4;
+  border-color: #7ef0dc;
+}
+[data-theme="dark"] button.pet-focus-btn.is-active:hover {
+  background: #7ef0dc;
+  border-color: #a5f5ea;
+}
+
+/* Milestone chips — earned badges are gold-trimmed, unearned stay quiet */
+.pet-milestones {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.pet-milestone {
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(120, 128, 148, 0.25);
+  color: #8a92a8;
+  opacity: 0.55;
+}
+.pet-milestone.is-earned {
+  border-color: #ffd166;
+  background: rgba(255, 209, 102, 0.14);
+  color: #8a6d1a;
+  opacity: 1;
+  font-weight: 600;
+}
+[data-theme="dark"] .pet-milestone {
+  color: #9aa3ba;
+}
+[data-theme="dark"] .pet-milestone.is-earned {
+  color: #ffd166;
+}
+
+/* ── Reduced motion ────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .pet-strip .pet-actor,
+  .pet-zzz,
+  .pet-heart,
+  .pet-confetti i,
+  .pet-bubble {
+    animation: none !important;
+  }
+  .pet-confetti {
+    display: none;
+  }
+}

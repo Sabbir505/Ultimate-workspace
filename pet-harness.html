@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Relay Pet — Animation Harness</title>
+<style>
+  :root {
+    --bg: #14161d;
+    --panel: #1b1e28;
+    --line: rgba(255, 255, 255, 0.12);
+    --text: #e8ecf5;
+    --dim: #9aa3ba;
+    --accent: #5fd4c4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 28px 32px 64px;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 14px; margin: 34px 0 10px; color: var(--accent); letter-spacing: 0.04em; text-transform: uppercase; }
+  p.sub { margin: 0 0 8px; color: var(--dim); font-size: 12px; }
+  .controls { display: flex; gap: 14px; align-items: center; margin: 14px 0 0; color: var(--dim); font-size: 12px; }
+  .controls label { display: flex; align-items: center; gap: 6px; }
+  button {
+    background: rgba(95, 212, 196, 0.14);
+    color: var(--accent);
+    border: 1px solid rgba(95, 212, 196, 0.4);
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  button:hover { background: rgba(95, 212, 196, 0.26); }
+
+  .sheet {
+    background:
+      linear-gradient(45deg, rgba(255,255,255,0.04) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.04) 75%),
+      linear-gradient(45deg, rgba(255,255,255,0.04) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.04) 75%);
+    background-size: 12px 12px;
+    background-position: 0 0, 6px 6px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    image-rendering: pixelated;
+  }
+  .mood-label { font-size: 10px; color: var(--dim); text-align: center; margin-top: 5px; }
+  .species-head { display: flex; align-items: baseline; gap: 10px; margin: 22px 0 8px; }
+  .species-head b { font-size: 14px; }
+  .species-head span { color: var(--dim); font-size: 11px; }
+  .mood-grid { display: flex; gap: 10px; flex-wrap: wrap; }
+
+  .sprite {
+    image-rendering: pixelated;
+    background-repeat: no-repeat;
+  }
+
+  /* teleport demo */
+  .tp-demo { display: flex; gap: 26px; align-items: stretch; }
+  .tp-strip {
+    width: 300px;
+    height: 56px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background:
+      linear-gradient(45deg, rgba(255,255,255,0.04) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.04) 75%),
+      linear-gradient(45deg, rgba(255,255,255,0.04) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.04) 75%);
+    background-size: 12px 12px;
+    background-position: 0 0, 6px 6px;
+    position: relative;
+  }
+  .tp-strip .tag {
+    position: absolute; top: -9px; left: 10px;
+    background: var(--bg); padding: 0 6px;
+    font-size: 10px; color: var(--dim);
+  }
+  .tp-slot { position: absolute; bottom: 2px; width: 0; height: 100%; }
+  .tp-status { color: var(--dim); font-size: 11px; margin-top: 8px; }
+  @keyframes pet-vanish {
+    0% { opacity: 1; transform: scale(1) rotate(0deg); filter: brightness(1); }
+    55% { opacity: 0.9; transform: scale(0.75) rotate(-8deg); filter: brightness(1.6); }
+    100% { opacity: 0; transform: scale(0.05) rotate(14deg); filter: brightness(2.4); }
+  }
+  @keyframes pet-appear {
+    0% { opacity: 0; transform: scale(0.05) rotate(-12deg); filter: brightness(2.4); }
+    60% { opacity: 1; transform: scale(1.12) rotate(4deg); filter: brightness(1.5); }
+    100% { opacity: 1; transform: scale(1) rotate(0deg); filter: brightness(1); }
+  }
+  @keyframes pet-sparkle {
+    0% { opacity: 0; transform: translate(0, 6px) scale(0.4); }
+    40% { opacity: 1; }
+    100% { opacity: 0; transform: translate(0, -14px) scale(1.2); }
+  }
+  .tp-slot.vanish .pet { animation: pet-vanish 390ms cubic-bezier(0.5, 0, 0.9, 0.4) forwards; }
+  .tp-slot.appear .pet { animation: pet-appear 340ms cubic-bezier(0.2, 0.9, 0.3, 1.3) 390ms backwards; }
+  .tp-slot.vanish::after, .tp-slot.appear::after {
+    content: "";
+    position: absolute; bottom: 12px; left: -24px;
+    width: 4px; height: 4px; border-radius: 1px;
+    background: #7ef0dc;
+    box-shadow: 10px -8px 0 #ffd166, 34px -2px 0 #ff6f91, 44px -16px 0 #7ef0dc, 18px -22px 0 #b7c3d6;
+    animation: pet-sparkle 390ms ease-out forwards;
+  }
+  .tp-slot.appear::after { animation-delay: 390ms; }
+</style>
+</head>
+<body>
+  <h1>Relay Pet — Animation Harness</h1>
+  <p class="sub">Every species × every mood, straight from the shipped sprite sheets. Serve with <code>npm run dev</code> and open <code>/pet-harness.html</code>. Pixel data: scripts/generate_pet_sprites.mjs.</p>
+  <div class="controls">
+    <button id="pauseBtn">Pause all</button>
+    <label>Scale
+      <select id="scaleSel">
+        <option value="2">2× (32px)</option>
+        <option value="3" selected>3× (48px, in-app size)</option>
+        <option value="4">4× (64px)</option>
+        <option value="6">6× (96px)</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="hatsChk" /> show hats</label>
+  </div>
+
+  <div id="grid"></div>
+
+  <h2>Teleport (sidebar ⇄ composer)</h2>
+  <p class="sub">The pet lives in one home at a time. Vanish 390ms → sparkle → appear 340ms — same constants as the app.</p>
+  <div class="tp-demo">
+    <div class="tp-strip"><span class="tag">sidebar · above search</span><div class="tp-slot" id="slotSidebar"></div></div>
+    <div class="tp-strip"><span class="tag">composer · above message box</span><div class="tp-slot" id="slotComposer"></div></div>
+  </div>
+  <div style="margin-top: 10px; display: flex; gap: 10px; align-items: center;">
+    <button id="tpBtn">Teleport now</button>
+    <label class="controls" style="margin:0"><input type="checkbox" id="tpAuto" /> auto every 2.5s</label>
+  </div>
+  <div class="tp-status" id="tpStatus">pet is in: sidebar</div>
+
+<script type="module">
+  // Mirrors src/lib/pets/manifest.ts (regenerated by the sprite script).
+  const SPECIES = {
+    cat:     { sheet: "/pets/cat.png",     note: "soft blue-gray, pink ears" },
+    axolotl: { sheet: "/pets/axolotl.png", note: "coral gill frills, big smile" },
+    robot:   { sheet: "/pets/robot.png",   note: "screen face, teal glow" },
+  };
+  const ANIMS = {
+    idle:      { row: 0, frames: 2, fps: 1.2 },
+    walk:      { row: 1, frames: 2, fps: 5 },
+    work:      { row: 2, frames: 2, fps: 4 },
+    celebrate: { row: 3, frames: 4, fps: 6 },
+    concerned: { row: 4, frames: 2, fps: 2 },
+    doze:      { row: 5, frames: 1, fps: 1 },
+    happy:     { row: 6, frames: 2, fps: 4 },
+    teleout:   { row: 7, frames: 4, fps: 10, once: true },
+    telein:    { row: 8, frames: 4, fps: 10, once: true },
+    zoomies:   { row: 1, frames: 2, fps: 10 },
+  };
+  const HAT_BOTTOM = { party: 8, headphones: 7, wizard: 9, crown: 9 };
+  const HAT_ANCHOR = { cat: 2, axolotl: 3, robot: 1 };
+  const HAT_ANCHOR_DOZE = { cat: 8, axolotl: 8, robot: 6 };
+  const HAT_ANCHOR_CELEBRATE = { cat: 5, axolotl: 6, robot: 4 };
+  const SHEET_COLS = 4, SHEET_ROWS = 9, FRAME = 16;
+  const HATS = ["party", "headphones", "wizard", "crown"];
+
+  let scale = 3;
+  let paused = false;
+  let showHats = false;
+  const actors = []; // {el, species, anim, frameEls...}
+
+  function draw(actor) {
+    const s = scale;
+    const anim = actor.anim;
+    const raw = Math.floor((performance.now() - actor.t0) / (1000 / anim.fps));
+    // one-shot anims replay on a cycle in the harness so tiles never sit empty
+    const cycle = anim.once ? anim.frames + 9 : anim.frames;
+    const idx = anim.once
+      ? Math.min(raw % cycle, anim.frames - 1)
+      : (paused ? actor.frozenFrame ?? 0 : raw % anim.frames);
+    if (paused && actor.frozenFrame == null) actor.frozenFrame = idx;
+    if (!paused) actor.frozenFrame = null;
+    const f = paused ? (actor.frozenFrame ?? 0) : idx;
+    actor.el.style.width = FRAME * s + "px";
+    actor.el.style.height = FRAME * s + "px";
+    actor.el.style.backgroundImage = `url(${actor.sheet})`;
+    actor.el.style.backgroundSize = `${SHEET_COLS * FRAME * s}px ${SHEET_ROWS * FRAME * s}px`;
+    actor.el.style.backgroundPosition = `-${f * FRAME * s}px -${anim.row * FRAME * s}px`;
+    // hat overlay
+    if (actor.hatEl) {
+      if (showHats && actor.hat != null) {
+        const hi = HATS.indexOf(actor.hat);
+        const anchor = actor.mood === "doze" ? HAT_ANCHOR_DOZE[actor.species]
+          : actor.mood === "celebrate" ? HAT_ANCHOR_CELEBRATE[actor.species]
+          : HAT_ANCHOR[actor.species];
+        if (actor.hat === "headphones" && actor.mood === "doze") { actor.hatEl.style.display = "none"; return; }
+        const raise = actor.hat === "headphones" ? 0 : anchor - HAT_BOTTOM[actor.hat];
+        actor.hatEl.style.display = "block";
+        actor.hatEl.style.width = FRAME * s + "px";
+        actor.hatEl.style.height = FRAME * s + "px";
+        actor.hatEl.style.backgroundImage = "url(/pets/hats.png)";
+        actor.hatEl.style.backgroundSize = `${HATS.length * FRAME * s}px ${FRAME * s}px`;
+        actor.hatEl.style.backgroundPosition = `-${hi * FRAME * s}px 0`;
+        actor.hatEl.style.transform = `translateY(${raise * s}px)`;
+      } else {
+        actor.hatEl.style.display = "none";
+      }
+    }
+  }
+
+  function makeActor(sheet, animKey, hatSlot) {
+    const el = document.createElement("div");
+    el.className = "sprite";
+    let hatEl = null;
+    if (hatSlot) {
+      hatEl = document.createElement("div");
+      hatEl.className = "sprite";
+      hatEl.style.position = "relative";
+      hatEl.style.marginTop = "-100%";
+      hatSlot.appendChild(el);
+      hatSlot.appendChild(hatEl);
+    }
+    const actor = { el, hatEl, sheet, anim: ANIMS[animKey], t0: performance.now(), frozenFrame: null, hat: hatSlot?.hat ?? null, species: hatSlot?.species ?? null, mood: animKey };
+    actors.push(actor);
+    return actor;
+  }
+
+  // build grid: species × moods
+  const grid = document.getElementById("grid");
+  for (const [name, sp] of Object.entries(SPECIES)) {
+    const head = document.createElement("div");
+    head.className = "species-head";
+    head.innerHTML = `<b>${name}</b><span>${sp.note}</span>`;
+    grid.appendChild(head);
+    const row = document.createElement("div");
+    row.className = "mood-grid";
+    for (const [mood, anim] of Object.entries(ANIMS)) {
+      const cell = document.createElement("div");
+      const sheet = document.createElement("div");
+      sheet.className = "sheet";
+      sheet.style.width = FRAME * 4 * 3 + "px"; // padded; sprite drawn over it
+      sheet.style.height = FRAME * 3 + "px";
+      sheet.style.position = "relative";
+      sheet.style.overflow = "visible";
+      const hatSlot = document.createElement("div");
+      hatSlot.style.position = "relative";
+      hatSlot.hat = showHats ? HATS[Object.keys(ANIMS).keys ? 0 : 0] : null;
+      const actor = makeActor(sp.sheet, mood, hatSlot);
+      actor.species = name;
+      actor.hat = HATS[Object.values(ANIMS).indexOf(anim) % HATS.length];
+      sheet.appendChild(hatSlot);
+      cell.appendChild(sheet);
+      const label = document.createElement("div");
+      label.className = "mood-label";
+      label.textContent = `${mood} · ${anim.frames}f @${anim.fps}fps`;
+      cell.appendChild(label);
+      row.appendChild(cell);
+    }
+    grid.appendChild(row);
+  }
+
+  // teleport demo — sprite-based, same sequencing as the app:
+  // old home plays teleout (390ms), then the new home plays telein (400ms).
+  let tpHome = "sidebar";
+  let tpTimer = null;
+  const slotS = document.getElementById("slotSidebar");
+  const slotC = document.getElementById("slotComposer");
+  const tpStatus = document.getElementById("tpStatus");
+  function mountPet(slot, animKey) {
+    slot.innerHTML = "";
+    const el = document.createElement("div");
+    el.className = "sprite pet";
+    slot.appendChild(el);
+    const actor = { el, sheet: SPECIES.axolotl.sheet, anim: ANIMS[animKey], t0: performance.now(), frozenFrame: null, hat: null };
+    actors.push(actor);
+    // prune old one-shot actors so the array doesn't grow forever
+    if (actors.length > 40) actors.splice(0, actors.length - 40);
+    draw(actor);
+  }
+  function renderTp() {
+    slotS.innerHTML = ""; slotC.innerHTML = "";
+    if (tpHome === "sidebar") mountPet(slotS, "idle");
+    tpStatus.textContent = "pet is in: " + tpHome;
+  }
+  function teleport() {
+    const from = tpHome;
+    const fromSlot = from === "sidebar" ? slotS : slotC;
+    const toSlot = from === "sidebar" ? slotC : slotS;
+    tpHome = from === "sidebar" ? "composer" : "sidebar";
+    fromSlot.innerHTML = "";
+    mountPet(fromSlot, "teleout");           // dissolve now
+    setTimeout(() => {
+      fromSlot.innerHTML = "";
+      mountPet(toSlot, "telein");            // materialise in the second half
+    }, 390);
+    setTimeout(renderTp, 820);               // settle to idle in the new home
+  }
+  document.getElementById("tpBtn").onclick = teleport;
+  document.getElementById("tpAuto").onchange = (e) => {
+    if (e.target.checked) tpTimer = setInterval(teleport, 2500);
+    else clearInterval(tpTimer);
+  };
+  renderTp();
+
+  // controls
+  document.getElementById("pauseBtn").onclick = (e) => {
+    paused = !paused;
+    e.target.textContent = paused ? "Resume all" : "Pause all";
+  };
+  document.getElementById("scaleSel").onchange = (e) => { scale = Number(e.target.value); };
+  document.getElementById("hatsChk").onchange = (e) => { showHats = e.target.checked; };
+
+  function loop() { for (const a of actors) draw(a); requestAnimationFrame(loop); }
+  loop();
+</script>
+</body>
+</html>

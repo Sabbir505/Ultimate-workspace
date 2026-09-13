@@ -41,6 +41,11 @@ vi.mock("../lib/ipc", () => ({
   createChatSession: vi.fn(),
   generateChatTitle: vi.fn().mockResolvedValue(null),
   getChatConfig: vi.fn(),
+  listChatInstances: vi.fn().mockResolvedValue([]),
+  providerKindOf: (id: string) => {
+    const dash = id.indexOf("-");
+    return dash > 0 ? id.slice(0, dash) : id;
+  },
   getChatSessionMetrics: vi.fn().mockResolvedValue(null),
   setChatSessionUnread: vi.fn().mockResolvedValue(undefined),
   setChatSessionStarred: vi.fn(),

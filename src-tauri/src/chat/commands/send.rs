@@ -83,7 +83,7 @@ pub(crate) async fn fetch_models_list(
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let req = client.get(&url);
 
-    let req = match provider {
+    let req = match crate::chat::providers::provider_kind(provider) {
         "anthropic" | "anthropic_compatible" => req
             .header("x-api-key", &key)
             .header("anthropic-version", ANTHROPIC_API_VERSION),
@@ -643,15 +643,8 @@ pub async fn send_chat_message(
     }
 
     // 3. Resolve provider id.
-    let provider_id: ChatProviderId = match provider_str.as_str() {
-        "anthropic" => ChatProviderId::Anthropic,
-        "openai" => ChatProviderId::OpenAI,
-        "anthropic_compatible" => ChatProviderId::AnthropicCompatible,
-        "openai_compatible" => ChatProviderId::OpenAICompatible,
-        "openrouter" => ChatProviderId::OpenRouter,
-        "local_gguf" => ChatProviderId::LocalGguf,
-        other => return Err(format!("unknown provider: {other}")),
-    };
+    let provider_id: ChatProviderId = parse_provider_id(&provider_str)
+        .ok_or_else(|| format!("unknown provider: {provider_str}"))?;
 
     // 3b. Local model auto-warm on restart. After an app restart the
     // llama-server sidecar is gone, but the session still remembers the model

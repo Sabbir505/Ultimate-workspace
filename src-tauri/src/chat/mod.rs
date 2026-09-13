@@ -1886,7 +1886,7 @@ pub fn run_one_shot_chat(
     // `select!` drops the losing branch, aborting the request and closing the
     // connection rather than letting it stream to completion first.
     let call = async {
-        match provider_str {
+        match crate::chat::providers::provider_kind(provider_str) {
             "openai" | "openrouter" => {
                 let base = base_url.as_deref().unwrap_or(if provider_str == "openrouter" {
                     crate::chat::providers::OpenRouterProvider::DEFAULT_BASE

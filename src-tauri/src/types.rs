@@ -997,6 +997,21 @@ pub struct ChatConfigPayload {
     pub has_key: bool,
 }
 
+/// One saved API endpoint (list_chat_instances): a provider kind plus its
+/// own name, base URL, model, and keychain flag. Bare-kind ids are a kind's
+/// default endpoint; "<kind>-<suffix>" ids are extra endpoints of the same
+/// kind.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatInstancePayload {
+    pub id: String,
+    pub kind: String,
+    pub display_name: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub has_key: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatModel {

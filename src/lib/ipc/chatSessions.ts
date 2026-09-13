@@ -344,6 +344,7 @@ export const setChatApiKey = (
   baseUrl?: string,
   model?: string,
   displayName?: string,
+  kind?: ChatProvider,
 ) =>
   safeInvoke<void>("set_chat_api_key", {
     provider,
@@ -351,11 +352,28 @@ export const setChatApiKey = (
     baseUrl: baseUrl ?? null,
     model: model ?? null,
     displayName: displayName ?? null,
+    kind: kind ?? null,
   });
 export const deleteChatApiKey = (provider: string) =>
   safeInvoke<void>("delete_chat_api_key", { provider });
 export const getChatConfig = (provider?: string) =>
   safeInvoke<ChatConfigPayload | null>("get_chat_config", provider ? { provider } : {});
+
+/** One saved API endpoint. `id` is either a bare kind ("anthropic" — the
+ *  kind's default endpoint) or "<kind>-<suffix>" for extra endpoints of the
+ *  same kind; `kind` is always the protocol kind. */
+export interface ChatInstancePayload {
+  id: string;
+  kind: ChatProvider;
+  displayName: string | null;
+  baseUrl: string | null;
+  model: string | null;
+  hasKey: boolean;
+}
+export const listChatInstances = () =>
+  safeInvoke<ChatInstancePayload[] | null>("list_chat_instances");
+
+export { providerKindOf } from "../providerKind";
 /** Persist ONLY the per-provider default model (chat.<provider>.model) — no
  *  key, base_url, or active_provider changes. Composer model picks call this
  *  so new chats seed with the last-picked model instead of a stale default. */

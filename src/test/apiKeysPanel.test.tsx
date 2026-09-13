@@ -1,7 +1,8 @@
-// API Keys panel: the rail lists only ADDED endpoints (each under its
-// user-assigned name), the Add API form picks the protocol kind from a
-// dropdown (only kinds not added yet) and takes a name field, plus the
-// original save-validation / model-fetch / accessibility coverage.
+// API Keys panel: the rail lists every saved ENDPOINT (the instance
+// registry — a kind can be added any number of times, each under its own
+// name), the Add API form picks the protocol kind from a dropdown that
+// always offers every kind, plus the original save-validation /
+// model-fetch / accessibility coverage.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { SettingsView } from "../components/settings/SettingsView";
@@ -9,6 +10,7 @@ import { useChatStore } from "../state/chat";
 import { useUiStore } from "../state/ui";
 
 const getChatConfigMock = vi.fn();
+const listInstancesMock = vi.fn();
 const saveApiKeyMock = vi.fn();
 const clearApiKeyMock = vi.fn();
 const listChatModelsMock = vi.fn();
@@ -17,6 +19,12 @@ const getSettingMock = vi.fn();
 
 vi.mock("../lib/ipc", () => ({
   getChatConfig: (...a: unknown[]) => getChatConfigMock(...a),
+  listChatInstances: (...a: unknown[]) => listInstancesMock(...a),
+  // Same rule as src/lib/providerKind.ts: "<kind>-<suffix>" → kind.
+  providerKindOf: (id: string) => {
+    const dash = id.indexOf("-");
+    return dash > 0 ? id.slice(0, dash) : id;
+  },
   saveApiKey: (...a: unknown[]) => saveApiKeyMock(...a),
   deleteChatApiKey: (...a: unknown[]) => clearApiKeyMock(...a),
   listChatModels: (...a: unknown[]) => listChatModelsMock(...a),
@@ -123,8 +131,8 @@ vi.mock("../state/chat", async () => {
   };
   const notify = () => listeners.forEach((fn) => fn());
   const actions = {
-    saveApiKey: async (provider: string, key: string, baseUrl?: string, model?: string, displayName?: string) => {
-      await saveApiKeyMock(provider, key, baseUrl, model, displayName);
+    saveApiKey: async (provider: string, key: string, baseUrl?: string, model?: string, displayName?: string, kind?: string) => {
+      await saveApiKeyMock(provider, key, baseUrl, model, displayName, kind);
       config = { provider, hasKey: true, baseUrl: baseUrl ?? "", model: model ?? "" };
       notify();
     },
@@ -136,7 +144,7 @@ vi.mock("../state/chat", async () => {
     loadConfig: async (provider: string) => {
       const result = await getChatConfigMock(provider);
       // Always reset the store's config on load — a null result means the
-      // provider is unconfigured, and keeping the previous test's config
+      // endpoint is unconfigured, and keeping the previous test's config
       // around would leak hasKey/placeholder state across tests.
       config = result
         ? { ...result, provider }
@@ -153,10 +161,13 @@ vi.mock("../state/chat", async () => {
   };
 });
 
+type InstanceLike = { id: string; kind: string; displayName?: string | null; baseUrl?: string | null; model?: string | null; hasKey?: boolean };
+
 describe("API Keys Panel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getChatConfigMock.mockResolvedValue(null);
+    listInstancesMock.mockResolvedValue([]);
     saveApiKeyMock.mockResolvedValue(undefined);
     clearApiKeyMock.mockResolvedValue(undefined);
     listChatModelsMock.mockResolvedValue([]);
@@ -165,14 +176,26 @@ describe("API Keys Panel", () => {
   });
   afterEach(cleanup);
 
-  // Per-provider config map: getChatConfig(id) returns { provider: id, ...cfg }
-  // (or an unconfigured payload when the id has no entry). getChatConfig()
-  // with no argument resolves null, like the backend's no-active-provider path.
+  // Per-endpoint config map for getChatConfig(id) — what the store's
+  // loadConfig (and thus the detail form) sees per endpoint.
   const mockConfigs = (map: Record<string, Record<string, unknown>>) => {
     getChatConfigMock.mockImplementation((provider?: string) => {
       if (!provider) return Promise.resolve(null);
       return Promise.resolve({ provider, hasKey: false, baseUrl: "", model: "", ...map[provider] });
     });
+  };
+
+  // The saved-endpoint registry the rail renders.
+  const mockInstances = (list: InstanceLike[]) => {
+    listInstancesMock.mockResolvedValue(
+      list.map((i) => ({
+        displayName: null,
+        baseUrl: null,
+        model: null,
+        hasKey: false,
+        ...i,
+      })),
+    );
   };
 
   const getKindSelect = () => screen.getAllByTestId("glass-select")[0] as HTMLSelectElement;
@@ -185,18 +208,21 @@ describe("API Keys Panel", () => {
   };
 
   it("shows an empty rail and every kind in the add-form dropdown when nothing is configured", async () => {
-    getChatConfigMock.mockResolvedValue(null);
     render(<SettingsView />);
     await waitFor(() => expect(screen.getByText("API providers")).toBeTruthy());
     // The rail no longer pre-lists protocol kinds — it starts empty.
     await screen.findByText(/No APIs yet/);
     expect(screen.queryByLabelText("Select Anthropic")).toBeNull();
-    // The Add API form's type dropdown is where all five kinds live now.
+    // The Add API form's type dropdown lists every protocol kind — and it
+    // keeps listing them all no matter how many endpoints exist.
     const kinds = Array.from(getKindSelect().options).map((o) => o.value);
     expect(kinds).toEqual(["anthropic", "openai", "openrouter", "anthropic_compatible", "openai_compatible"]);
   });
 
-  it("lists an added endpoint on the rail and locks its type while editing", async () => {
+  it("lists added endpoints on the rail and locks the type while editing", async () => {
+    mockInstances([
+      { id: "anthropic_compatible", kind: "anthropic_compatible", baseUrl: "https://api.example.com/v1" },
+    ]);
     mockConfigs({ anthropic_compatible: { hasKey: false, baseUrl: "https://api.example.com/v1" } });
     render(<SettingsView />);
     await waitFor(() => expect(screen.getByText("API providers")).toBeTruthy());
@@ -208,7 +234,21 @@ describe("API Keys Panel", () => {
     expect(getKindSelect().disabled).toBe(true);
   });
 
+  it("lists a second endpoint of the same kind under its own name", async () => {
+    mockInstances([
+      { id: "openai_compatible", kind: "openai_compatible", hasKey: true },
+      { id: "openai_compatible-x7f2", kind: "openai_compatible", displayName: "GLM via Z.ai", hasKey: true },
+    ]);
+    render(<SettingsView />);
+    await waitFor(() => expect(screen.getByText("API providers")).toBeTruthy());
+    // Two same-kind endpoints: the default shows the kind label, the named
+    // one shows its own name — both on the rail at once.
+    expect(await screen.findByLabelText("Select OpenAI Compatible")).toBeTruthy();
+    expect(screen.getByLabelText("Select GLM via Z.ai")).toBeTruthy();
+  });
+
   it("shows Connected badge and summary when provider has key", async () => {
+    mockInstances([{ id: "anthropic", kind: "anthropic", hasKey: true, model: "claude-sonnet-5", baseUrl: "https://api.anthropic.com" }]);
     mockConfigs({ anthropic: { hasKey: true, baseUrl: "https://api.anthropic.com", model: "claude-sonnet-5" } });
     render(<SettingsView />);
     await waitFor(() => expect(screen.getByText("Connected")).toBeTruthy());
@@ -217,7 +257,8 @@ describe("API Keys Panel", () => {
   });
 
   it("shows the custom endpoint name on the rail instead of the kind", async () => {
-    mockConfigs({ anthropic: { hasKey: true, baseUrl: "", model: "", displayName: "Work key" } });
+    mockInstances([{ id: "anthropic", kind: "anthropic", hasKey: true, displayName: "Work key" }]);
+    mockConfigs({ anthropic: { hasKey: true } });
     render(<SettingsView />);
     await waitFor(() => expect(screen.getByText("API providers")).toBeTruthy());
     expect(screen.getByLabelText("Select Work key")).toBeTruthy();
@@ -225,8 +266,12 @@ describe("API Keys Panel", () => {
   });
 
   it("selecting a provider loads its config", async () => {
+    mockInstances([
+      { id: "anthropic", kind: "anthropic", hasKey: true },
+      { id: "openai_compatible", kind: "openai_compatible", baseUrl: "https://api.example.com/v1" },
+    ]);
     mockConfigs({
-      anthropic: { hasKey: true, baseUrl: "https://api.anthropic.com", model: "claude-sonnet-5" },
+      anthropic: { hasKey: true, baseUrl: "", model: "" },
       openai_compatible: { hasKey: false, baseUrl: "https://api.example.com/v1" },
     });
     render(<SettingsView />);
@@ -239,7 +284,6 @@ describe("API Keys Panel", () => {
   });
 
   it("native provider requires API key to save", async () => {
-    getChatConfigMock.mockResolvedValue(null);
     render(<SettingsView />);
     const panel = await screen.findByText("API providers");
     const container = panel.closest(".api-settings") as HTMLElement;
@@ -251,6 +295,7 @@ describe("API Keys Panel", () => {
   });
 
   it("existing key allows saving model/baseUrl without re-entering key", async () => {
+    mockInstances([{ id: "anthropic", kind: "anthropic", hasKey: true }]);
     mockConfigs({ anthropic: { hasKey: true, baseUrl: "", model: "" } });
     render(<SettingsView />);
     const panel = await screen.findByText("API providers");
@@ -261,7 +306,6 @@ describe("API Keys Panel", () => {
   });
 
   it("compatible provider requires base URL to save", async () => {
-    getChatConfigMock.mockResolvedValue(null);
     render(<SettingsView />);
     const panel = await screen.findByText("API providers");
     const container = panel.closest(".api-settings") as HTMLElement;
@@ -277,8 +321,7 @@ describe("API Keys Panel", () => {
     await waitFor(() => expect(getSaveButton(container).disabled).toBe(false));
   });
 
-  it("adding an endpoint sends the name from the name field", async () => {
-    getChatConfigMock.mockResolvedValue(null);
+  it("adding an endpoint sends the kind and the name from the form", async () => {
     render(<SettingsView />);
     await screen.findByText(/No APIs yet/);
     fireEvent.change(getKindSelect(), { target: { value: "openai_compatible" } });
@@ -288,24 +331,51 @@ describe("API Keys Panel", () => {
     const container = panel.closest(".api-settings") as HTMLElement;
     fireEvent.click(getSaveButton(container));
     await waitFor(() =>
-      expect(saveApiKeyMock).toHaveBeenCalledWith("openai_compatible", "", "https://api.example.com/v1", undefined, "GLM via Z.ai"),
+      expect(saveApiKeyMock).toHaveBeenCalledWith(
+        "openai_compatible",
+        "",
+        "https://api.example.com/v1",
+        undefined,
+        "GLM via Z.ai",
+        "openai_compatible",
+      ),
     );
     // Key input is cleared after a successful save (security).
     await waitFor(() => expect((screen.getByLabelText("API key") as HTMLInputElement).value).toBe(""));
   });
 
+  it("a second endpoint of the same kind saves under a fresh suffixed id", async () => {
+    mockInstances([{ id: "openai_compatible", kind: "openai_compatible", hasKey: true, baseUrl: "https://a.example.com/v1" }]);
+    mockConfigs({ openai_compatible: { hasKey: true, baseUrl: "https://a.example.com/v1" } });
+    render(<SettingsView />);
+    const panel = await screen.findByText("API providers");
+    const container = panel.closest(".api-settings") as HTMLElement;
+    await screen.findByLabelText("Select OpenAI Compatible");
+    // Add another OpenAI-compatible endpoint while the first is on the rail.
+    fireEvent.click(screen.getByLabelText("Add a new provider"));
+    // The add flow preselects the first kind (anthropic) — switch to
+    // openai_compatible, which must stay selectable.
+    fireEvent.change(getKindSelect(), { target: { value: "openai_compatible" } });
+    fireEvent.change(within(container).getByLabelText("Base URL"), { target: { value: "https://b.example.com/v1" } });
+    fireEvent.click(getSaveButton(container));
+    await waitFor(() => expect(saveApiKeyMock).toHaveBeenCalled());
+    const [id] = saveApiKeyMock.mock.calls[0];
+    expect(id).toMatch(/^openai_compatible-[a-z2-9]{5}$/);
+    expect(id).not.toBe("openai_compatible");
+  });
+
   it("falls back to the kind label when no name is typed", async () => {
-    getChatConfigMock.mockResolvedValue(null);
     render(<SettingsView />);
     const panel = await screen.findByText("API providers");
     const container = panel.closest(".api-settings") as HTMLElement;
     await screen.findByText(/No APIs yet/);
     fireEvent.change(within(container).getByPlaceholderText(/sk/), { target: { value: "sk-new-key" } });
     fireEvent.click(getSaveButton(container));
-    await waitFor(() => expect(saveApiKeyMock).toHaveBeenCalledWith("anthropic", "sk-new-key", undefined, undefined, "Anthropic"));
+    await waitFor(() => expect(saveApiKeyMock).toHaveBeenCalledWith("anthropic", "sk-new-key", undefined, undefined, "Anthropic", "anthropic"));
   });
 
   it("fetches models for compatible provider when base URL and key present", async () => {
+    mockInstances([{ id: "openai_compatible", kind: "openai_compatible", hasKey: true, baseUrl: "https://api.example.com/v1" }]);
     mockConfigs({ openai_compatible: { hasKey: true, baseUrl: "https://api.example.com/v1", model: "" } });
     listChatModelsMock.mockResolvedValue([{ id: "model-a", object: "model", created: 1, ownedBy: "test" }, { id: "model-b", object: "model", created: 2, ownedBy: "test" }]);
     render(<SettingsView />);
@@ -317,6 +387,7 @@ describe("API Keys Panel", () => {
   });
 
   it("shows fetch error and manual fallback button", async () => {
+    mockInstances([{ id: "openai_compatible", kind: "openai_compatible", hasKey: true, baseUrl: "https://api.example.com/v1" }]);
     mockConfigs({ openai_compatible: { hasKey: true, baseUrl: "https://api.example.com/v1", model: "" } });
     listChatModelsMock.mockRejectedValue(new Error("Network error"));
     render(<SettingsView />);
@@ -328,6 +399,7 @@ describe("API Keys Panel", () => {
   });
 
   it("manual fallback clears error and switches the add-model row to text input", async () => {
+    mockInstances([{ id: "openai_compatible", kind: "openai_compatible", hasKey: true, baseUrl: "https://api.example.com/v1" }]);
     mockConfigs({ openai_compatible: { hasKey: true, baseUrl: "https://api.example.com/v1", model: "" } });
     listChatModelsMock.mockRejectedValue(new Error("Network error"));
     render(<SettingsView />);
@@ -345,13 +417,14 @@ describe("API Keys Panel", () => {
   });
 
   it("clear removes key and flips the pane back to the add flow", async () => {
+    mockInstances([{ id: "anthropic", kind: "anthropic", hasKey: true, baseUrl: "https://api.anthropic.com", model: "claude-sonnet-5" }]);
     mockConfigs({ anthropic: { hasKey: true, baseUrl: "https://api.anthropic.com", model: "claude-sonnet-5" } });
     render(<SettingsView />);
     const panel = await screen.findByText("API providers");
     const container = panel.closest(".api-settings") as HTMLElement;
     await waitFor(() => expect(within(container).getByText("Clear")).toBeTruthy());
-    // After clear, getChatConfig reports an unconfigured provider.
-    mockConfigs({});
+    // After clear, the endpoint is gone from the registry.
+    mockInstances([]);
     fireEvent.click(within(container).getByText("Clear"));
     await waitFor(() => expect(clearApiKeyMock).toHaveBeenCalledWith("anthropic"));
     // The endpoint left the rail, so the add flow takes over the pane.
@@ -360,7 +433,8 @@ describe("API Keys Panel", () => {
   });
 
   it("provider delete button calls clear and refreshes", async () => {
-    mockConfigs({ anthropic: { hasKey: true, baseUrl: "https://api.anthropic.com", model: "claude-sonnet-5" } });
+    mockInstances([{ id: "anthropic", kind: "anthropic", hasKey: true, baseUrl: "https://api.anthropic.com" }]);
+    mockConfigs({ anthropic: { hasKey: true, baseUrl: "https://api.anthropic.com", model: "" } });
     render(<SettingsView />);
     const panel = await screen.findByText("API providers");
     const container = panel.closest(".api-settings") as HTMLElement;
@@ -371,7 +445,8 @@ describe("API Keys Panel", () => {
   });
 
   it("provider rail items have accessible labels and no nested interactive elements", async () => {
-    mockConfigs({ anthropic: { hasKey: true, baseUrl: "https://api.anthropic.com", model: "claude-sonnet-5" } });
+    mockInstances([{ id: "anthropic", kind: "anthropic", hasKey: true, baseUrl: "https://api.anthropic.com" }]);
+    mockConfigs({ anthropic: { hasKey: true, baseUrl: "https://api.anthropic.com", model: "" } });
     render(<SettingsView />);
     const panel = await screen.findByText("API providers");
     const container = panel.closest(".api-settings") as HTMLElement;
@@ -385,7 +460,6 @@ describe("API Keys Panel", () => {
   });
 
   it("show/hide key toggles input type", async () => {
-    getChatConfigMock.mockResolvedValue(null);
     render(<SettingsView />);
     const panel = await screen.findByText("API providers");
     const container = panel.closest(".api-settings") as HTMLElement;
@@ -398,28 +472,14 @@ describe("API Keys Panel", () => {
     expect((within(container).getByPlaceholderText(/sk/) as HTMLInputElement).type).toBe("password");
   });
 
-  it("kind dropdown only offers types that are not added yet", async () => {
-    mockConfigs({ anthropic: { hasKey: true, baseUrl: "", model: "" } });
+  it("kind dropdown still lists every kind after one is added", async () => {
+    mockInstances([{ id: "anthropic", kind: "anthropic", hasKey: true }]);
+    mockConfigs({ anthropic: { hasKey: true } });
     render(<SettingsView />);
     await waitFor(() => expect(screen.getByLabelText("Select Anthropic")).toBeTruthy());
-    // Enter the add flow — Anthropic is already added, so it must not be
-    // offered again.
+    // Enter the add flow — every kind must remain addable.
     fireEvent.click(screen.getByLabelText("Add a new provider"));
     const kinds = Array.from(getKindSelect().options).map((o) => o.value);
-    expect(kinds).not.toContain("anthropic");
-    expect(kinds).toEqual(["openai", "openrouter", "anthropic_compatible", "openai_compatible"]);
-  });
-
-  it("Add API is disabled once every provider type is added", async () => {
-    mockConfigs({
-      anthropic: { hasKey: true },
-      openai: { hasKey: true },
-      openrouter: { hasKey: true },
-      anthropic_compatible: { hasKey: true },
-      openai_compatible: { hasKey: true },
-    });
-    render(<SettingsView />);
-    await waitFor(() => expect(screen.getAllByLabelText(/^Select /).length).toBe(5));
-    expect((screen.getByLabelText("Add a new provider") as HTMLButtonElement).disabled).toBe(true);
+    expect(kinds).toEqual(["anthropic", "openai", "openrouter", "anthropic_compatible", "openai_compatible"]);
   });
 });

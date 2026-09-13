@@ -2066,24 +2066,10 @@ pub(crate) fn persist_partial_row(
     let _ = db::add_chat_message(
         conn,
         db::NewChatMessage {
-            chat_session_id,
-            role: "assistant",
-            content: trimmed,
-            input_tokens: None,
-            output_tokens: None,
-            cost_usd: None,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-            reasoning_output_tokens: None,
             provider: provider_val,
             model_key,
-            pricing_estimated_usd: None,
-            started_at: None,
             completed_at: Some(db::now_ts()),
-            llm_time_ms: None,
-            tool_time_ms: None,
-            ttft_ms: None,
-            tokens_per_second: None,
+            ..db::NewChatMessage::assistant(chat_session_id, trimmed)
         },
     );
     let _ = db::touch_chat_session(conn, chat_session_id);

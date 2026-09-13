@@ -3,7 +3,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::db;
-use crate::mobile::relay::{pairing_token_accepted, TempChatSessionCleanup};
+use crate::mobile::relay::TempChatSessionCleanup;
 
 // ---------------------------------------------------------------------------
 // F1: mid-turn E2E frames (decrypt + counter + CancelChatTurn)
@@ -282,23 +282,10 @@ fn transcript_hash_is_stable_across_polls() {
     assert_ne!(transcript_hash("different screen"), first);
 }
 
-// L11 regression: an empty pairing token must never authenticate.
-#[test]
-fn pairing_fails_closed_when_no_token_configured() {
-    assert!(!pairing_token_accepted("", ""));
-    assert!(!pairing_token_accepted("", "anything"));
-}
+// (The legacy plaintext-token pairing tests were removed with the mode
+// itself — pairing now requires the E2E proof exclusively; see
+// relay_requests::handle_pair.)
 
-#[test]
-fn pairing_rejects_empty_presented_token() {
-    assert!(!pairing_token_accepted("real-token", ""));
-}
-
-#[test]
-fn pairing_accepts_only_matching_nonempty_tokens() {
-    assert!(pairing_token_accepted("real-token", "real-token"));
-    assert!(!pairing_token_accepted("real-token", "other-token"));
-}
 
 // M29 regression: dropping the guard removes the temp chat session and its
 // message rows (FK cascade), as happens on a failed ChatTurn.

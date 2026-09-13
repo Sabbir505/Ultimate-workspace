@@ -631,6 +631,22 @@ pub struct NewChatMessage<'a> {
     pub tokens_per_second: Option<f64>,
 }
 
+impl<'a> NewChatMessage<'a> {
+    /// Assistant-row shape: role pinned, every metric defaulted. The one
+    /// constructor every assistant persist site starts from — the built-in
+    /// turn, harness finish_turn, the relay one-shot, and partial-persist all
+    /// layer their usage/perf fields on top via struct-update syntax, so the
+    /// row shape can't drift between the chat worlds.
+    pub fn assistant(chat_session_id: &'a str, content: &'a str) -> Self {
+        Self {
+            chat_session_id,
+            role: "assistant",
+            content,
+            ..Default::default()
+        }
+    }
+}
+
 /// Persist the turn's user message (plain text; attachment-derived text is
 /// expected to already be inlined into `content` by the caller). Thin
 /// shorthand for `add_chat_message(role: "user", ..)` — every send path

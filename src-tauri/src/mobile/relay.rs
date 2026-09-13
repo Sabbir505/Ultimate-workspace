@@ -490,29 +490,11 @@ impl Drop for TempChatSessionCleanup {
     }
 }
 
-/// Fail-closed pairing check: a missing configured token (relay not fully
-/// started / DB read failed) or an empty presented token must NEVER
-/// authenticate. Previously `unwrap_or_default` turned "no token configured"
-/// into an empty expected token, so presenting an empty token paired
-/// successfully.
-pub(crate) fn pairing_token_accepted(expected: &str, presented: &str) -> bool {
-    use subtle::ConstantTimeEq;
-    // mi22: constant-time compare — the token gates full remote control of
-    // the desktop, so don't leak match prefixes via timing.
-    !expected.is_empty()
-        && !presented.is_empty()
-        && expected.len() == presented.len()
-        && expected.as_bytes().ct_eq(presented.as_bytes()).into()
-}
-
-/// The live pairing token: OS keychain (secrets generic store) since the
-/// at-rest fix, with a read-only fallback to the legacy plaintext setting for
-/// a relay started before this change. Writes go only to the keychain.
+/// The live pairing token. Lives in the OS keychain (secrets generic store)
+/// since the at-rest fix — relay start writes it there and deletes the old
+/// plaintext settings row, so no fallback read remains.
 pub(crate) fn current_pairing_token(conn: &rusqlite::Connection) -> Option<String> {
-    if let Some(t) = crate::secrets::generic_load(conn, "mobile", "pairing-token") {
-        return Some(t);
-    }
-    db::get_setting(conn, "mobile.pairing_token").ok().flatten()
+    crate::secrets::generic_load(conn, "mobile", "pairing-token")
 }
 
 /// How long a fresh connection may take to present its Pair frame.
@@ -1531,9 +1513,6 @@ pub(super) async fn handle_chat_turn(
         let _ = db::add_chat_message(
             &conn,
             db::NewChatMessage {
-                chat_session_id: &sid,
-                role: "assistant",
-                content: &full_text,
                 input_tokens: usage.as_ref().and_then(|u| {
                     if u.input_tokens > 0 || u.output_tokens > 0 {
                         Some(u.input_tokens)
@@ -1555,18 +1534,10 @@ pub(super) async fn handle_chat_turn(
                         None
                     }
                 }),
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
                 provider: provider.as_deref(),
-                model_key: model_key,
-                pricing_estimated_usd: None,
-                started_at: None,
+                model_key,
                 completed_at: Some(db::now_ts()),
-                llm_time_ms: None,
-                tool_time_ms: None,
-                ttft_ms: None,
-                tokens_per_second: None,
+                ..db::NewChatMessage::assistant(&sid, &full_text)
             },
         );
         let _ = db::touch_chat_session(&conn, &sid);

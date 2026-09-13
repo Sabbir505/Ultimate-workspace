@@ -38,6 +38,7 @@ mod mobile;
 mod os_toast;
 mod pty;
 mod secrets;
+mod session_fabric;
 mod types;
 pub mod user_dirs;
 mod util;
@@ -147,6 +148,10 @@ pub fn run() {
             app.manage(ChatState(Arc::new(chat::ChatManager::new())));
             app.manage(agent_sessions::AgentSessionState(Arc::new(
                 agent_sessions::AgentSessionManager::new(),
+            )));
+            // Session Mesh runtime (mailbox pumps + parked question calls).
+            app.manage(session_fabric::FabricState(Arc::new(
+                session_fabric::FabricRuntime::default(),
             )));
             app.manage(TaskState(Arc::new(chat::tasks::TaskManager::new())));
             app.manage(chat::plan::PlanState::default());

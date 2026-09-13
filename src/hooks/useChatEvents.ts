@@ -33,6 +33,8 @@ import {
   listenChatSubagentSpawn,
   listenChatSubagentTokens,
   listenChatSubagentDone,
+  listenSessionMail,
+  listenSessionSpawn,
 } from "../lib/ipc";
 import { matchPlanStep } from "../lib/planMatcher";
 import { openInBrowserPane } from "../lib/openBrowserPane";
@@ -371,6 +373,20 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatSubagentDone((payload) => {
         useChatStore.getState().onSubagentDone(payload);
+      }),
+    );
+
+    // Session Mesh (SESSION_MESH_DESIGN_ARCHITECTURE.md): cross-session mail
+    // transitions and spawn notices. One mail event covers BOTH parties —
+    // the store routes it into each session's list.
+    unlistens.push(
+      listenSessionMail((payload) => {
+        useChatStore.getState().onSessionMail(payload);
+      }),
+    );
+    unlistens.push(
+      listenSessionSpawn((payload) => {
+        useChatStore.getState().onSessionSpawn(payload);
       }),
     );
 

@@ -1664,6 +1664,76 @@ async fn run_gated_automation_tool(
     tools::execute_automation_tool(app, name, args).await
 }
 
+/// Approval-card wrapper for the mesh write pair (`message_session` /
+/// `spawn_session`) — mirrors `run_gated_automation_tool`: the card is the
+/// only guard on cross-session token spend, so it stays meaningful under
+/// every approval posture that asks.
+async fn run_gated_mesh_tool(
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+) -> String {
+    let summary = mesh_tool_summary(name, args);
+    let (pending_id, rx) = mgr.register_pending_approval(sid, name, args.clone(), summary.clone());
+
+    let _ = app.emit(
+        "chat:approval-request",
+        ChatApprovalRequestPayload {
+            chat_session_id: sid.to_string(),
+            pending_id: pending_id.clone(),
+            tool: name.to_string(),
+            summary,
+            args: args.clone(),
+        },
+    );
+
+    let approved = rx.await.unwrap_or(false);
+    let _ = app.emit(
+        "chat:approval-resolved",
+        ChatApprovalResolvedPayload {
+            chat_session_id: sid.to_string(),
+            pending_id,
+            approved,
+        },
+    );
+
+    if !approved {
+        return format!(
+            "The user denied the {name} action. Do not retry it unless the user explicitly asks."
+        );
+    }
+
+    crate::session_fabric::execute_mesh_tool(app, Some(sid), name, args).await
+}
+
+/// One-line card summary for a gated mesh call.
+fn mesh_tool_summary(name: &str, args: &Value) -> String {
+    let target = args
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    match name {
+        tools::MESSAGE_SESSION => format!(
+            "message another chat session ({target}): \"{}\"",
+            args.get("body")
+                .or_else(|| args.get("message"))
+                .and_then(|v| v.as_str())
+                .map(|b| crate::util::truncate_chars(b, 80))
+                .unwrap_or_default()
+        ),
+        tools::SPAWN_SESSION => format!(
+            "spawn a new chat session: \"{}\"",
+            args.get("task")
+                .and_then(|v| v.as_str())
+                .map(|t| crate::util::truncate_chars(t, 80))
+                .unwrap_or_default()
+        ),
+        other => format!("{other}"),
+    }
+}
+
 /// Run a tool and, if it produced a file, notify the UI. Returns the text to
 /// feed back to the model.
 ///
@@ -1956,6 +2026,36 @@ pub(crate) async fn run_tool(
             return run_gated_automation_tool(mgr, app, sid, name, args).await;
         }
         return tools::execute_automation_tool(app, name, args).await;
+    }
+
+    // Session Mesh tools (list/read/search sessions + message/spawn) —
+    // DB + AgentSessionState/ChatState via the AppHandle, like the automation
+    // family above. The read trio auto-runs in every mode; messaging/spawning
+    // follow the connector-write posture (approval under read_only/manual,
+    // auto-run under auto_edit/full_auto) and are plan-mode-refused upstream
+    // via plan::is_mutating_tool. `sid` is the caller identity the runtime
+    // needs (self-exclusion, mail routing) — harness callers come through the
+    // relay-tools bridge instead, carrying a model-supplied session_id.
+    if tools::is_mesh_tool(name) {
+        let decision = if tools::is_mesh_write_tool(name)
+            && !sandbox.allows_mutating_tools()
+        {
+            // Schema keeps the write pair visible under read_only (awareness
+            // stays useful); a call reaching here fails closed to a card.
+            permission::PermissionDecision::NeedsApproval
+        } else if tools::is_mesh_write_tool(name) {
+            permission::check_connector_permission(
+                sandbox,
+                approval,
+                permission::ConnectorToolKind::Write,
+            )
+        } else {
+            permission::PermissionDecision::AutoRun
+        };
+        if matches!(decision, permission::PermissionDecision::NeedsApproval) {
+            return run_gated_mesh_tool(mgr, app, sid, name, args).await;
+        }
+        return crate::session_fabric::execute_mesh_tool(app, Some(sid), name, args).await;
     }
 
     // Local-docs search: needs both DB (corpora + chunks) and the embedding

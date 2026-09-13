@@ -68,6 +68,8 @@ import {
   type ChatSessionMetricsPayload,
   type ChatTaskProgressPayload,
   type PlanTodo,
+  type SessionMailPayload,
+  type SessionSpawnPayload,
   type SubagentInfo,
   type SubagentSpawnPayload,
   type SubagentTokenPayload,
@@ -125,6 +127,9 @@ function cliAgentId(agent: string): string {
  *  cap−margin (190K), instead of re-slicing the ~200K-char buffer on every
  *  token once the cap was reached. Worst case stays bounded at cap+margin. */
 const STREAM_TAIL_CAP = 200_000;
+/** Per-session mail history cap in the Git-sidebar Mesh section (older
+ *  transitions age out of the UI; the durable audit trail is the DB). */
+const MESH_MAIL_HISTORY_CAP = 30;
 const STREAM_TAIL_MARGIN = 10_000;
 
 /** Worktree-per-session default (roadmap P0 §3.1.1): give a fresh chat on a
@@ -770,6 +775,17 @@ export interface ChatState {
   /** Active subagents per chat session, keyed by sessionId → subagent id → info.
    *  Updated by chat:subagent-spawn / chat:subagent-tokens / chat:subagent-done. */
   subagents: Record<string, Record<string, SubagentInfo>>;
+  /** Session Mesh (SESSION_MESH_DESIGN_ARCHITECTURE.md): cross-session mail
+   *  keyed by mail id, plus per-session ordered id lists covering BOTH
+   *  directions (from/to) — the Git-sidebar Mesh section renders either side
+   *  from the same record. Latest transition per mail wins. */
+  meshMail: Record<string, SessionMailPayload>;
+  meshMailBySession: Record<string, string[]>;
+  /** Sessions this session spawned (chat:session-spawn), parent id → children
+   *  in spawn order. The rows click through to the child chat. */
+  meshChildren: Record<string, { childId: string; title: string; agent: string }[]>;
+  onSessionMail: (payload: SessionMailPayload) => void;
+  onSessionSpawn: (payload: SessionSpawnPayload) => void;
   /** Per-turn owner session id (mobile app's session identifier) keyed by
    *  chatSessionId. Set by `sendMessage` when invoked from the mobile relay
    *  so the chat:token / chat:done / chat:error / chat:status / chat:artifact
@@ -1346,6 +1362,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingPlanProposals: {},
   sessionPlans: {},
   subagents: {},
+  meshMail: {},
+  meshMailBySession: {},
+  meshChildren: {},
   ownerSessionByChatId: {},
   cwdOverrides: {},
   sessionProjects: {},
@@ -1961,6 +1980,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ownerSessionByChatId: {},
       loopState: {},
       subagents: {},
+      meshMail: {},
+      meshMailBySession: {},
+      meshChildren: {},
       livePerf: {},
       lastTurnPerf: {},
       sessionMetrics: {},
@@ -3642,6 +3664,67 @@ export const useChatStore = create<ChatState>((set, get) => ({
         },
       };
       return { subagents: { ...s.subagents, [payload.chatSessionId]: updated } };
+    });
+  },
+
+  // ---- Session Mesh (chat:session-mail / chat:session-spawn) ----
+
+  onSessionMail: (payload) => {
+    set((s) => {
+      // One event covers both parties; index the mail under each so the
+      // sidebar shows the exchange from either session's perspective.
+      const bySession = { ...s.meshMailBySession };
+      for (const sid of [payload.fromSession, payload.toSession]) {
+        const list = bySession[sid];
+        bySession[sid] = list
+          ? list.includes(payload.mailId)
+            ? list
+            : [...list, payload.mailId].slice(-MESH_MAIL_HISTORY_CAP)
+          : [payload.mailId];
+      }
+      // Delivery means a turn is about to run in the target. onToken only
+      // accumulates for sessions already present in `streaming` (it never
+      // CREATES an entry — sendMessage/broadcast pre-create), so mesh turns
+      // must pre-create here or every token is dropped and the chat view
+      // shows nothing until done. Same shape broadcastToSessions uses.
+      let streaming = s.streaming;
+      let chatStatus = s.chatStatus;
+      if (payload.status === "delivered" && !(payload.toSession in streaming)) {
+        streaming = { ...streaming, [payload.toSession]: "" };
+        chatStatus = { ...chatStatus, [payload.toSession]: { reason: "thinking", message: "" } };
+      }
+      return {
+        meshMail: { ...s.meshMail, [payload.mailId]: payload },
+        meshMailBySession: bySession,
+        streaming,
+        chatStatus,
+      };
+    });
+  },
+
+  onSessionSpawn: (payload) => {
+    set((s) => {
+      const list = s.meshChildren[payload.parentSessionId] ?? [];
+      const nextChildren = list.some((c) => c.childId === payload.childSessionId)
+        ? list
+        : [
+            ...list,
+            { childId: payload.childSessionId, title: payload.title, agent: payload.agent },
+          ];
+      // The spawned session's first turn starts right after this event —
+      // pre-create its streaming entry so its tokens stream (see
+      // onSessionMail: onToken drops tokens for unknown sessions).
+      const streaming = !(payload.childSessionId in s.streaming)
+        ? { ...s.streaming, [payload.childSessionId]: "" }
+        : s.streaming;
+      const chatStatus = !(payload.childSessionId in s.chatStatus)
+        ? { ...s.chatStatus, [payload.childSessionId]: { reason: "thinking", message: "" } }
+        : s.chatStatus;
+      return {
+        meshChildren: { ...s.meshChildren, [payload.parentSessionId]: nextChildren },
+        streaming,
+        chatStatus,
+      };
     });
   },
 }));

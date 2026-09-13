@@ -1018,6 +1018,17 @@ pub async fn send_chat_message(
             manifest.as_deref(),
             memory_profile.as_deref(),
         );
+        // Session Mesh peer registry (SESSION_MESH_DESIGN_ARCHITECTURE.md
+        // §4.3) — appended AFTER build_system_prompt (which has 16 call
+        // sites; only the interactive turn needs the block). Auto-model
+        // fail-over rebuilds prompts from SystemPromptInputs and skips the
+        // block for that one fallback attempt — awareness resumes next turn.
+        let built = built.map(|sys| {
+            match crate::session_fabric::registry_block(&conn, Some(&chat_session_id)) {
+                Some(block) if !block.trim().is_empty() => format!("{sys}\n\n{block}"),
+                _ => sys,
+            }
+        });
         // [prompt-audit] inputs captured before `custom`/`skills` are consumed.
         let audit = (
             custom.as_deref().map(|c| c.trim().len()).unwrap_or(0),

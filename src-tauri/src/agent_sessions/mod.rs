@@ -74,6 +74,13 @@ pub struct AgentSessionManager {
     /// all of that used to freeze cancel / permission-mode / remove for
     /// EVERY session behind one slow send.
     sessions: Mutex<HashMap<String, Arc<Mutex<AgentChild>>>>,
+    /// Lock-free busy flags for Session Mesh pollers (session_fabric):
+    /// chat session id → the SAME Arc<AtomicBool> as the child's
+    /// `turn_in_flight`, registered at entry creation. `send` holds the
+    /// per-session mutex for a whole turn's setup+run, so a poller that
+    /// touched `entry.lock()` would block a tokio worker for minutes; this
+    /// map loads the atomic under only the (short) outer map lock.
+    busy_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Live RELAY_ASK questions (harnesses with no native ask protocol):
     /// chat session id → the question payload plus the pending_id the UI
     /// answers with. The claude control protocol uses ChatManager's
@@ -219,6 +226,12 @@ struct AgentChild {
     /// events always land inside the persisted reply (the POST resolves when
     /// the turn completes, which can race its last SSE flush).
     oc_last_event_ms: Arc<AtomicU64>,
+    /// FNV-1a hash of the opencode.json config the server was spawned with.
+    /// The server is reused across turns, and MCP servers attach only at its
+    /// startup — without this stamp a config change (app update adding mesh
+    /// tools, connector attach) never reached a healthy server and the CLI
+    /// kept its stale tool list forever.
+    oc_config_stamp: Arc<Mutex<Option<u64>>>,
     /// Audit #87: false once the SSE reader has exited (connection dropped /
     /// stream error / clean close). The turn thread checks it before
     /// finish_turn: a POST that "succeeded" while the reader was dead means
@@ -231,6 +244,7 @@ impl AgentSessionManager {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            busy_flags: Mutex::new(HashMap::new()),
             pending_asks: Mutex::new(HashMap::new()),
         }
     }
@@ -436,11 +450,23 @@ impl AgentSessionManager {
                             oc_full: Arc::new(Mutex::new(String::new())),
                             oc_in_think: Arc::new(Mutex::new(false)),
                             oc_last_event_ms: Arc::new(AtomicU64::new(0)),
+                            oc_config_stamp: Arc::new(Mutex::new(None)),
                             oc_reader_alive: Arc::new(AtomicBool::new(false)),
                         }))
                     }),
             )
         };
+        // Session Mesh pollers read this flag without the per-session lock
+        // (send holds that for a whole turn) — same Arc allocation, so the
+        // reader threads' clears are visible here too. Entries stay after
+        // the chat is removed: a stale flag reads false, which is harmless.
+        {
+            let entry_ref = entry.lock().unwrap_or_else(|e| e.into_inner());
+            self.busy_flags
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(chat_session_id.to_string(), Arc::clone(&entry_ref.turn_in_flight));
+        }
         let mut entry = entry.lock().unwrap_or_else(|e| e.into_inner());
         // Check turn-in-flight BEFORE persisting the user message, so a
         // rejected send doesn't leave an orphan user message in the DB
@@ -553,6 +579,7 @@ impl AgentSessionManager {
                 connectors,
                 None,
                 None,
+                Some(chat_session_id),
             )
             .and_then(|b| std::fs::read_to_string(&b.claude_instructions).ok())
             .filter(|s| !s.trim().is_empty())
@@ -569,6 +596,22 @@ impl AgentSessionManager {
                 None => String::new(),
             };
             base.push_str(&persona);
+            // Session Mesh identity (SESSION_MESH_DESIGN_ARCHITECTURE.md §3):
+            // the shared per-project bundle can't carry a per-chat id, so the
+            // first turn states it — this is what lets a harness CLI address
+            // `message_session`/`spawn_session` calls as itself. First turn
+            // only (like the instructions prefix): the CLI retains it.
+            if fresh_cli {
+                base.push_str(&format!(
+                    "\n\n[Relay Session Mesh] Your Relay session id is \
+                     {chat_session_id} — pass it as the `caller_session_id` argument \
+                     of message_session / spawn_session calls (their `session_id` \
+                     field is the PEER you are addressing). Peer sessions are listed \
+                     in the Session Mesh context: consult them with message_session / \
+                     read_session instead of guessing what happened in other \
+                     conversations."
+                ));
+            }
             if let Some(sp) = custom.filter(|sp| !sp.trim().is_empty()) {
                 base.push_str("\n\n");
                 base.push_str(&sp);
@@ -591,6 +634,24 @@ impl AgentSessionManager {
         // whenever it might need a decision.
         let effective = if harness_question_channel(harness) {
             format!("{effective}\n\n{RELAY_ASK_DIRECTIVE}")
+        } else {
+            effective
+        };
+        // Session Mesh hint rides EVERY turn of RESUMED CLI sessions: the
+        // full registry block rides only the first turn's instructions, so a
+        // reopened chat had the mesh tools but nothing steering it to use
+        // them for "what did we do last session" — it answered from its own
+        // CLI's session data instead. Fresh sessions already carry the full
+        // context and skip the duplicate.
+        let effective = if !fresh_cli {
+            let hint = {
+                let conn = db.0.lock();
+                crate::session_fabric::resumed_turn_hint(&conn, chat_session_id)
+            };
+            match hint {
+                Some(h) => format!("{effective}\n\n{h}"),
+                None => effective,
+            }
         } else {
             effective
         };
@@ -698,6 +759,18 @@ impl AgentSessionManager {
     /// `cancelled` flag tells the dying process's reader thread not to
     /// persist the partial reply or emit a second `chat:done`. State is
     /// dropped only when the chat itself is deleted (`remove_session`).
+    /// Session Mesh busy check (session_fabric): the child's `turn_in_flight`
+    /// flag via the lock-free `busy_flags` registry. Deliberately NEVER takes
+    /// the per-session mutex — `send` holds it for a whole turn's setup+run,
+    /// and a blocking poll here would pin a tokio worker for that long.
+    pub fn is_turn_in_flight(&self, chat_session_id: &str) -> bool {
+        let flag = {
+            let flags = self.busy_flags.lock().unwrap_or_else(|e| e.into_inner());
+            flags.get(chat_session_id).cloned()
+        };
+        flag.map(|f| f.load(Ordering::SeqCst)).unwrap_or(false)
+    }
+
     pub fn cancel(&self, app: &AppHandle, chat_session_id: &str) -> Result<(), String> {
         // E-6: poison recovery like `send` — the panic that poisoned the lock
         // is exactly when children most need to be killed, so teardown must

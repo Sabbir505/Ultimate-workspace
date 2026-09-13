@@ -1089,24 +1089,19 @@ fn finish_turn(
         crate::db::add_chat_message(
             &conn,
             crate::db::NewChatMessage {
-                chat_session_id: sid,
-                role: "assistant",
-                content: full,
                 input_tokens: input,
                 output_tokens: output,
                 cost_usd: cost,
                 cache_creation_input_tokens: cache_creation,
                 cache_read_input_tokens: cache_read,
-                reasoning_output_tokens: None,
                 provider: Some(provider),
-                model_key: model_key,
-                pricing_estimated_usd: None,
+                model_key,
                 started_at: Some(started_at),
                 completed_at: Some(crate::db::now_ts()),
                 llm_time_ms: llm_ms,
-                tool_time_ms: None,
                 ttft_ms: ttft,
                 tokens_per_second: tok_s,
+                ..crate::db::NewChatMessage::assistant(sid, full)
             },
         )
         .ok()

@@ -11,17 +11,18 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::protocol::{DesktopMessage, MobileMessage};
-use super::relay::{
-    handle_chat_turn, handle_mid_turn_frame, pairing_token_accepted, send_msg, transcript_hash,
-    warm_up_local_model, PAIRING_TIMEOUT,
-};
+use super::relay::{handle_chat_turn, handle_mid_turn_frame, send_msg, transcript_hash, warm_up_local_model, PAIRING_TIMEOUT};
 use crate::chat::ChatManager;
 use crate::db;
 
 /// Drive the pairing handshake: load the expected token, require the first
-/// frame to be a `Pair`, and verify it via the E2E proof or the legacy token
-/// compare. Sends the error frame and returns `Err` on every rejection path.
-/// Returns the B-24 `used_e2e` flag the read loop enforces afterwards.
+/// frame to be a `Pair`, and verify it via the E2E proof — exclusively. The
+/// legacy raw-token compare was removed once every client had the E2E path:
+/// a proof is HMAC over the token (so the token itself never crosses the
+/// wire) and both sides derive a session key from it, which the read loop
+/// then enforces on every frame. Sends the error frame and returns `Err` on
+/// every rejection path. Always returns `true` (B-24 `used_e2e`), which the
+/// read loop still enforces defensively.
 pub(super) async fn verify_pairing<R>(
     db: &Arc<Mutex<Connection>>,
     write: &super::relay_ws::SharedWsWrite,
@@ -79,66 +80,45 @@ where
             return Err("first frame was not a Pair message".into());
         }
     };
-    // B-24: which pairing mode won — E2E connections must reject plaintext
-    // Text command frames (relay_ws's protocol doc promises exactly that).
-    let used_e2e = proof.is_some();
-    match (proof, legacy_token) {
-        // E2E path: proof-only. Verify the HMAC against the expected token,
-        // then both sides derive the same session key from the shared PSK.
-        (Some(p), _) => {
-            // S-1: fail closed when no pairing token is configured — with an
-            // empty token the proof is HMAC("") and publicly computable.
-            // (verify_pair_proof now also rejects empty tokens itself; this
-            // check just gives the honest error message.)
-            if expected_token.is_empty() {
-                let err = DesktopMessage::ChatError {
-                    chat_session_id: "pair".into(),
-                    error: "pairing failed: no pairing token configured".into(),
-                };
-                let _ = send_msg(&write, &err).await;
-                return Err("pairing failed: no pairing token configured".into());
-            }
-            if !super::relay_crypto::verify_pair_proof(&expected_token, &p) {
-                let err = DesktopMessage::ChatError {
-                    chat_session_id: "pair".into(),
-                    error: "pairing failed: invalid E2E proof".into(),
-                };
-                let _ = send_msg(&write, &err).await;
-                return Err("pairing failed: invalid E2E proof".into());
-            }
-            let key = super::relay_crypto::derive_session_key(&expected_token);
-            super::relay_ws::enable_e2e(&write, key).await;
-            eprintln!("[mobile-relay] paired (E2E encrypted); processing commands");
-        }
-        // Legacy plaintext path: raw token compare (pre-E2E clients).
-        (None, Some(presented)) => {
-            if !pairing_token_accepted(&expected_token, &presented) {
-                // Constant-time-ish comparison via length-trim to avoid leaking the
-                // token length. The token is 256 bits so brute force is moot; this
-                // is just defense-in-depth.
-                if presented.len() != expected_token.len() {
-                    return Err("pairing token length mismatch".into());
-                }
-                let err = DesktopMessage::ChatError {
-                    chat_session_id: "pair".into(),
-                    error: "pairing failed: invalid token".into(),
-                };
-                let _ = send_msg(&write, &err).await;
-                return Err("pairing failed: invalid token".into());
-            }
-            eprintln!("[mobile-relay] paired (legacy plaintext); processing commands");
-        }
-        // Neither field: not a valid Pair frame.
-        (None, None) => {
+    // The legacy plaintext-token mode was removed (fix/final-audit-loose-ends):
+    // pairing requires the E2E proof. A client that presents only the raw
+    // token is running a pre-E2E build and must update.
+    let Some(p) = proof else {
+        let err = DesktopMessage::ChatError {
+            chat_session_id: "pair".into(),
+            error: "pairing failed: this server requires the E2E proof — update the mobile app"
+                .into(),
+        };
+        let _ = send_msg(&write, &err).await;
+        let _ = legacy_token; // accepted field on the wire; ignored
+        return Err("pairing failed: no E2E proof in Pair frame".into());
+    };
+    {
+        // S-1: fail closed when no pairing token is configured — with an
+        // empty token the proof is HMAC("") and publicly computable.
+        // (verify_pair_proof now also rejects empty tokens itself; this
+        // check just gives the honest error message.)
+        if expected_token.is_empty() {
             let err = DesktopMessage::ChatError {
                 chat_session_id: "pair".into(),
-                error: "pairing failed: Pair frame must carry a proof or a token".into(),
+                error: "pairing failed: no pairing token configured".into(),
             };
             let _ = send_msg(&write, &err).await;
-            return Err("pairing failed: Pair frame carried neither proof nor token".into());
+            return Err("pairing failed: no pairing token configured".into());
         }
+        if !super::relay_crypto::verify_pair_proof(&expected_token, &p) {
+            let err = DesktopMessage::ChatError {
+                chat_session_id: "pair".into(),
+                error: "pairing failed: invalid E2E proof".into(),
+            };
+            let _ = send_msg(&write, &err).await;
+            return Err("pairing failed: invalid E2E proof".into());
+        }
+        let key = super::relay_crypto::derive_session_key(&expected_token);
+        super::relay_ws::enable_e2e(&write, key).await;
+        eprintln!("[mobile-relay] paired (E2E encrypted); processing commands");
     }
-    Ok(used_e2e)
+    Ok(true)
 }
 
 /// B-26 `ChatTurn`: run the turn on its own task while this loop keeps

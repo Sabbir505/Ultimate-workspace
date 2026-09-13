@@ -89,6 +89,59 @@ pub(super) fn path_in_preview_scope(path: &str, roots: &[String]) -> Option<()> 
     crate::chat::permission::path_within_scope(path, roots).then_some(())
 }
 
+/// Silent cap for read-aloud text. `doc_to_text` caps at 250K chars for the
+/// MODEL context, with a visible truncation note; speech wants neither the
+/// size nor the note (the note itself would be read aloud). A document this
+/// long is already hours of audio, and the player's background prefetch would
+/// keep the synthesis engine busy voicing every sentence of it.
+fn cap_speech_text(mut text: String) -> String {
+    const MAX_SPEECH_CHARS: usize = 60_000;
+    if text.chars().count() <= MAX_SPEECH_CHARS {
+        return text;
+    }
+    let mut cut = MAX_SPEECH_CHARS;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text.truncate(cut);
+    text
+}
+
+/// Speech-ready plain text for the read-aloud button: what
+/// [`crate::chat::office::doc_to_text`] extracts for the office/PDF formats,
+/// line-normalized for the sentence splitter, then capped.
+///
+/// The line pass matters for office documents, whose extractor emits one
+/// paragraph per line: a deck bullet with no period would run straight into
+/// the next line as one unbroken sentence. Each line gets a terminal stop
+/// unless it already ends in punctuation (or a dash — the `--- Slide N ---`
+/// markers must survive verbatim; the speech side turns them into labels).
+/// PDFs are exempt: their extractor emits visually wrapped lines, and a
+/// period there would cut sentences mid-thought.
+fn speech_text_for(ext: &str, bytes: &[u8]) -> Option<String> {
+    let mut text = crate::chat::office::doc_to_text(ext, bytes)?;
+    if matches!(ext, "docx" | "pptx" | "xlsx" | "xls") {
+        let mut spoken = String::with_capacity(text.len() + 16);
+        for line in text.lines() {
+            let line = line.trim_end();
+            if line.is_empty() {
+                // Blank lines ARE structure — the paragraph pause between
+                // slides comes from them.
+                spoken.push('\n');
+                continue;
+            }
+            spoken.push_str(line);
+            let ends_sentence = line.ends_with(|c: char| matches!(c, '.' | '!' | '?'));
+            if !ends_sentence && !line.ends_with('-') {
+                spoken.push('.');
+            }
+            spoken.push('\n');
+        }
+        text = spoken;
+    }
+    Some(cap_speech_text(text))
+}
+
 /// Read a generated artifact for in-app preview. Text-like files return their
 /// decoded (and length-capped) text; images and PDFs return a `data:` URI;
 /// Office documents are rendered as: docx → raw bytes for client-side
@@ -97,6 +150,11 @@ pub(super) fn path_in_preview_scope(path: &str, roots: &[String]) -> Option<()> 
 /// else the hand-rolled HTML converter (kind = `office`); xlsx → HTML
 /// (kind = `office`). Anything else returns metadata only (rendered as a
 /// file card).
+///
+/// Office and PDF previews also carry `speech_text` — the extractors' plain
+/// text, for the read-aloud button (see [`speech_text_for`]). The office
+/// `text` is the preview HTML and a PDF has no `text` at all, so without it
+/// there would be nothing speakable to hand the TTS player.
 ///
 /// The path must sit inside the artifacts dir, a registered project/worktree,
 /// a user-granted root, or the remembered working folder — see
@@ -180,6 +238,7 @@ pub async fn read_artifact_preview(
             ext,
             kind: final_kind.to_string(),
             text: Some(text),
+            speech_text: None,
             data_uri: None,
             original_bytes: None,
             size,
@@ -189,11 +248,23 @@ pub async fn read_artifact_preview(
 
     if (is_image || is_pdf) && size <= MAX_MEDIA {
         // spawn_blocking (B2): up to 25 MB read + base64 on the hot path.
+        // The speech text rides along in the same closure — for a PDF it is
+        // what read-aloud speaks, and pdf_extract can be slow, so it must
+        // stay off the IPC thread too.
         let path_for_read = path.clone();
-        let bytes = tokio::task::spawn_blocking(move || std::fs::read(Path::new(&path_for_read)))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("cannot read file: {e}"))?;
+        let read = tokio::task::spawn_blocking(move || {
+            let bytes = std::fs::read(Path::new(&path_for_read))
+                .map_err(|e| format!("cannot read file: {e}"))?;
+            let speech = if is_pdf {
+                speech_text_for("pdf", &bytes)
+            } else {
+                None
+            };
+            Ok::<_, String>((bytes, speech))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let (bytes, speech_text) = read?;
         let mime = match ext.as_str() {
             "png" => "image/png",
             "jpg" | "jpeg" => "image/jpeg",
@@ -211,6 +282,7 @@ pub async fn read_artifact_preview(
             ext,
             kind: if is_pdf { "pdf" } else { "image" }.to_string(),
             text: None,
+            speech_text,
             data_uri: Some(data_uri),
             original_bytes: None,
             size,
@@ -231,6 +303,18 @@ pub async fn read_artifact_preview(
         .ok()
         .flatten();
         if let Some(pdf_bytes) = pdf_bytes {
+            // Read-aloud speaks the ORIGINAL slides (with the `--- Slide N ---`
+            // markers the speech side turns into labels), not the converted
+            // PDF — slide structure is worth a pause between slides.
+            let path_for_speech = path.clone();
+            let speech_text = tokio::task::spawn_blocking(move || {
+                std::fs::read(Path::new(&path_for_speech))
+                    .ok()
+                    .and_then(|bytes| speech_text_for("pptx", &bytes))
+            })
+            .await
+            .ok()
+            .flatten();
             let data_uri = format!("data:application/pdf;base64,{}", base64_encode(&pdf_bytes));
             return Ok(ArtifactPreview {
                 path,
@@ -238,6 +322,7 @@ pub async fn read_artifact_preview(
                 ext,
                 kind: "pdf".to_string(),
                 text: None,
+                speech_text,
                 data_uri: Some(data_uri),
                 original_bytes: Some(true),
                 size,
@@ -259,6 +344,15 @@ pub async fn read_artifact_preview(
         .ok()
         .flatten();
         if let Some(pdf_bytes) = pdf_bytes {
+            let path_for_speech = path.clone();
+            let speech_text = tokio::task::spawn_blocking(move || {
+                std::fs::read(Path::new(&path_for_speech))
+                    .ok()
+                    .and_then(|bytes| speech_text_for("xls", &bytes))
+            })
+            .await
+            .ok()
+            .flatten();
             let data_uri = format!("data:application/pdf;base64,{}", base64_encode(&pdf_bytes));
             return Ok(ArtifactPreview {
                 path,
@@ -266,6 +360,7 @@ pub async fn read_artifact_preview(
                 ext,
                 kind: "pdf".to_string(),
                 text: None,
+                speech_text,
                 data_uri: Some(data_uri),
                 original_bytes: Some(true),
                 size,
@@ -288,6 +383,7 @@ pub async fn read_artifact_preview(
                 ext,
                 kind: "text".to_string(),
                 text: Some(text),
+                speech_text: None,
                 data_uri: None,
                 original_bytes: None,
                 size,
@@ -309,18 +405,19 @@ pub async fn read_artifact_preview(
         let ext_for_render = ext.clone();
         let rendered = tokio::task::spawn_blocking(move || {
             let bytes = std::fs::read(Path::new(&path_for_read)).ok()?;
+            let speech = speech_text_for(&ext_for_render, &bytes);
             let html = match ext_for_render.as_str() {
                 "docx" => crate::chat::office::docx_to_html(&bytes),
                 "pptx" => crate::chat::office::pptx_to_html(&bytes),
                 "xlsx" => crate::chat::office::xlsx_to_html(&bytes),
                 _ => None,
             };
-            html.map(|h| (bytes, h))
+            html.map(|h| (bytes, h, speech))
         })
         .await
         .ok()
         .flatten();
-        if let Some((bytes, html)) = rendered {
+        if let Some((bytes, html, speech_text)) = rendered {
             // Encode raw file bytes for client-side rendering.
             let mime = match ext.as_str() {
                 "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -337,6 +434,7 @@ pub async fn read_artifact_preview(
                 ext,
                 kind: "office".to_string(),
                 text: Some(html),
+                speech_text,
                 data_uri: Some(data_uri),
                 original_bytes: Some(true),
                 size,
@@ -352,6 +450,7 @@ pub async fn read_artifact_preview(
         ext,
         kind: "binary".to_string(),
         text: None,
+        speech_text: None,
         data_uri: None,
         original_bytes: None,
         size,
@@ -379,7 +478,7 @@ pub(crate) fn classify_text_ext(ext: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod preview_tests {
-    use super::{classify_text_ext, find_by_basename_walk, get_file_mtime_gated};
+    use super::{cap_speech_text, classify_text_ext, find_by_basename_walk, get_file_mtime_gated, speech_text_for};
 
     #[test]
     fn mermaid_sources_classify_as_mermaid_kind() {
@@ -397,6 +496,64 @@ mod preview_tests {
         assert_eq!(classify_text_ext("tsx"), Some("jsx"));
         assert_eq!(classify_text_ext("py"), Some("code"));
         assert_eq!(classify_text_ext("exe"), None);
+    }
+
+    #[test]
+    fn speech_text_gives_office_lines_terminal_stops_but_not_pdfs() {
+        let dir = std::env::temp_dir().join(format!("relay-speech-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Deck bullets have no periods; read-aloud must still break between
+        // them, and the slide markers must survive verbatim (the speech side
+        // turns them into spoken labels).
+        let pptx = crate::chat::artifacts::generate(
+            &dir,
+            "pptx",
+            "t.pptx",
+            None,
+            "Slide One\nAlpha\n---\nSlide Two\nBeta",
+        )
+        .unwrap();
+        let speech = speech_text_for("pptx", &std::fs::read(&pptx.path).unwrap()).unwrap();
+        assert!(speech.contains("Alpha."), "missing line stop: {speech}");
+        assert!(speech.contains("Beta."), "missing line stop: {speech}");
+        assert!(
+            speech.contains("--- Slide 1 ---"),
+            "slide marker must survive verbatim: {speech}"
+        );
+
+        // A PDF's wrapped lines must NOT gain periods — they are visual, not
+        // sentence boundaries.
+        let pdf = crate::chat::artifacts::generate(
+            &dir,
+            "pdf",
+            "t.pdf",
+            Some("Quarterly Report"),
+            "Revenue grew twelve percent.\nCosts stayed flat.",
+        )
+        .unwrap();
+        let pdf_speech =
+            speech_text_for("pdf", &std::fs::read(&pdf.path).unwrap()).unwrap();
+        assert!(
+            pdf_speech.contains("Revenue grew twelve percent."),
+            "{pdf_speech}"
+        );
+
+        assert!(speech_text_for("bogus", b"not a real file").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn speech_cap_cuts_silently_at_a_char_boundary() {
+        // 100_000 chars is past the 60K speech cap (doc_to_text's own 250K
+        // model-context cap is far larger by design).
+        let long = "word ".repeat(20_000);
+        let capped = cap_speech_text(long.clone());
+        assert!(capped.chars().count() <= 60_000);
+        assert!(capped.is_char_boundary(capped.len()));
+        assert_ne!(capped, long);
+        // Under the cap: returned untouched, no truncation note appended.
+        assert_eq!(cap_speech_text("short.".to_string()), "short.");
     }
 
     #[test]

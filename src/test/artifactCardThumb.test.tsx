@@ -41,6 +41,7 @@ function preview(over: Partial<ArtifactPreview>): ArtifactPreview {
     ext: "txt",
     kind: "text",
     text: null,
+    speechText: null,
     dataUri: null,
     size: 0,
     truncated: false,

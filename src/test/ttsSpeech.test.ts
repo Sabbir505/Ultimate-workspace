@@ -147,6 +147,94 @@ describe("markdownToSpeech — numbers and symbols", () => {
   });
 });
 
+// Artifacts (decks, PDFs, docs) are read aloud with the same pipeline, and
+// they are full of quotation marks, date abbreviations and decoration the
+// engine reads as clicks and stray syllables.
+describe("markdownToSpeech — quotes, abbreviations and decoration", () => {
+  it("drops quotation marks but keeps the quoted words", () => {
+    const out = markdownToSpeech('She said “hello world” and a "straight" one.');
+    expect(out).toContain("hello world");
+    expect(out).toContain("a straight one");
+    expect(out).not.toContain("“");
+    expect(out).not.toContain('"');
+  });
+
+  it("keeps apostrophes as apostrophes", () => {
+    expect(markdownToSpeech("don’t stop")).toContain("don't stop");
+    expect(markdownToSpeech("it's fine")).toContain("it's fine");
+  });
+
+  it("expands month abbreviations, including before a dotted date", () => {
+    expect(markdownToSpeech("Ships Sep 13, 2026.")).toContain("September 13, 2026");
+    expect(markdownToSpeech("In Oct. 2026 we ship.")).toContain("In October 2026 we ship");
+    expect(markdownToSpeech("done in Sept")).toContain("September");
+  });
+
+  it("leaves full month names — and the word May — alone", () => {
+    expect(markdownToSpeech("In May it rains.")).toBe("In May it rains.");
+    expect(markdownToSpeech("September was busy.")).toBe("September was busy.");
+  });
+
+  it("expands weekday abbreviations; Sat/Sun only in a date", () => {
+    expect(markdownToSpeech("Kickoff Wed 14 Sep")).toContain("Wednesday 14 September");
+    expect(markdownToSpeech("Review Fri.")).toContain("Review Friday.");
+    expect(markdownToSpeech("Due Sat 21")).toContain("Saturday 21");
+    // The words, not the weekdays.
+    expect(markdownToSpeech("The Sun rises.")).toBe("The Sun rises.");
+  });
+
+  it("spells number-attached units out", () => {
+    expect(markdownToSpeech("a 200 ms delay")).toContain("200 milliseconds");
+    expect(markdownToSpeech("needs 5 mins")).toContain("5 minutes");
+    expect(markdownToSpeech("64 GB of RAM")).toContain("64 gigabytes of RAM");
+  });
+
+  it("voices currency as the amount plus the unit", () => {
+    expect(markdownToSpeech("€5 per user")).toContain("5 euros");
+    expect(markdownToSpeech("costs £3")).toContain("3 pounds");
+  });
+
+  it("reads comparison operators between words or numbers", () => {
+    expect(markdownToSpeech("when 5 < 6")).toContain("5 less than 6");
+    expect(markdownToSpeech("count > 3")).toContain("count greater than 3");
+    expect(markdownToSpeech("x = 5")).toContain("x equals 5");
+    expect(markdownToSpeech("a -> b")).toContain("a to b");
+    expect(markdownToSpeech("written in C++")).toContain("C plus plus");
+  });
+
+  it("drops html tags and entities but keeps their text", () => {
+    const out = markdownToSpeech("a <b>bold</b> move");
+    expect(out).toContain("bold");
+    expect(out).not.toContain("<b>");
+    expect(markdownToSpeech("A &amp; B")).toContain("and");
+    expect(markdownToSpeech("A &amp; B")).not.toContain("amp");
+  });
+
+  it("reads deck slide headers as labels, not dashes", () => {
+    const out = markdownToSpeech("--- Slide 2 ---\nQuarterly numbers");
+    expect(out).toContain("Slide 2.");
+    expect(out).not.toContain("---");
+  });
+
+  it("expands honorifics and handles", () => {
+    expect(markdownToSpeech("Ask Dr. Chen")).toContain("Doctor Chen");
+    expect(markdownToSpeech("ping @sabbir")).toContain("at sabbir");
+  });
+
+  it("turns decoration into words or silence", () => {
+    expect(markdownToSpeech("© 2026 ACME")).toContain("copyright 2026");
+    expect(markdownToSpeech("see § 2.1")).toContain("section 2.1");
+    expect(markdownToSpeech("Wait… more")).toContain("Wait, more");
+    expect(markdownToSpeech("Done 🎉")).toBe("Done");
+  });
+
+  it("never reads a markdown blockquote marker as 'greater than'", () => {
+    const out = markdownToSpeech("> quoted line");
+    expect(out).toContain("quoted line");
+    expect(out).not.toContain("greater than");
+  });
+});
+
 // GPU synthesis is a child process per call (~4.5s of startup), so the chunk
 // budget there is a target to fill rather than a limit to split at. Splitting
 // only — which is all `splitSentences` does — left a process start per

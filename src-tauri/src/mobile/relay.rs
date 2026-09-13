@@ -1290,8 +1290,10 @@ pub(super) async fn handle_chat_turn(
     chat_mgr: &Arc<ChatManager>,
     write: &super::relay_ws::SharedWsWrite,
 ) -> Result<(), String> {
-    // Resolve provider id.
-    let provider_id = match provider_id_str.as_str() {
+    // Resolve provider id. Phone sessions may point at a named extra
+    // endpoint ("openai_compatible-x7f2") — resolve its protocol kind; the
+    // key/base lookups below stay keyed by the raw endpoint id.
+    let provider_id = match crate::chat::providers::provider_kind(&provider_id_str) {
         "anthropic" => ChatProviderId::Anthropic,
         "openai" => ChatProviderId::OpenAI,
         "anthropic_compatible" => ChatProviderId::AnthropicCompatible,
@@ -1852,6 +1854,9 @@ async fn probe_api_provider(
     base_url: Option<&str>,
     key: &str,
 ) -> Vec<String> {
+    // Suffixed endpoint ids probe by their protocol kind (auth style and
+    // default bases are per kind, not per endpoint).
+    let id = crate::chat::providers::provider_kind(id);
     let fetched = match id {
         "openrouter" => fetch_model_list(client, "https://openrouter.ai/api", key, "bearer").await,
         "anthropic_compatible" | "openai_compatible" => {

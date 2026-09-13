@@ -97,6 +97,9 @@ export interface ChatConfigPayload {
   provider: string | null;
   baseUrl: string | null;
   model: string | null;
+  /** User-assigned endpoint name (Settings → API); the provider rail shows
+   *  this instead of the protocol kind. Null → UI falls back to the kind label. */
+  displayName?: string | null;
   /** True when an API key exists in the keychain for this provider. */
   hasKey: boolean;
 }
@@ -336,12 +339,14 @@ export const setChatApiKey = (
   key: string,
   baseUrl?: string,
   model?: string,
+  displayName?: string,
 ) =>
   safeInvoke<void>("set_chat_api_key", {
     provider,
     key,
     baseUrl: baseUrl ?? null,
     model: model ?? null,
+    displayName: displayName ?? null,
   });
 export const deleteChatApiKey = (provider: string) =>
   safeInvoke<void>("delete_chat_api_key", { provider });

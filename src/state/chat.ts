@@ -1032,7 +1032,7 @@ export interface ChatState {
   cancelFullAccessConfirm: () => void;
   /** Resolve the session's pending approval card (Approve/Deny). */
   resolveApproval: (chatSessionId: string, approved: boolean) => Promise<void>;
-  saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string) => Promise<void>;
+  saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string, displayName?: string) => Promise<void>;
   clearApiKey: (provider: string) => Promise<void>;
 
   // Called by the event hook (useChatEvents) — not meant for direct component use.
@@ -2882,8 +2882,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  saveApiKey: async (provider, key, baseUrl, model) => {
-    await setChatApiKey(provider, key, baseUrl, model);
+  saveApiKey: async (provider, key, baseUrl, model, displayName) => {
+    await setChatApiKey(provider, key, baseUrl, model, displayName);
     // Refresh config for the SPECIFIC provider that was just saved, so the
     // API Keys panel sees hasKey: true for the currently selected provider.
     const config = await getChatConfig(provider);

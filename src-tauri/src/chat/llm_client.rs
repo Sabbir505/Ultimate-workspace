@@ -18,7 +18,7 @@ pub(crate) fn oneshot_client() -> Result<reqwest::Client, String> {
 /// have no sensible default, so a configured base is REQUIRED (None).
 /// Unknown providers resolve to None.
 pub(crate) fn resolve_base_url<'a>(provider: &str, base_url: Option<&'a str>) -> Option<&'a str> {
-    match provider {
+    match crate::chat::providers::provider_kind(provider) {
         "openai" => Some(base_url.unwrap_or(crate::chat::providers::OpenAIProvider::DEFAULT_BASE)),
         "openrouter" => {
             Some(base_url.unwrap_or(crate::chat::providers::OpenRouterProvider::DEFAULT_BASE))
@@ -127,7 +127,7 @@ pub(crate) async fn oneshot(
     let Some(base) = resolve_base_url(provider, base_url) else {
         return Ok(None);
     };
-    match provider {
+    match crate::chat::providers::provider_kind(provider) {
         "openai" | "openrouter" | "openai_compatible" | "local_gguf" => {
             openai_oneshot(client, api_key, base, model, system, user)
                 .await

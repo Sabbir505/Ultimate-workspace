@@ -548,7 +548,7 @@ export interface ChatState {
   cancelFullAccessConfirm: () => void;
   /** Resolve the session's pending approval card (Approve/Deny). */
   resolveApproval: (chatSessionId: string, approved: boolean) => Promise<void>;
-  saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string, displayName?: string) => Promise<void>;
+  saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string, displayName?: string, kind?: string) => Promise<void>;
   clearApiKey: (provider: string) => Promise<void>;
 
   // Called by the event hook (useChatEvents) — not meant for direct component use.

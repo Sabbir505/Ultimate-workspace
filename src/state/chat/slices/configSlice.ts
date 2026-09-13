@@ -3,6 +3,7 @@ import {
   deleteChatApiKey,
   getChatConfig,
   setChatApiKey,
+  type ChatProvider,
 } from "../../../lib/ipc";
 import { loadLastSelection, saveLastSelection } from "../../../lib/lastSelection";
 import type { LastSelection } from "../../../lib/lastSelection";
@@ -25,8 +26,8 @@ export function createConfigSlice(set: ChatStoreSet, get: ChatStoreGet) {
       });
     },
 
-    saveApiKey: async (provider: string, key: string, baseUrl?: string, model?: string, displayName?: string) => {
-      await setChatApiKey(provider, key, baseUrl, model, displayName);
+    saveApiKey: async (provider: string, key: string, baseUrl?: string, model?: string, displayName?: string, kind?: string) => {
+      await setChatApiKey(provider, key, baseUrl, model, displayName, kind as ChatProvider | undefined);
       // Refresh config for the SPECIFIC provider that was just saved, so the
       // API Keys panel sees hasKey: true for the currently selected provider.
       const config = await getChatConfig(provider);

@@ -37,7 +37,7 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 // edit-tool call. None of these appear on the empty welcome screen.
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
 const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m) => ({ default: m.ArtifactProposalCard })));
-import { listHarnessModels, stopLocalModel, localModelStatus, deleteEmptyChatSessions, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel, getResearchCitationReport, PROVIDER_INPUT_INCLUDES_CACHE } from "../../lib/ipc";
+import { listHarnessModels, stopLocalModel, localModelStatus, deleteEmptyChatSessions, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel, getResearchCitationReport, PROVIDER_INPUT_INCLUDES_CACHE, providerKindOf } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatSelectionPrefill } from "../../lib/chatSelection";
 import { useTranscriptScroll } from "./useTranscriptScroll";
@@ -229,10 +229,12 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   //    `effort` selector), so the explicit thinking flag is redundant. We
   //    only show the brain button for providers where the flag actually
   //    changes the request body.
-  const thinkingSupported =
-    activeSession?.provider === "anthropic" ||
-    activeSession?.provider === "anthropic_compatible" ||
-    activeSession?.provider === "local_gguf";
+  const thinkingSupported = (() => {
+    // Sessions can point at a named endpoint ("openai_compatible-x7f2") —
+    // gate on its protocol kind, not the raw id.
+    const kind = providerKindOf(activeSession?.provider ?? "");
+    return kind === "anthropic" || kind === "anthropic_compatible" || kind === "local_gguf";
+  })();
   // Local GGUF discovery + sidecar lifecycle (scan, live sidecar id,
   // persisted overrides, spawn/swap with prompt warmup) — carved to
   // useLocalModelSidecar.ts. The pick handlers below consume it and own the

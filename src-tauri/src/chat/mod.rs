@@ -992,9 +992,6 @@ impl ChatManager {
                         let persisted = db::add_chat_message(
                             &conn,
                             db::NewChatMessage {
-                                chat_session_id: &sid,
-                                role: "assistant",
-                                content: &full_response,
                                 input_tokens: usage.as_ref().and_then(|u| {
                                     if u.input_tokens > 0 || u.output_tokens > 0 {
                                         Some(u.input_tokens)
@@ -1038,8 +1035,7 @@ impl ChatManager {
                                     }
                                 }),
                                 provider: Some(provider_id.as_str()),
-                                model_key: model_key,
-                                pricing_estimated_usd: None,
+                                model_key,
                                 started_at: Some(started_at),
                                 completed_at: Some(db::now_ts()),
                                 llm_time_ms: perf.llm_time_ms(),
@@ -1048,6 +1044,7 @@ impl ChatManager {
                                 tokens_per_second: perf.tokens_per_second(
                                     usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
                                 ),
+                                ..db::NewChatMessage::assistant(&sid, &full_response)
                             },
                         );
                         // Attribute this turn's artifacts to the assistant
@@ -1889,7 +1886,7 @@ pub fn run_one_shot_chat(
     // `select!` drops the losing branch, aborting the request and closing the
     // connection rather than letting it stream to completion first.
     let call = async {
-        match provider_str {
+        match crate::chat::providers::provider_kind(provider_str) {
             "openai" | "openrouter" => {
                 let base = base_url.as_deref().unwrap_or(if provider_str == "openrouter" {
                     crate::chat::providers::OpenRouterProvider::DEFAULT_BASE
@@ -1942,24 +1939,9 @@ pub fn run_one_shot_chat(
         crate::db::add_chat_message(
             &conn,
             crate::db::NewChatMessage {
-                chat_session_id: chat_session_id,
-                role: "assistant",
-                content: &response_text,
-                input_tokens: None,
-                output_tokens: None,
-                cost_usd: None,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                provider: None,
-                model_key: None,
-                pricing_estimated_usd: None,
                 started_at: Some(started_at),
                 completed_at: Some(crate::db::now_ts()),
-                llm_time_ms: None,
-                tool_time_ms: None,
-                ttft_ms: None,
-                tokens_per_second: None,
+                ..crate::db::NewChatMessage::assistant(chat_session_id, &response_text)
             },
         )
         .map_err(|e| e.to_string())?;

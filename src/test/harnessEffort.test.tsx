@@ -25,6 +25,11 @@ vi.mock("../lib/ipc", () => ({
   listChatModels: vi.fn().mockResolvedValue([]),
   scanLocalModels: vi.fn().mockResolvedValue([]),
   getChatConfig: vi.fn().mockResolvedValue(null),
+  listChatInstances: vi.fn().mockResolvedValue([]),
+  providerKindOf: (id: string) => {
+    const dash = id.indexOf("-");
+    return dash > 0 ? id.slice(0, dash) : id;
+  },
 }));
 
 const openPicker = (container: HTMLElement) => {

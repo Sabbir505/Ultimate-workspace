@@ -4,6 +4,7 @@
 // agents have no freely-licensed glyph — they fall back to a monogram of
 // the agent's initial, same shape the Settings API rail uses.
 import type { ReactElement } from "react";
+import { providerKindOf } from "../../lib/ipc";
 
 /** `size` is UNIFORM across all rail glyphs (16): per-brand "visual weight"
  *  nudges (13–17px) made harness icons pop in visibly smaller than the
@@ -233,6 +234,9 @@ export function sessionModelIcon(
  *  sessionModelIcon and the picker stay in sync. */
 export function railIcon(key: string, label: string): JSX.Element {
   if (key === "auto") return <AutoRouteIcon />;
+  // Extra endpoints of a kind carry suffixed ids ("openai_compatible-x7f2");
+  // they share the kind's icon.
+  if (key.startsWith("provider:")) key = `provider:${providerKindOf(key.slice("provider:".length))}`;
   if (key === "harness:claude_code") {
     return (
       <span className="agent-icon-tint-claude">

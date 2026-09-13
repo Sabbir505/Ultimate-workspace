@@ -501,6 +501,7 @@ pub fn run() {
             commands::chat_cmds::delete_chat_api_key,
             commands::chat_cmds::set_chat_default_model,
             commands::chat_cmds::get_chat_config,
+            commands::chat_cmds::list_chat_instances,
             commands::chat_cmds::list_chat_models,
             commands::chat_cmds::read_artifact_preview,
             commands::chat_cmds::is_libreoffice_available,

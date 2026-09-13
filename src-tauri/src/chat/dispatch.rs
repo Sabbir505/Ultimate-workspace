@@ -23,8 +23,8 @@ use crate::chat::tools::ToolOutcome;
 use crate::chat::{permission, tools, ChatManager};
 use crate::db;
 use crate::types::{
-    ChatApprovalRequestPayload, ChatApprovalResolvedPayload, ChatArtifactPayload,
-    ChatOpenBrowserPayload, ChatOpenPreviewPayload, ChatTokenPayload,
+    ChatApprovalRequestPayload, ChatApprovalResolvedPayload, ChatOpenBrowserPayload,
+    ChatOpenPreviewPayload,
 };
 
 /// Push a token to the accumulated full message and emit it to the frontend as
@@ -52,16 +52,10 @@ fn emit_chunk<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, token: &str, ful
         return;
     }
     full.push_str(token);
-    let payload = ChatTokenPayload {
-        chat_session_id: sid.to_string(),
-        token: token.to_string(),
-    };
-    if !stream_events::try_send(sid, &payload) {
-        let _ = app.emit("chat:token", payload);
-    }
-    if record {
-        crate::chat::turn_perf::record_active_token(sid);
-    }
+    // Wire emission + perf recording live in the shared chat-event seam
+    // (chat/stream_events.rs) — same channel-first/fallback path for both
+    // chat worlds.
+    stream_events::emit_chat_token(Some(app), sid, token, record);
 }
 
 /// Setting key for the user-configured artifacts directory (Settings →
@@ -251,6 +245,78 @@ fn fs_tool_summary(name: &str, args: &Value) -> String {
     }
 }
 
+/// Shared approval gate (the approval-card contract): register a pending
+/// approval, emit `chat:approval-request`, pause on the oneshot until the UI
+/// resolves — a dropped sender (stream cancelled) resolves to a denial —
+/// then emit `chat:approval-resolved`. Returns the user's decision; the
+/// caller renders its own denial text.
+pub(crate) async fn run_approval_gate(
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    tool: &str,
+    args: &Value,
+    summary: String,
+) -> bool {
+    let (pending_id, rx) = mgr.register_pending_approval(sid, tool, args.clone(), summary.clone());
+    let _ = app.emit(
+        "chat:approval-request",
+        ChatApprovalRequestPayload {
+            chat_session_id: sid.to_string(),
+            pending_id: pending_id.clone(),
+            tool: tool.to_string(),
+            summary,
+            args: args.clone(),
+        },
+    );
+    let approved = rx.await.unwrap_or(false);
+    emit_approval_resolved(app, sid, &pending_id, approved);
+    approved
+}
+
+/// Sync-thread variant of [`run_approval_gate`] for harness reader threads
+/// (claude.rs `can_use_tool`): the reader blocks on the oneshot — the CLI is
+/// simultaneously blocked waiting on stdin, so neither side spins. A `None`
+/// app or registry (unit tests / relay contexts) means nobody can ever answer
+/// the card: deny so the CLI continues instead of waiting forever.
+pub(crate) fn run_approval_gate_blocking(
+    app: Option<&AppHandle>,
+    mgr: Option<&Arc<ChatManager>>,
+    sid: &str,
+    tool: &str,
+    args: &Value,
+    summary: String,
+) -> bool {
+    let Some((app, mgr)) = app.zip(mgr) else {
+        return false;
+    };
+    let (pending_id, rx) = mgr.register_pending_approval(sid, tool, args.clone(), summary.clone());
+    let _ = app.emit(
+        "chat:approval-request",
+        ChatApprovalRequestPayload {
+            chat_session_id: sid.to_string(),
+            pending_id: pending_id.clone(),
+            tool: tool.to_string(),
+            summary,
+            args: args.clone(),
+        },
+    );
+    let approved = rx.blocking_recv().unwrap_or(false);
+    emit_approval_resolved(app, sid, &pending_id, approved);
+    approved
+}
+
+fn emit_approval_resolved(app: &AppHandle, sid: &str, pending_id: &str, approved: bool) {
+    let _ = app.emit(
+        "chat:approval-resolved",
+        ChatApprovalResolvedPayload {
+            chat_session_id: sid.to_string(),
+            pending_id: pending_id.to_string(),
+            approved,
+        },
+    );
+}
+
 /// Execute a filesystem tool that the permission gate flagged for approval.
 /// Registers a pending approval, emits `chat:approval-request`, and pauses on
 /// the oneshot until the UI resolves. Returns the tool result text (either the
@@ -268,32 +334,7 @@ async fn run_gated_fs_tool(
     args: &Value,
 ) -> String {
     let summary = fs_tool_summary(name, args);
-    let (pending_id, rx) = mgr.register_pending_approval(sid, name, args.clone(), summary.clone());
-
-    let _ = app.emit(
-        "chat:approval-request",
-        ChatApprovalRequestPayload {
-            chat_session_id: sid.to_string(),
-            pending_id: pending_id.clone(),
-            tool: name.to_string(),
-            summary,
-            args: args.clone(),
-        },
-    );
-
-    // Pause the loop until the UI resolves the card. A dropped sender
-    // (stream cancelled) resolves to a denial.
-    let approved = rx.await.unwrap_or(false);
-    let _ = app.emit(
-        "chat:approval-resolved",
-        ChatApprovalResolvedPayload {
-            chat_session_id: sid.to_string(),
-            pending_id,
-            approved,
-        },
-    );
-
-    if !approved {
+    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
         return format!(
             "The user denied the {name} action. Do not retry it unless the user explicitly asks."
         );
@@ -302,24 +343,11 @@ async fn run_gated_fs_tool(
     // Approved — execute the tool now and return its real result.
     let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app)).await;
     if let Some(a) = outcome.artifact {
-        let kind = std::path::Path::new(&a.filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
         {
             let db = app.state::<crate::DbState>();
             let conn = db.0.lock();
-            let _ = db::insert_artifact(&conn, Some(sid), &a.filename, &a.path, &kind);
+            stream_events::insert_and_emit_artifact(Some(app), &conn, sid, &a.path, &a.filename);
         }
-        let _ = app.emit(
-            "chat:artifact",
-            ChatArtifactPayload {
-                chat_session_id: sid.to_string(),
-                path: a.path,
-                filename: a.filename,
-            },
-        );
     }
     outcome.text
 }
@@ -340,30 +368,7 @@ async fn run_gated_connector_tool(
     args: &Value,
 ) -> String {
     let summary = connector_tool_summary(attached, idx, name, args);
-    let (pending_id, rx) = mgr.register_pending_approval(sid, name, args.clone(), summary.clone());
-
-    let _ = app.emit(
-        "chat:approval-request",
-        ChatApprovalRequestPayload {
-            chat_session_id: sid.to_string(),
-            pending_id: pending_id.clone(),
-            tool: name.to_string(),
-            summary,
-            args: args.clone(),
-        },
-    );
-
-    let approved = rx.await.unwrap_or(false);
-    let _ = app.emit(
-        "chat:approval-resolved",
-        ChatApprovalResolvedPayload {
-            chat_session_id: sid.to_string(),
-            pending_id,
-            approved,
-        },
-    );
-
-    if !approved {
+    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
         return format!(
             "The user denied the {name} action. Do not retry it unless the user explicitly asks."
         );
@@ -392,31 +397,7 @@ async fn run_gated_mcp_tool(
             String::new()
         }
     );
-    let (pending_id, rx) =
-        mgr.register_pending_approval(sid, &entry.wire_name, args.clone(), summary.clone());
-
-    let _ = app.emit(
-        "chat:approval-request",
-        ChatApprovalRequestPayload {
-            chat_session_id: sid.to_string(),
-            pending_id: pending_id.clone(),
-            tool: entry.wire_name.clone(),
-            summary,
-            args: args.clone(),
-        },
-    );
-
-    let approved = rx.await.unwrap_or(false);
-    let _ = app.emit(
-        "chat:approval-resolved",
-        ChatApprovalResolvedPayload {
-            chat_session_id: sid.to_string(),
-            pending_id,
-            approved,
-        },
-    );
-
-    if !approved {
+    if !run_approval_gate(mgr, app, sid, &entry.wire_name, args, summary).await {
         return format!(
             "The user denied the {} action ({}). Do not retry it unless the user explicitly asks.",
             entry.raw_name, entry.server_name
@@ -1562,30 +1543,7 @@ async fn run_gated_system_tool(
     args: &Value,
 ) -> String {
     let summary = system_tool_summary(name, args);
-    let (pending_id, rx) = mgr.register_pending_approval(sid, name, args.clone(), summary.clone());
-
-    let _ = app.emit(
-        "chat:approval-request",
-        ChatApprovalRequestPayload {
-            chat_session_id: sid.to_string(),
-            pending_id: pending_id.clone(),
-            tool: name.to_string(),
-            summary,
-            args: args.clone(),
-        },
-    );
-
-    let approved = rx.await.unwrap_or(false);
-    let _ = app.emit(
-        "chat:approval-resolved",
-        ChatApprovalResolvedPayload {
-            chat_session_id: sid.to_string(),
-            pending_id,
-            approved,
-        },
-    );
-
-    if !approved {
+    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
         return format!(
             "The user denied the {name} action. Do not retry it unless the user explicitly asks."
         );
@@ -1632,30 +1590,7 @@ async fn run_gated_automation_tool(
     args: &Value,
 ) -> String {
     let summary = automation_tool_summary(name, args);
-    let (pending_id, rx) = mgr.register_pending_approval(sid, name, args.clone(), summary.clone());
-
-    let _ = app.emit(
-        "chat:approval-request",
-        ChatApprovalRequestPayload {
-            chat_session_id: sid.to_string(),
-            pending_id: pending_id.clone(),
-            tool: name.to_string(),
-            summary,
-            args: args.clone(),
-        },
-    );
-
-    let approved = rx.await.unwrap_or(false);
-    let _ = app.emit(
-        "chat:approval-resolved",
-        ChatApprovalResolvedPayload {
-            chat_session_id: sid.to_string(),
-            pending_id,
-            approved,
-        },
-    );
-
-    if !approved {
+    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
         return format!(
             "The user denied the {name} action. Do not retry it unless the user explicitly asks."
         );
@@ -1676,30 +1611,7 @@ async fn run_gated_mesh_tool(
     args: &Value,
 ) -> String {
     let summary = mesh_tool_summary(name, args);
-    let (pending_id, rx) = mgr.register_pending_approval(sid, name, args.clone(), summary.clone());
-
-    let _ = app.emit(
-        "chat:approval-request",
-        ChatApprovalRequestPayload {
-            chat_session_id: sid.to_string(),
-            pending_id: pending_id.clone(),
-            tool: name.to_string(),
-            summary,
-            args: args.clone(),
-        },
-    );
-
-    let approved = rx.await.unwrap_or(false);
-    let _ = app.emit(
-        "chat:approval-resolved",
-        ChatApprovalResolvedPayload {
-            chat_session_id: sid.to_string(),
-            pending_id,
-            approved,
-        },
-    );
-
-    if !approved {
+    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
         return format!(
             "The user denied the {name} action. Do not retry it unless the user explicitly asks."
         );
@@ -1820,13 +1732,11 @@ async fn run_attach_tool(
         let names: Vec<&str> = entries.iter().map(|e| e.wire_name.as_str()).collect();
         let n = names.len();
         let listing = names.join(", ");
-        let _ = app.emit(
-            "chat:status",
-            crate::types::ChatStatusPayload {
-                chat_session_id: sid.to_string(),
-                reason: "connector_attached".to_string(),
-                message: format!("Attached {display} ({n} tools)"),
-            },
+        stream_events::emit_status_reason(
+            Some(app),
+            sid,
+            "connector_attached",
+            format!("Attached {display} ({n} tools)"),
         );
         if let Some(slot) = mgr.late_attach_slot(sid) {
             slot.lock().mcp.extend(entries);
@@ -1834,14 +1744,7 @@ async fn run_attach_tool(
         // E-9a: paired clear for the status above — an attach-only tool round
         // streams no model tokens, so the first-token clear never fires and
         // the pill used to stick until the turn ended.
-        let _ = app.emit(
-            "chat:status",
-            crate::types::ChatStatusPayload {
-                chat_session_id: sid.to_string(),
-                reason: String::new(),
-                message: String::new(),
-            },
-        );
+        stream_events::emit_status_clear(Some(app), sid);
         // No DB row: the attach lives only in this turn's late-attach slot,
         // so tool discovery never leaks into the session's pinned set.
         format!("Attached {display} ({n} tools): {listing}")
@@ -1859,26 +1762,17 @@ async fn run_attach_tool(
         } else {
             names.join(", ")
         };
-        let _ = app.emit(
-            "chat:status",
-            crate::types::ChatStatusPayload {
-                chat_session_id: sid.to_string(),
-                reason: "connector_attached".to_string(),
-                message: format!("Attached {display} ({n} tools)"),
-            },
+        stream_events::emit_status_reason(
+            Some(app),
+            sid,
+            "connector_attached",
+            format!("Attached {display} ({n} tools)"),
         );
         if let Some(slot) = mgr.late_attach_slot(sid) {
             slot.lock().connectors.push(att);
         }
         // E-9a: paired clear (see the MCP branch).
-        let _ = app.emit(
-            "chat:status",
-            crate::types::ChatStatusPayload {
-                chat_session_id: sid.to_string(),
-                reason: String::new(),
-                message: String::new(),
-            },
-        );
+        stream_events::emit_status_clear(Some(app), sid);
         // No DB row — same turn-scoping as the MCP branch above: discovery
         // attaches must not pin chips into the composer.
         format!("Attached {display} ({n} tools): {listing}")
@@ -2212,24 +2106,11 @@ pub(crate) async fn run_tool(
     if let Some(a) = outcome.artifact {
         // Persist to the Artifacts sidebar (30-day retention) before notifying
         // the UI. A DB failure must not block the chat, so errors are ignored.
-        let kind = std::path::Path::new(&a.filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
         {
             let db = app.state::<crate::DbState>();
             let conn = db.0.lock();
-            let _ = db::insert_artifact(&conn, Some(sid), &a.filename, &a.path, &kind);
+            stream_events::insert_and_emit_artifact(Some(app), &conn, sid, &a.path, &a.filename);
         }
-        let _ = app.emit(
-            "chat:artifact",
-            ChatArtifactPayload {
-                chat_session_id: sid.to_string(),
-                path: a.path,
-                filename: a.filename,
-            },
-        );
     }
     if let Some(url) = outcome.browse_url {
         // The model just opened a page in the built-in pane: mark the session
@@ -2339,16 +2220,8 @@ async fn run_browser_tool(
         {
             let db = app.state::<crate::DbState>();
             let conn = db.0.lock();
-            let _ = db::insert_artifact(&conn, Some(sid), &filename, &path_str, "png");
+            stream_events::insert_and_emit_artifact(Some(app), &conn, sid, &path_str, &filename);
         }
-        let _ = app.emit(
-            "chat:artifact",
-            ChatArtifactPayload {
-                chat_session_id: sid.to_string(),
-                path: path_str.clone(),
-                filename,
-            },
-        );
         return Some(format!(
             "Screenshot saved to {path_str}. It has been opened in the user's canvas. To show it inline, embed it in your reply as ![screenshot]({path_str})."
         ));

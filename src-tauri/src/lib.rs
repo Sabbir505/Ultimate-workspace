@@ -54,6 +54,13 @@ use pty::PtyManager;
 
 /// Shared SQLite connection. One connection behind a mutex: rusqlite
 /// connections are !Sync, and Relay's write volume is tiny.
+///
+/// RULE: the lock guards SQL ONLY. Never hold it across file IO, subprocesses,
+/// zip compression, or HTTP — collect the data under the lock, release, then
+/// do the slow work (see export.rs / git_cmds.rs / sessions.rs for the
+/// pattern). The one deliberate exception is `swap_chat_db_files`
+/// (commands/data.rs), whose single hold is the documented atomicity
+/// mechanism for the WAL-checkpoint-and-copy.
 pub struct DbState(pub Arc<Mutex<Connection>>);
 
 pub struct PtyState(pub Arc<PtyManager>);

@@ -1331,7 +1331,8 @@ pub use cost_v2::{get_cost_rollups_v2, read_rate_overrides};
 
 // chat
 pub use chat::{
-    add_chat_message, add_chat_session_connector, add_command_chat_message, chat_worktree_paths,
+    add_chat_message, add_chat_session_connector, add_command_chat_message,
+    add_user_chat_message, chat_worktree_paths,
     create_chat_session, delete_chat_message, delete_chat_messages_after, delete_chat_session,
     delete_chat_sessions_for_project, delete_empty_chat_sessions, get_chat_session,
     latest_local_session_working_root, list_active_chat_messages, list_chat_messages,

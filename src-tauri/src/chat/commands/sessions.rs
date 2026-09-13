@@ -580,8 +580,12 @@ pub fn get_chat_session_metrics(
     chat_session_id: String,
     db: State<'_, DbState>,
 ) -> CmdResult<ChatSessionMetricsPayload> {
-    let conn = db.0.lock();
-    let all = db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?;
+    // Rows under the lock; the O(n) aggregation folds after release (DbState
+    // rule: the lock guards SQL only) — the fold scales with session length.
+    let all = {
+        let conn = db.0.lock();
+        db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?
+    };
 
     let mut llm_ms = 0i64;
     let mut tool_ms = 0i64;

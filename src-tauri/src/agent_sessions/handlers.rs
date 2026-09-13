@@ -1,7 +1,15 @@
 //! per-harness event handlers (kimi/opencode/pi/commandcode) + subagent spawn/usage helpers — extracted carve of agent_sessions (see
-//! mod.rs). `use super::*` inherits the parent's imports and private
-//! helpers; items are pub(super) and glob-reimported by the parent.
-use super::*;
+//! mod.rs). Imports are explicit; the handler fns defined here are pub(super)
+//! and glob-reimported by the parent (mod.rs `use handlers::*`).
+use std::sync::{Arc, Mutex};
+
+use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter};
+
+use super::tracker::{
+    extract_result_text, is_subagent_tool_name, tool_meta_generic, tool_meta_kimi, ToolTracker,
+};
+use super::{emit_token, usage_i64};
 /// Kimi stream-json: `{"role":"assistant","content":…}` messages, tool events
 /// (see tool_marker_kimi), and a `session.resume_hint` meta line carrying the
 /// resume id. (Verified against v0.31.1 output.)

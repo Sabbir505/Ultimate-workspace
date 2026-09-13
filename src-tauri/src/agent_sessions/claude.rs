@@ -333,38 +333,19 @@ pub(super) fn handle_can_use_tool(
         .and_then(|a| a.try_state::<crate::ChatState>())
         .map(|s| Arc::clone(&s.0));
 
-    let (approved, pending_id) = if let (Some(app), Some(mgr)) = (app, mgr) {
-        let (pending_id, rx) =
-            mgr.register_pending_approval(sid, &tool, input.clone(), summary.clone());
-        let _ = app.emit(
-            "chat:approval-request",
-            crate::types::ChatApprovalRequestPayload {
-                chat_session_id: sid.to_string(),
-                pending_id: pending_id.clone(),
-                tool: tool.clone(),
-                summary,
-                args: input.clone(),
-            },
-        );
-        // Block this reader thread until the UI resolves (or the pending is
-        // dropped on cancel → deny). The CLI is simultaneously blocked
-        // waiting on stdin, so neither side spins.
-        let approved = rx.blocking_recv().unwrap_or(false);
-        let _ = app.emit(
-            "chat:approval-resolved",
-            crate::types::ChatApprovalResolvedPayload {
-                chat_session_id: sid.to_string(),
-                pending_id: pending_id.clone(),
-                approved,
-            },
-        );
-        (approved, Some(pending_id))
-    } else {
-        // No app/registry → nobody can ever answer the card. Deny so the
-        // CLI continues instead of waiting forever.
-        (false, None)
-    };
-    let _ = pending_id; // kept in scope for clarity; the event owns it
+    // Shared approval gate, sync-thread variant: blocks this reader thread
+    // until the UI resolves (or the pending is dropped on cancel → deny).
+    // The CLI is simultaneously blocked waiting on stdin, so neither side
+    // spins. No app/registry → nobody can ever answer the card: the helper
+    // denies so the CLI continues instead of waiting forever.
+    let approved = crate::chat::dispatch::run_approval_gate_blocking(
+        app,
+        mgr.as_ref(),
+        sid,
+        &tool,
+        &input,
+        summary,
+    );
 
     let response = can_use_tool_response(&request_id, approved, &input);
     let line = response.to_string();
@@ -1012,16 +993,12 @@ pub(super) fn read_claude_stream(
         eprintln!(
             "[context] claude_code resume failed (no turn activity); dropping stale CLI              session id — the next send replays the context primer"
         );
-        if let Some(app) = app {
-            let _ = app.emit(
-                "chat:status",
-                json!({
-                    "chatSessionId": sid,
-                    "reason": "context_primer_pending",
-                    "message": "CLI session expired — the next send replays the conversation context",
-                }),
-            );
-        }
+        crate::chat::stream_events::emit_status_reason(
+            app,
+            sid,
+            "context_primer_pending",
+            "CLI session expired — the next send replays the conversation context",
+        );
     }
     // E-5: a respawned process may already be streaming a new turn — an old
     // reader's EOF must not clear its flag (nor emit a spurious exit error).

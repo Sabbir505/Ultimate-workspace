@@ -150,10 +150,24 @@ pub fn unhide_cost_project(db: State<'_, DbState>, project_id: String) -> CmdRes
 
 /// Compute the current calendar month's spend per project and, for each
 /// configured budget that has crossed its threshold, emit `budget:alert` and
-/// push a mobile notice. Called after cost events / on a timer. Returns the
-/// alerts that fired.
+/// push a mobile notice. Called from the frontend after cost events AND from
+/// the backend's 5-minute timer (see `start_budget_timer` in lib.rs) — so
+/// alerts fire even when no chat window is open to drive the IPC call.
+/// Returns the alerts that fired.
+///
+/// Enforcement note: budgets are ADVISORY by design (product decision) — an
+/// alert never aborts a running turn. This is the notification plumbing, not
+/// a spend blocker.
 #[tauri::command]
 pub async fn check_budgets(app: AppHandle, db: State<'_, DbState>) -> CmdResult<Vec<BudgetAlertPayload>> {
+    Ok(run_budget_checks(app, std::sync::Arc::clone(&db.0)).await)
+}
+
+/// Timer-free core of [`check_budgets`], callable from the backend scheduler.
+pub async fn run_budget_checks(
+    app: AppHandle,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+) -> Vec<BudgetAlertPayload> {
     // Resolve to the start of the current month (approximate, via Unix epoch
     // day arithmetic). A robust window covering the month begins at the first
     // day of the current civil month.
@@ -169,18 +183,22 @@ pub async fn check_budgets(app: AppHandle, db: State<'_, DbState>) -> CmdResult<
     let config: Vec<BudgetConfig>;
     let rollups;
     {
-        let conn = db.0.lock();
+        let conn = db.lock();
         config = load_config(&conn);
         // Re-pricing with a window covering the month; reuse the cached rollup.
+        // A rollup failure skips this cycle's alerts (next timer tick retries).
         let days = ((now - since) / 86400).max(1) as u32;
-        rollups = db::get_cost_rollups_v2(&conn, days).map_err(|e| e.to_string())?;
+        match db::get_cost_rollups_v2(&conn, days) {
+            Ok(r) => rollups = r,
+            Err(_) => return Vec::new(),
+        }
     }
 
     // Build project id → name for friendly alert text.
     let mut project_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     {
-        let conn = db.0.lock();
-        for p in db::list_projects(&conn).map_err(|e| e.to_string())? {
+        let conn = db.lock();
+        for p in db::list_projects(&conn).unwrap_or_default() {
             project_names.insert(p.id.clone(), p.name);
         }
     }
@@ -213,7 +231,7 @@ pub async fn check_budgets(app: AppHandle, db: State<'_, DbState>) -> CmdResult<
             );
         }
     }
-    Ok(alerts)
+    alerts
 }
 
 /// Start-of-current-month Unix timestamp (approximate, using the local day

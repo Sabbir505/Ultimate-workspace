@@ -729,6 +729,12 @@
   flex-direction: column;
   gap: 2px;
 }
+.api-provider-rail-empty {
+  padding: 10px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
 .api-provider-item {
   position: relative;
   display: flex;

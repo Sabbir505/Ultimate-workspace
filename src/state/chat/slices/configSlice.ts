@@ -25,8 +25,8 @@ export function createConfigSlice(set: ChatStoreSet, get: ChatStoreGet) {
       });
     },
 
-    saveApiKey: async (provider: string, key: string, baseUrl?: string, model?: string) => {
-      await setChatApiKey(provider, key, baseUrl, model);
+    saveApiKey: async (provider: string, key: string, baseUrl?: string, model?: string, displayName?: string) => {
+      await setChatApiKey(provider, key, baseUrl, model, displayName);
       // Refresh config for the SPECIFIC provider that was just saved, so the
       // API Keys panel sees hasKey: true for the currently selected provider.
       const config = await getChatConfig(provider);

@@ -470,6 +470,30 @@ pub fn delete_chat_api_key(conn: &Connection, provider: &str) -> Result<(), Stri
     Ok(())
 }
 
+// ---- Generic app-scoped namespace (keychain on all shipped targets) ----
+//
+// Currently hosts the mobile pairing token ("mobile" / "pairing-token"), which
+// gates full remote control of the desktop and must not sit plaintext in the
+// settings table.
+
+pub fn generic_store(
+    conn: &Connection,
+    namespace: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    platform::generic_store(conn, namespace, key, value)
+}
+
+pub fn generic_load(conn: &Connection, namespace: &str, key: &str) -> Option<String> {
+    platform::generic_load(conn, namespace, key)
+}
+
+pub fn generic_remove(conn: &Connection, namespace: &str, key: &str) {
+    platform::generic_remove(conn, namespace, key);
+}
+
+
 // ---- Connector OAuth token store (app-scoped, third namespace) ----
 
 fn connector_account(connector_id: &str, field: &str) -> String {

@@ -56,8 +56,13 @@ describe("ApiKeysPanel stale model fetch (C4)", () => {
     render(<SettingsView />);
     await waitFor(() => expect(screen.getByText("API providers")).toBeTruthy());
 
-    // Provider A: OpenAI Compatible. Type key + base URL — the auto-fetch
-    // effect (or the manual button) starts the fetch we keep in flight.
+    // Nothing is configured yet, so the panel opens straight into the Add API
+    // flow — wait for that before touching the kind dropdown (it only lists
+    // every kind once the saved-provider summary has loaded).
+    await screen.findByText(/No APIs yet/);
+
+    // Provider A: OpenAI Compatible. Pick it in the add-form dropdown, then
+    // type key + base URL — the debounced auto-fetch starts A's fetch.
     const providerSelect = screen.getAllByTestId("glass-select")[0] as HTMLSelectElement;
     fireEvent.change(providerSelect, { target: { value: "openai_compatible" } });
     await waitFor(() => expect(screen.getByLabelText("API key")).toBeTruthy());
@@ -68,8 +73,9 @@ describe("ApiKeysPanel stale model fetch (C4)", () => {
     await waitFor(() => expect(listChatModelsMock).toHaveBeenCalled(), { timeout: 3000 });
     expect(listChatModelsMock.mock.calls[0][0]).toBe("openai_compatible");
 
-    // Switch to provider B while A's fetch is still in flight.
-    fireEvent.click(screen.getByLabelText("Select Anthropic Compatible"));
+    // Switch to provider B via the same dropdown while A's fetch is in flight.
+    const providerSelect2 = screen.getAllByTestId("glass-select")[0] as HTMLSelectElement;
+    fireEvent.change(providerSelect2, { target: { value: "anthropic_compatible" } });
     expect(screen.getByLabelText("API key")).toBeTruthy();
 
     // A's fetch finally resolves with models — they must NOT land in B's panel
@@ -84,6 +90,7 @@ describe("ApiKeysPanel stale model fetch (C4)", () => {
     const second = deferred<Array<{ id: string; object: string; created: number; ownedBy: string }>>();
     listChatModelsMock.mockImplementation(() => second.promise);
     fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-b" } });
+    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "http://localhost:1337/v1" } });
     fireEvent.click(screen.getByRole("button", { name: "Fetch models" }));
     await act(async () => {
       second.resolve([{ id: "fresh-model-b", object: "model", created: 2, ownedBy: "x" }]);

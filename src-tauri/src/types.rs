@@ -987,6 +987,10 @@ pub struct ChatConfigPayload {
     pub provider: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    /// User-assigned name for this endpoint (Settings → API). The provider
+    /// rail shows it instead of the protocol kind; None → the UI falls back
+    /// to the kind label ("Anthropic", "OpenAI Compatible", …).
+    pub display_name: Option<String>,
     /// True when an API key is stored in the keychain for this provider.
     /// Lets the API Keys panel enable Save for model-only updates without
     /// re-entering the key. The key VALUE is never returned over IPC.

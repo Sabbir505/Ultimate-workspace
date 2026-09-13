@@ -127,6 +127,9 @@ fn adapt_automation(spec: &AutomationSpec) -> AutomationInput {
         cwd: None,
         schedule,
         enabled: Some(active),
+        // Artifact-spec automations are model-driven (the chat proposes the
+        // artifact) — badge them like chat-tool creations.
+        origin: Some("agent".into()),
     }
 }
 

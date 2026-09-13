@@ -21,6 +21,9 @@ interface Props<T extends string> {
   title?: string;
   /** Extra class on the trigger button (e.g. size variant). */
   className?: string;
+  /** Locked control (e.g. a provider's protocol kind is fixed after add):
+   *  trigger renders disabled and the popover can't open. */
+  disabled?: boolean;
   /** Width the popover should match: "trigger" (default) or "content". */
   matchWidth?: "trigger" | "content";
   /** Per-row control rendered after the label (e.g. audition a voice). Its
@@ -37,6 +40,7 @@ export function GlassSelect<T extends string>({
   onChange,
   title,
   className,
+  disabled,
   matchWidth = "trigger",
   optionAction,
 }: Props<T>) {
@@ -133,10 +137,11 @@ export function GlassSelect<T extends string>({
       <button
         ref={triggerRef}
         type="button"
-        className={`glass-select-trigger${className ? ` ${className}` : ""}`}
+        className={`glass-select-trigger${className ? ` ${className}` : ""}${disabled ? " is-disabled" : ""}`}
         title={title}
         aria-haspopup="listbox"
         aria-expanded={open}
+        disabled={disabled}
         onClick={() => setOpen((o) => !o)}
         onKeyDown={onKeyDown}
       >

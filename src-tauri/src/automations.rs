@@ -989,6 +989,7 @@ mod tests {
             last_status: None,
             chat_session_id: None,
             created_at: 0,
+            origin: "user".to_string(),
         };
         let p = webhook_payload(&a, "ok", "Completed", 1234);
         assert_eq!(p["event"], "automation.run_finished");
@@ -1047,6 +1048,7 @@ mod tests {
                     cwd: None,
                     schedule: "* * * * *".into(),
                     enabled: Some(true),
+                    origin: None,
                 },
             )
             .unwrap();
@@ -1093,6 +1095,7 @@ mod tests {
                     cwd: None,
                     schedule: schedule.into(),
                     enabled: Some(enabled),
+                    origin: None,
                 },
             )
             .unwrap()

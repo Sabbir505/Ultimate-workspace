@@ -319,6 +319,18 @@ export function AutomationsView() {
                         <PlayCircle size={14} strokeWidth={2} className="automations-list-status running" />
                       )}
                       <span className="automations-list-name">{a.name}</span>
+                      {a.origin === "agent" ? (
+                        // Authored by the model (create_automation tool — which
+                        // always required an explicit approval card). Kept
+                        // visible so agent-scheduled prompts are never
+                        // indistinguishable from the user's own.
+                        <span
+                          className="automations-list-agent-badge"
+                          title="Created by an agent chat — runs unattended at full-auto"
+                        >
+                          Agent
+                        </span>
+                      ) : null}
                     </div>
                     <div className="automations-list-row-meta">
                       <span>{scheduleLabel(a.schedule)}</span>
@@ -406,7 +418,7 @@ export function RunWhileClosedToggle() {
       if (next) {
         toastSuccess(
           "Runs while closed: on",
-          "Task Scheduler fires every minute — due automations run headless.",
+          "Windows Task Scheduler fires every minute and due automations run headless at full permissions — even while Relay is closed. Turn it off any time to unregister the task.",
         );
       }
     } catch (err) {

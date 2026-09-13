@@ -100,9 +100,7 @@ pub async fn get_mobile_pairing_info(
     let running = port.is_some();
     let token = {
         let conn = db.0.lock();
-        crate::db::get_setting(&conn, "mobile.pairing_token")
-            .ok()
-            .flatten()
+        crate::mobile::relay::current_pairing_token(&conn)
     };
     let local_url = match (running, port, token.as_ref()) {
         (true, Some(p), Some(t)) => Some(format!("ws://127.0.0.1:{p}/#{t}")),

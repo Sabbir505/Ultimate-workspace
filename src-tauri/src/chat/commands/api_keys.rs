@@ -19,6 +19,7 @@ pub fn set_chat_api_key(
     key: String,
     base_url: Option<String>,
     model: Option<String>,
+    display_name: Option<String>,
     db: State<'_, DbState>,
 ) -> CmdResult<()> {
     if provider.trim().is_empty() {
@@ -45,6 +46,22 @@ pub fn set_chat_api_key(
     if let Some(m) = model {
         db::set_setting(&conn, &format!("chat.{provider}.model"), &m).map_err(|e| e.to_string())?;
     }
+    // Display name (what the provider rail shows instead of the kind label).
+    // An empty/whitespace name clears the setting so the UI falls back to the
+    // kind label rather than rendering a blank rail entry.
+    if let Some(name) = display_name {
+        let name = name.trim();
+        if name.is_empty() {
+            conn.execute(
+                "DELETE FROM app_settings WHERE key = ?1",
+                rusqlite::params![format!("chat.{provider}.display_name")],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            db::set_setting(&conn, &format!("chat.{provider}.display_name"), name)
+                .map_err(|e| e.to_string())?;
+        }
+    }
     // Remember the provider the user last configured so the app reopens on it
     // instead of falling back to the hardcoded priority order. See get_chat_config.
     db::set_setting(&conn, "chat.active_provider", &provider).map_err(|e| e.to_string())?;
@@ -57,10 +74,11 @@ pub fn delete_chat_api_key(provider: String, db: State<'_, DbState>) -> CmdResul
     secrets::delete_chat_api_key(&conn, &provider)?;
     // Clearing a provider removes its whole configuration, not just the key.
     conn.execute(
-        "DELETE FROM app_settings WHERE key IN (?1, ?2)",
+        "DELETE FROM app_settings WHERE key IN (?1, ?2, ?3)",
         rusqlite::params![
             format!("chat.{provider}.base_url"),
             format!("chat.{provider}.model"),
+            format!("chat.{provider}.display_name"),
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -123,6 +141,8 @@ pub fn get_chat_config(
                 db::get_setting(&conn, &format!("chat.{p}.base_url")).map_err(|e| e.to_string())?;
             let model =
                 db::get_setting(&conn, &format!("chat.{p}.model")).map_err(|e| e.to_string())?;
+            let display_name = db::get_setting(&conn, &format!("chat.{p}.display_name"))
+                .map_err(|e| e.to_string())?;
             // local_gguf is keyless — always treat as having a "key" so the
             // frontend doesn't block on a missing API key.
             let has_key = if p == "local_gguf" {
@@ -134,6 +154,7 @@ pub fn get_chat_config(
                 provider: Some(p),
                 base_url,
                 model,
+                display_name,
                 has_key,
             })
         }
@@ -163,10 +184,14 @@ pub fn get_chat_config(
                         .map_err(|e| e.to_string())?;
                     let model = db::get_setting(&conn, &format!("chat.{active}.model"))
                         .map_err(|e| e.to_string())?;
+                    let display_name =
+                        db::get_setting(&conn, &format!("chat.{active}.display_name"))
+                            .map_err(|e| e.to_string())?;
                     return Ok(ChatConfigPayload {
                         provider: Some(active),
                         base_url,
                         model,
+                        display_name,
                         has_key: true,
                     });
                 }
@@ -183,10 +208,13 @@ pub fn get_chat_config(
                         .map_err(|e| e.to_string())?;
                     let model = db::get_setting(&conn, &format!("chat.{p}.model"))
                         .map_err(|e| e.to_string())?;
+                    let display_name = db::get_setting(&conn, &format!("chat.{p}.display_name"))
+                        .map_err(|e| e.to_string())?;
                     return Ok(ChatConfigPayload {
                         provider: Some(p.to_string()),
                         base_url,
                         model,
+                        display_name,
                         has_key: true,
                     });
                 }
@@ -196,6 +224,7 @@ pub fn get_chat_config(
                 provider: None,
                 base_url: None,
                 model: None,
+                display_name: None,
                 has_key: false,
             })
         }

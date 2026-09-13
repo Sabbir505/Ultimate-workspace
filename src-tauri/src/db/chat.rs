@@ -1101,6 +1101,7 @@ mod tests {
                 cwd: None,
                 schedule: "* * * * *".into(),
                 enabled: Some(true),
+                origin: None,
             },
         )
         .unwrap();

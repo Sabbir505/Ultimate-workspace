@@ -150,6 +150,21 @@ fn migrate_automation_runs_improve_link(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Tag who authored each automation ("user" form vs "agent" chat tool) —
+/// the Automations view badges agent-authored rows (see
+/// fix/execution-gates: runs are full-auto by design, so authorship must be
+/// visible).
+fn migrate_automations_origin(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE automations ADD COLUMN origin TEXT NOT NULL DEFAULT 'user'";
+    if let Err(e) = conn.execute(sql, []) {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 fn migrate_chat_fts(conn: &Connection) -> DbResult<()> {
     let in_sync = conn
         .query_row(
@@ -198,6 +213,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_messages_perf(conn)?;
     migrate_improve_autonomy(conn)?;
     migrate_automation_runs_improve_link(conn)?;
+    migrate_automations_origin(conn)?;
     migrate_chat_fts(conn)?;
     migrate_memory_reflected(conn)?;
     migrate_chat_message_kind(conn)?;
@@ -1112,6 +1128,9 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
 
         -- Scheduled headless agent runs (see db/automations.rs +
         -- crate::automations). chat_session_id is the run log, bound lazily.
+        -- origin: user (Automations view form) or agent (chat
+        -- create_automation tool) — the UI badges agent-authored rows so the
+        -- user can see what the model scheduled.
         CREATE TABLE IF NOT EXISTS automations (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
@@ -1124,7 +1143,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           last_run_at INTEGER,
           last_status TEXT,
           chat_session_id TEXT,
-          created_at INTEGER NOT NULL
+          created_at INTEGER NOT NULL,
+          origin TEXT NOT NULL DEFAULT 'user'
         );
 
         CREATE TABLE IF NOT EXISTS automation_runs (

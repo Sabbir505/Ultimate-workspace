@@ -18,6 +18,7 @@
 //
 // The "used" figure (passed in by the meter consumer) combines the
 // backend's live estimate with the input_tokens of the last assistant turn.
+import { providerKindOf } from "./providerKind";
 
 /** Fallback context window (tokens) for model ids the registry doesn't
  *  recognize. Mirrors the backend's DEFAULT_CLOUD_WINDOW. */
@@ -271,7 +272,9 @@ export async function contextWindowForModel(
   model: string | undefined | null,
   provider: string | undefined | null,
 ): Promise<number | null> {
-  const p = (provider ?? "").toLowerCase();
+  // Sessions may carry a named endpoint id ("openai_compatible-x7f2");
+  // live-window support is per protocol kind.
+  const p = providerKindOf((provider ?? "").toLowerCase());
   const m = (model ?? "").toLowerCase();
   if (!m) return null;
   if (p === "openrouter") {

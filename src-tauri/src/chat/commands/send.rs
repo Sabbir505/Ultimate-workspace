@@ -83,7 +83,7 @@ pub(crate) async fn fetch_models_list(
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let req = client.get(&url);
 
-    let req = match provider {
+    let req = match crate::chat::providers::provider_kind(provider) {
         "anthropic" | "anthropic_compatible" => req
             .header("x-api-key", &key)
             .header("anthropic-version", ANTHROPIC_API_VERSION),
@@ -643,15 +643,8 @@ pub async fn send_chat_message(
     }
 
     // 3. Resolve provider id.
-    let provider_id: ChatProviderId = match provider_str.as_str() {
-        "anthropic" => ChatProviderId::Anthropic,
-        "openai" => ChatProviderId::OpenAI,
-        "anthropic_compatible" => ChatProviderId::AnthropicCompatible,
-        "openai_compatible" => ChatProviderId::OpenAICompatible,
-        "openrouter" => ChatProviderId::OpenRouter,
-        "local_gguf" => ChatProviderId::LocalGguf,
-        other => return Err(format!("unknown provider: {other}")),
-    };
+    let provider_id: ChatProviderId = parse_provider_id(&provider_str)
+        .ok_or_else(|| format!("unknown provider: {provider_str}"))?;
 
     // 3b. Local model auto-warm on restart. After an app restart the
     // llama-server sidecar is gone, but the session still remembers the model
@@ -2066,24 +2059,10 @@ pub(crate) fn persist_partial_row(
     let _ = db::add_chat_message(
         conn,
         db::NewChatMessage {
-            chat_session_id,
-            role: "assistant",
-            content: trimmed,
-            input_tokens: None,
-            output_tokens: None,
-            cost_usd: None,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-            reasoning_output_tokens: None,
             provider: provider_val,
             model_key,
-            pricing_estimated_usd: None,
-            started_at: None,
             completed_at: Some(db::now_ts()),
-            llm_time_ms: None,
-            tool_time_ms: None,
-            ttft_ms: None,
-            tokens_per_second: None,
+            ..db::NewChatMessage::assistant(chat_session_id, trimmed)
         },
     );
     let _ = db::touch_chat_session(conn, chat_session_id);

@@ -21,8 +21,9 @@ import {
   toastError,
   toastSuccess,
   type ChatProvider,
-  getChatConfig,
-  type ChatConfigPayload,
+  listChatInstances,
+  providerKindOf,
+  type ChatInstancePayload,
   type ConnectorWithStatus,
   type DataPaths,
   type GgufModel,
@@ -55,9 +56,12 @@ export function ApiKeysPanel() {
   const clearApiKeyFn = useChatStore((s) => s.clearApiKey);
   const loadConfigFn = useChatStore((s) => s.loadConfig);
 
-  const [provider, setProvider] = useState<ChatProvider>("anthropic");
+  // The selected ENDPOINT id — a bare kind ("anthropic", the kind's default)
+  // or "<kind>-<suffix>" for extra endpoints of the same kind. The protocol
+  // kind behind it is `selectedKind` below.
+  const [provider, setProvider] = useState<string>("anthropic");
   // Latest selected provider for async closures (see handleFetchModels).
-  const providerRef = useRef<ChatProvider>(provider);
+  const providerRef = useRef<string>(provider);
   providerRef.current = provider;
   // Monotonic ticket for in-flight fetches (see handleFetchModels).
   const fetchTicketRef = useRef(0);
@@ -84,23 +88,17 @@ export function ApiKeysPanel() {
   // label. Empty falls back to the kind label (also the field's placeholder).
   const [displayName, setDisplayName] = useState("");
 
-  // Saved-providers summary: fetched once on mount, refreshed after save/clear.
+  // Saved ENDPOINTS: every entry of the instance registry, keyed by id.
+  // Fetched once on mount, refreshed after save/clear.
   const [savedProviders, setSavedProviders] = useState<
-    Record<string, ChatConfigPayload> | null
+    Record<string, ChatInstancePayload> | null
   >(null);
   const refreshSavedProviders = async () => {
-    const ids: ChatProvider[] = [
-      "anthropic",
-      "openai",
-      "openrouter",
-      "anthropic_compatible",
-      "openai_compatible",
-    ];
     try {
-      const results = await Promise.all(ids.map((id) => getChatConfig(id)));
-      const out: Record<string, ChatConfigPayload> = {};
-      ids.forEach((id, i) => {
-        if (results[i]) out[id] = results[i]!;
+      const instances = (await listChatInstances()) ?? [];
+      const out: Record<string, ChatInstancePayload> = {};
+      instances.forEach((inst) => {
+        out[inst.id] = inst;
       });
       setSavedProviders(out);
     } catch (e) {
@@ -109,10 +107,11 @@ export function ApiKeysPanel() {
     }
   };
 
-  const isCompatible = provider === "anthropic_compatible" || provider === "openai_compatible";
+  const selectedKind = providerKindOf(provider);
+  const isCompatible = selectedKind === "anthropic_compatible" || selectedKind === "openai_compatible";
   // OpenRouter uses a fixed endpoint (no base-URL field) but still supports
   // fetching its model catalogue from `/v1/models`.
-  const isOpenRouter = provider === "openrouter";
+  const isOpenRouter = selectedKind === "openrouter";
   const canFetchModels = isCompatible || isOpenRouter;
   const hasExistingKey = config?.provider === provider && config?.hasKey;
 
@@ -246,6 +245,7 @@ export function ApiKeysPanel() {
         isCompatible ? baseUrl : undefined,
         model || undefined,
         displayName.trim() || selectedProvider.label,
+        selectedKind,
       );
       // Clear the API key field after successful save (security)
       setApiKey("");
@@ -292,7 +292,7 @@ export function ApiKeysPanel() {
     { id: "anthropic_compatible", label: "Anthropic Compatible", short: "A/", description: "Custom Anthropic-compatible endpoint" },
     { id: "openai_compatible", label: "OpenAI Compatible", short: "O/", description: "Custom OpenAI-compatible endpoint" },
   ];
-  const selectedProvider = PROVIDERS.find((item) => item.id === provider) ?? PROVIDERS[0];
+  const selectedProvider = PROVIDERS.find((item) => item.id === selectedKind) ?? PROVIDERS[0];
   const selectedConfig = savedProviders?.[provider];
   const savedModel = selectedConfig?.model || model;
   const endpoint = isCompatible
@@ -301,19 +301,35 @@ export function ApiKeysPanel() {
       ? "https://openrouter.ai/api"
       : "Provider-managed endpoint";
 
-  // An endpoint counts as "added" once it has a key or (compatible providers)
-  // a base URL. Only added endpoints appear on the rail — the full list of
-  // protocol kinds lives in the Add API form's type dropdown instead.
-  const isAdded = (cfg?: ChatConfigPayload) =>
-    Boolean(cfg && (cfg.hasKey || (cfg.baseUrl ?? "").trim().length > 0));
-  const addedProviders = PROVIDERS.filter((item) => isAdded(savedProviders?.[item.id]));
-  const availableKinds = PROVIDERS.filter((item) => !isAdded(savedProviders?.[item.id]));
-  const allAdded = savedProviders !== null && availableKinds.length === 0;
+  // The rail lists every saved ENDPOINT (the instance registry); the kind
+  // dropdown in the add form offers ALL protocol kinds — a kind can be added
+  // any number of times, each add becoming its own named endpoint.
+  const addedInstances = savedProviders ? Object.values(savedProviders) : [];
   // Fresh installs land straight in the add flow: with nothing on the rail
   // yet, the detail pane IS the Add API form.
-  const showAddForm = addingNew || (savedProviders !== null && addedProviders.length === 0);
-  const railLabel = (item: (typeof PROVIDERS)[number]) =>
-    savedProviders?.[item.id]?.displayName?.trim() || item.label;
+  const showAddForm = addingNew || (savedProviders !== null && addedInstances.length === 0);
+  const kindLabel = (kind: string) =>
+    PROVIDERS.find((item) => item.id === kind)?.label ?? kind;
+  const railLabel = (inst: ChatInstancePayload) =>
+    inst.displayName?.trim() || kindLabel(inst.kind);
+
+  // New endpoint ids: a kind's FIRST endpoint reuses the bare kind id (so
+  // legacy/active-provider logic keeps working); further ones get
+  // "<kind>-<suffix>". `except` drops endpoints being deleted/re-added.
+  const makeInstanceIdForKind = (kind: ChatProvider, except: string[]): string => {
+    const taken = new Set(
+      Object.values(savedProviders ?? {})
+        .map((inst) => inst.id)
+        .filter((id) => !except.includes(id)),
+    );
+    if (!taken.has(kind)) return kind;
+    const alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
+    let id: string = kind;
+    do {
+      id = `${kind}-${Array.from({ length: 5 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("")}`;
+    } while (taken.has(id));
+    return id;
+  };
 
   // Mirror the saved display name into the form whenever the selection or the
   // saved summary changes — unless the user is in the add flow (the kind
@@ -329,8 +345,8 @@ export function ApiKeysPanel() {
   // added, showAddForm already owns the pane.
   useEffect(() => {
     if (!savedProviders || addingNew) return;
-    if (isAdded(savedProviders?.[provider])) return;
-    const first = PROVIDERS.find((item) => isAdded(savedProviders?.[item.id]));
+    if (savedProviders[provider]) return;
+    const first = Object.values(savedProviders)[0];
     if (first) {
       setProvider(first.id);
       formDirtyRef.current = false;
@@ -345,13 +361,14 @@ export function ApiKeysPanel() {
     // the same kind so the form never shows a removed endpoint as editable.
     setAddingNew(true);
     formDirtyRef.current = false;
+    setProvider(makeInstanceIdForKind(selectedKind, [provider]));
     setDisplayName(selectedProvider.label);
   };
 
   // When the user switches provider, load that provider's config so hasKey
   // is always accurate for the selected provider. Fields are pre-filled by
   // the config effect above when the response arrives.
-  const onProviderChange = (v: ChatProvider) => {
+  const onProviderChange = (v: string) => {
     setProvider(v);
     setApiKey("");
     setFetchedModels([]);
@@ -373,26 +390,26 @@ export function ApiKeysPanel() {
       <div className="api-settings-shell">
         <aside className="api-provider-rail" aria-label="API providers">
           <div className="api-provider-rail-items">
-            {savedProviders !== null && addedProviders.length === 0 && (
+            {savedProviders !== null && addedInstances.length === 0 && (
               <div className="api-provider-rail-empty">No APIs yet — add one to get started.</div>
             )}
-            {addedProviders.map((item) => {
-              const label = railLabel(item);
-              const isSelected = item.id === provider;
-              const isSaved = Boolean(savedProviders?.[item.id]?.hasKey);
+            {addedInstances.map((inst) => {
+              const label = railLabel(inst);
+              const kindMeta = PROVIDERS.find((item) => item.id === inst.kind);
+              const isSelected = inst.id === provider;
               return (
-                <div key={item.id} className={`api-provider-item${isSelected ? " selected" : ""}`}>
+                <div key={inst.id} className={`api-provider-item${isSelected ? " selected" : ""}`}>
                   <button
                     type="button"
                     className="api-provider-select"
                     aria-current={isSelected ? "page" : undefined}
                     aria-label={`Select ${label}`}
-                    title={item.label}
-                    onClick={() => onProviderChange(item.id)}
+                    title={kindMeta?.label ?? inst.kind}
+                    onClick={() => onProviderChange(inst.id)}
                   >
-                    <span className="api-provider-mark" aria-hidden="true">{item.short}</span>
+                    <span className="api-provider-mark" aria-hidden="true">{kindMeta?.short ?? "•"}</span>
                     <span className="api-provider-item-label">{label}</span>
-                    <span className={`api-provider-status${isSaved ? " connected" : ""}`} aria-label={isSaved ? "Connected" : "Not connected"} />
+                    <span className={`api-provider-status${inst.hasKey ? " connected" : ""}`} aria-label={inst.hasKey ? "Connected" : "Not connected"} />
                   </button>
                   <button
                     type="button"
@@ -400,8 +417,8 @@ export function ApiKeysPanel() {
                     aria-label={`Remove ${label}`}
                     title={`Remove ${label}`}
                     onClick={() => {
-                      void clearApiKeyFn(item.id).then(async () => {
-                        if (item.id === provider) {
+                      void clearApiKeyFn(inst.id).then(async () => {
+                        if (inst.id === provider) {
                           setApiKey("");
                           setBaseUrl("");
                           setModel("");
@@ -409,8 +426,10 @@ export function ApiKeysPanel() {
                           setFetchError(null);
                           setAddingNew(true);
                           formDirtyRef.current = false;
-                          setDisplayName(item.label);
-                          await loadConfigFn(item.id);
+                          setDisplayName(kindMeta?.label ?? inst.kind);
+                          const nextId = makeInstanceIdForKind(inst.kind, [inst.id]);
+                          setProvider(nextId);
+                          await loadConfigFn(nextId);
                         }
                         await refreshSavedProviders();
                       });
@@ -426,11 +445,10 @@ export function ApiKeysPanel() {
             type="button"
             className="api-provider-add"
             aria-label="Add a new provider"
-            title={allAdded ? "All provider types are already added" : undefined}
-            disabled={allAdded}
             onClick={() => {
-              const target = availableKinds[0] ?? PROVIDERS[0];
-              setProvider(target.id);
+              const target = PROVIDERS[0];
+              const id = makeInstanceIdForKind(target.id, []);
+              setProvider(id);
               setApiKey("");
               setBaseUrl("");
               setModel("");
@@ -439,7 +457,7 @@ export function ApiKeysPanel() {
               setAddingNew(true);
               formDirtyRef.current = false;
               setDisplayName(target.label);
-              void loadConfigFn(target.id);
+              void loadConfigFn(id);
             }}
           >
             <Plus size={16} />
@@ -453,7 +471,7 @@ export function ApiKeysPanel() {
               <span className="api-provider-large-mark" aria-hidden="true">{selectedProvider.short}</span>
               <div>
                 <div className="api-provider-title-row">
-                  <h4 id="api-provider-title">{showAddForm ? "Add API" : railLabel(selectedProvider)}</h4>
+                  <h4 id="api-provider-title">{showAddForm ? "Add API" : (selectedConfig ? railLabel(selectedConfig) : selectedProvider.label)}</h4>
                   {!showAddForm && (
                     <span className={`api-connection-badge${hasExistingKey ? " connected" : ""}`}>
                       <span className="api-connection-dot" />
@@ -464,8 +482,8 @@ export function ApiKeysPanel() {
                 <p>{showAddForm ? "Name the endpoint, pick its type, and add your key." : selectedProvider.description}</p>
               </div>
             </div>
-            {!showAddForm && isAdded(selectedConfig) && (
-              <button type="button" className="api-icon-button danger" aria-label={`Remove ${railLabel(selectedProvider)}`} title={`Remove ${railLabel(selectedProvider)}`} onClick={() => void clearSelectedProvider()}>
+            {!showAddForm && selectedConfig && (
+              <button type="button" className="api-icon-button danger" aria-label={`Remove ${railLabel(selectedConfig)}`} title={`Remove ${railLabel(selectedConfig)}`} onClick={() => void clearSelectedProvider()}>
                 <Trash2 size={16} />
               </button>
             )}
@@ -504,17 +522,16 @@ export function ApiKeysPanel() {
             <div className="api-form-field">
               <label htmlFor="api-provider-kind">Provider type</label>
               <GlassSelect<ChatProvider>
-                value={provider}
+                value={selectedKind}
                 disabled={!showAddForm}
-                options={(showAddForm
-                  ? availableKinds
-                  : PROVIDERS.filter((item) => item.id === provider)
-                ).map((item) => ({ value: item.id, label: item.label }))}
+                options={PROVIDERS.map((item) => ({ value: item.id, label: item.label }))}
                 onChange={(v) => {
                   // Reachable only in the add flow (locked while editing):
-                  // a kind switch resets the fields and reseeds the name with
-                  // that kind's label unless a custom name was already typed.
-                  setProvider(v);
+                  // a kind switch mints a fresh endpoint id for that kind —
+                  // every kind can be added any number of times — resets the
+                  // fields, and reseeds the name unless one was already typed.
+                  const id = makeInstanceIdForKind(v, []);
+                  setProvider(id);
                   setApiKey("");
                   setBaseUrl("");
                   setModel("");
@@ -527,7 +544,7 @@ export function ApiKeysPanel() {
                       ? PROVIDERS.find((p) => p.id === v)?.label ?? v
                       : prev;
                   });
-                  void loadConfigFn(v);
+                  void loadConfigFn(id);
                 }}
                 aria-label="Provider type"
               />

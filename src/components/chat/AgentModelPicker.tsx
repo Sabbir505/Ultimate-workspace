@@ -22,7 +22,7 @@
 // on an agent with another agent's model attached.
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { listHarnesses, listAcpAgents, listHarnessModels, listChatModels, scanLocalModels, getChatConfig, type ChatConfigPayload, type GgufModel, type HarnessModelConfig, type LlamaOverrides } from "../../lib/ipc";
+import { listHarnesses, listAcpAgents, listHarnessModels, listChatModels, scanLocalModels, listChatInstances, providerKindOf, type ChatInstancePayload, type GgufModel, type HarnessModelConfig, type LlamaOverrides } from "../../lib/ipc";
 import type { HarnessStatus, AcpAgentStatus } from "../../types";
 import { fuzzyFilter, type FuzzyResult } from "../../lib/fuzzy";
 import { shortModelName } from "../../lib/modelLabel";
@@ -79,6 +79,13 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
   anthropic_compatible: "Anthropic-compatible",
   openai_compatible: "OpenAI-compatible",
 };
+
+/** Display name for a saved endpoint: the user-assigned name when set, else
+ *  the protocol kind's label (extra endpoints of a kind share the kind's
+ *  label until named). */
+function instanceLabel(inst: ChatInstancePayload): string {
+  return inst.displayName?.trim() || PROVIDER_LABELS[providerKindOf(inst.id) as ProviderId] || "API";
+}
 
 /** What a committed pick looks like — ChatView turns this into the session's
  *  agent/provider/model (spawning the local sidecar when provider is
@@ -172,7 +179,17 @@ export function AgentModelPickerInner({
   const [query, setQuery] = useState("");
   const [harnesses, setHarnesses] = useState<HarnessStatus[]>(() => getCachedAgentStatuses()?.harnesses ?? []);
   const [acpAgents, setAcpAgents] = useState<AcpAgentStatus[]>(() => getCachedAgentStatuses()?.acpAgents ?? []);
-  const [providerCfgs, setProviderCfgs] = useState<Partial<Record<ProviderId, ChatConfigPayload>>>({});
+  // Saved cloud ENDPOINTS (Settings → API), keyed by endpoint id. A kind
+  // can be added several times — each instance is its own rail entry with
+  // its own name, endpoint, and curated model list.
+  const [providerCfgs, setProviderCfgs] = useState<Record<string, ChatInstancePayload>>({});
+  // Display name for the session's endpoint: its user-assigned name when it
+  // is still in the registry, else the protocol kind's label.
+  const providerDisplayName = (id: string): string => {
+    const saved = providerCfgs[id];
+    if (saved) return instanceLabel(saved);
+    return PROVIDER_LABELS[providerKindOf(id) as ProviderId] ?? "API";
+  };
   const [pane, setPane] = useState<PaneData | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   // Gear panel: which local model row has its advanced-settings panel open,
@@ -316,19 +333,19 @@ export function AgentModelPickerInner({
       setHarnesses(h);
       setAcpAgents(a);
     });
-    void Promise.all(PROVIDER_IDS.map((id) => getChatConfig(id)))
-      .then((cfgs) => {
-        const out: Partial<Record<ProviderId, ChatConfigPayload>> = {};
-        PROVIDER_IDS.forEach((id, i) => {
-          if (cfgs[i]) out[id] = cfgs[i]!;
+    void listChatInstances()
+      .then((instances) => {
+        const out: Record<string, ChatInstancePayload> = {};
+        (instances ?? []).forEach((inst) => {
+          out[inst.id] = inst;
         });
         setProviderCfgs(out);
-        // Warm panes we have no list for yet (first open of the run, or a
-        // provider keyed since the last open) so the first click on their
+        // Warm panes we have no list for yet (first open of the run, or an
+        // endpoint keyed since the last open) so the first click on their
         // rail entry renders rows immediately instead of a spinner.
-        for (const id of PROVIDER_IDS) {
-          if (!out[id]?.hasKey) continue;
-          const key = `provider:${id}`;
+        for (const inst of Object.values(out)) {
+          if (!inst.hasKey) continue;
+          const key = `provider:${inst.id}`;
           if (paneCache.has(key) || paneInFlight.has(key)) continue;
           startPaneFetch(key);
         }
@@ -430,12 +447,11 @@ export function AgentModelPickerInner({
     const direct: RailEntry[] = [
       { key: "local", label: "Local model", enabled: true },
     ];
-    for (const p of PROVIDER_IDS) {
-      const cfg = providerCfgs[p];
-      if (!cfg?.hasKey) continue;
+    for (const inst of Object.values(providerCfgs)) {
+      if (!inst.hasKey) continue;
       direct.push({
-        key: `provider:${p}`,
-        label: PROVIDER_LABELS[p],
+        key: `provider:${inst.id}`,
+        label: instanceLabel(inst),
         enabled: true,
       });
     }
@@ -452,7 +468,7 @@ export function AgentModelPickerInner({
     const a = acpIdOf(agent);
     if (a) return `acp:${a}`;
     if (agent === "local") return "local";
-    if (agent === "builtin" && provider && PROVIDER_IDS.includes(provider as ProviderId)) {
+    if (agent === "builtin" && provider && provider !== "auto" && provider !== "local_gguf") {
       return `provider:${provider}`;
     }
     return null;
@@ -536,7 +552,7 @@ export function AgentModelPickerInner({
    *  (read live from providerCfgs so it's correct even when the model fetch
    *  was served from cache). */
   const paneEndpoint = railKey.startsWith("provider:")
-    ? (providerCfgs[railKey.slice("provider:".length) as ProviderId]?.baseUrl ?? null)
+    ? (providerCfgs[railKey.slice("provider:".length)]?.baseUrl ?? null)
     : (pane?.endpoint ?? null);
 
   const ranked = useMemo(() => {
@@ -634,11 +650,11 @@ export function AgentModelPickerInner({
     }
     if (agent === "builtin" && provider === "auto") return "Auto";
     if (agent === "builtin") {
-      const p = (provider ?? "") as ProviderId;
-      return model ? (modelLabels?.[model] ?? model) : (PROVIDER_LABELS[p] ?? "API");
+      const p = provider ?? "";
+      return model ? (modelLabels?.[model] ?? model) : providerDisplayName(p);
     }
     return null;
-  }, [agent, model, provider, modelLabels, harnesses, acpAgents]);
+  }, [agent, model, provider, modelLabels, harnesses, acpAgents, providerCfgs]);
 
   // Full "Provider · model" text for the tooltip (the label alone no longer
   // names the provider).
@@ -660,12 +676,12 @@ export function AgentModelPickerInner({
         : "Auto — Relay picks an available cloud model";
     }
     if (agent === "builtin") {
-      const p = (provider ?? "") as ProviderId;
-      const name = PROVIDER_LABELS[p] ?? "API";
+      const p = provider ?? "";
+      const name = providerDisplayName(p);
       return model ? `${name} · ${model}` : name;
     }
     return null;
-  }, [agent, model, provider, modelLabels, harnesses, acpAgents]);
+  }, [agent, model, provider, modelLabels, harnesses, acpAgents, providerCfgs]);
 
   // Same icon set the picker rail renders (Claude slash-A, OpenAI knot, …);
   // falls back to the colored dot for anything the rail doesn't mark.
@@ -678,11 +694,11 @@ export function AgentModelPickerInner({
     if (agent === "local") return railIcon("local", "Local");
     if (agent === "builtin" && provider === "auto") return railIcon("auto", "Auto");
     if (agent === "builtin") {
-      const p = (provider ?? "") as ProviderId;
-      return railIcon(`provider:${p}`, PROVIDER_LABELS[p] ?? "API");
+      const p = provider ?? "";
+      return railIcon(`provider:${providerKindOf(p)}`, providerDisplayName(p));
     }
     return null;
-  }, [agent, provider]);
+  }, [agent, provider, providerCfgs]);
 
   const dotClass =
     agent == null ? null : harnessIdOf(agent) || acpIdOf(agent) ? "" : agent === "local" ? "local" : "cloud";

@@ -49,6 +49,31 @@ impl ChatProviderId {
     }
 }
 
+/// True for the protocol-kind ids (`ChatProviderId::as_str` values).
+pub fn is_known_kind(s: &str) -> bool {
+    matches!(
+        s,
+        "anthropic"
+            | "openai"
+            | "openrouter"
+            | "anthropic_compatible"
+            | "openai_compatible"
+            | "local_gguf"
+    )
+}
+
+/// Endpoint ids are either a bare kind ("anthropic" — a kind's default /
+/// legacy endpoint) or "<kind>-<suffix>" (an extra endpoint of the same
+/// kind, e.g. "openai_compatible-x7f2"). Extracts the protocol kind so
+/// protocol dispatch never needs a settings lookup. Ids not shaped
+/// "<known_kind>-<suffix>" are returned unchanged.
+pub fn provider_kind(id: &str) -> &str {
+    match id.split_once('-') {
+        Some((kind, suffix)) if is_known_kind(kind) && !suffix.is_empty() => kind,
+        _ => id,
+    }
+}
+
 /// A base64-encoded image attached to a user message, sent to vision-capable
 /// models as a proper image content part (not inlined as garbled text).
 #[derive(Debug, Clone, Serialize, Deserialize)]

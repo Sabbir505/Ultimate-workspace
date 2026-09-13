@@ -20,13 +20,45 @@ pub fn set_chat_api_key(
     base_url: Option<String>,
     model: Option<String>,
     display_name: Option<String>,
+    kind: Option<String>,
     db: State<'_, DbState>,
 ) -> CmdResult<()> {
     if provider.trim().is_empty() {
         return Err("provider must not be empty".to_string());
     }
+    let provider = provider.trim().to_string();
+    if !provider
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return Err("provider id must be lowercase letters, digits, '_' or '-'".to_string());
+    }
 
     let conn = db.0.lock();
+
+    // Endpoint registry: every saved endpoint is an instance of a protocol
+    // kind. Extra endpoints of the same kind carry suffixed ids
+    // ("<kind>-<suffix>", kind passed by the Settings add form); bare-kind
+    // ids (onboarding / pre-instancing data) self-register with
+    // kind == provider. Saving an unknown id without a kind is rejected —
+    // it could never appear on the rail.
+    let resolved_kind = match kind.as_deref() {
+        Some(k) if crate::chat::providers::is_known_kind(k) => Some(k.to_string()),
+        Some(other) => return Err(format!("unknown provider kind: {other}")),
+        None => None,
+    };
+    let effective_kind = resolved_kind.or_else(|| {
+        if crate::chat::providers::is_known_kind(&provider) {
+            Some(provider.clone())
+        } else {
+            None
+        }
+    });
+    if effective_kind.is_none() {
+        return Err("provider kind is required for new endpoints".to_string());
+    }
+    instance_ids_upsert(&conn, &provider);
+
     // local_gguf has no API key (llama-server is keyless). Skip the keychain
     // entirely — only persist base_url/model/active_provider.
     if provider != "local_gguf" {
@@ -72,6 +104,7 @@ pub fn set_chat_api_key(
 pub fn delete_chat_api_key(provider: String, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     secrets::delete_chat_api_key(&conn, &provider)?;
+    instance_ids_remove(&conn, &provider);
     // Clearing a provider removes its whole configuration, not just the key.
     conn.execute(
         "DELETE FROM app_settings WHERE key IN (?1, ?2, ?3)",
@@ -258,7 +291,7 @@ pub async fn list_chat_models(
             let conn = db.0.lock();
             db::get_setting(&conn, &format!("chat.{provider}.base_url"))
                 .map_err(|e| e.to_string())?
-                .or_else(|| match provider.as_str() {
+                .or_else(|| match crate::chat::providers::provider_kind(&provider) {
                     "openrouter" => Some(OpenRouterProvider::DEFAULT_BASE.to_string()),
                     "anthropic" => Some(AnthropicProvider::DEFAULT_BASE.to_string()),
                     "openai" => Some(OpenAIProvider::DEFAULT_BASE.to_string()),
@@ -281,3 +314,95 @@ pub async fn list_chat_models(
     fetch_models_list(&provider, base, key).await
 }
 
+
+// ---- Endpoint instance registry ----
+//
+// A "provider" used to be one settings slot per protocol kind. Endpoints are
+// now instances: id `anthropic` is a kind's default endpoint (all pre-
+// instancing data), `openai_compatible-x7f2` an extra endpoint of the same
+// kind. The registry (`chat.instance_ids`, a JSON array in add order) lists
+// every saved endpoint so the settings rail and the composer picker can
+// enumerate them; per-endpoint config lives in the usual `chat.<id>.*` keys
+// and the keychain, so nothing else had to move.
+
+fn instance_ids_read(conn: &rusqlite::Connection) -> Vec<String> {
+    db::get_setting(conn, "chat.instance_ids")
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn instance_ids_write(conn: &rusqlite::Connection, ids: &[String]) -> CmdResult<()> {
+    let raw = serde_json::to_string(ids).map_err(|e| e.to_string())?;
+    db::set_setting(conn, "chat.instance_ids", &raw).map_err(|e| e.to_string())
+}
+
+fn instance_ids_upsert(conn: &rusqlite::Connection, id: &str) {
+    let mut ids = instance_ids_read(conn);
+    if !ids.iter().any(|i| i == id) {
+        ids.push(id.to_string());
+        let _ = instance_ids_write(conn, &ids);
+    }
+}
+
+fn instance_ids_remove(conn: &rusqlite::Connection, id: &str) {
+    let ids = instance_ids_read(conn);
+    if ids.iter().any(|i| i == id) {
+        let kept: Vec<String> = ids.into_iter().filter(|i| i != id).collect();
+        let _ = instance_ids_write(conn, &kept);
+    }
+}
+
+/// Every saved endpoint (Settings rail / composer "Direct API" entries):
+/// the registry plus any legacy bare-kind endpoint that still has a key or
+/// base URL but predates the registry. `local_gguf` is a sidecar, not a
+/// saved endpoint, and never appears.
+#[tauri::command(async)]
+pub fn list_chat_instances(db: State<'_, DbState>) -> CmdResult<Vec<ChatInstancePayload>> {
+    let conn = db.0.lock();
+    let mut ids = instance_ids_read(&conn);
+    for kind in [
+        "anthropic",
+        "openai",
+        "openrouter",
+        "anthropic_compatible",
+        "openai_compatible",
+    ] {
+        if ids.iter().any(|i| i == kind) {
+            continue;
+        }
+        let has_key = secrets::has_chat_api_key(&conn, kind);
+        let has_base = db::get_setting(&conn, &format!("chat.{kind}.base_url"))
+            .ok()
+            .flatten()
+            .is_some_and(|b| !b.trim().is_empty());
+        if has_key || has_base {
+            ids.push(kind.to_string());
+        }
+    }
+
+    Ok(ids
+        .into_iter()
+        .filter(|id| id != "local_gguf")
+        .map(|id| {
+            let kind = crate::chat::providers::provider_kind(&id).to_string();
+            let display_name = db::get_setting(&conn, &format!("chat.{id}.display_name"))
+                .ok()
+                .flatten();
+            let base_url = db::get_setting(&conn, &format!("chat.{id}.base_url"))
+                .ok()
+                .flatten();
+            let model = db::get_setting(&conn, &format!("chat.{id}.model")).ok().flatten();
+            let has_key = secrets::has_chat_api_key(&conn, &id);
+            ChatInstancePayload {
+                id,
+                kind,
+                display_name,
+                base_url,
+                model,
+                has_key,
+            }
+        })
+        .collect())
+}

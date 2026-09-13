@@ -230,7 +230,9 @@ pub(crate) fn effective_session_window(
 /// Map a provider id string to the ChatProviderId enum (send-path dispatch,
 /// auto fail-over chain building, and the context-meter paths).
 pub(crate) fn parse_provider_id(s: &str) -> Option<ChatProviderId> {
-    match s {
+    // Instance ids ("openai_compatible-x7f2") resolve to their kind; bare
+    // kinds pass through unchanged.
+    match crate::chat::providers::provider_kind(s) {
         "anthropic" => Some(ChatProviderId::Anthropic),
         "openai" => Some(ChatProviderId::OpenAI),
         "anthropic_compatible" => Some(ChatProviderId::AnthropicCompatible),

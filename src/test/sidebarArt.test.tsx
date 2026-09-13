@@ -1,7 +1,7 @@
 // Sidebar art tests: the header paints the art on a masked layer (feathered
 // edge, no hard stop), the panel previews it miniaturized, the stock gallery
-// selects presets, and the upload flow calls import → read → store update.
-// IPC is stubbed; the dialog module is mocked at its dynamic-import site.
+// selects presets, and the upload flow calls the backend import (which owns
+// the native file dialog) → read → store update. IPC is stubbed.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
@@ -12,7 +12,6 @@ const setPresetMock = vi.fn();
 const getSettingMock = vi.fn();
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
-const dialogOpenMock = vi.fn();
 
 vi.mock("../lib/ipc", () => ({
   importSidebarArt: (...a: unknown[]) => importArtMock(...a),
@@ -28,10 +27,6 @@ vi.mock("../lib/ipc", () => ({
   sidebarArtPresetUrl: (id: string) => `/sideart/${id}.png`,
   toastError: (...a: unknown[]) => toastErrorMock(...a),
   toastSuccess: (...a: unknown[]) => toastSuccessMock(...a),
-}));
-
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: (...a: unknown[]) => dialogOpenMock(...a),
 }));
 
 import { SidebarHeader } from "../components/sidebar/Sidebar";
@@ -119,24 +114,23 @@ describe("SidebarArtPanel", () => {
     expect(useAppearanceStore.getState().artPreset).toBe("ember");
   });
 
-  it("uploads: dialog pick → import → read → store update", async () => {
+  it("uploads: backend import → read → store update (no renderer-supplied path)", async () => {
     readArtMock.mockResolvedValue(DATA_URL);
-    dialogOpenMock.mockResolvedValue("C:\\pics\\art.png");
     render(<SidebarArtPanel />);
     fireEvent.click(screen.getByText("Upload your own"));
-    await waitFor(() => expect(importArtMock).toHaveBeenCalledWith("C:\\pics\\art.png"));
+    await waitFor(() => expect(importArtMock).toHaveBeenCalledWith());
     await waitFor(() => expect(useAppearanceStore.getState().artData).toBe(DATA_URL));
     expect(useAppearanceStore.getState().artPreset).toBeNull();
     expect(toastSuccessMock).toHaveBeenCalledWith("Sidebar art updated");
     expect(screen.getByText("Remove")).toBeTruthy();
   });
 
-  it("cancelling the dialog imports nothing", async () => {
-    dialogOpenMock.mockResolvedValue(null);
+  it("cancelling the backend dialog surfaces the error and imports nothing", async () => {
+    importArtMock.mockRejectedValue("no image picked");
     render(<SidebarArtPanel />);
     fireEvent.click(screen.getByText("Upload your own"));
-    await waitFor(() => expect(dialogOpenMock).toHaveBeenCalled());
-    expect(importArtMock).not.toHaveBeenCalled();
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
+    expect(useAppearanceStore.getState().artData).toBeNull();
   });
 
   it("remove clears the store and the backend entry", async () => {
@@ -150,7 +144,6 @@ describe("SidebarArtPanel", () => {
 
   it("surfaces import failures as toasts", async () => {
     importArtMock.mockRejectedValue(new Error("boom"));
-    dialogOpenMock.mockResolvedValue("C:\\pics\\art.bmp");
     render(<SidebarArtPanel />);
     fireEvent.click(screen.getByText("Upload your own"));
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());

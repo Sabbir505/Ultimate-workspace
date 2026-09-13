@@ -29,6 +29,35 @@ pub const AUTO_PROVIDERS: [&str; 5] = [
     "openai_compatible",
 ];
 
+/// Synchronous fallback resolver — the core the mobile WS path runs (its
+/// dispatch is sync, so no live /v1/models fetch): the first keyed provider
+/// in static preference order that the health store hasn't excluded, with its
+/// persisted default model. The desktop send path layers the full
+/// context-aware [`resolve`] on top of this same ordering. `None` = no keyed,
+/// healthy provider — the caller surfaces "add an API key".
+pub fn resolve_sync_default(conn: &rusqlite::Connection, now: i64) -> Option<(String, String)> {
+    for p in AUTO_PROVIDERS {
+        if !crate::secrets::has_chat_api_key(conn, p) {
+            continue;
+        }
+        if crate::chat::model_health::provider_excluded(conn, p, now).is_some() {
+            continue;
+        }
+        let default_model = crate::db::get_setting(conn, &format!("chat.{p}.model"))
+            .ok()
+            .flatten()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| {
+                let pid = crate::chat::commands::parse_provider_id(p);
+                crate::chat::streaming::resolve_provider(&pid.unwrap())
+                    .default_model()
+                    .to_string()
+            });
+        return Some((p.to_string(), default_model));
+    }
+    None
+}
+
 /// The send path's hardcoded per-turn cap (commands.rs `max_tokens`); the
 /// resolver reserves room for it on top of the estimated prompt.
 pub const MAX_RESPONSE_TOKENS: u64 = 4096;

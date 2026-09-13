@@ -50,16 +50,29 @@ fn remove_stored_files(data_dir: &std::path::Path) {
     }
 }
 
-/// Import a picked image: validate, copy into the app data dir, remember the
+/// Import a picked image: NATIVE file dialog first (exec-gate principle —
+/// the renderer used to pass an arbitrary path here, which made this an
+/// image-only arbitrary-read primitive; the file must now be picked outside
+/// the webview), then validate, copy into the app data dir, remember the
 /// path in settings, and return it. The stored file is what later launches
 /// load from — the original can be deleted by the user without breaking us.
 #[tauri::command(async)]
 pub fn import_sidebar_art(
     app: AppHandle,
     db: State<'_, DbState>,
-    source_path: String,
 ) -> Result<String, String> {
-    let source = PathBuf::from(&source_path);
+    use tauri_plugin_dialog::DialogExt;
+
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter(
+            "Images",
+            &ALLOWED.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+        )
+        .blocking_pick_file()
+        .ok_or_else(|| "no image picked".to_string())?;
+    let source = picked.into_path().map_err(|e| e.to_string())?;
     let ext = source
         .extension()
         .and_then(|e| e.to_str())

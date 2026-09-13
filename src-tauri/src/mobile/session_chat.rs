@@ -319,31 +319,11 @@ fn handle_send_chat_message(
     //    persisted default model (the desktop composer path runs the full
     //    context-aware resolver and writes the pick back for stickiness).
     let (provider_str, model_str) = if provider_str == "auto" {
+        // Shared sync fallback resolver (auto_router::resolve_sync_default) —
+        // the ordering/keying/health logic used to be copy-pasted here.
         let picked: Option<(String, String)> = {
             let conn = db.lock();
-            let now = db::now_ts();
-            let mut chosen: Option<(String, String)> = None;
-            for p in crate::chat::auto_router::AUTO_PROVIDERS {
-                if !crate::secrets::has_chat_api_key(&conn, p) {
-                    continue;
-                }
-                if crate::chat::model_health::provider_excluded(&conn, p, now).is_some() {
-                    continue;
-                }
-                let default_model = db::get_setting(&conn, &format!("chat.{p}.model"))
-                    .ok()
-                    .flatten()
-                    .filter(|m| !m.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        let pid = crate::chat::commands::parse_provider_id(p);
-                        crate::chat::streaming::resolve_provider(&pid.unwrap())
-                            .default_model()
-                            .to_string()
-                    });
-                chosen = Some((p.to_string(), default_model));
-                break;
-            }
-            chosen
+            crate::chat::auto_router::resolve_sync_default(&conn, db::now_ts())
         };
         let Some((p, m)) = picked else {
             return Err(
@@ -362,7 +342,8 @@ fn handle_send_chat_message(
     } else {
         (provider_str, model)
     };
-    let provider_id = match provider_str.as_str() {
+    let provider_id = match crate::chat::providers::provider_kind(&provider_str) {
+        // Instance ids resolve to their kind (see provider_kind).
         "anthropic" => crate::chat::providers::ChatProviderId::Anthropic,
         "openai" => crate::chat::providers::ChatProviderId::OpenAI,
         "anthropic_compatible" => crate::chat::providers::ChatProviderId::AnthropicCompatible,

@@ -4,10 +4,12 @@
 // commands/appearance_cmds.rs.
 import { safeInvoke } from "../ipcCore";
 
-/** Import a picked image: validates, copies into the app data dir, and
- *  remembers it (replacing any preset). Returns the stored path. */
-export const importSidebarArt = (sourcePath: string) =>
-  safeInvoke<string>("import_sidebar_art", { sourcePath });
+/** Import a picked image: the BACKEND opens the native file dialog (so the
+ *  renderer never supplies a path — exec-gate principle), validates, copies
+ *  into the app data dir, and remembers it (replacing any preset). Returns
+ *  the stored path; cancelling the dialog errors. */
+export const importSidebarArt = () =>
+  safeInvoke<string>("import_sidebar_art");
 /** Select a bundled stock image by id (replaces any custom upload). */
 export const setSidebarArtPreset = (id: string) =>
   safeInvoke<void>("set_sidebar_art_preset", { id });

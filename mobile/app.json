@@ -3,7 +3,7 @@
     "name": "Relay Mobile",
     "slug": "relay-mobile",
     "scheme": "relay",
-    "version": "1.0.0",
+    "version": "0.4.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",

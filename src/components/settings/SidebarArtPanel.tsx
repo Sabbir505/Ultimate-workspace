@@ -4,7 +4,6 @@
 // picked file into the app data dir (original untouched). See
 // commands/appearance_cmds.rs + state/appearance.ts.
 import { useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { Check, Image as ImageIcon, Loader2, Search, Trash2, Upload } from "lucide-react";
 import {
   SIDEBAR_ART_PRESETS,
@@ -46,15 +45,9 @@ export function SidebarArtPanel() {
   const chooseFile = async () => {
     setBusy(true);
     try {
-      const picked = await open({
-        multiple: false,
-        directory: false,
-        filters: [
-          { name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif", "avif", "bmp"] },
-        ],
-      });
-      if (!picked || Array.isArray(picked)) return;
-      const stored = await importSidebarArt(picked);
+      // The backend opens the native file dialog itself — the renderer never
+      // supplies a path (exec-gate principle). Cancel surfaces as an error.
+      const stored = await importSidebarArt();
       if (stored) {
         // Read back the stored copy so preview and sidebar render the exact
         // bytes later launches will load.

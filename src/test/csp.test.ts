@@ -49,4 +49,15 @@ describe("artifact preview CSP", () => {
     // The app's own origin must stay trusted for its own scripts.
     expect(directive("script-src")).toContain("'self'");
   });
+
+  it("never allows connect-src to every HTTPS host", () => {
+    // A bare `https:` here let the main window (and, via inherited policy,
+    // every artifact preview iframe) fetch/POST any endpoint on the internet
+    // — a ready exfiltration channel for anything that ever injects HTML into
+    // the app origin. Remote connects stay pinned to the loopback (sidecars,
+    // dev server), huggingface.co (model-market catalog), and cdnjs (live
+    // previews fetching their CDN libs). Anything else belongs in Rust
+    // commands, which the CSP does not govern.
+    expect(directive("connect-src")).not.toContain("https:");
+  });
 });

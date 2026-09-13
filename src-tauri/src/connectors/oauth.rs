@@ -1316,14 +1316,17 @@ mod tests {
 
     #[test]
     fn form_encoded_token_response_parses_like_json() {
-        // The EXACT body GitHub's OAuth App token endpoint returned for the
-        // first live GitHub connect (form-urlencoded, percent-encoded scope):
-        // parsing it as JSON fails, which used to kill the whole flow silently.
-        let body = "access_token=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&scope=read%3Aorg%2Cread%3Auser%2Crepo%2Cuser%3Aemail&token_type=bearer";
+        // The body GitHub's OAuth App token endpoint returns (form-urlencoded,
+        // percent-encoded scope): parsing it as JSON fails, which used to kill
+        // the whole flow silently. The token value is a FAKE placeholder in
+        // the real format (`gho_` + 36 chars) — the parser only cares about
+        // the shape. (An early version of this fixture embedded a live token
+        // captured from an actual connect; that token has been revoked.)
+        let body = "access_token=gho_000000000000000000000000000000000000&scope=read%3Aorg%2Cread%3Auser%2Crepo%2Cuser%3Aemail&token_type=bearer";
         let v = parse_form_body(body).expect("form body parses");
         assert_eq!(
             v["access_token"].as_str(),
-            Some("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")
+            Some("gho_000000000000000000000000000000000000")
         );
         assert_eq!(
             v["scope"].as_str(),

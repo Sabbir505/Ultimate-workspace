@@ -113,6 +113,14 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         // below follow the mutating-tool gating (see tools/mod.rs family
         // block). Without them the model denies an app capability it has.
         openai_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
+        // Session Mesh — sibling-session awareness + consultation. The read
+        // trio is read-only; message/spawn are gated at dispatch (see
+        // dispatch.rs + plan.rs is_mutating_tool).
+        openai_fn(LIST_SESSIONS, LIST_SESSIONS_DESC, list_sessions_parameters()),
+        openai_fn(READ_SESSION, READ_SESSION_DESC, read_session_parameters()),
+        openai_fn(SEARCH_SESSIONS, SEARCH_SESSIONS_DESC, search_sessions_parameters()),
+        openai_fn(MESSAGE_SESSION, MESSAGE_SESSION_DESC, message_session_parameters()),
+        openai_fn(SPAWN_SESSION, SPAWN_SESSION_DESC, spawn_session_parameters()),
     ]);
     // Browser interaction tools — advertised only when the built-in pane has
     // a page (ToolCaps.browser is sticky per session, so a turn that opened
@@ -409,6 +417,12 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         ),
         // Automations — read-only list always on (mirror of the OpenAI block).
         anthropic_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
+        // Session Mesh — mirror of the OpenAI block above.
+        anthropic_fn(LIST_SESSIONS, LIST_SESSIONS_DESC, list_sessions_parameters()),
+        anthropic_fn(READ_SESSION, READ_SESSION_DESC, read_session_parameters()),
+        anthropic_fn(SEARCH_SESSIONS, SEARCH_SESSIONS_DESC, search_sessions_parameters()),
+        anthropic_fn(MESSAGE_SESSION, MESSAGE_SESSION_DESC, message_session_parameters()),
+        anthropic_fn(SPAWN_SESSION, SPAWN_SESSION_DESC, spawn_session_parameters()),
     ]);
     // Browser interaction tools — mirror of the OpenAI block's caps.browser
     // gate (sticky per session; refreshed mid-turn by streaming.rs).
@@ -1194,6 +1208,142 @@ const DELETE_AUTOMATION_DESC: &str = "Delete an automation by id, permanently an
 const RUN_AUTOMATION_NOW_DESC: &str = "Fire one run of an automation immediately; \
     it executes in the background and lands in the run history.";
 
+// ---- Session Mesh tool descriptions + schemas ----
+//
+// SESSION_MESH_DESIGN_ARCHITECTURE.md. Dispatched by crate::session_fabric
+// (NOT execute_tool) so harness CLIs reach the identical handlers through the
+// relay-tools bridge. The registry block injected into both prompt paths
+// states the caller's own session id — the `session_id` argument here refers
+// to PEER sessions from list_sessions.
+
+const LIST_SESSIONS_DESC: &str = "List the user's OTHER Relay chat sessions (peer     awareness): id, title, engine, project, live status, and a one-line summary of     what each covers. Use when the user references another conversation ('the auth     chat', 'what we decided earlier') or before duplicating work that may already     be in progress elsewhere. Same-project sessions rank first.";
+
+const READ_SESSION_DESC: &str = "Read another Relay chat session's knowledge: mode=\"summary\"     (default) returns its distilled abstract; \"recent_turns\" returns the latest     role-tagged messages; \"transcript\" returns the fuller history (capped). Use     after list_sessions/search_sessions point at a peer.";
+
+const SEARCH_SESSIONS_DESC: &str = "Full-text search across ALL Relay chat sessions'     messages and titles — 'which conversation covered X?'. Returns matching     sessions with excerpts; pair with read_session for depth. This is your own     history, not the web.";
+
+const MESSAGE_SESSION_DESC: &str = "Send a message to another Relay chat session.     mode=\"question\" (default) waits up to timeout_s for that session's answer and     returns it; on timeout the reply still arrives later as a follow-up turn.     mode=\"notify\" delivers without expecting a reply. The target receives it as a     turn marked as coming from you (NOT the user) — the user sees the exchange in     the UI. Use to consult a peer's context or request something of it; NOT for     chatting with the user.";
+
+const SPAWN_SESSION_DESC: &str = "Spawn a NEW Relay chat session to delegate work:     create a real, sidebar-visible session (any installed engine — it may differ     from yours) whose first turn is `task`. mode=\"background\" (default) returns the     new session's id immediately; mode=\"wait\" blocks (bounded) and returns its     first-turn output. The user can watch and take over the spawned session at any     time. Prefer this over doing a big parallel task inside this conversation.";
+
+fn list_sessions_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "scope": {
+                "type": "string",
+                "enum": ["project", "all"],
+                "description": "\"project\" (default) = this session's project plus                     project-less chats; \"all\" = every session in the app."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max sessions to return (1-24, default 12).",
+                "minimum": 1,
+                "maximum": 24
+            }
+        }
+    })
+}
+
+fn read_session_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["session_id"],
+        "properties": {
+            "session_id": {
+                "type": "string",
+                "description": "The peer session's id (from list_sessions / search_sessions)."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["summary", "recent_turns", "transcript"],
+                "description": "\"summary\" (default) = distilled abstract;                     \"recent_turns\" = latest messages (8k chars); \"transcript\" = fuller                     history (24k chars)."
+            }
+        }
+    })
+}
+
+fn search_sessions_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Keywords or a phrase to find across all sessions'                     messages and titles."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max sessions to return (1-10, default 5).",
+                "minimum": 1,
+                "maximum": 10
+            }
+        }
+    })
+}
+
+fn message_session_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["session_id", "body"],
+        "properties": {
+            "caller_session_id": {
+                "type": "string",
+                "description": "YOUR own Relay session id (stated in your Session Mesh                     context). Harness sessions should include it so replies can be                     routed back; built-in chats can omit it."
+            },
+            "session_id": {
+                "type": "string",
+                "description": "The TARGET session's id (from list_sessions) — the peer                     you are addressing, never your own id."
+            },
+            "body": {
+                "type": "string",
+                "description": "The message/question text. Be self-contained — the peer                     cannot see this conversation."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["question", "notify"],
+                "description": "\"question\" (default) waits for the peer's answer;                     \"notify\" fires and returns."
+            },
+            "timeout_s": {
+                "type": "integer",
+                "description": "question mode: how long to wait (5-120, default 25s).                     Later answers still arrive as a follow-up turn.",
+                "minimum": 5,
+                "maximum": 120
+            }
+        }
+    })
+}
+
+fn spawn_session_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["task"],
+        "properties": {
+            "caller_session_id": {
+                "type": "string",
+                "description": "YOUR own Relay session id (stated in your Session Mesh                     context). Harness sessions should include it so the spawn tree is                     tracked; built-in chats can omit it."
+            },
+            "task": {
+                "type": "string",
+                "description": "The new session's first instruction — a complete,                     self-contained task description."
+            },
+            "title": {
+                "type": "string",
+                "description": "Short sidebar title for the new session (defaults to                     the task's first words)."
+            },
+            "agent": {
+                "type": "string",
+                "description": "Engine for the new session, e.g. \"claude_code\",                     \"opencode\", \"builtin\", \"local\" (defaults to yours)."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["background", "wait"],
+                "description": "\"background\" (default) returns the session id now;                     \"wait\" blocks for the first turn's output (bounded)."
+            }
+        }
+    })
+}
+
 /// Agent enum for the automation create/update schemas — mirrors
 /// commands::automation_cmds::ALLOWED_AGENTS (+ local_gguf).
 const AUTOMATION_AGENTS: [&str; 8] = [
@@ -1661,9 +1811,14 @@ mod tests {
         // round, so sum creep is a per-turn tax forever. HEADROOM ≈ 4% above
         // the measured sizes at the diet pass — a deliberate bump needs a
         // reason in the PR.
+        // Bumped 38_000→42_000 / 41_000→45_000 for Session Mesh
+        // (SESSION_MESH_DESIGN_ARCHITECTURE.md): five tools (~3.2k chars)
+        // giving sibling-session awareness, messaging, and spawning. The read
+        // trio replaces asking the user about other chats; the write pair
+        // replaces re-doing work that already happened elsewhere.
         assert!(
-            total < 38_000,
-            "default tool specs total {total} chars (budget 38_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            total < 42_000,
+            "default tool specs total {total} chars (budget 42_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
         let all_on_caps = ToolCaps {
             browser: true,
@@ -1675,8 +1830,8 @@ mod tests {
             .sum();
         println!("all-on specs JSON: {all_on} chars");
         assert!(
-            all_on < 41_000,
-            "all-on tool specs total {all_on} chars (budget 41_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 45_000,
+            "all-on tool specs total {all_on} chars (budget 45_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 

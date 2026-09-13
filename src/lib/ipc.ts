@@ -443,6 +443,7 @@ export * from "./ipc/localModels";
 export * from "./ipc/harnessChat";
 export * from "./ipc/exportImport";
 export * from "./ipc/updater";
+export * from "./ipc/sessionMesh";
 export * from "./ipc/workspaces";
 export * from "./ipc/marketFiles";
 export * from "./ipc/github";

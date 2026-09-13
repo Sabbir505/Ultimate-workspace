@@ -19,6 +19,7 @@ pub mod improve;
 mod memory;
 mod projects;
 mod research_cache;
+pub(crate) mod session_fabric;
 mod secrets;
 mod settings;
 mod skills;
@@ -200,7 +201,22 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_fts(conn)?;
     migrate_memory_reflected(conn)?;
     migrate_chat_message_kind(conn)?;
+    migrate_chat_session_origin(conn)?;
     migrate_unc_paths(conn)
+}
+
+/// Add the `origin` column to `chat_sessions` (Session Mesh): NULL for
+/// human-created chats, `spawned_by:<chat_id>` for a session an agent spawned,
+/// `automation:<id>` for automation run-logs. Drives the spawn-tree depth
+/// guard and the sidebar origin tag.
+fn migrate_chat_session_origin(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN origin TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 /// Add the `kind` column to `chat_messages` and backfill legacy command-only
@@ -713,7 +729,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           sandbox_policy TEXT,
           approval_policy TEXT,
           auto_model INTEGER NOT NULL DEFAULT 0,
-          effort_level TEXT
+          effort_level TEXT,
+          origin TEXT
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -740,6 +757,36 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         -- every poll — previously a full-table scan + join per rollup call.
         CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at);
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_active ON chat_sessions(last_active_at DESC);
+
+        -- ── Session Mesh (SESSION_MESH_DESIGN_ARCHITECTURE.md §4-§6) ──────
+        -- Cross-session awareness/messaging/spawning. `session_summaries` is
+        -- the distillation layer: one ≤2-sentence abstract per chat, written
+        -- by a background one-shot (never blocking a turn), refreshed when
+        -- the session's last_active_at outruns it. `session_mail` is the
+        -- point-to-point agent mailbox — every agent-to-agent exchange is a
+        -- row, so the mesh's audit trail is plain data the user can inspect.
+        CREATE TABLE IF NOT EXISTS session_summaries (
+          chat_session_id TEXT PRIMARY KEY REFERENCES chat_sessions(id) ON DELETE CASCADE,
+          summary TEXT NOT NULL,
+          topics TEXT NOT NULL DEFAULT '',
+          model TEXT,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS session_mail (
+          id TEXT PRIMARY KEY,
+          from_session TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+          to_session TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+          mode TEXT NOT NULL,               -- 'question' | 'notify'
+          body TEXT NOT NULL,
+          status TEXT NOT NULL,             -- queued|delivered|answered|expired|rejected
+          answer TEXT,
+          depth INTEGER NOT NULL DEFAULT 0, -- forwarded-question chain depth
+          created_at INTEGER NOT NULL,
+          delivered_at INTEGER,
+          answered_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_mail_to ON session_mail(to_session, status);
+        CREATE INDEX IF NOT EXISTS idx_session_mail_from ON session_mail(from_session, created_at DESC);
 
         -- ── Self-improving artifacts (SELF_IMPROVING_ARTIFACTS.md §4/§5) ──
         -- `improve_artifacts` (not `artifacts` — that name is taken by the
@@ -1391,6 +1438,7 @@ pub(crate) fn mem() -> Connection {
     migrate_chat_messages_started_completed(&conn).unwrap();
     migrate_chat_messages_perf(&conn).unwrap();
     migrate_chat_message_kind(&conn).unwrap();
+    migrate_chat_session_origin(&conn).unwrap();
     migrate_unc_paths(&conn).unwrap();
     conn
 }

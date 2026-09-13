@@ -23,13 +23,35 @@ pub(super) fn send_opencode_turn(
     project_id: Option<&str>,
     connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Result<(), String> {
-    // Reuse a healthy server; respawn a dead one. The persisted opencode
+    // Reuse a healthy server; respawn a dead one — or one whose MCP config
+    // changed since spawn. The server loads MCP servers ONLY at its startup,
+    // so a config change (app update adding mesh tools to the sidecar,
+    // connector attach) never reached a healthy server: the CLI kept its
+    // stale tool list for the chat's whole life. The persisted opencode
     // session id keeps the conversation continuous across respawns.
-    let alive = entry
-        .oc_base_url
-        .as_deref()
-        .map(opencode_server_alive)
-        .unwrap_or(false);
+    let bundle = resolve_harness_bundle(
+        app,
+        project_id,
+        cwd,
+        artifacts_dir_for_bundle(app, cwd),
+        connectors,
+        None,
+        None,
+        Some(sid),
+    );
+    let current_stamp = bundle
+        .as_ref()
+        .map(|b| b.opencode_config.clone())
+        .filter(|p| p.exists())
+        .and_then(|cfg| current_config_stamp(&cfg));
+    let stamp_changed = current_stamp.is_some()
+        && *entry.oc_config_stamp.lock().unwrap_or_else(|e| e.into_inner()) != current_stamp;
+    let alive = !stamp_changed
+        && entry
+            .oc_base_url
+            .as_deref()
+            .map(opencode_server_alive)
+            .unwrap_or(false);
     let mut fell_back = false;
     if entry.child.is_none() || !alive {
         if let Some(mut old) = entry.child.take() {
@@ -54,6 +76,7 @@ pub(super) fn send_opencode_turn(
             Arc::clone(&entry.oc_in_think),
             Arc::clone(&entry.oc_last_event_ms),
             Arc::clone(&entry.oc_reader_alive),
+            Arc::clone(&entry.oc_config_stamp),
         ) {
             Ok((child, base_url)) => {
                 entry.child = Some(child);
@@ -309,6 +332,7 @@ pub(super) fn spawn_opencode_server(
     think_cell: Arc<Mutex<bool>>,
     last_event_ms: Arc<AtomicU64>,
     reader_alive: Arc<AtomicBool>,
+    config_stamp_cell: Arc<Mutex<Option<u64>>>,
 ) -> Result<(Child, String), String> {
     let port = opencode_free_port().ok_or("no free TCP port for opencode server")?;
     let base_url = format!("http://127.0.0.1:{port}");
@@ -324,6 +348,7 @@ pub(super) fn spawn_opencode_server(
         connectors,
         None,
         None,
+        Some(sid),
     );
     let legacy_cfg = if bundle.is_none() {
         resolve_opencode_config(app, project_id)
@@ -348,6 +373,9 @@ pub(super) fn spawn_opencode_server(
         .filter(|p| p.exists())
         .or(legacy_cfg)
     {
+        // Record the config content this server starts with — the turn path
+        // compares stamps and respawns the server when it changes.
+        *config_stamp_cell.lock().unwrap_or_else(|e| e.into_inner()) = current_config_stamp(&cfg);
         cmd.env("OPENCODE_CONFIG", cfg);
     }
     // Serve from the workspace dir so relative tool paths land in the project.
@@ -1104,6 +1132,26 @@ pub(super) fn emit_opencode_tool(
 mod tests {
     use super::*;
 
+    #[test]
+    fn fnv1a_detects_content_change_and_is_stable() {
+        let dir = std::env::temp_dir().join(format!("relay-oc-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.json");
+        std::fs::write(&a, br#"{"mcp":{}}"#).unwrap();
+        let h1 = fnv1a_file(&a).unwrap();
+        assert_eq!(h1, fnv1a_file(&a).unwrap(), "same content → same stamp");
+        std::fs::write(&a, br#"{"mcp":{"relay-tools":{}}}"#).unwrap();
+        let h2 = fnv1a_file(&a).unwrap();
+        assert_ne!(h1, h2, "content change must change the stamp");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fnv1a_missing_file_is_none() {
+        assert!(fnv1a_file(std::path::Path::new("Z:/definitely/missing.json")).is_none());
+    }
+
+
     /// The shape observed from `GET /config/providers` on opencode 1.18.7:
     /// built-in OpenCode Zen alongside the user's opencode.json providers.
     fn catalog() -> Value {
@@ -1150,3 +1198,23 @@ mod tests {
         assert_eq!(provider_error_message(&serde_json::json!({"cost":0})), None);
     }
 }
+
+/// FNV-1a 64-bit over file bytes — cheap content stamp for the opencode
+/// config (no crypto needed; this only detects "the config changed").
+fn fnv1a_file(path: &std::path::Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Some(hash)
+}
+
+/// Stamp of the config file the server would be spawned with right now.
+/// `None` = no config file (bundle write failed) — treated as "unknown",
+/// never as a change.
+fn current_config_stamp(cfg: &std::path::Path) -> Option<u64> {
+    fnv1a_file(cfg)
+}
+

@@ -25,7 +25,7 @@ mod generators;
 mod llama_sidecar;
 mod preview;
 mod selection;
-mod send;
+pub(crate) mod send;
 mod sessions;
 
 // Re-exported so every existing `crate::chat::commands::<item>` path and

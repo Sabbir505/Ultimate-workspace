@@ -71,6 +71,7 @@ pub(super) fn spawn_per_turn(
         connectors,
         None,
         None,
+        Some(sid),
     );
     // Legacy fallback: browser-only MCP when the bundle (or its mcp part)
     // didn't write — keeps pty-style browser tools working in degraded mode.

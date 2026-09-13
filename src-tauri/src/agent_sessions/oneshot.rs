@@ -80,6 +80,7 @@ pub fn run_one_shot(
                 &[],
                 None,
                 Some("full_access"),
+                Some(chat_session_id),
             ) {
                 if harness_needs_prompt_instructions(harness) {
                     if let Ok(ins) = std::fs::read_to_string(&b.claude_instructions) {

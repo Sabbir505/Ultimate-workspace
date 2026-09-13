@@ -1336,6 +1336,13 @@ impl ChatManager {
             .is_some_and(|h| h.id() == task_id)
     }
 
+    /// Session Mesh busy check (session_fabric): a registered stream means a
+    /// turn is in flight, so peer mail must queue instead of superseding the
+    /// user's turn.
+    pub(crate) fn has_active_stream(&self, chat_session_id: &str) -> bool {
+        self.streams.lock().contains_key(chat_session_id)
+    }
+
     /// Remove the abort-handle registry entry for a finished stream — but only
     /// if the entry still maps to that stream's own handle (identified by its
     /// task id). A superseding `send` for the same session replaces the entry;

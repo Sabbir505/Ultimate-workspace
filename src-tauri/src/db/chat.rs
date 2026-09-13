@@ -53,6 +53,8 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
         effort_level: row
             .get::<_, Option<String>>("effort_level")?
             .filter(|s| !s.is_empty()),
+        // Session Mesh provenance; NULL = human-created.
+        origin: row.get::<_, Option<String>>("origin")?,
     })
 }
 

@@ -112,6 +112,7 @@ pub(super) fn spawn_claude(
         connectors,
         Some(&sandbox_str),
         Some(&approval_str),
+        Some(sid),
     ) {
         args.extend(crate::harness_bundle::claude_bundle_args(
             &bundle,

@@ -102,6 +102,15 @@ pub(super) fn harness_context_section(
                 }
             }
         }
+        // Session Mesh peer registry (SESSION_MESH_DESIGN_ARCHITECTURE.md
+        // §4.3). The bundle is per-PROJECT (shared by every chat in it), so
+        // self_sid=None: no per-chat identity line here — `AgentSession
+        // Manager::send` adds it to the first turn's prompt instead.
+        if let Some(block) = crate::session_fabric::registry_block(&conn, None) {
+            if !block.trim().is_empty() {
+                parts.push(block);
+            }
+        }
     }
     parts.join("\n\n")
 }
@@ -129,12 +138,17 @@ pub(crate) fn resolve_harness_bundle(
     connectors: &[crate::connectors::HarnessMcpServer],
     sandbox: Option<&str>,
     approval: Option<&str>,
+    chat_session_id: Option<&str>,
 ) -> Option<crate::harness_bundle::HarnessBundlePaths> {
     let data_dir = crate::user_dirs::app_data_dir(app);
     // Artifact awareness for the harness instructions: the CLI has no other
     // way to learn where Relay's artifacts live, so "open the report we made"
     // used to resolve to a shrug. Default export folder + the 10 most recent
-    // artifacts (newest first, from the DB).
+    // artifacts (newest first, from the DB). The list is scoped to THIS chat
+    // when a chat id is given: a fresh session whose instructions listed
+    // OTHER conversations' artifacts answered "what did we do in previous
+    // sessions" with that list — artifacts are files, not history. (The
+    // interactive PTY spawn passes None and keeps the global snapshot.)
     let default_export_dir = crate::chat::dispatch::artifacts_dir(app)
         .to_string_lossy()
         .into_owned();
@@ -142,9 +156,18 @@ pub(crate) fn resolve_harness_bundle(
         .try_state::<DbState>()
         .map(|db| {
             let conn = db.0.lock();
-            crate::db::list_artifacts(&conn)
-                .unwrap_or_default()
-                .iter()
+            let rows = match chat_session_id {
+                Some(chat_id) => {
+                    // Oldest-first timeline; the snapshot wants the 10 MOST
+                    // RECENT, newest first.
+                    let mut all = crate::db::list_artifacts_for_chat(&conn, chat_id)
+                        .unwrap_or_default();
+                    all.reverse();
+                    all
+                }
+                None => crate::db::list_artifacts(&conn).unwrap_or_default(),
+            };
+            rows.iter()
                 .take(10)
                 .filter_map(|a| {
                     let date = chrono::DateTime::from_timestamp(a.created_at, 0)

@@ -339,7 +339,15 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         // without these a harness session answers "I can't schedule things"
         // to the same requests the built-in chat handles.
         | "list_automations" | "create_automation" | "update_automation"
-        | "delete_automation" | "run_automation_now" => Ok(format!("relay_tools:{tool}")),
+        | "delete_automation" | "run_automation_now"
+        // Session Mesh (SESSION_MESH_DESIGN_ARCHITECTURE.md): sibling-session
+        // awareness + messaging + spawning. Without these a harness session
+        // answers from its OWN CLI's session data ("I don't have a tool to
+        // spawn a Relay chat") — the app-side relay-tools whitelist and
+        // execute_relay_tool already route these to
+        // session_fabric::execute_mesh_tool.
+        | "list_sessions" | "read_session" | "search_sessions"
+        | "message_session" | "spawn_session" => Ok(format!("relay_tools:{tool}")),
         _ => Err("unknown tool"),
     }
 }
@@ -966,6 +974,80 @@ fn tool_schemas() -> Vec<Value> {
                 "required": ["automation_id"]
             }
         }),
+        // ---- Session Mesh (SESSION_MESH_DESIGN_ARCHITECTURE.md) ----
+        // Sibling-session awareness, messaging, and spawning. Descriptions
+        // mirror chat/tools/specs.rs; the app side executes via
+        // session_fabric::execute_mesh_tool. The read trio carries the
+        // readOnlyHint (auto-approved by MCP clients); the write pair does
+        // NOT (cross-session token spend stays user-visible).
+        json!({
+            "name": "list_sessions",
+            "description": "List the user's OTHER Relay chat sessions (peer awareness): id, title, engine, project, live status, and a one-line summary of what each covers. Use when the user references another conversation ('the auth chat', 'what we decided earlier') or before duplicating work that may already be in progress elsewhere. Same-project sessions rank first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": { "type": "string", "enum": ["project", "all"], "description": "\"project\" (default) = this session's project plus project-less chats; \"all\" = every session." },
+                    "limit": { "type": "integer", "description": "Max sessions to return (1-24, default 12).", "minimum": 1, "maximum": 24 }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "read_session",
+            "description": "Read another Relay chat session's knowledge: mode=\"summary\" (default) returns its distilled abstract; \"recent_turns\" returns the latest role-tagged messages; \"transcript\" returns the fuller history (capped). Use after list_sessions/search_sessions point at a peer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "The peer session's id (from list_sessions / search_sessions)." },
+                    "mode": { "type": "string", "enum": ["summary", "recent_turns", "transcript"], "description": "\"summary\" (default); \"recent_turns\" (8k chars); \"transcript\" (24k chars)." }
+                },
+                "required": ["session_id"]
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "search_sessions",
+            "description": "Full-text search across ALL Relay chat sessions' messages and titles — 'which conversation covered X?'. Returns matching sessions with excerpts; pair with read_session for depth. This is the user's own chat history, not the web.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Keywords or phrase to find across all sessions' messages and titles." },
+                    "limit": { "type": "integer", "description": "Max sessions to return (1-10, default 5).", "minimum": 1, "maximum": 10 }
+                },
+                "required": ["query"]
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "message_session",
+            "description": "Send a message to another Relay chat session. mode=\"question\" (default) waits up to timeout_s for that session's answer and returns it; on timeout the reply still arrives later as a follow-up turn. mode=\"notify\" delivers without expecting a reply. The target receives it as a turn marked as coming from you (NOT the user) — the user sees the exchange in the UI. Include caller_session_id (your own Relay session id, stated in your Session Mesh context) so the reply can be routed back to you.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "caller_session_id": { "type": "string", "description": "YOUR own Relay session id (stated in your Session Mesh context) — include it so replies can be routed back to you." },
+                    "session_id": { "type": "string", "description": "The TARGET session's id (from list_sessions) — the peer you are addressing, never your own id." },
+                    "body": { "type": "string", "description": "The message/question text. Be self-contained — the peer cannot see this conversation." },
+                    "mode": { "type": "string", "enum": ["question", "notify"], "description": "\"question\" (default) waits for the peer's answer; \"notify\" fires and returns." },
+                    "timeout_s": { "type": "integer", "description": "question mode: how long to wait (5-120, default 25s).", "minimum": 5, "maximum": 120 }
+                },
+                "required": ["session_id", "body"]
+            }
+        }),
+        json!({
+            "name": "spawn_session",
+            "description": "Spawn a NEW Relay chat session to delegate work: create a real, sidebar-visible session (any installed engine — it may differ from yours) whose first turn is `task`. mode=\"background\" (default) returns the new session's id immediately; mode=\"wait\" blocks (bounded) and returns its first-turn output. The user can watch and take over the spawned session at any time. Prefer this over doing a big parallel task inside this conversation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "caller_session_id": { "type": "string", "description": "YOUR own Relay session id (stated in your Session Mesh context) — include it so the spawn tree is tracked." },
+                    "task": { "type": "string", "description": "The new session's first instruction — a complete, self-contained task description." },
+                    "title": { "type": "string", "description": "Short sidebar title (defaults to the task's first words)." },
+                    "agent": { "type": "string", "description": "Engine for the new session, e.g. \"claude_code\", \"opencode\", \"builtin\", \"local\" (defaults to yours)." },
+                    "mode": { "type": "string", "enum": ["background", "wait"], "description": "\"background\" (default) returns the session id now; \"wait\" blocks for the first turn's output (bounded)." }
+                },
+                "required": ["task"]
+            }
+        }),
     ]
 }
 
@@ -986,6 +1068,8 @@ mod tests {
                      "get_capabilities",
                      "list_automations", "create_automation", "update_automation",
                      "delete_automation", "run_automation_now",
+                     "list_sessions", "read_session", "search_sessions",
+                     "message_session", "spawn_session",
                      "history", "hover", "evaluate", "click_and_wait", "screenshot"] {
             assert!(names.contains(&tool), "missing tool schema: {tool}");
         }
@@ -1007,6 +1091,11 @@ mod tests {
         assert_eq!(tool_op("plan_document").unwrap(), "relay_tools:plan_document");
         assert_eq!(tool_op("revise_document").unwrap(), "relay_tools:revise_document");
         assert_eq!(tool_op("search_docs").unwrap(), "relay_tools:search_docs");
+        // Session Mesh routes into the relay_tools namespace (the app side
+        // executes it via session_fabric::execute_mesh_tool).
+        for tool in ["list_sessions", "read_session", "search_sessions", "message_session", "spawn_session"] {
+            assert_eq!(tool_op(tool).unwrap(), format!("relay_tools:{tool}"));
+        }
         assert_eq!(tool_op("navigate").unwrap(), "navigate"); // browser tools unchanged
         // New browser tools keep their bare op names (dispatched in
         // browser_mcp::dispatch) — never the relay_tools namespace.

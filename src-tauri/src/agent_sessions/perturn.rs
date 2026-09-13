@@ -71,6 +71,7 @@ pub(super) fn spawn_per_turn(
         connectors,
         None,
         None,
+        Some(sid),
     );
     // Legacy fallback: browser-only MCP when the bundle (or its mcp part)
     // didn't write — keeps pty-style browser tools working in degraded mode.
@@ -386,9 +387,11 @@ End your reply with the plan and wait for the user's approval.]"
     // fallback shares this spawn path — a flash there would be noise too.
     // Cleared by the first real `chat:token` event or `chat:done`/`chat:error`.
     if matches!(kind, PerTurn::Kimi) {
-        let _ = app.emit(
-            "chat:status",
-            json!({ "chatSessionId": sid, "reason": "harness_starting", "message": format!("{} is starting up…", kind.display()) }),
+        crate::chat::stream_events::emit_status_reason(
+            Some(app),
+            sid,
+            "harness_starting",
+            format!("{} is starting up…", kind.display()),
         );
     }
 

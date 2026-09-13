@@ -762,14 +762,7 @@ impl ChatManager {
                 chat_req.model = cand.model.clone();
                 chat_req.system = cand_system.clone().or(chat_req.system.take());
                 let notify_reconnect = |reason: &str, message: String| {
-                    let _ = app.emit(
-                        "chat:status",
-                        ChatStatusPayload {
-                            chat_session_id: sid.clone(),
-                            reason: reason.to_string(),
-                            message,
-                        },
-                    );
+                    crate::chat::stream_events::emit_status_reason(Some(&app), &sid, reason, message);
                 };
                 let attempt = loop {
                     // Scoped so the attempt closure's borrow of `chat_req`
@@ -924,28 +917,26 @@ impl ChatManager {
                                 next.provider_id.as_str(),
                                 next.model,
                             );
-                            let _ = app.emit(
-                                "chat:status",
-                                crate::types::ChatStatusPayload {
-                                    chat_session_id: sid.clone(),
-                                    // Distinct from the routine "auto_route"
-                                    // resolution notice (which the frontend
-                                    // suppresses — a pill on every turn read
-                                    // as noise): fail-overs are rare and
-                                    // worth surfacing.
-                                    reason: "auto_failover".to_string(),
-                                    message: format!(
-                                        "Auto: {} · {} unavailable — trying {} · {}",
-                                        crate::chat::auto_router::provider_label(
-                                            cand.provider_id.as_str()
-                                        ),
-                                        cand.model,
-                                        crate::chat::auto_router::provider_label(
-                                            next.provider_id.as_str()
-                                        ),
-                                        next.model,
+                            // Distinct from the routine "auto_route"
+                            // resolution notice (which the frontend
+                            // suppresses — a pill on every turn read
+                            // as noise): fail-overs are rare and
+                            // worth surfacing.
+                            crate::chat::stream_events::emit_status_reason(
+                                Some(&app),
+                                &sid,
+                                "auto_failover",
+                                format!(
+                                    "Auto: {} · {} unavailable — trying {} · {}",
+                                    crate::chat::auto_router::provider_label(
+                                        cand.provider_id.as_str()
                                     ),
-                                },
+                                    cand.model,
+                                    crate::chat::auto_router::provider_label(
+                                        next.provider_id.as_str()
+                                    ),
+                                    next.model,
+                                ),
                             );
                             continue;
                         }
@@ -1196,8 +1187,8 @@ impl ChatManager {
                             );
                         }
                     }
-                    let _ = app.emit(
-                        "chat:done",
+                    crate::chat::stream_events::emit_done(
+                        Some(&app),
                         ChatDonePayload {
                             chat_session_id: sid.clone(),
                             input_tokens: usage.as_ref().and_then(|u| {
@@ -1250,6 +1241,13 @@ impl ChatManager {
                                     is_openai,
                                 )
                             }),
+                            // The cache token split rides on harness turns
+                            // only (agent_sessions::emit_done); the built-in
+                            // providers express cache usage through
+                            // cache_hit_rate alone, and `skip_serializing_if`
+                            // keeps these two keys out of the event.
+                            cache_creation_input_tokens: None,
+                            cache_read_input_tokens: None,
                         },
                     );
 
@@ -1285,13 +1283,11 @@ impl ChatManager {
                     // context-overflow rejection is recoverable and the
                     // frontend keys its "compact / new chat" copy off the code.
                     let code = crate::chat::error_class::classify_error(&e);
-                    let _ = app.emit(
-                        "chat:error",
-                        ChatErrorPayload {
-                            chat_session_id: sid.clone(),
-                            message: e,
-                            code: code.map(|c| c.to_string()),
-                        },
+                    crate::chat::stream_events::emit_error_with_code(
+                        Some(&app),
+                        &sid,
+                        &e,
+                        code.map(|c| c.to_string()),
                     );
                 }
             }
@@ -1334,6 +1330,13 @@ impl ChatManager {
             .lock()
             .get(chat_session_id)
             .is_some_and(|h| h.id() == task_id)
+    }
+
+    /// Session Mesh busy check (session_fabric): a registered stream means a
+    /// turn is in flight, so peer mail must queue instead of superseding the
+    /// user's turn.
+    pub(crate) fn has_active_stream(&self, chat_session_id: &str) -> bool {
+        self.streams.lock().contains_key(chat_session_id)
     }
 
     /// Remove the abort-handle registry entry for a finished stream — but only
@@ -1640,17 +1643,11 @@ pub(crate) async fn run_chat_stream(
     let mut pump = crate::chat::streaming::ProviderSsePump::new(&mut buf, &mut full_text);
 
     // Token emit: stream_events channel first, app event as the fallback
-    // (headless tests run without an app handle).
+    // (headless tests run without an app handle). The shared chat-event seam
+    // (stream_events::emit_chat_token) carries the registry/fallback policy;
+    // no perf recording here — the SSE pump path records separately.
     let emit_token = |out: String| {
-        let payload = ChatTokenPayload {
-            chat_session_id: chat_session_id.to_string(),
-            token: out,
-        };
-        if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
-            if let Some(app) = app {
-                let _ = app.emit("chat:token", payload);
-            }
-        }
+        crate::chat::stream_events::emit_chat_token(app, chat_session_id, &out, false);
     };
 
     // D4: the done flag previously broke only the INNER line loop, so the
@@ -1758,26 +1755,14 @@ async fn compact_and_retry(
     // before send, any tool rounds during it).
     let entries: Vec<crate::chat::compaction::CompactionEntry> = {
         let conn = db.lock();
-        db::list_active_chat_messages(&conn, sid).ok()?
-    }
-    .into_iter()
-    .map(|r| crate::chat::compaction::CompactionEntry {
-        id: r.id,
-        message: ChatMessage {
-            role: r.role,
-            content: crate::chat::commands::strip_think_blocks(&r.content),
-            images: Vec::new(),
-        },
-    })
-    .collect();
+        crate::chat::compaction::load_compaction_entries(&conn, sid).ok()?
+    };
 
-    let _ = app.emit(
-        "chat:status",
-        ChatStatusPayload {
-            chat_session_id: sid.to_string(),
-            reason: "context_compacting".to_string(),
-            message: "Context window full — compacting and retrying…".to_string(),
-        },
+    crate::chat::stream_events::emit_status_reason(
+        Some(app),
+        sid,
+        "context_compacting",
+        "Context window full — compacting and retrying…",
     );
     let run = crate::chat::cloud_compact::run_cloud_compaction(
         client,
@@ -1799,17 +1784,15 @@ async fn compact_and_retry(
         "[cloud-compaction] overflow retry: compacted {} exchange(s) (~{}→{} est. tokens)",
         run.compacted_exchange_count, run.pre_tokens, run.post_tokens,
     );
-    let _ = app.emit(
-        "chat:status",
-        ChatStatusPayload {
-            chat_session_id: sid.to_string(),
-            reason: "context_compacted".to_string(),
-            message: format!(
-                "Context compacted (~{} → {} tokens, estimated) — retrying…",
-                crate::chat::commands::format_compact_token_count(run.pre_tokens as i64),
-                crate::chat::commands::format_compact_token_count(run.post_tokens as i64),
-            ),
-        },
+    crate::chat::stream_events::emit_status_reason(
+        Some(app),
+        sid,
+        "context_compacted",
+        format!(
+            "Context compacted (~{} → {} tokens, estimated) — retrying…",
+            crate::chat::commands::format_compact_token_count(run.pre_tokens as i64),
+            crate::chat::commands::format_compact_token_count(run.post_tokens as i64),
+        ),
     );
     let mut rebuilt = chat_req.clone();
     rebuilt.messages = run.messages;

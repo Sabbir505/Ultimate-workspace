@@ -575,6 +575,62 @@
   font-size: 10px; padding: 1px 6px; border-radius: 99px;
   background: var(--surface-2); color: var(--text-dim);
 }
+
+/* Git sidebar mesh rows (Session Mesh) — mail chips "To/From <peer> ·
+   <status>" and spawned-session chips. Direction arrow flips for incoming
+   mail; answered rows go quiet-green, expired/rejected go quiet-red, and
+   running spawned sessions carry the agent shimmer. */
+.git-sidebar-mesh-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 9px;
+  margin-bottom: 4px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.git-sidebar-mesh-row:hover {
+  border-color: color-mix(in srgb, #c98ef7 45%, var(--border));
+  color: var(--text);
+}
+.git-sidebar-mesh-row svg { flex-shrink: 0; color: var(--text-dim); }
+.git-sidebar-mesh-row.answered svg { color: #3fb970; }
+.git-sidebar-mesh-row.failed { opacity: 0.65; }
+.git-sidebar-mesh-row.failed svg { color: #ef4444; }
+.git-sidebar-mesh-label { flex-shrink: 0; font-weight: 600; color: var(--text); }
+.git-sidebar-mesh-peer {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #c98ef7;
+  font-weight: 600;
+}
+.git-sidebar-mesh-dot-sep { flex-shrink: 0; color: var(--text-dim); opacity: 0.6; }
+.git-sidebar-mesh-status {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+.git-sidebar-mesh-status.status-answered { color: #3fb970; }
+.git-sidebar-mesh-status.status-expired,
+.git-sidebar-mesh-status.status-rejected { color: #ef4444; }
+.git-sidebar-mesh-status.status-running { color: #5aa7f0; }
+.git-sidebar-mesh-row.spawned {
+  border-color: color-mix(in srgb, #c98ef7 22%, var(--border));
+}
+.git-sidebar-mesh-row.spawned.running {
+  border-color: color-mix(in srgb, #c98ef7 40%, var(--border));
+}
 /* ---- Pull Requests tab (PullsPanel) ---- */
 .pulls-panel {
   display: flex; flex-direction: column; height: 100%; min-height: 0;

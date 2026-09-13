@@ -38,6 +38,7 @@ mod mobile;
 mod os_toast;
 mod pty;
 mod secrets;
+mod session_fabric;
 mod types;
 pub mod user_dirs;
 mod util;
@@ -53,6 +54,13 @@ use pty::PtyManager;
 
 /// Shared SQLite connection. One connection behind a mutex: rusqlite
 /// connections are !Sync, and Relay's write volume is tiny.
+///
+/// RULE: the lock guards SQL ONLY. Never hold it across file IO, subprocesses,
+/// zip compression, or HTTP — collect the data under the lock, release, then
+/// do the slow work (see export.rs / git_cmds.rs / sessions.rs for the
+/// pattern). The one deliberate exception is `swap_chat_db_files`
+/// (commands/data.rs), whose single hold is the documented atomicity
+/// mechanism for the WAL-checkpoint-and-copy.
 pub struct DbState(pub Arc<Mutex<Connection>>);
 
 pub struct PtyState(pub Arc<PtyManager>);
@@ -147,6 +155,10 @@ pub fn run() {
             app.manage(ChatState(Arc::new(chat::ChatManager::new())));
             app.manage(agent_sessions::AgentSessionState(Arc::new(
                 agent_sessions::AgentSessionManager::new(),
+            )));
+            // Session Mesh runtime (mailbox pumps + parked question calls).
+            app.manage(session_fabric::FabricState(Arc::new(
+                session_fabric::FabricRuntime::default(),
             )));
             app.manage(TaskState(Arc::new(chat::tasks::TaskManager::new())));
             app.manage(chat::plan::PlanState::default());

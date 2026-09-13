@@ -1374,15 +1374,7 @@ pub(super) async fn handle_chat_turn(
     if let Some(last) = messages.last() {
         if last.role == "user" {
             let conn = db.lock();
-            let _ = db::add_chat_message(
-                &conn,
-                db::NewChatMessage {
-                    chat_session_id: &chat_session_id,
-                    role: "user",
-                    content: &last.content,
-                    ..Default::default()
-                },
-            );
+            let _ = db::add_user_chat_message(&conn, &chat_session_id, &last.content);
             let _ = db::touch_chat_session(&conn, &chat_session_id);
         }
     }

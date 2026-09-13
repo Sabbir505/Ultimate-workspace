@@ -370,6 +370,12 @@ pub struct ChatSession {
     /// no flag is passed and the CLI's own configured effort stands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_level: Option<String>,
+    /// Session Mesh provenance (SESSION_MESH_DESIGN_ARCHITECTURE.md §6):
+    /// `None` = human-created; `spawned_by:<chat_id>` = an agent spawned this
+    /// session; `automation:<id>` = an automation run-log. Drives the
+    /// spawn-tree depth guard and the sidebar origin tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 fn default_permission_mode() -> String {
@@ -604,6 +610,37 @@ pub struct ChatStatusPayload {
     pub message: String,
 }
 
+/// One Session Mesh mail transition (SESSION_MESH_DESIGN_ARCHITECTURE.md
+/// §5.3). Emitted as `chat:session-mail` on enqueue/deliver/answered/expired/
+/// rejected — ONE event covers both parties; the store routes it into each
+/// session's list. Excerpts are UI-sized; full text lives in `session_mail`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMailPayload {
+    pub mail_id: String,
+    pub from_session: String,
+    pub from_title: String,
+    pub to_session: String,
+    pub to_title: String,
+    /// "question" | "notify"
+    pub mode: String,
+    /// queued | delivered | answered | expired | rejected
+    pub status: String,
+    pub body_excerpt: String,
+    pub answer_excerpt: Option<String>,
+    pub depth: i64,
+}
+
+/// An agent spawned a new first-class chat session (`chat:session-spawn`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSpawnPayload {
+    pub parent_session_id: String,
+    pub child_session_id: String,
+    pub title: String,
+    pub agent: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatDonePayload {
@@ -628,6 +665,16 @@ pub struct ChatDonePayload {
     /// Prompt/KV-cache hit rate (0.0–1.0), computed from usage cache fields.
     #[serde(default)]
     pub cache_hit_rate: Option<f64>,
+    /// Cache-write tokens, reported by harness turns that measure them
+    /// (claude/pi/commandcode/opencode). The built-in providers fold cache
+    /// usage into `cache_hit_rate` only — `skip_serializing_if` keeps their
+    /// events byte-identical to before these fields existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<i64>,
+    /// Cache-read tokens from harness turns — the bulk of a mid-session
+    /// claude prompt. `input_tokens` stays the uncached slice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<i64>,
 }
 
 /// End-of-turn citation-integrity verdict for a research report (`chat:citation-report`

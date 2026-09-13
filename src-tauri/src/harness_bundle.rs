@@ -202,14 +202,20 @@ pub fn build_instructions_md(
 /// "open the report we made" otherwise resolve to a shrug. `recent` lines are
 /// pre-rendered by the caller ("- path (kind, date)") since they need the DB;
 /// empty inputs (no dir, no artifacts) produce no section.
+///
+/// The copy is deliberate about provenance: the section lists FILES, and when
+/// it carried a global recent-list it read as conversation history — sessions
+/// answered "what did we do in previous sessions" with artifact names. It now
+/// labels the list as this session's own output and points past-session
+/// questions at the Session Mesh tools.
 pub fn build_artifacts_section(default_export_dir: &str, recent: &[String]) -> String {
     if default_export_dir.trim().is_empty() && recent.is_empty() {
         return String::new();
     }
     let mut s = String::from(
         "## Artifacts\n\n\
-         Everything Relay generates for you (documents, charts, exports, \
-         reports) is saved on disk and stays readable. Relay's default export \
+         Files Relay generates for you (documents, charts, exports, reports) \
+         are saved on disk and stay readable. Relay's default export \
          folder",
     );
     if !default_export_dir.trim().is_empty() {
@@ -219,12 +225,15 @@ pub fn build_artifacts_section(default_export_dir: &str, recent: &[String]) -> S
         ". When the user asks about an artifact — a report, a document, a chart, \
          an export, even by an approximate name — list and read files from that \
          folder and the project folder with your file tools instead of saying \
-         you don't have it. The list below is a snapshot from when this session \
-         started: for the live list call the relay-tools `list_artifacts` \
-         tool (filename-filterable, returns absolute paths).\n",
+         you don't have it. For the live list call the relay-tools `list_artifacts` \
+         tool (filename-filterable, returns absolute paths).\n\n\
+         IMPORTANT — artifacts are FILES, not conversation history. Do not answer \
+         questions about past work or previous conversations from this section: \
+         for those, use the relay-tools `list_sessions` / `read_session` / \
+         `search_sessions` tools, which cover every Relay chat session.\n",
     );
     if !recent.is_empty() {
-        s.push_str("\nMost recent artifacts:\n");
+        s.push_str("\nArtifacts THIS session produced (most recent first):\n");
         for line in recent {
             s.push_str(line);
             s.push('\n');
@@ -645,9 +654,21 @@ mod tests {
         assert!(section.contains("## Artifacts"));
         assert!(section.contains("C:/Users/x/Documents/Relay"));
         assert!(section.contains("report.docx"));
+        // Provenance: the list is THIS session's output, explicitly NOT
+        // conversation history — the global recent-list used to be answered
+        // as "what we did in previous sessions" (Session Mesh regression).
+        assert!(section.contains("THIS session produced"));
+        assert!(section.contains("not conversation history"));
+        assert!(section.contains("list_sessions"));
 
         // Nothing known → no section at all (the instructions skip it).
         assert!(build_artifacts_section("", &[]).is_empty());
+
+        // No OWN artifacts but a known dir → dir guidance without any list
+        // that could read as history.
+        let own = build_artifacts_section("C:/out", &[]);
+        assert!(own.contains("## Artifacts"));
+        assert!(!own.contains("produced"));
 
         // The section is only appended when non-empty.
         let md = build_instructions_md("C:/work/proj", "C:/work/out", "", "");

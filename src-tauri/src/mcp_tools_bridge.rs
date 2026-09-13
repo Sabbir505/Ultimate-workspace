@@ -29,7 +29,12 @@ use crate::chat::tools::{self, ToolCaps};
 /// The automation family is DB-state CRUD scoped to the Automations feature
 /// (same operations the built-in chat's tools and the Automations form use);
 /// `run_automation_now` launches exactly the scheduler's own guarded path.
-const ALLOWED_RELAY_TOOLS: [&str; 15] = [
+/// The Session Mesh family routes through `session_fabric::execute_mesh_tool`
+/// before `execute_tool` (same interception shape as the automation family);
+/// the write pair's approval gate lives in the BUILT-IN path's run_tool, so
+/// over the bridge messaging/spawning rely on the mesh's own caps + full UI
+/// visibility instead — the documented trade-off of this ungated path.
+const ALLOWED_RELAY_TOOLS: [&str; 20] = [
     tools::GENERATE_DOCUMENT,
     tools::PLAN_DOCUMENT,
     tools::REVISE_DOCUMENT,
@@ -45,6 +50,11 @@ const ALLOWED_RELAY_TOOLS: [&str; 15] = [
     tools::UPDATE_AUTOMATION,
     tools::DELETE_AUTOMATION,
     tools::RUN_AUTOMATION_NOW,
+    tools::LIST_SESSIONS,
+    tools::READ_SESSION,
+    tools::SEARCH_SESSIONS,
+    tools::MESSAGE_SESSION,
+    tools::SPAWN_SESSION,
 ];
 
 /// Strip the `relay_tools:` prefix from a WS op; None for non-tool ops and
@@ -86,6 +96,14 @@ pub async fn execute_relay_tool(
         let text = tools::execute_automation_tool(app, tool_name, args).await;
         return Ok(json!({ "text": text, "artifact": Value::Null }));
     }
+    // Session Mesh family: same interception shape. `execute_mesh_tool`
+    // carries the caller identity in args (`session_id` — the registry block
+    // injected at spawn states it), because this path has no built-in notion
+    // of which chat is calling.
+    if tools::is_mesh_tool(tool_name) {
+        let text = crate::session_fabric::execute_mesh_tool(app, None, tool_name, args).await;
+        return Ok(json!({ "text": text, "artifact": Value::Null }));
+    }
     // Same client construction the built-in chat uses (chat/mod.rs).
     let client = reqwest::Client::new();
     let artifacts_dir = crate::chat::dispatch::artifacts_dir(app);
@@ -117,6 +135,15 @@ mod tests {
         assert_eq!(tool_from_op("relay_tools:update_automation"), Some("update_automation".to_string()));
         assert_eq!(tool_from_op("relay_tools:delete_automation"), Some("delete_automation".to_string()));
         assert_eq!(tool_from_op("relay_tools:run_automation_now"), Some("run_automation_now".to_string()));
+        // Session Mesh family reaches harness CLIs through the same bridge —
+        // the read trio and the write pair alike (the write pair's approval
+        // gate lives in the built-in path's run_tool; over the bridge the
+        // mesh's own caps + UI visibility are the guard, per the module doc).
+        assert_eq!(tool_from_op("relay_tools:list_sessions"), Some("list_sessions".to_string()));
+        assert_eq!(tool_from_op("relay_tools:read_session"), Some("read_session".to_string()));
+        assert_eq!(tool_from_op("relay_tools:search_sessions"), Some("search_sessions".to_string()));
+        assert_eq!(tool_from_op("relay_tools:message_session"), Some("message_session".to_string()));
+        assert_eq!(tool_from_op("relay_tools:spawn_session"), Some("spawn_session".to_string()));
         assert_eq!(tool_from_op("navigate"), None);
         assert_eq!(tool_from_op("relay_tools:"), None);
         // Mutating/dangerous chat tools must be rejected server-side even

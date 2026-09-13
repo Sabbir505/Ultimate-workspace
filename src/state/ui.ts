@@ -149,6 +149,8 @@ export interface UiState {
   gitSectionPlansOpen: boolean;
   gitSectionProgressOpen: boolean;
   gitSectionAgentsOpen: boolean;
+  /** Session Mesh section (mail + spawned sessions) in the Git tools sidebar. */
+  gitSectionMeshOpen: boolean;
   /** Plan markdown content to show in the Canvas tab. Set when a plan
    *  row is clicked in the Git tools sidebar. */
   planCanvasContent: string | null;
@@ -269,6 +271,7 @@ export interface UiState {
   toggleGitSectionPlans: () => void;
   toggleGitSectionProgress: () => void;
   toggleGitSectionAgents: () => void;
+  toggleGitSectionMesh: () => void;
   setPlanCanvas: (content: string | null, title: string | null) => void;
   setDiffPanelFile: (file: string | null, cwd: string | null) => void;
   setToolPanelWidth: (width: number) => void;
@@ -334,6 +337,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   gitSectionPlansOpen: true,
   gitSectionProgressOpen: true,
   gitSectionAgentsOpen: true,
+  gitSectionMeshOpen: true,
   planCanvasContent: null,
   planCanvasTitle: null,
   diffPanelFile: null,
@@ -674,6 +678,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   toggleGitSectionPlans: () => set((s) => ({ gitSectionPlansOpen: !s.gitSectionPlansOpen })),
   toggleGitSectionProgress: () => set((s) => ({ gitSectionProgressOpen: !s.gitSectionProgressOpen })),
   toggleGitSectionAgents: () => set((s) => ({ gitSectionAgentsOpen: !s.gitSectionAgentsOpen })),
+  toggleGitSectionMesh: () => set((s) => ({ gitSectionMeshOpen: !s.gitSectionMeshOpen })),
   setPlanCanvas: (content, title) => set({ planCanvasContent: content, planCanvasTitle: title }),
   setDiffPanelFile: (diffPanelFile, diffPanelCwd) => set({ diffPanelFile, diffPanelCwd }),
   setToolPanelWidth: (toolPanelWidth) =>

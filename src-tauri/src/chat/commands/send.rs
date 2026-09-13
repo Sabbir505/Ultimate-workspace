@@ -532,18 +532,16 @@ pub async fn send_chat_message(
             db::update_chat_session_model(&conn, &chat_session_id, &pick.model)
                 .map_err(|e| e.to_string())?;
         }
-        let _ = app.emit(
-            "chat:status",
-            crate::types::ChatStatusPayload {
-                chat_session_id: chat_session_id.clone(),
-                reason: "auto_route".to_string(),
-                message: format!(
-                    "Auto → {} · {} ({})",
-                    crate::chat::auto_router::provider_label(&pick.provider),
-                    pick.model,
-                    pick.reason
-                ),
-            },
+        let _ = crate::chat::stream_events::emit_status_reason(
+            Some(&app),
+            &chat_session_id,
+            "auto_route",
+            format!(
+                "Auto → {} · {} ({})",
+                crate::chat::auto_router::provider_label(&pick.provider),
+                pick.model,
+                pick.reason
+            ),
         );
         // Fail-over chain: candidates after the pick, with credentials
         // pre-resolved so the turn loop never touches the DB for them.
@@ -639,16 +637,8 @@ pub async fn send_chat_message(
     // 2. Persist the user message.
     {
         let conn = db.0.lock();
-        db::add_chat_message(
-            &conn,
-            db::NewChatMessage {
-                chat_session_id: &chat_session_id,
-                role: "user",
-                content: &content,
-                ..Default::default()
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        db::add_user_chat_message(&conn, &chat_session_id, &content)
+            .map_err(|e| e.to_string())?;
         db::touch_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())?;
     }
 
@@ -682,13 +672,11 @@ pub async fn send_chat_message(
             .map(|l| l.status().is_some())
             .unwrap_or(false);
         if !sidecar_running {
-            let _ = app.emit(
-                "chat:status",
-                crate::types::ChatStatusPayload {
-                    chat_session_id: chat_session_id.clone(),
-                    reason: "local_model_loading".to_string(),
-                    message: "Local model is starting up — this can take a moment before the first token arrives.".to_string(),
-                },
+            crate::chat::stream_events::emit_status_reason(
+                Some(&app),
+                &chat_session_id,
+                "local_model_loading",
+                "Local model is starting up — this can take a moment before the first token arrives.",
             );
             if let Some(local) = local_state {
                 // Resolve the GGUF file path from the session's stored model
@@ -843,14 +831,7 @@ pub async fn send_chat_message(
                                 // warmup finished (one way or another) and the first token may be
                                 // seconds away or never come if the turn fails elsewhere; the
                                 // pill must not outlive this block.
-                                let _ = app.emit(
-                                    "chat:status",
-                                    crate::types::ChatStatusPayload {
-                                        chat_session_id: chat_session_id.clone(),
-                                        reason: String::new(),
-                                        message: String::new(),
-                                    },
-                                );
+                                crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
                                 return Err(format!(
                                     "The local model \"{want}\" could not be started after restart: {e}"
                                 ));
@@ -868,14 +849,7 @@ pub async fn send_chat_message(
             // warmup finished (one way or another) and the first token may be
             // seconds away or never come if the turn fails elsewhere; the
             // pill must not outlive this block.
-            let _ = app.emit(
-                "chat:status",
-                crate::types::ChatStatusPayload {
-                    chat_session_id: chat_session_id.clone(),
-                    reason: String::new(),
-                    message: String::new(),
-                },
-            );
+            crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
         }
     }
 
@@ -1018,6 +992,17 @@ pub async fn send_chat_message(
             manifest.as_deref(),
             memory_profile.as_deref(),
         );
+        // Session Mesh peer registry (SESSION_MESH_DESIGN_ARCHITECTURE.md
+        // §4.3) — appended AFTER build_system_prompt (which has 16 call
+        // sites; only the interactive turn needs the block). Auto-model
+        // fail-over rebuilds prompts from SystemPromptInputs and skips the
+        // block for that one fallback attempt — awareness resumes next turn.
+        let built = built.map(|sys| {
+            match crate::session_fabric::registry_block(&conn, Some(&chat_session_id)) {
+                Some(block) if !block.trim().is_empty() => format!("{sys}\n\n{block}"),
+                _ => sys,
+            }
+        });
         // [prompt-audit] inputs captured before `custom`/`skills` are consumed.
         let audit = (
             custom.as_deref().map(|c| c.trim().len()).unwrap_or(0),
@@ -1069,20 +1054,8 @@ pub async fn send_chat_message(
     // mark the rows it folds into a summary.
     let mut messages: Vec<crate::chat::compaction::CompactionEntry> = {
         let conn = db.0.lock();
-        let records =
-            db::list_active_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?;
-        records
-            .into_iter()
-            .map(|r| crate::chat::compaction::CompactionEntry {
-                id: r.id,
-                message: ChatMessage {
-                    role: r.role,
-                    // Thinking blocks are for display only — never re-sent.
-                    content: strip_think_blocks(&r.content),
-                    images: Vec::new(),
-                },
-            })
-            .collect::<Vec<_>>()
+        crate::chat::compaction::load_compaction_entries(&conn, &chat_session_id)
+            .map_err(|e| e.to_string())?
     };
     // Attach this turn's images to the just-persisted user message so they are
     // sent as vision content. Images are not persisted, so they only apply to
@@ -1161,13 +1134,11 @@ pub async fn send_chat_message(
             )
             .await;
             let pre_compact_tokens: u32 = pre_count_result.as_ref().copied().unwrap_or(0);
-            let _ = app.emit(
-                "chat:status",
-                crate::types::ChatStatusPayload {
-                    chat_session_id: chat_session_id.clone(),
-                    reason: "context_compacting".to_string(),
-                    message: "Compacting earlier context…".to_string(),
-                },
+            crate::chat::stream_events::emit_status_reason(
+                Some(&app),
+                &chat_session_id,
+                "context_compacting",
+                "Compacting earlier context…",
             );
 
             // P4 summarizer override: `chat.local_gguf.compaction_summarizer =
@@ -1370,28 +1341,16 @@ pub async fn send_chat_message(
                 // above, since the no-op case never gets a follow-up
                 // context_compacted event.
                 Ok(_noop) => {
-                    let _ = app.emit(
-                        "chat:status",
-                        crate::types::ChatStatusPayload {
-                            chat_session_id: chat_session_id.clone(),
-                            reason: "".to_string(),
-                            message: String::new(),
-                        },
-                    );
+                    // Clear the "compacting…" spinner (no follow-up
+                    // context_compacted event fires on the no-op path).
+                    crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
                     _noop.messages
                 }
                 // Unreachable in practice (maybe_compact never returns Err),
                 // but rebuild from the caller's messages if it ever does.
                 Err(e) => {
                     eprintln!("[local-compaction] gave up, passing history through: {e}");
-                    let _ = app.emit(
-                        "chat:status",
-                        crate::types::ChatStatusPayload {
-                            chat_session_id: chat_session_id.clone(),
-                            reason: "".to_string(),
-                            message: String::new(),
-                        },
-                    );
+                    crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
                     messages.iter().map(|e| e.message.clone()).collect()
                 }
             }
@@ -1452,13 +1411,11 @@ pub async fn send_chat_message(
         if cfg.enabled && base_ready && pre_tokens >= trigger {
             // Same spinner contract as the local path: the summarizer call
             // can take seconds and must not look like a frozen composer.
-            let _ = app.emit(
-                "chat:status",
-                crate::types::ChatStatusPayload {
-                    chat_session_id: chat_session_id.clone(),
-                    reason: "context_compacting".to_string(),
-                    message: "Compacting earlier context…".to_string(),
-                },
+            crate::chat::stream_events::emit_status_reason(
+                Some(&app),
+                &chat_session_id,
+                "context_compacting",
+                "Compacting earlier context…",
             );
             // Rebuild-from-raw (same contract as the local path): when a
             // prior summary exists, re-feed its raw source rows into the
@@ -1545,14 +1502,7 @@ pub async fn send_chat_message(
                 }
                 Err(e) => {
                     eprintln!("[cloud-compaction] failed ({e}); sending history unchanged");
-                    let _ = app.emit(
-                        "chat:status",
-                        crate::types::ChatStatusPayload {
-                            chat_session_id: chat_session_id.clone(),
-                            reason: "".to_string(),
-                            message: String::new(),
-                        },
-                    );
+                    crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
                     messages.into_iter().map(|e| e.message).collect()
                 }
             }
@@ -1565,8 +1515,8 @@ pub async fn send_chat_message(
     // frontend shows it in the timeline. Reuses the existing chat:status
     // event + ChatStatusPayload the local-model-loading notice uses.
     if let Some((reason, message)) = compacted_system_notice {
-        let _ = app.emit(
-            "chat:status",
+        crate::chat::stream_events::emit_status(
+            Some(&app),
             crate::types::ChatStatusPayload {
                 chat_session_id: chat_session_id.clone(),
                 reason,

@@ -38,6 +38,8 @@ const EMPTY_TASKS: Record<string, ChatTaskProgress> = {};
 const EMPTY_STEPS: PlanStep[] = [];
 const EMPTY_SUBAGENTS: Record<string, SubagentInfo> = {};
 const EMPTY_ACCEPTED: import("../../lib/ipc").ChatPlanRecord[] = [];
+const EMPTY_MAIL_IDS: string[] = [];
+const EMPTY_CHILDREN: { childId: string; title: string; agent: string }[] = [];
 
 const SIDEBAR_VISIBLE_CAP = 4;
 
@@ -197,6 +199,18 @@ export function GitToolsSidebar() {
   const subagents = useChatStore((s) =>
     activeChatSessionId ? (s.subagents[activeChatSessionId] ?? EMPTY_SUBAGENTS) : EMPTY_SUBAGENTS,
   );
+  // Session Mesh — this session's cross-session mail (both directions) and
+  // the child sessions it spawned. Latest transitions win; click-through
+  // opens the peer/child chat.
+  const meshMailIds = useChatStore((s) =>
+    activeChatSessionId ? (s.meshMailBySession[activeChatSessionId] ?? EMPTY_MAIL_IDS) : EMPTY_MAIL_IDS,
+  );
+  const meshMail = useChatStore((s) => s.meshMail);
+  const meshChildren = useChatStore((s) =>
+    activeChatSessionId ? (s.meshChildren[activeChatSessionId] ?? EMPTY_CHILDREN) : EMPTY_CHILDREN,
+  );
+  const selectSession = useChatStore((s) => s.selectSession);
+  const streamingMap = useChatStore((s) => s.streaming);
   // Running /goal or /loop for the focused chat — the sidebar goal card.
   const activeLoop = activeChatSessionId ? loopState[activeChatSessionId] : undefined;
   const stopLoop = useChatStore((s) => s.stopLoop);
@@ -220,10 +234,13 @@ export function GitToolsSidebar() {
   const gitSectionPlansOpen = useUiStore((s) => s.gitSectionPlansOpen);
   const gitSectionProgressOpen = useUiStore((s) => s.gitSectionProgressOpen);
   const gitSectionAgentsOpen = useUiStore((s) => s.gitSectionAgentsOpen);
+  const gitSectionMeshOpen = useUiStore((s) => s.gitSectionMeshOpen);
   const toggleGitSectionGit = useUiStore((s) => s.toggleGitSectionGit);
   const toggleGitSectionPlans = useUiStore((s) => s.toggleGitSectionPlans);
   const toggleGitSectionProgress = useUiStore((s) => s.toggleGitSectionProgress);
   const toggleGitSectionAgents = useUiStore((s) => s.toggleGitSectionAgents);
+  const toggleGitSectionMesh = useUiStore((s) => s.toggleGitSectionMesh);
+  const setActiveView = useUiStore((s) => s.setActiveView);
 
   // Strictly chat-bound: the git surface follows the ACTIVE SESSION's
   // project binding, never the sidebar-selected project. A brand-new chat
@@ -405,6 +422,24 @@ export function GitToolsSidebar() {
   const toggleBranchPopover = useCallback(() => {
     setBranchOpen((prev) => !prev);
   }, []);
+
+  // Mesh rows, newest first. Mail rows resolve the PEER (the other side of
+  // this session's exchange); children keep their own rows.
+  const meshMailRows = useMemo(() => {
+    return meshMailIds
+      .map((id) => meshMail[id])
+      .filter(Boolean)
+      .reverse();
+  }, [meshMailIds, meshMail]);
+  const meshBadgeCount = meshMailRows.length + meshChildren.length;
+
+  const openMeshSession = useCallback(
+    (id: string) => {
+      void selectSession(id).catch(() => {});
+      setActiveView("chat");
+    },
+    [selectSession, setActiveView],
+  );
 
   // Collapsed-chip status line: what the chat is doing RIGHT NOW, so the
   // collapsed rail isn't just a mute icon. Priority: the running /goal or
@@ -772,6 +807,105 @@ export function GitToolsSidebar() {
                   ))}
                 </SidebarMoreRow>
               )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Mesh section — Session Mesh: this session's cross-session mail
+          (both directions) plus the child sessions it spawned. Mail rows
+          jump to the PEER session; spawned rows to the child. Everything
+          the agents exchanged is visible here — no silent channel. */}
+      <div className="git-sidebar-section">
+        <button
+          className="git-sidebar-section-header"
+          onClick={toggleGitSectionMesh}
+          title={gitSectionMeshOpen ? "Collapse mesh" : "Expand mesh"}
+          aria-expanded={gitSectionMeshOpen}
+          aria-controls="git-section-mesh"
+        >
+          <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="5" cy="12" r="2" /><circle cx="19" cy="5" r="2" /><circle cx="19" cy="19" r="2" />
+            <path d="M7 11l10-5M7 13l10 5" />
+          </svg>
+          <span className="git-sidebar-section-title">Mesh</span>
+          {meshBadgeCount > 0 && (
+            <span className="git-sidebar-section-badge">{meshBadgeCount}</span>
+          )}
+        </button>
+        <div
+          id="git-section-mesh"
+          className={`git-section-collapse${gitSectionMeshOpen ? " open" : ""}`}
+          aria-hidden={!gitSectionMeshOpen}
+        >
+          <div className="git-section-collapse-inner">
+            {meshMailRows.length === 0 && meshChildren.length === 0 ? (
+              <div className="git-sidebar-empty">No mesh activity.</div>
+            ) : (
+              <>
+              {meshMailRows.slice(0, SIDEBAR_VISIBLE_CAP).map((m) => {
+                const outgoing = m.fromSession === activeChatSessionId;
+                const peer = outgoing ? m.toTitle : m.fromTitle;
+                const answered = m.status === "answered";
+                const failed = m.status === "expired" || m.status === "rejected";
+                return (
+                  <button
+                    key={m.mailId}
+                    className={`git-sidebar-mesh-row${failed ? " failed" : ""}${answered ? " answered" : ""}`}
+                    onClick={() => openMeshSession(outgoing ? m.toSession : m.fromSession)}
+                    title={`${outgoing ? "To" : "From"} ${peer} (${m.mode}, ${m.status}): ${m.bodyExcerpt}`}
+                  >
+                    <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ transform: outgoing ? "none" : "scaleX(-1)" }}>
+                      <path d="M5 12h14M13 6l6 6-6 6" />
+                    </svg>
+                    <span className="git-sidebar-mesh-label">{outgoing ? "To" : "From"}</span>
+                    <span className="git-sidebar-mesh-peer">{peer}</span>
+                    <span className="git-sidebar-mesh-dot-sep" aria-hidden="true">·</span>
+                    <span className={`git-sidebar-mesh-status status-${m.status}`}>{answered ? "answered" : m.status}</span>
+                  </button>
+                );
+              })}
+              {meshMailRows.length > SIDEBAR_VISIBLE_CAP && (
+                <SidebarMoreRow count={meshMailRows.length - SIDEBAR_VISIBLE_CAP} label="mails">
+                  {meshMailRows.slice(SIDEBAR_VISIBLE_CAP).map((m) => {
+                    const outgoing = m.fromSession === activeChatSessionId;
+                    const peer = outgoing ? m.toTitle : m.fromTitle;
+                    return (
+                      <button
+                        key={`more-${m.mailId}`}
+                        className="git-sidebar-mesh-row"
+                        onClick={() => openMeshSession(outgoing ? m.toSession : m.fromSession)}
+                        title={`${outgoing ? "To" : "From"} ${peer} (${m.mode}, ${m.status})`}
+                      >
+                        <span className="git-sidebar-mesh-label">{outgoing ? "To" : "From"}</span>
+                        <span className="git-sidebar-mesh-peer">{peer}</span>
+                        <span className={`git-sidebar-mesh-status status-${m.status}`}>{m.status}</span>
+                      </button>
+                    );
+                  })}
+                </SidebarMoreRow>
+              )}
+              {meshChildren.map((c) => {
+                const running = streamingMap[c.childId] !== undefined;
+                return (
+                  <button
+                    key={c.childId}
+                    className={`git-sidebar-mesh-row spawned${running ? " running" : ""}`}
+                    onClick={() => openMeshSession(c.childId)}
+                    title={`Spawned session: ${c.title} (${c.agent})`}
+                  >
+                    <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 5v5M12 10l-6 6M12 10l6 6" />
+                      <circle cx="12" cy="4" r="1.5" /><circle cx="5" cy="18" r="1.5" /><circle cx="19" cy="18" r="1.5" />
+                    </svg>
+                    <span className="git-sidebar-mesh-label">Spawned</span>
+                    <span className="git-sidebar-mesh-peer">{c.title}</span>
+                    {running && <span className="git-sidebar-mesh-dot-sep" aria-hidden="true">·</span>}
+                    {running && <span className="git-sidebar-mesh-status status-running">running</span>}
+                  </button>
+                );
+              })}
               </>
             )}
           </div>

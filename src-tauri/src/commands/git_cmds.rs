@@ -18,10 +18,26 @@ fn verify_project_path(path: &Path, db: &DbState) -> CmdResult<()> {
     let canon = path
         .canonicalize()
         .map_err(|e| format!("cannot resolve path: {e}"))?;
-    let conn = db.0.lock();
-    let projects = db::list_projects(&conn).map_err(|e| e.to_string())?;
-    for proj in &projects {
-        if let Ok(proj_canon) = Path::new(&proj.path).canonicalize() {
+    // Fetch the allow-listed path STRINGS under the lock, then canonicalize
+    // after release (DbState rule: the lock guards SQL only — canonicalize is
+    // filesystem IO, and this runs on every fs-change burst).
+    let (project_paths, worktree_paths, chat_worktrees) = {
+        let conn = db.0.lock();
+        let projects = db::list_projects(&conn).map_err(|e| e.to_string())?;
+        let worktrees: Vec<String> = db::list_sessions(&conn, None)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter_map(|s| s.worktree_path)
+            .collect();
+        let chat_wts = db::chat_worktree_paths(&conn, None).map_err(|e| e.to_string())?;
+        (
+            projects.into_iter().map(|p| p.path).collect::<Vec<_>>(),
+            worktrees,
+            chat_wts,
+        )
+    };
+    for proj in &project_paths {
+        if let Ok(proj_canon) = Path::new(proj).canonicalize() {
             if crate::util::path_starts_with_ci(&canon, &proj_canon) {
                 return Ok(());
             }
@@ -31,21 +47,17 @@ fn verify_project_path(path: &Path, db: &DbState) -> CmdResult<()> {
     // so they legitimately sit outside every project prefix — allowlist the
     // exact paths recorded on sessions rather than loosening the prefix check
     // (a raw prefix match is what let any same-prefix sibling dir pass).
-    let sessions = db::list_sessions(&conn, None).map_err(|e| e.to_string())?;
-    for sess in &sessions {
-        if let Some(wt) = &sess.worktree_path {
-            if let Ok(wt_canon) = Path::new(wt).canonicalize() {
-                if crate::util::path_starts_with_ci(&canon, &wt_canon) {
-                    return Ok(());
-                }
+    for wt in &worktree_paths {
+        if let Ok(wt_canon) = Path::new(wt).canonicalize() {
+            if crate::util::path_starts_with_ci(&canon, &wt_canon) {
+                return Ok(());
             }
         }
     }
     // Chat-session worktrees (roadmap P0 §3.1.1) live in the same sibling
     // layout; allowlist the exact recorded paths the same way.
-    let chat_worktrees = db::chat_worktree_paths(&conn, None).map_err(|e| e.to_string())?;
-    for wt in chat_worktrees {
-        if let Ok(wt_canon) = Path::new(&wt).canonicalize() {
+    for wt in &chat_worktrees {
+        if let Ok(wt_canon) = Path::new(wt).canonicalize() {
             if crate::util::path_starts_with_ci(&canon, &wt_canon) {
                 return Ok(());
             }

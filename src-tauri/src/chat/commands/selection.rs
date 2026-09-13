@@ -1095,18 +1095,8 @@ pub async fn chat_compact_now(
     };
     let entries: Vec<crate::chat::compaction::CompactionEntry> = {
         let conn = db.0.lock();
-        db::list_active_chat_messages(&conn, &chat_session_id)
+        crate::chat::compaction::load_compaction_entries(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|r| crate::chat::compaction::CompactionEntry {
-                id: r.id,
-                message: ChatMessage {
-                    role: r.role,
-                    content: strip_think_blocks(&r.content),
-                    images: Vec::new(),
-                },
-            })
-            .collect()
     };
     let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
         let conn = db.0.lock();
@@ -1123,13 +1113,11 @@ pub async fn chat_compact_now(
         .filter_map(|r| r.strip_prefix("mcp:").map(|s| s.to_string()))
         .collect();
 
-    let _ = app.emit(
-        "chat:status",
-        crate::types::ChatStatusPayload {
-            chat_session_id: chat_session_id.clone(),
-            reason: "context_compacting".to_string(),
-            message: "Compacting earlier context…".to_string(),
-        },
+    crate::chat::stream_events::emit_status_reason(
+        Some(&app),
+        &chat_session_id,
+        "context_compacting",
+        "Compacting earlier context…",
     );
 
     let run = if provider_str == "local_gguf" {
@@ -1281,17 +1269,15 @@ pub async fn chat_compact_now(
         "[compact-now] compacted {} exchange(s) into summary row {}",
         run.compacted_exchange_count, summary_id,
     );
-    let _ = app.emit(
-        "chat:status",
-        crate::types::ChatStatusPayload {
-            chat_session_id: chat_session_id.clone(),
-            reason: "context_compacted".to_string(),
-            message: format!(
-                "Compacted {} exchange(s) — {} messages now active",
-                run.compacted_exchange_count,
-                run.messages.len(),
-            ),
-        },
+    crate::chat::stream_events::emit_status_reason(
+        Some(&app),
+        &chat_session_id,
+        "context_compacted",
+        format!(
+            "Compacted {} exchange(s) — {} messages now active",
+            run.compacted_exchange_count,
+            run.messages.len(),
+        ),
     );
     Ok(format!(
         "Compacted {} exchange(s)",

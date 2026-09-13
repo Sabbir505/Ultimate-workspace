@@ -430,15 +430,26 @@ fn is_path_allowed(path: &Path, app: &AppHandle, db: &DbState) -> bool {
             return true;
         }
     }
+    // Fetch the candidate path STRINGS under the lock, then canonicalize
+    // after release (DbState rule: the lock guards SQL only — canonicalize is
+    // filesystem IO).
+    let (project_paths, worktree_paths, chat_worktrees, configured_artifacts) = {
+        let conn = db.0.lock();
+        let project_paths: Vec<String> = db::list_projects(&conn)
+            .map(|ps| ps.into_iter().map(|p| p.path).collect())
+            .unwrap_or_default();
+        let worktree_paths: Vec<String> = db::list_sessions(&conn, None)
+            .map(|ss| ss.into_iter().filter_map(|s| s.worktree_path).collect())
+            .unwrap_or_default();
+        let chat_worktrees = db::chat_worktree_paths(&conn, None).unwrap_or_default();
+        let configured_artifacts = crate::chat::dispatch::configured_artifacts_dir(&conn);
+        (project_paths, worktree_paths, chat_worktrees, configured_artifacts)
+    };
     // Allow anything under a registered project root.
-    let conn = db.0.lock();
-    if let Ok(projs) = db::list_projects(&conn) {
-        for proj in &projs {
-            let proj_path = Path::new(&proj.path);
-            if let Ok(proj_canon) = proj_path.canonicalize() {
-                if crate::util::path_starts_with_ci(path, &proj_canon) {
-                    return true;
-                }
+    for proj_path in &project_paths {
+        if let Ok(proj_canon) = Path::new(proj_path).canonicalize() {
+            if crate::util::path_starts_with_ci(path, &proj_canon) {
+                return true;
             }
         }
     }
@@ -447,31 +458,25 @@ fn is_path_allowed(path: &Path, app: &AppHandle, db: &DbState) -> bool {
     // outside every project prefix — allowlist the exact recorded paths
     // instead of loosening the prefix check (which would also pass any
     // same-prefix sibling like `<name>-evil`).
-    if let Ok(sessions) = db::list_sessions(&conn, None) {
-        for sess in &sessions {
-            if let Some(wt) = &sess.worktree_path {
-                if let Ok(wt_canon) = Path::new(wt).canonicalize() {
-                    if crate::util::path_starts_with_ci(path, &wt_canon) {
-                        return true;
-                    }
-                }
+    for wt in &worktree_paths {
+        if let Ok(wt_canon) = Path::new(wt).canonicalize() {
+            if crate::util::path_starts_with_ci(path, &wt_canon) {
+                return true;
             }
         }
     }
     // Chat-session worktrees (roadmap P0 §3.1.1) sit in the same sibling
     // layout; allowlist the exact recorded paths the same way.
-    if let Ok(chat_worktrees) = db::chat_worktree_paths(&conn, None) {
-        for wt in chat_worktrees {
-            if let Ok(wt_canon) = Path::new(&wt).canonicalize() {
-                if crate::util::path_starts_with_ci(path, &wt_canon) {
-                    return true;
-                }
+    for wt in &chat_worktrees {
+        if let Ok(wt_canon) = Path::new(wt).canonicalize() {
+            if crate::util::path_starts_with_ci(path, &wt_canon) {
+                return true;
             }
         }
     }
     // Allow anything under the configured artifacts dir (Settings →
     // Storage & Data, `storage.artifactsDir`) when set.
-    if let Some(configured) = crate::chat::dispatch::configured_artifacts_dir(&conn) {
+    if let Some(configured) = configured_artifacts {
         let _ = fs::create_dir_all(&configured);
         if let Ok(conf_canon) = configured.canonicalize() {
             if crate::util::path_starts_with_ci(path, &conf_canon) {
@@ -479,7 +484,6 @@ fn is_path_allowed(path: &Path, app: &AppHandle, db: &DbState) -> bool {
             }
         }
     }
-    drop(conn);
     // Allow anything under the user's Documents/Relay dir (artifact exports),
     // plus the pre-rebrand Documents/Conduit so old artifacts stay exportable.
     if let Some(docs_dir) = dirs::document_dir() {

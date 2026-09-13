@@ -54,6 +54,10 @@ export interface ChatSession {
    *  "full_access". Decides when visible tools pause for approval.
    *  Defaults to "on_request". */
   approvalPolicy?: string;
+  /** Session Mesh provenance (SESSION_MESH_DESIGN_ARCHITECTURE.md §6):
+   *  null = human-created; "spawned_by:<chatId>" = an agent spawned this
+   *  session; "automation:<id>" = an automation run-log. */
+  origin?: string | null;
   /** Auto model routing: every send re-resolves the provider+model through
    *  the backend's auto router (cloud providers only). The row's
    *  provider/model hold the LAST resolution (post-first-send they name the

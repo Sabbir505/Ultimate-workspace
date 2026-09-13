@@ -944,22 +944,9 @@ fn record_download_artifact<R: tauri::Runtime>(app: Option<&AppHandle<R>>, sid: 
         return;
     };
     let db = app.state::<crate::DbState>();
-    let kind = dest
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
     let path = dest.to_string_lossy().to_string();
     let conn = db.0.lock();
-    let _ = crate::db::insert_artifact(&conn, Some(sid), &filename, &path, &kind);
-    let _ = app.emit(
-        "chat:artifact",
-        crate::types::ChatArtifactPayload {
-            chat_session_id: sid.to_string(),
-            path,
-            filename,
-        },
-    );
+    crate::chat::stream_events::insert_and_emit_artifact(Some(app), &conn, sid, &path, &filename);
 }
 
 /// Run a native shell command, streaming output lines as progress events.

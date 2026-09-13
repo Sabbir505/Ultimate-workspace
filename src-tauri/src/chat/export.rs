@@ -147,12 +147,14 @@ fn sanitize_name(name: &str) -> String {
         .collect()
 }
 
-/// Serialize one chat (metadata + messages + artifact bytes) from a live DB
-/// connection. Missing/unreadable artifact files are skipped.
-fn serialize_chat(
+/// Serialize one chat (metadata + messages) from a live DB connection — the
+/// lock-safe DB half of the export. Artifact disk paths are returned in the
+/// order [`finish_serialize_chat`] consumes them; NO disk IO happens here, so
+/// this is safe to call while holding the `DbState` lock.
+fn serialize_chat_rows(
     conn: &Connection,
     session: &crate::types::ChatSession,
-) -> Result<ChatWithFiles, String> {
+) -> Result<(ChatWithFiles, Vec<(String, String)>), String> {
     let messages = db::list_chat_messages(conn, &session.id).map_err(|e| e.to_string())?;
     let arts = crate::db::list_artifacts_for_chat(conn, &session.id).map_err(|e| e.to_string())?;
     let by_msg: HashMap<Option<i64>, Vec<&crate::types::ArtifactRecord>> = {
@@ -164,7 +166,7 @@ fn serialize_chat(
     };
 
     let mut exported = Vec::with_capacity(messages.len());
-    let mut files: Vec<ArtifactFile> = Vec::new();
+    let mut artifact_paths: Vec<(String, String)> = Vec::new();
     for m in &messages {
         let msg_arts = by_msg.get(&Some(m.id)).cloned().unwrap_or_default();
         let mut exp_arts = Vec::with_capacity(msg_arts.len());
@@ -173,12 +175,7 @@ fn serialize_chat(
                 filename: a.filename.clone(),
                 kind: a.kind.clone(),
             });
-            if let Ok(bytes) = std::fs::read(&a.path) {
-                files.push(ArtifactFile {
-                    internal_name: format!("{:06}__{}", files.len(), sanitize_name(&a.filename)),
-                    bytes,
-                });
-            }
+            artifact_paths.push((a.path.clone(), a.filename.clone()));
         }
         exported.push(ExportedMessage {
             id: m.id,
@@ -205,26 +202,58 @@ fn serialize_chat(
         });
     }
 
-    Ok(ChatWithFiles {
-        chat: ExportedChat {
-            id: session.id.clone(),
-            title: session.title.clone(),
-            provider: session.provider.clone(),
-            model: session.model.clone(),
-            created_at: session.created_at,
-            last_active_at: session.last_active_at,
-            starred: session.starred,
-            unread: session.unread,
-            watch_mode: session.watch_mode.clone(),
-            agent: session.agent.clone(),
-            project_id: session.project_id.clone(),
-            permission_mode: session.permission_mode.clone(),
-            sandbox_policy: session.sandbox_policy.clone(),
-            approval_policy: session.approval_policy.clone(),
-            messages: exported,
+    Ok((
+        ChatWithFiles {
+            chat: ExportedChat {
+                id: session.id.clone(),
+                title: session.title.clone(),
+                provider: session.provider.clone(),
+                model: session.model.clone(),
+                created_at: session.created_at,
+                last_active_at: session.last_active_at,
+                starred: session.starred,
+                unread: session.unread,
+                watch_mode: session.watch_mode.clone(),
+                agent: session.agent.clone(),
+                project_id: session.project_id.clone(),
+                permission_mode: session.permission_mode.clone(),
+                sandbox_policy: session.sandbox_policy.clone(),
+                approval_policy: session.approval_policy.clone(),
+                messages: exported,
+            },
+            files: Vec::new(),
         },
-        files,
-    })
+        artifact_paths,
+    ))
+}
+
+/// Disk half of [`serialize_chat_rows`]: reads each artifact file (missing/
+/// unreadable entries are skipped, same as the original single-pass walk) and
+/// fills `chat.files` with stable `NNNNNN__name` internal names. Call WITHOUT
+/// the `DbState` lock held — file IO must never stall other DB consumers.
+fn finish_serialize_chat(
+    mut chat: ChatWithFiles,
+    artifact_paths: Vec<(String, String)>,
+) -> ChatWithFiles {
+    for (path, filename) in artifact_paths {
+        if let Ok(bytes) = std::fs::read(&path) {
+            chat.files.push(ArtifactFile {
+                internal_name: format!("{:06}__{}", chat.files.len(), sanitize_name(&filename)),
+                bytes,
+            });
+        }
+    }
+    chat
+}
+
+/// Convenience composition of [`serialize_chat_rows`] + [`finish_serialize_chat`]
+/// for callers that don't hold the `DbState` lock (tests).
+fn serialize_chat(
+    conn: &Connection,
+    session: &crate::types::ChatSession,
+) -> Result<ChatWithFiles, String> {
+    let (chat, artifact_paths) = serialize_chat_rows(conn, session)?;
+    Ok(finish_serialize_chat(chat, artifact_paths))
 }
 
 /// Materialize a zip archive for a set of chats + manifest → raw bytes.
@@ -284,12 +313,14 @@ pub async fn export_chat_zip(
     dest: String,
 ) -> Result<(), String> {
     let db = db.0.clone();
-    let (_manifest, zip_bytes) = {
+    // DB rows under the lock; artifact file reads + deflate happen after it
+    // is released (DbState rule: the lock guards SQL only).
+    let (manifest, chat, artifact_paths) = {
         let conn = db.lock();
         let session = crate::db::get_chat_session(&conn, &session_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("chat session not found: {session_id}"))?;
-        let chat = serialize_chat(&conn, &session)?;
+        let (chat, artifact_paths) = serialize_chat_rows(&conn, &session)?;
         let manifest = ChatManifest {
             version: EXPORT_VERSION,
             kind: "chat".to_string(),
@@ -299,9 +330,10 @@ pub async fn export_chat_zip(
                 project_id: None,
             },
         };
-        let zip_bytes = build_zip(&manifest, std::slice::from_ref(&chat))?;
-        (manifest, zip_bytes)
+        (manifest, chat, artifact_paths)
     };
+    let chat = finish_serialize_chat(chat, artifact_paths);
+    let zip_bytes = build_zip(&manifest, std::slice::from_ref(&chat))?;
     write_zip(PathBuf::from(&dest), zip_bytes)
 }
 
@@ -313,7 +345,9 @@ pub async fn export_project_zip(
     dest: String,
 ) -> Result<(), String> {
     let db = db.0.clone();
-    let (_manifest, zip_bytes) = {
+    // DB rows under the lock; artifact file reads + deflate after release
+    // (DbState rule: the lock guards SQL only).
+    let (manifest, mut chats, path_batch) = {
         let conn = db.lock();
         let all = crate::db::list_chat_sessions(&conn).map_err(|e| e.to_string())?;
         let project_sessions: Vec<_> = all
@@ -321,8 +355,11 @@ pub async fn export_project_zip(
             .filter(|s| s.project_id.as_deref() == Some(project_id.as_str()))
             .collect();
         let mut chats = Vec::with_capacity(project_sessions.len());
+        let mut path_batch = Vec::new();
         for s in &project_sessions {
-            chats.push(serialize_chat(&conn, s)?);
+            let (chat, artifact_paths) = serialize_chat_rows(&conn, s)?;
+            path_batch.push(artifact_paths);
+            chats.push(chat);
         }
         let manifest = ChatManifest {
             version: EXPORT_VERSION,
@@ -333,9 +370,14 @@ pub async fn export_project_zip(
                 project_id: Some(project_id.clone()),
             },
         };
-        let zip_bytes = build_zip(&manifest, &chats)?;
-        (manifest, zip_bytes)
+        (manifest, chats, path_batch)
     };
+    let chats = chats
+        .into_iter()
+        .zip(path_batch)
+        .map(|(chat, artifact_paths)| finish_serialize_chat(chat, artifact_paths))
+        .collect::<Vec<_>>();
+    let zip_bytes = build_zip(&manifest, &chats)?;
     write_zip(PathBuf::from(&dest), zip_bytes)
 }
 
@@ -368,8 +410,11 @@ pub async fn import_chat_zip(
 ) -> Result<Vec<String>, String> {
     let artifacts_dir = dispatch::artifacts_dir(&app);
     let bytes = std::fs::read(&src).map_err(|e| format!("could not read zip: {e}"))?;
+    // Decompress + parse BEFORE taking the lock (DbState rule: the lock
+    // guards SQL only) — a big archive must not stall other DB consumers.
+    let parsed = parse_zip_export(&bytes)?;
     let conn = db.0.lock();
-    import_zip_bytes(&conn, &bytes, &artifacts_dir)
+    import_parsed_chats(&conn, parsed, &artifacts_dir)
 }
 
 /// Pure import core — testable with an in-memory connection (`db::mem()`).
@@ -378,6 +423,22 @@ fn import_zip_bytes(
     bytes: &[u8],
     artifacts_dir: &std::path::Path,
 ) -> Result<Vec<String>, String> {
+    let parsed = parse_zip_export(bytes)?;
+    import_parsed_chats(conn, parsed, artifacts_dir)
+}
+
+/// One imported chat, fully decompressed: the parsed `chats/<slug>/chat.json`
+/// plus its artifact entries in the deterministic `NNNNNN__name` order the
+/// DB half consumes them in.
+struct ParsedChatExport {
+    chat: ExportedChat,
+    art_entries: Vec<(String, Vec<u8>)>,
+}
+
+/// Memory half of the import: decompress + validate the archive. NO DB, NO
+/// lock — safe (and best) to run before taking `DbState`; a big zip would
+/// otherwise stall every other DB consumer for the whole decompress.
+fn parse_zip_export(bytes: &[u8]) -> Result<Vec<ParsedChatExport>, String> {
     use std::io::Cursor;
 
     let mut archive =
@@ -406,13 +467,50 @@ fn import_zip_bytes(
     }
     chat_dirs.sort();
 
-    let mut imported = Vec::with_capacity(chat_dirs.len());
+    let mut parsed = Vec::with_capacity(chat_dirs.len());
     for dir in chat_dirs {
         let chat_path = format!("{dir}chat.json");
         let raw = read_zip_entry(&mut archive, &chat_path)?;
         let chat: ExportedChat =
             serde_json::from_slice(&raw).map_err(|e| format!("bad {chat_path}: {e}"))?;
 
+        // Restore artifact entry bytes. Archive entries
+        // `chats/<slug>/artifacts/*` sort lexicographically (`NNNNNN__name`)
+        // in the same order `serialize_chat` pushed bytes per message, so
+        // import maps them back by walking messages' `artifacts` in order
+        // and pulling the next entry each time.
+        let art_prefix = format!("{dir}artifacts/");
+        let mut art_entries: Vec<(String, Vec<u8>)> = Vec::new();
+        for i in 0..archive.len() {
+            let name = match archive.name_for_index(i) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if name.starts_with(&art_prefix)
+                && name.len() > art_prefix.len()
+                && !name.ends_with('/')
+            {
+                if let Ok(bytes) = read_zip_entry(&mut archive, &name) {
+                    art_entries.push((name, bytes));
+                }
+            }
+        }
+        art_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        parsed.push(ParsedChatExport { chat, art_entries });
+    }
+    Ok(parsed)
+}
+
+/// DB half of the import: insert session + message + artifact rows and write
+/// the artifact files. Call with the `DbState` lock held.
+fn import_parsed_chats(
+    conn: &Connection,
+    parsed: Vec<ParsedChatExport>,
+    artifacts_dir: &std::path::Path,
+) -> Result<Vec<String>, String> {
+    let mut imported = Vec::with_capacity(parsed.len());
+    for ParsedChatExport { chat, art_entries } in parsed {
         let new_id = db::new_id();
         let title = chat
             .title
@@ -508,28 +606,6 @@ fn import_zip_bytes(
                 }
             }
         }
-
-        // Restore artifact files + rows. Archive entries `chats/<slug>/artifacts/*`
-        // sort lexicographically (`NNNNNN__name`) in the same order
-        // `serialize_chat` pushed bytes per message, so map them back by walking
-        // messages' `artifacts` in order and pulling the next entry each time.
-        let art_prefix = format!("{dir}artifacts/");
-        let mut art_entries: Vec<(String, Vec<u8>)> = Vec::new();
-        for i in 0..archive.len() {
-            let name = match archive.name_for_index(i) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            if name.starts_with(&art_prefix)
-                && name.len() > art_prefix.len()
-                && !name.ends_with('/')
-            {
-                if let Ok(bytes) = read_zip_entry(&mut archive, &name) {
-                    art_entries.push((name, bytes));
-                }
-            }
-        }
-        art_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         // Files already present in the artifacts dir, to dedupe on write.
         let mut used = {

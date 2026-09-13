@@ -110,7 +110,9 @@ export function TtsPanel() {
   };
   useEffect(refresh, []);
   // Each visit to the picker gets a fresh speculative budget (see prefetch).
-  useEffect(() => voicePreview.resetPrefetchBudget, []);
+  // The reset runs on unmount; the arrow wrapper binds `voicePreview` — React
+  // invokes cleanups unbound, so the bare method reference crashed on `this`.
+  useEffect(() => () => voicePreview.resetPrefetchBudget(), []);
 
   // Model downloads ride the shared progress stream, keyed by the catalog id
   // (so the Cancel button is the same `cancelModelDownload` the market uses).

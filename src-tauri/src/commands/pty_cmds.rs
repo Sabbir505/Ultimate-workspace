@@ -97,6 +97,9 @@ pub fn spawn_agent_session(
         &[],
         Some("workspace_write"),
         Some("on_request"),
+        // Interactive pane sessions aren't chat_sessions rows — keep the
+        // global artifact snapshot for them.
+        None,
     );
     let mut extra_env: Vec<(String, String)> = vec![];
     match session.harness.as_str() {

@@ -53,6 +53,8 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
         effort_level: row
             .get::<_, Option<String>>("effort_level")?
             .filter(|s| !s.is_empty()),
+        // Session Mesh provenance; NULL = human-created.
+        origin: row.get::<_, Option<String>>("origin")?,
     })
 }
 
@@ -627,6 +629,27 @@ pub struct NewChatMessage<'a> {
     pub tool_time_ms: Option<i64>,
     pub ttft_ms: Option<i64>,
     pub tokens_per_second: Option<f64>,
+}
+
+/// Persist the turn's user message (plain text; attachment-derived text is
+/// expected to already be inlined into `content` by the caller). Thin
+/// shorthand for `add_chat_message(role: "user", ..)` — every send path
+/// (built-in chat, harness sessions, mobile WS, relay one-shot) persists the
+/// same shape up front so history survives a crash mid-turn.
+pub fn add_user_chat_message(
+    conn: &Connection,
+    chat_session_id: &str,
+    content: &str,
+) -> DbResult<ChatMessageRecord> {
+    add_chat_message(
+        conn,
+        NewChatMessage {
+            chat_session_id,
+            role: "user",
+            content,
+            ..Default::default()
+        },
+    )
 }
 
 pub fn add_chat_message(conn: &Connection, msg: NewChatMessage) -> DbResult<ChatMessageRecord> {

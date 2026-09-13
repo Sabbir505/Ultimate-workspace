@@ -410,16 +410,8 @@ fn handle_send_chat_message(
     //    history matches what the model actually saw).
     {
         let conn = db.lock();
-        db::add_chat_message(
-            &conn,
-            db::NewChatMessage {
-                chat_session_id: &chat_session_id,
-                role: "user",
-                content: &content,
-                ..Default::default()
-            },
-        )
-        .map_err(|e| format!("failed to persist user message: {e}"))?;
+        db::add_user_chat_message(&conn, &chat_session_id, &content)
+            .map_err(|e| format!("failed to persist user message: {e}"))?;
         db::touch_chat_session(&conn, &chat_session_id)
             .map_err(|e| format!("failed to touch chat session: {e}"))?;
     }

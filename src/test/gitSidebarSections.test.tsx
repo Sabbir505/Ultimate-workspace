@@ -24,6 +24,7 @@ describe("git sidebar section disclosure", () => {
       gitSectionPlansOpen: true,
       gitSectionProgressOpen: true,
       gitSectionAgentsOpen: true,
+      gitSectionMeshOpen: true,
     });
   });
 
@@ -45,6 +46,14 @@ describe("git sidebar section disclosure", () => {
 
     s.toggleGitSectionAgents();
     expect(useUiStore.getState().gitSectionAgentsOpen).toBe(false);
+
+    // Mesh (Session Mesh) section: same independence contract.
+    expect(useUiStore.getState().gitSectionMeshOpen).toBe(true);
+    s.toggleGitSectionMesh();
+    expect(useUiStore.getState().gitSectionMeshOpen).toBe(false);
+    expect(useUiStore.getState().gitSectionAgentsOpen).toBe(false);
+    s.toggleGitSectionMesh();
+    expect(useUiStore.getState().gitSectionMeshOpen).toBe(true);
   });
 
   it("toggling a section twice returns it to its original state", () => {

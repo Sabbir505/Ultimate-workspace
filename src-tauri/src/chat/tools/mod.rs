@@ -199,6 +199,44 @@ pub const DELETE_AUTOMATION: &str = "delete_automation";
 /// Fire one run of an automation immediately (same path the scheduler uses).
 pub const RUN_AUTOMATION_NOW: &str = "run_automation_now";
 
+// ---- Session Mesh (cross-session awareness / messaging / spawning) ----
+//
+// SESSION_MESH_DESIGN_ARCHITECTURE.md. The read trio makes sibling chats
+// visible to the model; the write pair lets it consult or delegate to them.
+// Dispatch is NOT here (like automations): the runtime lives in
+// `crate::session_fabric` and is reachable from BOTH the built-in loop
+// (`dispatch::run_tool`) and the relay-tools MCP bridge, so harness CLIs get
+// the identical capability. The read trio is always safe; messaging/spawning
+// are plan-mode-refused and permission-gated like connector writes.
+
+/// List the user's other chat sessions (id, title, engine, project, status,
+/// summary line). Read-only.
+pub const LIST_SESSIONS: &str = "list_sessions";
+/// Read a peer session's summary, recent turns, or full transcript. Read-only.
+pub const READ_SESSION: &str = "read_session";
+/// Full-text search across ALL sessions' messages + titles (the command
+/// palette's Chats index, opened to the model). Read-only.
+pub const SEARCH_SESSIONS: &str = "search_sessions";
+/// Send a message/question to another session; it arrives as a turn there
+/// and the answer comes back (parked tool call, or a follow-up turn on
+/// timeout). Guarded: rate/depth caps, fully visible in the UI.
+pub const MESSAGE_SESSION: &str = "message_session";
+/// Create a real (sidebar-visible, resumable) chat session with a task as
+/// its first turn, in any installed engine. Guarded: depth/concurrency caps.
+pub const SPAWN_SESSION: &str = "spawn_session";
+
+pub fn is_mesh_tool(name: &str) -> bool {
+    matches!(
+        name,
+        LIST_SESSIONS | READ_SESSION | SEARCH_SESSIONS | MESSAGE_SESSION | SPAWN_SESSION
+    )
+}
+
+/// The mutating half of the mesh family (plan-mode + permission gates).
+pub fn is_mesh_write_tool(name: &str) -> bool {
+    matches!(name, MESSAGE_SESSION | SPAWN_SESSION)
+}
+
 // ---- Filesystem tools (the "filesystem tool-use" layer) ----
 //
 // Read-only tools auto-run in every permission mode; mutating tools are

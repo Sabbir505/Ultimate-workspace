@@ -44,6 +44,7 @@ function preview(over: Partial<ArtifactPreview>): ArtifactPreview {
     ext: "html",
     kind: "html",
     text: null,
+    speechText: null,
     dataUri: null,
     size: 0,
     truncated: false,

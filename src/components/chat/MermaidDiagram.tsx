@@ -558,6 +558,7 @@ export function MermaidDiagramInner({ code, onFix }: MermaidDiagramProps) {
         ext: "svg",
         kind: "diagram" as const,
         text: svg,
+        speechText: null,
         dataUri: null,
         size: svg.length,
         truncated: false,

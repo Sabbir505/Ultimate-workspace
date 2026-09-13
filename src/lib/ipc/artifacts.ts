@@ -398,6 +398,10 @@ export interface ArtifactPreview {
     | "office"
     | "binary";
   text: string | null;
+  /** Plain text for read-aloud (office/PDF kinds): the backend extractors'
+   *  clean text, not the preview HTML (`text`) and not nothing (a PDF).
+   *  Null when there is nothing speakable. */
+  speechText: string | null;
   dataUri: string | null;
   /** Signal to frontend that dataUri contains raw bytes (not base64-encoded HTML). */
   originalBytes?: boolean;

@@ -960,6 +960,10 @@ pub struct ArtifactPreview {
     pub kind: String,
     /// Present for text-like kinds (text/markdown/csv/json/html/code/office/diagram).
     pub text: Option<String>,
+    /// Plain text for the read-aloud button (office/PDF kinds): what the
+    /// office/PDF text extractors produce, not the preview HTML (`text`) and
+    /// not nothing (a PDF). Null when there is nothing speakable.
+    pub speech_text: Option<String>,
     /// `data:` URI present for image/pdf/docx/pptx kinds (raw file bytes).
     pub data_uri: Option<String>,
     /// Signal to frontend that data_uri contains raw bytes (not base64-encoded HTML).

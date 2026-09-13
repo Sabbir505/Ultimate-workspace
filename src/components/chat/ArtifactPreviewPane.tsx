@@ -615,6 +615,7 @@ export function ArtifactPreviewPaneInner({
           ext: "svg",
           kind: "diagram",
           text: inline.code,
+          speechText: null,
           dataUri: null,
           size: inline.code.length,
           truncated: false,
@@ -858,19 +859,24 @@ export function ArtifactPreviewPaneInner({
       effectivePreview.text != null &&
       isInteractiveHtml(effectivePreview.text));
 
-  // Read-aloud applies only to artifacts that are actually text. Images, PDFs,
-  // diagrams and live HTML/JSX have nothing to say — offering the control there
-  // would just produce a "nothing to read" error.
-  const speakableText =
-    effectivePreview?.text != null &&
-    (effectivePreview.kind === "markdown" ||
-      effectivePreview.kind === "text" ||
-      effectivePreview.kind === "code" ||
-      effectivePreview.kind === "json" ||
-      effectivePreview.kind === "csv" ||
-      effectivePreview.kind === "office")
-      ? effectivePreview.text
-      : null;
+  // Read-aloud applies only to artifacts that are actually text. Images,
+  // diagrams and live HTML/JSX have nothing to say — offering the control
+  // there would just produce a "nothing to read" error. Office documents and
+  // PDFs speak the backend's extracted plain text (speechText): the office
+  // `text` is the preview HTML and a PDF carries no text at all, so without
+  // it there was either markup junk in the audio or no button.
+  const speakableText = effectivePreview
+    ? effectivePreview.kind === "office" || effectivePreview.kind === "pdf"
+      ? effectivePreview.speechText
+      : effectivePreview.text != null &&
+          (effectivePreview.kind === "markdown" ||
+            effectivePreview.kind === "text" ||
+            effectivePreview.kind === "code" ||
+            effectivePreview.kind === "json" ||
+            effectivePreview.kind === "csv")
+        ? effectivePreview.text
+        : null
+    : null;
   const speakKey = `artifact:${artifact.path}`;
   const speaking = useTtsStore((s) => s.key === speakKey && s.phase !== "idle");
 

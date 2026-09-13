@@ -117,6 +117,89 @@ const MONTHS = [
   "December",
 ];
 
+/** Abbreviated month → index into MONTHS ("Sept" folds to its first three
+ *  letters). "May" is deliberately absent — it is a word in its own right. */
+const MONTH_ABBREVS: Record<string, number> = {
+  jan: 0,
+  feb: 1,
+  mar: 2,
+  apr: 3,
+  jun: 5,
+  jul: 6,
+  aug: 7,
+  sep: 8,
+  oct: 9,
+  nov: 10,
+  dec: 11,
+};
+
+/** The spoken month for an abbreviation, or the abbreviation itself when it is
+ *  not one ("May"). */
+function monthName(abbr: string): string {
+  return MONTHS[MONTH_ABBREVS[abbr.slice(0, 3).toLowerCase()] ?? -1] ?? abbr;
+}
+
+/** Abbreviated weekday → spoken weekday. "Sat" and "Sun" are ordinary words,
+ *  so they only ever expand through the date-context rule (the caller's job). */
+const DAY_NAMES: Record<string, string> = {
+  mon: "Monday",
+  tue: "Tuesday",
+  tues: "Tuesday",
+  wed: "Wednesday",
+  thu: "Thursday",
+  thur: "Thursday",
+  thurs: "Thursday",
+  fri: "Friday",
+  sat: "Saturday",
+  sun: "Sunday",
+};
+
+function dayName(abbr: string): string {
+  return DAY_NAMES[abbr.toLowerCase()] ?? abbr;
+}
+
+/** Honorifics the engine reads as a bare syllable rather than the title. */
+const HONORIFICS: Record<string, string> = {
+  Mr: "Mister",
+  Mrs: "Missus",
+  Ms: "Miss",
+  Dr: "Doctor",
+  Prof: "Professor",
+};
+
+/** Number-attached time units, spoken whole ("5 mins" → "5 minutes"). */
+const TIME_WORDS: Record<string, string> = {
+  min: "minutes",
+  mins: "minutes",
+  sec: "seconds",
+  secs: "seconds",
+  hr: "hours",
+  hrs: "hours",
+};
+
+/** Number-attached units the engine would spell out letter by letter ("64 GB",
+ *  "200 ms"). Keys are lowercase; the rule matches case-insensitively. */
+const UNIT_SPELLED: Record<string, string> = {
+  km: "kilometers",
+  cm: "centimeters",
+  mm: "millimeters",
+  kg: "kilograms",
+  mg: "milligrams",
+  mb: "megabytes",
+  gb: "gigabytes",
+  kb: "kilobytes",
+  tb: "terabytes",
+  ms: "milliseconds",
+  fps: "frames per second",
+  mi: "miles",
+  ft: "feet",
+  lb: "pounds",
+  kw: "kilowatts",
+  khz: "kilohertz",
+  mhz: "megahertz",
+  hz: "hertz",
+};
+
 /** Symbols and abbreviations that are read badly or not at all. Applied before
  *  the markdown pass, because several of them (`&`, `→`) also appear inside
  *  constructs the markdown pass has to see intact. */
@@ -130,6 +213,15 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
   [/\bapprox\./gi, "approximately"],
   [/\bw\/o\b/gi, "without"],
   [/\bw\//gi, "with "],
+  [/\bviz\.?/gi, "namely"],
+  // Written-out honorifics: "Dr." reads as a syllable the engine invents.
+  [/\b(Mr|Mrs|Ms|Dr|Prof)\.(?=\s)/g, (_m, abbr: string) => HONORIFICS[abbr] ?? abbr],
+  // Currency before the amount: the bare glyph is skipped or mangled, so
+  // "€5" is voiced as "5 euros". Bare leftovers are dropped further below.
+  [/€\s?(\d+(?:[.,]\d+)?)/g, "$1 euros"],
+  [/£\s?(\d+(?:[.,]\d+)?)/g, "$1 pounds"],
+  [/₹\s?(\d+(?:[.,]\d+)?)/g, "$1 rupees"],
+  [/¥\s?(\d+(?:[.,]\d+)?)/g, "$1 yen"],
   // Dates first: "2024-01-05" is a date, and the number-range rule below would
   // otherwise read it as two ranges ("2024 to 01 to 05").
   [
@@ -137,6 +229,17 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
     (_m, y: string, m: string, d: string) =>
       `${MONTHS[Number(m) - 1] ?? m} ${Number(d)}, ${y}`,
   ],
+  // Month abbreviations ("Sep 13", "Oct. 2026") — the engine says "sehp".
+  // Two rules: the period is only eaten when a date follows it, so "Sep. 13"
+  // reads clean while "…in Sep." keeps its sentence break. "May" is not an
+  // abbreviation here; it is a word.
+  [/\b(Sept|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.(?=\s*\d)/gi, (_m, abbr: string) => monthName(abbr)],
+  [/\b(Sept|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/gi, (_m, abbr: string) => monthName(abbr)],
+  // Weekday abbreviations, same shape. Case-sensitive, because "wed" is a
+  // word; and the genuinely ambiguous Sat/Sun expand only in a date context
+  // ("Sat 14" becomes Saturday, "the Sun rises" stays a star).
+  [/\b(Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\.?(?=\s*\d)/g, (_m, abbr: string) => dayName(abbr)],
+  [/\b(Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri)\b/g, (_m, abbr: string) => dayName(abbr)],
   // Numbers: the engine reads the punctuation around them literally.
   //   "1/4"        → "1 slash 4"
   //   "10-20 mins" → "10, 20 mins" (the em/en-dash rule below treats every
@@ -154,6 +257,16 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
   [
     /\b(km|cm|mm|kg|mg|MB|GB|KB|TB|ms|fps|mi|ft|lb|kW|kHz|MHz|Hz|W|V)\s*\/\s*(hr|h|sec|min|day|wk|mo|yr|s|d)\b/g,
     "$1 per $2",
+  ],
+  // Number-attached units, spoken whole. The rate rule above has first claim
+  // on a unit that turned into "per", so "50 MB per s" stays as it is.
+  [
+    /\b(\d+(?:\.\d+)?)\s*(mins?|secs?|hrs?)\b/gi,
+    (_m, num: string, unit: string) => `${num} ${TIME_WORDS[unit.toLowerCase()] ?? unit}`,
+  ],
+  [
+    /\b(\d+(?:\.\d+)?)\s*(km|cm|mm|kg|mg|MB|GB|KB|TB|ms|fps|mi|ft|lb|kW|kHz|MHz|Hz)\b(?!\s*per\b)/gi,
+    (_m, num: string, unit: string) => `${num} ${UNIT_SPELLED[unit.toLowerCase()] ?? unit}`,
   ],
   // Version and issue numbers: "v0.4.2" and "#7" are spoken words, not a letter
   // and a hash. `\b` keeps "rev2" and "#ff0000" out of it.
@@ -205,6 +318,73 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
   // "~~struck out~~" is emphasis the engine would read as "approximately".
   [/~~([^~]+)~~/g, "$1"],
   [/~(\d)/g, "approximately $1"],
+  // HTML entities before the ampersand rule below, and tags before the
+  // comparison rules: "a <b>bold" must lose the tag, not gain "less than".
+  [/&amp;/gi, " and "],
+  [/&lt;/gi, " less than "],
+  [/&gt;/gi, " greater than "],
+  [/&quot;|&apos;|&nbsp;/gi, " "],
+  [/&[a-zA-Z]+;/g, " "],
+  [/<\/?[a-zA-Z][^>]*>/g, " "],
+  // Arrows and operators the engine reads as stray clicks, drawn in ASCII.
+  [/->/g, " to "],
+  [/=>/g, " to "],
+  [/>=/g, " greater than or equal to "],
+  [/<=/g, " less than or equal to "],
+  [/!=/g, " not equal to "],
+  [/(\w)\s*<\s*(\w)/g, "$1 less than $2"],
+  [/(\w)\s*>\s*(\w)/g, "$1 greater than $2"],
+  [/=/g, " equals "],
+  [/\+\+/g, " plus plus "],
+  // A lone plus is a word ("C plus plus", "+44"); at line start it is a
+  // markdown bullet and stays one — `.` does not match a newline.
+  [/(.)\+/g, "$1 plus "],
+  [/(\d)\s*\*\s*(\d)/g, "$1 times $2"],
+  // Leftover asterisk (unmatched emphasis, a footnote star) is silence.
+  [/\*/g, " "],
+  [/(\d)\s*\^\s*(\d)/g, "$1 to the power of $2"],
+  [/\^/g, " "],
+  // A tilde not attached to a number (those two rules ran above) reads as a
+  // hedge, not a squiggle.
+  [/~(?=\s)/g, " approximately "],
+  // A typed em dash, spaced or glued to the words it separates.
+  [/\s--\s/g, ", "],
+  [/(\w)--(?=\w)/g, "$1, "],
+  // Slide headers from the deck text extractor become a spoken label with a
+  // stop, not a run of dashes.
+  [/^\s*-{2,}\s*Slide\s+(\d+)\s*-{2,}\s*\.?\s*$/gim, "Slide $1."],
+  [/…/g, ", "],
+  // Quotation marks read as pauses or stray clicks; the quoted words are what
+  // matter. Apostrophe-like singles survive, as the apostrophes they are.
+  [/[“”„‟«»]/g, " "],
+  [/[‘’]/g, "'"],
+  [/"/g, " "],
+  // Currency glyphs that did not sit before a number are decoration.
+  [/[€£₹¥]/g, " "],
+  [/©/g, " copyright "],
+  [/®/g, " registered "],
+  [/™/g, " trademark "],
+  [/§/g, " section "],
+  [/№/g, " number "],
+  [/•/g, ", "],
+  [/·/g, ", "],
+  [/†|‡|¶/g, " "],
+  // Marks that carry a verdict get their word; the rest of the dingbats are
+  // stripped with the emoji.
+  [/[✓✔✅]/g, " check "],
+  [/[✗✘❌]/g, " cross "],
+  [/[\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}]/gu, " "],
+  // Spaces the renderer leaves invisible but the engine stumbles on, and the
+  // ligatures it cannot pronounce.
+  [/[\u00a0\u2007\u202f]/g, " "],
+  [/[\u200b-\u200d\ufeff]/g, ""],
+  [/ﬁ/g, "fi"],
+  [/ﬂ/g, "fl"],
+  [/ﬀ/g, "ff"],
+  [/ﬃ/g, "ffi"],
+  [/ﬄ/g, "ffl"],
+  // Handles and email addresses: "user@example.com" is "user at example.com".
+  [/@/g, " at "],
   [/&/g, " and "],
   [/%/g, " percent"],
 ];

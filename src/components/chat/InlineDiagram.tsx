@@ -162,6 +162,7 @@ export function InlineDiagram({
           ext: "html",
           kind: preview.kind === "diagram" || preview.kind === "html" ? preview.kind : "html",
           text: preview.text ?? "",
+          speechText: null,
           dataUri: null,
           size: (preview.text ?? "").length,
           truncated: false,

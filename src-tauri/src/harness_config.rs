@@ -529,39 +529,59 @@ fn commandcode_config() -> HarnessModelConfig {
     }
 }
 
+/// "deepseek/deepseek-v4-pro" → "Deepseek V4 Pro". Takes the id's last path
+/// segment and title-cases each separator-delimited token; known acronyms
+/// come back all-caps. Version-ish tokens ("v4.1", "k3", "1m") only get their
+/// first character touched, so digits and dots survive.
+fn pretty_model_label(id: &str) -> String {
+    const ACRONYMS: [&str; 3] = ["ai", "glm", "llm"];
+    let slug = id.rsplit('/').next().unwrap_or(id);
+    slug.split(|c| c == '-' || c == '_')
+        .filter(|tok| !tok.is_empty())
+        .map(|tok| {
+            if ACRONYMS.contains(&tok.to_lowercase().as_str()) {
+                tok.to_uppercase()
+            } else {
+                capitalize(tok)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn commandcode_config_from(out: &str) -> HarnessModelConfig {
+    // The CLI's second column is vendor copy ("fast hybrid-attention
+    // reasoning"), unreadable as a picker row — only its trailing
+    // ` (default)` marker is kept and labels derive from the id instead.
     let mut cfg = HarnessModelConfig::default();
+    let mut ids: Vec<String> = Vec::new();
     for line in out.lines() {
-        let Some((id, label)) = line.split_once("  ") else { continue };
+        let Some((id, tail)) = line.split_once("  ") else { continue };
         let id = id.trim();
         if !id.contains('/') || id.contains(' ') {
             continue;
         }
-        let label = label.trim();
-        if label == "(default)" {
-            // Empty description, only the marker — still list the model.
+        let tail = tail.trim();
+        if tail == "(default)" || tail.ends_with(" (default)") {
             cfg.default_model = Some(id.to_string());
-            cfg.models.push(HarnessModelInfo::new(
-                id.to_string(),
-                id.rsplit('/').next().unwrap_or(id).to_string(),
-                "cli",
-            ));
+        }
+        ids.push(id.to_string());
+    }
+    // The same slug can appear under several providers ("deepseek/x" and
+    // "openrouter/x"); prefix those with the provider unless the slug already
+    // leads with it, so the prefix doesn't just repeat ("Deepseek Deepseek…").
+    let mut labels: Vec<String> = ids.iter().map(|id| pretty_model_label(id)).collect();
+    for i in 0..labels.len() {
+        if !labels[..i].contains(&labels[i]) && !labels[i + 1..].contains(&labels[i]) {
             continue;
         }
-        if let Some(base) = label.strip_suffix(" (default)") {
-            cfg.default_model = Some(id.to_string());
-            cfg.models.push(HarnessModelInfo::new(
-                id.to_string(),
-                base.trim().to_string(),
-                "cli",
-            ));
-            continue;
+        let provider = ids[i].split('/').next().unwrap_or("");
+        if !labels[i].to_lowercase().starts_with(provider) {
+            labels[i] = format!("{} {}", capitalize(provider), labels[i]);
         }
-        cfg.models.push(HarnessModelInfo::new(
-            id.to_string(),
-            label.to_string(),
-            "cli",
-        ));
+    }
+    for (id, label) in ids.into_iter().zip(labels) {
+        cfg.models.push(HarnessModelInfo::new(id, label, "cli"));
     }
     cfg
 }
@@ -860,6 +880,7 @@ mod tests {
     #[test]
     fn parse_commandcode_models_table_real_listing() {
         // Captured verbatim from `commandcode --list-models` (authenticated).
+        // Labels come from the id; the description column is dropped.
         let out = "Available models  ·  67 models\n\
                    \n\
                    Open Source\n\
@@ -870,9 +891,26 @@ mod tests {
         let cfg = commandcode_config_from(out);
         assert_eq!(cfg.models.len(), 3);
         assert_eq!(cfg.models[0].id, "deepseek/deepseek-v4-pro");
-        assert_eq!(cfg.models[0].label, "hybrid-attention long-context reasoning");
+        assert_eq!(cfg.models[0].label, "Deepseek V4 Pro");
         assert_eq!(cfg.default_model.as_deref(), Some("deepseek/deepseek-v4-flash"));
-        assert_eq!(cfg.models[1].label, "fast hybrid-attention reasoning");
+        assert_eq!(cfg.models[1].label, "Deepseek V4 Flash");
+        assert_eq!(cfg.models[2].label, "Kimi K3");
+    }
+
+    #[test]
+    fn parse_commandcode_duplicate_slugs_get_provider_prefix() {
+        let out = "deepseek/deepseek-v4-pro               attention reasoning\n\
+                   openrouter/deepseek-v4-pro              attention reasoning\n\
+                   zhipu/glm-5.3-flash                     fast reasoning\n\
+                   openrouter/kimi-k3                      long-horizon coding\n";
+        let cfg = commandcode_config_from(out);
+        // The slug already leads with the provider name — no prefix.
+        assert_eq!(cfg.models[0].label, "Deepseek V4 Pro");
+        // Same slug under a second provider — prefix disambiguates.
+        assert_eq!(cfg.models[1].label, "Openrouter Deepseek V4 Pro");
+        // Acronym tokens come back all-caps; unique slugs stay unprefixed.
+        assert_eq!(cfg.models[2].label, "GLM 5.3 Flash");
+        assert_eq!(cfg.models[3].label, "Kimi K3");
     }
 
     #[test]

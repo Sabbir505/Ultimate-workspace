@@ -665,6 +665,16 @@ pub struct ChatDonePayload {
     /// Prompt/KV-cache hit rate (0.0–1.0), computed from usage cache fields.
     #[serde(default)]
     pub cache_hit_rate: Option<f64>,
+    /// Cache-write tokens, reported by harness turns that measure them
+    /// (claude/pi/commandcode/opencode). The built-in providers fold cache
+    /// usage into `cache_hit_rate` only — `skip_serializing_if` keeps their
+    /// events byte-identical to before these fields existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<i64>,
+    /// Cache-read tokens from harness turns — the bulk of a mid-session
+    /// claude prompt. `input_tokens` stays the uncached slice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<i64>,
 }
 
 /// End-of-turn citation-integrity verdict for a research report (`chat:citation-report`

@@ -539,16 +539,8 @@ impl AgentSessionManager {
         // check so a rejected turn can't orphan a user message.
         {
             let conn = db.0.lock();
-            crate::db::add_chat_message(
-                &conn,
-                crate::db::NewChatMessage {
-                    chat_session_id: chat_session_id,
-                    role: "user",
-                    content: content,
-                    ..Default::default()
-                },
-            )
-            .map_err(|e| e.to_string())?;
+            crate::db::add_user_chat_message(&conn, chat_session_id, content)
+                .map_err(|e| e.to_string())?;
         }
 
         // Prepend the Relay persona + the user's custom system prompt
@@ -1144,23 +1136,14 @@ fn finish_turn(
                 continue;
             }
             let filename = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-            let kind = Path::new(&filename)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
             {
                 let conn = db.0.lock();
-                let _ = crate::db::insert_artifact(&conn, Some(sid), &filename, &path, &kind);
-            }
-            if let Some(app) = app {
-                let _ = app.emit(
-                    "chat:artifact",
-                    crate::types::ChatArtifactPayload {
-                        chat_session_id: sid.to_string(),
-                        path,
-                        filename,
-                    },
+                crate::chat::stream_events::insert_and_emit_artifact(
+                    app,
+                    &conn,
+                    sid,
+                    &path,
+                    &filename,
                 );
             }
         }
@@ -1198,18 +1181,11 @@ fn finish_turn(
 }
 
 fn emit_token(app: Option<&AppHandle>, sid: &str, token: &str) {
-    if let Some(app) = app {
-        let payload = crate::types::ChatTokenPayload {
-            chat_session_id: sid.to_string(),
-            token: token.to_string(),
-        };
-        if !crate::chat::stream_events::try_send(sid, &payload) {
-            let _ = app.emit("chat:token", payload);
-        }
-    }
-    // Record into the active per-turn perf accumulator (if one is registered
-    // by the harness turn loop) so the live composer row shows TTFT + tok/s.
-    crate::chat::turn_perf::record_active_token(sid);
+    // Shared chat-event seam (chat/stream_events.rs): typed channel first,
+    // global-bus fallback, then the per-turn perf accumulator. Harness turns
+    // always record so the live composer row shows TTFT + tok/s even when no
+    // window is open.
+    crate::chat::stream_events::emit_chat_token(app, sid, token, true);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1229,49 +1205,44 @@ fn emit_done(
     tokens_per_second: Option<f64>,
     llm_time_ms: Option<i64>,
 ) {
-    if let Some(app) = app {
-        // Cache fields ride along when the harness reported them (absent →
-        // null, so older frontend consumers keep working unchanged). `input`
-        // is the uncached slice for claude-style reports; the frontend uses
-        // the split to show the same IN/CACHE breakdown the built-in chat
-        // gets — including the cacheHitRate chip (same math as
-        // turn_perf::cache_hit_rate; harness reports are all exclusive).
-        let cache_hit_rate = crate::chat::turn_perf::cache_hit_rate(
-            cache_read.unwrap_or(0),
-            cache_creation.unwrap_or(0),
-            input.unwrap_or(0),
-            false,
-        );
-        let _ = app.emit(
-            "chat:done",
-            json!({
-                "chatSessionId": sid,
-                "inputTokens": input,
-                "outputTokens": output,
-                "costUsd": cost,
-                "cacheCreationInputTokens": cache_creation,
-                "cacheReadInputTokens": cache_read,
-                "cacheHitRate": cache_hit_rate,
-                "llmTimeMs": llm_time_ms,
-                "toolTimeMs": null,
-                "ttftMs": ttft,
-                "tokensPerSecond": tokens_per_second,
-            }),
-        );
-    }
+    // Cache fields ride along when the harness reported them (absent →
+    // null, so older frontend consumers keep working unchanged). `input`
+    // is the uncached slice for claude-style reports; the frontend uses
+    // the split to show the same IN/CACHE breakdown the built-in chat
+    // gets — including the cacheHitRate chip (same math as
+    // turn_perf::cache_hit_rate; harness reports are all exclusive).
+    // The built-in chat leaves both fields None; `skip_serializing_if`
+    // keeps its events byte-identical.
+    let cache_hit_rate = crate::chat::turn_perf::cache_hit_rate(
+        cache_read.unwrap_or(0),
+        cache_creation.unwrap_or(0),
+        input.unwrap_or(0),
+        false,
+    );
+    crate::chat::stream_events::emit_done(
+        app,
+        crate::types::ChatDonePayload {
+            chat_session_id: sid.to_string(),
+            input_tokens: input,
+            output_tokens: output,
+            cost_usd: cost,
+            llm_time_ms: llm_time_ms,
+            tool_time_ms: None,
+            ttft_ms: ttft,
+            tokens_per_second: tokens_per_second,
+            cache_hit_rate,
+            cache_creation_input_tokens: cache_creation,
+            cache_read_input_tokens: cache_read,
+        },
+    );
 }
 
 pub(crate) fn emit_error(app: Option<&AppHandle>, sid: &str, message: &str) {
-    if let Some(app) = app {
-        // Classify harness errors too: a remapped harness backend rejecting a
-        // turn for window overflow must reach the same recoverable-error UX
-        // as the built-in providers, not the generic failure banner.
-        let code = crate::chat::error_class::classify_error(message);
-        let _ = app.emit(
-            "chat:error",
-            json!({ "chatSessionId": sid, "message": message, "code": code }),
-        );
-    }
+    // Classify harness errors too: a remapped harness backend rejecting a
+    // turn for window overflow must reach the same recoverable-error UX
+    // as the built-in providers, not the generic failure banner. The shared
+    // seam (chat/stream_events.rs) classifies and emits the typed payload.
+    crate::chat::stream_events::emit_error(app, sid, message);
 }
 
 /// Persist a "harness-side auto-compact" boundary row + emit the meter
@@ -1306,16 +1277,12 @@ fn emit_harness_compact(
             ..Default::default()
         },
     );
-    if let Some(app) = app {
-        let _ = app.emit(
-            "chat:status",
-            json!({
-                "chatSessionId": sid,
-                "reason": "context_compacted",
-                "message": "Harness context compacted",
-            }),
-        );
-    }
+    crate::chat::stream_events::emit_status_reason(
+        app,
+        sid,
+        "context_compacted",
+        "Harness context compacted",
+    );
 }
 
 /// A GUI app spawning console tools on Windows would otherwise flash a

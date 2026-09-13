@@ -147,6 +147,31 @@ pub struct CompactionEntry {
     pub message: ChatMessage,
 }
 
+/// Load the session's active history as orchestrator entries: DB rows mapped
+/// to `CompactionEntry` with thinking blocks stripped (they are display-only
+/// and never re-sent). Single shared version of the assembly loop that used
+/// to be copy-pasted across the built-in send path, the compact-and-retry
+/// path, and compact-now.
+///
+/// NOTE: `agent_sessions/primer.rs` deliberately does NOT use this — its
+/// primer transcript keeps raw content (no think-strip) by design.
+pub(crate) fn load_compaction_entries(
+    conn: &Connection,
+    chat_session_id: &str,
+) -> rusqlite::Result<Vec<CompactionEntry>> {
+    Ok(crate::db::list_active_chat_messages(conn, chat_session_id)?
+        .into_iter()
+        .map(|r| CompactionEntry {
+            id: r.id,
+            message: ChatMessage {
+                role: r.role,
+                content: crate::chat::commands::strip_think_blocks(&r.content),
+                images: Vec::new(),
+            },
+        })
+        .collect())
+}
+
 /// Result of a compaction pass.
 #[derive(Debug, Clone)]
 pub struct CompactionOutcome {

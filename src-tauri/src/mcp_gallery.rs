@@ -293,6 +293,42 @@ impl GallerySession {
 #[derive(Default)]
 pub struct McpGalleryState(pub parking_lot::Mutex<HashMap<String, std::sync::Arc<GallerySession>>>);
 
+/// Gate + spawn: every production path that may LAUNCH a server process goes
+/// through here. Gallery (curated-catalog) definitions run fixed package names
+/// and attach freely; CUSTOM definitions (name + command + args + env straight
+/// from the renderer) pass the native exec gate (exec_gate.rs) — Allow is
+/// remembered per exact command line. Deny fails closed: the tool attach /
+/// connect reports the server as blocked.
+pub async fn connect_server_checked(
+    app: &AppHandle,
+    def: &McpServerDef,
+) -> Result<std::sync::Arc<GallerySession>, String> {
+    if !def.from_gallery {
+        let command_line = format!("{} {}", def.command, def.args.join(" "));
+        let db = app.state::<crate::DbState>().inner().0.clone();
+        let allowed = crate::exec_gate::confirm_remembered(
+            &db,
+            app,
+            "mcp_connect",
+            &command_line,
+            "Relay — run this MCP server?",
+            format!(
+                "An app window asked to launch the MCP server \"{}\":\n\n{}\n{}\n\nA local MCP server executes arbitrary code on this machine with your privileges. Allow it? \"Allow\" also remembers this exact command.",
+                def.name, def.command, def.args.join(" ")
+            ),
+        )
+        .await
+        .unwrap_or(false);
+        if !allowed {
+            return Err(format!(
+                "MCP server \"{}\" blocked — it was not allowed in the confirmation dialog",
+                def.name
+            ));
+        }
+    }
+    connect_server(def).await
+}
+
 /// Spawn + initialize the server process and return the live session.
 /// Follows the Windows `.cmd`-shim wrapping rule from the harness spawner.
 pub async fn connect_server(def: &McpServerDef) -> Result<std::sync::Arc<GallerySession>, String> {
@@ -349,7 +385,7 @@ pub async fn session_for(app: &AppHandle, server_id: &str) -> Result<std::sync::
         .into_iter()
         .find(|d| d.id == server_id)
         .ok_or_else(|| format!("no installed MCP server `{server_id}`"))?;
-    let session = tokio::time::timeout(Duration::from_secs(30), connect_server(&def))
+    let session = tokio::time::timeout(Duration::from_secs(30), connect_server_checked(app, &def))
         .await
         .map_err(|_| format!("MCP server `{}` reconnect timed out", def.name))??;
     state
@@ -441,7 +477,8 @@ pub async fn attach_filtered(app: &AppHandle, allowed: Option<&[String]>) -> Vec
             Some(s) => s,
             None => {
                 let connected =
-                    tokio::time::timeout(Duration::from_secs(30), connect_server(def)).await;
+                    tokio::time::timeout(Duration::from_secs(30), connect_server_checked(app, def))
+                        .await;
                 match connected {
                     Ok(Ok(s)) => {
                         state
@@ -659,7 +696,7 @@ pub async fn mcp_gallery_connect(app: AppHandle, id: String) -> Result<McpConnec
     let session = match existing {
         Some(s) => s,
         None => {
-            let s = connect_server(&def).await?;
+            let s = connect_server_checked(&app, &def).await?;
             state.0.lock().insert(id.clone(), std::sync::Arc::clone(&s));
             s
         }

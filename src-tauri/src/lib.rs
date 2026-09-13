@@ -22,6 +22,7 @@ mod connectors;
 pub mod db;
 mod download;
 mod docs_index;
+mod exec_gate;
 mod git;
 mod github;
 mod git_watcher;
@@ -242,6 +243,26 @@ pub fn run() {
             // Automations scheduler: 30s tick, fires due cron schedules as
             // headless one-shot agent turns (see automations.rs).
             automations::start(app.handle().clone(), Arc::clone(&shared_db));
+
+            // Budget alert timer (commands/budget.rs): the frontend re-checks
+            // after cost events, but a backend cadence keeps threshold alerts
+            // firing when no chat window is open to drive the IPC call.
+            // Advisory-only: alerts never abort a running turn.
+            {
+                let app_handle = app.handle().clone();
+                let db_state = DbState(Arc::clone(&shared_db));
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3 * 60)).await;
+                    loop {
+                        commands::budget::run_budget_checks(
+                            app_handle.clone(),
+                            Arc::clone(&db_state.0),
+                        )
+                        .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+                    }
+                });
+            }
 
             // Native vibrancy (PRD §7.1): acrylic blur on Windows, frosted
             // vibrancy on macOS, nothing on Linux (flat theme is the correct
@@ -643,6 +664,21 @@ pub fn run() {
             // renderer process outlives the app.
             if let Some(state) = handle.try_state::<BrowserState>() {
                 state.0.close_all();
+            }
+            // Quit mid-stream: persist what the built-in turns had accumulated
+            // (chat/partial_buf.rs) BEFORE cancel_all aborts the turn tasks —
+            // the abort discards their buffers, and this is the only chance to
+            // keep the partial text the user watched. Best-effort, bounded by
+            // the per-session cap; harness sessions persist their own rows in
+            // finish_turn and are not recorded there.
+            let partials = chat::partial_buf::drain_all();
+            if !partials.is_empty() {
+                if let Some(db) = handle.try_state::<DbState>() {
+                    let conn = db.0.lock();
+                    for (sid, text) in partials {
+                        chat::commands::persist_partial_row(&conn, &sid, &text);
+                    }
+                }
             }
             if let Some(state) = handle.try_state::<ChatState>() {
                 state.0.cancel_all();

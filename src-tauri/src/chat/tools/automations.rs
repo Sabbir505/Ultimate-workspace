@@ -179,6 +179,10 @@ fn create_automation(app: &AppHandle, args: &Value) -> String {
         cwd: None,
         schedule: schedule.clone(),
         enabled: Some(enabled),
+        // Authored by the model — the Automations view badges these rows, and
+        // the dispatch gate already required an explicit user approval card
+        // for THIS tool call (in every permission posture) before we got here.
+        origin: Some("agent".into()),
     };
     let created = {
         let db = app.state::<crate::DbState>();
@@ -272,6 +276,9 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
             cwd: None,
             schedule: schedule.clone(),
             enabled: None,
+            // Update preserves the row's original origin (the column is not
+            // part of the UPDATE).
+            origin: None,
         };
         crate::db::update_automation(&conn, &id, &input)
             .map_err(|e| format!("update failed: {e}"))

@@ -35,6 +35,15 @@ pub struct Automation {
     /// Chat session used as the run log; created lazily on first run.
     pub chat_session_id: Option<String>,
     pub created_at: i64,
+    /// "user" (Automations view form) or "agent" (chat create_automation
+    /// tool). Runs are full-auto by design; the UI badges agent-authored rows
+    /// so the user can always see what the model scheduled.
+    #[serde(default = "default_origin")]
+    pub origin: String,
+}
+
+fn default_origin() -> String {
+    "user".to_string()
 }
 
 /// One past (or in-flight) run of an automation. Used by the Automations
@@ -71,6 +80,9 @@ pub struct AutomationInput {
     pub cwd: Option<String>,
     pub schedule: String,
     pub enabled: Option<bool>,
+    /// "user" (UI form — the default when absent) or "agent" (chat tool).
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 fn map_automation(row: &Row) -> rusqlite::Result<Automation> {
@@ -87,17 +99,18 @@ fn map_automation(row: &Row) -> rusqlite::Result<Automation> {
         last_status: row.get("last_status")?,
         chat_session_id: row.get("chat_session_id")?,
         created_at: row.get("created_at")?,
+        origin: row.get("origin").unwrap_or_else(|_| default_origin()),
     })
 }
 
 const COLUMNS: &str =
-    "id, name, prompt, harness, model, cwd, schedule, enabled, last_run_at, last_status, chat_session_id, created_at";
+    "id, name, prompt, harness, model, cwd, schedule, enabled, last_run_at, last_status, chat_session_id, created_at, origin";
 
 pub fn create_automation(conn: &Connection, input: &AutomationInput) -> DbResult<Automation> {
     let id = new_id();
     conn.execute(
-        "INSERT INTO automations (id, name, prompt, harness, model, cwd, schedule, enabled, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO automations (id, name, prompt, harness, model, cwd, schedule, enabled, created_at, origin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             id,
             input.name,
@@ -108,6 +121,7 @@ pub fn create_automation(conn: &Connection, input: &AutomationInput) -> DbResult
             input.schedule,
             input.enabled.unwrap_or(true) as i64,
             now_ts(),
+            input.origin.as_deref().unwrap_or("user"),
         ],
     )?;
     get_automation(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
@@ -410,6 +424,7 @@ mod tests {
                 cwd: None,
                 schedule: "0 3 * * *".into(),
                 enabled: Some(true),
+                origin: None,
             },
         )
         .unwrap();
@@ -454,6 +469,7 @@ mod tests {
             cwd: Some("D:/proj".into()),
             schedule: "2 9 * * 1-5".into(),
             enabled: None,
+            origin: None,
         }
     }
 

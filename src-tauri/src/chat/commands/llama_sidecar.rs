@@ -228,8 +228,17 @@ pub struct LlamaServerPathResult {
 
 /// Set the user-configured llama-server path. Returns success with the
 /// new path, or an error if the path is invalid (binary not found).
+///
+/// The registered binary is spawned as a local inference sidecar, so the
+/// setting passes the native exec gate (exec_gate.rs): an OS dialog shows the
+/// exact path and Allow is remembered per path. A compromised webview cannot
+/// point Relay at an arbitrary executable without the user seeing it.
 #[tauri::command]
-pub async fn set_llama_server_path(path: String, db: State<'_, DbState>) -> CmdResult<String> {
+pub async fn set_llama_server_path(
+    path: String,
+    db: State<'_, DbState>,
+    app: tauri::AppHandle,
+) -> CmdResult<String> {
     // Validate: check if the path is a file or a directory with llama-server inside.
     let p = std::path::Path::new(&path);
     let bin_name = if cfg!(windows) {
@@ -258,7 +267,26 @@ pub async fn set_llama_server_path(path: String, db: State<'_, DbState>) -> CmdR
         ));
     }
 
-    // Store the path as-is (could be a file or directory).
+    // Store the path as-is (could be a file or directory) — behind the native
+    // exec gate, remembered per exact path.
+    let db_arc = std::sync::Arc::clone(&db.0);
+    let allowed = crate::exec_gate::confirm_remembered(
+        &db_arc,
+        &app,
+        "llama_server",
+        &path,
+        "Relay — use this llama-server executable?",
+        format!(
+            "An app window asked to register this executable as the llama-server sidecar:\n\n{path}\n\nRelay will spawn it for local-model chat sessions. Allow it? \"Allow\" also remembers this path."
+        ),
+    )
+    .await
+    .unwrap_or(false);
+    if !allowed {
+        return Err(
+            "llama-server path blocked — it was not allowed in the confirmation dialog".into(),
+        );
+    }
     let conn = db.0.lock();
     db::set_setting(&conn, local_models::LLAMA_SERVER_PATH_KEY, &path)
         .map_err(|e| e.to_string())?;

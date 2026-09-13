@@ -182,6 +182,11 @@ fn append_config_flag(spec: &mut CommandSpec, flag: &str, cfg_path: &Path) {
 /// Spawns a login shell running `command` — used for quick actions and
 /// harness login flows. Project secrets are injected as env vars ONLY when
 /// `inject_secrets_project_id` is passed (PRD §7.16: explicit opt-in).
+///
+/// The command string is whatever the renderer sent, so it passes the native
+/// exec gate (exec_gate.rs) first: a native OS dialog shows the exact command
+/// and working folder, and Allow is remembered PER FOLDER in settings. A
+/// compromised webview therefore cannot run anything the user hasn't seen.
 #[tauri::command(async)]
 pub fn spawn_shell(
     pane_id: String,
@@ -190,9 +195,30 @@ pub fn spawn_shell(
     inject_secrets_project_id: Option<String>,
     db: State<'_, DbState>,
     pty: State<'_, PtyState>,
+    app: tauri::AppHandle,
 ) -> CmdResult<()> {
     if !Path::new(&cwd).is_dir() {
         return Err(format!("working directory does not exist: {cwd}"));
+    }
+    let secret_note = if inject_secrets_project_id.is_some() {
+        "\n\nProject secrets will be injected as environment variables for this command."
+    } else {
+        ""
+    };
+    let allowed = crate::exec_gate::confirm_remembered_sync(
+        &db.0,
+        &app,
+        "spawn_shell",
+        &cwd,
+        "Relay — run this shell command?",
+        &format!(
+            "An app window asked to run a shell command in:\n{cwd}\n\nCommand:\n{command}{secret_note}\n\nAllow it? \"Allow\" also remembers this folder."
+        ),
+    );
+    if !allowed {
+        return Err(
+            "shell command blocked — it was not allowed in the confirmation dialog".into(),
+        );
     }
     let extra_env = match inject_secrets_project_id {
         Some(pid) => {

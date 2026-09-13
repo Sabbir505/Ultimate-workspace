@@ -24,6 +24,10 @@ export interface Automation {
   /** Chat session used as the run log (bound on first run). */
   chatSessionId: string | null;
   createdAt: number;
+  /** "user" (Automations form) | "agent" (created by the model's
+   *  create_automation tool — badged in the UI so agent-scheduled prompts are
+   *  always visible). */
+  origin: string;
 }
 export interface AutomationInput {
   name: string;

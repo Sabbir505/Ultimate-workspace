@@ -52,6 +52,9 @@ fn emit_chunk<R: tauri::Runtime>(app: &AppHandle<R>, sid: &str, token: &str, ful
         return;
     }
     full.push_str(token);
+    // Keep the app-exit partial buffer warm (chat/partial_buf.rs): a quit
+    // mid-stream persists what the user watched instead of dropping it.
+    crate::chat::partial_buf::record(sid, token);
     let payload = ChatTokenPayload {
         chat_session_id: sid.to_string(),
         token: token.to_string(),
@@ -1927,14 +1930,20 @@ pub(crate) async fn run_tool(
 
     // Automation tools (list/create/update/delete/run-now) — DB + scheduler
     // via the AppHandle, like the ledger tools above. The list is read-only
-    // and auto-runs; the rest mutate persisted state / spawn unattended runs,
-    // so they follow the connector-write posture (approval under read_only/
-    // manual, auto-run under auto_edit/full_auto), with delete held to the
-    // stricter delete_file posture (gated unless full_auto). Plan mode has
-    // already refused the mutating ones above via is_mutating_tool.
+    // and auto-runs. Runs execute unattended at full permission by design
+    // (an unattended turn can never answer a prompt), so the human gate lives
+    // at CONTENT-WRITING time: create/update are approval-carded in EVERY
+    // posture including full_auto — an automation must never exist that the
+    // user didn't explicitly click yes on. delete keeps the stricter
+    // delete_file posture; run_now launches an already-approved automation.
+    // Plan mode has already refused the mutating ones above via is_mutating_tool.
     if tools::is_automation_tool(name) {
         let decision = if name == tools::LIST_AUTOMATIONS {
             permission::PermissionDecision::AutoRun
+        } else if name == tools::CREATE_AUTOMATION || name == tools::UPDATE_AUTOMATION {
+            // Runs are full_auto by design (product decision 2026-09-13), so
+            // authoring one is the moment of consent — no posture bypasses it.
+            permission::PermissionDecision::NeedsApproval
         } else if name == tools::DELETE_AUTOMATION {
             if matches!(approval, permission::ApprovalPolicy::FullAccess) {
                 permission::PermissionDecision::AutoRun

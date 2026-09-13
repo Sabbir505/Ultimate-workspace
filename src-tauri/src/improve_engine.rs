@@ -909,6 +909,7 @@ mod tests {
                     cwd: None,
                     schedule: "0 3 * * *".into(),
                     enabled: Some(true),
+                    origin: None,
                 },
             )
             .unwrap()

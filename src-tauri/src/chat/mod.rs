@@ -24,6 +24,7 @@ pub mod jsdocgen;
 pub mod local_models;
 pub mod model_health;
 pub mod office;
+pub mod partial_buf;
 pub mod pdfprint;
 pub mod permission;
 pub mod plan;
@@ -983,7 +984,10 @@ impl ChatManager {
                         usage.as_ref().map(|u| u.cache_creation_input_tokens).unwrap_or(0),
                         usage.as_ref().map(|u| u.cache_read_input_tokens).unwrap_or(0),
                     );
-                    // Persist the assistant message with usage.
+                    // Persist the assistant message with usage. The turn's
+                    // partial buffer (partial_buf) is cleared here — the final
+                    // row supersedes it and a later quit must not re-persist.
+                    crate::chat::partial_buf::take(&sid);
                     // The turn's message id escapes this block for the
                     // post-done checkpoint (chip attaches to this message).
                     let mut turn_message_id: Option<i64> = None;
@@ -1640,8 +1644,10 @@ pub(crate) async fn run_chat_stream(
     let mut pump = crate::chat::streaming::ProviderSsePump::new(&mut buf, &mut full_text);
 
     // Token emit: stream_events channel first, app event as the fallback
-    // (headless tests run without an app handle).
+    // (headless tests run without an app handle). The app-exit partial buffer
+    // (partial_buf) mirrors the stream so a quit mid-stream can persist it.
     let emit_token = |out: String| {
+        crate::chat::partial_buf::record(chat_session_id, &out);
         let payload = ChatTokenPayload {
             chat_session_id: chat_session_id.to_string(),
             token: out,

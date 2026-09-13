@@ -2072,7 +2072,31 @@ pub fn persist_partial_chat_message(
     if trimmed.is_empty() {
         return Ok(());
     }
+    // The backend kept its own copy of the stream (chat/partial_buf.rs) —
+    // take it so a later app exit can't re-persist this turn, and prefer it
+    // when it holds MORE than the frontend had (it received every token).
+    let buffered = crate::chat::partial_buf::take(&chat_session_id);
+    let effective = match buffered {
+        Some(b) if b.trim().len() > trimmed.len() => b,
+        _ => trimmed.to_string(),
+    };
     let conn = db.0.lock();
+    persist_partial_row(&conn, &chat_session_id, &effective);
+    Ok(())
+}
+
+/// Row-writing core of [`persist_partial_chat_message`], shared with the
+/// app-exit path (lib.rs drains chat/partial_buf.rs) so a quit mid-stream
+/// keeps the partial text the user watched instead of discarding it.
+pub(crate) fn persist_partial_row(
+    conn: &rusqlite::Connection,
+    chat_session_id: &str,
+    content: &str,
+) {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return;
+    }
     // Mirror the assistant-insert metadata (provider/model_key) so the partial
     // row prices and groups like a completed turn would.
     let (provider, model, agent): (Option<String>, Option<String>, Option<String>) = conn
@@ -2090,9 +2114,9 @@ pub fn persist_partial_chat_message(
         .as_deref()
         .and_then(crate::harness_adapters::canonical_model_key);
     let _ = db::add_chat_message(
-        &conn,
+        conn,
         db::NewChatMessage {
-            chat_session_id: &chat_session_id,
+            chat_session_id,
             role: "assistant",
             content: trimmed,
             input_tokens: None,
@@ -2102,7 +2126,7 @@ pub fn persist_partial_chat_message(
             cache_read_input_tokens: None,
             reasoning_output_tokens: None,
             provider: provider_val,
-            model_key: model_key,
+            model_key,
             pricing_estimated_usd: None,
             started_at: None,
             completed_at: Some(db::now_ts()),
@@ -2112,7 +2136,6 @@ pub fn persist_partial_chat_message(
             tokens_per_second: None,
         },
     );
-    let _ = db::touch_chat_session(&conn, &chat_session_id);
-    Ok(())
+    let _ = db::touch_chat_session(conn, chat_session_id);
 }
 

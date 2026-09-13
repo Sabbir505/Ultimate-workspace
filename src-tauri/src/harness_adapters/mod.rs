@@ -153,10 +153,14 @@ pub fn canonical_model_key(model: &str) -> Option<&'static str> {
 
 /// Default rates ($/Mtok input, output) from official pricing pages
 /// (anthropic.com, platform.kimi.ai, docs.z.ai, api-docs.deepseek.com,
-/// platform.minimax.io, alibabacloud.com — researched 2026-07; claude-sonnet-5
-/// is the $2/$10 intro rate valid until 2026-08-31; minimax-m3 uses the
-/// "permanent 50% off" effective rate; qwen3.7-plus uses the ≤256K tier).
-/// Users override per-model in Settings; everything stays labeled an estimate.
+/// platform.minimax.io, alibabacloud.com — researched 2026-07, re-checked
+/// 2026-09-13 against platform.claude.com: opus-4-8 $5/$25, sonnet-5 $2/$10
+/// (the "intro until 2026-08-31" deadline passed but $2/$10 is still the
+/// listed rate), haiku-4-5 $1/$5. minimax-m3 uses the "permanent 50% off"
+/// effective rate; qwen3.7-plus uses the ≤256K tier. Models missing from
+/// this table fall back to provider-reported cost — add entries only with a
+/// primary-source price. Users override per-model in Settings; everything
+/// stays labeled an estimate.
 /// NOTE: the user routes both CLIs through a third-party relay whose actual
 /// billing may differ from these official list prices.
 pub fn default_rates(key: &str) -> Option<(f64, f64)> {

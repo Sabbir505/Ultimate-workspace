@@ -227,14 +227,20 @@ pub async fn start_relay(
         None => None,
     };
 
-    // Persist the port + a fresh per-launch pairing token. The token must be
-    // presented on the first frame of the first WebSocket connection from a
-    // phone; the handler validates it before doing anything else.
+    // Persist the port; the fresh per-launch pairing token goes to the OS
+    // keychain (secrets::generic_store — audit fix: it used to sit as
+    // plaintext in the settings table, and the token gates full remote
+    // control of the desktop). The token must be presented on the first
+    // frame of the first WebSocket connection from a phone; the handler
+    // validates it before doing anything else.
     let pairing_token = new_pairing_token();
     {
         let conn = db.lock();
         let _ = db::set_setting(&conn, "mobile.relay_port", &port.to_string());
-        let _ = db::set_setting(&conn, "mobile.pairing_token", &pairing_token);
+        let _ = crate::secrets::generic_store(&conn, "mobile", "pairing-token", &pairing_token);
+        // Migration: a pre-keychain plaintext token (or a revoked stale one)
+        // must not linger readable in the settings table.
+        let _ = db::delete_setting(&conn, "mobile.pairing_token");
     }
 
     *relay_state.port.lock() = Some(port);
@@ -497,6 +503,16 @@ pub(crate) fn pairing_token_accepted(expected: &str, presented: &str) -> bool {
         && !presented.is_empty()
         && expected.len() == presented.len()
         && expected.as_bytes().ct_eq(presented.as_bytes()).into()
+}
+
+/// The live pairing token: OS keychain (secrets generic store) since the
+/// at-rest fix, with a read-only fallback to the legacy plaintext setting for
+/// a relay started before this change. Writes go only to the keychain.
+pub(crate) fn current_pairing_token(conn: &rusqlite::Connection) -> Option<String> {
+    if let Some(t) = crate::secrets::generic_load(conn, "mobile", "pairing-token") {
+        return Some(t);
+    }
+    db::get_setting(conn, "mobile.pairing_token").ok().flatten()
 }
 
 /// How long a fresh connection may take to present its Pair frame.

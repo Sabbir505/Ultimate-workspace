@@ -19,16 +19,29 @@ pub struct ModelRate {
 /// Resolves a Settings override row (parsed from the `price.<key>.input_per_mtok`
 /// / `.cache_read_per_mtok` / `.output_per_mtok` keys) into a `ModelRate`.
 /// Missing fields fall back to the built-in default for the same key.
+/// Default cache-read multiplier for a model key, by family. Anthropic (and
+/// DeepSeek, and most others) bill cache reads at 0.1× input; OpenAI bills
+/// cached input at 0.5× (verified against developers.openai.com/api/docs/
+/// pricing — gpt-4o $2.50 → $1.25 cached). The old blanket 0.1× contradicted
+/// its own comment and under-priced OpenAI cache hits 5× on the estimation
+/// path.
+fn cache_multiplier(key: &str) -> f64 {
+    let k = key.to_ascii_lowercase();
+    let openai_family =
+        k.starts_with("gpt-") || k.starts_with("o1") || k.starts_with("o3") || k.starts_with("o4");
+    if openai_family { 0.5 } else { 0.1 }
+}
+
 pub fn resolve_rate(key: &str, settings: &HashMap<String, ModelRate>) -> Option<ModelRate> {
     let override_rate = settings.get(key).copied();
     match default_rates(key) {
         Some((in_def, out_def)) => {
             let mut rate = ModelRate {
                 input_per_mtok: in_def,
-                // Anthropic default cache rate is 0.1× input. The default_rates_v2
-                // table is the source of cache rates; the override is a layered
-                // replacement, not a 0.1× recompute (so OpenAI's 0.5× is preserved).
-                cache_read_per_mtok: in_def * 0.1,
+                // Family-aware default (see cache_multiplier); the
+                // default_rates_v2 override table is a layered replacement,
+                // not a recompute from this default.
+                cache_read_per_mtok: in_def * cache_multiplier(key),
                 output_per_mtok: out_def,
             };
             if let Some(o) = override_rate {

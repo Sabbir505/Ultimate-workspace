@@ -32,10 +32,7 @@ where
 {
     let expected_token = {
         let conn = db.lock();
-        db::get_setting(&conn, "mobile.pairing_token")
-            .ok()
-            .flatten()
-            .unwrap_or_default()
+        super::relay::current_pairing_token(&conn).unwrap_or_default()
     };
 
     let first = match tokio::time::timeout(PAIRING_TIMEOUT, read.next()).await {

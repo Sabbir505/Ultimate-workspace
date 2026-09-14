@@ -326,9 +326,28 @@ export function useTranscriptScroll({
       // re-render required — before pinning.
       const rows = el.querySelectorAll<HTMLElement>("[data-index]");
       const last = rows[rows.length - 1];
+      let total = virt.getTotalSize();
       if (last && last.parentElement) {
         const inner = last.parentElement;
-        const total = virt.getTotalSize();
+        // MEASURED TAIL CLAMP (2026-09-15): totalSize counts the 160px
+        // ESTIMATE for every row never mounted — a freshly switched-to chat
+        // (or one with pages of one-liner history above the viewport) totals
+        // 2-4x its real content height. The excess is scrollable blank space
+        // BELOW the last message: scrolling to the bottom parks the viewport
+        // in it, and the read "enormous gap between the last turn and the
+        // composer". When the tail row IS mounted its rendered bottom is
+        // ground truth — clamp the wrapper to it, shrinking and growing
+        // alike (a real bottom past totalSize means the cache under-counts
+        // async-grown content, and taking it fixes that overlap too). Rows
+        // are positioned with `transform: translateY(...)`, so offsetTop is
+        // always 0 — the bounding rect against the wrapper's is the position.
+        if (Number(last.dataset.index) === itemsRef.current.length - 1) {
+          const measuredBottom =
+            last.getBoundingClientRect().bottom - inner.getBoundingClientRect().top;
+          if (measuredBottom > 0 && Math.abs(total - measuredBottom) > 1) {
+            total = measuredBottom;
+          }
+        }
         if (Math.abs(inner.offsetHeight - total) > 1) {
           // Instant DOM sync (next React render confirms it via liveTotal —
           // a plain React style write would otherwise clobber this with the

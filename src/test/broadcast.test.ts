@@ -84,7 +84,8 @@ describe("broadcastToSessions", () => {
     });
     await useChatStore.getState().broadcastToSessions(["h"], "run tests");
     expect(sendAgentChatMessageMock).toHaveBeenCalledWith(
-      "h", "run tests", "claude_code", "claude-sonnet-4-5", undefined, undefined,
+      // attachments, then forceResearch — both undefined on a plain broadcast.
+      "h", "run tests", "claude_code", "claude-sonnet-4-5", undefined, undefined, undefined, undefined,
     );
   });
 

@@ -11,7 +11,6 @@ if (!Element.prototype.scrollIntoView) {
 }
 
 import { ChatComposer } from "../components/chat/ChatComposer";
-import { harnessResearchWrap } from "../state/chat/slices/streamingSlice";
 
 afterEach(cleanup);
 
@@ -59,14 +58,5 @@ describe("slash menu consumes the typed token", () => {
     fireEvent.change(ta, { target: { value: "/research the evolution of CPUs" } });
     fireEvent.keyDown(ta, { key: "Enter", shiftKey: false });
     expect(onSend).toHaveBeenCalledWith("the evolution of CPUs", [], true);
-  });
-});
-
-describe("harnessResearchWrap", () => {
-  it("carries the protocol and the topic, ending with the request itself", () => {
-    const wrapped = harnessResearchWrap("state of WebGPU in 2026");
-    expect(wrapped).toContain("Research mode");
-    expect(wrapped).toContain("## Sources");
-    expect(wrapped.endsWith("state of WebGPU in 2026")).toBe(true);
   });
 });

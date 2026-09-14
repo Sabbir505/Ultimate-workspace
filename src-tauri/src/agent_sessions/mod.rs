@@ -392,6 +392,24 @@ impl AgentSessionManager {
         )
     }
 
+    /// Research-mode protocol for harness turns. Harnesses have no Relay
+    /// research scaffolding (that rides the built-in provider's tool loop),
+    /// so `force_research` on a harness send folds the protocol into the
+    /// CLI-facing appendix — it reaches the model but never enters the
+    /// persisted user message, so the transcript shows exactly what the
+    /// user typed (same contract as the built-in path). The `## Sources`
+    /// tail is what Relay's citation renderer parses back into source chips.
+    pub fn research_directive() -> String {
+        format!(
+            "\n\n---\n\n## Research mode\n\
+             The user request above is a multi-source RESEARCH task, not a chat answer.\n\
+             Do not answer from memory. Break it into 3-5 sub-questions; for each, search the web\n\
+             (your web search / page fetch tools), read what you find, prefer independent sources,\n\
+             and write a report that ends with a `## Sources` section listing every URL you actually\n\
+             used, cited inline as [1], [2], \u{2026}"
+        )
+    }
+
     /// Send one user turn. The harness id comes from the chat session's
     /// `agent` field ("harness:<id>"), passed by the command layer.
     /// `attach_prompt` is the CLI-facing appendix built by
@@ -1373,6 +1391,20 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_directive_is_appendix_shaped_and_carries_the_protocol() {
+        let d = AgentSessionManager::research_directive();
+        // Appendix shape: the directive is appended AFTER the user message,
+        // so it must reference it as "above" and open with the appendix
+        // separator the attachment appendix uses.
+        assert!(d.starts_with("\n\n---\n\n## Research mode"));
+        assert!(d.contains("user request above"));
+        assert!(d.contains("## Sources"));
+        // The topic itself is NOT part of the directive — it stays in the
+        // persisted user message.
+        assert!(!d.contains("topic"));
+    }
 
     #[test]
     fn truncate_output_never_panics_on_multibyte_tail_boundary() {

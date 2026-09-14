@@ -403,6 +403,14 @@ export const ChatComposer = memo(function ChatComposer({
     },
     {
       kind: "command",
+      name: "Research",
+      slug: "research",
+      description: isHarnessSession
+        ? "Research mode runs on Relay-backed sessions only"
+        : "Force multi-source research mode for this message (Plan → search → read → cite → synthesize)",
+    },
+    {
+      kind: "command",
       name: "Create artifact",
       slug: "create",
       description: "Create a reusable skill / loop / prompt template / automation",
@@ -449,12 +457,23 @@ export const ChatComposer = memo(function ChatComposer({
     ...harnessSlashCommands,
   ];
 
+  // Exact slug/trigger matches rank FIRST: typing "/research" must highlight
+  // the /research command, not the first skill whose label merely contains
+  // "research" — Enter applies the highlighted item, and a wrong top hit
+  // silently rewrote the token into an unrelated skill.
   const slashFiltered = slashQuery !== null
-    ? allSlashItems.filter((it) => {
-        const key = ("slug" in it && it.slug) || ("trigger" in it && it.trigger) || "";
-        const label = it.name.toLowerCase();
-        return key.startsWith(slashQuery) || label.includes(slashQuery);
-      })
+    ? (() => {
+        const matches = allSlashItems.filter((it) => {
+          const key = ("slug" in it && it.slug) || ("trigger" in it && it.trigger) || "";
+          const label = it.name.toLowerCase();
+          return key.startsWith(slashQuery) || label.includes(slashQuery);
+        });
+        const isExact = (it: SlashItem) => {
+          const key = ("slug" in it && it.slug) || ("trigger" in it && it.trigger) || "";
+          return key.toLowerCase() === slashQuery;
+        };
+        return [...matches.filter(isExact), ...matches.filter((it) => !isExact(it))];
+      })()
     : [];
 
   // Reset the highlight whenever the query changes.
@@ -988,6 +1007,32 @@ export const ChatComposer = memo(function ChatComposer({
     const trimmed = quoted ? (base ? `${quoted}\n\n${base}` : quoted) : base;
     if (!trimmed && attachments.length === 0) return;
 
+    // --- /research: force research mode for this turn ---
+    // The token is a relay affordance; the model gets the plain topic and the
+    // backend's research flag carries the intent. Applied on the composed
+    // text (pill or typed token both serialize to a leading `/research`), so
+    // the model never sees a slash token it was never taught to interpret.
+    // Harness sessions can't run the research scaffolding (it rides the
+    // built-in provider's tool loop), so the text passes through untouched.
+    const researchMatch = !isHarnessSession ? /^\/research\b\s*/i.exec(trimmed) : null;
+    if (researchMatch) {
+      const topic = trimmed.slice(researchMatch[0].length).trim();
+      const researchAsk =
+        topic ||
+        "Perform in-depth multi-source research on the topic of this conversation and write a cited report.";
+      setContent("");
+      setCommandPill(null);
+      setAttachments([]);
+      setAttachError(null);
+      setForceResearch(false);
+      setAttachMenuOpen(false);
+      const ta = textareaRef.current;
+      if (ta) ta.style.height = "auto";
+      onSend(researchAsk, attachments, true);
+      onClearQuotedSelections?.();
+      return;
+    }
+
     // --- /compact: universal context compaction, routed by engine ---
     // CLI harness sessions: forwarded verbatim — the CLI runs its own
     // native /compact. Cloud and local sessions: Relay's own compaction
@@ -1423,22 +1468,28 @@ export const ChatComposer = memo(function ChatComposer({
                   <FolderIcon />
                   <span>Choose working folder…</span>
                 </button>
-                <button
-                  type="button"
-                  className="composer-attach-menu-item"
-                  role="menuitem"
-                  aria-pressed={forceResearch}
-                  onClick={() => {
-                    setForceResearch((v) => !v);
-                    setAttachMenuOpen(false);
-                    textareaRef.current?.focus();
-                  }}
-                >
-                  <ResearchIcon />
-                  <span>
-                    {forceResearch ? "Research mode on — tap again to turn off" : "Research a topic"}
-                  </span>
-                </button>
+                {/* Research mode rides the built-in provider's tool loop
+                    (web_search → browser_read → source ledger → synthesis);
+                    a CLI harness session has no path for it, so the toggle
+                    would silently do nothing — hide it there. */}
+                {!isHarnessSession && (
+                  <button
+                    type="button"
+                    className="composer-attach-menu-item"
+                    role="menuitem"
+                    aria-pressed={forceResearch}
+                    onClick={() => {
+                      setForceResearch((v) => !v);
+                      setAttachMenuOpen(false);
+                      textareaRef.current?.focus();
+                    }}
+                  >
+                    <ResearchIcon />
+                    <span>
+                      {forceResearch ? "Research mode on — tap again to turn off" : "Research a topic"}
+                    </span>
+                  </button>
+                )}
                 {thinkingSupported && onThinkingChange && (
                   <button
                     type="button"

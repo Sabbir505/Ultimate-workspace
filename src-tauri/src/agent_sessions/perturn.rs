@@ -506,6 +506,9 @@ pub(super) fn read_per_turn_stream(
     // CommandCode emits several frames per running tool (`tool_running` and
     // friends all carry the same toolCallId) — dedupe markers per call id.
     let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // CommandCode's plain-text accumulator (deltas only, no think wrappers /
+    // tool markers) — the result line's finalText catch-up diffs against it.
+    let mut cc_text = String::new();
     // mi18: read_line into ONE reused String — BufReader::lines() allocated a
     // fresh String per line on streams that run thousands of lines per turn.
     let mut reader = BufReader::new(stdout);
@@ -577,6 +580,7 @@ pub(super) fn read_per_turn_stream(
                 sid,
                 &v,
                 &mut full,
+                &mut cc_text,
                 session_cell,
                 &mut input,
                 &mut output,

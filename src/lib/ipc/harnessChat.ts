@@ -26,6 +26,14 @@ export interface ChatQuestionRequestPayload {
 export const listenChatQuestionRequest = (handler: (payload: ChatQuestionRequestPayload) => void) =>
   safeListen<ChatQuestionRequestPayload>("chat:question-request", handler);
 
+/** Emitted when the backend starts a turn the frontend did NOT initiate —
+ *  the harness-question follow-up (the answer's turn dispatches from a
+ *  backend thread). The store pre-creates the session's streaming entry
+ *  (beginRemoteTurn) so the composer flips to Stop and onToken's straggler
+ *  guard lets the turn's tokens through. */
+export const listenChatTurnStarted = (handler: (payload: { chatSessionId: string }) => void) =>
+  safeListen<{ chatSessionId: string }>("chat:turn-started", handler);
+
 /** The model id the session's harness LAST actually ran (claude
  *  message.model / opencode info.modelID) — custom/remapped harness setups
  *  make the session's stored catalog id a lie. Null for built-in/local

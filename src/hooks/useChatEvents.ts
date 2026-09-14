@@ -33,6 +33,7 @@ import {
   listenChatSubagentSpawn,
   listenChatSubagentTokens,
   listenChatSubagentDone,
+  listenChatTurnStarted,
   listenSessionMail,
   listenSessionSpawn,
 } from "../lib/ipc";
@@ -74,6 +75,18 @@ export function useChatEvents(): void {
         if (ownerSessionId) {
           void emitMobileSessionChatEvent(ownerSessionId, "token", { chatSessionId, token });
         }
+      }),
+    );
+
+    // Backend-initiated turn start (the harness-question follow-up: the
+    // answer's turn dispatches from a backend thread). Pre-creates the
+    // streaming entry so the composer flips back to Stop for the running
+    // turn and onToken's straggler guard accepts the turn's tokens —
+    // without it the button read "send" mid-turn and the reply only
+    // surfaced at chat:done via the refetch.
+    unlistens.push(
+      listenChatTurnStarted(({ chatSessionId }) => {
+        useChatStore.getState().beginRemoteTurn(chatSessionId);
       }),
     );
 

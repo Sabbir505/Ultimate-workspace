@@ -507,6 +507,9 @@ pub(super) fn read_per_turn_stream(
                 &mut output,
                 &mut cache_read,
                 &mut cache_creation,
+                &mut last_text,
+                &mut last_reasoning,
+                &mut in_think,
                 &mut tools,
             ),
             PerTurn::OpenCode => handle_opencode_event(

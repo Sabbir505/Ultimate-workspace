@@ -205,6 +205,12 @@ struct AgentChild {
     /// ACP: id of the in-flight `session/request`, for a best-effort
     /// `request/cancel` notification before the process tree is killed.
     acp_request_id: Arc<Mutex<Option<u64>>>,
+    /// ACP: the CURRENT turn's prompt text, recorded by `send_acp_turn` so
+    /// the reader can estimate input tokens at session/finish — ACP v1
+    /// carries no usage, and without the prompt the reader has no idea what
+    /// the turn cost to send (later turns are written straight to stdin,
+    /// never seen by the reader).
+    acp_last_prompt: Arc<Mutex<Option<String>>>,
     /// Workspace snapshot of the LAST send (cwd/project/connectors), so a
     /// RELAY_ASK follow-up turn can run where the asking turn ran.
     send_ctx: std::sync::Mutex<Option<SendCtx>>,
@@ -445,6 +451,7 @@ impl AgentSessionManager {
                             stdin: Arc::new(Mutex::new(None)),
                             acp_pending: Arc::new(Mutex::new(None)),
                             acp_request_id: Arc::new(Mutex::new(None)),
+                            acp_last_prompt: Arc::new(Mutex::new(None)),
                             send_ctx: std::sync::Mutex::new(None),
                             oc_base_url: None,
                             oc_full: Arc::new(Mutex::new(String::new())),
@@ -1111,6 +1118,44 @@ fn finish_turn(
     };
     full.clear();
 
+    // Learn pricing from a provider-REPORTED cost (claude's
+    // total_cost_usd, opencode's info.cost, an ACP agent's usage
+    // extension): accumulate into the DB's observed per-model rate so the
+    // cost model prices this model from the user's REAL billing — and
+    // models the hardcoded rate table has never heard of become priceable
+    // at all. The key mirrors what the row stored (the rollup's lookup
+    // key); a session-model fallback covers reporters that name no model.
+    if let Some(reported) = cost.filter(|c| *c > 0.0) {
+        if input.is_some() || output.is_some() {
+            let obs_key: Option<String> = model_key
+                .map(|m| m.to_string())
+                .or_else(|| {
+                    let conn = db.0.lock();
+                    conn.query_row(
+                        "SELECT model FROM chat_sessions WHERE id = ?1",
+                        rusqlite::params![sid],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok()
+                    .and_then(|m| {
+                        crate::harness_adapters::canonical_model_key(&m).map(String::from)
+                    })
+                });
+            if obs_key.is_some() {
+                let conn = db.0.lock();
+                crate::db::record_observed_pricing(
+                    &conn,
+                    obs_key.as_deref(),
+                    input.unwrap_or(0),
+                    output.unwrap_or(0),
+                    cache_read.unwrap_or(0),
+                    cache_creation.unwrap_or(0),
+                    reported,
+                );
+            }
+        }
+    }
+
     // Clear the active per-turn perf accumulator registered by the turn reader
     // (see the `register` call in the stream loops) so a later turn starts
     // fresh and `emit_token` stops recording to it.
@@ -1403,6 +1448,98 @@ mod tests {
         }
     }
 
+    /// Feed kimi stream-json frames through handle_kimi_event with app=None,
+    /// sharing reader state like read_per_turn_stream does.
+    fn feed_kimi(lines: &[&str]) -> UsageState {
+        let cell = Arc::new(Mutex::new(None));
+        let mut full = String::new();
+        let mut input = None;
+        let mut output = None;
+        let mut cache_read = None;
+        let mut cache_creation = None;
+        let mut last_text = String::new();
+        let mut last_reasoning = String::new();
+        let mut in_think = false;
+        let mut tools = ToolTracker::new();
+        for line in lines {
+            let v = serde_json::from_str(line).expect("test line must be valid JSON");
+            handle_kimi_event(
+                None,
+                "s",
+                &v,
+                &mut full,
+                &cell,
+                &mut input,
+                &mut output,
+                &mut cache_read,
+                &mut cache_creation,
+                &mut last_text,
+                &mut last_reasoning,
+                &mut in_think,
+                &mut tools,
+            );
+        }
+        UsageState {
+            full,
+            cell,
+            input,
+            output,
+            cache_read,
+            cache_creation,
+            cost: None,
+        }
+    }
+
+    #[test]
+    fn kimi_progressive_snapshots_emit_suffix_only() {
+        // A CLI that re-sends the assistant text so far in each frame must
+        // not have every frame duplicated into the transcript.
+        let st = feed_kimi(&[
+            r#"{"role":"assistant","content":"Hello"}"#,
+            r#"{"role":"assistant","content":"Hello world"}"#,
+            r#"{"role":"assistant","content":"Hello world!"}"#,
+        ]);
+        assert_eq!(st.full, "Hello world!");
+    }
+
+    #[test]
+    fn kimi_chunk_frames_concatenate() {
+        // Plain chunked deltas (no snapshot overlap) still concatenate.
+        let st = feed_kimi(&[
+            r#"{"role":"assistant","content":"Hel"}"#,
+            r#"{"role":"assistant","content":"lo"}"#,
+        ]);
+        assert_eq!(st.full, "Hello");
+    }
+
+    #[test]
+    fn kimi_reasoning_opens_think_and_text_closes_it() {
+        let st = feed_kimi(&[
+            r#"{"role":"assistant","reasoning_content":"let me think"}"#,
+            r#"{"role":"assistant","reasoning_content":"let me think harder"}"#,
+            r#"{"role":"assistant","content":"Answer"}"#,
+        ]);
+        assert_eq!(st.full, "<think>let me think harder</think>Answer");
+    }
+
+    #[test]
+    fn kimi_tool_boundary_resets_snapshot_history() {
+        // A fresh assistant message after a tool round starts a NEW text —
+        // it must not be diffed against the previous message's snapshot
+        // (text starting with the old one would otherwise lose its head).
+        let st = feed_kimi(&[
+            r#"{"role":"assistant","content":"aaa"}"#,
+            r#"{"role":"assistant","content":"","tool_calls":[{"function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]}"#,
+            r#"{"role":"tool","content":"file1\nfile2"}"#,
+            r#"{"role":"assistant","content":"aaabbb"}"#,
+        ]);
+        assert!(
+            st.full.contains("aaabbb"),
+            "post-tool message must be emitted whole, got: {}",
+            st.full
+        );
+    }
+
     #[test]
     fn pi_session_header_binds_cli_session_id() {
         // First line of a real `pi -p --mode json` run.
@@ -1595,6 +1732,49 @@ mod tests {
             st.full.matches("bash").count(),
             1,
             "tool marked once: {}",
+            st.full
+        );
+    }
+
+    #[test]
+    fn commandcode_completion_frame_attaches_result() {
+        // A completion frame carrying the tool's output must close the
+        // already-open card with that output — not be silently dropped
+        // (the card previously dangled on "running" forever).
+        let st = feed_cc(&[
+            r#"{"type":"event","event":{"type":"tool_running","toolCallId":"t1","toolName":"bash","args":{"command":"ls"}}}"#,
+            r#"{"type":"event","event":{"type":"tool_finished","toolCallId":"t1","toolName":"bash","result":"file1\nfile2"}}"#,
+        ]);
+        assert!(
+            st.full.contains("file1"),
+            "result text must land in the transcript: {}",
+            st.full
+        );
+        assert_eq!(
+            st.full.matches(r#""code":"ls""#).count(),
+            1,
+            "start marker emitted once: {}",
+            st.full
+        );
+    }
+
+    #[test]
+    fn commandcode_selfcontained_start_frame_carries_output() {
+        // A start frame that already carries the result (opencode's inline
+        // shape) opens the card WITH the output attached. Shell tools only —
+        // non-shell steps carry no mergeable id, matching the opencode
+        // handler's convention.
+        let st = feed_cc(&[
+            r#"{"type":"event","event":{"type":"tool_completed","toolCallId":"t1","toolName":"bash","args":{"command":"cat a.txt"},"result":"the contents"}}"#,
+        ]);
+        assert!(
+            st.full.contains("the contents"),
+            "inline output must be attached: {}",
+            st.full
+        );
+        assert!(
+            st.full.contains("cat a.txt"),
+            "tool input must be in the marker: {}",
             st.full
         );
     }

@@ -474,6 +474,16 @@ impl TurnPerf {
         self.inner.lock().tools_ran
     }
 
+    /// Whether any provider delta (text, reasoning, or tool-call args) has
+    /// already streamed this turn. The reconnect ladder gates on this next
+    /// to `tools_ran`: replaying a round whose answer already half-streamed
+    /// would duplicate the text on screen (the retry re-sends from the
+    /// start), so a mid-answer stall must fail the turn instead of
+    /// reconnecting.
+    pub fn streamed_anything(&self) -> bool {
+        self.inner.lock().first_token_seen
+    }
+
     /// Fold one round's provider usage into the running live totals (called
     /// at each tool-loop round boundary) so the live IN/CACHE chips can
     /// render before `chat:done`. `input_includes_cache` follows the

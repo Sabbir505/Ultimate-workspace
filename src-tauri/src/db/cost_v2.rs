@@ -15,10 +15,76 @@ use crate::types::*;
 use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, HashMap};
 
-/// Read Settings overrides once: `price.<key>.{input,cache_read,output}_per_mtok`.
-/// Each row contributes one field; if the field is 0 the default stands.
+/// Read Settings overrides once: `price.<key>.{input,cache_read,output}_per_mtok`,
+/// then blend in the OBSERVED rates learned from provider-reported costs
+/// (see [`record_observed_pricing`]). Explicit `price.*` fields win per
+/// field; observed fills the rest — so the learned rate from the user's
+/// actual endpoint prices models the hardcoded table doesn't know (or knows
+/// wrong, e.g. proxied billing), while a user-pinned field always wins.
+/// Each row contributes one field; if the field is 0 the next layer stands.
 pub fn read_rate_overrides(conn: &Connection) -> HashMap<String, ModelRate> {
-    use crate::db::get_setting;
+    let mut out = read_explicit_rate_overrides(conn);
+    // Observed (learned) layer: `cost.observed.<model>.{total_cost_usd,total_tokens}`.
+    // A single blended $/Mtok across all token kinds — the observation
+    // bundles cache multipliers, so no per-kind split is attempted. Keys are
+    // deliberately OUTSIDE the `price.*` namespace so this query and the
+    // explicit one never overlap.
+    let mut stmt = match conn.prepare(
+        "SELECT key, value FROM app_settings
+          WHERE key LIKE 'cost.observed.%.total_cost_usd'
+             OR key LIKE 'cost.observed.%.total_tokens'",
+    ) {
+        Ok(s) => s,
+        Err(_) => return out,
+    };
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
+    if let Ok(rows) = rows {
+        // <model, (cost, tokens)>
+        let mut observed: HashMap<String, (f64, f64)> = HashMap::new();
+        for row in rows.flatten() {
+            let (key, value) = row;
+            let Some((prefix, suffix)) = key.rsplit_once('.') else {
+                continue;
+            };
+            let Some(model) = prefix.strip_prefix("cost.observed.") else {
+                continue;
+            };
+            let entry = observed.entry(model.to_string()).or_insert((0.0, 0.0));
+            match suffix {
+                "total_cost_usd" => entry.0 = value.parse().unwrap_or(0.0),
+                "total_tokens" => entry.1 = value.parse().unwrap_or(0.0),
+                _ => {}
+            }
+        }
+        for (model, (cost, tokens)) in observed {
+            if cost <= 0.0 || tokens <= 0.0 {
+                continue;
+            }
+            let blended = cost / tokens * 1_000_000.0;
+            let obs_rate = ModelRate {
+                input_per_mtok: blended,
+                cache_read_per_mtok: blended,
+                output_per_mtok: blended,
+            };
+            // Explicit overrides win PER FIELD: an existing entry keeps its
+            // user-pinned fields, zero (unset) fields inherit the observed rate.
+            let entry = out.entry(model).or_insert(obs_rate);
+            if entry.input_per_mtok <= 0.0 {
+                entry.input_per_mtok = obs_rate.input_per_mtok;
+            }
+            if entry.cache_read_per_mtok <= 0.0 {
+                entry.cache_read_per_mtok = obs_rate.cache_read_per_mtok;
+            }
+            if entry.output_per_mtok <= 0.0 {
+                entry.output_per_mtok = obs_rate.output_per_mtok;
+            }
+        }
+    }
+    out
+}
+
+/// The explicit-only `price.*` layer (user-pinned per-model rates).
+fn read_explicit_rate_overrides(conn: &Connection) -> HashMap<String, ModelRate> {
     let mut out = HashMap::new();
     let mut stmt = match conn.prepare(
         "SELECT key, value FROM app_settings
@@ -59,8 +125,53 @@ pub fn read_rate_overrides(conn: &Connection) -> HashMap<String, ModelRate> {
             }
         }
     }
-    let _ = get_setting; // silence unused-import lint if it appears
     out
+}
+
+/// Learn per-model pricing from a provider-REPORTED cost: accumulate the
+/// turn's cost and token total under `cost.observed.<model_key>.*` so the
+/// next rollup prices that model from the user's real billing instead of
+/// the hardcoded table (or prices models the table has never heard of).
+/// Called on every turn whose harness/API reported a real cost. Pure
+/// accumulation — a later user override still wins per field, and the
+/// rollup freshness marker changes with the totals so cached aggregates
+/// re-price.
+pub fn record_observed_pricing(
+    conn: &Connection,
+    model_key: Option<&str>,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_input_tokens: i64,
+    cache_creation_input_tokens: i64,
+    reported_cost: f64,
+) {
+    use crate::db::{get_setting, set_setting};
+    let Some(key) = model_key.map(str::trim).filter(|k| !k.is_empty()) else {
+        return;
+    };
+    if reported_cost <= 0.0 {
+        return;
+    }
+    // Reasoning tokens are excluded: OpenAI-style completion counts and
+    // Claude output both already include them.
+    let tokens = input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens;
+    if tokens <= 0 {
+        return;
+    }
+    let cost_key = format!("cost.observed.{key}.total_cost_usd");
+    let tok_key = format!("cost.observed.{key}.total_tokens");
+    let prev_cost: f64 = get_setting(conn, &cost_key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
+    let prev_tokens: i64 = get_setting(conn, &tok_key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let _ = set_setting(conn, &cost_key, &format!("{}", prev_cost + reported_cost));
+    let _ = set_setting(conn, &tok_key, &format!("{}", prev_tokens + tokens));
 }
 
 /// Read local model electricity settings: USD/kWh rate + GPU power (W).
@@ -330,13 +441,18 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
     {
         // provider: coalesce the row's own provider with the chat session's —
         // rows written before the provider column existed carry NULL and would
-        // otherwise show as "chat:unknown".
+        // otherwise show as "chat:unknown". The RAW session provider rides
+        // along too: only harness-backed rows ("harness:*" sessions) carry a
+        // provider-REPORTED cost (claude's total_cost_usd, opencode's
+        // info.cost) — built-in chat rows hold the coarse per-family
+        // estimate, which the rate table prices better.
         let mut stmt = conn.prepare(
             "SELECT cm.created_at, cm.input_tokens, cm.output_tokens,
                     COALESCE(cm.provider, cs.provider) AS provider, cm.model_key,
                     cm.cache_creation_input_tokens, cm.cache_read_input_tokens,
                     cm.reasoning_output_tokens, cs.model,
-                    cm.started_at, cm.completed_at, cs.project_id
+                    cm.started_at, cm.completed_at, cs.project_id,
+                    cm.cost_usd, cs.provider
                FROM chat_messages cm
                JOIN chat_sessions cs ON cs.id = cm.chat_session_id
               WHERE cm.created_at >= ?1 AND cm.role = 'assistant'",
@@ -355,6 +471,8 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                 r.get::<_, Option<i64>>(9)?,
                 r.get::<_, Option<i64>>(10)?,
                 r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<f64>>(12)?,
+                r.get::<_, Option<String>>(13)?,
             ))
         })?;
         for row in rows {
@@ -371,6 +489,8 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                 started_at,
                 completed_at,
                 chat_project,
+                reported_cost,
+                session_provider,
             ) = row?;
             let usage = UsageInfo {
                 input_tokens: i,
@@ -389,7 +509,14 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
             });
             // Local models: derive cost from electricity (power × duration × rate).
             // No rate table — they run on the user's hardware. Cloud models keep
-            // the per-token rate calculation.
+            // the per-token rate calculation. Harness-backed sessions prefer the
+            // cost the CLI itself reported on the row (claude's total_cost_usd,
+            // opencode's info.cost) — same precedence as the cost_events branch
+            // above — and only rate-estimate when it stored NULL.
+            let is_harness_session = session_provider
+                .as_deref()
+                .map(|p| p.starts_with("harness:"))
+                .unwrap_or(false);
             let cost = match provider.as_deref() {
                 Some("local_gguf") if elec_rate > 0.0 && gpu_watts > 0.0 => {
                     let duration_s = match (started_at, completed_at) {
@@ -399,8 +526,17 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                     let c = local_model_electricity_cost(gpu_watts, duration_s, elec_rate);
                     (c > 0.0).then_some(c)
                 }
+                _ if is_harness_session => {
+                    reported_cost.or_else(|| price_usage(&usage, key, &overrides))
+                }
                 _ => price_usage(&usage, key, &overrides),
             };
+            if is_harness_session {
+                if let Some(r) = reported_cost {
+                    totals.provider_reported_usd += r;
+                    provider_reported_rows += 1;
+                }
+            }
             let tokens_i = i.unwrap_or(0)
                 + cc.unwrap_or(0)
                 + cr.unwrap_or(0)
@@ -613,6 +749,74 @@ mod tests {
     use crate::harness_adapters::UsageInfo;
 
     #[test]
+    fn observed_pricing_accumulates_and_prices_unknown_models() {
+        // A model the hardcoded rate table has NEVER heard of becomes
+        // priceable once a provider-reported cost lands: the observed
+        // blended rate prices it from real billing.
+        let conn = super::super::mem();
+        record_observed_pricing(&conn, Some("my-proxy-glm-x"), 1_000_000, 500_000, 0, 0, 3.0);
+        // A second turn folds INTO the same accumulator (running totals).
+        record_observed_pricing(&conn, Some("my-proxy-glm-x"), 1_000_000, 0, 0, 0, 1.0);
+
+        let rates = read_rate_overrides(&conn);
+        let rate = rates.get("my-proxy-glm-x").expect("observed rate must surface");
+        // 4.0 USD over 2.5M tokens = 1.6 $/Mtok blended.
+        assert!((rate.input_per_mtok - 1.6).abs() < 1e-9, "got {}", rate.input_per_mtok);
+
+        let u = UsageInfo {
+            input_tokens: Some(1_000_000),
+            output_tokens: Some(250_000),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            cost_usd: None,
+        };
+        let cost = price_usage(&u, Some("my-proxy-glm-x"), &rates);
+        assert!(cost.is_some(), "unknown model must price via observed rate");
+        assert!((cost.unwrap() - 2.0).abs() < 1e-9, "got {}", cost.unwrap());
+    }
+
+    #[test]
+    fn observed_pricing_ignored_without_tokens_or_cost() {
+        let conn = super::super::mem();
+        record_observed_pricing(&conn, Some("m1"), 0, 0, 0, 0, 5.0);
+        record_observed_pricing(&conn, Some("m2"), 1_000, 0, 0, 0, 0.0);
+        record_observed_pricing(&conn, None, 1_000, 0, 0, 0, 5.0);
+        assert!(
+            read_rate_overrides(&conn).is_empty(),
+            "no cost or no tokens must not create a rate"
+        );
+    }
+
+    #[test]
+    fn explicit_override_wins_over_observed_per_field() {
+        let conn = super::super::mem();
+        // Observed: 2.0 USD over 1M tokens → blended 2.0.
+        record_observed_pricing(&conn, Some("my-model"), 750_000, 250_000, 0, 0, 2.0);
+        // User pins ONLY the input rate.
+        crate::db::set_setting(&conn, "price.my-model.input_per_mtok", "9.0").unwrap();
+        let rates = read_rate_overrides(&conn);
+        let rate = rates.get("my-model").unwrap();
+        assert!((rate.input_per_mtok - 9.0).abs() < 1e-9, "pinned field wins");
+        assert!(
+            (rate.output_per_mtok - 2.0).abs() < 1e-9,
+            "unpinned field inherits observed: got {}",
+            rate.output_per_mtok
+        );
+    }
+
+    #[test]
+    fn observed_rate_changes_freshness_marker() {
+        // A new observation must invalidate the rollup cache so aggregates
+        // re-price (the marker hashes the merged override map).
+        let conn = super::super::mem();
+        let before = rollup_freshness_marker(&conn).unwrap();
+        record_observed_pricing(&conn, Some("fresh-model"), 1_000, 0, 0, 0, 0.5);
+        let after = rollup_freshness_marker(&conn).unwrap();
+        assert_ne!(before, after, "new observation must re-price rollups");
+    }
+
+    #[test]
     fn rollup_totals_match_sum() {
         let conn = super::super::mem();
         let p = super::super::add_project(&conn, "/tmp/a", "a", false).unwrap();
@@ -727,6 +931,128 @@ mod tests {
                 - 100.0)
                 .abs()
                 < 1e-6
+        );
+    }
+
+    #[test]
+    fn harness_chat_rows_prefer_reported_cost() {
+        // A harness-backed session's rows carry the cost the CLI itself
+        // reported (claude's total_cost_usd, opencode's info.cost). The
+        // rollup must prefer it over the rate-table estimate — same
+        // precedence as the cost_events branch — and rate-price only the
+        // rows where no cost was reported. Built-in chat rows keep using
+        // the rate table (their stored figure is the coarse family
+        // estimate).
+        let conn = super::super::mem();
+        let cs = super::super::create_chat_session(
+            &conn,
+            "harness:claude_code",
+            "claude-opus-4-8",
+            None,
+        )
+        .unwrap();
+        // Reported $0.77 on a turn whose rate-table estimate would be $5
+        // (1M input @ opus $5/Mtok, no cache).
+        super::super::add_chat_message(
+            &conn,
+            super::super::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "reported",
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(0),
+                cost_usd: Some(0.77),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: Some("claude_code"),
+                model_key: Some("claude-opus-4-8"),
+                pricing_estimated_usd: None,
+                started_at: None,
+                completed_at: None,
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
+        )
+        .unwrap();
+        // NULL-cost row falls back to the rate table: 1M @ $5 = $5.00.
+        super::super::add_chat_message(
+            &conn,
+            super::super::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "estimated",
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(0),
+                cost_usd: None,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: Some("claude_code"),
+                model_key: Some("claude-opus-4-8"),
+                pricing_estimated_usd: None,
+                started_at: None,
+                completed_at: None,
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
+        )
+        .unwrap();
+        let r = rollups_for_tests(&conn);
+        assert!(
+            (r.totals.raw_token_cost_usd - 5.77).abs() < 1e-6,
+            "reported cost must win on its row: got {}",
+            r.totals.raw_token_cost_usd
+        );
+        // The reported row counts into the provider-reported quality share.
+        assert!(
+            r.cost_quality.provider_reported_pct > 0.0,
+            "harness-reported cost must surface in cost quality: {}",
+            r.cost_quality.provider_reported_pct
+        );
+    }
+
+    #[test]
+    fn builtin_chat_rows_still_rate_price_over_stored_estimate() {
+        // Built-in chat rows store the coarse per-family estimate — the rate
+        // table must keep winning there (anthropic $3/$15): 1M in + 0.5M out
+        // = $10.50 regardless of the stored figure.
+        let conn = super::super::mem();
+        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
+            .unwrap();
+        super::super::add_chat_message(
+            &conn,
+            super::super::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "hi",
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(500_000),
+                cost_usd: Some(99.0),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: Some("anthropic"),
+                model_key: None,
+                pricing_estimated_usd: None,
+                started_at: None,
+                completed_at: None,
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
+        )
+        .unwrap();
+        let r = rollups_for_tests(&conn);
+        assert!(
+            (r.totals.raw_token_cost_usd - 10.5).abs() < 1e-6,
+            "rate table must win for built-in providers: got {}",
+            r.totals.raw_token_cost_usd
         );
     }
 

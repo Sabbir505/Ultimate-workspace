@@ -257,6 +257,7 @@ pub(super) fn send_acp_turn(
         let cancelled2 = Arc::clone(&cancelled);
         let stdin2 = Arc::clone(&entry.stdin);
         let pending2 = Arc::clone(&entry.acp_pending);
+        let last_prompt2 = Arc::clone(&entry.acp_last_prompt);
         let request_id2 = Arc::clone(&entry.acp_request_id);
         // B-4/B-5/E-5: new process generation — arm `reader_alive` (the
         // thread's RAII guard clears it on every exit path, including the
@@ -278,6 +279,7 @@ pub(super) fn send_acp_turn(
                 &cancelled2,
                 stdin2,
                 &pending2,
+                &last_prompt2,
                 &request_id2,
                 &generation_cell2,
                 generation,
@@ -292,6 +294,12 @@ pub(super) fn send_acp_turn(
     // `session/request` directly below.
     {
         let mut g = entry.acp_pending.lock().map_err(|e| e.to_string())?;
+        *g = Some(content.to_string());
+    }
+    // Record the prompt for the reader's input-token estimate (Fix: ACP
+    // usage) — the reader never sees later turns' content, which goes
+    // straight to stdin below.
+    if let Ok(mut g) = entry.acp_last_prompt.lock() {
         *g = Some(content.to_string());
     }
     entry.turn_in_flight.store(true, Ordering::SeqCst);
@@ -340,16 +348,32 @@ pub(super) fn read_acp_stream(
     cancelled: &Arc<AtomicBool>,
     shared_stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
     pending: &Arc<Mutex<Option<String>>>,
+    last_prompt: &Arc<Mutex<Option<String>>>,
     request_id_cell: &Arc<Mutex<Option<u64>>>,
     proc_generation: &AtomicU64,
     my_generation: u64,
     mut watches: Vec<DirWatch>,
 ) {
     let mut full = String::new();
+    // Snapshot-suffix state for the text/reasoning streams. ACP agents
+    // disagree on update semantics: some send pure deltas, others re-send
+    // the block so far — emitting only what EXTENDS the previous snapshot
+    // is correct for both, and collapses duplicate re-sends instead of
+    // duplicating them in the transcript (same rule as the kimi/opencode
+    // handlers). A block that doesn't extend the previous one is emitted
+    // whole (a genuinely new block).
+    let mut last_text = String::new();
+    let mut last_reasoning = String::new();
     // "Worked for Xs" label: the turn window runs from when we start watching
     // for the turn's output until session/finish. Reset at each finish so the
     // next turn (sent directly by send_acp_turn) gets its own window.
     let mut turn_started = crate::db::now_ts();
+    // Usage accounting for the CURRENT turn. ACP v1 defines no usage field —
+    // agents that extend the protocol get their real numbers read; everyone
+    // else gets a char-based estimate at session/finish (input from the
+    // recorded prompt, output from the accumulated reply), so ACP sessions
+    // no longer report all-None usage to the HUD and the cost rollup.
+    let mut turn_usage = Option::<crate::acp::events::AcpUsage>::None;
     // Perf accumulator for the CURRENT turn, holding the chat's AppHandle so
     // `chat:perf` flows. Like the claude reader, this loop outlives turns: a
     // fresh accumulator is registered at the first session/update of each
@@ -399,6 +423,7 @@ pub(super) fn read_acp_stream(
                         // turn is over before it streamed anything.
                         emit_error(app, sid, &format!("ACP request failed: {msg}"));
                         full.clear();
+                        turn_usage = None;
                         crate::chat::turn_perf::unregister(sid);
                         perf = None;
                         if should_clear_in_flight(
@@ -500,16 +525,35 @@ pub(super) fn read_acp_stream(
                             crate::chat::turn_perf::TurnPerf::new_opt(app.cloned(), sid),
                         ));
                     }
+                    // Agents that extend the protocol with a usage object get
+                    // their real numbers folded in (later reports win
+                    // field-wise — updates typically carry cumulative totals).
+                    if let Some(u) = crate::acp::events::extract_usage(&params) {
+                        match turn_usage.as_mut() {
+                            Some(t) => t.merge(u),
+                            None => turn_usage = Some(u),
+                        }
+                    }
                     for ev in crate::acp::events::translate_session_update(&params) {
                         match ev {
                             AcpEvent::Text(t) => {
-                                full.push_str(&t);
-                                emit_token(app, sid, &t);
+                                let suffix = acp_snapshot_suffix(&last_text, &t);
+                                if !suffix.is_empty() {
+                                    full.push_str(suffix);
+                                    emit_token(app, sid, suffix);
+                                }
+                                last_text.clear();
+                                last_text.push_str(&t);
                             }
                             AcpEvent::Reasoning(t) => {
-                                let wrapped = format!("<think>{t}</think>");
-                                full.push_str(&wrapped);
-                                emit_token(app, sid, &wrapped);
+                                let suffix = acp_snapshot_suffix(&last_reasoning, &t);
+                                if !suffix.is_empty() {
+                                    let wrapped = format!("<think>{suffix}</think>");
+                                    full.push_str(&wrapped);
+                                    emit_token(app, sid, &wrapped);
+                                }
+                                last_reasoning.clear();
+                                last_reasoning.push_str(&t);
                             }
                             AcpEvent::ToolCall { id, name, input } => {
                                 let marker =
@@ -529,17 +573,59 @@ pub(super) fn read_acp_stream(
                     for ev in crate::acp::events::translate_session_finish(&params) {
                         match ev {
                             AcpEvent::Text(t) => {
-                                full.push_str(&t);
-                                emit_token(app, sid, &t);
+                                let suffix = acp_snapshot_suffix(&last_text, &t);
+                                if !suffix.is_empty() {
+                                    full.push_str(suffix);
+                                    emit_token(app, sid, suffix);
+                                }
+                                last_text.clear();
+                                last_text.push_str(&t);
                             }
                             AcpEvent::Reasoning(t) => {
-                                let wrapped = format!("<think>{t}</think>");
-                                full.push_str(&wrapped);
-                                emit_token(app, sid, &wrapped);
+                                let suffix = acp_snapshot_suffix(&last_reasoning, &t);
+                                if !suffix.is_empty() {
+                                    let wrapped = format!("<think>{suffix}</think>");
+                                    full.push_str(&wrapped);
+                                    emit_token(app, sid, &wrapped);
+                                }
+                                last_reasoning.clear();
+                                last_reasoning.push_str(&t);
                             }
                             _ => {}
                         }
                     }
+                    // Finish params can carry the turn's final usage too.
+                    if let Some(u) = crate::acp::events::extract_usage(&params) {
+                        match turn_usage.as_mut() {
+                            Some(t) => t.merge(u),
+                            None => turn_usage = Some(u),
+                        }
+                    }
+                    // ACP v1 has no usage channel of its own: when the agent
+                    // reported nothing, estimate the turn from what Relay
+                    // actually sent and received (~4 chars/token, the same
+                    // convention the context meter uses) so chat:done, the
+                    // composer HUD and the cost rollup all see numbers
+                    // instead of permanent NULLs. Estimates are passed as
+                    // usage WITHOUT a cost — pricing stays with the rollup's
+                    // rate table, exactly like the kimi/commandcode turns.
+                    let usage = turn_usage.take().unwrap_or_else(|| {
+                        let prompt_len = last_prompt
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.clone())
+                            .map(|p| {
+                                crate::chat::commands::estimate_tokens(&p) as i64
+                            });
+                        let visible = crate::chat::commands::strip_think_blocks(&full);
+                        let reply_len = (!visible.is_empty())
+                            .then(|| crate::chat::commands::estimate_tokens(&visible) as i64);
+                        crate::acp::events::AcpUsage {
+                            input_tokens: prompt_len,
+                            output_tokens: reply_len,
+                            ..Default::default()
+                        }
+                    });
                     let started = turn_started;
                     turn_started = crate::db::now_ts();
                     if cancelled.load(Ordering::SeqCst) {
@@ -553,11 +639,11 @@ pub(super) fn read_acp_stream(
                             db,
                             sid,
                             &mut full,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.cost_usd,
+                            usage.cache_write_tokens,
+                            usage.cache_read_tokens,
                             &mut watches,
                             started,
                             None,
@@ -585,6 +671,7 @@ pub(super) fn read_acp_stream(
                         emit_error(app, sid, &m);
                     }
                     full.clear();
+                    turn_usage = None;
                     if should_clear_in_flight(proc_generation.load(Ordering::SeqCst), my_generation)
                     {
                         in_flight.store(false, Ordering::SeqCst);
@@ -650,6 +737,13 @@ pub(super) fn read_acp_stream(
     }
 }
 
+/// Snapshot-suffix diff: text that extends the previous snapshot yields only
+/// its new tail; anything else (a new block, a shorter rewrite) yields the
+/// whole string. An empty history yields the whole string (pure-delta agents).
+fn acp_snapshot_suffix<'a>(last: &str, text: &'a str) -> &'a str {
+    text.strip_prefix(last).unwrap_or(text)
+}
+
 /// Answer an ACP tool call with an error tool_result (v1 doesn't execute
 /// tools). The reader sends a fresh session/request carrying the result;
 /// the agent continues the same turn.
@@ -666,4 +760,22 @@ pub(super) fn reply_acp_tool_error(
         shared_stdin,
         &crate::acp::encode_request(rid, "session/request", &params),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::acp_snapshot_suffix;
+
+    #[test]
+    fn snapshot_suffix_dedups_resends_and_keeps_deltas() {
+        // Pure-delta agents: empty history → whole chunk.
+        assert_eq!(acp_snapshot_suffix("", "Hel"), "Hel");
+        assert_eq!(acp_snapshot_suffix("Hel", "lo"), "lo");
+        // Snapshot agents: a re-send that extends the block yields the tail.
+        assert_eq!(acp_snapshot_suffix("Hello", "Hello world"), " world");
+        // An identical re-send (duplicate chunk) yields nothing.
+        assert_eq!(acp_snapshot_suffix("Hello", "Hello"), "");
+        // A genuinely NEW block that doesn't extend the old one is whole.
+        assert_eq!(acp_snapshot_suffix("Hello", "second block"), "second block");
+    }
 }

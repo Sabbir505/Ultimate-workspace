@@ -816,13 +816,17 @@ impl ChatManager {
                         // the turn is allowed to fail: the same model, the
                         // same request, up to ten pinged attempts, with the
                         // counter on screen. Only while the turn has caused
-                        // nothing yet (`tools_ran == 0`) — replaying a round
+                        // nothing yet: `tools_ran == 0` (replaying a round
                         // that already wrote a file or ran a command would do
-                        // it twice, so a stall after a tool keeps the plain
-                        // fail-the-turn path.
+                        // it twice) AND nothing has streamed (a retry after
+                        // half an answer re-sends the text from the start,
+                        // duplicating it on screen — a mid-answer stall keeps
+                        // the plain fail-the-turn path).
                         let lost = match &attempt {
                             Err(e)
-                                if perf.tools_ran() == 0 && reconnect::is_connection_loss(e) =>
+                                if perf.tools_ran() == 0
+                                    && !perf.streamed_anything()
+                                    && reconnect::is_connection_loss(e) =>
                             {
                                 Some(e.clone())
                             }
@@ -1008,7 +1012,10 @@ impl ChatManager {
                                 }),
                                 cost_usd: usage.as_ref().and_then(|u| {
                                     if u.input_tokens > 0 || u.output_tokens > 0 {
-                                        Some(u.cost_usd)
+                                        // The provider's own figure (OpenRouter's
+                                        // usage.cost) is real billing — store it in
+                                        // place of the family-rate estimate.
+                                        Some(u.reported_cost_usd.unwrap_or(u.cost_usd))
                                     } else {
                                         None
                                     }
@@ -1047,6 +1054,27 @@ impl ChatManager {
                                 ..db::NewChatMessage::assistant(&sid, &full_response)
                             },
                         );
+                        // Learn pricing from a provider-REPORTED cost
+                        // (OpenRouter's usage.cost): accumulate the turn into
+                        // the DB's observed per-model rate so the cost model
+                        // prices this model from the user's real billing from
+                        // now on — including models the hardcoded table has
+                        // never heard of. User overrides still win.
+                        if let (Some(u), Some(key)) =
+                            (usage.as_ref(), model_key.as_deref())
+                        {
+                            if let Some(reported) = u.reported_cost_usd.filter(|c| *c > 0.0) {
+                                db::record_observed_pricing(
+                                    &conn,
+                                    Some(key),
+                                    u.input_tokens,
+                                    u.output_tokens,
+                                    u.cache_read_input_tokens,
+                                    u.cache_creation_input_tokens,
+                                    reported,
+                                );
+                            }
+                        }
                         // Attribute this turn's artifacts to the assistant
                         // message so they reappear on its bubble when the chat
                         // is reopened.
@@ -1218,7 +1246,9 @@ impl ChatManager {
                             }),
                             cost_usd: usage.as_ref().and_then(|u| {
                                 if u.input_tokens > 0 || u.output_tokens > 0 {
-                                    Some(u.cost_usd)
+                                    // Same precedence as the persisted row: the
+                                    // provider's own figure wins.
+                                    Some(u.reported_cost_usd.unwrap_or(u.cost_usd))
                                 } else {
                                     None
                                 }
@@ -1654,27 +1684,47 @@ pub(crate) async fn run_chat_stream(
         crate::chat::stream_events::emit_chat_token(app, chat_session_id, &out, false);
     };
 
-    // D4: the done flag previously broke only the INNER line loop, so the
-    // outer read kept pulling from the SSE body. Providers that hold the
-    // connection open after `data: [DONE]` then parked here on the 60s
-    // watchdog and FAILED the turn after the answer had already streamed.
-    // The `'read` label makes `[DONE]` terminal for the whole loop; usage is
-    // parsed from the accumulated buffer below either way.
+    // D4: `[DONE]` stays terminal for the whole loop (the stream never
+    // reads on past it for long), but the break is now DEFERRED: OpenAI
+    // requests carry `stream_options.include_usage`, and endpoints differ on
+    // whether the usage-only chunk lands before or after `data: [DONE]` —
+    // llama-server even sends its usage chunk after the final delta and
+    // again past `[DONE]` in some builds. Breaking at `[DONE]` dropped that
+    // chunk and with it every plain (tools-off) turn's token accounting.
+    // Instead the first `Done` arms a 2-second drain (same grace the tool
+    // loop uses after `finish_reason: "stop"`): keep reading, then end the
+    // turn on drain expiry, EOF, or post-DONE silence — a stall inside the
+    // drain is the expected end, never the 60s watchdog failure. The
+    // deadline arms ONCE so a server streaming repeated `[DONE]` lines can't
+    // extend it forever.
+    let mut drain_deadline: Option<tokio::time::Instant> = None;
     'read: loop {
+        if let Some(deadline) = drain_deadline {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+        }
         // B-9: stall watchdog — a silent connection must fail the turn, not
         // park it forever. With `ping`, silence is probed: a slow model on a
         // live endpoint is allowed to finish, and a dead endpoint fails the
         // read immediately (see streaming::stream_next_with_watchdog), which
-        // is what starts the reconnect ladder in `send`.
+        // is what starts the reconnect ladder in `send`. Inside the drain
+        // the grace shrinks to 2s and silence ends the turn.
+        let draining = drain_deadline.is_some();
         let chunk = match crate::chat::streaming::stream_next_with_watchdog(
             &mut stream,
-            std::time::Duration::from_secs(60),
+            if draining {
+                std::time::Duration::from_secs(2)
+            } else {
+                std::time::Duration::from_secs(60)
+            },
             ping,
         )
         .await
         {
             Ok(Some(c)) => c,
             Ok(None) => break,
+            Err(e) if draining && e.starts_with("stream stalled") => break,
             Err(e) => return Err(e),
         };
 
@@ -1689,8 +1739,11 @@ pub(crate) async fn run_chat_stream(
                     perf.maybe_emit_perf();
                 }
                 Ok(crate::chat::streaming::SsePumpEvent::Done) => {
-                    // Stream done — usage will be parsed from buffer below.
-                    break 'read;
+                    // Terminal marker seen — usage is parsed from the
+                    // accumulated buffer below after the drain closes.
+                    if drain_deadline.is_none() {
+                        drain_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(2));
+                    }
                 }
                 Ok(crate::chat::streaming::SsePumpEvent::Quiet) => {}
                 Err(e) => return Err(e),
@@ -2428,6 +2481,7 @@ mod tests {
                             input_tokens: u["prompt_tokens"].as_i64().unwrap_or(0),
                             output_tokens: u["completion_tokens"].as_i64().unwrap_or(0),
                             cost_usd: 0.0,
+                            reported_cost_usd: None,
                             cache_creation_input_tokens: 0,
                             cache_read_input_tokens: 0,
                             reasoning_tokens: 0,

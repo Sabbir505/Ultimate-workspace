@@ -2623,6 +2623,53 @@ button.chat-mermaid-open {
   font-size: 10.5px;
   font-weight: 600;
 }
+/* Live run badge: the run's latest call (target/command) in place of the
+   "N calls" count. Mono + ellipsized so a long path can't blow the row out. */
+.chat-fold-count.chat-fold-last {
+  min-width: 0;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+/* Live tool rows (folded group + single step): no spinner, no ✓ — the title
+   itself is the progress indicator. A bright band sweeps first word → last
+   word on a loop until the turn's tools finish; the text sits at --text-dim
+   so the crossing band reads as a shine. */
+.chat-fold-title.is-live,
+.chat-step-label.is-live {
+  background-image: linear-gradient(
+    90deg,
+    var(--text-dim) 0%,
+    var(--text-dim) 44%,
+    var(--text) 50%,
+    var(--text-dim) 56%,
+    var(--text-dim) 100%
+  );
+  background-size: 300% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: chat-title-shine 1.6s linear infinite;
+}
+@keyframes chat-title-shine {
+  /* 300% gradient: 100% parks the band past the left edge of the text, 0%
+     past the right — the band crosses first word → last word and both loop
+     ends render plain dim text, so the wrap-around is invisible. */
+  from { background-position: 100% 0; }
+  to { background-position: 0% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-fold-title.is-live,
+  .chat-step-label.is-live {
+    animation: none;
+  }
+}
 .chat-fold-body {
   padding: 2px 0 4px 22px;
 }

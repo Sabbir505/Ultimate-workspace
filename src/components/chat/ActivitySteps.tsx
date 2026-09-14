@@ -586,6 +586,22 @@ export function stepLabel(data: ToolData | null): string {
   return `${cmd}  ${detail}`;
 }
 
+/** The live folded row's badge shows the run's LATEST call — its concrete
+ *  target (path / url / query), or the shell command for code tools — instead
+ *  of an anonymous "N calls" count, so the collapsed line reads as what the
+ *  agent is touching right now. One line, truncated; null when the call's
+ *  payload hasn't streamed/parsed yet (the badge simply stays hidden). */
+export function lastCallBadge(step?: ActivityStep): string | null {
+  const d = step?.data;
+  if (!d) return null;
+  // Only code-kind steps put the command in `code`; other kinds may carry a
+  // whole generated file body there, which must never become the badge.
+  const raw = (d.kind === "code" ? d.code : d.detail) ?? "";
+  const line = raw.trim().split("\n", 1)[0].trim();
+  if (!line) return null;
+  return line.length > 64 ? `${line.slice(0, 64)}…` : line;
+}
+
 
 /** Detect whether a string looks like a unified diff. */
 export function looksLikeDiff(text: string): boolean {
@@ -697,9 +713,15 @@ export function StepCodeHighlighter({ code, language }: { code: string; language
 export function ActivityStepRow({
   step,
   done,
+  live,
 }: {
   step: ActivityStep;
   done: boolean;
+  /** Turn-level streaming flag. Per-call `done` is untrustworthy while the
+   *  turn streams — the backend closes every <tool> marker at call START —
+   *  so only this may show the row as finished. Tool rows carry no ✓/spinner
+   *  in any state: while live the label itself is the progress (shine). */
+  live?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const hasBody = Boolean(
@@ -778,21 +800,19 @@ export function ActivityStepRow({
       </div>
     );
   }
+  const rowLive = !!live;
   return (
-    <div className={`chat-step${done ? "" : " live"}`}>
+    <div className={`chat-step${rowLive ? " live" : ""}`}>
       <button
         className="chat-step-toggle"
         onClick={() => hasBody && setOpen((o) => !o)}
         title={hasBody ? (open ? "Hide details" : "Show details") : undefined}
         disabled={!hasBody}
       >
-        <span className="chat-step-status">
-          <StepStatusIcon done={done} />
-        </span>
         <span className="chat-step-icon">
           <ToolIcon kind={step.data?.kind} />
         </span>
-        <span className="chat-step-label">{stepLabel(step.data)}</span>
+        <span className={`chat-step-label${rowLive ? " is-live" : ""}`}>{stepLabel(step.data)}</span>
         {hasBody && (
           <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
         )}
@@ -906,7 +926,10 @@ export function ProcessSummary({
  *  block KIND plus the loop index (PERFORMANCE_AUDIT.md F6): a bare `key={i}`
  *  remounts a block whenever the block at that index changes kind (e.g. a
  *  think block that gains a tool run below it mid-stream), losing collapse
- *  state. Diff blocks key on their file path, which is unique per turn. */
+ *  state. Diff blocks key on their file path, which is unique per turn.
+ *  `live` is the TURN-level streaming flag — tool rows use it to render the
+ *  live (shining title, latest-call badge) state instead of trusting the
+ *  per-call `done`, which flips at call start. */
 export function renderProcessBlock(
   b: Block,
   i: number,
@@ -914,6 +937,7 @@ export function renderProcessBlock(
   cache = true,
   sources?: ChatSource[],
   chatSessionId?: string | null,
+  live?: boolean,
 ) {
   switch (b.kind) {
     case "activity":
@@ -924,6 +948,7 @@ export function renderProcessBlock(
               key={`${step.data?.kind ?? "step"}:${step.data?.path ?? step.data?.title ?? j}:${j}`}
               step={step}
               done={step.done}
+              live={live}
             />
           ))}
         </div>
@@ -936,6 +961,7 @@ export function renderProcessBlock(
           icon={b.icon}
           count={b.count}
           steps={b.steps}
+          live={live}
         />
       );
     case "editrow":
@@ -953,20 +979,42 @@ export function renderProcessBlock(
 
 /** A run of N consecutive same-tool calls folded into ONE expandable row
  *  ("⌗ Terminal · 2 commands ⌄") — nine stacked search rows drowned the
- *  transcript. Expanded, it renders the original per-call rows. */
+ *  transcript. Expanded, it renders the original per-call rows.
+ *
+ *  The collapsed row never carries a ✓/spinner in any state. While the turn
+ *  is LIVE it reads as what's happening: the title carries the progress with
+ *  a shine that sweeps first word → last word on a loop until the calls end,
+ *  and the "N calls" count is replaced by the run's latest call (its target
+ *  or command). Once done it settles to the plain title + count. Expanding
+ *  still shows every call, as before. */
 export function FoldedStepGroup({
   title,
   icon,
   count,
   steps,
+  live,
 }: {
   title: string;
   icon: string;
   count: number;
   steps: ActivityStep[];
+  /** Turn-level streaming flag — see ActivityStepRow. Per-call `done` flips
+   *  at call start, so only this may end the live presentation. */
+  live?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const allDone = steps.every((s) => s.done);
+  const isLive = !!live;
+  // The badge tracks the run's newest call that has a parsed payload —
+  // mid-stream the newest segment can still be an unparsed JSON shell, and
+  // the previous call's target reads better than a flickering empty badge.
+  const lastLabel = useMemo(() => {
+    if (!isLive) return null;
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const label = lastCallBadge(steps[i]);
+      if (label) return label;
+    }
+    return null;
+  }, [isLive, steps]);
   // Noun matches what the run actually did — "reading_a_web_page · 3 searches"
   // read as a bug; web rows are page reads, search rows are searches.
   const noun =
@@ -985,12 +1033,17 @@ export function FoldedStepGroup({
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
-        <StepStatusIcon done={allDone} />
         <ToolIcon kind={icon} />
-        <span className="chat-fold-title">{title.toLowerCase().replace(/\s+/g, "_")}</span>
-        <span className="chat-fold-count">
-          {count} {noun}
-        </span>
+        <span className={`chat-fold-title${isLive ? " is-live" : ""}`}>{title.toLowerCase().replace(/\s+/g, "_")}</span>
+        {isLive ? (
+          lastLabel && (
+            <span className="chat-fold-count chat-fold-last">{lastLabel}</span>
+          )
+        ) : (
+          <span className="chat-fold-count">
+            {count} {noun}
+          </span>
+        )}
         <span className={`chat-thinking-chevron${open ? " open" : ""}`} aria-hidden="true">
           ›
         </span>
@@ -1002,6 +1055,7 @@ export function FoldedStepGroup({
               key={`${step.data?.kind ?? "step"}:${j}`}
               step={step}
               done={step.done}
+              live={isLive}
             />
           ))}
         </div>

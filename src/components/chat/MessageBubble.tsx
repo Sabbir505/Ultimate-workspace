@@ -447,7 +447,7 @@ function MessageBubbleInner({
                       label={processLabel}
                       keepExpandedOnEnd={endedByStop}
                     >
-                      {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact, mdCache, sources, chatSessionId))}
+                      {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact, mdCache, sources, chatSessionId, live === true))}
                     </ProcessSummary>
                     {outside.map((b, i) => textBlock(b, `out:${i}`))}
                   </>

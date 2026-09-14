@@ -334,6 +334,16 @@ export const ChatComposer = memo(function ChatComposer({
   // token UNDER THE CURSOR, not off the whole content, so "/" works anywhere
   // in the sentence (text before and after the command is preserved).
   const [caret, setCaret] = useState(0);
+  // Live mirrors for the popup apply path: a selection can land in a handler
+  // whose view of the draft is one keystroke behind (async skill list
+  // swapping in, a programmatic caret write after the last input event) —
+  // resolving the token from that stale view left the partial "/res" text
+  // sitting in the box next to the applied pill. The apply path below
+  // re-resolves the token against the CURRENT draft through these refs.
+  const contentRef = useRef(content);
+  contentRef.current = content;
+  const caretRef = useRef(caret);
+  caretRef.current = caret;
   // Escape-dismiss latches: the exact token (position + query) whose popup
   // was dismissed. Any edit to the token re-opens the menu; the dismissal is
   // non-destructive (it no longer wipes the draft).
@@ -405,9 +415,7 @@ export const ChatComposer = memo(function ChatComposer({
       kind: "command",
       name: "Research",
       slug: "research",
-      description: isHarnessSession
-        ? "Research mode runs on Relay-backed sessions only"
-        : "Force multi-source research mode for this message (Plan → search → read → cite → synthesize)",
+      description: "Force multi-source research mode for this message (plan → search → read → cite → synthesize)",
     },
     {
       kind: "command",
@@ -678,18 +686,35 @@ export const ChatComposer = memo(function ChatComposer({
   // token IS the whole draft, and are spliced into the text in place
   // otherwise — the text before and after the token is always preserved.
   const applySlashItem = useCallback((item: SlashItem) => {
+    // Re-resolve the token against the LIVE draft (see the mirror refs): the
+    // render-closure token can be a keystroke behind, and splicing the stale
+    // span left the partial "/res" text next to the applied pill.
+    const live = tokenAtCaret(contentRef.current, caretRef.current, "/");
+    // Fallback for a caret state that no longer points into the token (a
+    // programmatic caret write after the last input event): when the WHOLE
+    // draft is the bare partial token, applying an item must still consume
+    // it — the pill may never sit next to the text it stands for.
+    const token =
+      live ??
+      (/^[ \t]*\/\S*$/.test(contentRef.current)
+        ? {
+            start: 0,
+            end: contentRef.current.length,
+            query: contentRef.current.trim().slice(1).toLowerCase(),
+          }
+        : null);
     if (item.kind === "command") {
       if (item.slug === "create") {
         // Drop just the token; any other draft text stays for after the
         // type selector closes.
-        if (slashToken) replaceTokenSpan(slashToken, "");
+        if (token) replaceTokenSpan(token, "");
         setCreateInstruction("");
         setCreateTypeOpen(true);
       } else {
         // Commands are message-level directives — they ride the command
         // pill (serialized back to the leading `/slug` on send) while the
         // rest of the draft is kept verbatim.
-        if (slashToken) replaceTokenSpan(slashToken, "");
+        if (token) replaceTokenSpan(token, "");
         setCommandPill({ slug: item.slug, label: item.name });
       }
       return;
@@ -701,11 +726,11 @@ export const ChatComposer = memo(function ChatComposer({
       if (!template) return;
       const variables = templateVariables(template.body);
       if (variables.length > 0) {
-        if (slashToken) replaceTokenSpan(slashToken, "");
+        if (token) replaceTokenSpan(token, "");
         setFillingTemplate(template);
         setFillValues({});
-      } else if (slashToken) {
-        replaceTokenSpan(slashToken, template.body);
+      } else if (token) {
+        replaceTokenSpan(token, template.body);
       } else {
         insertTemplateText(template.body);
       }
@@ -715,14 +740,14 @@ export const ChatComposer = memo(function ChatComposer({
     // affordance; anywhere else the `/slug ` token is inserted at the
     // cursor so surrounding text survives and the backend's token-aware
     // skill parsing still sees it.
-    if (slashToken && slashToken.start === 0 && slashToken.end === content.length) {
+    if (token && token.start === 0 && token.end === contentRef.current.length) {
       setCommandPill({ slug: item.slug, label: item.name });
       setContent("");
       setCaret(0);
       const ta = textareaRef.current;
       ta?.focus();
-    } else if (slashToken) {
-      replaceTokenSpan(slashToken, `/${item.slug} `);
+    } else if (token) {
+      replaceTokenSpan(token, `/${item.slug} `);
     } else {
       setCommandPill({ slug: item.slug, label: item.name });
       setContent("");
@@ -730,7 +755,7 @@ export const ChatComposer = memo(function ChatComposer({
       const ta = textareaRef.current;
       ta?.focus();
     }
-  }, [insertTemplateText, promptTemplates, slashToken, content, replaceTokenSpan]);
+  }, [insertTemplateText, promptTemplates, replaceTokenSpan]);
 
   // Voice dictation engine (carved to useVoiceDictation.ts): owns the mic
   // capture / segment-commit machinery; dictated text splices into this
@@ -1009,12 +1034,13 @@ export const ChatComposer = memo(function ChatComposer({
 
     // --- /research: force research mode for this turn ---
     // The token is a relay affordance; the model gets the plain topic and the
-    // backend's research flag carries the intent. Applied on the composed
-    // text (pill or typed token both serialize to a leading `/research`), so
-    // the model never sees a slash token it was never taught to interpret.
-    // Harness sessions can't run the research scaffolding (it rides the
-    // built-in provider's tool loop), so the text passes through untouched.
-    const researchMatch = !isHarnessSession ? /^\/research\b\s*/i.exec(trimmed) : null;
+    // research flag carries the intent. Applied on the composed text (pill or
+    // typed token both serialize to a leading `/research`), so the model
+    // never sees a slash token it was never taught to interpret. Works on
+    // every engine: built-in providers run the research scaffolding, harness
+    // sessions get the protocol folded into the outgoing message
+    // (harnessResearchWrap in the streaming slice).
+    const researchMatch = /^\/research\b\s*/i.exec(trimmed);
     if (researchMatch) {
       const topic = trimmed.slice(researchMatch[0].length).trim();
       const researchAsk =
@@ -1468,28 +1494,22 @@ export const ChatComposer = memo(function ChatComposer({
                   <FolderIcon />
                   <span>Choose working folder…</span>
                 </button>
-                {/* Research mode rides the built-in provider's tool loop
-                    (web_search → browser_read → source ledger → synthesis);
-                    a CLI harness session has no path for it, so the toggle
-                    would silently do nothing — hide it there. */}
-                {!isHarnessSession && (
-                  <button
-                    type="button"
-                    className="composer-attach-menu-item"
-                    role="menuitem"
-                    aria-pressed={forceResearch}
-                    onClick={() => {
-                      setForceResearch((v) => !v);
-                      setAttachMenuOpen(false);
-                      textareaRef.current?.focus();
-                    }}
-                  >
-                    <ResearchIcon />
-                    <span>
-                      {forceResearch ? "Research mode on — tap again to turn off" : "Research a topic"}
-                    </span>
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className="composer-attach-menu-item"
+                  role="menuitem"
+                  aria-pressed={forceResearch}
+                  onClick={() => {
+                    setForceResearch((v) => !v);
+                    setAttachMenuOpen(false);
+                    textareaRef.current?.focus();
+                  }}
+                >
+                  <ResearchIcon />
+                  <span>
+                    {forceResearch ? "Research mode on — tap again to turn off" : "Research a topic"}
+                  </span>
+                </button>
                 {thinkingSupported && onThinkingChange && (
                   <button
                     type="button"

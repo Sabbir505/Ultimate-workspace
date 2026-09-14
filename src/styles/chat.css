@@ -2615,10 +2615,6 @@ button.chat-mermaid-open {
 }
 .chat-fold-count {
   flex: none;
-  padding: 0 7px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
   color: var(--text-dim);
   font-size: 10.5px;
   font-weight: 600;

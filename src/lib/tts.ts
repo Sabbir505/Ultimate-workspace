@@ -200,6 +200,39 @@ const UNIT_SPELLED: Record<string, string> = {
   hz: "hertz",
 };
 
+/** Magnitude word for a currency suffix ("$5M" → "million"). */
+const CURRENCY_WORDS: Record<string, string> = {
+  k: "thousand",
+  m: "million",
+  b: "billion",
+  t: "trillion",
+};
+
+/** Glued/abbreviated durations ("4d", "4days", "2wks", "3mo") spoken as the
+ *  words they stand for. Single letters are case-SENSITIVE lowercase — "5W"
+ *  is watts, not weeks — and are the ambiguous set; the multi-letter forms
+ *  are safe either case. `m` is deliberately absent: "5m" is minutes in a
+ *  timer, meters in a track answer, and million in "5m users" — no guess is
+ *  better than a wrong one (the existing min/Min rule covers "5 min"). */
+const SHORT_DURATIONS: Record<string, string> = {
+  d: "days",
+  h: "hours",
+  s: "seconds",
+  w: "weeks",
+  yr: "years",
+  yrs: "years",
+  wk: "weeks",
+  wks: "weeks",
+  mo: "months",
+  mos: "months",
+};
+
+/** "1" before a duration reads singular ("1 year"), everything else keeps
+ *  the plural word the map carries. */
+function spokenDuration(num: string, word: string): string {
+  return `${num} ${Number(num) === 1 ? word.replace(/s$/, "") : word}`;
+}
+
 /** Symbols and abbreviations that are read badly or not at all. Applied before
  *  the markdown pass, because several of them (`&`, `→`) also appear inside
  *  constructs the markdown pass has to see intact. */
@@ -222,12 +255,60 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
   [/£\s?(\d+(?:[.,]\d+)?)/g, "$1 pounds"],
   [/₹\s?(\d+(?:[.,]\d+)?)/g, "$1 rupees"],
   [/¥\s?(\d+(?:[.,]\d+)?)/g, "$1 yen"],
+  // Dollar magnitudes and pricing, which the engine reads as a bare letter:
+  // "$5M" is five million dollars, "$3/M" (model pricing) is three dollars
+  // per million. The per-unit form runs first so "$5M/M" splits correctly.
+  [
+    /\$\s?(\d+(?:[.,]\d+)?)\s*\/\s*([KkMm])\b/g,
+    (_m, num: string, unit: string) =>
+      `${num} dollars per ${CURRENCY_WORDS[unit.toLowerCase()] ?? unit}`,
+  ],
+  [
+    /\$\s?(\d+(?:[.,]\d+)?)\s*([KMBT])\b/g,
+    (_m, num: string, unit: string) =>
+      `${num} ${CURRENCY_WORDS[unit.toLowerCase()] ?? unit} dollars`,
+  ],
+  // A dollar rate left glued to its period ("/yr", "/mo") after the amount
+  // became words — "$5M/yr" arrives here as "5 million dollars/yr" and the
+  // slash would read as "slash".
+  [
+    /dollars\s*\/\s*(yr|mo|wk|day|hr)\b/gi,
+    (_m, unit: string) => {
+      const words: Record<string, string> = {
+        yr: "year",
+        mo: "month",
+        wk: "week",
+        day: "day",
+        hr: "hour",
+      };
+      return `dollars per ${words[unit.toLowerCase()] ?? unit}`;
+    },
+  ],
   // Dates first: "2024-01-05" is a date, and the number-range rule below would
   // otherwise read it as two ranges ("2024 to 01 to 05").
   [
     /\b(\d{4})-(\d{2})-(\d{2})\b/g,
     (_m, y: string, m: string, d: string) =>
       `${MONTHS[Number(m) - 1] ?? m} ${Number(d)}, ${y}`,
+  ],
+  // Clock times: "04:00" reads as "zero four…colon…" or a raw digit run.
+  // With a meridiem, "04:00 pm" → "4 p m"; bare, "04:00" → "4 o'clock" and
+  // "14:30" → "14 30" (the engine's natural "fourteen thirty"). The
+  // lookahead keeps "04:00:00" (H:M:S) and "16:9"-style ratios alone, and
+  // "localhost:5173" never matches (no second colon-shaped pair).
+  [
+    /\b(\d{1,2}):(\d{2})\s*([ap])\.?\s?m\.?(?![a-z])/gi,
+    (_m, h: string, mm: string, ap: string) =>
+      mm === "00"
+        ? `${Number(h)} ${ap.toLowerCase()} m`
+        : `${Number(h)} ${Number(mm)} ${ap.toLowerCase()} m`,
+  ],
+  [
+    /(^|[^\w:.])(\d{1,2}):(\d{2})(?![\d:])(?!\s*[ap]\.?\s?m)/gi,
+    (_m, pre: string, h: string, mm: string) =>
+      mm === "00"
+        ? `${pre}${Number(h)} o'clock`
+        : `${pre}${Number(h)} ${Number(mm)}`,
   ],
   // Month abbreviations ("Sep 13", "Oct. 2026") — the engine says "sehp".
   // Two rules: the period is only eaten when a date follows it, so "Sep. 13"
@@ -264,6 +345,31 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
     /\b(\d+(?:\.\d+)?)\s*(mins?|secs?|hrs?)\b/gi,
     (_m, num: string, unit: string) => `${num} ${TIME_WORDS[unit.toLowerCase()] ?? unit}`,
   ],
+  // Glued day/week spellings first ("4days", "2weeks" — the engine reads the
+  // run-on as one mangled word), then the abbreviated durations ("4d",
+  // "3mo", "2wks"). The single-letter set is case-sensitive lowercase so
+  // "10W" stays watts; a 4-digit number before a bare "s" is a decade ("the
+  // 1990s"), and "Ns of" is an approximation ("100s of pages") — both left
+  // alone.
+  [
+    /\b(\d+(?:\.\d+)?)\s*(days?|weeks?|months?|years?)\b/gi,
+    (_m, num: string, unit: string) => `${num} ${unit.toLowerCase()}`,
+  ],
+  [
+    /\b(\d+(?:\.\d+)?)\s*(yr|yrs|wk|wks|mo|mos)\b/gi,
+    (_m, num: string, unit: string) => {
+      const word = SHORT_DURATIONS[unit.toLowerCase()] ?? unit;
+      return spokenDuration(num, word);
+    },
+  ],
+  [
+    /\b(\d+(?:\.\d+)?)\s*([dhsw])\b(?!\s*of\b)/g,
+    (match, num: string, unit: string) => {
+      // "the 1990s" is a decade, not 1990 seconds.
+      if (unit === "s" && num.length === 4) return match;
+      return spokenDuration(num, SHORT_DURATIONS[unit] ?? unit);
+    },
+  ],
   [
     /\b(\d+(?:\.\d+)?)\s*(km|cm|mm|kg|mg|MB|GB|KB|TB|ms|fps|mi|ft|lb|kW|kHz|MHz|Hz)\b(?!\s*per\b)/gi,
     (_m, num: string, unit: string) => `${num} ${UNIT_SPELLED[unit.toLowerCase()] ?? unit}`,
@@ -299,6 +405,12 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
     (_m, letters: string, plural: string) =>
       `${letters.toUpperCase().split("").join(" ")}${plural}`,
   ],
+  // Model formats and size codes the engine invents a pronunciation for:
+  // "gguf"/"ggml" are spelled out, and "XXS"/"XS" (quant tiers, clothing
+  // sizes) are the words they stand for.
+  [/\b(gguf|ggml)\b/gi, (_m, w: string) => w.toUpperCase().split("").join(" ")],
+  [/\bxxs\b/gi, "extra extra small"],
+  [/\bxs\b/gi, "extra small"],
   // Symbols the engine either skips or mispronounces.
   [/→/g, " to "],
   [/←/g, " from "],
@@ -340,6 +452,17 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
   // markdown bullet and stays one — `.` does not match a newline.
   [/(.)\+/g, "$1 plus "],
   [/(\d)\s*\*\s*(\d)/g, "$1 times $2"],
+  // A line that is ONE bold span is a pseudo-header ("**Sources**" as a
+  // section label). Handled here — before the leftover-asterisk rule below
+  // strips the markers — so the label gets the full stop and paragraph break
+  // a spoken section break needs instead of running into the next line.
+  [
+    /^[ \t]*(\*\*|__)([^\n]*?\S)\1[ \t]*$/gm,
+    (_m, _mk: string, title: string) => {
+      const clean = title.trim().replace(/[.:;,!?]+$/, "");
+      return clean ? `${clean}.\n\n` : _m;
+    },
+  ],
   // Leftover asterisk (unmatched emphasis, a footnote star) is silence.
   [/\*/g, " "],
   [/(\d)\s*\^\s*(\d)/g, "$1 to the power of $2"],
@@ -385,6 +508,19 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
   [/ﬄ/g, "ffl"],
   // Handles and email addresses: "user@example.com" is "user at example.com".
   [/@/g, " at "],
+  // Bare numeric citation markers ("[3]", the research reports' "[1,2]"):
+  // the engine clicks on the brackets, so voice them as what they are.
+  // Markdown links ("[1](url)") and reference definitions ("[1]: url") are
+  // excluded and handled by the markdown pass; a word character before the
+  // bracket (an array index like "a[1]") stays untouched.
+  [
+    /\[((?:\d{1,2})(?:,\s*\d{1,2})+)\]/g,
+    (_m, nums: string) => `sources ${nums}`,
+  ],
+  [
+    /(^|[^\w\]])\[(\d{1,2})\](?!\s*[:\)(])/g,
+    (_m, pre: string, num: string) => `${pre}source ${num}`,
+  ],
   [/&/g, " and "],
   [/%/g, " percent"],
 ];
@@ -438,12 +574,15 @@ export function markdownToSpeech(md: string): string {
   out = out.replace(/`([^`]+)`/g, "$1");
   // Inline math.
   out = out.replace(/\$([^$\n]+)\$/g, "$1");
-  // Headings and blockquote markers. The trailing punctuation a heading carries
-  // (or gains here) is what gives the reader a beat before the body text, so
-  // headings end in a full stop rather than running straight on.
+  // Headings and blockquote markers. The trailing punctuation a heading
+  // carries (or gains here) is what gives the reader a beat before the body
+  // text, so headings end in a full stop — and the blank line after them
+  // turns into a real PARAGRAPH break in the splitter (a ~280ms pause),
+  // which a bare newline does not: section headers read as part of the
+  // sentence that follows without it.
   out = out.replace(/^[ \t]{0,3}#{1,6}[ \t]+(.*)$/gm, (_m, title: string) => {
     const clean = title.trim().replace(/[.:;,!?]+$/, "");
-    return clean ? `${clean}.\n` : "";
+    return clean ? `${clean}.\n\n` : "";
   });
   out = out.replace(/^[ \t]{0,3}>[ \t]?/gm, "");
   // List markers: the bullet becomes a full stop so items are separated by a
@@ -452,6 +591,13 @@ export function markdownToSpeech(md: string): string {
   out = out.replace(/^[ \t]*\[[ xX]\][ \t]*/gm, "");
   out = out.replace(/^[ \t]*\d+[.)][ \t]+/gm, "");
   out = out.replace(/^[ \t]*([-*_])[ \t]*\1[ \t]*\1[-*_ \t]*$/gm, "\n\n");
+  // A standalone "Label:" line ("Sources:" above a source list) is a section
+  // header too: the colon is a breath inside a sentence, not the full stop a
+  // section break needs. Short, punctuation-free lines only.
+  out = out.replace(/^[ \t]*([^\W_][^\n:*]{0,58}?)\s*:[ \t]*$/gm, (_m, label: string) => {
+    const clean = label.trim();
+    return /^[!?.,;]+$/.test(clean) ? _m : `${clean}.\n\n`;
+  });
   // Emphasis markers, keeping the words. Only `*`/`**` are touched — a lone
   // underscore is far more likely to be inside an identifier (which the pass
   // above has already spaced out) than to be emphasis in a technical answer.

@@ -271,6 +271,73 @@ describe("groupSentences", () => {
   });
 });
 
+// The shapes users actually complained the reader mangles: glued durations,
+// dollar magnitudes, clock times, model-format acronyms, and research
+// citations.
+describe("markdownToSpeech — durations, money, times and citations", () => {
+  it("speaks abbreviated durations as the words they stand for", () => {
+    expect(markdownToSpeech("it ships in 4d")).toContain("4 days");
+    expect(markdownToSpeech("done in 4days")).toContain("4 days");
+    expect(markdownToSpeech("over 2wks")).toContain("2 weeks");
+    expect(markdownToSpeech("3mo ago")).toContain("3 months");
+    expect(markdownToSpeech("a 1yr warranty")).toContain("1 year");
+    expect(markdownToSpeech("waited 6h")).toContain("6 hours");
+    expect(markdownToSpeech("about 45s")).toContain("45 seconds");
+  });
+
+  it("does not mistake decades, watts or approximations for durations", () => {
+    expect(markdownToSpeech("the 1990s style")).toContain("the 1990s");
+    expect(markdownToSpeech("a 10W charger")).not.toContain("10 weeks");
+    expect(markdownToSpeech("100s of pages")).toContain("100s of");
+    // Whole words are already readable — just unglue them.
+    expect(markdownToSpeech("in 4days time")).toContain("4 days");
+  });
+
+  it("speaks dollar magnitudes and per-token pricing", () => {
+    expect(markdownToSpeech("raised $5M")).toContain("5 million dollars");
+    expect(markdownToSpeech("a $1.5B deal")).toContain("1.5 billion dollars");
+    expect(markdownToSpeech("it costs $3/M")).toContain("3 dollars per million");
+    expect(markdownToSpeech("priced at $0.5/K")).toContain("0.5 dollars per thousand");
+    expect(markdownToSpeech("$5M/yr contract")).toContain("dollars per year");
+  });
+
+  it("speaks clock times instead of raw digit runs", () => {
+    expect(markdownToSpeech("starts at 04:00")).toContain("4 o'clock");
+    expect(markdownToSpeech("from 04:00 to 04:30")).toContain("4 o'clock");
+    expect(markdownToSpeech("the 14:30 train")).toContain("14 30");
+    expect(markdownToSpeech("lands 09:05 am")).toContain("9 5 a m");
+    // Ratios and durations with seconds stay untouched.
+    expect(markdownToSpeech("a 16:9 image")).toContain("16:9");
+    expect(markdownToSpeech("length 04:00:12")).toContain("04:00:12");
+  });
+
+  it("spells out model formats and size codes", () => {
+    expect(markdownToSpeech("exported to gguf")).toContain("G G U F");
+    expect(markdownToSpeech("a GGML model")).toContain("G G M L");
+    expect(markdownToSpeech("the XXS quant")).toContain("extra extra small");
+    expect(markdownToSpeech("size XS")).toContain("extra small");
+  });
+
+  it("voices citation markers as sources", () => {
+    expect(markdownToSpeech("The benchmark confirms it [3].")).toContain("source 3");
+    expect(markdownToSpeech("Two teams agree [1,2].")).toContain("sources 1,2");
+    // A markdown link keeps its label; an array index is not a citation.
+    const link = markdownToSpeech("see [1](https://x.io/a) there");
+    expect(link).toContain("1 there");
+    expect(markdownToSpeech("copy a[1] over")).not.toContain("source");
+  });
+
+  it("gives headings and pseudo-headers a spoken beat", () => {
+    // The blank line after a heading is what the splitter turns into a
+    // paragraph pause — a bare newline left the header glued to the body.
+    expect(markdownToSpeech("## Sources\n\nFirst entry.")).toContain("Sources.\n\n");
+    expect(markdownToSpeech("**Overview**\n\nBody text.")).toContain("Overview.\n\n");
+    expect(markdownToSpeech("Sources:\n\nFirst entry.")).toContain("Sources.\n\n");
+    // A "key: value" line is content, not a header.
+    expect(markdownToSpeech("status: ok")).toContain("status: ok");
+  });
+});
+
 describe("splitSentences", () => {
   it("does NOT break on a semicolon or comma — those are breaths, not ends", () => {
     // Splitting here would insert a full stop's silence mid-thought, which is

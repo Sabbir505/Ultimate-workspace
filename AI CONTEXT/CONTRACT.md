@@ -5,7 +5,7 @@
 All Tauri commands are invoked from the frontend with `invoke('<command_name>', { args })`.
 All structs serialized over IPC use **camelCase** field names (Rust: `#[serde(rename_all = "camelCase")]`).
 IDs are UUID strings. Timestamps are Unix epoch **seconds** (i64).
-The backend registers **296 commands** (`src-tauri/src/lib.rs` `invoke_handler`). The sections below document the surface by subsystem; a handful of minor internal commands (e.g. `docdesign_complete`, `get_file_mtime`, `find_file_by_basename`) follow the same conventions.
+The backend registers **321 commands** (`src-tauri/src/lib.rs` `invoke_handler`; `generate_handler!` at lines 312–658). The sections below document the surface by subsystem; a handful of minor internal commands (e.g. `docdesign_complete`, `docdesign_qa_complete`, `get_file_mtime`, `find_file_by_basename`, `persist_partial_chat_message`) follow the same conventions.
 
 ## Types
 
@@ -64,6 +64,7 @@ PTY (paneId is a frontend-generated UUID per pane slot):
 
 Harnesses:
 - `list_harnesses(force?: boolean) -> HarnessStatus[]` — install probe per harness (spawns each CLI with `--version`); pass `force: true` to bypass the cache (Settings "Re-check")
+- `check_harness_updates(force?: boolean) -> HarnessUpdateStatus[]` — installed-vs-npm-registry version per harness (1h cache); drives the Settings "Update" button and the boot update notification
 - `run_harness_login(paneId: string, harnessId: HarnessId, cwd: string) -> ()` (spawns login flow in that pane's pty)
 - `install_harness(harnessId: HarnessId) -> string` — one-click `npm install -g` of the harness package (returns the binary name)
 - `pane_memory(paneId: string) -> number` — process memory usage (bytes) of the pane's child process
@@ -73,6 +74,8 @@ Harnesses:
 Headless CLI chat (chat sessions whose `agent` is `"harness:<id>"`; same `chat:token`/`chat:done`/`chat:error`/`chat:artifact` events as the built-in chat):
 - `send_agent_chat_message(chatSessionId, content, harnessId, model?, cwd?, projectId?) -> ()` — spawns (or writes to) the headless CLI; claude uses a persistent process, kimi/opencode/pi/omp/commandcode spawn per turn (pi-lineage CLIs stream `-p --mode json` / `--output-format json` NDJSON and take the turn prompt on stdin). The harness always runs at full-auto permission (`--dangerously-skip-permissions` for claude, `--auto` for opencode, kimi prompt mode auto-approves). The capture-and-resume CLI session id persists under `agent.cli_session_id.<harness>.<sid>` in `app_settings`.
 - `cancel_agent_chat_message(chatSessionId) -> ()` — kills the in-flight CLI process; the next send respawns. Captured CLI session id is kept so context survives the cancel.
+- `list_acp_agents() -> AgentInfo[]` — ACP (Agent Client Protocol) agents available to the composer agent selector: static registry entries merged with user agents from the `acp.agents` settings blob. Sessions whose agent id is `acp:<id>` run over the ACP stdio client (`src-tauri/src/acp/`, lifecycle in `agent_sessions/acp.rs`).
+- `chat_token_subscribe(chatSessionId: string, channel: Channel<...>) -> ()` — subscribes a channel to a harness chat's streamed tokens (used by the mobile relay and pop-out windows).
 
 Git:
 - `get_git_status(path: string) -> GitStatusInfo`
@@ -105,6 +108,7 @@ Automations (scheduled headless agent runs; kimi excluded — `--yolo`/`--auto` 
 - `delete_automation(automationId: string) -> ()`
 - `set_automation_enabled(automationId: string, enabled: boolean) -> ()`
 - `run_automation_now(automationId: string) -> ()` — fire one run immediately on the same launch path the scheduler uses
+- `stop_automation_run(automationId: string) -> boolean` — kill the in-flight run of that automation (this process only; returns `false` when the run belongs to the Task Scheduler sidecar binary, which is unreachable from the desktop)
 - `list_automation_runs(automationId: string, limit?: number, beforeId?: number) -> AutomationRun[]` — newest-first, default cap 100; `beforeId` keysets older pages
 - `count_automation_runs(automationId: string) -> number` — sidebar list badge
 - `automation_next_fire(automationId: string) -> number | null` — next scheduled fire (epoch seconds)
@@ -194,15 +198,15 @@ Event:
 - `chat:open-browser` — payload `{ chatSessionId: string, url: string }` (the `open_url` tool asks the UI to show a page in the built-in browser pane)
 - `chat:approval-request` — payload `{ chatSessionId, pendingId, tool, summary, args }` (a filesystem tool call needs per-action approval; the turn pauses until the UI calls `resolve_tool_action`)
 - `chat:approval-resolved` — payload `{ chatSessionId, pendingId, approved }` (the user resolved the card; the backend has resumed the paused tool loop)
-- `chat:status` — payload `{ chatSessionId: string, status: string, reason?: string }` (stream status change, e.g. `context_compacted`)
+- `chat:status` — payload `{ chatSessionId: string, status: string, reason?: string }` (stream status change, e.g. `context_compacted` or the auto-router's `auto_route`; the `chat/reconnect.rs` ladder adds `reconnecting` / `reconnect_restart` / `reconnected` when a dropped provider stream is being recovered)
 - `chat:task-progress` — payload `{ chatSessionId: string, taskId: string, kind: string, status: string, detail?: string }` (background task progress)
 - `updater:progress` — payload `{ downloaded: number, total: number | null }` (cumulative bytes downloaded during `download_and_install_update`; `total` is the Content-Length if known)
 - `updater:installed` — payload `()` (the verified update package is on disk; the app restarts automatically)
 - `browser:resolve-pane-request` — payload `{ reqId: string, projectId: string }` (MCP server asks frontend to resolve which browser pane to use)
 - `browser:open-browser-request` — payload `{ reqId: string, projectId: string, url?: string }` (MCP server asks frontend to open a browser pane)
 - `oauth:callback` — payload `{ connectorId: string, code: string, state: string }` (OAuth redirect captured by the backend)
-- `mobile:session_chat_event` — payload `{ sessionId: string, event: object }` (mobile relay forwards a chat event)
-- `mobile:session_chat_owner` — payload `{ sessionId: string, ownerPaneId: string }` (mobile relay assigns chat ownership)
+- `mobile:session_chat_event` — flows **frontend → backend**: React emits `{ session_id, kind, payload }` (`kind` = token/status/done/error/artifact/approval/approval-resolved/plan-proposal) so the relay can forward harness chat events to the phone (`src/lib/ipc/harnessChat.ts` emit, `mobile/relay_owner.rs` forwards via the owner map)
+- `mobile:session_chat_owner` — payload `{ chatSessionId: string, ownerSessionId: string }` (mobile relay assigns which chat session owns a phone-triggered stream)
 - `local-model:download:progress` — payload `{ modelId: string, downloaded: number, total: number, status: string }` (model download progress)
 - `mobile:pairing-token` — payload `{ token: string }` (per-launch relay pairing token)
 - `mobile:session-open-requested` — payload `{ sessionId: string }` (phone asked the desktop to open a chat session)
@@ -233,6 +237,8 @@ Event:
 - `chat:citation-report` — citation lint verdicts for the finished turn
 - `chat:doc-qa` — payload `{ path, filename, passed[], warnings[], probes[], pageCount, … }` (document design QA probes)
 - `chat:open-preview` — payload `{ chatSessionId, path, filename }` (open a generated file in the canvas)
+- `chat:session-spawn` — payload `{ parentSessionId, childSessionId, title, agent }` (an agent spawned a first-class child chat session — Session Mesh, `session_fabric/mod.rs`)
+- `chat:session-mail` — payload `{ mailId, fromSession, fromTitle, toSession, toTitle, mode: "question" | "notify", status: "queued" | "delivered" | "answered" | "expired" | "rejected", bodyExcerpt, answerExcerpt?, depth }` (inter-session mail transition; one event covers both the sender and recipient)
 
 ## Auto-updater (Tauri plugin-updater + GitHub Releases)
 
@@ -273,7 +279,7 @@ Commands:
 - `set_chat_session_unread(chatSessionId: string, unread: boolean) -> ()`
 - `get_chat_messages(chatSessionId: string) -> ChatMessageRecord[]` (chronological by id)
 - `touch_chat_session(chatSessionId: string) -> ()` (sets lastActiveAt = now)
-- `send_chat_message(chatSessionId: string, content: string, effort?: string, toolsEnabled?: boolean, codeExecEnabled?: boolean, attachments?: ChatAttachmentInput[], forceResearch?: boolean, thinking?: boolean, extraFsRoot?: string) -> ()` — persists user message, looks up provider/model/api_key + the session's `permissionMode`, assembles message history, kicks off SSE streaming. `forceResearch` bypasses the research-request heuristic; `thinking` is the extended-thinking toggle; `extraFsRoot` grants one extra filesystem root for the turn. `ChatAttachmentInput = { name, kind: "image"|"text"|"doc", text?, data? (base64), mediaType?, format? }`: images are sent to the model as vision content parts (data URL for OpenAI, base64 image block for Anthropic) on the live turn only; `doc` (docx/pptx/xlsx) bytes are text-extracted server-side and inlined into the message; `text` files are inlined as fenced blocks. Emits `chat:token`, then `chat:done` or `chat:error`. All diagrams go through the `generate_diagram` (vector SVG) tool. Chat tools (52): `web_search`, `generate_file`, `generate_document`, `plan_document`, `revise_document`, `generate_diagram`, `fetch_url`, `open_url`, `open_file`, `run_code`, `get_skill`, `list_skills`, `list_artifacts`, `attach_connector`, `attach_mcp_server`, `get_capabilities`, `check_sufficiency`, `todo_write`, `enter_plan_mode`, `present_plan`, `list_automations`, `create_automation`, `update_automation`, `delete_automation`, `run_automation_now`, `search_docs`, `memory_save`, `memory_recall`, `memory_forget`, the agentic browser control set (`browser_read`/`browser_click`/`browser_type`/`browser_scroll`/`browser_screenshot`), `download_file`, `download_progress`, `run_shell`, `Task` (focused subagent), `get_task_status`, `cancel_task`, `add_source_note`, `get_source_ledger`, `reset_source_ledger`, and the filesystem set (`list_directory`/`read_file`/`search_files`/`search_content`/`write_file`/`edit_file`/`delete_file`/`move_file`/`copy_file`). Filesystem mutating tools route through the central `check_permission` gate: under `read_only` the mutating tools are absent from the tool schema entirely; under `manual`/`auto_edit`/`full_auto` an action that needs approval emits `chat:approval-request` and pauses the turn until the UI resolves it via `resolve_tool_action`. `delete_file` is ALWAYS gated, in every mode.
+- `send_chat_message(chatSessionId: string, content: string, effort?: string, toolsEnabled?: boolean, codeExecEnabled?: boolean, attachments?: ChatAttachmentInput[], forceResearch?: boolean, thinking?: boolean, extraFsRoot?: string) -> ()` — persists user message, looks up provider/model/api_key + the session's `permissionMode`, assembles message history, kicks off SSE streaming. `forceResearch` bypasses the research-request heuristic; `thinking` is the extended-thinking toggle; `extraFsRoot` grants one extra filesystem root for the turn. `ChatAttachmentInput = { name, kind: "image"|"text"|"doc", text?, data? (base64), mediaType?, format? }`: images are sent to the model as vision content parts (data URL for OpenAI, base64 image block for Anthropic) on the live turn only; `doc` (docx/pptx/xlsx) bytes are text-extracted server-side and inlined into the message; `text` files are inlined as fenced blocks. Emits `chat:token`, then `chat:done` or `chat:error`. All diagrams go through the `generate_diagram` (vector SVG) tool. Chat tools (59 name constants in `chat/tools/mod.rs`; 58 advertised in the tool schemas — `download_progress` is merged into `get_task_status` and hidden from the schema): `web_search`, `generate_file`, `generate_document`, `plan_document`, `revise_document`, `generate_diagram`, `fetch_url`, `open_url`, `open_file`, `run_code`, `get_skill`, `list_skills`, `list_artifacts`, `attach_connector`, `attach_mcp_server`, `get_capabilities`, `check_sufficiency`, `todo_write`, `enter_plan_mode`, `present_plan`, `list_automations`, `create_automation`, `update_automation`, `delete_automation`, `run_automation_now`, `search_docs`, `memory_save`, `memory_recall`, `memory_forget`, the agentic browser control set (`browser_read`/`browser_click`/`browser_type`/`browser_scroll`/`browser_screenshot`/`browser_observe`/`browser_extract`), `download_file`, `download_progress`, `run_shell`, `Task` (focused subagent), `get_task_status`, `cancel_task`, `add_source_note`, `get_source_ledger`, `reset_source_ledger`, `totp_code` (RFC 6238 2FA codes — seed stays in the keychain/Bitwarden/1Password CLI, only the code is returned), the Session Mesh inter-session set (`list_sessions`/`read_session`/`search_sessions`/`message_session`/`spawn_session` — runtime in `session_fabric/mod.rs`), and the filesystem set (`list_directory`/`read_file`/`search_files`/`search_content`/`write_file`/`edit_file`/`delete_file`/`move_file`/`copy_file`). Filesystem mutating tools route through the central `check_permission` gate: under `read_only` the mutating tools are absent from the tool schema entirely; under `manual`/`auto_edit`/`full_auto` an action that needs approval emits `chat:approval-request` and pauses the turn until the UI resolves it via `resolve_tool_action`. `delete_file` is ALWAYS gated, in every mode.
 - `cancel_chat_message(chatSessionId: string) -> ()` — aborts the active stream for that session (also drops its pending approvals).
 - `resolve_tool_action(pendingId: string, approved: boolean) -> ()` — resolves a pending per-action filesystem-tool approval card. `true` lets the paused tool loop run the action and feed its result back to the model; `false` injects a "user denied" tool result. Unknown/already-resolved `pendingId` is a no-op.
 - `list_artifacts() -> ArtifactRecord[]` — all persisted generated artifacts (files/diagrams), most recent first. `ArtifactRecord = { id, chatSessionId?, chatMessageId?, filename, path, kind, createdAt, expiresAt }`. `chatMessageId` links an artifact to the specific assistant message that produced it (used to restore inline diagrams/file chips on a reopened chat). Artifacts are retained 30 days; expired rows+files are swept on app startup.
@@ -347,8 +353,32 @@ Commands:
 Commands:
 - `stt_status() -> SttStatus` / `stt_start()` / `stt_stop() -> SttResult` — push-to-talk lifecycle (whisper sidecar).
 - `stt_install_server() -> ()` — download/install the sidecar server.
-- `stt_set_default(model: string)` / `stt_set_server_path(path: string)` / `stt_set_auto_start(enabled: boolean)` — settings (autostart honored at app boot).
+- `stt_set_default(model: string)` / `stt_set_server_path(path: string)` / `stt_set_auto_start(enabled: boolean)` / `stt_set_device(device: string)` — settings (autostart honored at app boot; device switches cpu/gpu whisper build on next start).
 - `transcribe_audio(path: string) -> string` / `transcribe_cancel() -> ()` — file-based speech-to-text.
+
+## TTS / read-aloud
+
+Assistant answers and text artifacts can be spoken aloud. Hexgrad Kokoro-82M (Apache-2.0) runs **in-process** via sherpa-onnx — no sidecar, no cloud; models install into `<models dir>/tts/` (progress reuses the `local-model:download:progress` event).
+
+Commands:
+- `tts_status() -> TtsStatus` — engine state (installed model/voice, device, loaded).
+- `tts_speak(text: string, voice?: string, speed?: number) -> TtsAudio` — synthesize to PCM/WAV (chunk cache makes replays cheap).
+- `tts_preload() -> boolean` / `tts_unload() -> TtsStatus` — warm the engine early / release its memory.
+- `tts_install_model(id: string) -> TtsStatus` — download a model/voice bundle.
+- `tts_set_model(id)` / `tts_set_voice(voice)` / `tts_set_speed(speed) -> f32` — synthesis settings.
+- `tts_set_auto_read(autoRead: boolean)` / `tts_set_keep_loaded(keep: boolean)` / `tts_set_device(device: string) -> TtsStatus` — behavior settings (device = cpu/gpu).
+- `tts_gpu_status() -> TtsGpuStatus` / `tts_install_gpu() -> TtsGpuStatus` — GPU synthesis (`commands/tts_gpu.rs`): the crates.io sherpa-onnx is CPU-only, so the CUDA path runs the vendor's `sherpa-onnx-offline-tts` binary as a short-lived child process (Windows; install is cached).
+
+## Appearance (sidebar art)
+
+Commands:
+- `import_sidebar_art() -> string` — file-picker import of custom sidebar header art; copied into app data so the original can be deleted.
+- `set_sidebar_art_preset(id: string)` — select a built-in preset (retires any custom upload).
+- `read_sidebar_art_data() -> string | null` — art as a data URL for rendering (works in dev and prod; no asset-protocol scope needed).
+- `get_sidebar_art_path() -> string | null` — stored art path.
+- `clear_sidebar_art() -> ()` — remove stored art files and settings (header falls back to plain).
+
+Persisted in the `sidebar.artPath` setting; frontend: `state/appearance.ts` + `SidebarArtPanel.tsx`.
 
 ## Docs index (knowledge / RAG)
 
@@ -362,7 +392,7 @@ Commands:
 
 Commands:
 - `mcp_gallery_list() -> McpServerDef[]` / `mcp_gallery_install(...)` / `mcp_gallery_remove(id)` / `mcp_gallery_set_enabled(id, enabled)`
-- `mcp_gallery_connect(id) -> ()` / `mcp_gallery_disconnect(id) -> ()` / `kill_all() -> ()` — stdio server lifecycle; enabled servers attach to chat turns and the relay-tools bridge.
+- `mcp_gallery_connect(id) -> ()` / `mcp_gallery_disconnect(id) -> ()` — stdio server lifecycle; enabled servers attach to chat turns and the relay-tools bridge. (`kill_all` is an internal exit-cleanup fn, not an invoke command.)
 
 ## Chat export/import
 
@@ -421,8 +451,7 @@ Commands:
 - `tailscale_serve_enable() -> string` — runs `tailscale serve --bg --https=443 http://127.0.0.1:<relay-port>`; returns the public ts.net URL
 - `tailscale_serve_disable() -> ()` — tears down the serve config
 
-The relay auto-starts on app launch and auto-stops on exit. See `src-tauri/src/mobile/`
-for the full protocol (JSON over WebSocket, tagged-union message types).
+The relay auto-starts on app launch and auto-stops on exit. Pairing is **E2E-encrypted only**: the QR carries a per-launch 43-char token, the phone proves possession with an HMAC-SHA256 proof (never sending the token itself), and every frame after pairing is XChaCha20-Poly1305 encrypted (the legacy raw-token plaintext path was removed from the desktop). The full protocol is tagged-union JSON message types over the WebSocket — 25 Mobile→Desktop (`Pair`, `ListSessions`, `ChatTurn`, `SendChatMessage`, `ResolveSessionApproval`, `ResolvePlanProposal`, `RegisterPushToken`, `TranscribeAudio`, …) and 30 Desktop→Mobile (`SessionList`, `ChatToken`, `ChatDone`, `SessionApprovalRequest`, `SessionPlanProposal`, `ArtifactContent`, `PushAck`, `AutomationRunFinished`, `BudgetAlert`, …); see `src-tauri/src/mobile/protocol.rs`. `RegisterPushToken` opts the phone into an Expo push-notification fallback (APNs/FCM, `mobile/push.rs`) for approval requests / turn-done / automations / budget alerts while its socket is backgrounded; without a stored token the desktop never pushes. See `docs/remote-access.md` for the pairing walkthrough.
 
 ## Rules both sides must honor
 
@@ -432,4 +461,4 @@ for the full protocol (JSON over WebSocket, tagged-union message types).
 - Skill slash-command expansion happens in the **frontend** before `write_pty`.
 - Broadcast mode is pure frontend: it calls `write_pty` for each selected pane.
 - **Headless CLI chat** routes through `send_agent_chat_message` when the chat session's `agent` starts with `"harness:"`; built-in chat uses `send_chat_message`. The `permission_mode` column is honored by the built-in chat and by Claude Code headless (non-full-auto spawns add `--permission-prompt-tool stdio`); kimi/opencode/pi/omp/commandcode headless runs are full-auto. The composer's `PermissionModeMenu` (builtin/local/claude_code sessions) selects the mode.
-- SQLite lives at `<app_data_dir>/relay.db`. Schema = PRD §6.3 plus `quick_actions`, `chat_sessions` (with `starred`/`unread`/`watch_mode`/`agent`/`permission_mode` columns), `chat_messages` (with `superseded_by`), `artifacts`, `chat_source_notes`, `connector_credentials`, `chat_session_connectors`, `workspaces`, `automations`, and `automation_runs`. Migrations add columns idempotently (`ALTER TABLE … ADD COLUMN` + duplicate-column tolerance).
+- SQLite lives at `<app_data_dir>/relay.db` — 44 tables (WAL mode), 24 idempotent inline migrations in `db/mod.rs`. Schema = PRD §6.3 plus `quick_actions`, `chat_sessions` (with `starred`/`unread`/`watch_mode`/`agent`/`permission_mode`/`auto_model`/`effort_level`/`origin`/`sandbox_policy`/`approval_policy` columns), `chat_messages` (with `superseded_by` and `kind`), `artifacts`, `chat_source_notes`, `citation_reports`, `chat_checkpoints`, `connector_credentials`, `chat_session_connectors`, `workspaces`, `automations`, `automation_runs`, the knowledge tables (`doc_corpora`/`doc_files`/`doc_chunks`/`chat_documents`), research caches (`research_queries`/`search_cache`/`page_cache`), memory tables (`memories`/`memory_*`), self-improvement tables (`improve_*` + `loop_sessions`), and Session Mesh tables (`session_mail`/`session_summaries`). Migrations add columns idempotently (`ALTER TABLE … ADD COLUMN` + duplicate-column tolerance).

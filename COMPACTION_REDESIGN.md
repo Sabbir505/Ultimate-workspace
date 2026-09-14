@@ -4,6 +4,8 @@
 paths (local models, cloud models, harnesses), followed by a research survey of how the
 best systems do it and a redesign proposal.*
 
+> **Status (2026-09-14):** implemented for the cloud path — `chat/cloud_compact.rs` (`compact_and_retry`, wired into the send path in `chat/mod.rs`) summarizes the oldest turns with the session's own provider and retries on context overflow, exactly the gap §1 calls out below. §1 is retained as the point-in-time investigation snapshot; its "Cloud: None" row is now historical.
+
 ---
 
 ## 1. Current state
@@ -13,8 +15,8 @@ Relay has three completely different context-management stories, sharing almost 
 | Path | Mechanism | Quality |
 |---|---|---|
 | **Local (LocalGguf)** | Pin N exchanges + summarize aged-out head via the same sidecar (`src-tauri/src/chat/compaction.rs`) | Real compaction, but lossy in predictable ways |
-| **Cloud (Anthropic / OpenAI / OpenRouter / compat)** | **None.** Full DB history re-sent every turn (`src-tauri/src/chat/commands.rs:1767` gate, `:1962-1964` passthrough) | Overflow = terminal raw 400 banner |
-| **Harnesses (Claude Code, Kimi, opencode, ACP)** | Delegated to the CLI; Relay is blind (`src-tauri/src/agent_sessions.rs:4757-4760`) | Invisible + a tiny truncate-only primer |
+| **Cloud (Anthropic / OpenAI / OpenRouter / compat)** | ~~None~~ → **implemented after this investigation**: pin + summarize via the session's own provider (`src-tauri/src/chat/cloud_compact.rs`), forced re-compact + retry on overflow (called from `chat/mod.rs`) | The §1.2 gap analysis below drove the design |
+| **Harnesses (Claude Code, Kimi, opencode, ACP)** | Delegated to the CLI; Relay is blind (`src-tauri/src/agent_sessions/`) | Invisible + a tiny truncate-only primer |
 
 ### 1.1 Local models — real machinery, weakest summarizer
 

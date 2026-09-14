@@ -72,9 +72,12 @@ git push origin master --tags
 
 Pushing the tag triggers `.github/workflows/build.yml`, which:
 
-1. **Build (Windows):** Builds the `relay-browser-mcp` sidecar, stages it,
-   runs `npm run tauri build` (no signing env vars — avoids password prompt
-   hang), and uploads the NSIS installer as an artifact.
+1. **Build (Windows):** Stages bundled Python + LibreOffice resources, builds and
+   stages BOTH sidecars (`relay-browser-mcp` and `relay-automation`), then runs
+   `npm run tauri build` (no signing env vars — avoids password prompt
+   hang), and uploads the NSIS installer as an artifact. The Tauri config's
+   `externalBin` + `resources` globs require all of these to be staged before
+   any cargo build, so skipping a staging step breaks the bundle.
 2. **Release (Ubuntu):** Downloads the installer, restores the signing key from
    GitHub Actions secrets, signs the `.exe` with `tauri signer sign`, generates
    `latest.json`, and creates the GitHub Release with both files attached.
@@ -100,20 +103,26 @@ If CI is unavailable, you can cut a release manually:
 ```powershell
 # 1. Bump version in all three files (as above)
 
-# 2. Build the sidecar and stage it
+# 2. Stage bundled resources (required by tauri.conf.json resources globs)
+node scripts/fetch-bundled-python.mjs
+node scripts/fetch-bundled-libreoffice.mjs
+
+# 3. Build and stage BOTH sidecars
 cd src-tauri
 cargo build --release --bin relay-browser-mcp
-node ../scripts/stage-browser-mcp.mjs
+cargo build --release --bin relay-automation
 cd ..
+node scripts/stage-browser-mcp.mjs
+node scripts/stage-automation.mjs
 
-# 3. Build (no signing env vars — signing hangs the build)
+# 4. Build (no signing env vars — signing hangs the build)
 #    Set connector credentials as needed (see CI workflow for env vars)
 npm run tauri build
 
-# 4. Sign + generate latest.json
+# 5. Sign + generate latest.json
 npm run release:latest-json -- --notes "Your release notes here"
 
-# 5. Create GitHub Release at:
+# 6. Create GitHub Release at:
 #    https://github.com/Sabbir505/Ultimate-workspace/releases/new
 #    Tag: v<version>
 #    Attach: the .exe from src-tauri/target/release/bundle/nsis/

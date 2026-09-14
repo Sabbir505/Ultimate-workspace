@@ -10,8 +10,9 @@ Relay wraps the AI agent CLIs you already use (Claude Code, Kimi Code CLI, OpenC
 - **Git sidebar** with status, diff, log, branches, worktrees, AI-proposed plans, and a Git Graph commit table
 - **Local model "market"** — browse, download, and run Hugging Face GGUF models
 - **Cron automations** that fire even while the app is closed (Windows Task Scheduler sidecar)
+- **Voice** — push-to-talk dictation (whisper STT) and read-aloud answers (Kokoro TTS, in-process via sherpa-onnx, optional CUDA)
 - **Mobile companion** (React Native / Expo, Expo SDK 57) — pair over QR, run chats from your phone, the phone never holds API keys
-- **Connectors** (OAuth): Notion, GitHub, Google Drive/Calendar/Sheets/Docs/Slides/Chat/People, Gmail, YouTube, Kiwi
+- **Connectors** (OAuth): Notion, GitHub, Google Drive/Calendar/Sheets/Docs/Slides/Chat/People, Gmail, YouTube, Kiwi, Canva
 
 ## Naming
 
@@ -35,8 +36,8 @@ npm run tauri build    # NSIS installer in src-tauri/target/release/bundle/nsis/
 ## Tests
 
 ```bash
-npm test                          # vitest, 128 files / 798 tests
-cd src-tauri && cargo test --lib  # 898 passed, 0 failed, 12 ignored
+npm test                          # vitest, 152 files / 1055 tests
+cd src-tauri && cargo test --lib  # 1078 passed, 0 failed, 15 ignored
 npx tsc --noEmit                  # clean (also for mobile/: npx tsc --noEmit)
 ```
 
@@ -45,19 +46,23 @@ npx tsc --noEmit                  # clean (also for mobile/: npx tsc --noEmit)
 ```
 src/                React + TypeScript frontend (Zustand stores, components, lib)
 src-tauri/          Rust backend (Tauri v2)
-  src/lib.rs        Tauri command surface (296 registered commands)
-  src/db/           SQLite schema + 19 inline migrations (42 tables, WAL mode)
+  src/lib.rs        Tauri command surface (321 registered commands)
+  src/db/           SQLite schema + 24 inline migrations (44 tables, WAL mode)
+  src/commands/     Tauri command handlers, one module per domain (chat, git, tts, stt, …)
   src/chat/         Chat dispatch, prompts, streaming, providers, tools, local models
   src/memory/       Persistent user memory (extraction, consolidation, retrieval)
+  src/session_fabric/  Session Mesh — cross-session awareness/messaging/spawning
   src/pty/          PTY lifecycle
   src/browser*.rs   Native browser panes + browser MCP
   src/mobile/       Localhost WebSocket relay (E2E encrypted)
   src/automations*  Cron scheduler
   src/improve_engine.rs  Self-improving artifacts engine
   src/connectors/   OAuth + remote MCP for Notion / GitHub / Google / etc.
+  src/harness_adapters/  Per-CLI harness adapters (six harnesses)
+  src/bin/          Sidecar binaries (relay-browser-mcp, relay-automation)
 mobile/             React Native / Expo companion (Expo SDK 57, RN 0.86)
 scripts/            Build sidecars, stage Python/LibreOffice bundles, emit latest.json
-docs/               Public docs (currently: remote-access.md)
+docs/               Public docs (remote-access.md + images/assets)
 AI CONTEXT/         Canonical code map, IPC contract, PRD, build log, release notes
 ```
 
@@ -80,6 +85,7 @@ AI CONTEXT/         Canonical code map, IPC contract, PRD, build log, release no
 | `MEMORY_DESIGN_ARCHITECTURE.md` | Persistent user-memory architecture |
 | `COMPACTION_REDESIGN.md` | Context compaction across the three chat paths |
 | `SELF_IMPROVING_ARTIFACTS.md` | Self-improving artifacts loop (design + shipped phases) |
+| `SESSION_MESH_DESIGN_ARCHITECTURE.md` | Session Mesh — cross-session awareness, messaging, and spawning |
 | `docs/remote-access.md` | Pairing the mobile companion over USB or Tailscale |
 
 ## License

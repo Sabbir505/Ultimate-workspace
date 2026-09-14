@@ -10,7 +10,7 @@ The core project docs live in the `AI CONTEXT/` folder: see `PRD.md` for the ful
 
 - **Shell:** Tauri v2 (Rust backend + system webview) — `productName: "Relay"`, crate `relay`, identifier `dev.relay.app`
 - **Frontend:** React 18 + TypeScript + Zustand, xterm.js for terminal panes
-- **Persistence:** SQLite (projects, sessions, cost events, skills, quick actions, settings, memory, self-improvement) — 42 tables, WAL mode
+- **Persistence:** SQLite (projects, sessions, cost events, skills, quick actions, settings, memory, self-improvement) — 44 tables, WAL mode
 - **Secrets:** OS keychain via the `keyring` crate (Windows Credential Manager / macOS Keychain / Linux Secret Service)
 
 ## Prerequisites
@@ -52,8 +52,8 @@ The NSIS installer is written to `src-tauri/target/release/bundle/nsis/` and nam
 ## Tests
 
 ```bash
-npm test                      # frontend logic tests (vitest, 100 files / 733 tests as of 2026-09-05)
-cd src-tauri && cargo test --lib  # backend unit tests (865 passed, 0 failed, 12 ignored as of 2026-09-05)
+npm test                      # frontend logic tests (vitest, 152 files / 1055 tests as of 2026-09-14)
+cd src-tauri && cargo test --lib  # backend unit tests (1078 passed, 0 failed, 15 ignored as of 2026-09-14)
 ```
 
 ## Notes
@@ -61,8 +61,8 @@ cd src-tauri && cargo test --lib  # backend unit tests (865 passed, 0 failed, 12
 - Pane processes are killed on explicit pane close, LRU replacement (when all 6 pane slots are full — the least-recently-used pane is evicted and its pty terminated), or app quit — unfocused panes keep running (PRD §6.5). `MAX_PANES = 6` in `src/state/panes.ts:20`.
 - On app launch, previously open sessions are *not* auto-resumed; click a session in the sidebar to resume it by ID.
 - The browser pane uses native Tauri webviews on every supported platform — child webviews (WebView2 / WKWebView) on Windows/macOS, standalone `WebviewWindow`s on Linux (since wry/gtk has no multi-webview support). No more X-Frame-Options limitations on any platform. Each pane supports multiple tabs — every tab is its own native webview. Agent-driven browser control (navigate, click, type, scroll, read) is available via the bundled `relay-browser-mcp` sidecar (binary name retained) or the in-app `browser_read`/`browser_click`/`browser_type`/`browser_scroll` chat tools, with on-screen visual feedback (cursor tween, click ripple, typing caret, element highlight).
-- The Chat tab offers a direct LLM conversation interface: streaming responses, HTML/CSS vector-SVG diagram generation (exportable to PNG/SVG), document generation (docx via the `docx` npm library, pptx via PptxGenJS, pdf via HTML → WebView2 print with Paged.js; Python engines as fallback), a visual artifact library with download/copy/export, message attachments (images and docs), a model-effort selector, local model support (GGUF via llama.cpp with automatic context compaction), per-session permission modes (read-only / manual / auto-edit / full-auto) for filesystem tool access, research mode (`/research`) with a source ledger for cited answers, and a Connectors framework (OAuth sign-in for Notion, GitHub, Google, Gmail, YouTube, Kiwi) that bridges remote MCP servers as per-session tools. Mermaid is also rendered when present, but diagrams are generated through the `generate_diagram` tool, not Mermaid.
-- **Connectors** (OAuth SaaS integrations): Notion, GitHub, Gmail, Google Drive/Calendar/Sheets/Docs/Slides/Chat/People, YouTube, and Kiwi are supported via OAuth 2.0. Connectors are per-conversation opt-in (attached to a chat session, never global). Credentials are stored in the OS keychain (Windows Credential Manager / macOS Keychain / Linux Secret Service).
+- The Chat tab offers a direct LLM conversation interface: streaming responses, HTML/CSS vector-SVG diagram generation (exportable to PNG/SVG), document generation (docx via the `docx` npm library, pptx via PptxGenJS, pdf via HTML → WebView2 print with Paged.js; Python engines as fallback), a visual artifact library with download/copy/export, message attachments (images and docs), a model-effort selector, local model support (GGUF via llama.cpp with automatic context compaction), per-session permission modes (read-only / manual / auto-edit / full-auto) for filesystem tool access, research mode (`/research`) with a source ledger for cited answers, and a Connectors framework (OAuth sign-in for Notion, GitHub, Google, Gmail, YouTube, Kiwi, Canva) that bridges remote MCP servers as per-session tools. Mermaid is also rendered when present, but diagrams are generated through the `generate_diagram` tool, not Mermaid.
+- **Connectors** (OAuth SaaS integrations): Notion, GitHub, Gmail, Google Drive/Calendar/Sheets/Docs/Slides/Chat/People, YouTube, Kiwi, and Canva are supported via OAuth 2.0. Connectors are per-conversation opt-in (attached to a chat session, never global). Credentials are stored in the OS keychain (Windows Credential Manager / macOS Keychain / Linux Secret Service).
 - The app ships a bundled `python-build-standalone` interpreter (with python-docx/python-pptx/openpyxl/reportlab) staged by `scripts/fetch-bundled-python.mjs`, so the Python document-generation fallback and code execution work out of the box; `scripts/fetch-bundled-libreoffice.mjs` stages LibreOffice for office-accurate PDF conversion.
 - Auto-updates: the app checks a GitHub Releases endpoint on launch and every 4 hours; a found update surfaces a banner and installs with signature verification. See `RELEASE.md`.
 - A **mobile companion app** (React Native / Expo, SDK 57, RN 0.86) connects to the desktop over a localhost WebSocket relay. The phone never holds API keys — every model call originates from the desktop. It mirrors terminal sessions as styled text snapshots, triggers chat turns, spawns local model sidecars, and resolves tool approvals. See `CONTRACT.md` → Mobile Relay and `docs/remote-access.md`.

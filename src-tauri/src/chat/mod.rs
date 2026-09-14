@@ -700,10 +700,21 @@ impl ChatManager {
             });
             candidates.extend(fallbacks);
 
+            // The caller's prebuilt system prompt (assembled for the primary).
+            // Each Auto candidate rebuilds its own from `system_inputs`; when
+            // that rebuild comes up empty the candidate falls back to THIS
+            // value — never to a previous candidate's rebuild (an
+            // `.or(chat_req.system.take())` chain used to hand candidate N
+            // candidate 0's rebuilt prompt).
+            let prebuilt_system = chat_req.system.clone();
+
             let mut result: Option<Result<(String, Option<ChatUsage>), String>> = None;
             // Post-turn helpers (citation verification, cache-hit-rate) need
-            // the WINNING candidate's endpoint details — tracked here.
-            let mut winner: Option<(String, String, bool)> = None;
+            // the WINNING candidate's endpoint details — tracked here, plus
+            // its provider id (which is what gets persisted on the message
+            // row; the primary's id used to be recorded even when a fail-over
+            // candidate won).
+            let mut winner: Option<(String, String, bool, ChatProviderId)> = None;
             for (ci, cand) in candidates.iter().enumerate() {
                 // OpenRouter and LocalGguf speak the OpenAI wire format; the
                 // rest ride the Anthropic path.
@@ -761,7 +772,7 @@ impl ChatManager {
                 // model + system prompt. On success/failure the request's
                 // model names what actually ran (cost attribution below).
                 chat_req.model = cand.model.clone();
-                chat_req.system = cand_system.clone().or(chat_req.system.take());
+                chat_req.system = cand_system.clone().or_else(|| prebuilt_system.clone());
                 let notify_reconnect = |reason: &str, message: String| {
                     crate::chat::stream_events::emit_status_reason(Some(&app), &sid, reason, message);
                 };
@@ -770,7 +781,7 @@ impl ChatManager {
                     // ends with this block: a compaction retry below replaces
                     // the request (`chat_req = rebuilt`), and the closure must
                     // be rebuilt against the new one anyway.
-                    let mut attempt = {
+                    let attempt = {
                         // Reachability probe for this candidate's endpoint —
                         // the stall watchdog pings it instead of killing a
                         // merely slow stream.
@@ -872,7 +883,8 @@ impl ChatManager {
                                 // candidate's model + rebuilt prompt on it.
                                 chat_req = rebuilt;
                                 chat_req.model = cand.model.clone();
-                                chat_req.system = cand_system.clone().or(chat_req.system.take());
+                                chat_req.system =
+                                    cand_system.clone().or_else(|| prebuilt_system.clone());
                                 continue;
                             }
                             None => break attempt,
@@ -891,8 +903,12 @@ impl ChatManager {
                                 db::now_ts(),
                             );
                         }
-                        winner =
-                            Some((cand_tool_base.clone(), cand.api_key.clone(), cand_is_openai));
+                        winner = Some((
+                            cand_tool_base.clone(),
+                            cand.api_key.clone(),
+                            cand_is_openai,
+                            cand.provider_id,
+                        ));
                         result = Some(Ok(turn));
                         break;
                     }
@@ -958,6 +974,9 @@ impl ChatManager {
             let tool_base = winner.as_ref().map(|w| w.0.clone()).unwrap_or_default();
             let api_key = winner.as_ref().map(|w| w.1.clone()).unwrap_or(api_key);
             let is_openai = winner.as_ref().map(|w| w.2).unwrap_or(true);
+            // Row + log attribution name the provider that ACTUALLY ran (the
+            // winning candidate), not the session's primary.
+            let winning_provider = winner.as_ref().map(|w| w.3).unwrap_or(provider_id);
 
             match result {
                 Ok((full_response, usage)) => {
@@ -972,7 +991,7 @@ impl ChatManager {
                     // the cap lives in the meter (lib/contextWindow.ts).
                     eprintln!(
                         "[context] provider turn: provider={} model='{}' in={} out={} cache_create={} cache_read={}",
-                        provider_id.as_str(),
+                        winning_provider.as_str(),
                         chat_req.model,
                         usage.as_ref().map(|u| u.input_tokens).unwrap_or(0),
                         usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
@@ -986,6 +1005,9 @@ impl ChatManager {
                     // The turn's message id escapes this block for the
                     // post-done checkpoint (chip attaches to this message).
                     let mut turn_message_id: Option<i64> = None;
+                    // Set when the assistant row could not be persisted — the
+                    // turn must surface a failure instead of chat:done.
+                    let mut persist_error: Option<String> = None;
                     {
                         let conn = db.lock();
                         // provider + model_key on the row let the rollup group
@@ -1041,7 +1063,7 @@ impl ChatManager {
                                         None
                                     }
                                 }),
-                                provider: Some(provider_id.as_str()),
+                                provider: Some(winning_provider.as_str()),
                                 model_key,
                                 started_at: Some(started_at),
                                 completed_at: Some(db::now_ts()),
@@ -1078,11 +1100,44 @@ impl ChatManager {
                         // Attribute this turn's artifacts to the assistant
                         // message so they reappear on its bubble when the chat
                         // is reopened.
-                        if let Ok(msg) = persisted {
-                            let _ = db::attach_artifacts_to_message(&conn, &sid, msg.id);
-                            turn_message_id = Some(msg.id);
+                        match persisted {
+                            Ok(msg) => {
+                                if let Err(e) =
+                                    db::attach_artifacts_to_message(&conn, &sid, msg.id)
+                                {
+                                    // Audit: a failed artifact re-attachment
+                                    // used to vanish — the reply renders fine,
+                                    // but the files never reappear on its
+                                    // bubble after a reopen.
+                                    eprintln!(
+                                        "[chat:stream] artifact attach failed for {sid} (msg {}): {e}",
+                                        msg.id
+                                    );
+                                }
+                                turn_message_id = Some(msg.id);
+                            }
+                            Err(e) => persist_error = Some(e.to_string()),
                         }
                         let _ = db::touch_chat_session(&conn, &sid);
+                    }
+                    // A persist failure must reach the user as a FAILED turn:
+                    // emitting chat:done here told the UI the reply was saved
+                    // when it wasn't (the text existed only in the live bubble
+                    // and disappeared on the next reload).
+                    if let Some(perr) = persist_error {
+                        eprintln!("[chat:stream] persist failed for {sid}: {perr}");
+                        crate::chat::stream_events::emit_error_with_code(
+                            Some(&app),
+                            &sid,
+                            &format!("failed to save the assistant reply: {perr}"),
+                            None,
+                        );
+                        // Early return skips the tail below — run the same
+                        // cleanup the normal end of the task performs.
+                        mgr.remove_stream_if_current(&sid, tokio::task::id());
+                        mgr.clear_late_attach(&sid);
+                        crate::chat::turn_perf::unregister(&sid);
+                        return;
                     }
                     // Memory extraction (MEMORY_DESIGN_ARCHITECTURE.md §7.1):
                     // background, fire-and-forget — the assistant row is
@@ -1422,11 +1477,21 @@ impl ChatManager {
         for handle in children {
             handle.abort();
         }
-        // Drop all pending approvals too.
+        // Drop all pending approvals, pending harness questions and
+        // late-attach slots too. Dropping the oneshot senders resolves the
+        // paused waiters (approvals resume as "denied", questions as
+        // "skipped" — same contract as drop_pending_for_session); a late-attach
+        // slot left parked here would hold the turn's connected connector/MCP
+        // sessions for the process lifetime.
         let ids: Vec<String> = self.pending.lock().keys().cloned().collect();
         for id in ids {
             self.pending.lock().remove(&id);
         }
+        let q_ids: Vec<String> = self.pending_questions.lock().keys().cloned().collect();
+        for id in q_ids {
+            self.pending_questions.lock().remove(&id);
+        }
+        self.late_attach.lock().clear();
     }
 }
 
@@ -2387,6 +2452,34 @@ mod tests {
         // The registrant outer task pends forever — abort it (the test's own
         // inner stand-in was already aborted by cancel()).
         child.abort();
+    }
+
+    #[tokio::test]
+    async fn cancel_all_resolves_pending_questions_and_late_attach() {
+        // Audit LOW: cancel_all drained pending approvals but left harness
+        // questions parked forever (the reader thread waited on a oneshot
+        // whose resolver no longer existed) and late-attach slots holding
+        // live connector/MCP sessions for the process lifetime. Everything
+        // must drain, and the dropped senders must resolve the waiters.
+        let mgr = ChatManager::new();
+
+        let (_aid, arx) = mgr.register_pending_approval("s1", "write_file", json!({}), "s".into());
+        let (_qid, qrx) = mgr.register_pending_question("s1");
+        mgr.reset_late_attach("s1");
+
+        assert!(!mgr.pending.lock().is_empty());
+        assert!(!mgr.pending_questions.lock().is_empty());
+        assert!(mgr.late_attach.lock().contains_key("s1"));
+
+        mgr.cancel_all();
+
+        assert!(mgr.pending.lock().is_empty());
+        assert!(mgr.pending_questions.lock().is_empty());
+        assert!(!mgr.late_attach.lock().contains_key("s1"));
+        // Dropping the senders resolves the waiters (approval → denied,
+        // question → skip) — they must never wedge.
+        assert!(arx.await.is_err());
+        assert!(qrx.await.is_err());
     }
 
     #[tokio::test]

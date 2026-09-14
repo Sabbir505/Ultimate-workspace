@@ -164,8 +164,13 @@ pub async fn transcribe_audio(
         .map_err(|e| e.to_string())?;
     let form = multipart::Form::new().part("file", part).text("model", "whisper-1");
 
-    let client = reqwest::Client::builder()
-        .no_proxy()
+    // Deliberately NOT `.no_proxy()`: the loopback sidecar must bypass the
+    // system proxy, but an external `whisper.baseUrl` on a proxied network is
+    // only reachable THROUGH it — the same rule the TTS/STT downloaders use
+    // (tts::proxied_client_builder applies the proxy with loopback exempt).
+    // The shorter per-request timeout (vs the downloader's 30 min) is kept:
+    // a transcription is seconds of audio, not a multi-GB model.
+    let client = super::tts::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| e.to_string())?;

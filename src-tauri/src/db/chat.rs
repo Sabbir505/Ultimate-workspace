@@ -216,13 +216,25 @@ pub fn chat_worktree_paths(conn: &Connection, project_id: Option<&str>) -> DbRes
 /// Delete every chat session bound to a project (and, via FK cascade, its
 /// messages). Used when a project is removed from the sidebar. Automation
 /// run-log pointers into those sessions are unbound first so no dangling
-/// `automations.chat_session_id` survives the bulk delete.
+/// `automations.chat_session_id` survives the bulk delete. Mirrors
+/// [`delete_chat_session`]: memory evidence for the doomed sessions is
+/// deleted and unbacked memories flagged — evidence is not FK-cascaded (the
+/// rows point into chat_messages by bare ids), so skipping this orphans the
+/// evidence and leaves extracted memories looking backed forever.
 pub fn delete_chat_sessions_for_project(conn: &Connection, project_id: &str) -> DbResult<usize> {
     conn.execute(
         "UPDATE automations SET chat_session_id = NULL
           WHERE chat_session_id IN (SELECT id FROM chat_sessions WHERE project_id = ?1)",
         params![project_id],
     )?;
+    // Memory evidence for the project's sessions (§13.5) — gone with the
+    // transcripts.
+    conn.execute(
+        "DELETE FROM memory_evidence WHERE chat_session_id IN
+           (SELECT id FROM chat_sessions WHERE project_id = ?1)",
+        params![project_id],
+    )?;
+    crate::db::memory::flag_unbacked_memories(conn)?;
     let n = conn.execute(
         "DELETE FROM chat_sessions WHERE project_id = ?1",
         params![project_id],
@@ -240,23 +252,30 @@ pub fn get_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult<Op
 }
 
 pub fn delete_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult<()> {
+    // B-29/B-31: the four statements are one logical delete — they used to
+    // run bare (with the memory cleanup errors SWALLOWED), so a failure
+    // midway left a half-deleted state (evidence gone while the transcript,
+    // or the session row itself, survived). One unchecked_transaction with
+    // `?` propagation, mirroring `delete_chat_messages_after`.
+    let tx = conn.unchecked_transaction()?;
     // If this session is an automation's run log, unbind it so the next run
     // recreates a fresh session instead of dying on the chat_messages FK.
-    conn.execute(
+    tx.execute(
         "UPDATE automations SET chat_session_id = NULL WHERE chat_session_id = ?1",
         params![chat_session_id],
     )?;
     // Memory evidence for this session (§13.5) — gone with the transcript.
-    let _ = conn.execute(
+    tx.execute(
         "DELETE FROM memory_evidence WHERE chat_session_id = ?1",
         params![chat_session_id],
-    );
-    let _ = crate::db::memory::flag_unbacked_memories(conn);
+    )?;
+    crate::db::memory::flag_unbacked_memories(&tx)?;
     // FK cascade handles chat_messages.
-    conn.execute(
+    tx.execute(
         "DELETE FROM chat_sessions WHERE id = ?1",
         params![chat_session_id],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1909,9 +1928,18 @@ summary",
     fn migration_backfills_legacy_create_rows() {
         // Rows persisted before the `kind` column existed are command-only
         // by their '/create ' content prefix (the artifact flow is the only
-        // writer of command-only rows). The backfill must catch them, while
-        // a normal message that merely mentions /create stays in context.
+        // writer of command-only rows). The backfill is ONE-SHOT: it runs on
+        // the upgrade open (marker absent), stamps those rows, and never
+        // touches rows created afterwards — a message that merely starts
+        // with "/create " (the harness/mobile send path inserts kind=NULL)
+        // must stay in context.
         let conn = super::super::mem();
+        // Simulate the upgrade moment: the DB predates the marker.
+        super::super::settings::delete_setting(
+            &conn,
+            "db.migration.chat_message_kind.backfilled",
+        )
+        .unwrap();
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
         conn.execute(
             "INSERT INTO chat_messages (chat_session_id, role, content, created_at)
@@ -1930,5 +1958,100 @@ summary",
         let active = list_active_chat_messages(&conn, &cs.id).unwrap();
         assert_eq!(active.len(), 1);
         assert!(active[0].content.starts_with("how does"));
+
+        // With the marker set, a later legitimately-typed "/create " message
+        // survives every subsequent open with its context intact.
+        conn.execute(
+            "INSERT INTO chat_messages (chat_session_id, role, content, created_at)
+             VALUES (?1, 'user', '/create written from a harness later', 3)",
+            params![cs.id],
+        )
+        .unwrap();
+        super::super::migrate_chat_message_kind(&conn).unwrap();
+        let active = list_active_chat_messages(&conn, &cs.id).unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().any(|m| m.content.starts_with("/create")));
+    }
+
+    /// Seed an extracted memory (minimum NOT NULL columns) + one evidence row
+    /// pointing into `session`.
+    fn seed_backed_memory(conn: &Connection, id: &str, session: &str, message: i64) {
+        conn.execute(
+            "INSERT INTO memories (id, kind, content, valid_from, created_at, updated_at, origin)
+             VALUES (?1, 'preference', 'fact', 1, 1, 1, 'extracted')",
+            params![id],
+        )
+        .unwrap();
+        crate::db::add_memory_evidence(conn, id, session, message, "quote").unwrap();
+    }
+
+    #[test]
+    fn delete_chat_session_removes_evidence_and_flags_unbacked() {
+        // B-29/B-31 shape: the delete is one transaction — transcript, its
+        // memory evidence, and the unbacked-flag pass land or none do.
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let m = add_msg(&conn, &cs.id, "user", "I like dark themes");
+        seed_backed_memory(&conn, "m1", &cs.id, m.id);
+
+        delete_chat_session(&conn, &cs.id).unwrap();
+
+        // Session + messages gone (FK cascade)…
+        assert!(get_chat_session(&conn, &cs.id).unwrap().is_none());
+        assert!(list_chat_messages(&conn, &cs.id).unwrap().is_empty());
+        // …evidence gone with the transcript…
+        let evidence: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_evidence", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(evidence, 0);
+        // …and the extracted memory that lost its backing is flagged, not
+        // silently injected forever.
+        let status: String = conn
+            .query_row("SELECT status FROM memories WHERE id = 'm1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "flagged");
+    }
+
+    #[test]
+    fn project_removal_cleans_memory_evidence_and_flags_unbacked() {
+        let conn = super::super::mem();
+        conn.execute(
+            "INSERT INTO projects (id, path, name, is_git_repo, created_at)
+             VALUES ('p1', 'D:/p1', 'P1', 0, 1)",
+            [],
+        )
+        .unwrap();
+        let a = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", Some("p1")).unwrap();
+        let b = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", Some("p1")).unwrap();
+        // A session OUTSIDE the project must survive the bulk delete.
+        let other = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+
+        let ma = add_msg(&conn, &a.id, "user", "I like dark themes");
+        let mb = add_msg(&conn, &b.id, "user", "I use tabs");
+        seed_backed_memory(&conn, "m1", &a.id, ma.id);
+        seed_backed_memory(&conn, "m2", &b.id, mb.id);
+
+        let n = delete_chat_sessions_for_project(&conn, "p1").unwrap();
+        assert_eq!(n, 2);
+        assert!(get_chat_session(&conn, &a.id).unwrap().is_none());
+        assert!(get_chat_session(&conn, &b.id).unwrap().is_none());
+        assert!(get_chat_session(&conn, &other.id).unwrap().is_some());
+
+        // Evidence for the project's sessions is deleted (it is NOT
+        // FK-cascaded — bare id pointers into chat_messages)…
+        let evidence: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_evidence", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(evidence, 0);
+        // …and unbacked extracted memories are flagged, exactly like the
+        // per-session delete_chat_session path does.
+        for id in ["m1", "m2"] {
+            let status: String = conn
+                .query_row("SELECT status FROM memories WHERE id = ?1", params![id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(status, "flagged", "memory {id} must lose its backing");
+        }
     }
 }

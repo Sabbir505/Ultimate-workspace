@@ -251,6 +251,7 @@ pub fn run_one_shot(
                 watches,
                 &generation,
                 1,
+                None,
             );
         } else {
             let cell = Arc::new(Mutex::new(None));
@@ -266,6 +267,7 @@ pub fn run_one_shot(
                 watches,
                 &generation,
                 1,
+                None,
             );
         }
     });
@@ -398,8 +400,13 @@ pub(super) fn harness_oneshot_blocking(
                 "--dangerously-skip-permissions".into(),
             ];
             if !model.is_empty() {
+                // E-9c: the alias rides the cmd.exe wrapper line via an
+                // unquoted `%*` — reject cmd metacharacters up front (same
+                // gate the other harnesses' -m flags already apply).
+                let alias = claude_model_alias(model);
+                crate::harness_adapters::ensure_cmd_safe_model(&alias)?;
                 args.push("--model".into());
-                args.push(claude_model_alias(model));
+                args.push(alias);
             }
             (
                 resolve_for_spawn(&CommandSpec {
@@ -519,26 +526,54 @@ pub(super) fn harness_oneshot_blocking(
         // stdin drops here → EOF tells the CLI the prompt is complete.
     }
 
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "failed to capture CLI stdout".to_string())?;
-    // Reader thread collects stdout to EOF; recv below joins it implicitly.
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let mut buf = String::new();
-        use std::io::Read as _;
-        let _ = stdout.read_to_string(&mut buf);
-        let _ = tx.send(buf);
-    });
+    // Register the child so the app-exit handler can kill this tree (M13,
+    // same as run_one_shot): a /create generation is a full
+    // --dangerously-skip-permissions CLI tree that would otherwise keep
+    // running after the app quits. The guard unregisters on EVERY exit path.
+    let child = Arc::new(Mutex::new(child));
+    #[allow(unused_variables)]
+    let one_shot_guard = OneShotGuard(register_one_shot_child(&child));
+    let stdout = {
+        let mut guard = child.lock().map_err(|e| e.to_string())?;
+        guard.stdout.take().ok_or("failed to capture CLI stdout")?
+    };
+    // stdout drain into a SHARED capture buffer + EOF signal (mirrors
+    // harness_config::terminate_capture): an orphaned grandchild can hold the
+    // pipe open after the direct child exited, so the old full-EOF channel
+    // recv discarded an already-complete reply at its 5s bound — the capture
+    // below returns whatever landed, EOF or not.
+    let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let (eof_tx, eof_rx) = std::sync::mpsc::channel::<()>();
+    {
+        let captured = Arc::clone(&captured);
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            let mut stdout = stdout;
+            use std::io::Read as _;
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut c) = captured.lock() {
+                            c.extend_from_slice(&buf[..n]);
+                        }
+                    }
+                }
+            }
+            let _ = eof_tx.send(());
+        });
+    }
     // stderr is where harness CLIs report the cause of a dead turn (auth /
     // quota / unknown-model errors — `opencode run` retries them indefinitely
     // and prints NOTHING to stdout), so a discarded stderr left the caller
     // with only "empty response" and the user with nothing actionable.
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "failed to capture CLI stderr".to_string())?;
+    let mut stderr = {
+        let mut guard = child.lock().map_err(|e| e.to_string())?;
+        guard
+            .stderr
+            .take()
+            .ok_or_else(|| "failed to capture CLI stderr".to_string())?
+    };
     let (etx, erx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
         let mut buf = String::new();
@@ -548,22 +583,28 @@ pub(super) fn harness_oneshot_blocking(
     });
 
     // Poll-wait with a deadline; a hung CLI is killed at the bound instead of
-    // wedging the async command forever (same posture as run_one_shot).
+    // wedging the async command forever (same posture as run_one_shot). The
+    // child lock is NOT held across the sleep so the app-exit killer can take
+    // it (M13).
     let deadline = std::time::Instant::now() + ONESHOT_GEN_TIMEOUT;
     let mut timed_out = false;
     loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(_) => break,
-            None if std::time::Instant::now() >= deadline => {
-                // E-7: kill the WHOLE tree — on Windows `child.kill()` only
-                // terminates the cmd.exe /C wrapper and the CLI grandchild
-                // survives, keeps running (and spending) (see kill_child_tree).
-                kill_child_tree(&mut child);
-                timed_out = true;
-                break;
+        {
+            let mut guard = child.lock().map_err(|e| e.to_string())?;
+            match guard.try_wait().map_err(|e| e.to_string())? {
+                Some(_) => break,
+                None if std::time::Instant::now() >= deadline => {
+                    // E-7: kill the WHOLE tree — on Windows `child.kill()` only
+                    // terminates the cmd.exe /C wrapper and the CLI grandchild
+                    // survives, keeps running (and spending) (see kill_child_tree).
+                    kill_child_tree(&mut guard);
+                    timed_out = true;
+                    break;
+                }
+                None => {}
             }
-            None => std::thread::sleep(Duration::from_millis(100)),
         }
+        std::thread::sleep(Duration::from_millis(100));
     }
     if timed_out {
         // The kill above closed the stderr pipe → the reader hits EOF; give
@@ -576,9 +617,14 @@ pub(super) fn harness_oneshot_blocking(
             ONESHOT_GEN_TIMEOUT.as_secs()
         ));
     }
-    let raw = rx
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| format!("{harness_id} closed without producing output"))?;
+    // Bounded EOF wait, then take whatever stdout captured — a complete reply
+    // must not be discarded because a grandchild still holds the pipe open.
+    let _ = eof_rx.recv_timeout(Duration::from_secs(5));
+    let raw = String::from_utf8_lossy(&captured.lock().map(|c| c.clone()).unwrap_or_default())
+        .into_owned();
+    if raw.is_empty() {
+        return Err(format!("{harness_id} closed without producing output"));
+    }
     let err = erx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
 
     let text =
@@ -752,8 +798,12 @@ pub(super) fn one_shot_spec(
                 "--dangerously-skip-permissions".into(),
             ];
             if !model.is_empty() {
+                // E-9c: the alias rides the cmd.exe wrapper line via an
+                // unquoted `%*` — reject cmd metacharacters up front.
+                let alias = claude_model_alias(model);
+                crate::harness_adapters::ensure_cmd_safe_model(&alias)?;
                 args.push("--model".into());
-                args.push(claude_model_alias(model));
+                args.push(alias);
             }
             Ok((
                 resolve_for_spawn(&CommandSpec {

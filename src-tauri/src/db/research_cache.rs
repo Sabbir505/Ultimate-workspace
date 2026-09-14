@@ -88,6 +88,7 @@ pub fn cacheable_engines(status: &[(&str, bool)]) -> bool {
 
 /// Store a search-result payload. `engines_tag` documents the engine mix for
 /// debugging; rows are skipped entirely when the mix is not cacheable.
+/// Also sweeps expired rows — the caches only ever grow otherwise.
 pub fn search_cache_put(
     conn: &Connection,
     query_key: &str,
@@ -102,7 +103,7 @@ pub fn search_cache_put(
          VALUES (?1, ?2, ?3, ?4)",
         params![query_key, payload, engines_tag, now_ts()],
     )?;
-    Ok(())
+    purge_expired(conn)
 }
 
 /// Fetch a fresh-enough cached search payload. Expired rows are deleted.
@@ -153,14 +154,15 @@ fn parse_engine_tag(tag: &str) -> Vec<(&str, bool)> {
 // Page cache
 // ---------------------------------------------------------------------------
 
-/// Store extracted page content for a canonical URL.
+/// Store extracted page content for a canonical URL. Also sweeps expired
+/// rows — the caches only ever grow otherwise.
 pub fn page_cache_put(conn: &Connection, canonical: &str, content: &str) -> DbResult<()> {
     conn.execute(
         "INSERT OR REPLACE INTO page_cache (url_key, content, content_hash, created_at) \
          VALUES (?1, ?2, ?3, ?4)",
         params![canonical, content, content_hash(content), now_ts()],
     )?;
-    Ok(())
+    purge_expired(conn)
 }
 
 /// Fetch fresh-enough cached page content. Expired rows are deleted.
@@ -202,6 +204,37 @@ pub fn content_hash(content: &str) -> String {
     h.update(content.as_bytes());
     let bytes = h.finalize();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ---------------------------------------------------------------------------
+// TTL purge (unbounded-growth bound)
+// ---------------------------------------------------------------------------
+
+/// How many citation-integrity reports to keep. They have no natural TTL —
+/// they power the citation-quality regression trend — so the newest window is
+/// retained and older rows are trimmed on every purge.
+const CITATION_REPORTS_KEEP: i64 = 500;
+
+/// Delete cache rows past their TTL and trim the citation-report history.
+/// Called on every `search_cache_put` / `page_cache_put` insert and on DB
+/// open (db::configure) so long-lived installs stop accumulating. Cheap:
+/// both DELETEs hit the `idx_*_cache_created` indexes from init_schema.
+pub fn purge_expired(conn: &Connection) -> DbResult<()> {
+    let now = now_ts();
+    conn.execute(
+        "DELETE FROM search_cache WHERE created_at < ?1",
+        params![now - SEARCH_CACHE_TTL_SECS],
+    )?;
+    conn.execute(
+        "DELETE FROM page_cache WHERE created_at < ?1",
+        params![now - PAGE_CACHE_TTL_SECS],
+    )?;
+    conn.execute(
+        "DELETE FROM citation_reports WHERE id NOT IN \
+         (SELECT id FROM citation_reports ORDER BY created_at DESC, id DESC LIMIT ?1)",
+        params![CITATION_REPORTS_KEEP],
+    )?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -355,9 +388,12 @@ pub fn clear_searches(conn: &Connection, chat_session_id: &str) -> DbResult<()> 
 }
 
 /// Case-folded, whitespace-collapsed query for repeat detection.
+/// Unicode-aware `to_lowercase`, not `to_ascii_lowercase` — "СТРАНА" and
+/// "страна" (and every other non-Latin script) are the same query to the
+/// repeat-detector.
 fn normalize_query(q: &str) -> String {
     q.split_whitespace()
-        .map(str::to_ascii_lowercase)
+        .map(str::to_lowercase)
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -467,6 +503,81 @@ mod tests {
         record_search(&conn, &a.id, "shared query", "duckduckgo:ok", 1).unwrap();
         // Session B never searched this — not a repeat.
         assert!(!record_search(&conn, &b.id, "shared query", "duckduckgo:ok", 1).unwrap());
+    }
+
+    #[test]
+    fn normalize_query_folds_non_ascii_case() {
+        // ASCII behavior unchanged.
+        assert_eq!(normalize_query("  Rust   ASYNC "), "rust async");
+        // Non-ASCII scripts: to_ascii_lowercase left these untouched, so the
+        // same query in different letter case looked like two queries.
+        assert_eq!(normalize_query("СТРАНА"), normalize_query("страна"));
+        assert_eq!(
+            normalize_query("ΕΛΛΑΣ  Async"),
+            normalize_query("ελλας async")
+        );
+        // …and the repeat-detector agrees.
+        let conn = mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
+        assert!(!record_search(&conn, &cs.id, "СТРАНА", "duckduckgo:ok", 1).unwrap());
+        assert!(record_search(&conn, &cs.id, "страна", "duckduckgo:ok", 1).unwrap());
+    }
+
+    #[test]
+    fn purge_drops_expired_rows_and_trims_reports() {
+        let conn = mem();
+        // Fresh rows survive the purge.
+        search_cache_put(&conn, "k", "duckduckgo:ok", "results").unwrap();
+        page_cache_put(&conn, "https://example.com/p", "body").unwrap();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
+        for i in 0..3 {
+            save_citation_report(&conn, &cs.id, Some(i), 1, 0, 0, 0, 0, "{}").unwrap();
+            conn.execute(
+                "UPDATE citation_reports SET created_at = created_at + ?1 WHERE id = (SELECT MAX(id) FROM citation_reports)",
+                [i * 10],
+            )
+            .unwrap();
+        }
+        purge_expired(&conn).unwrap();
+        assert!(search_cache_get(&conn, "k", SEARCH_CACHE_TTL_SECS).unwrap().is_some());
+        assert!(page_cache_get(&conn, "https://example.com/p", PAGE_CACHE_TTL_SECS)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM citation_reports", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+            3
+        );
+
+        // Age everything past its TTL → the purge empties both caches and
+        // trims citation reports to the keep window.
+        conn.execute("UPDATE search_cache SET created_at = 0", []).unwrap();
+        conn.execute("UPDATE page_cache SET created_at = 0", []).unwrap();
+        conn.execute(
+            "UPDATE citation_reports SET created_at = 0",
+            [],
+        )
+        .unwrap();
+        purge_expired(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM search_cache", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM page_cache", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        // Trimmed to the newest CITATION_REPORTS_KEEP, not emptied.
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM citation_reports", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            kept <= CITATION_REPORTS_KEEP,
+            "citation reports must be trimmed to the keep window"
+        );
     }
 
     #[test]

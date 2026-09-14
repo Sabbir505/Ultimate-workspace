@@ -670,6 +670,10 @@ function AssistantPanel() {
       if (stale) return;
       setSystemPrompt(sp ?? "");
       setLoaded(true);
+    }).catch(() => {
+      // A rejected boot fetch must not leave the textarea disabled forever —
+      // degrade to the empty default (still editable).
+      if (!stale) setLoaded(true);
     });
     return () => {
       stale = true;
@@ -799,11 +803,17 @@ function WebSearchPanel() {
   const [loaded, setLoaded] = useState(false);
   // Debounced persists for the key inputs: they fire per keystroke, and
   // out-of-order backend writes could persist an intermediate (shorter)
-  // value over the final one.
+  // value over the final one. The latest typed value is mirrored per id so
+  // the unmount cleanup can FLUSH a still-pending write instead of dropping it.
   const keyPersistTimers = useRef<Record<string, number>>({});
+  const keyPersistPending = useRef<Record<string, string>>({});
   useEffect(
     () => () => {
-      for (const t of Object.values(keyPersistTimers.current)) window.clearTimeout(t);
+      for (const [id, t] of Object.entries(keyPersistTimers.current)) {
+        window.clearTimeout(t);
+        const pending = keyPersistPending.current[id];
+        if (pending !== undefined) void setSetting(`search.${id}_key`, pending);
+      }
     },
     [],
   );
@@ -820,6 +830,10 @@ function WebSearchPanel() {
       setProvider(p ?? "");
       setKeys({ serper: serper ?? "", tavily: tavily ?? "", brave: brave ?? "" });
       setLoaded(true);
+    }).catch(() => {
+      // A rejected boot fetch must not leave the saved engine/key fields
+      // forever unlatched — degrade to the keyless defaults.
+      if (!stale) setLoaded(true);
     });
     return () => {
       stale = true;
@@ -833,9 +847,11 @@ function WebSearchPanel() {
 
   const setKey = (id: string, value: string) => {
     setKeys((k) => ({ ...k, [id]: value }));
+    keyPersistPending.current[id] = value;
     if (keyPersistTimers.current[id] !== undefined) window.clearTimeout(keyPersistTimers.current[id]);
     keyPersistTimers.current[id] = window.setTimeout(() => {
       delete keyPersistTimers.current[id];
+      delete keyPersistPending.current[id];
       void setSetting(`search.${id}_key`, value);
     }, 400);
   };
@@ -888,8 +904,3 @@ function WebSearchPanel() {
     </>
   );
 }
-
-/** Version control settings: the utility model used to auto-generate commit
- *  messages in the commit modal (a fast/cheap model, independent of the chat
- *  assistant). Stored as a provider+model pair because API keys resolve
- *  per-provider. */

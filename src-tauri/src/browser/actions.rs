@@ -581,7 +581,7 @@ impl BrowserManager {
         scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         let mut kept: Vec<usize> = Vec::new();
         let mut used = 0usize;
-        for (i, s) in &scored {
+        for (i, _s) in &scored {
             if used >= max_chars {
                 break;
             }

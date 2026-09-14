@@ -166,6 +166,20 @@ fn migrate_automations_origin(conn: &Connection) -> DbResult<()> {
 }
 
 fn migrate_chat_fts(conn: &Connection) -> DbResult<()> {
+    // LOW: the docsize COUNT probe is O(chat_messages) on every startup.
+    // The FTS triggers keep the index in sync after the one-time backfill,
+    // so once a rebuild/check has observably COMPLETED, a persisted marker
+    // (B-30 pattern) skips the probe entirely. A drifted/restored DB can be
+    // re-checked by clearing the `db.migration.chat_fts.synced` marker.
+    ensure_settings_table(conn);
+    let checked = settings::get_setting(conn, "db.migration.chat_fts.synced")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1");
+    if checked {
+        return Ok(());
+    }
     let in_sync = conn
         .query_row(
             "SELECT (SELECT COUNT(*) FROM chat_messages)
@@ -177,6 +191,7 @@ fn migrate_chat_fts(conn: &Connection) -> DbResult<()> {
     if in_sync != Some(true) {
         conn.execute_batch("INSERT INTO chat_messages_fts(chat_messages_fts) VALUES('rebuild');")?;
     }
+    settings::set_setting(conn, "db.migration.chat_fts.synced", "1")?;
     Ok(())
 }
 
@@ -218,6 +233,9 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_memory_reflected(conn)?;
     migrate_chat_message_kind(conn)?;
     migrate_chat_session_origin(conn)?;
+    // Research caches grow without bound otherwise: drop rows past their TTL
+    // on every open (research_cache.rs also purges on insert).
+    research_cache::purge_expired(conn)?;
     migrate_unc_paths(conn)
 }
 
@@ -244,7 +262,10 @@ fn migrate_chat_session_origin(conn: &Connection) -> DbResult<()> {
 /// unfulfilled "create X" instruction and re-executes it on the next send.
 /// Rows created before the column existed are backfilled by their
 /// `/create ` content prefix (the artifact flow is the only writer of
-/// command-only rows).
+/// command-only rows). B-30: the backfill is gated on a persisted marker —
+/// it used to re-run on EVERY startup, re-stamping any later real user
+/// message that merely starts with "/create " (hiding it from the model's
+/// context) instead of only the pre-migration legacy rows.
 fn migrate_chat_message_kind(conn: &Connection) -> DbResult<()> {
     let sql = "ALTER TABLE chat_messages ADD COLUMN kind TEXT";
     if let Err(e) = conn.execute(sql, []) {
@@ -252,11 +273,19 @@ fn migrate_chat_message_kind(conn: &Connection) -> DbResult<()> {
             return Err(e);
         }
     }
-    conn.execute(
-        "UPDATE chat_messages SET kind = 'artifact_command'
-          WHERE kind IS NULL AND role = 'user' AND content LIKE '/create %'",
-        [],
-    )?;
+    ensure_settings_table(conn);
+    let backfill_done = settings::get_setting(conn, "db.migration.chat_message_kind.backfilled")
+        .ok()
+        .flatten()
+        .is_some();
+    if !backfill_done {
+        conn.execute(
+            "UPDATE chat_messages SET kind = 'artifact_command'
+              WHERE kind IS NULL AND role = 'user' AND content LIKE '/create %'",
+            [],
+        )?;
+        settings::set_setting(conn, "db.migration.chat_message_kind.backfilled", "1")?;
+    }
     Ok(())
 }
 
@@ -1204,6 +1233,11 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           created_at INTEGER NOT NULL
         );
 
+        -- TTL purges (research_cache::purge_expired, on open + insert) range
+        -- over these; without them each purge is a full-table scan.
+        CREATE INDEX IF NOT EXISTS idx_search_cache_created ON search_cache(created_at);
+        CREATE INDEX IF NOT EXISTS idx_page_cache_created ON page_cache(created_at);
+
         -- Per-session log of executed web searches. Powers the each-query-unique
         -- rule (the dispatcher nudges on exact repeats) and leaves an audit
         -- trail of what a research task actually searched.
@@ -1381,9 +1415,9 @@ pub use source_ledger::{add_source_note, clear_source_notes, list_source_notes};
 // research caches + query history (research mode)
 pub use research_cache::{
     cacheable_engines, canonical_url_key, citation_quality_trend, clear_searches, content_hash,
-    latest_citation_detail, page_cache_get, page_cache_put, record_search, save_citation_report,
-    search_cache_get, search_cache_put, CitationQualityPoint, PAGE_CACHE_TTL_SECS,
-    SEARCH_CACHE_TTL_SECS,
+    latest_citation_detail, page_cache_get, page_cache_put, purge_expired, record_search,
+    save_citation_report, search_cache_get, search_cache_put, CitationQualityPoint,
+    PAGE_CACHE_TTL_SECS, SEARCH_CACHE_TTL_SECS,
 };
 
 pub use docs::{

@@ -84,21 +84,67 @@ pub fn on_demand_injection(
     now: i64,
     recall_hint: bool,
 ) -> Option<String> {
-    let all = crate::db::active_memories_for_scope(conn, "default", project_id).unwrap_or_default();
-    let mut core: Vec<crate::memory::model::MemoryRecord> = all
-        .iter()
-        .filter(|m| {
-            m.kind == crate::memory::model::kind::IDENTITY
-                && m.importance >= crate::memory::render::CORE_MIN_IMPORTANCE
-        })
-        .cloned()
-        .collect();
-    core.sort_by(|a, b| {
-        b.importance
-            .cmp(&a.importance)
-            .then(b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
-    });
-    core.truncate(crate::memory::render::CORE_MAX_FACTS);
+    // PERF: the core lookup used to load EVERY active memory in scope —
+    // cloning each row's embedding blob (Vec<f32>) on every send — only to
+    // filter down to identity facts in Rust. The filters now run in SQL and
+    // the embedding column is never selected; retrieval hits keep their own
+    // bounded top-k load path in `retrieve`.
+    let core: Vec<crate::memory::model::MemoryRecord> = (|| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, kind, profile, project_id, subject, content, keywords, importance, \
+                 confidence, status, superseded_by, valid_from, valid_until, created_at, \
+                 updated_at, superseded_at, last_accessed_at, access_count, origin, reflected \
+                 FROM memories \
+                 WHERE profile = ?1 AND status = 'active' \
+                   AND (project_id IS NULL OR project_id = ?2) \
+                   AND confidence >= 0.35 \
+                   AND kind = ?3 AND importance >= ?4 \
+                 ORDER BY importance DESC, confidence DESC, updated_at DESC \
+                 LIMIT ?5",
+            )
+            .ok()?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![
+                    "default",
+                    project_id,
+                    crate::memory::model::kind::IDENTITY,
+                    crate::memory::render::CORE_MIN_IMPORTANCE,
+                    crate::memory::render::CORE_MAX_FACTS as i64,
+                ],
+                |r| {
+                    Ok(crate::memory::model::MemoryRecord {
+                        id: r.get(0)?,
+                        kind: r.get(1)?,
+                        profile: r.get(2)?,
+                        project_id: r.get(3)?,
+                        subject: r.get(4)?,
+                        content: r.get(5)?,
+                        keywords: serde_json::from_str(&r.get::<_, String>(6)?)
+                            .unwrap_or_default(),
+                        importance: r.get(7)?,
+                        confidence: r.get(8)?,
+                        status: r.get(9)?,
+                        superseded_by: r.get(10)?,
+                        valid_from: r.get(11)?,
+                        valid_until: r.get(12)?,
+                        created_at: r.get(13)?,
+                        updated_at: r.get(14)?,
+                        superseded_at: r.get(15)?,
+                        last_accessed_at: r.get(16)?,
+                        access_count: r.get(17)?,
+                        origin: r.get(18)?,
+                        reflected: r.get::<_, i64>(19)? != 0,
+                        // Never selected — see the query above.
+                        embedding: None,
+                    })
+                },
+            )
+            .ok()?;
+        Some(rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+    })()
+    .unwrap_or_default();
 
     let query = query.map(str::trim).filter(|q| !q.is_empty());
     let hits = match query {
@@ -116,13 +162,23 @@ pub fn on_demand_injection(
     }
     // Nothing qualified this turn — fall back to the stored document (a
     // hand-typed profile may be the ONLY memory there is), then to the
-    // search hint, and only then to silence.
+    // search hint, and only then to silence. The hint gate only needs to
+    // know whether ANY active memory exists in scope — an EXISTS probe, not
+    // a full record load.
     if let Some(doc) = crate::memory::document::stored_document(conn) {
         if let Some(block) = crate::memory::render::render_document_fallback(&doc) {
             return Some(block);
         }
     }
-    if !all.is_empty() && recall_hint {
+    let any_in_scope = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE profile = ?1 AND status = 'active' \
+             AND (project_id IS NULL OR project_id = ?2) AND confidence >= 0.35)",
+            rusqlite::params!["default", project_id],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if any_in_scope && recall_hint {
         return crate::memory::render::render_on_demand_block(&[], &[], now, recall_hint);
     }
     None

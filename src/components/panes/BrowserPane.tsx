@@ -827,16 +827,20 @@ export function BrowserPane({ pane, visible = true }: Props) {
       .catch((err) => console.warn("copy failed", err));
   };
 
-  const onLoad = () => {
+  // iframe load handler, keyed by the LOADING tab's own id — not the active
+  // tab. Every tab renders an iframe (only the active one is visible), so a
+  // background tab's late load event must not clear the ACTIVE tab's
+  // loading state / timeout.
+  const onIframeLoad = (tabId: string) => {
     setTabStates((prev) => {
       const next = new Map(prev);
-      const existing = next.get(activeTabId);
-      if (existing) next.set(activeTabId, { ...existing, loading: false, loadFailed: false });
+      const existing = next.get(tabId);
+      if (existing) next.set(tabId, { ...existing, loading: false, loadFailed: false });
       return next;
     });
-    if (timeoutRefs.current.has(activeTabId)) {
-      window.clearTimeout(timeoutRefs.current.get(activeTabId)!);
-      timeoutRefs.current.delete(activeTabId);
+    if (timeoutRefs.current.has(tabId)) {
+      window.clearTimeout(timeoutRefs.current.get(tabId)!);
+      timeoutRefs.current.delete(tabId);
     }
   };
 
@@ -1054,7 +1058,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
                   className="browser-frame"
                   src={src}
                   title="Browser preview"
-                  onLoad={onLoad}
+                  onLoad={() => onIframeLoad(tab.tabId)}
                 />
               )}
               {nativeOk !== true && loadFailed && (

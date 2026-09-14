@@ -347,7 +347,7 @@ pub async fn export_project_zip(
     let db = db.0.clone();
     // DB rows under the lock; artifact file reads + deflate after release
     // (DbState rule: the lock guards SQL only).
-    let (manifest, mut chats, path_batch) = {
+    let (manifest, chats, path_batch) = {
         let conn = db.lock();
         let all = crate::db::list_chat_sessions(&conn).map_err(|e| e.to_string())?;
         let project_sessions: Vec<_> = all
@@ -413,8 +413,14 @@ pub async fn import_chat_zip(
     // Decompress + parse BEFORE taking the lock (DbState rule: the lock
     // guards SQL only) — a big archive must not stall other DB consumers.
     let parsed = parse_zip_export(&bytes)?;
-    let conn = db.0.lock();
-    import_parsed_chats(&conn, parsed, &artifacts_dir)
+    // Artifact FILE writes happen after the lock is released below — disk
+    // I/O never spans the global DB mutex.
+    let (imported, pending_writes) = {
+        let conn = db.0.lock();
+        import_parsed_chats(&conn, parsed, &artifacts_dir)?
+    };
+    write_imported_artifacts(pending_writes)?;
+    Ok(imported)
 }
 
 /// Pure import core — testable with an in-memory connection (`db::mem()`).
@@ -424,7 +430,21 @@ fn import_zip_bytes(
     artifacts_dir: &std::path::Path,
 ) -> Result<Vec<String>, String> {
     let parsed = parse_zip_export(bytes)?;
-    import_parsed_chats(conn, parsed, artifacts_dir)
+    let (imported, pending_writes) = import_parsed_chats(conn, parsed, artifacts_dir)?;
+    write_imported_artifacts(pending_writes)?;
+    Ok(imported)
+}
+
+/// Write the artifact files [`import_parsed_chats`] deferred. Callers hold NO
+/// DB lock here — the whole point of the split is that disk I/O never spans
+/// the global mutex.
+fn write_imported_artifacts(
+    writes: Vec<(String, std::path::PathBuf, Vec<u8>)>,
+) -> Result<(), String> {
+    for (name, full, bytes) in writes {
+        std::fs::write(&full, &bytes).map_err(|e| format!("write artifact {name}: {e}"))?;
+    }
+    Ok(())
 }
 
 /// One imported chat, fully decompressed: the parsed `chats/<slug>/chat.json`
@@ -502,14 +522,17 @@ fn parse_zip_export(bytes: &[u8]) -> Result<Vec<ParsedChatExport>, String> {
     Ok(parsed)
 }
 
-/// DB half of the import: insert session + message + artifact rows and write
-/// the artifact files. Call with the `DbState` lock held.
+/// DB half of the import: insert session + message + artifact rows. Artifact
+/// FILE writes are deferred — they are returned as `(name, path, bytes)` and
+/// the caller performs them AFTER releasing the `DbState` lock (disk I/O
+/// must never span the global mutex).
 fn import_parsed_chats(
     conn: &Connection,
     parsed: Vec<ParsedChatExport>,
     artifacts_dir: &std::path::Path,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, Vec<(String, std::path::PathBuf, Vec<u8>)>), String> {
     let mut imported = Vec::with_capacity(parsed.len());
+    let mut pending_writes: Vec<(String, std::path::PathBuf, Vec<u8>)> = Vec::new();
     for ParsedChatExport { chat, art_entries } in parsed {
         let new_id = db::new_id();
         let title = chat
@@ -645,7 +668,9 @@ fn import_parsed_chats(
                 }
                 used.insert(name.clone());
                 let full = artifacts_dir.join(&name);
-                std::fs::write(&full, &bytes).map_err(|e| format!("write artifact {name}: {e}"))?;
+                // File write deferred (see fn docs) — only path + bytes are
+                // recorded; the caller writes after the lock is released.
+                pending_writes.push((name.clone(), full.clone(), bytes));
                 let art_rec = crate::db::insert_artifact(
                     conn,
                     Some(&new_id),
@@ -667,7 +692,7 @@ fn import_parsed_chats(
 
         imported.push(new_id);
     }
-    Ok(imported)
+    Ok((imported, pending_writes))
 }
 
 #[cfg(test)]

@@ -116,8 +116,12 @@ impl BrowserManager {
         let tid = tab_id.to_string();
         let label = browser_label(pane_id, tab_id);
         let app = self.app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+        // P-2: this used to be a detached OS thread per navigation (one
+        // thread per nav, each sleeping a second). It's a task on Tauri's
+        // existing tokio runtime now — same delay, no thread churn per nav
+        // (same conversion as the escalating reinject in browser.rs).
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             if let Some(w) = app.get_webview(&label) {
                 let _ = w.eval(&pushstate_injection_js(&pid, &tid));
                 // Re-inject the diagnostics layer + visual-feedback overlay

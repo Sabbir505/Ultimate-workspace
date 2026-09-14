@@ -8,7 +8,14 @@ import type { ChatStoreGet, ChatStoreSet } from "../types";
 export function createPerfSlice(set: ChatStoreSet, get: ChatStoreGet) {
   return {
     loadSessionMetrics: async (chatSessionId: string) => {
-      const metrics = await getChatSessionMetrics(chatSessionId);
+      // Best-effort (call sites fire this with `void`): a rejection here must
+      // not surface as an unhandled rejection — keep the previous aggregate.
+      let metrics: Awaited<ReturnType<typeof getChatSessionMetrics>> = null;
+      try {
+        metrics = await getChatSessionMetrics(chatSessionId);
+      } catch {
+        return;
+      }
       set((s) => {
         if (!metrics) {
           const next = { ...s.sessionMetrics };

@@ -59,12 +59,25 @@ pub fn adapt(spec: &ArtifactSpec) -> Result<AdaptedArtifact, String> {
 }
 
 fn slugify(name: &str) -> String {
-    name.to_lowercase()
+    // ASCII-only slug: non-Latin names (CJK, emoji, …) collapse to nothing,
+    // and the slug becomes a directory name / slash command — "" breaks
+    // both. Fall back to a stable short hash of the original name so the
+    // result is never empty and stays deterministic across retries.
+    let slug: String = name
+        .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect::<String>()
         .trim_matches('-')
-        .to_string()
+        .to_string();
+    if slug.is_empty() {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(name.as_bytes());
+        format!("artifact-{:08x}", h.finish() as u32)
+    } else {
+        slug
+    }
 }
 
 fn adapt_skill(spec: &SkillSpec, kind: &str) -> InstalledSkillInput {
@@ -312,5 +325,21 @@ mod tests {
         assert!(prompt.contains("1. Gather: Run git log --since=yesterday"));
         assert!(prompt.contains("   Read the last 24h of commits."));
         assert!(prompt.contains("2. Send: Post the report to the team channel"));
+    }
+
+    #[test]
+    fn slugify_keeps_latin_and_falls_back_for_non_latin() {
+        assert_eq!(slugify("Nightly Report"), "nightly-report");
+        assert_eq!(slugify("  --Weird___Name!!--  "), "weird---name");
+        // CJK collapses to nothing under the ASCII-only slug — the stable
+        // hash fallback must kick in (never "", which breaks directory names
+        // and /slash-commands).
+        let cjk = slugify("每日报告生成器");
+        assert!(!cjk.is_empty(), "CJK name must not produce an empty slug");
+        assert!(cjk.starts_with("artifact-"), "{cjk}");
+        // Stable across calls (hash of the name, not a timestamp).
+        assert_eq!(cjk, slugify("每日报告生成器"));
+        // Emoji-only names too.
+        assert!(!slugify("🚀🔥").is_empty());
     }
 }

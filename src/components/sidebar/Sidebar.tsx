@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { useShallow } from "zustand/react/shallow";
 
 import { toastError, toastSuccess, exportChatZip, getMobilePairingInfo, type MobilePairingInfo } from "../../lib/ipc";
 import {
@@ -162,9 +163,10 @@ export function Sidebar() {
   // even for background sessions (a user working in chat A must still see
   // chat B is responding). The old selector filtered to the active session
   // only, so nested-project background chats never lit up.
-  const streamingIds = useChatStore(
-    useCallback((s) => Object.keys(s.streaming), []),
-  );
+  // useShallow: Object.keys allocates a fresh array per store notification
+  // (i.e. every streamed token) — shallow-compare the ids so the sidebar only
+  // re-renders when the SET of streaming sessions actually changes.
+  const streamingIds = useChatStore(useShallow((s) => Object.keys(s.streaming)));
   const chatConfig = useChatStore((s) => s.config);
   const lastSelection = useChatStore((s) => s.lastSelection);
   const chatLoaded = useChatStore((s) => s.loaded);

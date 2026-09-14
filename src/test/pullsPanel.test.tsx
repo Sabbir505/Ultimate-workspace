@@ -159,6 +159,25 @@ describe("pullRequests store", () => {
     usePullRequestsStore.getState().invalidate("p1");
     expect(usePullRequestsStore.getState().lists[prListCacheKey("p1", "open")]).toBeUndefined();
   });
+
+  it("invalidate clears the project's in-flight loading locks too (audit #15)", () => {
+    usePullRequestsStore.setState({
+      listLoading: {
+        [prListCacheKey("p1", "open")]: Date.now(),
+        [prListCacheKey("p2", "open")]: Date.now(),
+      },
+      detailLoading: { p1: { 42: Date.now() }, p2: { 7: Date.now() } },
+    });
+    usePullRequestsStore.getState().invalidate("p1");
+    const s = usePullRequestsStore.getState();
+    // A fetch still running at invalidate time must not keep its lock (it
+    // would block the next refresh until the stale-lock takeover kicks in).
+    expect(s.listLoading[prListCacheKey("p1", "open")]).toBeUndefined();
+    expect(s.detailLoading.p1).toBeUndefined();
+    // Other projects' locks are untouched.
+    expect(s.listLoading[prListCacheKey("p2", "open")]).toBeDefined();
+    expect(s.detailLoading.p2?.[7]).toBeDefined();
+  });
 });
 
 describe("PullsPanel", () => {

@@ -633,8 +633,10 @@ pub fn binary_on_path(binary: &str) -> bool {
             Err(_) => return false,
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    // Kill the whole tree, not just the direct child: on Windows this is a
+    // `cmd.exe /C` wrapper, and a surviving CLI grandchild would keep running
+    // (same fix as installed_cli_version below).
+    crate::agent_sessions::kill_child_tree(&mut child);
     false
 }
 

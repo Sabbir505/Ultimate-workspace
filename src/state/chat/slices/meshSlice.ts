@@ -8,7 +8,7 @@ import type {
   SubagentTokenPayload,
 } from "../../../lib/ipc";
 import { tailCodePointsHysteresis } from "../../../lib/safeSlice";
-import { MESH_MAIL_HISTORY_CAP, STREAM_TAIL_CAP, STREAM_TAIL_MARGIN } from "../moduleState";
+import { MESH_MAIL_HISTORY_CAP, MESH_MAIL_RECORDS_CAP, STREAM_TAIL_CAP, STREAM_TAIL_MARGIN } from "../moduleState";
 import type { ChatStoreGet, ChatStoreSet } from "../types";
 
 export function createMeshSlice(set: ChatStoreSet, _get: ChatStoreGet) {
@@ -88,8 +88,19 @@ export function createMeshSlice(set: ChatStoreSet, _get: ChatStoreGet) {
           streaming = { ...streaming, [payload.toSession]: "" };
           chatStatus = { ...chatStatus, [payload.toSession]: { reason: "thinking", message: "" } };
         }
+        // Cap total records (audit #7): per-session lists cap above, but the
+        // mailId-keyed map itself grew for the app's lifetime. Oldest-inserted
+        // records evict first; an updated mailId keeps its slot. The durable
+        // audit trail is the DB — this is only the sidebar's cache.
+        const meshMail = { ...s.meshMail, [payload.mailId]: payload };
+        const mailIds = Object.keys(meshMail);
+        if (mailIds.length > MESH_MAIL_RECORDS_CAP) {
+          for (const stale of mailIds.slice(0, mailIds.length - MESH_MAIL_RECORDS_CAP)) {
+            delete meshMail[stale];
+          }
+        }
         return {
-          meshMail: { ...s.meshMail, [payload.mailId]: payload },
+          meshMail,
           meshMailBySession: bySession,
           streaming,
           chatStatus,

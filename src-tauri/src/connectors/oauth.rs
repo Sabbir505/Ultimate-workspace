@@ -737,7 +737,10 @@ fn accept_one_callback(listener: &TcpListener, expected_state: &str) -> Result<S
 
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
     let query_str = path.split('?').nth(1).unwrap_or("");
-    eprintln!("[relay:oauth] callback request: {path}");
+    // Log the path WITHOUT the query string — it carries the fresh
+    // authorization code (and state), which must never land in stderr logs.
+    let log_path = path.split('?').next().unwrap_or("/");
+    eprintln!("[relay:oauth] callback request: {log_path}");
 
     let query: HashMap<String, String> = url::form_urlencoded::parse(query_str.as_bytes())
         .map(|(k, v)| (k.into_owned(), v.into_owned()))

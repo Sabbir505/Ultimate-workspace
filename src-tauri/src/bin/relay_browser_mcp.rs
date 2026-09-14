@@ -215,6 +215,13 @@ async fn connect(url: &str) -> Result<WsConn, String> {
     Ok(WsConn { write, read, closed: false })
 }
 
+/// Upper bound for one WS request/response round trip. An app that accepted
+/// the connect but never answers (hung dispatch, stalled pane eval) must not
+/// wedge the MCP binary forever — the harness's tool call would hang past
+/// every client timeout. On expiry the connection is marked closed so the
+/// next call reconnects fresh.
+const ROUND_TRIP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// Send a request envelope over the WebSocket and await the response envelope.
 async fn round_trip(
     ws: &mut WsConn,
@@ -225,27 +232,42 @@ async fn round_trip(
         .send(Message::Text(text))
         .await
         .map_err(|e| format!("ws send failed: {e}"))?;
-    while let Some(msg) = ws.read.next().await {
-        match msg {
-            Ok(Message::Text(t)) => {
-                return serde_json::from_str(&t).map_err(|e| format!("decode resp: {e}"));
+    let wait = async {
+        while let Some(msg) = ws.read.next().await {
+            match msg {
+                Ok(Message::Text(t)) => {
+                    return Some(serde_json::from_str(&t).map_err(|e| format!("decode resp: {e}")));
+                }
+                Ok(Message::Ping(p)) => {
+                    let _ = ws.write.send(Message::Pong(p)).await;
+                }
+                Ok(Message::Close(_)) => {
+                    ws.closed = true;
+                    return Some(Err("ws closed by peer".into()));
+                }
+                Err(e) => {
+                    ws.closed = true;
+                    return Some(Err(format!("ws read failed: {e}")));
+                }
+                _ => {}
             }
-            Ok(Message::Ping(p)) => {
-                let _ = ws.write.send(Message::Pong(p)).await;
-            }
-            Ok(Message::Close(_)) => {
-                ws.closed = true;
-                return Err("ws closed by peer".into());
-            }
-            Err(e) => {
-                ws.closed = true;
-                return Err(format!("ws read failed: {e}"));
-            }
-            _ => {}
+        }
+        None
+    };
+    match tokio::time::timeout(ROUND_TRIP_TIMEOUT, wait).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            ws.closed = true;
+            Err("ws stream ended without response".into())
+        }
+        Err(_) => {
+            ws.closed = true;
+            Err(format!(
+                "relay round trip timed out after {}s — reconnecting on the next call",
+                ROUND_TRIP_TIMEOUT.as_secs()
+            ))
         }
     }
-    ws.closed = true;
-    Err("ws stream ended without response".into())
 }
 
 /// Handle one stdin JSON-RPC line, returning the JSON-RPC response object —

@@ -543,12 +543,15 @@ impl AgentSessionManager {
 
         // Mirror the built-in chat: the user message is persisted up front so
         // history survives a crash mid-turn. Done AFTER the turn-in-flight
-        // check so a rejected turn can't orphan a user message.
-        {
+        // check so a rejected turn can't orphan a user message. The row id is
+        // kept so the dispatch-error path below can still uphold that
+        // invariant when the spawn itself fails.
+        let user_message_id = {
             let conn = db.0.lock();
             crate::db::add_user_chat_message(&conn, chat_session_id, content)
-                .map_err(|e| e.to_string())?;
-        }
+                .map_err(|e| e.to_string())?
+                .id
+        };
 
         // Prepend the Relay persona + the user's custom system prompt
         // (Settings → Assistant) so the harness CLI presents the same identity
@@ -658,15 +661,19 @@ impl AgentSessionManager {
         // Checkpoint baseline: snapshot the spawn dir's working tree once per
         // session before the CLI starts touching files (checkpoint 0 =
         // pre-chat state). Non-repo dirs (artifacts folder) skip silently.
-        if let Some(dir) = spawn_dir(cwd, &db.0) {
-            let conn = db.0.lock();
-            crate::checkpoints::maybe_baseline(Some(app), &conn, chat_session_id, &dir);
-        }
+        // D3: detached — the git snapshot runs WITHOUT pinning the global DB
+        // mutex (same shape as the builtin path's turn-start baseline).
+        crate::checkpoints::maybe_baseline_detached_in_dir(
+            Some(app),
+            &db.0,
+            chat_session_id,
+            spawn_dir(cwd, &db.0),
+        );
 
         // `entry` is now a MutexGuard (per-session lock — B-8); the turn
         // helpers take `&mut AgentChild`.
         let entry = &mut *entry;
-        match harness {
+        let dispatched = match harness {
             "claude_code" => send_claude_turn(
                 app,
                 db,
@@ -744,7 +751,21 @@ impl AgentSessionManager {
             other => Err(format!(
                 "harness '{other}' has no headless chat backend yet"
             )),
+        };
+        if dispatched.is_err() {
+            // The dispatch failed BEFORE the turn started (spawn/wait-ready/
+            // stdin-write error) — remove the user row persisted up front or
+            // it survives restarts as an orphan user bubble with no reply
+            // (the invariant stated at the turn-in-flight check above).
+            let conn = db.0.lock();
+            if let Err(e) = crate::db::delete_chat_message(&conn, user_message_id) {
+                eprintln!(
+                    "[agent] failed to remove the user message of a failed spawn \
+                     (session {chat_session_id}): {e}"
+                );
+            }
         }
+        dispatched
     }
 
     /// Cancel the in-flight turn by killing the process tree (claude has no
@@ -1212,11 +1233,12 @@ fn finish_turn(
     // Per-turn git checkpoint against the spawn dir (watches are ordered
     // spawn-dir-first by turn_watch_dirs; non-repo dirs skip silently).
     // Runs on this reader thread — already off the UI path; turns that
-    // changed nothing dedup-skip inside after_turn.
+    // changed nothing dedup-skip inside after_turn. D3: detached — the git
+    // snapshot must not pin the global DB mutex (same shape as the builtin
+    // path's turn-end checkpoint).
     if let Some(spawn) = watches.first() {
         let dir = spawn.dir.clone();
-        let conn = db.0.lock();
-        crate::checkpoints::after_turn(app, &conn, sid, message_id, &dir);
+        crate::checkpoints::after_turn_detached(app, &db.0, sid, message_id, &dir);
     }
 }
 
@@ -1969,6 +1991,42 @@ mod tests {
         assert_eq!(harness_label("futurecli"), "futurecli");
     }
 
+    /// E-9c parity for the claude paths: `--model <alias>` rides the cmd.exe
+    /// wrapper line unquoted (`%*`), exactly like the kimi/pi `-m` flags that
+    /// already gate on ensure_cmd_safe_model. A hostile model id must be
+    /// rejected BEFORE it reaches the spawn argv — and the alias mapping must
+    /// not launder metacharacters into a "safe" id.
+    #[test]
+    fn claude_model_alias_output_is_cmd_safe_gated() {
+        // Family-name ids alias to the bare family — the alias LAUNDERS the
+        // metacharacters away before anything reaches the cmd.exe line.
+        for (hostile, alias) in [
+            ("sonnet&calc", "sonnet"),
+            ("haiku|pipe", "haiku"),
+            ("opus\"quoted", "opus"),
+            ("fable & calc & calc", "fable"),
+        ] {
+            assert_eq!(claude_model_alias(hostile), alias);
+            assert!(crate::harness_adapters::ensure_cmd_safe_model(alias).is_ok());
+        }
+        // Ids with NO family name pass through VERBATIM — the spawn-path
+        // `ensure_cmd_safe_model` gate (E-9c parity with the other harnesses)
+        // is what rejects those before the wrapper line is built.
+        for passthrough in ["gpt-4&calc", "weird|pipe", "evil\"quoted", "a&b&c"] {
+            let alias = claude_model_alias(passthrough);
+            assert_eq!(alias, passthrough);
+            assert!(
+                crate::harness_adapters::ensure_cmd_safe_model(&alias).is_err(),
+                "{passthrough} must be rejected before spawn"
+            );
+        }
+        // Real ids keep passing the gate (alias or not).
+        for ok in ["claude-sonnet-4-5", "Sonnet", "anthropic/claude-3.5-sonnet"] {
+            let alias = claude_model_alias(ok);
+            assert!(crate::harness_adapters::ensure_cmd_safe_model(&alias).is_ok(), "{ok}");
+        }
+    }
+
     /// G7 parity: automation one-shot prompts carry persona + instructions +
     /// custom prompt in the same order as the chat path, with the `---`
     /// separator only between prefix and prompt.
@@ -2058,6 +2116,7 @@ mod tests {
             Vec::new(),
             &generation,
             1,
+            None,
         );
 
         let conn = db.0.lock();
@@ -2103,6 +2162,7 @@ mod tests {
             Vec::new(),
             &generation,
             1,
+            None,
         );
 
         let conn = db.0.lock();
@@ -2141,6 +2201,7 @@ mod tests {
             Vec::new(),
             &generation,
             1,
+            None,
         );
 
         let conn = db.0.lock();

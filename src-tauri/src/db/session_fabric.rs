@@ -268,9 +268,19 @@ pub fn resolve_session_id(conn: &Connection, input: &str) -> Result<String, Stri
     if let Some(id) = exact {
         return Ok(id);
     }
-    let like = format!("{trimmed}%");
+    // Escape LIKE wildcards in the (model-supplied) input so `%` and `_`
+    // match literally — same contract as `search_chat_messages`. Unescaped,
+    // a "%%"-bearing probe would sweep every session into the candidate list
+    // instead of resolving a real prefix.
+    let like = format!(
+        "{}%",
+        trimmed
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
     let mut stmt = conn
-        .prepare("SELECT id FROM chat_sessions WHERE id LIKE ?1 ORDER BY last_active_at DESC")
+        .prepare("SELECT id FROM chat_sessions WHERE id LIKE ?1 ESCAPE '\\' ORDER BY last_active_at DESC")
         .map_err(|e| e.to_string())?;
     let rows: Vec<String> = stmt
         .query_map(params![like], |r| r.get(0))
@@ -489,5 +499,27 @@ mod tests {
         // No match → actionable error.
         assert!(resolve_session_id(&c, "zzzz").err().unwrap().contains("list_sessions"));
         assert!(resolve_session_id(&c, "  ").is_err());
+    }
+
+    #[test]
+    fn resolve_session_id_escapes_like_wildcards() {
+        let c = conn();
+        // "abc%wild" starts with a literal `%`, "abcxplain" differs after the
+        // prefix letters — unescaped, "abc%" and "abc_" would each wildcard-
+        // match BOTH rows and report a bogus ambiguity.
+        seed(&c, "abc%wild");
+        seed(&c, "abcxplain");
+
+        // A literal `%` in the input matches only the row that actually has
+        // one at that position.
+        assert_eq!(resolve_session_id(&c, "abc%").unwrap(), "abc%wild");
+        // A literal `_` matches nothing here (the old pattern treated it as a
+        // one-char wildcard and "resolved" the wrong row / a false ambiguity).
+        assert!(resolve_session_id(&c, "abc_").is_err());
+        // Escaping must not break ordinary prefix resolution.
+        assert_eq!(resolve_session_id(&c, "abcx").unwrap(), "abcxplain");
+        // A backslash in the input is itself escaped, not an escape char.
+        seed(&c, "bs\\id");
+        assert_eq!(resolve_session_id(&c, "bs\\").unwrap(), "bs\\id");
     }
 }

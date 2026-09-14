@@ -12,7 +12,10 @@ import * as Linking from 'expo-linking';
  * connect URL the relay layer already understands: `<ws|wss>://host[:port]#<token>`.
  *
  * Usage (integrator, from App.tsx):
- *   const dispose = initDeepLinkHandling((url) => connect(url));
+ *   const dispose = initDeepLinkHandling(
+ *     (url) => connect(url),
+ *     (token) => applyPairingToken(token),
+ *   );
  *   // call dispose() on unmount.
  */
 
@@ -89,18 +92,25 @@ export function parseRelayConnectLink(rawUrl: string): ParsedRelayLink | null {
 /**
  * Subscribe to relay deep links for the lifetime of the app.
  *
- * Calls `onUrl` for every recognized relay link: with the normalized
- * `ws(s)://host[:port]#<token>` connect URL when the link carried a host,
- * otherwise with the bare token string. Also checks `getInitialURL()` so a
- * cold start from a tapped link isn't missed. Returns an unsubscribe fn.
+ * Calls `onUrl` with the normalized `ws(s)://host[:port]#<token>` connect URL
+ * when the link carried a host, and `onToken` with the bare token when the
+ * link was token-only (`relay://connect#<token>`). Token-only links carry NO
+ * host — feeding the bare token to connect() as if it were a URL overwrites
+ * the stored relay URL and un-pairs the phone, so they are routed to the
+ * pairing-token flow instead. Also checks `getInitialURL()` so a cold start
+ * from a tapped link isn't missed. Returns an unsubscribe fn.
  */
-export function initDeepLinkHandling(onUrl: (url: string) => void): () => void {
+export function initDeepLinkHandling(
+  onUrl: (url: string) => void,
+  onToken: (token: string) => void,
+): () => void {
   let stale = false;
   const handle = (raw: string | null) => {
     if (stale || !raw) return;
     const parsed = parseRelayConnectLink(raw);
     if (!parsed) return;
-    onUrl(parsed.url ?? parsed.token);
+    if (parsed.url) onUrl(parsed.url);
+    else onToken(parsed.token);
   };
 
   void Linking.getInitialURL().then(handle).catch(() => {});

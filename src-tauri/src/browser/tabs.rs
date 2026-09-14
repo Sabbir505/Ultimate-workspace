@@ -33,19 +33,11 @@ impl BrowserManager {
         self.pane_active_tab.lock().remove(pane_id);
     }
 
-    /// Emit a `browser:resolve-pane-request` event to the frontend, asking it
-    /// to pick the best browser pane for `project_id`. Returns a req_id the
-    /// caller awaits via `resolve_pane_request_resolve`.
-    pub fn resolve_pane_request_emit(&self, project_id: &str) -> u64 {
-        let req_id = self.next_resolve_req.fetch_add(1, Ordering::SeqCst);
-        let (tx, _rx) = oneshot::channel::<Option<String>>();
-        self.pane_resolve_pending.lock().insert(req_id, tx);
-        let payload = serde_json::json!({ "reqId": req_id, "projectId": project_id });
-        let _ = self.app.emit("browser:resolve-pane-request", payload);
-        req_id
-    }
-
-    /// Receive the frontend's answer for a resolve-pane request.
+    /// Receive the frontend's answer for a resolve-pane request. Answers the
+    /// inline channel `resolve_pane_label` registers when it emits
+    /// `browser:resolve-pane-request` (there is deliberately no separate
+    /// "emit" helper — a helper would own only the sender, so the receiver
+    /// would drop before the frontend's answer ever arrived).
     pub fn resolve_pane_request_resolve(&self, req_id: u64, pane_id: Option<String>) {
         if let Some(tx) = self.pane_resolve_pending.lock().remove(&req_id) {
             let _ = tx.send(pane_id);
@@ -303,12 +295,21 @@ impl BrowserManager {
     }
 
     pub async fn close_tab_for_pane(&self, pane_id: &str, tab_id: &str) -> Result<String, String> {
+        // Only a CONFIRMED frontend close gets past this await — a failed
+        // request must not touch the native pane state.
         self.tab_request("close", pane_id, tab_id).await?;
-        // Defensive: drop our own map entry + visibility state in case the
-        // frontend's browser_close raced or was skipped.
+        // Close the NATIVE webview here too: the frontend's browser_close may
+        // race or be skipped, and dropping our map entry alone left the
+        // invisible webview floating over the UI as a click-blocking ghost
+        // block (same handling as close_pane_tabs — controller.Close() runs
+        // on the main thread for COM affinity). When the frontend already
+        // closed it, the entry is gone and this is a no-op.
         let label = browser_label(pane_id, tab_id);
+        self.in_flight.lock().remove(&label);
         self.tab_visible.lock().remove(&label);
-        self.webviews.lock().remove(&label);
+        if let Some(pane) = self.webviews.lock().remove(&label) {
+            let _ = self.run_main_thread_call(move || pane.close());
+        }
         Ok(tab_id.to_string())
     }
 

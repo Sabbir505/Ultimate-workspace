@@ -148,6 +148,18 @@ export function LocalModelsPanel() {
     }, 600);
   };
 
+  // Flush a pending overrides write on unmount: the debounce exists to batch
+  // rapid drags/typing, not to drop the final value when the panel closes
+  // before the timer fires (same flush the manual-save path below uses).
+  useEffect(() => {
+    return () => {
+      if (overridesPersistTimer.current === null) return;
+      window.clearTimeout(overridesPersistTimer.current);
+      overridesPersistTimer.current = null;
+      void setLocalModelOverrides(JSON.stringify(overridesMapRef.current));
+    };
+  }, []);
+
   const newChat = useChatStore((s) => s.newChat);
   const selectSession = useChatStore((s) => s.selectSession);
   const setActiveView = useUiStore((s) => s.setActiveView);
@@ -758,11 +770,16 @@ function LocalElectricitySettings() {
 
   useEffect(() => {
     const load = async () => {
-      const rate = await getSetting("localModels.electricityRateUsdPerKwh");
-      const watts = await getSetting("localModels.gpuPowerWatts");
-      setElecRate(rate ?? "");
-      setGpuWatts(watts ?? "");
-      setLoaded(true);
+      try {
+        const rate = await getSetting("localModels.electricityRateUsdPerKwh");
+        const watts = await getSetting("localModels.gpuPowerWatts");
+        setElecRate(rate ?? "");
+        setGpuWatts(watts ?? "");
+      } finally {
+        // A rejected load must not hide the section forever (`!loaded` renders
+        // null) — fall through to the empty defaults instead.
+        setLoaded(true);
+      }
     };
     void load();
   }, []);

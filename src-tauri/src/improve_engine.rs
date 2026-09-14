@@ -579,7 +579,7 @@ fn apply_regression_gate(outcomes: &[CaseOutcome]) -> String {
 
 fn eval_case(
     db: &Arc<parking_lot::Mutex<Connection>>,
-    artifact: &ImproveArtifact,
+    _artifact: &ImproveArtifact,
     base_body: &str,
     cand_body: &str,
     case: &EvalCase,

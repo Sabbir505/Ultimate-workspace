@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::agent_sessions::AgentSessionState;
 use crate::DbState;
@@ -67,19 +67,29 @@ pub async fn send_agent_chat_message(
     // Failure/None → send() falls back to the truncate-only primer.
     let primer_summary =
         crate::agent_sessions::build_primer_summary(&db, &chat_session_id, &harness_id).await;
-    state.0.send(
-        &app,
-        &db,
-        &chat_session_id,
-        &content,
-        &attach_prompt,
-        &harness_id,
-        model.as_deref().unwrap_or(""),
-        cwd.as_deref(),
-        project_id.as_deref(),
-        &connectors,
-        primer_summary.as_deref(),
-    )
+    // Run on a blocking worker like `cancel` below: `send` holds the
+    // per-session mutex for a whole turn's setup (git snapshot, bundle I/O,
+    // process spawn + wait-ready) — a whole blocking `send()` here would pin
+    // this tokio worker (including its 20s wait-ready poll) for that long.
+    let mgr = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app.state::<DbState>();
+        mgr.send(
+            &app,
+            &db,
+            &chat_session_id,
+            &content,
+            &attach_prompt,
+            &harness_id,
+            model.as_deref().unwrap_or(""),
+            cwd.as_deref(),
+            project_id.as_deref(),
+            &connectors,
+            primer_summary.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("send task panicked: {e}"))?
 }
 
 /// Cancel the in-flight turn (kills the CLI process; next send respawns).

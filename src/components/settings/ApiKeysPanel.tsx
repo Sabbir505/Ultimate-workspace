@@ -432,6 +432,10 @@ export function ApiKeysPanel() {
                           await loadConfigFn(nextId);
                         }
                         await refreshSavedProviders();
+                      }).catch((e) => {
+                        // A rejected delete used to vanish silently — same
+                        // toast the key-clear path uses.
+                        toastError("Couldn't clear the API key", String(e));
                       });
                     }}
                   >

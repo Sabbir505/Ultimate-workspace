@@ -633,6 +633,17 @@ pub fn harvest_eval_cases(
     max: i64,
 ) -> DbResult<usize> {
     let evidence = bad_runs_since(conn, artifact_id, since, max)?;
+    // Dedup: same input already covered by an existing case. ONE load of the
+    // artifact's stored inputs (the old per-run COUNT probe was a query per
+    // candidate run); the set also collapses repeats within this harvest.
+    let mut covered: std::collections::HashSet<String> = {
+        let mut stmt =
+            conn.prepare("SELECT input_text FROM improve_eval_cases WHERE artifact_id = ?1")?;
+        let rows = stmt.query_map(params![artifact_id], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<String>, _>>()?
+    }
+    .into_iter()
+    .collect();
     let mut added = 0;
     for e in evidence {
         let Some(input) = e.input_text.as_deref() else {
@@ -641,13 +652,7 @@ pub fn harvest_eval_cases(
         if input.trim().is_empty() {
             continue;
         }
-        // Dedup: same input already covered by an existing case.
-        let dup: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM improve_eval_cases WHERE artifact_id = ?1 AND input_text = ?2",
-            params![artifact_id, input],
-            |r| r.get(0),
-        )?;
-        if dup > 0 {
+        if !covered.insert(input.to_string()) {
             continue;
         }
         add_eval_case(
@@ -683,12 +688,14 @@ pub fn set_autonomy(conn: &Connection, artifact_id: &str, tier: &str) -> DbResul
         "UPDATE improve_artifacts SET autonomy = ?2 WHERE id = ?1",
         params![artifact_id, tier],
     )?;
+    // serde_json builds the audit detail — string formatting would break
+    // (unescaped quotes) the moment a tier value isn't a plain identifier.
     record_event(
         conn,
         Some(artifact_id),
         None,
         "tier_changed",
-        Some(&format!("{{\"tier\":\"{tier}\"}}")),
+        Some(&serde_json::json!({ "tier": tier }).to_string()),
     )
 }
 

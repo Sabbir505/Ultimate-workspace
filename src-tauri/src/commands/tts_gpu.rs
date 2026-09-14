@@ -329,7 +329,7 @@ async fn download_pinned<R: tauri::Runtime>(
                 "[tts] {label}: range start unconfirmed (got {confirmed_offset:?}, wanted {have}); restarting the download"
             );
         }
-        let total = if resuming {
+        let _total = if resuming {
             resp.content_length().map(|c| c + have)
         } else {
             resp.content_length()
@@ -665,8 +665,12 @@ pub async fn synthesize_gpu(
             output.status
         ));
     }
-    let bytes = std::fs::read(&out)
-        .map_err(|e| format!("the GPU engine reported success but wrote no audio: {e}"))?;
+    let bytes = std::fs::read(&out).map_err(|e| {
+        // The temp WAV must not leak on this path either (a failed final read
+        // used to leave relay-tts-*.wav files in the temp dir forever).
+        let _ = std::fs::remove_file(&out);
+        format!("the GPU engine reported success but wrote no audio: {e}")
+    })?;
     let _ = std::fs::remove_file(&out);
     eprintln!(
         "[tts] gpu synthesized {} chars -> {} KB in {} ms",

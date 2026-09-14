@@ -42,7 +42,13 @@ export function AcpAgentsPanel() {
   const [draftEnv, setDraftEnv] = useState("");
 
   const refresh = useCallback(async () => {
-    setAgents(await listAcpAgentDefs());
+    try {
+      setAgents(await listAcpAgentDefs());
+    } catch (err) {
+      // A rejected boot load must not leave the panel silently empty —
+      // surface it in the panel's existing error slot.
+      setError(`Failed to load agents: ${String(err)}`);
+    }
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);

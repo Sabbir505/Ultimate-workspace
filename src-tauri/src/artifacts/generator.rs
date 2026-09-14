@@ -332,7 +332,10 @@ async fn call_llm_structured(
     user_prompt: &str,
     json_schema: &Value,
 ) -> Result<ArtifactSpec, String> {
-    let client = Client::new();
+    // Bounded one-shot client (B-10, same shape as chat::llm_client): a
+    // wedged endpoint used to hang the /create flow forever — stream:false
+    // calls have no natural cutoff.
+    let client = crate::chat::llm_client::oneshot_client().unwrap_or_else(|_| Client::new());
 
     // Harness-agent sessions ("harness:<id>" rides in `provider` from
     // get_llm_context) have no HTTP endpoint — generation runs through the

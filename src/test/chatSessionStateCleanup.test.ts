@@ -45,6 +45,7 @@ import { useChatStore } from "../state/chat";
 const id = "sess-leak";
 
 function seedMaps() {
+  const other = "sess-keep";
   useChatStore.setState({
     sessions: [{ id, title: "t", provider: "openai", model: "m", createdAt: 0, lastActiveAt: 0 } as never],
     // One entry per audited map, keyed to the session about to be deleted.
@@ -52,6 +53,14 @@ function seedMaps() {
     citationReports: { [id]: { chatSessionId: id } } as never,
     stoppedPartial: { [id]: "x".repeat(2048) } as never,
     artifactProposals: { [id]: [{ id: "p1", proposal: {}, state: "ready" }] } as never,
+    // Session Mesh (audit #7): mail records where the deleted chat is either
+    // party, plus its per-session mail index and spawned-children list.
+    meshMail: {
+      m1: { mailId: "m1", fromSession: id, fromTitle: "t", toSession: other, toTitle: "k", mode: "question", status: "answered", bodyExcerpt: "b", answerExcerpt: "a", depth: 0 },
+      m2: { mailId: "m2", fromSession: other, fromTitle: "k", toSession: "third", toTitle: "z", mode: "notify", status: "delivered", bodyExcerpt: "b", answerExcerpt: null, depth: 0 },
+    } as never,
+    meshMailBySession: { [id]: ["m1"], [other]: ["m2"] } as never,
+    meshChildren: { [id]: [{ childId: "kid", title: "T", agent: "opencode" }] } as never,
   });
 }
 
@@ -79,6 +88,19 @@ describe("A1: per-session maps are cleared with their session", () => {
     // for the rest of the app run.
     expect(id in s.stoppedPartial).toBe(false);
     expect(id in s.artifactProposals).toBe(false);
+  });
+
+  it("deleteChat strips Session Mesh mail/index/children involving the chat", async () => {
+    await useChatStore.getState().deleteChat(id);
+
+    const s = useChatStore.getState();
+    // Both parties' records referencing the deleted chat are gone…
+    expect(s.meshMail["m1"]).toBeUndefined();
+    expect(id in s.meshMailBySession).toBe(false);
+    expect(id in s.meshChildren).toBe(false);
+    // …while unrelated mail survives.
+    expect(s.meshMail["m2"]).toBeDefined();
+    expect(s.meshMailBySession["sess-keep"]).toEqual(["m2"]);
   });
 
   it("deleteAllChats resets citationReports/stoppedPartial/artifactProposals too", async () => {

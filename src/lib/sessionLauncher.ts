@@ -256,6 +256,18 @@ export function openBrowserPane(): void {
   surfaceBrowserTab(paneId);
 }
 
+/** Build a well-formed file:/// URL for a local artifact path: forward
+ *  slashes only (Windows paths arrive with backslashes, which are invalid in
+ *  URLs), and `%`/`#`/`?` percent-encoded. encodeURI already escapes a bare
+ *  `%` to `%25` (so a literal percent in a filename round-trips correctly)
+ *  but keeps `#`/`?`, which would truncate the URL at the fragment/query —
+ *  those are re-encoded below (audit L5). */
+export function artifactFileUrl(path: string): string {
+  return encodeURI(`file:///${path.replace(/^\/+/, "").replace(/\\/g, "/")}`)
+    .replace(/#/g, "%23")
+    .replace(/\?/g, "%3F");
+}
+
 /** Open a file artifact in the Browser tab. Adds a new tab (or focuses an
  *  existing one) on a browser pane, navigates it to the local file, and
  *  surfaces the panel. */
@@ -270,13 +282,7 @@ export function openArtifactInBrowserPane(path: string): void {
   const browsers = store.panes.filter(
     (p) => p.data.kind === "browser" && !p.data.collapsed,
   );
-  // Build a well-formed file URL: forward slashes only (Windows paths arrive
-  // with backslashes, which are invalid in URLs), and `#`/`?` percent-encoded
-  // (encodeURI leaves them, and a `#` truncates the URL at the fragment —
-  // files with those characters failed to load; audit L5).
-  const fileUrl = encodeURI(`file:///${path.replace(/^\/+/, "").replace(/\\/g, "/")}`)
-    .replace(/#/g, "%23")
-    .replace(/\?/g, "%3F");
+  const fileUrl = artifactFileUrl(path);
   if (browsers.length > 0) {
     const target = browsers[browsers.length - 1];
     if (target.data.kind === "browser") {

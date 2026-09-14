@@ -100,6 +100,20 @@ describe("session mesh store", () => {
     expect(list.includes("m39")).toBe(true);
   });
 
+  it("caps the total mail-record map so it cannot grow for the whole app run", () => {
+    // 120 distinct mails: meshMail (keyed by mailId) must stay bounded —
+    // oldest-inserted records evict, newest survive (audit #7).
+    for (let i = 0; i < 120; i++) {
+      useChatStore
+        .getState()
+        .onSessionMail(mail({ mailId: `m${i}`, toSession: "b", toTitle: "T" }));
+    }
+    const meshMail = useChatStore.getState().meshMail;
+    expect(Object.keys(meshMail).length).toBeLessThanOrEqual(100);
+    expect(meshMail["m0"]).toBeUndefined();
+    expect(meshMail["m119"]?.status).toBe("queued");
+  });
+
   it("pre-creates the target's streaming entry when mail is delivered", () => {
     // onToken never CREATES a streaming entry — mesh turns start Rust-side,
     // so without this pre-creation every token from a mail-triggered turn

@@ -25,6 +25,7 @@ import {
 import { useChatStore } from "../../state/chat";
 import { usePanesStore } from "../../state/panes";
 import { useUiStore } from "../../state/ui";
+import { toastError } from "../../lib/ipc";
 import { relativeTime } from "../../lib/relativeTime";
 import { useOcclusion } from "../../hooks/useOcclusion";
 
@@ -113,7 +114,13 @@ export function NotificationBell() {
   const handleOpenRow = useCallback((n: RelayNotification) => {
     // Navigate to whatever the row points at, then drop it from the panel.
     if (n.chatSessionId) {
-      void useChatStore.getState().selectSession(n.chatSessionId);
+      // selectSession hits the DB and can reject (e.g. a brief lock) — same
+      // toast as the command palette's open path instead of an unhandled
+      // rejection.
+      void useChatStore
+        .getState()
+        .selectSession(n.chatSessionId)
+        .catch((err) => toastError("Couldn't open that chat", err));
       // selectSession only flips chat state — without an explicit view
       // switch (automation rows carry view:"automations") the click
       // switched chats invisibly behind the current view.

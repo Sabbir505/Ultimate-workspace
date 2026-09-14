@@ -109,15 +109,23 @@ function MinimalTabBar({ state, navigation }: any) {
 function AppShell() {
   const { isDark } = useTheme();
   const c = theme.colors;
-  const { connect, connected } = useRelay();
+  const { connect, applyPairingToken, connected } = useRelay();
 
   // relay:// deep links (QR-free pairing from e.g. a desktop-shown link):
-  // a valid relay URL connects immediately.
+  // a link with a host carries a full connect URL; a token-only link
+  // (`relay://connect#<token>`) must NOT hit connect() as a URL (it would
+  // overwrite the stored relay URL with the bare token) — it goes to the
+  // pairing-token flow instead.
   useEffect(() => {
-    return initDeepLinkHandling((url) => {
-      if (url) connect(url);
-    });
-  }, [connect]);
+    return initDeepLinkHandling(
+      (url) => {
+        if (url) connect(url);
+      },
+      (token) => {
+        if (token) applyPairingToken(token);
+      },
+    );
+  }, [connect, applyPairingToken]);
 
   // App lock: when enabled, backgrounding the app arms the gate; returning
   // after the grace window requires Face ID / fingerprint / passcode. The

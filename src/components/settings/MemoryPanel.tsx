@@ -260,6 +260,8 @@ export function MemoryPanel() {
       await memorySetExtractModel(value);
       setExtractModelSaved(true);
       window.setTimeout(() => setExtractModelSaved(false), 2500);
+    } catch (err) {
+      toastError("Couldn't save the extraction model", err);
     } finally {
       setBusy(false);
     }
@@ -269,7 +271,13 @@ export function MemoryPanel() {
     setListTab(tab);
     // Audit rows load lazily the first time the tab opens.
     if (tab === "audit" && ops === null) {
-      void memoryRecentOps(30).then((rows) => setOps(rows ?? []));
+      void memoryRecentOps(30)
+        .then((rows) => setOps(rows ?? []))
+        .catch((err) => {
+          // Degrade to an empty log so the pane doesn't spin forever.
+          setOps([]);
+          toastError("Couldn't load the audit log", err);
+        });
     }
   };
 
@@ -290,6 +298,8 @@ export function MemoryPanel() {
       await memorySetExtractModel(value);
       setExtractModelSaved(true);
       window.setTimeout(() => setExtractModelSaved(false), 2500);
+    } catch (err) {
+      toastError("Couldn't save the extraction model", err);
     } finally {
       setBusy(false);
     }
@@ -299,7 +309,14 @@ export function MemoryPanel() {
     const next = !historyOpen;
     setHistoryOpen(next);
     if (next && history === null) {
-      setHistory((await memoryDocumentHistory(20)) ?? []);
+      try {
+        setHistory((await memoryDocumentHistory(20)) ?? []);
+      } catch (err) {
+        // Degrade to "no versions" so the History pane doesn't show
+        // "Loading…" forever after a failed fetch.
+        setHistory([]);
+        toastError("Couldn't load version history", err);
+      }
     }
   };
 
@@ -364,13 +381,21 @@ export function MemoryPanel() {
     try {
       await memoryPurge();
       await refresh();
+    } catch (err) {
+      toastError("Couldn't delete the memories", err);
     } finally {
       setBusy(false);
     }
   };
 
   const exportAll = async () => {
-    const json = await memoryExport();
+    let json: string | null;
+    try {
+      json = await memoryExport();
+    } catch (err) {
+      toastError("Couldn't export memories", err);
+      return;
+    }
     if (!json) return;
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);

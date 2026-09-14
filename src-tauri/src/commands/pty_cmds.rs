@@ -188,7 +188,9 @@ fn append_config_flag(spec: &mut CommandSpec, flag: &str, cfg_path: &Path) {
 ///
 /// The command string is whatever the renderer sent, so it passes the native
 /// exec gate (exec_gate.rs) first: a native OS dialog shows the exact command
-/// and working folder, and Allow is remembered PER FOLDER in settings. A
+/// and working folder, and Allow is remembered PER EXACT COMMAND LINE in
+/// settings (same identity rule as the MCP-connect gate — one Allow must not
+/// approve every future command that happens to share the folder). A
 /// compromised webview therefore cannot run anything the user hasn't seen.
 #[tauri::command(async)]
 pub fn spawn_shell(
@@ -212,10 +214,14 @@ pub fn spawn_shell(
         &db.0,
         &app,
         "spawn_shell",
-        &cwd,
+        // Remembered per EXACT command line, not per working folder — a
+        // folder-scoped approval let one Allow bless every future command
+        // in that folder. The folder stays visible in the dialog for the
+        // user's decision; only the remember key narrowed.
+        &command,
         "Relay — run this shell command?",
         &format!(
-            "An app window asked to run a shell command in:\n{cwd}\n\nCommand:\n{command}{secret_note}\n\nAllow it? \"Allow\" also remembers this folder."
+            "An app window asked to run a shell command in:\n{cwd}\n\nCommand:\n{command}{secret_note}\n\nAllow it? \"Allow\" also remembers this exact command."
         ),
     );
     if !allowed {

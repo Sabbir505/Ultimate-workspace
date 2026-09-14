@@ -629,7 +629,11 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     // Promise-holding pattern — see the file-list effect above: call the
     // unlisten even if it resolves after this component already unmounted.
     const listenReady = safeListen<string>("project:fs-changed", (changedPath) => {
-      if (pathUnderChanged(cwd, changedPath)) {
+      // Filter on diffCwd — the cwd this effect actually fetches against.
+      // For an external peek diffCwd is the peek's folder, and filtering on
+      // the bound pane's cwd instead meant changes under the peeked repo
+      // never re-ticked the diff (no live refresh).
+      if (pathUnderChanged(diffCwd, changedPath)) {
         tick();
       }
     });

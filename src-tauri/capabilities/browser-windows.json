@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "browser-windows",
+  "description": "Minimal core-only capability for auxiliary browser-pane windows and any future oauth-* windows. No fs/dialog/opener/notification/updater: browser panes never load the Relay frontend (on Windows they are raw WebView2 controllers outside Tauri's IPC entirely, and the Linux standalone windows navigate to external page content), and the OAuth flow opens the system browser with a Rust-side loopback callback (no oauth-* window is ever created), so neither invokes a single plugin.",
+  "windows": [
+    "browser-*",
+    "oauth-*"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:webview:default"
+  ]
+}

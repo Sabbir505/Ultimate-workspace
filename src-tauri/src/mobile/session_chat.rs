@@ -22,6 +22,17 @@ use super::relay_owner::SessionChatOwnerPayload;
 /// Ensure the `owner_session_id` column exists on `chat_sessions`.
 /// Called lazily from fetch_page / handle — safe to call multiple times.
 pub fn ensure_chat_session_owner_column(conn: &Connection) -> Result<(), String> {
+    // Cheap schema-only probe first: in the steady state (column present)
+    // this replaces the per-call ALTER attempt, which took the write lock
+    // and logged a duplicate-column error EVERY call. (A process-wide
+    // once-flag would be wrong here — fresh in-memory DBs, e.g. tests, each
+    // need their own ALTER.)
+    if conn
+        .prepare("SELECT owner_session_id FROM chat_sessions LIMIT 0")
+        .is_ok()
+    {
+        return Ok(());
+    }
     let sql = "ALTER TABLE chat_sessions ADD COLUMN owner_session_id TEXT";
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
@@ -546,25 +557,42 @@ fn handle_resolve_session_approval(
     let chat_session_id = pending.chat_session_id.clone();
 
     if approved && always_allow && ALWAYS_ALLOWABLE_TOOLS.contains(&tool.as_str()) {
-        let conn = db.lock();
-        // The rules live in app_settings as a JSON array (same store the
-        // desktop settings UI writes). An empty pattern matches every path —
-        // still scope-gated by the dispatcher's fs_roots containment, so this
-        // can never widen writes outside the granted roots.
-        let mut rules: Vec<serde_json::Value> = db::get_setting(&conn, "permissions.rules")
-            .ok()
-            .flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        rules.push(serde_json::json!({
-            "id": uuid::Uuid::new_v4().to_string(),
-            "tool": tool,
-            "pattern": "",
-            "createdAt": db::now_ts(),
-        }));
-        let serialized = serde_json::to_string(&rules)
-            .map_err(|e| format!("failed to serialize approval rules: {e}"))?;
-        let _ = db::set_setting(&conn, "permissions.rules", &serialized);
+        // Scope the persisted rule to the approved action's target directory.
+        // The old empty pattern matched EVERY path for the tool — one phone
+        // tap auto-approved writes anywhere the fs_roots containment allows.
+        // move_file/copy_file gate on their write-side (`dest`) path; the
+        // other mutators on `path`. No resolvable parent → no rule (fail
+        // closed); the one-shot approval itself still goes through below.
+        let target_key = if tool == "move_file" || tool == "copy_file" {
+            "dest"
+        } else {
+            "path"
+        };
+        let dir = pending
+            .args
+            .get(target_key)
+            .and_then(|v| v.as_str())
+            .map(std::path::Path::new)
+            .and_then(|p| p.parent())
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .filter(|d| !d.trim().is_empty());
+        if let Some(dir) = dir {
+            let conn = db.lock();
+            let mut rules: Vec<serde_json::Value> = db::get_setting(&conn, "permissions.rules")
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            rules.push(serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "tool": tool,
+                "pattern": format!("{dir}/**"),
+                "createdAt": db::now_ts(),
+            }));
+            let serialized = serde_json::to_string(&rules)
+                .map_err(|e| format!("failed to serialize approval rules: {e}"))?;
+            let _ = db::set_setting(&conn, "permissions.rules", &serialized);
+        }
     }
 
     // Deliver the decision via the oneshot channel. A send error means the
@@ -787,6 +815,20 @@ fn handle_list_session_artifacts(
     }])
 }
 
+/// Run a blocking file read + encode off the async runtime workers: up to
+/// 8 MB of `fs::read` plus base64 used to run inline inside the relay's
+/// WebSocket task. `handle_read_artifact` is reached through the sync
+/// dispatch chain (which can run ON a runtime worker), so the result is
+/// joined via a plain channel — `block_on` from inside a runtime would
+/// panic, a channel recv is safe from any thread.
+fn blocking_read<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv().expect("blocking artifact read panicked")
+}
+
 fn handle_read_artifact(
     app: &AppHandle,
     db: &Arc<Mutex<Connection>>,
@@ -834,7 +876,9 @@ fn handle_read_artifact(
     let is_text = PREVIEWABLE_TEXT_EXTS.contains(&kind.as_str());
 
     if is_text {
-        let bytes = std::fs::read(path).map_err(|e| format!("failed to read artifact: {e}"))?;
+        let read_path = path.to_string();
+        let bytes = blocking_read(move || std::fs::read(&read_path))
+            .map_err(|e| format!("failed to read artifact: {e}"))?;
         let truncated = bytes.len() > TEXT_PREVIEW_CAP;
         let take = if truncated {
             TEXT_PREVIEW_CAP
@@ -858,14 +902,19 @@ fn handle_read_artifact(
     match meta {
         Ok(m) if m.len() as usize <= BINARY_CAP => {
             use base64::Engine as _;
-            let bytes = std::fs::read(path).map_err(|e| format!("failed to read artifact: {e}"))?;
+            let read_path = path.to_string();
+            let data_base64 = blocking_read(move || -> Result<String, String> {
+                let bytes =
+                    std::fs::read(&read_path).map_err(|e| format!("failed to read artifact: {e}"))?;
+                Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+            })?;
             Ok(vec![DesktopMessage::ArtifactContent {
                 session_id: owner_session_id,
                 path: path.to_string(),
                 filename,
                 kind,
                 text: None,
-                data_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                data_base64: Some(data_base64),
                 truncated: false,
             }])
         }

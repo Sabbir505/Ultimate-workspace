@@ -95,6 +95,30 @@ describe("WebSearchPanel key input debounce (C12)", () => {
     expect(setSettingMock).toHaveBeenCalledTimes(1);
     expect(setSettingMock).toHaveBeenCalledWith("search.serper_key", "k".repeat(30));
   });
+
+  it("unmount before the debounce elapses → flushes the pending value", async () => {
+    // Audit 2026-09-14 #7: the unmount cleanup used to only CLEAR the timers,
+    // dropping the last keystrokes' value entirely.
+    vi.useFakeTimers();
+    useUiStore.setState({ activeView: "settings", settingsCategory: "websearch" });
+    const { container, unmount } = render(<SettingsView />);
+    await act(async () => {});
+    const select = container.querySelector("select")!;
+    await act(async () => {
+      fireEvent.change(select, { target: { value: "tavily" } });
+    });
+    setSettingMock.mockClear();
+
+    const input = screen.getByPlaceholderText("Paste your API key…");
+    fireEvent.change(input, { target: { value: "pending-key" } });
+    expect(setSettingMock).not.toHaveBeenCalled();
+
+    // Close the panel BEFORE the 400ms debounce fires.
+    await act(async () => {
+      unmount();
+    });
+    expect(setSettingMock).toHaveBeenCalledWith("search.tavily_key", "pending-key");
+  });
 });
 
 describe("MemoryPanel extraction-model input debounce (C12)", () => {

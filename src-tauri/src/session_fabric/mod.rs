@@ -707,6 +707,23 @@ async fn mesh_message_session(app: &AppHandle, caller_sid: Option<&str>, args: &
     let queued = deliver_or_queue(app, &mail).await;
     match queued {
         Err(e) => {
+            // MED-11: a busy-race rejection requeues the mail for the pump
+            // instead of rejecting it — and KEEPS the parked answer waiter
+            // (the delivery watcher resolves it once the turn answers).
+            if is_busy_race_error(&e) {
+                {
+                    let conn = db.0.lock();
+                    let _ = store::set_mail_status(&conn, &mail.id, store::MAIL_QUEUED, None);
+                }
+                emit_mail_status(app, &mail, store::MAIL_QUEUED, None);
+                pump_kick(app, mail.to_session.clone());
+                return format!(
+                    "Session \"{target}\" is mid-turn — the message is QUEUED and will be \
+                     delivered when its current turn completes. It will arrive as a \
+                     follow-up turn in your session (question mode) — do not poll; keep \
+                     working and the answer reaches you."
+                );
+            }
             if watch_enabled {
                 rt.answer_waiters
                     .lock()
@@ -753,6 +770,14 @@ async fn mesh_message_session(app: &AppHandle, caller_sid: Option<&str>, args: &
              session. Keep working; don't poll."
         ),
     }
+}
+
+/// MED-11: true when the error is `AgentSessionManager::send`'s busy
+/// rejection ("a turn is already running for this chat") — i.e. the target
+/// went busy between our `session_busy` check and the actual send. Such a
+/// mail is requeued for the pump instead of rejected permanently.
+fn is_busy_race_error(e: &str) -> bool {
+    e.contains("a turn is already running")
 }
 
 /// Deliver now, or (busy target) enqueue for the pump. `Ok(true)` = delivered,
@@ -825,18 +850,30 @@ fn spawn_answer_watcher(app: AppHandle, mail: store::MailRow, watermark: i64) {
 /// a parked tool call, and (for an already-timed-out asker) push the answer
 /// back as a follow-up turn.
 async fn watch_answer(app: AppHandle, mail: store::MailRow, watermark: i64) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(WATCHER_CEILING_SECS);
+    let mut deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(WATCHER_CEILING_SECS);
     // Wait for the turn to actually start (send() may still be setting up).
     tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
+    // LOW-18: re-arm ONCE when the ceiling elapses while the target is STILL
+    // mid-turn — a long coding turn legitimately outlives the first window,
+    // and expiring then lost an answer that was on its way. A second expiry
+    // (or an already-idle target) takes the normal expiry path.
+    let mut rearmed = false;
     loop {
         if std::time::Instant::now() >= deadline {
-            let db = app.state::<DbState>();
-            let conn = db.0.lock();
-            let _ = store::set_mail_status(&conn, &mail.id, store::MAIL_EXPIRED, None);
-            drop(conn);
-            emit_mail_status(&app, &mail, store::MAIL_EXPIRED, None);
-            resolve_waiter(&app, &mail.id, None);
-            return;
+            if !rearmed && session_busy(&app, &mail.to_session) {
+                rearmed = true;
+                deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(WATCHER_CEILING_SECS);
+            } else {
+                let db = app.state::<DbState>();
+                let conn = db.0.lock();
+                let _ = store::set_mail_status(&conn, &mail.id, store::MAIL_EXPIRED, None);
+                drop(conn);
+                emit_mail_status(&app, &mail, store::MAIL_EXPIRED, None);
+                resolve_waiter(&app, &mail.id, None);
+                return;
+            }
         }
         if !session_busy(&app, &mail.to_session) {
             break;
@@ -961,6 +998,9 @@ fn pump_kick(app: &AppHandle, target: String) {
                 let _ = store::set_mail_status(&conn, &mail.id, store::MAIL_EXPIRED, None);
                 drop(conn);
                 emit_mail_status(&app, &mail, store::MAIL_EXPIRED, None);
+                // Never-delivered mail: the parked asker must not hang on a
+                // waiter that will now never be resolved by a watcher.
+                resolve_waiter(&app, &mail.id, None);
                 continue;
             }
             if session_busy(&app, &target) {
@@ -979,12 +1019,27 @@ fn pump_kick(app: &AppHandle, target: String) {
                         tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
                     }
                 }
-                Err(_) => {
-                    let db = app.state::<DbState>();
-                    let conn = db.0.lock();
-                    let _ = store::set_mail_status(&conn, &mail.id, store::MAIL_REJECTED, None);
-                    drop(conn);
-                    emit_mail_status(&app, &mail, store::MAIL_REJECTED, None);
+                Err(e) => {
+                    // MED-11: a busy-race rejection (target went busy between
+                    // the check above and the send) requeues the mail — the
+                    // loop re-picks it once the target idles. MED-6: every
+                    // terminal path here must also resolve the parked answer
+                    // waiter, or the asker's tool call hangs forever.
+                    let busy_race = is_busy_race_error(&e);
+                    let status = if busy_race {
+                        store::MAIL_QUEUED
+                    } else {
+                        store::MAIL_REJECTED
+                    };
+                    {
+                        let db = app.state::<DbState>();
+                        let conn = db.0.lock();
+                        let _ = store::set_mail_status(&conn, &mail.id, status, None);
+                    }
+                    emit_mail_status(&app, &mail, status, None);
+                    if !busy_race {
+                        resolve_waiter(&app, &mail.id, None);
+                    }
                 }
             }
         }
@@ -1663,5 +1718,15 @@ mod tests {
         assert_eq!(age_str(now - 300), "5m ago");
         assert_eq!(age_str(now - 7_200), "2h ago");
         assert_eq!(age_str(now - 3 * 86_400), "3d ago");
+    }
+
+    /// MED-11: exactly `AgentSessionManager::send`'s busy rejection counts as
+    /// a busy-race (→ requeue); every other send failure is terminal.
+    #[test]
+    fn busy_race_error_classifier() {
+        assert!(is_busy_race_error("a turn is already running for this chat"));
+        assert!(!is_busy_race_error("failed to spawn claude CLI: not found"));
+        assert!(!is_busy_race_error("target session vanished"));
+        assert!(!is_busy_race_error(""));
     }
 }

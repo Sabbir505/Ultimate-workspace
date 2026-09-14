@@ -146,6 +146,12 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
   // in the pane header (e.g. "Editing 3 files"). Debounced to 500ms to avoid
   // thrashing the store on rapid streaming output.
   const activityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Output ingest registered by the activity effect below and invoked from
+  // BOTH output paths (channel frames + the pty:output event fallback). The
+  // backend only emits the event when no channel consumer is subscribed, and
+  // this pane always subscribes on mount — so the channel frames are the only
+  // live path and the activity parser must see them.
+  const frameSinkRef = useRef<((text: string) => void) | null>(null);
 
   function parseActivity(text: string): string | null {
     // Claude Code patterns: "⏺ Reading …", "⏺ Writing …", "⏺ Editing …"
@@ -193,14 +199,16 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     return blocks;
   }
 
-  // Listen to pty:output for this pane to detect activity patterns.
+  // Detect activity patterns from this pane's output. Primary input is the
+  // coalesced channel frames (registered via frameSinkRef by the terminal
+  // effect below); the pty:output listener stays as a fallback for when no
+  // channel consumer is subscribed (tests, headless dev).
   // Debounce: update the store at most once per 500ms; only set when changed.
   // Also scan for completed fenced code blocks (```mermaid, ```html, ```jsx/tsx)
   // and accumulate them in the activity feed below the terminal.
   useEffect(() => {
     let buf = "";
-    const unlisten = safeListen<PtyOutputPayload>("pty:output", ({ paneId: id, data }) => {
-      if (id !== paneId) return;
+    const ingest = (data: string) => {
       buf += data;
       // Keep the buffer bounded to recent output (~8KB tail).
       if (buf.length > 8192) buf = buf.slice(-8192);
@@ -229,8 +237,14 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
           });
         }
       }, 500);
+    };
+    frameSinkRef.current = ingest;
+    const unlisten = safeListen<PtyOutputPayload>("pty:output", ({ paneId: id, data }) => {
+      if (id !== paneId) return;
+      ingest(data);
     });
     return () => {
+      frameSinkRef.current = null;
       void unlisten.then((fn) => fn());
       if (activityTimerRef.current) clearTimeout(activityTimerRef.current);
       activityTimerRef.current = null;
@@ -339,6 +353,8 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     // re-attached automatically if the Channel path is unavailable.
     let channelUnsub: (() => void) | null = null;
     let subscribedChannel: { onmessage: ((frame: number[]) => void) | null } | null = null;
+    // Shared decoder for channel frames → activity-feed text (see handler).
+    const frameDecoder = new TextDecoder();
     // The channel subscription is async: if this effect's cleanup runs before
     // ptyChannel resolves (pane replaced, StrictMode remount), the `.then`
     // below must NOT attach the handler to the disposed terminal — it would
@@ -355,7 +371,14 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
         return;
       }
       const handler = (frame: number[]) => {
-        if (term) term.write(new Uint8Array(frame));
+        const bytes = new Uint8Array(frame);
+        if (term) term.write(bytes);
+        // Feed the activity parser the same frames (PERFORMANCE_AUDIT.md C1):
+        // the backend skips the pty:output event whenever a channel consumer
+        // is registered, so without this the activity feed + pane-header chip
+        // can never fire. Frames are complete UTF-8 — the backend carries
+        // torn sequences over to the next frame.
+        frameSinkRef.current?.(frameDecoder.decode(bytes));
       };
       ch.onmessage = handler;
       subscribedChannel = ch;

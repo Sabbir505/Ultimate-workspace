@@ -231,7 +231,10 @@ function InlineRun({
                 key={i}
                 style={[baseStyle, styles.link, { color: theme.colors.accent }]}
                 onPress={() => {
-                  // Links are always absolute-ish http(s) — never navigate.
+                  // Scheme allowlist: model-rendered markdown can carry
+                  // arbitrary URLs — only real web links may reach the OS
+                  // (no file://, intent:, or custom-scheme tricks).
+                  if (!/^https?:\/\//i.test(t.url)) return;
                   void Linking.openURL(t.url).catch(() => {});
                 }}
               >

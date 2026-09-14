@@ -326,10 +326,6 @@ fn openai_wire_max_tokens(req: &ChatRequest) -> Option<u32> {
 ///
 /// Returns the (max_tokens, thinking) pair for the request body.
 fn anthropic_thinking_for(req: &ChatRequest) -> (i64, Option<AnthropicThinking>) {
-    // E-3: a caller-set max_tokens <= 1024 would make budget_tokens >=
-    // max_tokens, which Anthropic rejects outright (budget must be strictly
-    // smaller). Floor the cap so the thinking-enabled request stays valid.
-    let mut max_tokens = req.max_tokens.unwrap_or(4096).max(3072);
     let explicit_off = req.thinking == Some(false);
     let tier_budget = match req.effort.as_deref() {
         Some("low") => Some(4_096i64),
@@ -338,7 +334,15 @@ fn anthropic_thinking_for(req: &ChatRequest) -> (i64, Option<AnthropicThinking>)
         _ => None,
     };
     let thinking_on = !explicit_off && (req.thinking == Some(true) || tier_budget.is_some());
+    // E-3: a caller-set max_tokens <= 1024 would make budget_tokens >=
+    // max_tokens, which Anthropic rejects outright (budget must be strictly
+    // smaller). Floor the cap so the thinking-enabled request stays valid —
+    // but ONLY when thinking will actually be emitted: the unconditional
+    // floor used to silently override a deliberate small cap on plain
+    // (thinking-off) requests.
+    let mut max_tokens = req.max_tokens.unwrap_or(4096);
     if thinking_on {
+        max_tokens = max_tokens.max(3072);
         if let Some(budget) = tier_budget {
             // Reserve at least 1024 tokens for the visible answer above the
             // thinking budget.
@@ -1150,6 +1154,27 @@ mod tests {
         r.thinking = None;
         let (_, thinking) = anthropic_thinking_for(&r);
         assert!(thinking.is_some());
+    }
+
+    #[test]
+    fn thinking_off_preserves_a_small_max_tokens_cap() {
+        // The 3072 floor exists to keep budget_tokens < max_tokens, so it must
+        // apply only when thinking will be emitted — an unconditional floor
+        // silently overrode a deliberate small cap on thinking-off requests.
+        let mut r = bare_req();
+        r.max_tokens = Some(1024);
+        r.thinking = Some(false);
+        let (max, thinking) = anthropic_thinking_for(&r);
+        assert_eq!(max, 1024);
+        assert!(thinking.is_none());
+
+        // The floor still applies when thinking is on (and the request stays
+        // valid: budget < cap).
+        r.thinking = Some(true);
+        let (max, thinking) = anthropic_thinking_for(&r);
+        assert_eq!(max, 3072);
+        let t = thinking.expect("thinking on");
+        assert!(t.budget_tokens < max);
     }
 
     // ---- Anthropic wire-body cache tests ----

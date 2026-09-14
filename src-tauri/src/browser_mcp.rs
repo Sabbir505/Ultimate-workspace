@@ -191,8 +191,9 @@ async fn handle_connection(
     app: AppHandle,
     expected_token: &str,
 ) -> Result<(), String> {
-    let ws_stream = tokio_tungstenite::accept_async(stream)
+    let ws_stream = tokio::time::timeout(std::time::Duration::from_secs(5), tokio_tungstenite::accept_async(stream))
         .await
+        .map_err(|_| "ws handshake timed out after 5s".to_string())?
         .map_err(|e| format!("ws handshake failed: {e}"))?;
     let (mut write, mut read) = ws_stream.split();
 
@@ -200,20 +201,27 @@ async fn handle_connection(
     // Any other first message (including close) rejects the connection.
     // The relay-browser-mcp binary reads RELAY_MCP_AUTH_TOKEN from
     // the environment at startup and sends this as its first message.
-    let first = loop {
-        if let Some(msg) = read.next().await {
-            let msg = msg.map_err(|e| format!("ws read failed: {e}"))?;
-            if msg.is_close() {
+    // PRE-AUTH BUDGET: both the handshake above and this first read are
+    // bounded to 5s so an unauthenticated peer (or a wedged relay binary)
+    // can't hold a connection open indefinitely.
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(msg) = read.next().await {
+                let msg = msg.map_err(|e| format!("ws read failed: {e}"))?;
+                if msg.is_close() {
+                    return Err::<String, String>("connection closed before auth".into());
+                }
+                if let Message::Text(t) = msg {
+                    return Ok(t);
+                }
+                // Ignore ping/pong/binary before auth.
+            } else {
                 return Err("connection closed before auth".into());
             }
-            if let Message::Text(t) = msg {
-                break t;
-            }
-            // Ignore ping/pong/binary before auth.
-        } else {
-            return Err("connection closed before auth".into());
         }
-    };
+    })
+    .await
+    .map_err(|_| "auth message not received within 5s — connection rejected".to_string())??;
     let auth: serde_json::Value = serde_json::from_str(&first)
         .map_err(|e| format!("malformed auth message: {e}"))?;
     let token_ok = auth.get("auth")

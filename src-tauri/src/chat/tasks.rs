@@ -67,7 +67,7 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
@@ -842,7 +842,7 @@ async fn download_task<R: tauri::Runtime>(
             resuming,
             DOWNLOAD_STALL_TIMEOUT,
             &mut cancel_rx,
-            &mut |chunk, downloaded, total| {
+            &mut |_chunk, downloaded, total| {
                 if last_emit.elapsed() >= PROGRESS_EMIT_MIN {
                     let dt = last_emit.elapsed().as_secs_f64().max(0.001);
                     let speed = ((downloaded - last_downloaded) as f64 / dt) as u64;

@@ -1075,6 +1075,7 @@ async fn status_inner(
         .map(|p| voices_for_model(p))
         .unwrap_or_default();
     let loaded = tts.0.lock().as_ref().map(|e| e.model_id.clone());
+    let loaded_matches_selected = loaded == model_id;
     let catalog_entries = catalog()
         .into_iter()
         .map(|m| {
@@ -1099,10 +1100,11 @@ async fn status_inner(
     Ok(TtsStatus {
         model_id,
         model_dir: model_dir.map(|p| p.to_string_lossy().into_owned()),
-        // `loaded` only counts when it matches the SELECTED model — a stale
-        // engine for a model the user just switched away from is about to be
-        // replaced, and reporting it as live would be a lie.
-        loaded: loaded.is_some(),
+        // `loaded` only counts when the resident engine's model MATCHES the
+        // SELECTED model — a stale engine for a model the user just switched
+        // away from is about to be replaced, and reporting it as live would
+        // be a lie.
+        loaded: loaded_matches_selected,
         voice,
         speed: speed.unwrap_or(1.0),
         auto_read,
@@ -1250,13 +1252,17 @@ pub(crate) fn system_proxy_for_log() -> Option<String> {
     system_proxy()
 }
 
-pub(crate) fn http_client() -> CmdResult<reqwest::Client> {
+/// Client builder with the system proxy applied and LOOPBACK EXEMPT. Shared
+/// by the TTS model downloader and the STT transcribe client
+/// (commands/speech.rs): sidecar traffic (127.0.0.1) must bypass the proxy —
+/// a proxy that blackholes loopback would break it — while internet fetches
+/// must go THROUGH it: on a network that reaches the internet via a local
+/// proxy (a very common desktop setup, and mandatory in some regions),
+/// `.no_proxy()` turns a working fetch into an unreachable-host failure.
+pub(crate) fn proxied_client_builder() -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder()
         .user_agent(concat!("Relay/", env!("CARGO_PKG_VERSION"), " (desktop)"))
-        .connect_timeout(std::time::Duration::from_secs(15))
-        // Per-request: this bounds one file (the largest is ~310 MB), not the
-        // whole install, which is why it is generous.
-        .timeout(std::time::Duration::from_secs(1800));
+        .connect_timeout(std::time::Duration::from_secs(15));
     if let Some(server) = system_proxy() {
         if let Ok(proxy) = reqwest::Proxy::all(&server) {
             // Loopback is never proxied: the speech stack talks to local
@@ -1266,7 +1272,16 @@ pub(crate) fn http_client() -> CmdResult<reqwest::Client> {
             )));
         }
     }
-    builder.build().map_err(|e| e.to_string())
+    builder
+}
+
+pub(crate) fn http_client() -> CmdResult<reqwest::Client> {
+    // Per-request: this bounds one file (the largest is ~310 MB), not the
+    // whole install, which is why it is generous.
+    proxied_client_builder()
+        .timeout(std::time::Duration::from_secs(1800))
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 /// One entry from HF's `tree` API.

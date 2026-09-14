@@ -58,7 +58,14 @@ export function ConnectorsPanel() {
   const [modalFamily, setModalFamily] = useState<string | null>(null);
 
   const refresh = () => {
-    void listConnectors().then((cs) => setConnectors(cs ?? []));
+    void listConnectors()
+      .then((cs) => setConnectors(cs ?? []))
+      .catch((e) => {
+        // A rejected listing must not leave the panel blank forever
+        // (connectors stays null → nothing renders) — degrade to empty + toast.
+        setConnectors([]);
+        toastError("Couldn't load connectors", e);
+      });
   };
   useEffect(refresh, []);
 

@@ -117,6 +117,10 @@ export function useTranscriptScroll({
   // True once the user has scrolled far enough above the live edge that the
   // streaming tail is out of sight — drives the jump-to-latest pill.
   const [awayFromLive, setAwayFromLive] = useState(false);
+  // The jump-to-latest glide's pending animation frame. The loop below closes
+  // over this hook instance's refs, so it must stop scheduling when the hook
+  // unmounts (view closed mid-glide) — cancelled in the effect further down.
+  const jumpRafRef = useRef(0);
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
@@ -163,17 +167,21 @@ export function useTranscriptScroll({
       const prepend = isSplitView
         ? loadOlderSplitMessages(activeChatSessionId)
         : loadOlderMessages(activeChatSessionId);
-      void prepend.finally(() => {
-        loadOlderRef.current = false;
-        // Restore the visual anchor: prepended rows pushed everything down.
-        requestAnimationFrame(() => {
-          const el = messagesContainerRef.current;
-          if (el) {
-            el.scrollTop = prevTop + (el.scrollHeight - prevHeight);
-            programmaticPinUntilRef.current = performance.now() + PROGRAMMATIC_PIN_GUARD_MS;
-          }
+      void prepend
+        .finally(() => {
+          loadOlderRef.current = false;
+          // Restore the visual anchor: prepended rows pushed everything down.
+          requestAnimationFrame(() => {
+            const el = messagesContainerRef.current;
+            if (el) {
+              el.scrollTop = prevTop + (el.scrollHeight - prevHeight);
+              programmaticPinUntilRef.current = performance.now() + PROGRAMMATIC_PIN_GUARD_MS;
+            }
+          });
+        })
+        .catch(() => {
+          /* the store surfaces history-load errors; nothing to do here */
         });
-      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasMoreHistory, activeChatSessionId, isSplitView, loadOlderMessages, loadOlderSplitMessages]);
@@ -240,7 +248,6 @@ export function useTranscriptScroll({
     let retries = 3; // re-aim budget: virtualizer mounting + tail growth
     let stableFrames = 0;
     let lastTop = el.scrollTop;
-    let raf = 0;
 
     const done = () => {
       smoothScrollUntilRef.current = 0;
@@ -267,18 +274,21 @@ export function useTranscriptScroll({
         if (retries-- > 0) {
           stableFrames = 0;
           el.scrollTo({ top: pinTargetFor(el), behavior: "smooth" });
-          raf = requestAnimationFrame(step);
+          jumpRafRef.current = requestAnimationFrame(step);
           return;
         }
         done();
         return;
       }
-      raf = requestAnimationFrame(step);
+      jumpRafRef.current = requestAnimationFrame(step);
     };
 
     el.scrollTo({ top: pinTargetFor(el), behavior: "smooth" });
-    raf = requestAnimationFrame(step);
+    jumpRafRef.current = requestAnimationFrame(step);
   }, []);
+
+  // Cancel a still-running jump glide on unmount (see jumpRafRef above).
+  useEffect(() => () => cancelAnimationFrame(jumpRafRef.current), []);
 
   // Follow new messages / streaming tokens only while pinned to the bottom.
   // Writes scrollTop directly instead of scrollIntoView: scrollIntoView also

@@ -78,25 +78,32 @@ describe("isBareCreateCommand", () => {
 });
 
 describe("detectArtifactIntent (natural language)", () => {
-  it("keeps the legacy exact triggers working", () => {
+  it("keeps the unambiguous 'turn/save this' mint requests working", () => {
     expect(detectArtifactIntent("turn this into a skill")).toEqual({ type: "skill", instruction: "turn this into a skill" });
-    expect(detectArtifactIntent("Can you create a loop for this?")).toEqual({ type: "loop", instruction: "Can you create a loop for this?" });
-    expect(detectArtifactIntent("schedule this")).toEqual({ type: "automation", instruction: "schedule this" });
-  });
-
-  it("matches conversation-distill requests — the Save As replacement", () => {
-    expect(detectArtifactIntent("analyze our chat and come up with a skill we can use later")?.type).toBe("skill");
+    expect(detectArtifactIntent("save this as a skill")).toEqual({ type: "skill", instruction: "save this as a skill" });
     expect(detectArtifactIntent("turn this conversation into an automation")).toEqual({
       type: "automation",
       instruction: "turn this conversation into an automation",
     });
-    expect(detectArtifactIntent("make a prompt template from this conversation")?.type).toBe("prompt_template");
-    expect(detectArtifactIntent("distill our discussion into a loop")?.type).toBe("loop");
+    expect(detectArtifactIntent("save this as a prompt")).toEqual({ type: "prompt_template", instruction: "save this as a prompt" });
   });
 
-  it("matches 'come up with a <type>' without a conversation reference", () => {
-    expect(detectArtifactIntent("come up with a skill for reviewing PRs")?.type).toBe("skill");
-    expect(detectArtifactIntent("come up with an automation for daily reports")?.type).toBe("automation");
+  it("keeps direct automation asks", () => {
+    expect(detectArtifactIntent("make this run every morning")).toEqual({ type: "automation", instruction: "make this run every morning" });
+    expect(detectArtifactIntent("make this run until the build passes")).toEqual({ type: "loop", instruction: "make this run until the build passes" });
+    expect(detectArtifactIntent("please create an automation for the weekly report")).toEqual({ type: "automation", instruction: "please create an automation for the weekly report" });
+  });
+
+  it("does NOT intercept ambiguous phrasings — they flow to the model", () => {
+    // Type keyword + creation verb + conversation reference (the old triple).
+    expect(detectArtifactIntent("analyze our chat and come up with a skill we can use later")).toBeNull();
+    expect(detectArtifactIntent("make a prompt template from this conversation")).toBeNull();
+    expect(detectArtifactIntent("distill our discussion into a loop")).toBeNull();
+    // "Loop"/"skill" are common words and "schedule this" is context-dependent.
+    expect(detectArtifactIntent("Can you create a loop for this?")).toBeNull();
+    expect(detectArtifactIntent("I want to create a skill function in my app")).toBeNull();
+    expect(detectArtifactIntent("schedule this")).toBeNull();
+    expect(detectArtifactIntent("come up with a skill for reviewing PRs")).toBeNull();
   });
 
   it("lets questions about artifacts through to the model", () => {

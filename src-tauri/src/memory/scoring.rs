@@ -91,7 +91,7 @@ pub fn hybrid_scores(
         .zip(kw_n)
         .zip(rec_n)
         .zip(util_n)
-        .map(|(((((m, sv), sk), sr), su))| Scored {
+        .map(|((((m, sv), sk), sr), su)| Scored {
             record: m.0.clone(),
             score: 1.0 * sv + 0.5 * sk + 0.3 * sr + 0.5 * su,
         })

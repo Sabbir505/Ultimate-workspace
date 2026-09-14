@@ -48,8 +48,9 @@ pub const CHAT_DB_DIR_SETTING_KEY: &str = "storage.dbDir";
 /// Move the chat database to a new directory (or back to the app data dir when
 /// `None`). The DB is checkpointed, copied to the destination, and the live
 /// connection is swapped in place — no restart required. The destination
-/// directory is created if missing; an existing `relay.db` there is
-/// overwritten only after a backup-free move (the user picked this location).
+/// directory is created if missing; a move is REFUSED when the destination
+/// already holds a database file (picking a folder must not silently delete
+/// whatever history is already there).
 ///
 /// ASYNC on purpose: the file copy + full reopen (which runs all migrations)
 /// must NOT block the main thread — a synchronous command here froze the UI
@@ -126,6 +127,29 @@ fn swap_chat_db_files(
     setting_value: &str,
 ) -> CmdResult<()> {
     let mut conn = db_arc.lock();
+    // 0. Refuse to clobber a database that already exists at the
+    //    destination — a silent overwrite destroys whatever history lives
+    //    there (possibly another Relay install's). Only an absent/empty
+    //    target (or a non-SQLite leftover file) proceeds. Checked under the
+    //    same lock as the copy so a concurrent move can't slip past it.
+    if target.exists() {
+        let empty = std::fs::metadata(target)
+            .map(|m| m.len() == 0)
+            .unwrap_or(true);
+        let is_sqlite = !empty && {
+            let mut header = [0u8; 16];
+            std::fs::File::open(target)
+                .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut header))
+                .map(|_| &header == b"SQLite format 3\0")
+                .unwrap_or(false)
+        };
+        if is_sqlite {
+            return Err(format!(
+                "{} already contains a database — pick an empty location or remove it first",
+                target.display()
+            ));
+        }
+    }
     // 1. Checkpoint the WAL so the main .db file holds every committed
     //    row — the copy must be a complete snapshot, not a WAL-less stub.
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
@@ -150,9 +174,10 @@ fn swap_chat_db_files(
     //    Connection inside the Arc is safe — the next lock sees the new
     //    location. The setting is written on the NEW connection so the
     //    moved DB records its own location (the old file is stale after
-    //    the swap).
+    //    the swap). Writing it on the old one (as this used to) meant the
+    //    next launch read the default path again and undid the move.
     let new_conn = crate::db::open(target).map_err(|e| e.to_string())?;
-    let _ = db::set_setting(&conn, CHAT_DB_DIR_SETTING_KEY, setting_value);
+    let _ = db::set_setting(&new_conn, CHAT_DB_DIR_SETTING_KEY, setting_value);
     *conn = new_conn;
     Ok(())
 }
@@ -430,50 +455,22 @@ fn is_path_allowed(path: &Path, app: &AppHandle, db: &DbState) -> bool {
             return true;
         }
     }
-    // Fetch the candidate path STRINGS under the lock, then canonicalize
-    // after release (DbState rule: the lock guards SQL only — canonicalize is
-    // filesystem IO).
-    let (project_paths, worktree_paths, chat_worktrees, configured_artifacts) = {
+    // Project roots + session/chat worktrees come from the shared TTL cache
+    // (see git_cmds::allowlisted_roots) — this used to re-read the projects +
+    // sessions tables and re-canonicalize every root on every call.
+    match super::git_cmds::allowlisted_roots(db) {
+        Ok(roots) => {
+            if super::git_cmds::roots_contain(&roots, path) {
+                return true;
+            }
+        }
+        // The DB is unreadable → the project roots are unknown. Fail closed.
+        Err(_) => return false,
+    }
+    let configured_artifacts = {
         let conn = db.0.lock();
-        let project_paths: Vec<String> = db::list_projects(&conn)
-            .map(|ps| ps.into_iter().map(|p| p.path).collect())
-            .unwrap_or_default();
-        let worktree_paths: Vec<String> = db::list_sessions(&conn, None)
-            .map(|ss| ss.into_iter().filter_map(|s| s.worktree_path).collect())
-            .unwrap_or_default();
-        let chat_worktrees = db::chat_worktree_paths(&conn, None).unwrap_or_default();
-        let configured_artifacts = crate::chat::dispatch::configured_artifacts_dir(&conn);
-        (project_paths, worktree_paths, chat_worktrees, configured_artifacts)
+        crate::chat::dispatch::configured_artifacts_dir(&conn)
     };
-    // Allow anything under a registered project root.
-    for proj_path in &project_paths {
-        if let Ok(proj_canon) = Path::new(proj_path).canonicalize() {
-            if crate::util::path_starts_with_ci(path, &proj_canon) {
-                return true;
-            }
-        }
-    }
-    // Allow anything under a session worktree. Worktrees are SIBLINGS of the
-    // project root (`<parent>/<name>-<branch>`), so they legitimately sit
-    // outside every project prefix — allowlist the exact recorded paths
-    // instead of loosening the prefix check (which would also pass any
-    // same-prefix sibling like `<name>-evil`).
-    for wt in &worktree_paths {
-        if let Ok(wt_canon) = Path::new(wt).canonicalize() {
-            if crate::util::path_starts_with_ci(path, &wt_canon) {
-                return true;
-            }
-        }
-    }
-    // Chat-session worktrees (roadmap P0 §3.1.1) sit in the same sibling
-    // layout; allowlist the exact recorded paths the same way.
-    for wt in &chat_worktrees {
-        if let Ok(wt_canon) = Path::new(wt).canonicalize() {
-            if crate::util::path_starts_with_ci(path, &wt_canon) {
-                return true;
-            }
-        }
-    }
     // Allow anything under the configured artifacts dir (Settings →
     // Storage & Data, `storage.artifactsDir`) when set.
     if let Some(configured) = configured_artifacts {
@@ -588,6 +585,18 @@ mod tests {
             .unwrap();
         assert_eq!(ok, "ok", "moved DB must pass integrity_check");
 
+        // The storage.dbDir setting must be recorded IN THE MOVED file
+        // (written on the new connection) — a second move reads it from
+        // there, and an old-file write would undo the move at restart.
+        let stored: Option<String> = moved
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'storage.dbDir'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("e2dir"));
+
         // Every commit — pre-swap (copied) and post-swap (written into the
         // swapped connection) — must be present in the moved file.
         let count: i64 = moved
@@ -601,6 +610,38 @@ mod tests {
             count, written as i64,
             "no commits may be lost across the move"
         );
+    }
+
+    #[test]
+    fn db_move_refuses_to_clobber_existing_sqlite_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("relay.db");
+        let conn = crate::db::open(&src).unwrap();
+        let db_arc = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+
+        // Destination already holds a real SQLite database → refused, and
+        // the pre-existing DB survives untouched.
+        let dest_dir = dir.path().join("occupied");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let target = crate::db::db_file_in(&dest_dir);
+        crate::db::open(&target).unwrap();
+        let err = swap_chat_db_files(&db_arc, &src, &target, &dest_dir, "x")
+            .err()
+            .expect("move onto an existing DB must be refused");
+        assert!(err.contains("already contains a database"), "{err}");
+        let survivor = crate::db::open(&target).unwrap();
+        let ok: String = survivor
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ok, "ok", "the pre-existing DB must be untouched");
+
+        // A zero-byte leftover file is fine to overwrite.
+        let empty_dir = dir.path().join("empty");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        let empty_target = crate::db::db_file_in(&empty_dir);
+        std::fs::write(&empty_target, b"").unwrap();
+        swap_chat_db_files(&db_arc, &src, &empty_target, &empty_dir, "y")
+            .expect("empty leftover file may be overwritten");
     }
 }
 

@@ -304,15 +304,21 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       // provider key — probe the known cloud ids as well so they self-heal.
       const indexRaw = await getSetting(SELECTED_MODELS_INDEX_KEY);
       const indexed: string[] = indexRaw ? JSON.parse(indexRaw) : [];
-      const providers = Array.from(new Set([...indexed, ...CLOUD_PROVIDER_IDS]));
-      for (const p of providers) {
-        if (typeof p !== "string" || !p) continue;
+      const providers = Array.from(
+        new Set([...indexed, ...CLOUD_PROVIDER_IDS]),
+      ).filter((p) => typeof p === "string" && !!p);
+      // Fetch every provider's list in parallel (audit #13): the serial loop
+      // added one settings round-trip per provider to boot.
+      const raws = await Promise.all(
+        providers.map((p) => getSetting(selectedModelsKey(p)).catch(() => null)),
+      );
+      for (let i = 0; i < providers.length; i++) {
+        const raw = raws[i];
+        if (!raw) continue;
         try {
-          const raw = await getSetting(selectedModelsKey(p));
-          if (!raw) continue;
           const parsed = JSON.parse(raw) as ProviderModelEntry[];
           if (Array.isArray(parsed) && parsed.length > 0) {
-            providerModels[p] = parsed.filter((e) => e && typeof e.id === "string");
+            providerModels[providers[i]] = parsed.filter((e) => e && typeof e.id === "string");
           }
         } catch { /* skip malformed list */ }
       }

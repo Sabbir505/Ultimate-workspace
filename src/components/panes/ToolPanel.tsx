@@ -282,18 +282,30 @@ export function ToolPanel() {
   // Horizontal wheel handler: vertical scroll wheel (and trackpad) horizontal
   // scrolls the chip strip. Horizontal scroll containers don't respond to
   // vertical wheel by default, so translate deltaY → scrollLeft.
-  const onChipsWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+  //
+  // Attached as a NATIVE non-passive listener: React 17+ attaches onWheel as
+  // a passive listener, so the preventDefault below was a silent no-op (and
+  // the page scrolled behind the strip). Same approach as TerminalPane's
+  // Ctrl+wheel font zoom.
+  useEffect(() => {
     const el = chipsRef.current;
     if (!el) return;
-    // If the user scrolled horizontally, apply directly; else map vertical.
-    const dx = e.deltaX !== 0 ? e.deltaX : e.deltaY;
-    if (dx === 0) return;
-    el.scrollLeft += dx;
-    // Prevent the page from also scrolling when the strip has overflow.
-    if (el.scrollLeft > 0 || el.scrollLeft + el.clientWidth < el.scrollWidth) {
-      e.preventDefault();
-    }
-  }, []);
+    const onChipsWheel = (e: WheelEvent) => {
+      // If the user scrolled horizontally, apply directly; else map vertical.
+      const dx = e.deltaX !== 0 ? e.deltaX : e.deltaY;
+      if (dx === 0) return;
+      el.scrollLeft += dx;
+      // Prevent the page from also scrolling when the strip has overflow.
+      if (el.scrollLeft > 0 || el.scrollLeft + el.clientWidth < el.scrollWidth) {
+        e.preventDefault();
+      }
+    };
+    el.addEventListener("wheel", onChipsWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onChipsWheel);
+    // Dep on the tab count: the chips strip only EXISTS once a tab is open,
+    // so a mount-only pass would find a null ref and never bind.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openTabs.length]);
 
   // Drag-to-reorder via MOUSE pointer events (WebView2 has unreliable HTML5
   // drag-and-drop). A ref tracks the source index; the state pair powers the
@@ -393,7 +405,7 @@ export function ToolPanel() {
           {/* Tab bar — Shows one chip per open tab INSTANCE + a "+" that pops a
               menu of panes to add. Chips are scrollable + drag-to-reorder. */}
           <div className="tool-panel-tabbar">
-            <div className="tool-panel-tabbar-chips" ref={chipsRef} onWheel={onChipsWheel}>
+            <div className="tool-panel-tabbar-chips" ref={chipsRef}>
               {openTabs.map((inst, index) => {
                 const tabDef = TABS.find((tb) => tb.id === inst.kind);
                 const label = tabLabel(inst, tabDef?.label ?? inst.kind, panes);

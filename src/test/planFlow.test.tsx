@@ -101,6 +101,21 @@ describe("plan store slices", () => {
     expect(steps.map((st) => st.label)).toEqual(["old prose plan step", "Revised step"]);
   });
 
+  it("onPlanUpdated tolerates a malformed (non-array) todos payload", () => {
+    // Audit 2026-09-14 #8: a malformed payload used to throw inside the event
+    // listener; it must degrade to an empty todo list like onQuestionRequest.
+    expect(() =>
+      useChatStore.getState().onPlanUpdated({
+        chatSessionId: "s1",
+        todos: null as never,
+      }),
+    ).not.toThrow();
+    const s = useChatStore.getState();
+    expect(s.sessionTodos["s1"]).toEqual([]);
+    // Parsed prose steps survive; nothing was mirrored from the payload.
+    expect(s.planSteps["s1"].map((st) => st.source)).toEqual(["parsed"]);
+  });
+
   it("onPlanMode flips the flag AND mirrors the persisted label onto the session", () => {
     // Model-initiated enter_plan_mode → label "plan" lands on the session.
     useChatStore

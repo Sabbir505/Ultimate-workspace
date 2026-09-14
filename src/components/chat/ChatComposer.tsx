@@ -10,7 +10,7 @@
 // pasting straight into the textarea (screenshots, copied images, OS-copied
 // files — anything the clipboard exposes as a file), or by dragging them from
 // the OS onto the composer card.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowUpToLine, GripVertical, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
@@ -159,7 +159,12 @@ interface Props {
   chatSessionId?: string | null;
 }
 
-export function ChatComposer({
+// MEMOIZED: the composer is heavy (pickers, queue rows, HUD) and ChatView
+// re-renders on every streaming flush — a plain function re-rendered it all
+// each time even when no prop changed. All callback/object props ChatView
+// passes are useCallback/useMemo-stabilized (see ChatView), so shallow
+// props equality holds across flushes.
+export const ChatComposer = memo(function ChatComposer({
   sessionId: sessionIdProp,
   onSend,
   onStop,
@@ -537,6 +542,9 @@ export function ChatComposer({
         .catch(() => {
           /* attach-source discovery is best-effort */
         });
+      })
+      .catch(() => {
+        /* attach-source discovery is best-effort */
       });
   }, []);
 
@@ -1036,16 +1044,16 @@ export function ChatComposer({
     // --- Natural language cheap filter: detect obvious "create artifact" phrases ---
     const intent = detectArtifactIntent(trimmed);
     if (intent) {
-      // Natural language "create a skill" etc. triggers artifact generation only.
+      // Natural language "turn this into a skill" etc. triggers artifact
+      // generation only. The typed draft STAYS in the textarea: interception
+      // is heuristic, so the user's words must stay recoverable — they can
+      // edit/resend them normally if the proposal card isn't what they wanted.
       void triggerArtifactGeneration(intent.type, intent.instruction);
-      setContent("");
       setCommandPill(null);
       setAttachments([]);
       setAttachError(null);
       setForceResearch(false);
       setAttachMenuOpen(false);
-      const ta = textareaRef.current;
-      if (ta) ta.style.height = "auto";
       return;
     }
 
@@ -1610,7 +1618,7 @@ export function ChatComposer({
       )}
     </div>
   );
-}
+});
 
 // Public surface re-exported (tests import these from here).
 export {

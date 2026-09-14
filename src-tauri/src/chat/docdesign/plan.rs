@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{Emitter, Manager};
 use tokio::sync::oneshot;
 
 use super::super::artifacts;

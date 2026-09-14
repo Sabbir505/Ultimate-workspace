@@ -1,6 +1,6 @@
 # IPC Contract (binding for both Rust backend and React frontend)
 
-> **Naming note:** The product is "Relay" on every surface (user-visible strings, the Rust crate `relay`, sidecar binaries `relay-browser-mcp`/`relay-automation`, MCP servers `relay-browser`/`relay-tools`, `RELAY_*` env vars) as of the 2026-09 rebrand completion. The bundle identifier is `dev.relay.app` (legacy installs migrate their app data dir on first launch); the contract itself is unchanged. See `README.md` and `AI CONTEXT/RELEASE.md`.
+> **Naming note:** The product is "Relay" on every surface (user-visible strings, the Rust crate `relay`, sidecar binaries `relay-browser-mcp`/`relay-automation`, MCP servers `relay-browser`/`relay-tools`, `RELAY_*` env vars) as of the 2026-09 rebrand completion. The bundle identifier is `dev.relay.app` (legacy installs migrate their app data dir on first launch); the contract itself is unchanged. See `README.md` and `docs/ai-context/RELEASE.md`.
 
 All Tauri commands are invoked from the frontend with `invoke('<command_name>', { args })`.
 All structs serialized over IPC use **camelCase** field names (Rust: `#[serde(rename_all = "camelCase")]`).

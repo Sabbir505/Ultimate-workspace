@@ -1,6 +1,6 @@
 # Cost Model Redesign (T3-Code parity)
 
-> **Naming note:** This spec was written under the project name "Conduit". The product is "Relay" in user-visible surfaces as of 2026-08-27 (commit `e9abc7c3`). See `README.md` and `AI CONTEXT/RELEASE.md`.
+> **Naming note:** This spec was written under the project name "Conduit". The product is "Relay" in user-visible surfaces as of 2026-08-27 (commit `e9abc7c3`). See `README.md` and `docs/ai-context/RELEASE.md`.
 >
 > **Status:** implemented — `migrate_cost_v2` in `src-tauri/src/db/mod.rs` ships the schema described below (the code there cites this spec's §5.4); later work layered family-aware cache pricing on top (2026-09). §1 "Motivation" is retained as the historical gap analysis.
 > **Author:** Claude (brainstorming pass, 2026-08-08).
@@ -646,10 +646,10 @@ Seed a known mix of events + chat messages, run the rollup at 7d /
 
 ### Docs
 
-- `AI CONTEXT/CONTRACT.md` — `CostEvent`, `CostRollups`,
+- `docs/ai-context/CONTRACT.md` — `CostEvent`, `CostRollups`,
   `get_cost_rollups` signature, `cost:updated` event payload.
-- `AI CONTEXT/BUILD_LOG.md` — new entry summarizing this change.
-- `AI CONTEXT/AI_CONTEXT.md` — command count and section updates.
+- `docs/ai-context/BUILD_LOG.md` — new entry summarizing this change.
+- `docs/ai-context/AI_CONTEXT.md` — command count and section updates.
 
 ## 15. Resolved open calls (from the brainstorming sections)
 

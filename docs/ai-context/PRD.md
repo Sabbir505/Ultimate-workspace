@@ -2,7 +2,7 @@
 ## Codename: Conduit
 ### A local-first, multi-pane desktop shell for AI coding agents
 
-> **Naming note:** This PRD was written under the codename **Conduit**. The product was rebranded to "Relay" in user-visible surfaces on 2026-08-27 (commit `e9abc7c`); the internal rename (crate `relay`, bundle id `dev.relay.app`, sidecar binaries, mobile app) completed 2026-09-05 (commit `7f6952b`). See `README.md` and `AI CONTEXT/RELEASE.md`. The requirements themselves are unchanged.
+> **Naming note:** This PRD was written under the codename **Conduit**. The product was rebranded to "Relay" in user-visible surfaces on 2026-08-27 (commit `e9abc7c`); the internal rename (crate `relay`, bundle id `dev.relay.app`, sidecar binaries, mobile app) completed 2026-09-05 (commit `7f6952b`). See `README.md` and `docs/ai-context/RELEASE.md`. The requirements themselves are unchanged.
 
 **Document purpose:** This PRD is written to be handed to an AI coding agent (Kimi Code CLI / Kimi K3, or Claude Code) as the primary build specification. It should be read top to bottom before any code is written. Where a decision is ambiguous, this document states the default to take rather than leaving it open.
 
@@ -602,7 +602,7 @@ Do not batch multiple unrelated features into one untested, undocumented pass. S
 
 ### 14.5 Added in v0.4.x (out of original scope)
 
-Major feature surfaces shipped after the original v1 scope, none of which appear in the sections above (each is documented in `AI CONTEXT/AI_CONTEXT.md` and `CONTRACT.md`):
+Major feature surfaces shipped after the original v1 scope, none of which appear in the sections above (each is documented in `docs/ai-context/AI_CONTEXT.md` and `CONTRACT.md`):
 
 - **Persistent user memory** — extraction/consolidation/retrieval/injection/reflection across all chat paths (`src-tauri/src/memory/`, `memory_*` commands, `memories` + related tables; design: `MEMORY_DESIGN_ARCHITECTURE.md`).
 - **Spend budgets** — per-scope spend limits with breach alerts (`commands/budget.rs`, `budget:alert`).

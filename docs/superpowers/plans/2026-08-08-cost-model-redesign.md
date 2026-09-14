@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (Tauri 2, rusqlite), React + TypeScript, Recharts (already in `package.json`), Tailwind, vitest, jsdom, cargo test.
 
-**Spec:** `AI CONTEXT/COST_MODEL_REDESIGN.md` (binding; this plan implements it).
+**Spec:** `docs/ai-context/COST_MODEL_REDESIGN.md` (binding; this plan implements it).
 
 ## Global Constraints
 
@@ -61,9 +61,9 @@
 - `src/lib/ipc.ts` — `getCostRollups(rangeDays?)` wrapper
 - `src/components/cost-dashboard/CostDashboard.tsx` — full rewrite
 - `src/components/cost-dashboard/LocalModelUsagePanel.tsx` — deleted
-- `AI CONTEXT/CONTRACT.md` — type/command updates
-- `AI CONTEXT/BUILD_LOG.md` — new entry
-- `AI CONTEXT/AI_CONTEXT.md` — section updates
+- `docs/ai-context/CONTRACT.md` — type/command updates
+- `docs/ai-context/BUILD_LOG.md` — new entry
+- `docs/ai-context/AI_CONTEXT.md` — section updates
 
 ---
 
@@ -2445,9 +2445,9 @@ git commit -m "test(frontend): CostDashboard render + range toggle"
 ## Task 12: Doc updates (CONTRACT + BUILD_LOG + AI_CONTEXT)
 
 **Files:**
-- Modify: `AI CONTEXT/CONTRACT.md:22-23, 94-95, 141`
-- Modify: `AI CONTEXT/BUILD_LOG.md` (new entry)
-- Modify: `AI CONTEXT/AI_CONTEXT.md`
+- Modify: `docs/ai-context/CONTRACT.md:22-23, 94-95, 141`
+- Modify: `docs/ai-context/BUILD_LOG.md` (new entry)
+- Modify: `docs/ai-context/AI_CONTEXT.md`
 
 - [ ] **Step 1: Update `CONTRACT.md` types**
 
@@ -2486,7 +2486,7 @@ At the top of `BUILD_LOG.md`:
 ```markdown
 ## 2026-08-08 — Cost model v2 (T3-Code parity)
 
-(Brief entry summarizing: schema migration, read-time pricing, new rollup endpoint, T3 Code-style dashboard, mobile relay wire shape. Link to `AI CONTEXT/COST_MODEL_REDESIGN.md` and the implementation plan.)
+(Brief entry summarizing: schema migration, read-time pricing, new rollup endpoint, T3 Code-style dashboard, mobile relay wire shape. Link to `docs/ai-context/COST_MODEL_REDESIGN.md` and the implementation plan.)
 ```
 
 - [ ] **Step 5: Update `AI_CONTEXT.md`**
@@ -2501,7 +2501,7 @@ Expected: PASS, PASS, clean.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add "AI CONTEXT/"
+git add "docs/ai-context/"
 git commit -m "docs(cost): CONTRACT + BUILD_LOG + AI_CONTEXT updates"
 ```
 

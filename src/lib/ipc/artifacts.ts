@@ -584,6 +584,11 @@ export const sendAgentChatMessage = (
   // markers/extracted text are folded into the persisted message; image/doc
   // bytes are saved to disk paths the CLI's own file tools can open.
   attachments?: ChatAttachmentInput[],
+  // Force research mode for this turn. Like the built-in path, the
+  // transcript keeps what the user typed: the backend folds the research
+  // protocol into the CLI-facing appendix, which never reaches the
+  // persisted message.
+  forceResearch?: boolean,
 ) =>
   safeInvoke<void>("send_agent_chat_message", {
     chatSessionId,
@@ -593,6 +598,7 @@ export const sendAgentChatMessage = (
     cwd: cwd ?? null,
     projectId: projectId ?? null,
     attachments: attachments ?? null,
+    forceResearch: forceResearch || null,
   });
 export const cancelAgentChatMessage = (chatSessionId: string) =>
   safeInvoke<void>("cancel_agent_chat_message", { chatSessionId });

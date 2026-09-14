@@ -43,6 +43,11 @@ pub async fn send_agent_chat_message(
     cwd: Option<String>,
     project_id: Option<String>,
     attachments: Option<Vec<crate::types::ChatAttachmentInput>>,
+    // Force research mode for this turn (composer "+" toggle / /research
+    // route). Like the built-in path, the transcript keeps what the user
+    // typed: the protocol rides the CLI-facing appendix (agent_sessions::
+    // research_directive), which reaches the model but is never persisted.
+    force_research: Option<bool>,
 ) -> Result<(), String> {
     // Snapshot the session's attached connectors (refreshing OAuth tokens)
     // BEFORE the sync spawn path — the CLIs only read static MCP config at
@@ -59,6 +64,15 @@ pub async fn send_agent_chat_message(
             (format!("{content}{display_extra}"), prompt)
         }
         _ => (content, String::new()),
+    };
+    let attach_prompt = if force_research.unwrap_or(false) {
+        format!(
+            "{}{}",
+            attach_prompt,
+            crate::agent_sessions::AgentSessionManager::research_directive()
+        )
+    } else {
+        attach_prompt
     };
     // Primer summary (engine-switch handoff): when a fresh CLI session is
     // about to lose older turns to the primer's char budget, pre-summarize

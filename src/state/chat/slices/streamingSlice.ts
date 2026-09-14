@@ -42,23 +42,6 @@ import {
 import type { LastTurnMetrics } from "../types";
 import type { ChatStoreGet, ChatStoreSet } from "../types";
 
-/** Research-mode directive for CLI-harness/ACP turns. The harness sessions
- *  have no Relay research scaffolding (that rides the built-in provider's
- *  tool loop), so the protocol travels WITH the message: the CLI's own web
- *  search/fetch tools are the execution path, and the `## Sources` tail is
- *  what Relay's citation renderer parses back into chips. */
-export function harnessResearchWrap(topic: string): string {
-  return [
-    "Research mode — treat the request below as a multi-source research task, not a chat answer.",
-    "Do not answer from memory. Break it into 3-5 sub-questions; for each, search the web",
-    "(your web search / page fetch tools), read what you find, prefer independent sources,",
-    "and write a report that ends with a `## Sources` section listing every URL you actually",
-    "used, cited inline as [1], [2], …",
-    "",
-    topic,
-  ].join("\n");
-}
-
 export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
   return {
     sendMessage: async (content: string, attachments?: ChatAttachmentInput[], forceResearch?: boolean, sessionIdOverride?: string) => {
@@ -118,18 +101,6 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
         }
       }
 
-      // Harness sessions carry research mode IN the message (the CLI has no
-      // research flag): wrap BEFORE the optimistic bubble so the displayed
-      // text is the exact twin the backend persists — mergeOptimistic
-      // matches on role+content equality, and a mismatch would leave the
-      // optimistic row AND the persisted row on screen.
-      const harnessTurn = (() => {
-        const s = sessions.find((x) => x.id === activeChatSessionId);
-        return !!s && isCliAgent(s.agent);
-      })();
-      const outgoingContent =
-        forceResearch && harnessTurn ? harnessResearchWrap(content) : content;
-
       // Optimistic bubble mirrors what the backend will persist: the typed text
       // plus a compact note per attachment (the model gets the real content).
       // Optimistic bubble mirrors what the backend will persist. Mirror
@@ -147,7 +118,7 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
           return `\n\n[Attached file: ${a.name}]`;
         })
         .join("");
-      const displayContent = `${outgoingContent}${attachNote}`;
+      const displayContent = `${content}${attachNote}`;
       // Remember the real bytes under the persisted content so the sent message
       // keeps its image thumbnails after the optimistic bubble is swapped for
       // the persisted row (see liveAttachmentCache).
@@ -245,9 +216,7 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
         try {
           await sendAgentChatMessage(
             activeChatSessionId,
-            // Research mode rides the message on a harness turn (already
-            // wrapped in outgoingContent above, twin of the optimistic row).
-            outgoingContent,
+            content,
             cliAgentId(session.agent),
             session.model || undefined,
             cwd,
@@ -258,6 +227,10 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
             // extracted doc text into the persisted message and saves image/
             // doc bytes to disk paths the CLI's own file tools can open.
             attachments ?? undefined,
+            // Research mode rides the CLI-facing appendix (backend-side), so
+            // the transcript keeps exactly what the user typed — same
+            // contract as the built-in provider path.
+            forceResearch,
           );
         } catch (err) {
           console.error('[agent] sendAgentChatMessage failed:', err);
@@ -369,13 +342,14 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
           if (isCliAgent(session.agent)) {
             await sendAgentChatMessage(
               sid,
-              // Research mode rides the message on a harness turn; no
-              // optimistic bubble here to keep in twin shape.
-              forceResearch ? harnessResearchWrap(content) : content,
+              content,
               cliAgentId(session.agent),
               session.model || undefined,
               workingDir,
               projectsState.selectedProjectId ?? undefined,
+              undefined,
+              // Research mode rides the CLI-facing appendix (backend-side).
+              forceResearch,
             );
           } else {
             // Pass the store's tool flags (audit B-22): ipc.ts maps omitted

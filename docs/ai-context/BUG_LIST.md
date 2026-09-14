@@ -1,6 +1,6 @@
 # Bug Hunt — compiled 2026-08-07
 
-> **Naming note:** This document refers to the project as "Relay" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
+> **Naming note:** This document refers to the project as "Relay" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The findings still apply; the name has not. See `README.md` and `docs/ai-context/RELEASE.md` for the current naming.
 
 Whole-project audit of Relay (Rust backend `src-tauri/` + React frontend `src/`).
 67 findings from 7 parallel audit passes. Fix order: critical → high → medium → low.

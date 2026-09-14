@@ -7,7 +7,7 @@ dist/
 # into the binary at build time via option_env! in src-tauri/src/connectors/
 # config.rs — they must NEVER be committed (extractable from the binary, and
 # a leaked secret lets an attacker impersonate your integration). Set the same
-# vars in your shell when running the release build (see AI CONTEXT/RELEASE.md).
+# vars in your shell when running the release build (see docs/ai-context/RELEASE.md).
 src-tauri/.env
 # Tauri updater signing keypair — the private key MUST stay local.
 # If it leaks, anyone can ship signed updates to your users.

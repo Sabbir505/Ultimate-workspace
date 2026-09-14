@@ -1,6 +1,6 @@
 # Relay Build Log
 
-> **Naming note:** This log refers to the project as "Conduit" because most entries predate the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The build progress, test coverage, and design decisions are unchanged; the name has. See `README.md` and `AI CONTEXT/RELEASE.md`.
+> **Naming note:** This log refers to the project as "Conduit" because most entries predate the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The build progress, test coverage, and design decisions are unchanged; the name has. See `README.md` and `docs/ai-context/RELEASE.md`.
 
 > **Current status (verified 2026-09-14):** frontend vitest **152 files / 1055 tests**, all passing; `cargo test --lib` **1078 passed, 0 failed, 15 ignored**; **321** registered Tauri commands (`lib.rs`, `generate_handler!` at line 312); **44 tables / 24 inline migrations** (`db/mod.rs`); version `0.4.2` in sync across `package.json`, `tauri.conf.json`, and `Cargo.toml`; six harness adapters (`claude_code`, `kimi_code`, `opencode`, `pi`, `omp`, `commandcode`). The dated entries below end at 2026-08-14; the git log (PRs #46–#50 and the 2026-09-05 internal rename, `7f6952b`) is newer. Recent additions since then are summarized in `AI_CONTEXT.md` → "Recent shape".
 
@@ -11,7 +11,7 @@ Running log per PRD §13.3: what was built, what was tested and how, assumptions
 ## 2026-08-14 — Merge feat/goal-loop + feat/browser-agent-tools + feat/commit-msg-and-thinking-work; doc pass
 
 Three feature branches merged onto `master` back-to-back, plus a follow-up
-doc pass to keep `AI CONTEXT/`, `CONTRACT.md`, and `PROJECT_OVERVIEW.md`
+doc pass to keep `docs/ai-context/`, `CONTRACT.md`, and `PROJECT_OVERVIEW.md`
 honest about the resulting tool/skill counts and the perf-metrics schema.
 
 **What was built (merges):**
@@ -247,7 +247,7 @@ empty project path (no bogus "project is at ``" sentence, empty
 ---
 
 Cost model redesign to match the T3 Code usage dashboard (design spec:
-`AI CONTEXT/COST_MODEL_REDESIGN.md`; implementation plan:
+`docs/ai-context/COST_MODEL_REDESIGN.md`; implementation plan:
 `docs/superpowers/plans/2026-08-08-cost-model-redesign.md`).
 
 **What was built:**
@@ -307,7 +307,7 @@ two weeks (separate work sessions); the only code-shaped change in this entry
 itself is the `PermissionModeMenu` / `ApprovalFlow` removal in favor of the
 `AgentMenu` + `DiffCard` pattern (per the chat-frontend refactor below).
 
-**Doc set** (`AI CONTEXT/AI_CONTEXT.md`, `CONTRACT.md`):
+**Doc set** (`docs/ai-context/AI_CONTEXT.md`, `CONTRACT.md`):
 - Bumped `last verified` to 2026-08-07; added headless CLI chat to the boot
   overview, working-tree summary, and feature list.
 - §2.1 entry point now lists all 11 managed states (added
@@ -1163,7 +1163,7 @@ src/
 
 - **Doc folder consolidation:** the project docs (`README.md`, `PRD.md`,
   `CONTRACT.md`, `BUILD_LOG.md`, `RELEASE.md`, `AI_CONTEXT.md`) were moved into a
-  single `AI CONTEXT/` folder so an AI assistant can read the whole set in one
+  single `docs/ai-context/` folder so an AI assistant can read the whole set in one
   place. The `skills/` directory stays at the repo root because
   `src/lib/defaultSkills.ts` imports those `.md` files via Vite `?raw` at build
   time (`../../skills/*.md?raw`). Code comments that say "see CONTRACT.md" still
@@ -2345,9 +2345,9 @@ emits it into the deb's `/usr/share/applications/` on build.
 
 ### Docs updated
 
-- `AI CONTEXT/README.md` — added Linux prerequisites (apt + dnf system
+- `docs/ai-context/README.md` — added Linux prerequisites (apt + dnf system
   deps), and a Linux secrets note (Secret Service provider required).
-- `AI CONTEXT/RELEASE.md` — added a "Platforms" section explaining
+- `docs/ai-context/RELEASE.md` — added a "Platforms" section explaining
   Windows NSIS + Linux AppImage + deb, and the per-platform auto-update
   story.
 
@@ -2645,7 +2645,8 @@ Merge retirement and two Kiwi bug fixes from the same period:
   as the authorization server). Authorize
   https://github.com/login/oauth/authorize, token
   https://github.com/login/oauth/access_token, scopes
-  epo read:org read:user user:email (the scope set gates the tool surface).
+  
+epo read:org read:user user:email (the scope set gates the tool surface).
   OAuth App tokens never expire and no refresh token is issued � the stored
   expires_at stays None, so the refresh path is never triggered. GitHub
   OAuth Apps ignore the PKCE params our generic authorize URL always sends.
@@ -2655,7 +2656,8 @@ Merge retirement and two Kiwi bug fixes from the same period:
   Authorization-server metadata published (verified live): authorize
   /authorize, token /token, register /register, revocation at /token,
   auth methods client_secret_basic|post|none. Uses the generic RFC 7591
-  egistration_url machinery (Notion pattern) with a public PKCE client �
+  
+egistration_url machinery (Notion pattern) with a public PKCE client �
   no credentials needed at build time. Scope set: profile:read +
   design/folder/asset/comment/brandtemplate/brandkit reads+writes.
   **Gate (verified live):** /register rejects every request body with

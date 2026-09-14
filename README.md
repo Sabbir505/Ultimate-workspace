@@ -18,7 +18,7 @@ Relay wraps the AI agent CLIs you already use (Claude Code, Kimi Code CLI, OpenC
 
 "Relay" is the product name everywhere — the window title, the `productName` in `tauri.conf.json`, the `<title>` in `index.html`, all in-app strings, the Rust crate (`relay`, lib `relay_lib`), the bundle identifier (`dev.relay.app`), the sidecar binaries (`relay-browser-mcp`, `relay-automation`), the MCP server identifiers (`relay-browser`, `relay-tools`), the `RELAY_*` env vars, the OS keychain service, the mobile app (`Relay Mobile`, `com.relay.mobile`), and the Windows scheduled-task name (`RelayAutomations`).
 
-The only pre-rebrand values kept on purpose are the E2E pairing crypto constants (`conduit-e2e-relay-*`), which are protocol-anchored on both desktop and phone. Existing installs migrate transparently: the app data dir (`%APPDATA%/dev.conduit.app` → `%APPDATA%/dev.relay.app`) renames itself on first launch, keychain entries are read across generations and re-homed on delete, persisted paths (`conduit.db`, `Documents/Conduit`, `~/Conduit/models`, `ConduitAutomations`) resolve their legacy counterparts, and the updater still accepts legacy `Conduit_` release assets — see `AI CONTEXT/RELEASE.md` for the full compatibility matrix.
+The only pre-rebrand values kept on purpose are the E2E pairing crypto constants (`conduit-e2e-relay-*`), which are protocol-anchored on both desktop and phone. Existing installs migrate transparently: the app data dir (`%APPDATA%/dev.conduit.app` → `%APPDATA%/dev.relay.app`) renames itself on first launch, keychain entries are read across generations and re-homed on delete, persisted paths (`conduit.db`, `Documents/Conduit`, `~/Conduit/models`, `ConduitAutomations`) resolve their legacy counterparts, and the updater still accepts legacy `Conduit_` release assets — see `docs/ai-context/RELEASE.md` for the full compatibility matrix.
 
 ## Quick start
 
@@ -62,8 +62,12 @@ src-tauri/          Rust backend (Tauri v2)
   src/bin/          Sidecar binaries (relay-browser-mcp, relay-automation)
 mobile/             React Native / Expo companion (Expo SDK 57, RN 0.86)
 scripts/            Build sidecars, stage Python/LibreOffice bundles, emit latest.json
-docs/               Public docs (remote-access.md + images/assets)
-AI CONTEXT/         Canonical code map, IPC contract, PRD, build log, release notes
+docs/               All project documentation (see docs/README.md for the map)
+  docs/ai-context/    Canonical code map, IPC contract, PRD, build log, release notes
+  docs/architecture/  Shipped-subsystem design docs (memory, documents, compaction, …)
+  docs/research/      Feature research notes
+  docs/audits/        Audit / issue / roadmap records (point-in-time)
+  docs/notes/         One-off reports, release posts, task briefs
 ```
 
 ## Documentation
@@ -71,21 +75,21 @@ AI CONTEXT/         Canonical code map, IPC contract, PRD, build log, release no
 | File | Purpose |
 |---|---|
 | `README.md` | This file |
-| `AI CONTEXT/README.md` | Index of the `AI CONTEXT/` doc set |
+| `docs/ai-context/README.md` | Index of the `docs/ai-context/` doc set |
 | `CHANGELOG.md` | Release notes and notable commits |
-| `BUG_AUDIT.md` | Open and resolved bugs (Sev-tagged, source of truth: the code) |
-| `PERFORMANCE_AUDIT.md` | Performance findings and current build metrics |
-| `AI CONTEXT/AI_CONTEXT.md` | Canonical code map for AI assistants working on the codebase |
-| `AI CONTEXT/CONTRACT.md` | IPC contract between Rust backend and React frontend |
-| `AI CONTEXT/PRD.md` | Product requirements |
-| `AI CONTEXT/BUILD_LOG.md` | Build history, test coverage, design decisions |
-| `AI CONTEXT/RELEASE.md` | Auto-update release flow + naming rationale |
-| `AI CONTEXT/AUDIT.md`, `AI CONTEXT/BUG_LIST.md`, `AI CONTEXT/BUG_LIST_ROUND2.md` | Historical bug audits |
-| `DOCUMENT_DESIGN_ARCHITECTURE.md` | Document design layer (DOCX/PPTX/PDF generation) |
-| `MEMORY_DESIGN_ARCHITECTURE.md` | Persistent user-memory architecture |
-| `COMPACTION_REDESIGN.md` | Context compaction across the three chat paths |
-| `SELF_IMPROVING_ARTIFACTS.md` | Self-improving artifacts loop (design + shipped phases) |
-| `SESSION_MESH_DESIGN_ARCHITECTURE.md` | Session Mesh — cross-session awareness, messaging, and spawning |
+| `docs/audits/BUG_AUDIT.md` | Open and resolved bugs (Sev-tagged, source of truth: the code) |
+| `docs/audits/PERFORMANCE_AUDIT.md` | Performance findings and current build metrics |
+| `docs/ai-context/AI_CONTEXT.md` | Canonical code map for AI assistants working on the codebase |
+| `docs/ai-context/CONTRACT.md` | IPC contract between Rust backend and React frontend |
+| `docs/ai-context/PRD.md` | Product requirements |
+| `docs/ai-context/BUILD_LOG.md` | Build history, test coverage, design decisions |
+| `docs/ai-context/RELEASE.md` | Auto-update release flow + naming rationale |
+| `docs/ai-context/AUDIT.md`, `docs/ai-context/BUG_LIST.md`, `docs/ai-context/BUG_LIST_ROUND2.md` | Historical bug audits |
+| `docs/architecture/DOCUMENT_DESIGN_ARCHITECTURE.md` | Document design layer (DOCX/PPTX/PDF generation) |
+| `docs/architecture/MEMORY_DESIGN_ARCHITECTURE.md` | Persistent user-memory architecture |
+| `docs/architecture/COMPACTION_REDESIGN.md` | Context compaction across the three chat paths |
+| `docs/architecture/SELF_IMPROVING_ARTIFACTS.md` | Self-improving artifacts loop (design + shipped phases) |
+| `docs/architecture/SESSION_MESH_DESIGN_ARCHITECTURE.md` | Session Mesh — cross-session awareness, messaging, and spawning |
 | `docs/remote-access.md` | Pairing the mobile companion over USB or Tailscale |
 
 ## License

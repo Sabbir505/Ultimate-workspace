@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> **Naming note:** "Relay" is the product name on every surface as of the rename completion (`7f6952b1`, 2026-09-05): user-visible strings (window title, `package.json` name, `tauri.conf.json` `productName`, `<title>`, sidebar/banner/HTML strings), the Rust crate (`relay`, lib `relay_lib`), the bundle identifier (`dev.relay.app`), the sidecar binaries (`relay-browser-mcp`, `relay-automation`), the MCP server identifiers (`relay-browser`, `relay-tools`), the NSIS installer filename, the mobile app (`Relay Mobile`, `com.relay.mobile`), and the Windows scheduled-task name (`RelayAutomations`). Existing installs migrate transparently — see the [Unreleased] Changed entry and `AI CONTEXT/RELEASE.md` for the full compatibility matrix. The only pre-rebrand values kept on purpose are the E2E pairing crypto constants (`conduit-e2e-relay-*`), which are protocol-anchored on both desktop and phone.
+> **Naming note:** "Relay" is the product name on every surface as of the rename completion (`7f6952b1`, 2026-09-05): user-visible strings (window title, `package.json` name, `tauri.conf.json` `productName`, `<title>`, sidebar/banner/HTML strings), the Rust crate (`relay`, lib `relay_lib`), the bundle identifier (`dev.relay.app`), the sidecar binaries (`relay-browser-mcp`, `relay-automation`), the MCP server identifiers (`relay-browser`, `relay-tools`), the NSIS installer filename, the mobile app (`Relay Mobile`, `com.relay.mobile`), and the Windows scheduled-task name (`RelayAutomations`). Existing installs migrate transparently — see the [Unreleased] Changed entry and `docs/ai-context/RELEASE.md` for the full compatibility matrix. The only pre-rebrand values kept on purpose are the E2E pairing crypto constants (`conduit-e2e-relay-*`), which are protocol-anchored on both desktop and phone.
 
 ---
 
@@ -174,7 +174,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Family connect 400** — YouTube connects standalone; keep YouTube out of the combined Google consent ([59e2ea7d](https://github.com/Conduit-official/Conduit/commit/59e2ea7d), [d73a6d64](https://github.com/Conduit-official/Conduit/commit/d73a6d64))
 
 ### Documentation & Maintenance
-- **2026-08-27 doc pass** — `PROJECT_OVERVIEW.md`, `BUG_AUDIT.md`, `PERFORMANCE_AUDIT.md`, `AI CONTEXT/AI_CONTEXT.md`, and `README.md` (new) rewritten to match the current implementation. Realized metrics: 235 IPC commands, 21 tables, 68 vitest files / 460 tests passing, 539 cargo-lib tests + 1 failed, 34 `tsc --noEmit` errors, entry chunk 458.96 KB / 141.47 KB gzip. See `BUG_AUDIT.md` for the two open Sev M items.
+- **2026-08-27 doc pass** — `PROJECT_OVERVIEW.md`, `BUG_AUDIT.md`, `PERFORMANCE_AUDIT.md`, `docs/ai-context/AI_CONTEXT.md`, and `README.md` (new) rewritten to match the current implementation. Realized metrics: 235 IPC commands, 21 tables, 68 vitest files / 460 tests passing, 539 cargo-lib tests + 1 failed, 34 `tsc --noEmit` errors, entry chunk 458.96 KB / 141.47 KB gzip. See `BUG_AUDIT.md` for the two open Sev M items.
 - **Earlier (2026-08-23) doc pass** — Updated `PROJECT_OVERVIEW.md` with current architecture and metrics — **superseded by the 2026-08-27 pass above** (the 2026-08-23 numbers no longer match the code).
 
 ---

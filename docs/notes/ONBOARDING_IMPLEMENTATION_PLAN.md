@@ -77,7 +77,7 @@ Completion writes `onboarding.completed = "1"`; if the user saw/skipped step 2's
 | `src/components/command-palette/CommandPalette.tsx` | add `action:replay-onboarding` (~line 151) |
 | `src/components/settings/DataPanel.tsx` | "Replay welcome" row (calls `open()`) |
 | `src/test/welcomeWizard.test.tsx` | **new** — see §7 |
-| `AI CONTEXT/PRD.md` §9 | extend with the wizard spec (canon doc) |
+| `docs/ai-context/PRD.md` §9 | extend with the wizard spec (canon doc) |
 
 ## 6. Phases
 

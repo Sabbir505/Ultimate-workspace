@@ -608,12 +608,19 @@ pub(super) fn pi_message_text(msg: Option<&Value>) -> Option<String> {
 /// deltas are matched liberally (any inner event with a `delta` string whose
 /// type mentions text/reasoning) and the `result.finalText` line is used as a
 /// catch-up — any suffix the delta events never delivered still lands, so the
-/// reply can't be lost to a renamed event type.
+/// reply can't be lost to a renamed event type. `text_streamed` accumulates
+/// ONLY the non-thinking delta text: the finalText catch-up must diff against
+/// it, because `full` additionally carries `<think>` wrappers and tool
+/// markers that finalText never contains — diffing against `full` failed the
+/// prefix check after any thinking/tool turn and re-appended the whole reply
+/// (the doubled assistant bubble).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_commandcode_event(
     app: Option<&AppHandle>,
     sid: &str,
     v: &Value,
     full: &mut String,
+    text_streamed: &mut String,
     session_cell: &Arc<Mutex<Option<String>>>,
     input: &mut Option<i64>,
     output: &mut Option<i64>,
@@ -733,6 +740,12 @@ pub(super) fn handle_commandcode_event(
                         }
                         full.push_str(delta);
                         emit_token(app, sid, delta);
+                        // finalText's plain-text counterpart: thinking is
+                        // model reasoning the reply line never includes, and
+                        // tool markers are our own transcript decoration.
+                        if !thinking {
+                            text_streamed.push_str(delta);
+                        }
                     }
                 }
             }
@@ -763,10 +776,24 @@ pub(super) fn handle_commandcode_event(
                 }
             }
             // finalText catch-up: append whatever the delta events never
-            // delivered (nothing when streaming worked end-to-end).
+            // delivered (nothing when streaming worked end-to-end). The
+            // prefix check runs against `text_streamed` — `full` also holds
+            // <think> wrappers and tool markers, so it is never a prefix of
+            // finalText on thinking/tool turns and the whole reply used to
+            // land a second time.
             if let Some(text) = v.get("finalText").and_then(|t| t.as_str()) {
                 if !text.is_empty() {
-                    let suffix = text.strip_prefix(full.as_str()).unwrap_or(text);
+                    let suffix = match text.strip_prefix(text_streamed.as_str()) {
+                        Some(s) => s,
+                        // Nothing streamed (renamed event types): recover the
+                        // whole reply from finalText.
+                        None if text_streamed.is_empty() => text,
+                        // Streamed text diverged from finalText (e.g.
+                        // finalText carries only the LAST message of a
+                        // multi-turn reply): everything was already delivered
+                        // — appending would duplicate it.
+                        None => "",
+                    };
                     if !suffix.is_empty() {
                         full.push_str(suffix);
                         emit_token(app, sid, suffix);

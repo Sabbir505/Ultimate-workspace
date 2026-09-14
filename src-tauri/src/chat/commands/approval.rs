@@ -2,6 +2,9 @@
 //! monolith (mechanical split; see REFACTOR_PROGRESS.md).
 
 use super::*;
+// `Emitter` for the chat:turn-started emit below — the parent's private
+// tauri import doesn't re-export through the glob.
+use tauri::Emitter;
 
 // ---- Per-action tool approval ----
 
@@ -289,6 +292,7 @@ pub fn resolve_agent_question(
                     free,
                     skipped,
                 );
+                let display = crate::agent_sessions::compose_ask_display(&answers, free, skipped);
                 let manager = std::sync::Arc::clone(&agent_state.0);
                 let db2 = DbState(std::sync::Arc::clone(&db.0));
                 let sid = chat_session_id.clone();
@@ -311,7 +315,31 @@ pub fn resolve_agent_question(
                         );
                         return;
                     }
-                    if let Err(e) = manager.dispatch_ask_follow_up(&app, &db2, &sid, &content) {
+                    // Tell the frontend a turn it did NOT initiate is starting
+                    // (the answer's follow-up): it pre-creates the streaming
+                    // entry so the composer flips back to Stop and onToken's
+                    // straggler guard lets the turn's tokens through. Emitted
+                    // BEFORE the spawn — the reader can start emitting tokens
+                    // the moment spawn returns, and a token that raced this
+                    // event would be dropped. A failed dispatch cleans the
+                    // pre-created entry up through the chat:error path below.
+                    let _ = app.emit(
+                        "chat:turn-started",
+                        crate::types::ChatTurnStartedPayload {
+                            chat_session_id: sid.clone(),
+                        },
+                    );
+                    // The clean answer is the persisted user message; the
+                    // machine scaffold rides the attach appendix (CLI-only,
+                    // never persisted), separated by a blank line the way the
+                    // attachment appendix is.
+                    if let Err(e) = manager.dispatch_ask_follow_up(
+                        &app,
+                        &db2,
+                        &sid,
+                        &display,
+                        &format!("\n\n{content}"),
+                    ) {
                         eprintln!("[agent] question follow-up failed: {e}");
                         crate::agent_sessions::emit_error(
                             Some(&app2),

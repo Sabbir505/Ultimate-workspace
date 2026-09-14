@@ -4,9 +4,37 @@ import {
   resolveAgentQuestion,
   resolveToolAction,
 } from "../../../lib/ipc";
-import type { ChatCheckpoint, ChatTaskProgressPayload } from "../../../lib/ipc";
-import { resolvePendingCard } from "../moduleState";
+import type {
+  ChatCheckpoint,
+  ChatMessageRecord,
+  ChatTaskProgressPayload,
+} from "../../../lib/ipc";
+import { optimisticMsgIdCounter, resolvePendingCard } from "../moduleState";
 import type { ChatStoreGet, ChatStoreSet } from "../types";
+
+/** Mirror of the backend's `compose_ask_display` (agent_sessions/ask.rs):
+ *  the clean answer text the follow-up turn persists as its user message.
+ *  The optimistic bubble below must match that string EXACTLY or
+ *  mergeOptimistic keeps both when the persisted row lands. */
+function answerDisplayText(
+  answers: Record<string, string | string[]>,
+  response?: string,
+): string {
+  const skipped = !response?.trim() && Object.keys(answers).length === 0;
+  const parts: string[] = [];
+  if (!skipped) {
+    for (const v of Object.values(answers)) {
+      if (Array.isArray(v)) {
+        if (v.length > 0) parts.push(v.join(", "));
+      } else if (v.trim().length > 0) {
+        parts.push(v);
+      }
+    }
+    const free = response?.trim();
+    if (free) parts.push(free);
+  }
+  return parts.length > 0 ? parts.join("\n") : "(skipped the question)";
+}
 
 export function createApprovalsSlice(set: ChatStoreSet, get: ChatStoreGet) {
   return {
@@ -59,6 +87,7 @@ export function createApprovalsSlice(set: ChatStoreSet, get: ChatStoreGet) {
     resolveQuestion: async (chatSessionId: string, answers: Record<string, string | string[]>, response?: string) => {
       // The harness is still blocked on stdin — if the IPC fails the card goes
       // back so the turn can't hang silently.
+      const display = answerDisplayText(answers, response);
       await resolvePendingCard(
         get,
         set,
@@ -67,6 +96,34 @@ export function createApprovalsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         "Couldn't deliver the answer",
         (pending) => resolveAgentQuestion(chatSessionId, pending.pendingId, answers, response),
       );
+      // Surface the answer as a user bubble immediately: the follow-up turn
+      // dispatches on a backend thread, so without this nothing in the
+      // transcript shows the answer landed until the assistant's NEXT reply
+      // arrived. The persisted row (written inside the backend's send) carries
+      // the exact same text, so mergeOptimistic swaps this twin out when the
+      // turn's refetch lands. Only a visible pane gets the bubble — a
+      // background session's answer surfaces when that chat is opened (same
+      // contract as broadcastToSessions).
+      const s = get();
+      const forActive = s.activeChatSessionId === chatSessionId;
+      const forSplit = s.splitChatSessionId === chatSessionId && !forActive;
+      if (!forActive && !forSplit) return;
+      const userMsg: ChatMessageRecord = {
+        id: optimisticMsgIdCounter.next--,
+        chatSessionId,
+        role: "user",
+        content: display,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+        createdAt: Date.now(),
+        startedAt: null,
+        completedAt: null,
+      };
+      set((st) => ({
+        messages: forActive ? [...st.messages, userMsg] : st.messages,
+        splitMessages: forSplit ? [...st.splitMessages, userMsg] : st.splitMessages,
+      }));
     },
 
     onCheckpointCreated: (payload: ChatCheckpoint) => {

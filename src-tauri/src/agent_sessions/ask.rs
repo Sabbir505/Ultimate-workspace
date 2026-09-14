@@ -146,6 +146,9 @@ pub(super) fn split_relay_ask(full: String) -> (String, Option<serde_json::Value
 /// continuation of the same conversation).
 /// asking turn is already finished and persisted by the time this runs).
 /// Also used by `resolve_agent_question` to build the follow-up content.
+/// This is the CLI-FACING directive — it rides the send's `attach_prompt`
+/// appendix and reaches the model but never the persisted transcript. The
+/// user-facing bubble text is `compose_ask_display` below.
 pub(crate) fn compose_ask_follow_up(
     questions: &serde_json::Value,
     answers: &serde_json::Value,
@@ -184,6 +187,47 @@ pub(crate) fn compose_ask_follow_up(
     }
     body.push_str("\n\nContinue the task with these answers.");
     body
+}
+
+/// The user-facing transcript line for an answered question card — just the
+/// answer itself ("Relay product", "A, B" for multiSelect, the free text),
+/// which is what gets persisted as the follow-up turn's user message and
+/// what the frontend mirrors as its optimistic bubble. The machine directive
+/// that contextualizes the answer for the harness (`compose_ask_follow_up`)
+/// rides the send's `attach_prompt` appendix: it reaches the model but is
+/// never persisted, so the bubble no longer shows the "You asked: … /
+/// Continue the task…" scaffold. Skips render as a quiet marker so the
+/// timeline shows the card was dismissed rather than silently dropped.
+/// MUST stay in lockstep with the frontend's `answerDisplayText` mirror
+/// (state/chat/slices/approvalsSlice.ts) — the optimistic bubble only merges
+/// with the persisted row when the two strings match exactly.
+pub(crate) fn compose_ask_display(
+    answers: &serde_json::Value,
+    response: Option<&str>,
+    skipped: bool,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !skipped {
+        if let Some(map) = answers.as_object() {
+            for (_, a) in map {
+                if let Some(labels) = a.as_array() {
+                    let joined: Vec<&str> = labels.iter().filter_map(|l| l.as_str()).collect();
+                    if !joined.is_empty() {
+                        parts.push(joined.join(", "));
+                    }
+                } else if let Some(label) = a.as_str().filter(|l| !l.trim().is_empty()) {
+                    parts.push(label.to_string());
+                }
+            }
+        }
+        if let Some(free) = response.map(str::trim).filter(|s| !s.is_empty()) {
+            parts.push(free.to_string());
+        }
+    }
+    if parts.is_empty() {
+        return "(skipped the question)".to_string();
+    }
+    parts.join("\n")
 }
 
 /// Register a surfaced RELAY_ASK question and emit the question card. The

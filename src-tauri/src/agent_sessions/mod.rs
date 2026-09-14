@@ -342,13 +342,17 @@ impl AgentSessionManager {
     /// (kimi `--session`, opencode server session, pi `--session`, omp /
     /// commandcode `--resume`) carries the conversation forward, and the
     /// asking turn's workspace snapshot (cwd/project/connectors) keeps the
-    /// follow-up in the same directory.
+    /// follow-up in the same directory. `display` is the persisted user
+    /// message (the bare answer — what the transcript bubble shows);
+    /// `directive` is the CLI-facing context scaffold that rides the
+    /// `attach_prompt` appendix (reaches the model, never persisted).
     pub fn dispatch_ask_follow_up(
         &self,
         app: &AppHandle,
         db: &DbState,
         chat_session_id: &str,
-        content: &str,
+        display: &str,
+        directive: &str,
     ) -> Result<(), String> {
         let (harness, model, ctx) = {
             let entry = {
@@ -367,17 +371,18 @@ impl AgentSessionManager {
                 .unwrap_or_default();
             (g.harness.clone(), g.model.clone(), ctx)
         };
-        if ctx.cwd.is_none() {
-            return Err(
-                "no recorded workspace for this session — send a message first".to_string(),
-            );
-        }
+        // A chat with no custom folder, worktree, or bound project legitimately
+        // runs with cwd = None — the ASKING turn spawned exactly that way (the
+        // child inherits the app's working directory), so the follow-up must
+        // dispatch under the same conditions. Refusing here used to kill every
+        // answer in unbound chats with "no recorded workspace — send a message
+        // first" even though the question itself came from a completed turn.
         self.send(
             app,
             db,
             chat_session_id,
-            content,
-            "",
+            display,
+            directive,
             &harness,
             &model,
             ctx.cwd.as_deref(),
@@ -1010,7 +1015,10 @@ use tracker::*;
 
 pub(crate) use oneshot::{harness_oneshot_text, run_one_shot};
 pub(crate) use tracker::tool_meta_generic;
-pub(crate) use ask::{build_opencode_reply_answers, compose_ask_follow_up, opencode_answer_question};
+pub(crate) use ask::{
+    build_opencode_reply_answers, compose_ask_display, compose_ask_follow_up,
+    opencode_answer_question,
+};
 pub(crate) use attachments::prepare_agent_attachments;
 pub(crate) use bundle::{artifacts_dir_for_bundle, resolve_harness_bundle};
 pub(crate) use dirwatch::previewable_ext;
@@ -1650,6 +1658,7 @@ mod tests {
     fn feed_cc(lines: &[&str]) -> UsageState {
         let cell = Arc::new(Mutex::new(None));
         let mut full = String::new();
+        let mut cc_text = String::new();
         let mut input = None;
         let mut output = None;
         let mut cache_read = None;
@@ -1664,6 +1673,7 @@ mod tests {
                 "s",
                 &v,
                 &mut full,
+                &mut cc_text,
                 &cell,
                 &mut input,
                 &mut output,
@@ -1730,6 +1740,32 @@ mod tests {
             r#"{"type":"result","subtype":"success","sessionId":"sid-1","usage":{"inputTokens":1,"outputTokens":2},"finalText":"Hello world"}"#,
         ]);
         assert_eq!(st.full, "Hello world");
+    }
+
+    #[test]
+    fn commandcode_final_text_never_repeats_after_think_or_tool_turns() {
+        // Regression (doubled assistant bubble): the finalText catch-up used
+        // to diff against `full`, which also carries <think> wrappers and
+        // tool markers — after any thinking/tool turn the prefix check
+        // failed and the WHOLE reply was appended a second time.
+        let st = feed_cc(&[
+            r#"{"type":"event","event":{"type":"thinking_start"}}"#,
+            r#"{"type":"event","event":{"type":"thinking_delta","delta":"reasoning"}}"#,
+            r#"{"type":"event","event":{"type":"thinking_end"}}"#,
+            r#"{"type":"event","event":{"type":"text_delta","delta":"Answer"}}"#,
+            r#"{"type":"event","event":{"type":"tool_running","toolCallId":"t1","toolName":"bash"}}"#,
+            r#"{"type":"event","event":{"type":"tool_completed","toolCallId":"t1","toolName":"bash","result":"out"}}"#,
+            r#"{"type":"event","event":{"type":"text_delta","delta":" more"}}"#,
+            r#"{"type":"result","subtype":"success","sessionId":"sid-1","finalText":"Answer more"}"#,
+        ]);
+        assert_eq!(
+            st.full.matches("Answer").count() + st.full.matches(" more").count(),
+            2,
+            "each streamed piece must appear exactly once: {}",
+            st.full
+        );
+        assert!(st.full.contains("reasoning"), "{}", st.full);
+        assert!(st.full.contains("out"), "{}", st.full);
     }
 
     #[test]
@@ -3310,6 +3346,42 @@ mod tests {
         let skipped = compose_ask_follow_up(&qs, &serde_json::json!({}), None, true);
         assert!(skipped.contains("dismissed"), "{skipped}");
         assert!(skipped.contains("best judgment"), "{skipped}");
+    }
+
+    #[test]
+    fn ask_display_is_the_bare_answer() {
+        // The persisted user message must be the answer ALONE — the "You
+        // asked: … / Continue the task…" scaffold is CLI-facing only and
+        // must never leak into the transcript bubble.
+        let answers = serde_json::json!({"What should I focus on next?": "Relay product"});
+        assert_eq!(
+            compose_ask_display(&answers, None, false),
+            "Relay product",
+            "single label, no scaffold"
+        );
+
+        let multi = serde_json::json!({"Pick two": ["alpha", "beta"]});
+        assert_eq!(compose_ask_display(&multi, None, false), "alpha, beta");
+
+        let free_only = compose_ask_display(
+            &serde_json::json!({}),
+            Some("  use whatever  ").as_deref(),
+            false,
+        );
+        assert_eq!(free_only, "use whatever", "free text is trimmed");
+
+        let label_and_free = compose_ask_display(&answers, Some("and fast").as_deref(), false);
+        assert_eq!(label_and_free, "Relay product\nand fast");
+
+        // Skips (and any answerless shape) render the quiet dismissal marker.
+        assert_eq!(
+            compose_ask_display(&serde_json::json!({}), None, true),
+            "(skipped the question)"
+        );
+        assert_eq!(
+            compose_ask_display(&serde_json::json!({}), None, false),
+            "(skipped the question)"
+        );
     }
 
     #[test]

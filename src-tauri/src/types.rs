@@ -832,6 +832,18 @@ pub struct ChatQuestionRequestPayload {
     pub questions: serde_json::Value,
 }
 
+/// Emitted when the backend starts a turn the FRONTEND did not initiate —
+/// currently the harness-question follow-up (the answer's turn dispatches
+/// from a backend thread). The frontend pre-creates the session's streaming
+/// entry from this (beginRemoteTurn), so the composer flips to Stop and
+/// onToken's straggler guard lets the turn's tokens through. Emitted BEFORE
+/// the spawn: a token that races this event would be dropped otherwise.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTurnStartedPayload {
+    pub chat_session_id: String,
+}
+
 /// Emitted while a background chat task (download_file / run_shell) makes
 /// progress. The UI renders a live progress card; the model polls the same
 /// state via `get_task_status`.

@@ -157,7 +157,7 @@ describe("send cwd resolution prefers the worktree", () => {
     await useChatStore.getState().sendMessage("run tests");
 
     expect(sendAgentChatMessageMock).toHaveBeenCalledWith(
-      "s1", "run tests", "claude_code", "m", "D:/proj/p1-relay-abc", undefined, undefined,
+      "s1", "run tests", "claude_code", "m", "D:/proj/p1-relay-abc", undefined, undefined, false,
     );
   });
 
@@ -174,7 +174,7 @@ describe("send cwd resolution prefers the worktree", () => {
     await useChatStore.getState().sendMessage("run tests");
 
     expect(sendAgentChatMessageMock).toHaveBeenCalledWith(
-      "s1", "run tests", "claude_code", "m", "D:/custom", undefined, undefined,
+      "s1", "run tests", "claude_code", "m", "D:/custom", undefined, undefined, false,
     );
   });
 
@@ -193,7 +193,7 @@ describe("send cwd resolution prefers the worktree", () => {
     await useChatStore.getState().broadcastToSessions(["b"], "hello");
 
     expect(sendAgentChatMessageMock).toHaveBeenCalledWith(
-      "b", "hello", "kimi_code", "m", "D:/proj/p1-relay-b", undefined,
+      "b", "hello", "kimi_code", "m", "D:/proj/p1-relay-b", undefined, undefined, false,
     );
   });
 });

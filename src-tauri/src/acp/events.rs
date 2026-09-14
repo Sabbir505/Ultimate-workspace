@@ -27,6 +27,115 @@ pub enum AcpEvent {
     PromptIgnored,
 }
 
+/// Token/cost accounting attached to a turn by an agent that reports usage.
+/// ACP v1 does not define a usage field — this is a best-effort read of the
+/// extension key agents actually emit (`usage` on `session/update` /
+/// `session/finish` params or on the finish's `message`). When nothing is
+/// reported the reader falls back to a char-based estimate so the composer
+/// HUD and DB token accounting aren't permanently empty for ACP sessions.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AcpUsage {
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+}
+
+impl AcpUsage {
+    /// Field-wise merge used to fold successive updates — a later report
+    /// overrides only the fields it actually carries.
+    pub fn merge(&mut self, other: AcpUsage) {
+        if other.input_tokens.is_some() {
+            self.input_tokens = other.input_tokens;
+        }
+        if other.output_tokens.is_some() {
+            self.output_tokens = other.output_tokens;
+        }
+        if other.cache_read_tokens.is_some() {
+            self.cache_read_tokens = other.cache_read_tokens;
+        }
+        if other.cache_write_tokens.is_some() {
+            self.cache_write_tokens = other.cache_write_tokens;
+        }
+        if other.cost_usd.is_some() {
+            self.cost_usd = other.cost_usd;
+        }
+    }
+}
+
+/// Read one optional i64 out of a JSON object trying several key spellings
+/// (snake_case per the rest of ACP, camelCase per the pi-lineage agents that
+/// also speak this protocol shape).
+fn i64_field(obj: &Value, keys: &[&str]) -> Option<i64> {
+    let o = obj.as_object()?;
+    keys.iter().find_map(|k| o.get(*k).and_then(|v| v.as_i64()))
+}
+
+/// Best-effort usage extraction from a `session/update` / `session/finish`
+/// params object. Returns `None` when no usage-shaped object is present (the
+/// common case — ACP v1 doesn't define one); `Some` carries only the fields
+/// the agent actually sent.
+pub fn extract_usage(params: &Value) -> Option<AcpUsage> {
+    // The usage object can sit at the params root, under `message` (the
+    // finish summary shape), or under a `usage` key on either.
+    let candidates = [
+        params.get("usage"),
+        params.get("message").and_then(|m| m.get("usage")),
+    ];
+    let usage = candidates.into_iter().flatten().find(|u| u.is_object())?;
+    let mut out = AcpUsage {
+        input_tokens: i64_field(
+            usage,
+            &["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"],
+        ),
+        output_tokens: i64_field(
+            usage,
+            &["output_tokens", "outputTokens", "completion_tokens", "completionTokens"],
+        ),
+        cache_read_tokens: i64_field(
+            usage,
+            &["cache_read_tokens", "cacheReadTokens", "cache_read_input_tokens", "cached_tokens"],
+        ),
+        cache_write_tokens: i64_field(
+            usage,
+            &["cache_write_tokens", "cacheWriteTokens", "cache_creation_input_tokens"],
+        ),
+        cost_usd: usage
+            .as_object()
+            .and_then(|o| {
+                o.get("cost").and_then(|c| {
+                    c.as_f64()
+                        .or_else(|| c.get("total").and_then(|t| t.as_f64()))
+                })
+            })
+            .or_else(|| i64_field(usage, &["total_cost_usd"]).map(|v| v as f64))
+            .or_else(|| {
+                usage
+                    .as_object()?
+                    .get("cost_usd")
+                    .and_then(|c| c.as_f64())
+            }),
+    };
+    if out == AcpUsage::default() {
+        // A usage object carrying none of the recognized keys is noise, not
+        // an empty report — treat it as absent so the estimator runs.
+        return None;
+    }
+    // Fold a root-level cost that sits outside the usage object (some agents
+    // put `cost` next to `usage`).
+    if out.cost_usd.is_none() {
+        if let Some(cost) = params
+            .as_object()
+            .and_then(|o| o.get("cost"))
+            .and_then(|c| c.as_f64())
+        {
+            out.cost_usd = Some(cost);
+        }
+    }
+    Some(out)
+}
+
 /// Pull the content-item array from a notification's params. ACP puts the
 /// turn's streamed items in `content` for `session/update`, and the final
 /// summary inside `message.content` for `session/finish` — accept both.
@@ -212,5 +321,74 @@ mod tests {
             ],
         });
         assert!(translate_session_update(&params).is_empty());
+    }
+
+    #[test]
+    fn usage_absent_for_plain_updates() {
+        // ACP v1 has no usage field — a spec-conformant update must read as
+        // "no usage reported" so the estimator runs.
+        let params = json!({ "sessionId": "s1", "content": [{ "type": "text", "text": "hi" }] });
+        assert_eq!(extract_usage(&params), None);
+    }
+
+    #[test]
+    fn usage_extracted_from_extension_object() {
+        // An agent that extends the protocol with a usage object gets its
+        // numbers read — snake_case spellings.
+        let params = json!({
+            "sessionId": "s1",
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 45,
+                "cache_read_tokens": 100,
+                "cache_write_tokens": 20,
+            },
+        });
+        let u = extract_usage(&params).expect("usage object must be recognized");
+        assert_eq!(u.input_tokens, Some(120));
+        assert_eq!(u.output_tokens, Some(45));
+        assert_eq!(u.cache_read_tokens, Some(100));
+        assert_eq!(u.cache_write_tokens, Some(20));
+        assert_eq!(u.cost_usd, None);
+    }
+
+    #[test]
+    fn usage_extracted_camel_case_and_message_nesting() {
+        let params = json!({
+            "sessionId": "s1",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "usage": { "inputTokens": 10, "outputTokens": 4, "cost": 0.0123 },
+            },
+        });
+        let u = extract_usage(&params).expect("message.usage must be recognized");
+        assert_eq!(u.input_tokens, Some(10));
+        assert_eq!(u.output_tokens, Some(4));
+        assert_eq!(u.cost_usd, Some(0.0123));
+    }
+
+    #[test]
+    fn usage_recognizes_unrecognized_shape_as_absent() {
+        // A `usage` object with none of the known keys is noise — treat it
+        // as absent rather than reporting a zero turn.
+        let params = json!({ "usage": { "weird": true } });
+        assert_eq!(extract_usage(&params), None);
+    }
+
+    #[test]
+    fn usage_merge_overrides_only_present_fields() {
+        let mut base = AcpUsage {
+            input_tokens: Some(1),
+            output_tokens: None,
+            ..Default::default()
+        };
+        base.merge(AcpUsage {
+            input_tokens: None,
+            output_tokens: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(base.input_tokens, Some(1));
+        assert_eq!(base.output_tokens, Some(2));
     }
 }

@@ -1347,7 +1347,9 @@ pub use secrets::{delete_secret_row, get_secret_blob, list_secret_keys, upsert_s
 
 // cost
 pub use cost::{get_cost_events, insert_cost_event};
-pub use cost_v2::{get_cost_rollups_v2, read_rate_overrides};
+pub use cost_v2::{
+    get_cost_rollups_v2, read_rate_overrides, record_observed_pricing,
+};
 
 // chat
 pub use chat::{

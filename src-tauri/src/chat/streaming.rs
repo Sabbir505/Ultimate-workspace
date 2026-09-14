@@ -268,6 +268,10 @@ struct RoundUsage {
     cache_creation: i64,
     cache_read: i64,
     reasoning: i64,
+    /// Provider-reported cost (OpenRouter's `usage.cost`) — the LAST round
+    /// that reported wins (each round's figure covers that round only;
+    /// summing would double-count multi-round turns).
+    reported_cost: Option<f64>,
     have: bool,
 }
 
@@ -282,6 +286,9 @@ impl RoundUsage {
         self.cache_creation += r.cache_creation;
         self.cache_read += r.cache_read;
         self.reasoning += r.reasoning;
+        if r.reported_cost.is_some() {
+            self.reported_cost = r.reported_cost;
+        }
         self.have = self.have || r.have;
     }
 }
@@ -475,6 +482,11 @@ async fn openai_stream_round<R: tauri::Runtime>(
                     .pointer("/completion_tokens_details/reasoning_tokens")
                     .and_then(|x| x.as_i64())
                     .unwrap_or(usage.reasoning);
+                // OpenRouter reports the round's REAL cost — preferred over
+                // the family-rate estimate at build_usage.
+                if let Some(c) = u.get("cost").and_then(|x| x.as_f64()).filter(|c| *c > 0.0) {
+                    usage.reported_cost = Some(c);
+                }
                 usage.have = true;
             }
             let delta = match v.pointer("/choices/0/delta") {
@@ -1787,15 +1799,20 @@ fn build_usage(openai: bool, u: RoundUsage) -> Option<ChatUsage> {
     if !u.have {
         return None;
     }
-    let cost = if openai {
-        calculate_openai_cost(u.input, u.output)
-    } else {
-        calculate_anthropic_cost(u.input, u.output)
-    };
+    // The provider's own figure (OpenRouter sends usage.cost) is the user's
+    // real billing — it wins over the hardcoded family-rate estimate.
+    let cost = u.reported_cost.unwrap_or_else(|| {
+        if openai {
+            calculate_openai_cost(u.input, u.output)
+        } else {
+            calculate_anthropic_cost(u.input, u.output)
+        }
+    });
     Some(ChatUsage {
         input_tokens: u.input,
         output_tokens: u.output,
         cost_usd: cost,
+        reported_cost_usd: u.reported_cost,
         cache_creation_input_tokens: u.cache_creation,
         cache_read_input_tokens: u.cache_read,
         reasoning_tokens: u.reasoning,
@@ -1990,6 +2007,36 @@ async fn openai_round_accumulates_split_tool_call_deltas() {
         .expect("arguments accumulate as a string");
     assert_eq!(args, "{\"command\":\"ls\"}");
     assert_eq!(message["tool_calls"][0]["id"], "call_1");
+}
+
+#[tokio::test]
+async fn openai_round_captures_reported_cost_from_usage_chunk() {
+    let app = tauri::test::mock_app().handle().clone();
+    let client = reqwest::Client::new();
+    // llama-server order: final delta → finish_reason → usage chunk → [DONE].
+    // OpenRouter's usage chunk carries the round's real cost.
+    let url = spawn_sse_server(concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"cost\":0.42}}\n\n",
+        "data: [DONE]\n\n",
+    ))
+    .await;
+    let body = serde_json::json!({ "model": "test", "messages": [] });
+    let mut full = String::new();
+
+    let (_, usage) = openai_stream_round(
+        &client, &url, "key", &body, &app, "sid-cost", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+    )
+    .await
+    .expect("round succeeds");
+
+    let built = build_usage(true, usage).expect("usage chunk must build a ChatUsage");
+    assert_eq!(built.reported_cost_usd, Some(0.42));
+    // The provider's real cost supersedes the family-rate estimate.
+    assert!((built.cost_usd - 0.42).abs() < 1e-9, "got {}", built.cost_usd);
+    assert_eq!(built.input_tokens, 100);
+    assert_eq!(built.output_tokens, 50);
 }
 
 #[tokio::test]

@@ -143,7 +143,14 @@ pub struct ChatRequest {
 pub struct ChatUsage {
     pub input_tokens: i64,
     pub output_tokens: i64,
+    /// Local (family-rate) estimate — the fallback, not the truth.
     pub cost_usd: f64,
+    /// Cost the PROVIDER itself reported on the usage chunk (OpenRouter
+    /// sends `usage.cost`). When present it supersedes `cost_usd` — the
+    /// user's real billing, not a hardcoded family rate. It also feeds the
+    /// DB's observed per-model rate so future turns on the same model price
+    /// from reality (see db::record_observed_pricing).
+    pub reported_cost_usd: Option<f64>,
     pub cache_creation_input_tokens: i64,
     pub cache_read_input_tokens: i64,
     pub reasoning_tokens: i64,
@@ -246,6 +253,13 @@ struct OpenAIWireBody {
     /// become multimodal content arrays (vision); plain messages stay strings.
     messages: Vec<serde_json::Value>,
     stream: bool,
+    /// Ask the endpoint for the usage-only trailing chunk. Without this,
+    /// OpenAI-style endpoints stream no token counts at all, so plain
+    /// (non-tool) turns had NULL usage on `chat:done` and no DB token
+    /// accounting. The tool loop already sends this on every round
+    /// (`build_openai_body`); the OpenAI protocol sends the usage chunk
+    /// after the final delta and before `data: [DONE]`.
+    stream_options: OpenAIStreamOptions,
     /// Generation cap (E-2c): `ChatRequest.max_tokens` was silently dropped
     /// on every OpenAI-family request, making output length (and cost)
     /// unbounded while the Anthropic path honored it. Skipped for OpenAI
@@ -265,6 +279,13 @@ struct OpenAIWireBody {
     /// in `anthropic_request` and never sees this field.
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_template_kwargs: Option<ChatTemplateKwargs>,
+}
+
+/// `stream_options.include_usage` — the only field this codebase needs from
+/// the OpenAI streaming-options object.
+#[derive(Serialize)]
+struct OpenAIStreamOptions {
+    include_usage: bool,
 }
 
 /// Wraps a single `chat_template_kwargs` entry. We need a struct (not a
@@ -472,6 +493,9 @@ fn openai_wire_body(req: &ChatRequest, cache_marks: bool) -> OpenAIWireBody {
         model: req.model.clone(),
         messages,
         stream: true,
+        stream_options: OpenAIStreamOptions {
+            include_usage: true,
+        },
         max_tokens: openai_wire_max_tokens(req),
         reasoning_effort: req.effort.clone(),
         chat_template_kwargs: req
@@ -653,6 +677,8 @@ impl ChatProvider for AnthropicProvider {
             input_tokens: input,
             output_tokens: last_output,
             cost_usd: cost,
+            // The Messages API carries no cost field — estimate only.
+            reported_cost_usd: None,
             cache_creation_input_tokens: cache_creation,
             cache_read_input_tokens: cache_read,
             reasoning_tokens: 0, // Anthropic doesn't surface reasoning_tokens on message_delta yet
@@ -731,7 +757,6 @@ impl ChatProvider for OpenAIProvider {
             #[derive(Deserialize)]
             struct Choice {
                 delta: Option<Delta>,
-                finish_reason: Option<String>,
             }
 
             #[derive(Deserialize)]
@@ -758,14 +783,16 @@ impl ChatProvider for OpenAIProvider {
             }
 
             // Check for final chunk (may have usage, may have finish_reason).
-            let mut is_done = false;
-            // mi24: move deltas out instead of cloning — `payload` is
-            // dropped at the end of this branch.
+            // `finish_reason: "stop"` is NOT terminal: the provider's usage
+            // chunk arrives AFTER it (llama-server order: final delta →
+            // `{"choices":[],"usage":{…}}` → `[DONE]`), so only `data: [DONE]`
+            // ends the read loop — breaking at stop dropped token accounting
+            // on every plain (non-tool) turn. The stream still ends promptly
+            // at `[DONE]` or EOF; a half-open connection that never sends
+            // either hits the existing 60s stall watchdog, same as the tool
+            // loop's degenerate case.
             if let Some(choices) = payload.choices {
                 for choice in choices {
-                    if choice.finish_reason.as_deref() == Some("stop") {
-                        is_done = true;
-                    }
                     if let Some(delta) = choice.delta {
                         if let Some(content) = delta.content {
                             if !content.is_empty() {
@@ -781,9 +808,10 @@ impl ChatProvider for OpenAIProvider {
                 }
             }
 
-            // Some compatible endpoints send usage on the same chunk as finish.
-            if payload.usage.is_some() || is_done {
-                return Ok((None, payload.usage.is_some() || is_done));
+            // A usage-bearing chunk is mid-stream by definition — keep
+            // reading so the trailing `[DONE]` (or EOF) ends the turn.
+            if payload.usage.is_some() {
+                return Ok((None, false));
             }
         }
 
@@ -794,20 +822,44 @@ impl ChatProvider for OpenAIProvider {
         // Usage in OpenAI appears in the final chunk with usage object.
         // Search for the last data line that contains usage.
         for line in buf.lines().rev() {
-            if let Some(data) = line.strip_prefix("data: ") {
-                if data == "[DONE]" {
-                    continue;
-                }
-                #[derive(Deserialize)]
-                struct UsageEvent {
-                    usage: Option<UsageData>,
-                }
-                #[derive(Deserialize)]
-                struct UsageData {
-                    prompt_tokens: Option<i64>,
-                    completion_tokens: Option<i64>,
-                    total_tokens: Option<i64>,
-                }
+            // Tolerate `data:{…}` without the trailing space — the same
+            // aggregators (OpenRouter, vLLM) that emit it stream it here too,
+            // and the retained buffer keeps the raw line.
+            let data = match line
+                .strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
+            {
+                Some(d) => d,
+                None => continue,
+            };
+            if data == "[DONE]" {
+                continue;
+            }
+            #[derive(Deserialize)]
+            struct UsageEvent {
+                usage: Option<UsageData>,
+            }
+            #[derive(Deserialize)]
+            struct UsageData {
+                prompt_tokens: Option<i64>,
+                completion_tokens: Option<i64>,
+                /// OpenRouter reports the request's REAL cost on the usage
+                /// chunk; OpenAI-family endpoints that don't simply omit it.
+                #[serde(rename = "cost")]
+                reported_cost: Option<f64>,
+                #[serde(rename = "prompt_tokens_details")]
+                prompt_details: Option<PromptTokenDetails>,
+                #[serde(rename = "completion_tokens_details")]
+                completion_details: Option<CompletionTokenDetails>,
+            }
+            #[derive(Deserialize)]
+            struct PromptTokenDetails {
+                cached_tokens: Option<i64>,
+            }
+            #[derive(Deserialize)]
+            struct CompletionTokenDetails {
+                reasoning_tokens: Option<i64>,
+            }
                 if let Ok(ev) = serde_json::from_str::<UsageEvent>(data) {
                     if let Some(u) = ev.usage {
                         let input = u.prompt_tokens.unwrap_or(0);
@@ -817,11 +869,28 @@ impl ChatProvider for OpenAIProvider {
                             input_tokens: input,
                             output_tokens: output,
                             cost_usd: cost,
-                            ..Default::default()
+                            // OpenRouter's reported cost is the user's real
+                            // billing — carried separately so the turn (and
+                            // the observed-rate learner) can prefer it over
+                            // the family-rate estimate in `cost_usd`.
+                            reported_cost_usd: u.reported_cost.filter(|c| *c > 0.0),
+                            // OpenAI reports the cache-served share of the prompt
+                            // (billed at the cached rate) and reasoning tokens
+                            // folded into completion — mirror the tool loop's
+                            // extraction so the cache chip and cost rollup see
+                            // the same detail on the non-tool path.
+                            cache_read_input_tokens: u
+                                .prompt_details
+                                .and_then(|d| d.cached_tokens)
+                                .unwrap_or(0),
+                            cache_creation_input_tokens: 0,
+                            reasoning_tokens: u
+                                .completion_details
+                                .and_then(|d| d.reasoning_tokens)
+                                .unwrap_or(0),
                         });
                     }
                 }
-            }
         }
         None
     }
@@ -1242,6 +1311,9 @@ mod tests {
         assert!(tok.is_none());
         assert!(done);
 
+        // `finish_reason: "stop"` alone is mid-stream: the usage chunk and
+        // `[DONE]` follow it, and ending the read at stop dropped usage on
+        // every tools-off turn.
         let (tok, done) = provider
             .parse_sse_chunk(
                 r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
@@ -1249,7 +1321,7 @@ mod tests {
             )
             .unwrap();
         assert!(tok.is_none());
-        assert!(done);
+        assert!(!done);
     }
 
     #[test]
@@ -1379,7 +1451,10 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"outpu
         let data_line = r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}"#;
         let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
         assert!(tok.is_none());
-        assert!(done);
+        // A usage chunk is mid-stream — only `data: [DONE]` ends the read,
+        // so a usage chunk arriving after (or carrying) finish_reason is
+        // still captured by the runner.
+        assert!(!done);
 
         let usage = provider.parse_usage(&buf);
         assert!(usage.is_some());
@@ -1387,6 +1462,79 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"outpu
         assert_eq!(u.input_tokens, 100);
         assert_eq!(u.output_tokens, 50);
         assert!(u.cost_usd > 0.0);
+    }
+
+    #[test]
+    fn openai_stop_chunk_is_not_terminal() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+
+        let stop_line = r#"data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let (tok, done) = provider.parse_sse_chunk(stop_line, &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(!done, "finish_reason:stop must not end the read — the usage chunk follows it");
+
+        // Content delivered in the same chunk as finish_reason still streams
+        // and still doesn't end the read.
+        let mut buf2 = String::new();
+        let last_delta = r#"data: {"id":"x","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}"#;
+        let (tok, done) = provider.parse_sse_chunk(last_delta, &mut buf2).unwrap();
+        assert_eq!(tok, Some("done".to_string()));
+        assert!(!done);
+    }
+
+    #[test]
+    fn openai_parse_usage_captures_cache_and_reasoning_details() {
+        let provider = OpenAIProvider;
+        let buf = r#"data: {"choices":[],"usage":{"prompt_tokens":200,"completion_tokens":80,"prompt_tokens_details":{"cached_tokens":150},"completion_tokens_details":{"reasoning_tokens":30}}}
+data: [DONE]
+"#;
+        let usage = provider.parse_usage(buf).expect("usage chunk must parse");
+        assert_eq!(usage.input_tokens, 200);
+        assert_eq!(usage.output_tokens, 80);
+        assert_eq!(usage.cache_read_input_tokens, 150);
+        assert_eq!(usage.reasoning_tokens, 30);
+    }
+
+    #[test]
+    fn openai_parse_usage_tolerates_data_prefix_without_space() {
+        let provider = OpenAIProvider;
+        // OpenRouter / vLLM emit `data:{…}` (no trailing space).
+        let buf = r#"data:{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}
+"#;
+        let usage = provider.parse_usage(buf).expect("no-space data prefix must parse");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn openai_parse_usage_captures_reported_cost() {
+        let provider = OpenAIProvider;
+        // OpenRouter's usage chunk carries the request's real cost.
+        let buf = r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"cost":0.0123}}
+"#;
+        let usage = provider.parse_usage(buf).expect("usage chunk must parse");
+        assert_eq!(usage.reported_cost_usd, Some(0.0123));
+        // Endpoints without a cost field report None (estimate stays the
+        // fallback), and a zero cost is treated as "not reported".
+        let none_buf = r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}
+"#;
+        assert_eq!(provider.parse_usage(none_buf).unwrap().reported_cost_usd, None);
+        let zero_buf = r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"cost":0}}
+"#;
+        assert_eq!(provider.parse_usage(zero_buf).unwrap().reported_cost_usd, None);
+    }
+
+    #[test]
+    fn openai_wire_body_requests_usage_chunk() {
+        let req = ChatRequest {
+            model: "gpt-4o".to_string(),
+            ..bare_req()
+        };
+        let body = openai_wire_body(&req, false);
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["stream_options"]["include_usage"], serde_json::json!(true));
+        assert_eq!(json["stream"], serde_json::json!(true));
     }
 
     #[test]

@@ -84,6 +84,9 @@ pub(super) fn handle_kimi_event(
     output: &mut Option<i64>,
     cache_read: &mut Option<i64>,
     cache_creation: &mut Option<i64>,
+    last_text: &mut String,
+    last_reasoning: &mut String,
+    in_think: &mut bool,
     tools: &mut ToolTracker,
 ) {
     let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
@@ -92,9 +95,56 @@ pub(super) fn handle_kimi_event(
             // Assistant frames are model output — open/keep the generation
             // window so decode time (→ tok/s) is measurable.
             crate::chat::turn_perf::begin_active_gen(sid);
+            // Reasoning frames (DeepSeek-style `reasoning_content`, also
+            // accepted as `thinking`) open a live <think> block. Snapshot
+            // rule: a frame may REPEAT the previous reasoning with more
+            // appended — emit only the new suffix.
+            if let Some(reasoning) = v
+                .get("reasoning_content")
+                .and_then(|r| r.as_str())
+                .or_else(|| v.get("thinking").and_then(|t| t.as_str()))
+            {
+                if !reasoning.is_empty() {
+                    if !*in_think {
+                        full.push_str("<think>");
+                        emit_token(app, sid, "<think>");
+                        *in_think = true;
+                    }
+                    let suffix = reasoning
+                        .strip_prefix(last_reasoning.as_str())
+                        .unwrap_or(reasoning);
+                    if !suffix.is_empty() {
+                        full.push_str(suffix);
+                        emit_token(app, sid, suffix);
+                    }
+                    last_reasoning.clear();
+                    last_reasoning.push_str(reasoning);
+                }
+            }
+            // Text snapshots: a frame carries the full text of the message so
+            // far (or a whole chunk — empty history makes any string its own
+            // suffix), so append/emit only what extends the previous frame.
+            // Without this, a CLI that streams progressive snapshots
+            // duplicated every frame in the persisted message.
             if let Some(text) = v.get("content").and_then(|c| c.as_str()) {
-                full.push_str(text);
-                emit_token(app, sid, text);
+                if !text.is_empty() {
+                    // Answer text closes an open thinking block — an
+                    // unclosed <think> would swallow the whole reply into
+                    // the collapsible block.
+                    if *in_think {
+                        full.push_str("</think>");
+                        emit_token(app, sid, "</think>");
+                        *in_think = false;
+                        last_reasoning.clear();
+                    }
+                    let suffix = text.strip_prefix(last_text.as_str()).unwrap_or(text);
+                    if !suffix.is_empty() {
+                        full.push_str(suffix);
+                        emit_token(app, sid, suffix);
+                    }
+                    last_text.clear();
+                    last_text.push_str(text);
+                }
             }
             // Tool calls ride along as structured blocks when present.
             if let Some(calls) = v.get("tool_calls").and_then(|t| t.as_array()) {
@@ -130,6 +180,10 @@ pub(super) fn handle_kimi_event(
                 // tool wait isn't billed as decode time.
                 if !calls.is_empty() {
                     crate::chat::turn_perf::end_active_gen(sid);
+                    // The NEXT assistant frame starts a fresh message: its
+                    // text must not be diffed against this message's.
+                    last_text.clear();
+                    last_reasoning.clear();
                 }
             }
         }
@@ -139,6 +193,9 @@ pub(super) fn handle_kimi_event(
             // Defensive: a tool result also closes any open window (covers
             // streams where the tool_calls frame was missed).
             crate::chat::turn_perf::end_active_gen(sid);
+            // Message boundary: reset the snapshot history (see assistant).
+            last_text.clear();
+            last_reasoning.clear();
             let text = extract_result_text(v.get("content"));
             if let Some(marker) = tools.tool_result(&text, false, app, sid, None) {
                 full.push_str(&marker);
@@ -603,15 +660,34 @@ pub(super) fn handle_commandcode_event(
                     }
                 }
                 _ => {
-                    // Tool frames: every variant carries toolCallId+toolName;
-                    // mark once per call (the start marker), results attach via
-                    // the pi-style completion frames when present.
+                    // Tool frames: every variant carries toolCallId+toolName.
+                    // `tool_running`-style frames open the step's card once
+                    // (deduped by call id); a later frame that carries the
+                    // tool's `result`/`output` closes it — without this the
+                    // card dangles on "running" forever, since commandcode
+                    // surfaces results as frames, not in the result line.
                     if let (Some(call_id), Some(name)) = (
                         inner.get("toolCallId").and_then(|t| t.as_str()),
                         inner.get("toolName").and_then(|t| t.as_str()),
                     ) {
                         // Tool execution begins — close the generation window.
                         crate::chat::turn_perf::end_active_gen(sid);
+                        let result_text = extract_result_text(
+                            inner.get("result").or_else(|| inner.get("output")),
+                        );
+                        let already_open = seen_tools.contains(call_id);
+                        if already_open && !result_text.is_empty() {
+                            // Completion frame for a card already on screen.
+                            let is_error =
+                                inner.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
+                            if let Some(marker) =
+                                tools.tool_result(&result_text, is_error, app, sid, None)
+                            {
+                                full.push_str(&marker);
+                                emit_token(app, sid, &marker);
+                            }
+                            return;
+                        }
                         if seen_tools.insert(call_id.to_string()) {
                             let inp = inner
                                 .get("args")
@@ -619,7 +695,23 @@ pub(super) fn handle_commandcode_event(
                                 .unwrap_or(inner.get("input").cloned().unwrap_or(json!({})));
                             emit_todowrite_steps(app, sid, name, &inp);
                             let value = tool_meta_generic(name, &inp);
-                            let marker = tools.tool_use(name, vec![value]);
+                            // A start frame that already carries the output is
+                            // self-contained (opencode's inline shape) — open
+                            // the card WITH its result attached.
+                            let marker = if !result_text.is_empty() {
+                                let err_text = inner
+                                    .get("error")
+                                    .and_then(|e| e.as_str())
+                                    .filter(|s| !s.is_empty());
+                                tools.tool_use_with_output(
+                                    name,
+                                    value,
+                                    Some(&result_text),
+                                    err_text,
+                                )
+                            } else {
+                                tools.tool_use(name, vec![value])
+                            };
                             full.push_str(&marker);
                             emit_token(app, sid, &marker);
                         }

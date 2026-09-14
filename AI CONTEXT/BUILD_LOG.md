@@ -1,6 +1,8 @@
 # Relay Build Log
 
-> **Naming note:** This log refers to the project as "Relay" because most entries predate the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The build progress, test coverage, and design decisions are unchanged; the name has. See `README.md` and `AI CONTEXT/RELEASE.md`.
+> **Naming note:** This log refers to the project as "Conduit" because most entries predate the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The build progress, test coverage, and design decisions are unchanged; the name has. See `README.md` and `AI CONTEXT/RELEASE.md`.
+
+> **Current status (verified 2026-09-14):** frontend vitest **152 files / 1055 tests**, all passing; `cargo test --lib` **1078 passed, 0 failed, 15 ignored**; **321** registered Tauri commands (`lib.rs`, `generate_handler!` at line 312); **44 tables / 24 inline migrations** (`db/mod.rs`); version `0.4.2` in sync across `package.json`, `tauri.conf.json`, and `Cargo.toml`; six harness adapters (`claude_code`, `kimi_code`, `opencode`, `pi`, `omp`, `commandcode`). The dated entries below end at 2026-08-14; the git log (PRs #46–#50 and the 2026-09-05 internal rename, `7f6952b`) is newer. Recent additions since then are summarized in `AI_CONTEXT.md` → "Recent shape".
 
 Running log per PRD §13.3: what was built, what was tested and how, assumptions/deviations, known issues.
 

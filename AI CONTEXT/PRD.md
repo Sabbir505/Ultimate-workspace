@@ -1,8 +1,8 @@
 # Product Requirements Document
-## Codename: Relay
+## Codename: Conduit
 ### A local-first, multi-pane desktop shell for AI coding agents
 
-> **Naming note:** This PRD was written under the codename "Relay". The product was rebranded to "Relay" in user-visible surfaces on 2026-08-27 (commit `e9abc7c3`); the crate, bundle id, and other internal identifiers are still "Relay" — see `README.md` and `AI CONTEXT/RELEASE.md`. The requirements themselves are unchanged.
+> **Naming note:** This PRD was written under the codename **Conduit**. The product was rebranded to "Relay" in user-visible surfaces on 2026-08-27 (commit `e9abc7c`); the internal rename (crate `relay`, bundle id `dev.relay.app`, sidecar binaries, mobile app) completed 2026-09-05 (commit `7f6952b`). See `README.md` and `AI CONTEXT/RELEASE.md`. The requirements themselves are unchanged.
 
 **Document purpose:** This PRD is written to be handed to an AI coding agent (Kimi Code CLI / Kimi K3, or Claude Code) as the primary build specification. It should be read top to bottom before any code is written. Where a decision is ambiguous, this document states the default to take rather than leaving it open.
 
@@ -44,12 +44,14 @@ The app must support at minimum:
 2. **Kimi Code CLI** (Moonshot AI) — supports session resume via `kimi -r <session-id>` / `--session`, `kimi -c` / `--continue` for the most recent session. Single-binary distribution.
 3. **OpenCode** — added as a third adapter; resume support follows the same trait.
 
-> **Implementation note (Chat tab):** The app also includes a Chat tab (not described in this PRD) that offers direct LLM conversations via HTTP APIs — a separate feature from the CLI agent panes covered here. The Chat tab supports: streaming responses, tool calling (32 tools: web_search, generate_document, generate_file, generate_diagram, fetch_url, open_url, run_code, get_skill, list_skills, download_file, download_progress, run_shell, get_task_status, cancel_task, the agentic browser control set `browser_read`/`browser_click`/`browser_type`/`browser_scroll`/`browser_screenshot` plus `wait_for`, the focused-subagent `Task` tool, the filesystem set `list_directory`/`read_file`/`search_files`/`search_content`/`write_file`/`edit_file`/`delete_file`/`move_file`/`copy_file`, and the source ledger `add_source_note`/`get_source_ledger`/`reset_source_ledger`), Mermaid diagram rendering, HTML/CSS diagram generation with PNG export, artifact preview/download/export, research mode (`/research`) with Plan/Execute/Synthesize prompting and a persistent source ledger, the autonomous goal loop (`/goal` and its alias `/loop`), context compaction for local GGUF models, per-turn perf metrics (TTFT / LLM time / tool time / tokens-per-second, surfaced in the composer), per-session permission modes (read_only / manual / auto_edit / full_auto), and a Connectors framework (OAuth + remote MCP for Notion, GitHub, Google, Gmail, Kiwi). See `CONTRACT.md` Chat section for the full IPC contract.
+> **Implementation note (six adapters shipped):** the pluggable adapter registry now has **six** adapters — `claude_code`, `kimi_code`, `opencode`, `pi`, `omp`, `commandcode` (`src-tauri/src/harness_adapters/`). The original three are listed above because they were the v1 baseline; Pi, Omp, and CommandCode were added later through the same `§6.4` adapter interface.
+
+> **Implementation note (Chat tab):** The app also includes a Chat tab (not described in this PRD) that offers direct LLM conversations via HTTP APIs — a separate feature from the CLI agent panes covered here. The Chat tab supports: streaming responses, tool calling (the registry in `src-tauri/src/chat/tools/` defines ~60 tools — web/document/diagram generation, agentic browser control, filesystem access under the permission gate, automations, memory, research source ledger, plan mode, 2FA codes, and Session Mesh inter-session tools; see `CONTRACT.md` Chat section for the enumerated list), Mermaid diagram rendering, HTML/CSS diagram generation with PNG export, artifact preview/download/export, research mode (`/research`) with Plan/Execute/Synthesize prompting and a persistent source ledger, the autonomous goal loop (`/goal` and its alias `/loop`), context compaction for local GGUF models, per-turn perf metrics (TTFT / LLM time / tool time / tokens-per-second, surfaced in the composer), per-session permission modes (read_only / manual / auto_edit / full_auto), and a Connectors framework (OAuth + remote MCP for Notion, GitHub, Google, Gmail, YouTube, Kiwi, Canva). See `CONTRACT.md` Chat section for the full IPC contract.
 
 Both harnesses run as normal CLI processes; the app does **not** need to reimplement their protocols. The app spawns them in a pseudo-terminal (pty) with the working directory set to the target project folder, and lets their native TUI render inside the pane. This means:
 - Relay does not need to parse or understand the agent's internal message format for v1's baseline experience — the pty output is rendered as terminal output (via xterm.js or equivalent), exactly as if the user ran the CLI directly.
 - Session ID capture: after a session starts, Relay must capture the session ID the harness generates (both harnesses expose this — Kimi Code prints a resume hint like `kimi -r <session-id>` on every exit path) so it can be stored and used for later resume.
-- The harness list must be implemented as a pluggable adapter interface (see §6.4) so a third harness (e.g. Codex, OpenCode) can be added later without rearchitecting.
+- The harness list must be implemented as a pluggable adapter interface (see §6.4) so additional harnesses can be added later without rearchitecting. (Shipped adapters: `claude_code`, `kimi_code`, `opencode`, `pi`, `omp`, `commandcode`.)
 
 **Architecture implication:** because both harnesses persist session state to disk and resume by ID, Relay does **not** need to keep agent processes resident in memory when a pane is not visible/focused. Process lifecycle is spawn-on-focus, kill-on-blur-or-close, resume-by-ID-on-reopen. This is a deliberate simplification — do not build a background process supervisor for v1.
 
@@ -585,7 +587,7 @@ Do not batch multiple unrelated features into one untested, undocumented pass. S
 ## 14. Explicitly Deferred to v2
 
 - Open marketplace for third-party plugins/skills (search, install, permission-scoped sandboxing for code-executing plugins). Skills library (§7.15) in v1 is local-only, no discovery/sharing mechanism.
-- Additional harness adapters beyond Claude Code, Kimi Code, and OpenCode (e.g. Codex) — the adapter interface (§6.4) is designed to make this straightforward later, but only three are implemented for v1.
+- Additional harness adapters (e.g. Codex) — the adapter interface (§6.4) is designed to make this straightforward later; six are implemented (`claude_code`, `kimi_code`, `opencode`, `pi`, `omp`, `commandcode`).
 - Real-time collaborative/remote sessions.
 - Tahoe-era native `NSGlassEffectView` (true dynamic glass with per-corner radius) — waiting on a stable `tauri-plugin-liquid-glass` for Tauri v2; current build uses `window-vibrancy` (frosted look) as a stopgap.
 
@@ -597,3 +599,20 @@ Do not batch multiple unrelated features into one untested, undocumented pass. S
 - **Context compaction for local models** — auto-summarize aged-out turns to fit context window. (Not in the original PRD; added in v0.3.2.)
 - **Research mode** — Plan/Execute/Synthesize orchestration with source ledger. (Not in the original PRD; added in v0.3.0.)
 - **Agent-driven browser control** — `relay-browser-mcp` sidecar + in-app browser tools with visual feedback overlays. (Not in the original PRD; added in v0.3.0.)
+
+### 14.5 Added in v0.4.x (out of original scope)
+
+Major feature surfaces shipped after the original v1 scope, none of which appear in the sections above (each is documented in `AI CONTEXT/AI_CONTEXT.md` and `CONTRACT.md`):
+
+- **Persistent user memory** — extraction/consolidation/retrieval/injection/reflection across all chat paths (`src-tauri/src/memory/`, `memory_*` commands, `memories` + related tables; design: `MEMORY_DESIGN_ARCHITECTURE.md`).
+- **Spend budgets** — per-scope spend limits with breach alerts (`commands/budget.rs`, `budget:alert`).
+- **Automations** — cron-scheduled headless agent turns that fire even while the app is closed (`automations.rs` + Windows Task Scheduler sidecar binary `relay-automation`).
+- **Knowledge / doc-QA** — local RAG over project folders, attached per chat (`docs_index.rs`, `doc_*` tables, `search_docs` tool).
+- **Self-improving artifacts** — observation/proposal/eval/promote loop for generated artifacts (`improve_engine.rs`, `improve_*` tables; design: `SELF_IMPROVING_ARTIFACTS.md`).
+- **Plan mode** — `enter_plan_mode`/`present_plan` tools with proposal cards and step tracking (`chat/plan.rs`).
+- **Voice dictation (STT)** — push-to-talk whisper sidecar (`commands/stt.rs`).
+- **Read-aloud (TTS)** — in-process Kokoro-82M via sherpa-onnx, optional CUDA child process (`commands/tts.rs`, `commands/tts_gpu.rs`).
+- **Sidebar art** — user-uploadable sidebar header imagery (`commands/appearance_cmds.rs`).
+- **Session Mesh** — cross-session awareness/messaging/spawning for chats (`session_fabric/`; design: `SESSION_MESH_DESIGN_ARCHITECTURE.md`).
+- **ACP agents** — Agent Client Protocol client for ACP-speaking agents (`acp/`, `acp_agents.rs`).
+- **Conversational artifacts (`/create`)** — proposal/validate/generate pipeline (`artifacts/`, `commands/artifact_cmds.rs`).

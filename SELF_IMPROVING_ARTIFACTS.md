@@ -59,7 +59,7 @@ full-auto promotion is opt-in per artifact.
 | Skill | Filesystem `SKILL.md` in `~/.claude/skills/`, `~/.agents/skills/` (`installed_skills.rs`); legacy `skills` DB table; built-ins via `include_str!` | Passive injection into system prompt (`chat/prompts.rs:708`), `get_skill` tool, `/slug` expansion | **None** — invocation is not recorded at all |
 | Loop | Filesystem `LOOP.md` (`installed_skills.rs` kind `loops`); goal loop runtime is **frontend-only** ephemeral state (`src/state/chat.ts` `LoopState`, `GOAL_LOOP_MAX = 10`) | `LOOP_STATUS: continue|complete|blocked` sentinel parsed by `parseLoopStatus`; malformed ⇒ stop | **None persisted** — iterations vanish on session close |
 | Prompt template | Settings JSON `prompts.templates` (`{id, name, body, trigger, createdAt}`); artifact proposals also land in `skills` table + filesystem | Composer `/` menu fill-in (`ChatComposer.tsx`), skill injection | **None** |
-| Automation | `automations` + `automation_runs` tables (status: `running`/`ok`/`skipped`/error text, summary, source) | Scheduler `automations.rs`, headless `bin/conduit_automation.rs`, Task Scheduler | ✅ **Mature**: per-run status/summary, `last_status`, webhook + failure email |
+| Automation | `automations` + `automation_runs` tables (status: `running`/`ok`/`skipped`/error text, summary, source) | Scheduler `automations.rs`, headless `src/bin/relay_automation.rs`, Task Scheduler | ✅ **Mature**: per-run status/summary, `last_status`, webhook + failure email |
 
 Correction signals that already exist but are not recorded as feedback:
 

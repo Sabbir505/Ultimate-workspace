@@ -1,8 +1,8 @@
 # Cost Model Redesign (T3-Code parity)
 
-> **Naming note:** This spec was written under the project name "Relay". The product is "Relay" in user-visible surfaces as of 2026-08-27 (commit `e9abc7c3`); the crate is still `relay`. See `README.md` and `AI CONTEXT/RELEASE.md`.
+> **Naming note:** This spec was written under the project name "Conduit". The product is "Relay" in user-visible surfaces as of 2026-08-27 (commit `e9abc7c3`). See `README.md` and `AI CONTEXT/RELEASE.md`.
 >
-> **Status:** design spec, ready for review.
+> **Status:** implemented — `migrate_cost_v2` in `src-tauri/src/db/mod.rs` ships the schema described below (the code there cites this spec's §5.4); later work layered family-aware cache pricing on top (2026-09). §1 "Motivation" is retained as the historical gap analysis.
 > **Author:** Claude (brainstorming pass, 2026-08-08).
 > **Target release:** single PR, after spec sign-off.
 

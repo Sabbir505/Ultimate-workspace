@@ -103,6 +103,16 @@ export function CopyIcon() {
   );
 }
 
+/** The `</>` glyph shown left of the language label in code-block headers. */
+export function CodeLangIcon() {
+  return (
+    <svg {...iconProps} width={13} height={13} aria-hidden="true">
+      <polyline points="16 18 22 12 16 6" />
+      <polyline points="8 6 2 12 8 18" />
+    </svg>
+  );
+}
+
 export function CheckIcon() {
   return (
     <svg {...iconProps} aria-hidden="true">
@@ -653,7 +663,11 @@ export function InlineDiff({ diffText }: { diffText: string }) {
  *  the user sees content immediately; it upgrades to highlighted once the
  *  chunk lands. */
 export function StepCodeHighlighter({ code, language }: { code: string; language: string }) {
-  const theme = useSyntaxTheme();
+  // "chat-block" scope: the block is fixed-dark in both themes, so token
+  // colors resolve through the block's own --syntax-* scope (chat.css pins
+  // the dark palette there under light themes) — not the root's
+  // dark-on-light light-theme values.
+  const theme = useSyntaxTheme("chat-block");
   // `comp` resolves to the lazy-loaded Prism component after first use.
   const [comp, setComp] = useState<SyntaxHighlighterComponent | null>(null);
   // The loaded value IS a function component — pass it via an updater fn,
@@ -828,7 +842,10 @@ export function ActivityStepRow({
             ) : (
               <div className="chat-code-block">
                 <div className="chat-code-header">
-                  <span className="chat-code-lang">{step.data.lang || "text"}</span>
+                  <span className="chat-code-lang">
+                    <CodeLangIcon />
+                    {step.data.lang || "text"}
+                  </span>
                   <CopyButton code={step.data.code} />
                 </div>
                 <StepCodeHighlighter code={step.data.code} language={step.data.lang || "text"} />
@@ -1283,9 +1300,18 @@ export function CopyButton({ code }: { code: string }) {
     await copyToClipboard(code);
   }, [code, copyToClipboard]);
 
+  // Icon-only, ChatGPT-style: a quiet glyph in the header that flips to a
+  // check when the copy lands (color shift handled by .copy-code-btn in
+  // chat.css). Lives only inside .chat-code-block headers.
   return (
-    <button className="ghost copy-code-btn" onClick={handleCopy}>
-      {copied ? "Copied" : "Copy"}
+    <button
+      type="button"
+      className={`copy-code-btn${copied ? " copied" : ""}`}
+      onClick={handleCopy}
+      aria-label={copied ? "Copied" : "Copy code"}
+      title={copied ? "Copied" : "Copy code"}
+    >
+      {copied ? <CheckIcon /> : <CopyIcon />}
     </button>
   );
 }
@@ -1550,7 +1576,10 @@ export function Markdown({
             return (
               <div className="chat-code-block">
                 <div className="chat-code-header">
-                  <span className="chat-code-lang">{match ? match[1] : "text"}</span>
+                  <span className="chat-code-lang">
+                    <CodeLangIcon />
+                    {match ? match[1] : "text"}
+                  </span>
                   <CopyButton code={codeString} />
                 </div>
                 <StepCodeHighlighter code={codeString} language={match ? match[1] : "text"} />

@@ -1743,32 +1743,98 @@ div[data-index]:has(.chat-session-row.menu-open) {
   background: var(--border-strong);
 }
 
-/* Code blocks inside messages */
+/* Code blocks inside messages — fixed-dark (ChatGPT-style) in BOTH themes:
+   a near-black card with light text that never follows the light theme's
+   surfaces. The syntax token palette is pinned to the block further down. */
 .chat-code-block {
   margin: 10px 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid #262626;
+  border-radius: 10px;
   overflow: hidden;
-  background: var(--surface-solid);
-  box-shadow: var(--glass-rim-soft);
+  background: #0d0d0d;
+  color: #ececec;
 }
 .chat-code-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 10px;
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-dim);
+  gap: 8px;
+  padding: 7px 12px;
+  background: #171717;
+  border-bottom: 1px solid #262626;
+  font-size: 11px;
+  font-weight: 500;
+  color: #b4b4b4;
 }
+.chat-code-lang {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Language names render as written ("bash" stays lowercase, "Bash" stays
+     capitalized — like the reference) instead of the old all-caps label. */
+  text-transform: none;
+  letter-spacing: normal;
+}
+.chat-code-lang svg {
+  flex: none;
+  color: #8e8e8e;
+}
+/* Generic copy button (also used by the artifact pane's doc-code-header,
+   which keeps its text label and theme-following colors). */
 .copy-code-btn {
   padding: 2px 7px;
   font-size: 10px;
   border-radius: var(--radius-xs);
+}
+/* Icon-only restyle inside the fixed-dark chat code-block headers. */
+.chat-code-header .copy-code-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: 4px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #9a9a9a;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.chat-code-header .copy-code-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+.chat-code-header .copy-code-btn.copied {
+  color: #34d17b;
+}
+
+/* The chat code block is fixed-dark, so light themes must not bleed their
+   dark-on-light --syntax-* palette onto it. Pin the dark token set to the
+   block under light roots; syntaxTheme.ts resolves the highlighter's colors
+   from INSIDE a .chat-code-block probe, so these win over the root values.
+   Dark themes (incl. custom syntax themes) need no override and keep theirs. */
+:root[data-theme="light"] .chat-code-block {
+  --syntax-comment: #6a9955;
+  --syntax-string: #ce9178;
+  --syntax-keyword: #c586c0;
+  --syntax-function: #dcdcaa;
+  --syntax-type: #4ec9b0;
+  --syntax-variable: #9cdcfe;
+  --syntax-number: #b5cea8;
+  --syntax-operator: #d4d4d4;
+  --syntax-tag: #569cd6;
+  --syntax-attr-name: #9cdcfe;
+  --syntax-attr-value: #ce9178;
+  --syntax-punctuation: #a0a0a0;
+  --syntax-regex: #d16969;
+  --syntax-builtin: #4ec9b0;
+  --syntax-deleted: #ff7b72;
+  --syntax-inserted: #34d17b;
+  --syntax-changed: #88c0d0;
 }
 
 /* Live React/JSX preview block (rendered from a ```jsx / ```tsx fence). */

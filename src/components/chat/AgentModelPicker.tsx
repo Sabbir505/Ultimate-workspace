@@ -493,11 +493,18 @@ export function AgentModelPickerInner({
     // cached before the effort feature / by an older backend: their payload
     // has no `effortOptions` at all (vs [] for "no knob"), so they'd keep the
     // effort slider hidden for the whole run. Mark those for one revalidate.
+    // A ready pane with ZERO rows is the same story from the other side: it
+    // almost always means the discovery probe raced the CLI (cold start,
+    // login refresh), not a CLI with no models — re-probe on the next open
+    // instead of caching the empty list for the run.
     for (const key of paneCache.keys()) {
       if (key.startsWith("provider:") || key === "local") refreshOnOpen.current.add(key);
       else if (key.startsWith("harness:")) {
         const cached = paneCache.get(key);
-        if (cached?.status === "ready" && cached.effortOptions === undefined) {
+        if (
+          cached?.status === "ready" &&
+          (cached.effortOptions === undefined || cached.rows.length === 0)
+        ) {
           refreshOnOpen.current.add(key);
         }
       }
@@ -878,14 +885,30 @@ export function AgentModelPickerInner({
                 </div>
               ) : pane && pane.rows.length === 0 ? (
                 <div className="model-effort-empty">
-                  {railKey === "local"
-                    ? "No local models — add a folder in Settings → Local Models"
-                    : railKey.startsWith("harness:")
-                      ? `No models discovered from ${
-                          harnesses.find((x) => x.id === railKey.slice("harness:".length))
-                            ?.displayName ?? "this CLI"
-                        } — turns will use its own default model`
-                      : "No models — set base URL & key in Settings → API Keys"}
+                  {railKey === "local" ? (
+                    "No local models — add a folder in Settings → Local Models"
+                  ) : railKey.startsWith("harness:") ? (
+                    <>
+                      {`No models discovered from ${
+                        harnesses.find((x) => x.id === railKey.slice("harness:".length))
+                          ?.displayName ?? "this CLI"
+                      } — turns will use its own default model`}
+                      {/* An empty list is usually a raced discovery probe, not
+                          a real result — let the user re-run it right here. */}
+                      <button
+                        type="button"
+                        className="model-effort-retry"
+                        onClick={() => {
+                          paneCache.delete(railKey);
+                          bumpFetch();
+                        }}
+                      >
+                        Retry discovery
+                      </button>
+                    </>
+                  ) : (
+                    "No models — set base URL & key in Settings → API Keys"
+                  )}
                 </div>
               ) : (
                 <>

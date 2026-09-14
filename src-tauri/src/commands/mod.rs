@@ -7,6 +7,7 @@ pub mod appearance_cmds;
 pub mod artifact_cmds;
 pub mod automation_cmds;
 pub mod browser_cmds;
+pub mod build_updates;
 pub mod chat_cmds;
 pub mod connectors_cmds;
 pub mod data;

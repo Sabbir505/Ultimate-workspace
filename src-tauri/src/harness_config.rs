@@ -691,8 +691,11 @@ fn capture_cli_stdout(program: &str, args: &[&str], ticks: u32) -> Option<String
             }
         }
     }
-    terminate_capture(&mut child, eof_rx, &captured);
-    None
+    // Timed out, but the CLI may already have printed its listing before
+    // hanging (slow cold start, post-output stall) — hand back whatever was
+    // captured instead of reporting "no models". Junk lines can't parse as
+    // rows, so partial output is safe to forward.
+    terminate_capture(&mut child, eof_rx, &captured)
 }
 
 /// Kill the CLI's whole process tree, then collect the drain output with a
@@ -999,15 +1002,24 @@ mod tests {
     #[test]
     fn capture_cli_stdout_timeout_path_returns_without_hanging() {
         // A child that outlives the tick budget (30s runtime vs 0.5s budget)
-        // must come back as None promptly — the drain must never wedge the
-        // model-listing command.
+        // must be killed and the call must return promptly — the drain must
+        // never wedge the model-listing command. The CONTRACT for output is
+        // "whatever the child printed so far": a CLI that emitted its listing
+        // and then stalled still yields its rows (junk lines can't parse as
+        // models), while a silent child yields None. ping keeps printing, so
+        // it exercises the partial-output path; sleep prints nothing, the
+        // empty-None one.
         let start = std::time::Instant::now();
-        let out = if cfg!(windows) {
-            capture_cli_stdout("ping", &["-n", "30", "127.0.0.1"], 5)
+        if cfg!(windows) {
+            let out = capture_cli_stdout("ping", &["-n", "30", "127.0.0.1"], 5);
+            assert!(
+                out.as_deref().unwrap_or("").contains("Reply from"),
+                "an over-budget child keeps what it already printed: {out:?}"
+            );
         } else {
-            capture_cli_stdout("sleep", &["30"], 5)
-        };
-        assert_eq!(out, None, "an over-budget child yields no models");
+            let out = capture_cli_stdout("sleep", &["30"], 5);
+            assert_eq!(out, None, "a silent over-budget child yields no output");
+        }
         assert!(
             start.elapsed() < std::time::Duration::from_secs(15),
             "timeout path must return promptly, took {:?}",

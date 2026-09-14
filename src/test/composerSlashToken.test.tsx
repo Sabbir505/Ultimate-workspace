@@ -1,8 +1,7 @@
-// Slash-menu token consumption: picking an item (keyboard or mouse) must
-// REPLACE the typed token — the applied pill may never sit next to the
-// partial "/res" text it stands for. Regression: a selection landing in a
-// handler whose view of the draft was a keystroke behind left "/res" in the
-// box with the Research pill applied.
+// Slash-menu completion: applying an item replaces the partial token with
+// the FULL slug inline in the draft ("/rese" → "/research ") — Discord/Slack
+// style — so the slug rides the sent message (the user bubble shows the
+// command that ran) and no partial text is ever left behind.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
@@ -28,21 +27,20 @@ function renderComposer() {
   return { onSend, container, ta };
 }
 
-describe("slash menu consumes the typed token", () => {
-  it("clears the token when a command is picked with Enter", () => {
+describe("slash menu completes the token inline", () => {
+  it("completes /rese to '/research ' when picked with Enter", () => {
     const { ta } = renderComposer();
-    fireEvent.change(ta, { target: { value: "/res" } });
+    fireEvent.change(ta, { target: { value: "/rese" } });
     fireEvent.keyDown(ta, { key: "Enter" });
-    expect(ta.value).toBe("");
-    expect(screen.getByText("Research")).toBeTruthy();
+    expect(ta.value).toBe("/research ");
   });
 
-  it("clears the token when a command is picked with the mouse", () => {
+  it("completes with the mouse too", () => {
     const { container, ta } = renderComposer();
     fireEvent.change(ta, { target: { value: "/res" } });
     const item = container.querySelector<HTMLElement>(".composer-slash-item")!;
     fireEvent.mouseDown(item);
-    expect(ta.value).toBe("");
+    expect(ta.value).toBe("/research ");
   });
 
   it("keeps surrounding text when the token is mid-sentence", () => {
@@ -50,13 +48,18 @@ describe("slash menu consumes the typed token", () => {
     fireEvent.change(ta, { target: { value: "hey /res" } });
     const item = container.querySelector<HTMLElement>(".composer-slash-item")!;
     fireEvent.mouseDown(item);
-    expect(ta.value).toBe("hey ");
+    expect(ta.value).toBe("hey /research ");
   });
 
-  it("routes a /research send through research mode with the token stripped", () => {
+  it("sends the slug with the message — the bubble shows the command that ran", async () => {
+    // Full user story: complete the slug, type the topic, send. The menu
+    // closing after completion is browser-verified (jsdom's caret-event
+    // timing keeps it mounted here, harmlessly).
     const { onSend, ta } = renderComposer();
-    fireEvent.change(ta, { target: { value: "/research the evolution of CPUs" } });
+    fireEvent.change(ta, { target: { value: "/rese" } });
+    fireEvent.keyDown(ta, { key: "Enter" });
+    fireEvent.change(ta, { target: { value: "/research about cancer" } });
     fireEvent.keyDown(ta, { key: "Enter", shiftKey: false });
-    expect(onSend).toHaveBeenCalledWith("the evolution of CPUs", [], true);
+    expect(onSend).toHaveBeenCalledWith("/research about cancer", [], undefined);
   });
 });

@@ -12,7 +12,7 @@
 // the OS onto the composer card.
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUpToLine, GripVertical, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
+import { ArrowUpToLine, GripVertical, Mic, Pencil, Plug, Puzzle, Trash2, X } from "lucide-react";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { ArtifactTypeSelector } from "./ArtifactTypeSelector";
@@ -305,10 +305,6 @@ export const ChatComposer = memo(function ChatComposer({
     | { kind: "command"; name: string; slug: string; description: string };
   const [slashSkills, setSlashSkills] = useState<SlashSkill[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
-  // The picked slash command rendered as an inline pill (icon + label) in the
-  // composer; serialized back to the `/slug` prefix on send so the backend's
-  // token parsing (invoked skills, /create) sees exactly what it did before.
-  const [commandPill, setCommandPill] = useState<{ slug: string; label: string } | null>(null);
   // Prompt templates (roadmap #14): loaded alongside skills for the slash menu.
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
   // Variable-fill state: when a template with variables is selected, show a
@@ -630,9 +626,11 @@ export const ChatComposer = memo(function ChatComposer({
   const applyAttachSource = useCallback(
     (source: AttachSource) => {
       if (!chatSessionId) return;
-      // Drop the partial "@query" token from the input; text before and
-      // after it stays untouched.
-      if (atToken) replaceTokenSpan(atToken, "");
+      // Complete the "@query" token to the connector id instead of wiping it:
+      // the mention stays in the message ("@gmail …") the same way a slash
+      // slug does, and the backend's keyword-mention parsing sees the same
+      // connector the chip attached.
+      if (atToken) replaceTokenSpan(atToken, `@${source.id} `);
       void addSessionConnector(chatSessionId, source.rowId)
         .then(() => refreshAttached())
         .catch((e) => toastError(`Could not attach ${source.name}.`, e));
@@ -688,14 +686,15 @@ export const ChatComposer = memo(function ChatComposer({
   const applySlashItem = useCallback((item: SlashItem) => {
     // Re-resolve the token against the LIVE draft (see the mirror refs): the
     // render-closure token can be a keystroke behind, and splicing the stale
-    // span left the partial "/res" text next to the applied pill.
-    const live = tokenAtCaret(contentRef.current, caretRef.current, "/");
+    // span left the partial "/rese" text sitting in the box next to the
+    // applied item.
+    const token = tokenAtCaret(contentRef.current, caretRef.current, "/");
     // Fallback for a caret state that no longer points into the token (a
     // programmatic caret write after the last input event): when the WHOLE
     // draft is the bare partial token, applying an item must still consume
-    // it — the pill may never sit next to the text it stands for.
-    const token =
-      live ??
+    // it.
+    const resolved =
+      token ??
       (/^[ \t]*\/\S*$/.test(contentRef.current)
         ? {
             start: 0,
@@ -703,19 +702,21 @@ export const ChatComposer = memo(function ChatComposer({
             query: contentRef.current.trim().slice(1).toLowerCase(),
           }
         : null);
+    // INLINE COMPLETION, everywhere: applying an item replaces the partial
+    // token with the full slug right in the draft ("/rese" → "/research "),
+    // the way Discord/Slack complete. The slug then rides the SENT message —
+    // the user bubble shows the command that ran — instead of vanishing into
+    // a pill. The send path still routes leading "/compact" / "/create"
+    // tokens, and the backend parses invoked skills from the message text.
     if (item.kind === "command") {
       if (item.slug === "create") {
-        // Drop just the token; any other draft text stays for after the
-        // type selector closes.
-        if (token) replaceTokenSpan(token, "");
+        // /create opens the artifact type selector instead of completing —
+        // the type is chosen interactively, not prejudged by the entry.
+        if (resolved) replaceTokenSpan(resolved, "");
         setCreateInstruction("");
         setCreateTypeOpen(true);
-      } else {
-        // Commands are message-level directives — they ride the command
-        // pill (serialized back to the leading `/slug` on send) while the
-        // rest of the draft is kept verbatim.
-        if (token) replaceTokenSpan(token, "");
-        setCommandPill({ slug: item.slug, label: item.name });
+      } else if (resolved) {
+        replaceTokenSpan(resolved, `/${item.slug} `);
       }
       return;
     }
@@ -726,34 +727,21 @@ export const ChatComposer = memo(function ChatComposer({
       if (!template) return;
       const variables = templateVariables(template.body);
       if (variables.length > 0) {
-        if (token) replaceTokenSpan(token, "");
+        if (resolved) replaceTokenSpan(resolved, "");
         setFillingTemplate(template);
         setFillValues({});
-      } else if (token) {
-        replaceTokenSpan(token, template.body);
+      } else if (resolved) {
+        replaceTokenSpan(resolved, template.body);
       } else {
         insertTemplateText(template.body);
       }
       return;
     }
-    // Skill: a bare `/query` occupying the whole draft keeps the pill
-    // affordance; anywhere else the `/slug ` token is inserted at the
-    // cursor so surrounding text survives and the backend's token-aware
-    // skill parsing still sees it.
-    if (token && token.start === 0 && token.end === contentRef.current.length) {
-      setCommandPill({ slug: item.slug, label: item.name });
-      setContent("");
-      setCaret(0);
-      const ta = textareaRef.current;
-      ta?.focus();
-    } else if (token) {
-      replaceTokenSpan(token, `/${item.slug} `);
-    } else {
-      setCommandPill({ slug: item.slug, label: item.name });
-      setContent("");
-      setCaret(0);
-      const ta = textareaRef.current;
-      ta?.focus();
+    // Skill: same inline completion, at the start of the draft and
+    // mid-sentence alike — the backend's token-aware skill parsing reads the
+    // leading "/slug" from the sent message itself.
+    if (resolved) {
+      replaceTokenSpan(resolved, `/${item.slug} `);
     }
   }, [insertTemplateText, promptTemplates, replaceTokenSpan]);
 
@@ -1024,7 +1012,7 @@ export const ChatComposer = memo(function ChatComposer({
     // touched. A quote keeps the composed text from leading with a slash
     // token, so quoting text before "/compact" or "/create" stays a normal
     // quoted turn rather than invoking the command.
-    const base = (commandPill ? `/${commandPill.slug} ${content}` : content).trim();
+    const base = content.trim();
     const quoted = (quotedSelections ?? [])
       .map((q) => q.text.trim())
       .filter(Boolean)
@@ -1032,32 +1020,12 @@ export const ChatComposer = memo(function ChatComposer({
     const trimmed = quoted ? (base ? `${quoted}\n\n${base}` : quoted) : base;
     if (!trimmed && attachments.length === 0) return;
 
-    // --- /research: force research mode for this turn ---
-    // The token is a relay affordance; the model gets the plain topic and the
-    // research flag carries the intent. Applied on the composed text (pill or
-    // typed token both serialize to a leading `/research`), so the model
-    // never sees a slash token it was never taught to interpret. Works on
-    // every engine: built-in providers run the research scaffolding, harness
-    // sessions get the protocol folded into the outgoing message
-    // (harnessResearchWrap in the streaming slice).
-    const researchMatch = /^\/research\b\s*/i.exec(trimmed);
-    if (researchMatch) {
-      const topic = trimmed.slice(researchMatch[0].length).trim();
-      const researchAsk =
-        topic ||
-        "Perform in-depth multi-source research on the topic of this conversation and write a cited report.";
-      setContent("");
-      setCommandPill(null);
-      setAttachments([]);
-      setAttachError(null);
-      setForceResearch(false);
-      setAttachMenuOpen(false);
-      const ta = textareaRef.current;
-      if (ta) ta.style.height = "auto";
-      onSend(researchAsk, attachments, true);
-      onClearQuotedSelections?.();
-      return;
-    }
+    // NOTE: /research is deliberately NOT intercepted here. The slug stays
+    // in the message ("/research about cancer") so the user bubble shows the
+    // command that ran; the backend detects the prefix (is_research_request),
+    // turns research mode on, and strips the token from the model-bound copy.
+    // Harness sessions carry it the same way — sendMessage flags the turn and
+    // the protocol rides the CLI-facing appendix.
 
     // --- /compact: universal context compaction, routed by engine ---
     // CLI harness sessions: forwarded verbatim — the CLI runs its own
@@ -1066,7 +1034,6 @@ export const ChatComposer = memo(function ChatComposer({
     // sidecar) instead of sending the literal text to the model.
     if (/^\/compact\b/.test(trimmed) && !isHarnessSession) {
       setContent("");
-      setCommandPill(null);
       setAttachments([]);
       setAttachError(null);
       setForceResearch(false);
@@ -1095,7 +1062,6 @@ export const ChatComposer = memo(function ChatComposer({
       // /create, sees proposal card, then continues conversation normally.
       void triggerArtifactGeneration(createCmd.type, createCmd.instruction);
       setContent("");
-      setCommandPill(null);
       setAttachments([]);
       setAttachError(null);
       setForceResearch(false);
@@ -1120,7 +1086,6 @@ export const ChatComposer = memo(function ChatComposer({
       // is heuristic, so the user's words must stay recoverable — they can
       // edit/resend them normally if the proposal card isn't what they wanted.
       void triggerArtifactGeneration(intent.type, intent.instruction);
-      setCommandPill(null);
       setAttachments([]);
       setAttachError(null);
       setForceResearch(false);
@@ -1131,7 +1096,6 @@ export const ChatComposer = memo(function ChatComposer({
     onSend(trimmed, attachments, forceResearch || undefined);
     onClearQuotedSelections?.();
     setContent("");
-    setCommandPill(null);
     setAttachments([]);
     setAttachError(null);
     setForceResearch(false);
@@ -1141,7 +1105,7 @@ export const ChatComposer = memo(function ChatComposer({
     if (ta) {
       ta.style.height = "auto";
     }
-  }, [content, commandPill, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration, isHarnessSession, effectiveSessionId, quotedSelections, onClearQuotedSelections]);
+  }, [content, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration, isHarnessSession, effectiveSessionId, quotedSelections, onClearQuotedSelections]);
 
   // Handle ArtifactTypeSelector selection
   const handleCreateTypeSelect = useCallback((type: ArtifactType, instruction?: string) => {
@@ -1205,13 +1169,6 @@ export const ChatComposer = memo(function ChatComposer({
           return;
         }
       }
-      // Backspace on empty text removes the command pill (feels like editing
-      // the token it stands for).
-      if (e.key === "Backspace" && !content && commandPill) {
-        e.preventDefault();
-        setCommandPill(null);
-        return;
-      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         // Allowed while streaming too: the store stacks the message above
@@ -1221,7 +1178,7 @@ export const ChatComposer = memo(function ChatComposer({
         }
       }
     },
-    [disabled, needsModel, agentLocked, handleSend, slashOpen, slashFiltered, slashIndex, applySlashItem, atOpen, atFiltered, atIndex, applyAttachSource, content, commandPill, slashToken, atToken, dismissKey],
+    [disabled, needsModel, agentLocked, handleSend, slashOpen, slashFiltered, slashIndex, applySlashItem, atOpen, atFiltered, atIndex, applyAttachSource, content, slashToken, atToken, dismissKey],
   );
 
   // Quotes stacked above the composer count as sendable content: with a quote
@@ -1371,22 +1328,8 @@ export const ChatComposer = memo(function ChatComposer({
           </div>
         )}
         <div className="composer-slash-wrap">
-          {(commandPill || attachedRows.length > 0) && (
+          {attachedRows.length > 0 && (
             <span className="composer-token-row">
-              {commandPill && (
-                <span className="composer-token-pill composer-token-command">
-                  <SquareSlash className="composer-token-icon" size={13} aria-hidden="true" />
-                  <span className="composer-token-label">{commandPill.label || commandPill.slug}</span>
-                  <button
-                    type="button"
-                    className="composer-token-remove"
-                    aria-label={`Remove ${commandPill.slug} command`}
-                    onClick={() => setCommandPill(null)}
-                  >
-                    <X size={11} strokeWidth={2.5} />
-                  </button>
-                </span>
-              )}
               {attachedRows.map((rowId) => {
                 const src = attachSources.find((s) => s.rowId === rowId);
                 const Icon = src?.kind === "mcp" ? Puzzle : Plug;

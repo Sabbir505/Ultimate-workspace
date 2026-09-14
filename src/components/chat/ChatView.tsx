@@ -1337,6 +1337,12 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
               // React — see patchTailAndPin); liveTotal is the truth kept by
               // the pin pass, so the wrapper never renders too short and
               // lets the positioned rows overflow the scroll extent.
+              // liveTotal carries the MEASURED tail bottom (see the tail
+              // clamp in patchTailAndPin), so once the pin pass has run this
+              // converges to real content height — the estimate-inflated
+              // totalSize no longer reserves scrollable blank space below
+              // the last turn. Until then the DOM !important write holds
+              // the clamped height against this render-time value.
               // flexShrink 0: WITHOUT this, flexbox squeezes this child to a
               // fraction of its height (measured 755px vs 3958px specified)
               // because its absolutely-positioned rows give it zero

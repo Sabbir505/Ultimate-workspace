@@ -156,6 +156,11 @@ export const usePullRequestsStore = create<PullRequestsState>((set, get) => ({
         listErrors: drop(s.listErrors),
         details: drop(s.details),
         detailErrors: drop(s.detailErrors),
+        // Also clear this project's in-flight locks: a fetch still running
+        // when the caches are dropped would otherwise keep its "loading" lock
+        // (stale-fresh for up to LOCK_STALE_MS) and block the next refresh.
+        listLoading: drop(s.listLoading),
+        detailLoading: drop(s.detailLoading),
       };
     }),
 }));

@@ -48,7 +48,13 @@ export function PermissionRulesPanel() {
   const [draftPattern, setDraftPattern] = useState("");
 
   const refresh = useCallback(async () => {
-    setRules(await getPermissionsRules());
+    try {
+      setRules(await getPermissionsRules());
+    } catch (err) {
+      // A rejected boot load must not leave the panel silently empty —
+      // surface it in the panel's existing error slot.
+      setError(`Failed to load rules: ${String(err)}`);
+    }
   }, []);
 
   useEffect(() => {

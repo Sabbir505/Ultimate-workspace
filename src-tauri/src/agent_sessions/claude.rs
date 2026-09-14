@@ -19,6 +19,10 @@ pub(super) fn spawn_claude(
     connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Result<(Child, String, String), String> {
     let alias = claude_model_alias(model);
+    // E-9c: `--model <alias>` rides the cmd.exe wrapper line via an unquoted
+    // `%*` (same exposure as the kimi/pi `-m` flags) — reject cmd
+    // metacharacters up front instead of executing them.
+    crate::harness_adapters::ensure_cmd_safe_model(&alias)?;
     // Per-session dual permission policies. full_access approval keeps the
     // historical bypass-everything spawn; every other posture routes the CLI's
     // permission prompts to the reader thread over the stdio control protocol
@@ -127,7 +131,11 @@ pub(super) fn spawn_claude(
     cmd.args(&spec.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        // Diagnosis: the CLI reports the cause of a dead turn (auth / quota /
+        // bad model) on stderr — a discarded stream left "exited mid-turn"
+        // with nothing actionable. The reader surfaces the tail on the EOF
+        // error path (same pattern as the one-shot spawns).
+        .stderr(Stdio::piped());
     // Snapshot the watch dirs once per (re)spawn so finish_turn can diff them
     // after each turn and surface files the CLI created as artifacts. The
     // first dir is the spawn dir (the CLI's workspace); the second (when
@@ -145,6 +153,20 @@ pub(super) fn spawn_claude(
         .stdout
         .take()
         .ok_or("failed to capture claude stdout")?;
+    // stderr drain: collected into a channel the reader consumes at process
+    // death (the pipe closes then, so the recv below never waits long).
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("failed to capture claude stderr")?;
+    let (etx, erx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let mut stderr = stderr;
+        use std::io::Read as _;
+        let _ = stderr.read_to_string(&mut buf);
+        let _ = etx.send(buf);
+    });
     // Take stdin and share it so the reader thread can write user input —
     // turn prompts AND, for gated modes, control responses that answer the
     // CLI's can_use_tool permission prompts.
@@ -205,6 +227,7 @@ pub(super) fn spawn_claude(
             watches,
             &generation_cell2,
             generation,
+            Some(erx),
         );
     });
     // The mode label the flags above were built from — the caller records it
@@ -387,14 +410,18 @@ pub(super) fn handle_ask_user_question(
     let response = match app.and_then(|a| a.try_state::<crate::ChatState>()) {
         Some(state) => {
             let (pending_id, rx) = state.0.register_pending_question(sid);
-            let _ = app.unwrap().emit(
-                "chat:question-request",
-                crate::types::ChatQuestionRequestPayload {
-                    chat_session_id: sid.to_string(),
-                    pending_id: pending_id,
-                    questions: input.get("questions").cloned().unwrap_or(json!([])),
-                },
-            );
+            // app may legitimately be None (tests / headless runs) — the
+            // registry above came from try_state, not unwrap.
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "chat:question-request",
+                    crate::types::ChatQuestionRequestPayload {
+                        chat_session_id: sid.to_string(),
+                        pending_id: pending_id,
+                        questions: input.get("questions").cloned().unwrap_or(json!([])),
+                    },
+                );
+            }
             match rx.blocking_recv() {
                 Ok(reply) => {
                     let free = reply
@@ -490,6 +517,9 @@ pub(super) fn unstreamed_suffix<'a>(streamed: &str, final_text: &'a str) -> Opti
 }
 
 /// Reader loop for the persistent claude process: one JSON event per line.
+/// `stderr_tail` carries the spawn's drained stderr; it is consumed ONLY on
+/// the exited-mid-turn error path (the pipe closes at process death, so the
+/// bounded recv never delays a healthy exit).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_claude_stream(
     app: Option<&AppHandle>,
@@ -503,6 +533,7 @@ pub(super) fn read_claude_stream(
     mut watches: Vec<DirWatch>,
     proc_generation: &AtomicU64,
     my_generation: u64,
+    stderr_tail: Option<std::sync::mpsc::Receiver<String>>,
 ) {
     let mut full = String::new();
     // Answer text accumulated from `stream_event` deltas ONLY (no think
@@ -988,7 +1019,19 @@ pub(super) fn read_claude_stream(
         }
         {
             let conn = db.0.lock();
-            let _ = crate::db::delete_setting(&conn, &cli_session_key("claude_code", sid));
+            // Audit MED-7: only drop the PERSISTED id while this chat still
+            // runs claude_code. A harness switch (claude → opencode) keeps the
+            // stored id so switching back resumes; this reader's kill-induced
+            // EOF must not delete it under the switch. A missing row deletes
+            // anyway (delete_chat_session cleans its own keys).
+            let still_claude = crate::db::get_chat_session(&conn, sid)
+                .ok()
+                .flatten()
+                .map(|cs| cs.agent.as_deref() == Some("harness:claude_code"))
+                .unwrap_or(true);
+            if still_claude {
+                let _ = crate::db::delete_setting(&conn, &cli_session_key("claude_code", sid));
+            }
         }
         eprintln!(
             "[context] claude_code resume failed (no turn activity); dropping stale CLI              session id — the next send replays the context primer"
@@ -1006,6 +1049,15 @@ pub(super) fn read_claude_stream(
         && in_flight.swap(false, Ordering::SeqCst)
         && !cancelled.load(Ordering::SeqCst)
     {
-        emit_error(app, sid, "Claude Code exited mid-turn");
+        // The CLI's stderr carries the real cause (auth/quota/bad model);
+        // surface its tail like the one-shot paths do.
+        let tail = stderr_tail
+            .and_then(|rx| rx.recv_timeout(Duration::from_secs(2)).ok())
+            .unwrap_or_default();
+        emit_error(
+            app,
+            sid,
+            &format!("Claude Code exited mid-turn{}", stderr_suffix(&tail)),
+        );
     }
 }

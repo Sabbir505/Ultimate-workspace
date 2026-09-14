@@ -92,8 +92,28 @@ pub async fn execute_relay_tool(
     // The automation family dispatches through its own handler (AppHandle →
     // DbState) — the same split dispatch.rs uses for the built-in chat; the
     // provider-agnostic execute_tool doesn't route it. Tool results are text.
+    //
+    // TRUST GATE (audit HIGH-1): the built-in chat only reaches
+    // execute_automation_tool after dispatch.rs showed the user an explicit
+    // approval card for the call; THIS relay path is ungated, and every run
+    // forces full-auto — an unconfirmed automation would execute whatever a
+    // harness scheduled, unattended. The gate defers confirmation to the
+    // EXISTING surface (the Automations view's enable toggle) instead of
+    // duplicating approval UI: relay-created rows start disabled, relay
+    // updates may not enable, and run-now refuses disabled rows. See
+    // `gate_relay_automation_op`.
     if tools::is_automation_tool(tool_name) {
-        let text = tools::execute_automation_tool(app, tool_name, args).await;
+        let text = match gate_relay_automation_op(app, tool_name, args).await {
+            // Err = final refusal text — the underlying tool call is skipped.
+            Err(text) => text,
+            Ok((args, note)) => {
+                let mut text = tools::execute_automation_tool(app, tool_name, &args).await;
+                if let Some(note) = note {
+                    text.push_str(note);
+                }
+                text
+            }
+        };
         return Ok(json!({ "text": text, "artifact": Value::Null }));
     }
     // Session Mesh family: same interception shape. `execute_mesh_tool`
@@ -113,6 +133,95 @@ pub async fn execute_relay_tool(
         "text": outcome_text(&outcome),
         "artifact": outcome_artifact_json(&outcome)
     }))
+}
+
+/// One-time-user-confirmation gate for automations created or fired through
+/// the relay bridge (audit HIGH-1). The BUILT-IN chat reaches
+/// `execute_automation_tool` only after an explicit user approval card for the
+/// call (dispatch.rs); this relay path has no such gate, and automation runs
+/// force full-auto permission (see automations.rs — unattended turns can't
+/// answer prompts). A full in-bridge confirmation loop would need frontend
+/// changes, so the gate reuses the confirmation surface that already exists:
+/// the Automations view's enable toggle. The user flipping the row on IS the
+/// one-time confirmation; enabled rows (user-created or chat-approved) behave
+/// exactly as before.
+///
+/// Rules:
+/// 1. `create_automation` is forced to `enabled:false` — the caller's value
+///    is discarded — and an `automation:approval-request` event is emitted
+///    (same lifecycle-event shape the scheduler uses) so the UI/log can
+///    surface the pending row. The scheduler's due-math skips disabled rows,
+///    so nothing runs until a human enables it.
+/// 2. `update_automation` may not enable: an `enabled:true` argument is
+///    DROPPED (not flipped to false — an update must never disable a
+///    user-enabled row either) and a note is appended, so the agent can't
+///    confirm itself.
+/// 3. `run_automation_now` refuses while the row is disabled — without this,
+///    "create disabled, fire immediately" would bypass rule 1 entirely.
+///
+/// Returns the (possibly rewritten) args plus an optional note to append to
+/// the tool's response text, or `Err(final_text)` when the call is refused
+/// outright (the underlying tool must NOT run).
+async fn gate_relay_automation_op(
+    app: &tauri::AppHandle,
+    tool_name: &str,
+    args: &Value,
+) -> Result<(Value, Option<&'static str>), String> {
+    use tauri::{Emitter, Manager};
+
+    if tool_name == tools::CREATE_AUTOMATION {
+        let mut gated = args.clone();
+        if let Some(obj) = gated.as_object_mut() {
+            obj.insert("enabled".into(), Value::Bool(false));
+        }
+        // Best-effort visibility hook: the row exists but waits on a human.
+        let _ = app.emit(
+            "automation:approval-request",
+            json!({
+                "source": "relay_bridge",
+                "name": args.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                "schedule": args.get("schedule").and_then(|v| v.as_str()).unwrap_or(""),
+                "harness": args.get("agent").and_then(|v| v.as_str()).unwrap_or("claude_code"),
+            }),
+        );
+        Ok((gated, None))
+    } else if tool_name == tools::UPDATE_AUTOMATION
+        && args.get("enabled").and_then(|v| v.as_bool()) == Some(true)
+    {
+        // Drop the key entirely so the stored `enabled` state is untouched.
+        let mut gated = args.clone();
+        if let Some(obj) = gated.as_object_mut() {
+            obj.remove("enabled");
+        }
+        Ok((
+            gated,
+            Some(
+                " NOTE: the enabled:true request was ignored — automations can only \
+                 be enabled by the user in the Automations view.",
+            ),
+        ))
+    } else if tool_name == tools::RUN_AUTOMATION_NOW {
+        let id = args.get("automation_id").and_then(|v| v.as_str()).unwrap_or("");
+        let enabled = {
+            let db = app.state::<crate::DbState>();
+            let conn = db.0.lock();
+            crate::db::get_automation(&conn, id)
+                .ok()
+                .flatten()
+                .map(|a| a.enabled)
+        };
+        match enabled {
+            // Enabled (user-confirmed) rows — and unknown ids, which the tool
+            // itself reports — run through the normal path.
+            Some(true) | None => Ok((args.clone(), None)),
+            Some(false) => Err(format!(
+                "Error: automation \"{id}\" is disabled and was NOT run — \
+                 the user must enable it in the Automations view first."
+            )),
+        }
+    } else {
+        Ok((args.clone(), None))
+    }
 }
 
 #[cfg(test)]

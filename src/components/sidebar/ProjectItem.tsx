@@ -2,6 +2,7 @@
 // history, New Session control with harness picker (§4.2), and the project
 // context menu (New Worktree §7.10, Project Settings §7.7/§7.16, etc.).
 import { useEffect, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { createWorktree, listQuickActions, toastError } from "../../lib/ipc";
 import { newSessionFlow, runQuickAction } from "../../lib/sessionLauncher";
 import { useProjectsStore } from "../../state/projects";
@@ -21,7 +22,11 @@ export function ProjectItem({ project }: Props) {
   const expanded = useProjectsStore((s) => !!s.expanded[project.id]);
   const selected = useProjectsStore((s) => s.selectedProjectId === project.id);
   const gitStatus = useProjectsStore((s) => s.gitStatuses[project.id]);
-  const sessions = useProjectsStore((s) => s.sessionsFor(project.id));
+  // useShallow: sessionsFor allocates a fresh array on every store change,
+  // which would re-render every project row on any sessions-store write;
+  // shallow-compare the session entries so identity changes only when the
+  // list contents actually change.
+  const sessions = useProjectsStore(useShallow((s) => s.sessionsFor(project.id)));
   const harnesses = useProjectsStore((s) => s.harnesses);
   const toggleExpanded = useProjectsStore((s) => s.toggleExpanded);
   const selectProject = useProjectsStore((s) => s.selectProject);

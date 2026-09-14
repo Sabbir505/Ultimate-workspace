@@ -18,7 +18,7 @@
 use tauri::AppHandle;
 
 use crate::chat::permission::ConnectorToolKind;
-use crate::connectors::gmail_api::FallbackTool;
+use crate::connectors::gmail_api::{cap_response_text, FallbackTool};
 use crate::connectors::oauth::ensure_valid_access_token;
 
 /// The fallback tool definitions for a connector, or `None` if the connector
@@ -327,7 +327,7 @@ async fn youtube_call(
                 urlencoding::encode(query)
             );
             let json = get_json(http, &url, token, "youtube", "search").await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "youtube_video_details" => {
             let ids = str_arg(args, "video_ids")
@@ -337,7 +337,7 @@ async fn youtube_call(
                 urlencoding::encode(ids)
             );
             let json = get_json(http, &url, token, "youtube", "video_details").await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "youtube_my_channel" => {
             let json = get_json(
@@ -348,7 +348,7 @@ async fn youtube_call(
                 "my_channel",
             )
             .await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "youtube_list_my_playlists" => {
             let max = num_arg(args, "max_results", 25, 50, 1);
@@ -360,7 +360,7 @@ async fn youtube_call(
                 "list_my_playlists",
             )
             .await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "youtube_list_playlist_items" => {
             let pid = str_arg(args, "playlist_id").ok_or_else(|| {
@@ -372,13 +372,34 @@ async fn youtube_call(
                 urlencoding::encode(pid)
             );
             let json = get_json(http, &url, token, "youtube", "list_playlist_items").await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         other => Err(format!("unknown YouTube tool `{other}`")),
     }
 }
 
 // ---- HTTP helpers ----
+
+/// Binary-vs-text heuristic for `alt=media` downloads: a NUL byte or a REAL
+/// UTF-8 decode failure within the sampled prefix says binary. Non-ASCII
+/// UTF-8 (é, CJK, emoji) is text — the old `!body.is_ascii()` check misfiled
+/// every accented/CJK document as binary.
+fn looks_binary(bytes: &[u8]) -> bool {
+    const SAMPLE_LEN: usize = 8 * 1024;
+    let mut sample = &bytes[..bytes.len().min(SAMPLE_LEN)];
+    if sample.contains(&0) {
+        return true;
+    }
+    // A sample cut mid-multibyte-character fails from_utf8 spuriously —
+    // strip trailing continuation bytes before judging.
+    while let Some((&last, rest)) = sample.split_last() {
+        if (last & 0xC0) != 0x80 {
+            break;
+        }
+        sample = rest;
+    }
+    std::str::from_utf8(sample).is_err()
+}
 
 async fn get_json(
     http: &reqwest::Client,
@@ -473,7 +494,7 @@ async fn drive_call(
                 format!("{url}&q={}", urlencoding::encode(q))
             };
             let json = get_json(http, &url, token, "drive", "search").await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "gdrive_get_file_metadata" => {
             let file_id = str_arg(args, "file_id")
@@ -483,7 +504,7 @@ async fn drive_call(
                 urlencoding::encode(file_id)
             );
             let json = get_json(http, &url, token, "drive", "get_file_metadata").await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "gdrive_read_file_content" => {
             let file_id = str_arg(args, "file_id")
@@ -513,11 +534,12 @@ async fn drive_call(
                 format!("{BASE}/files/{}?alt=media", urlencoding::encode(file_id))
             };
             let resp = crate::util::checked_send_ctx(http .get(&url) .bearer_auth(token) .timeout(std::time::Duration::from_secs(60)), 500, "drive read_file_content").await?;
-            let body = resp.text().await.unwrap_or_default();
-            if export.is_none() && !body.is_ascii() && !body.is_empty() {
+            let body = resp.bytes().await.unwrap_or_default();
+            if export.is_none() && looks_binary(&body) {
                 return Ok("[binary file content — not displayed]".to_string());
             }
-            Ok(body)
+            // The decoded body flows straight into model context — cap it.
+            Ok(cap_response_text(String::from_utf8_lossy(&body).into_owned()))
         }
         "gdrive_create_file" => {
             let name_arg = str_arg(args, "name")
@@ -633,11 +655,11 @@ async fn docs_call(
                 .get("body")
                 .map(doc_to_text)
                 .unwrap_or_default();
-            Ok(serde_json::to_string_pretty(&serde_json::json!({
+            Ok(cap_response_text(serde_json::to_string_pretty(&serde_json::json!({
                 "title": title,
                 "text": text,
             }))
-            .map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?))
         }
         "gdocs_update_doc" => {
             let doc_id = str_arg(args, "document_id")
@@ -671,12 +693,12 @@ async fn docs_call(
             )
             .await?;
             let title = doc.get("title").cloned().unwrap_or(serde_json::Value::Null);
-            Ok(serde_json::to_string_pretty(&serde_json::json!({
+            Ok(cap_response_text(serde_json::to_string_pretty(&serde_json::json!({
                 "title": title,
                 "updated": true,
                 "replies": json.get("replies"),
             }))
-            .map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?))
         }
         other => Err(format!("unknown docs fallback tool `{other}`")),
     }
@@ -739,7 +761,7 @@ async fn sheets_call(
                 dim
             );
             let json = get_json(http, &url, token, "sheets", "get_values").await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "gsheets_update_values" => {
             let id = str_arg(args, "spreadsheet_id")
@@ -764,7 +786,7 @@ async fn sheets_call(
                 "update_values",
             )
             .await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "gsheets_append_values" => {
             let id = str_arg(args, "spreadsheet_id")
@@ -788,7 +810,7 @@ async fn sheets_call(
                 "append_values",
             )
             .await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "gsheets_create_spreadsheet" => {
             let title = str_arg(args, "title")
@@ -873,11 +895,11 @@ async fn slides_call(
                 .get("slides")
                 .map(slides_to_text)
                 .unwrap_or_default();
-            Ok(serde_json::to_string_pretty(&serde_json::json!({
+            Ok(cap_response_text(serde_json::to_string_pretty(&serde_json::json!({
                 "title": title,
                 "slides_text": text,
             }))
-            .map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?))
         }
         "gslides_replace_all_text" => {
             let id = str_arg(args, "presentation_id").ok_or_else(|| {
@@ -957,8 +979,10 @@ async fn calendar_call(
                         .collect()
                 })
                 .unwrap_or_default();
-            Ok(serde_json::to_string_pretty(&serde_json::json!({ "events": events }))
-                .map_err(|e| e.to_string())?)
+            Ok(cap_response_text(
+                serde_json::to_string_pretty(&serde_json::json!({ "events": events }))
+                    .map_err(|e| e.to_string())?,
+            ))
         }
         "gcalendar_get_event" => {
             let event_id = str_arg(args, "event_id")
@@ -969,7 +993,7 @@ async fn calendar_call(
                 urlencoding::encode(event_id)
             );
             let json = get_json(http, &url, token, "calendar", "get_event").await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "gcalendar_list_calendars" => {
             let json = get_json(
@@ -980,7 +1004,7 @@ async fn calendar_call(
                 "list_calendars",
             )
             .await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "gcalendar_create_event" => {
             let summary = str_arg(args, "summary")
@@ -1061,7 +1085,7 @@ async fn chat_call(
             let page = num_arg(args, "page_size", 20, 100, 1);
             let url = format!("{BASE}/spaces?pageSize={page}");
             let json = get_json(http, &url, token, "chat", "list_spaces").await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "gchat_list_messages" => {
             let space = str_arg(args, "space")
@@ -1069,7 +1093,7 @@ async fn chat_call(
             let page = num_arg(args, "page_size", 20, 50, 1);
             let url = format!("{BASE}/{}/messages?pageSize={page}", urlencoding::encode(space));
             let json = get_json(http, &url, token, "chat", "list_messages").await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "gchat_send_message" => {
             let space = str_arg(args, "space")
@@ -1113,7 +1137,7 @@ async fn people_call(
                 "get_user_profile",
             )
             .await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "gpeople_search_contacts" => {
             let query = str_arg(args, "query")
@@ -1124,7 +1148,7 @@ async fn people_call(
                 urlencoding::encode(query)
             );
             let json = get_json(http, &url, token, "people", "search_contacts").await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         "gpeople_search_directory_people" => {
             let query = str_arg(args, "query").ok_or_else(|| {
@@ -1136,7 +1160,7 @@ async fn people_call(
                 urlencoding::encode(query)
             );
             let json = get_json(http, &url, token, "people", "search_directory_people").await?;
-            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+            Ok(cap_response_text(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?))
         }
         other => Err(format!("unknown people fallback tool `{other}`")),
     }
@@ -1368,5 +1392,41 @@ mod tests {
         assert!(out.contains("--- Slide 1 ---"));
         assert!(out.contains("Title slide"));
         assert!(!out.contains("Slide 2"));
+    }
+
+    #[test]
+    fn utf8_text_is_not_binary() {
+        // The old `!body.is_ascii()` check misfiled every non-ASCII document
+        // as binary — é/CJK/emoji text must pass through.
+        assert!(!looks_binary("Café — 日本語 — 🎉 plain body".as_bytes()));
+        assert!(!looks_binary(b"plain ascii"));
+        assert!(!looks_binary(b""));
+        // A multibyte character cut at the sample boundary must not count as
+        // a decode failure (trailing continuation bytes are stripped first).
+        let mut bytes = vec![b'a'; 8 * 1024];
+        bytes.extend_from_slice("日".as_bytes());
+        assert!(!looks_binary(&bytes), "sample cut mid-char is still text");
+    }
+
+    #[test]
+    fn invalid_utf8_or_nul_is_binary() {
+        // ZIP local-file header magic (contains a NUL).
+        assert!(looks_binary(&[0x50, 0x4b, 0x03, 0x04, 0x00, 0x00]));
+        // Lone 0xFF is never a valid UTF-8 start byte.
+        assert!(looks_binary(&[0x63, 0x61, 0x66, 0xc3, 0xff]));
+        // Truncated UTF-8 sequence that is NOT at the sample boundary.
+        assert!(looks_binary(&[0x63, 0x61, 0x66, 0xc3]));
+    }
+
+    #[test]
+    fn cap_response_text_truncates_with_marker() {
+        let small = "short".to_string();
+        assert_eq!(cap_response_text(small.clone()), small);
+        let big = "日".repeat(64 * 1024); // 2 bytes/char → over the cap
+        let capped = cap_response_text(big.clone());
+        assert!(capped.len() < big.len());
+        assert!(capped.contains("[truncated"), "{capped}");
+        // Cut lands on a char boundary — must still be valid UTF-8.
+        assert!(std::str::from_utf8(capped.as_bytes()).is_ok());
     }
 }

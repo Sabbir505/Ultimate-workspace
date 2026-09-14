@@ -164,13 +164,13 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
         // model actually accept image inputs in the chat. The mmproj
         // download fires its own progress events with id
         // "{repo}::mmproj::...", so the user's card list will show a
-        // second in-progress entry next to the now-done one.
-        if (p.id.startsWith("vision::") || p.id.includes("::mmproj::") === false) {
-          // The leading "vision::" prefix is a tag the card sets when
-          // it kicks off a vision download (see onStartDownload).
-          // Otherwise: any non-mmproj completion that looks like a
-          // catalog id ({repo}::{filename}) might be a vision model
-          // and we should try the mmproj fetch.
+        // second in-progress entry next to the now-done one — skip
+        // those here so finishing a projector can't recursively fetch
+        // another one.
+        if (!p.id.includes("::mmproj::")) {
+          // Any non-mmproj completion that looks like a catalog id
+          // ({repo}::{filename}) might be a vision model; the card
+          // lookup below gates on card.vision before fetching.
           const sep = p.id.indexOf("::");
           if (sep > 0) {
             const repoId = p.id.slice(0, sep);
@@ -200,11 +200,19 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
     };
   }, [onDownloadComplete]);
 
+  // Monotonic search/sort ticket: responses can resolve out of order (HF
+  // latency varies wildly with query popularity), and a late response from an
+  // OLD search used to overwrite the newer one's entries (same stale-guard
+  // pattern as ApiKeysPanel's model fetch).
+  const fetchTicketRef = useRef(0);
+
   const doFetch = async (q: string, s: SortKey) => {
+    const ticket = ++fetchTicketRef.current;
     setLoading(true);
     setLoadError(null);
     try {
       const res = await fetchModelCatalog({ query: q, sort: s, limit: 60 });
+      if (fetchTicketRef.current !== ticket) return; // a newer search/sort superseded this one
       if (!res) {
         setEntries([]);
         setLoadError("Catalog unavailable (Tauri runtime not detected).");
@@ -220,13 +228,18 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
           : prev,
       );
     } catch (e) {
+      if (fetchTicketRef.current !== ticket) return;
       console.error("[ModelMarket] fetch error:", e);
       setLoadError(e instanceof Error ? e.message : String(e));
       setEntries([]);
       setStaleCatalog(false);
     } finally {
-      setLoading(false);
-      setFetchTick((t) => t + 1);
+      // A stale fetch still releases the spinner — unless a newer fetch has
+      // started, whose own resolution owns the flag now.
+      if (fetchTicketRef.current === ticket) {
+        setLoading(false);
+        setFetchTick((t) => t + 1);
+      }
     }
   };
 

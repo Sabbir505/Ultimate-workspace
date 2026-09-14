@@ -800,7 +800,7 @@ async fn run_task_subagent(
     args: &Value,
     _tasks: &crate::TaskState,
 ) -> String {
-    use crate::chat::providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
+    use crate::chat::providers::AnthropicProvider;
     use crate::secrets;
     use crate::types::{SubagentDonePayload, SubagentSpawnPayload};
 
@@ -956,24 +956,28 @@ async fn run_task_subagent(
         });
         run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, &sub_id, true).await
     } else {
-        let base = base_url
-            .as_deref()
-            .unwrap_or(if provider_str == "openrouter" {
-                OpenRouterProvider::DEFAULT_BASE
-            } else {
-                OpenAIProvider::DEFAULT_BASE
-            });
-        let url = format!("{base}/v1/chat/completions");
-        let mut body = serde_json::json!({
-            "model": model,
-            "stream": true,
-            "stream_options": {"include_usage": true},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-        });
-        run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, &sub_id, false).await
+        // Audit: compatible/local endpoints REQUIRE a configured base URL —
+        // the api.openai.com fallback used to send the user's key and the
+        // subagent's prompt to the wrong host. Fail the subagent with a
+        // clear error instead (the Err arm below still emits
+        // chat:subagent-done, so the Agents pane doesn't hang).
+        match subagent_openai_base(&provider_str, base_url.as_deref()) {
+            Err(e) => Err(e),
+            Ok(base) => {
+                let url = format!("{base}/v1/chat/completions");
+                let mut body = serde_json::json!({
+                    "model": model,
+                    "stream": true,
+                    "stream_options": {"include_usage": true},
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                });
+                run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, &sub_id, false)
+                    .await
+            }
+        }
     };
 
     match result {
@@ -1445,7 +1449,15 @@ async fn run_subagent_loop(
                 blocks.push(json!({ "type": "text", "text": round_text }));
             }
             let mut results: Vec<Value> = Vec::new();
-            for (_idx, (id, name, args_acc)) in ant_calls.iter() {
+            for (_idx, (id, name, args_acc)) in ant_calls.iter_mut() {
+                // Some compatible endpoints emit a tool_use block with no id;
+                // echoing `id: ""` made Anthropic reject round 2 (ids are
+                // required and must pair with the tool_result). Synthesize
+                // one — the same fallback the OpenAI rounds use for id-less
+                // calls.
+                if id.is_empty() {
+                    *id = crate::chat::proto::next_synthetic_tool_id();
+                }
                 let args = parse_subagent_args(args_acc);
                 blocks.push(json!({ "type": "tool_use", "id": id, "name": name, "input": args }));
                 let result =
@@ -1497,6 +1509,25 @@ async fn run_subagent_loop(
         return Err("subagent produced no output".to_string());
     }
     Ok(output)
+}
+
+/// Base URL for an OpenAI-format subagent round. OpenRouter has a fixed
+/// endpoint and native OpenAI a well-known default; compatible/local
+/// endpoints have NO sensible fallback — a missing base URL is a
+/// configuration error, not a reason to hit api.openai.com.
+fn subagent_openai_base<'a>(
+    provider_str: &str,
+    base_url: Option<&'a str>,
+) -> Result<&'a str, String> {
+    use crate::chat::providers::{OpenAIProvider, OpenRouterProvider};
+    match base_url {
+        Some(b) => Ok(b),
+        None if provider_str == "openrouter" => Ok(OpenRouterProvider::DEFAULT_BASE),
+        None if provider_str == "openai" => Ok(OpenAIProvider::DEFAULT_BASE),
+        None => Err(format!(
+            "no base URL configured for {provider_str}; set one in Settings \u{2192} Connectors"
+        )),
+    }
 }
 
 /// Shared argument-assembly for a subagent tool call: the streamed
@@ -2820,6 +2851,25 @@ mod tests {
         // And the grounding basics must remain available.
         assert!(SUBAGENT_TOOL_ALLOW.contains(&tools::READ_FILE));
         assert!(SUBAGENT_TOOL_ALLOW.contains(&tools::FETCH_URL));
+    }
+
+    #[test]
+    fn subagent_base_url_is_required_for_compatible_providers() {
+        // Audit: compatible/local endpoints fell back to api.openai.com when
+        // no base URL was configured — sending the user's key and the
+        // subagent's prompt to the wrong host. OpenRouter and native OpenAI
+        // keep their defaults; everything else must be a clear error.
+        assert!(subagent_openai_base("openai", None).is_ok());
+        assert!(subagent_openai_base("openrouter", None).is_ok());
+        let err = subagent_openai_base("openai_compatible", None).unwrap_err();
+        assert!(err.contains("no base URL configured"), "{err}");
+        let err = subagent_openai_base("local_gguf", None).unwrap_err();
+        assert!(err.contains("local_gguf"), "{err}");
+        // A configured base URL always wins.
+        assert_eq!(
+            subagent_openai_base("openai_compatible", Some("http://127.0.0.1:8999")).unwrap(),
+            "http://127.0.0.1:8999"
+        );
     }
 
     // ---- run_shell availability-probe guard ----

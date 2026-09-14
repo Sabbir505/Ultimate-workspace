@@ -45,10 +45,19 @@ beforeEach(() => {
 });
 
 describe("AutomationRunTable live duration", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("ticks elapsed time for a running row instead of showing an em-dash", () => {
+    // Pin the clock: the duration is derived from Date.now() at render time,
+    // and a real second-boundary between module load and render made the
+    // exact "1m 30s" assertion flaky.
+    const fixedSec = 1_800_000_000;
+    vi.useFakeTimers({ now: new Date(fixedSec * 1000) });
     render(
       <AutomationRunTable
-        runs={[run()]}
+        runs={[run({ startedAt: fixedSec - 90 })]}
         loading={false}
         onOpenRunLog={() => {}}
       />,
@@ -57,9 +66,18 @@ describe("AutomationRunTable live duration", () => {
   });
 
   it("finished rows still show their recorded duration", () => {
+    const fixedSec = 1_800_000_000;
+    vi.useFakeTimers({ now: new Date(fixedSec * 1000) });
     render(
       <AutomationRunTable
-        runs={[run({ finishedAt: nowSec - 30, status: "ok", summary: "Completed" })]}
+        runs={[
+          run({
+            startedAt: fixedSec - 90,
+            finishedAt: fixedSec - 30,
+            status: "ok",
+            summary: "Completed",
+          }),
+        ]}
         loading={false}
         onOpenRunLog={() => {}}
       />,

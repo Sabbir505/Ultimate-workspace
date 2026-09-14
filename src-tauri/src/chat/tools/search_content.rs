@@ -403,8 +403,17 @@ fn search_one_file(
         return Ok(false);
     }
 
-    // Binary sniff: read up to 1024 bytes; if >1% are NUL, treat as binary.
-    let sniff = std::fs::read(path).unwrap_or_default();
+    // Binary sniff: read a bounded 1 KiB prefix; if >1% are NUL, treat as
+    // binary. (A whole-file read used to pull up to MAX_FILE_BYTES into
+    // memory just to look at the first kilobyte.)
+    let sniff = {
+        use std::io::Read;
+        let mut buf = Vec::with_capacity(1024);
+        if let Ok(f) = std::fs::File::open(path) {
+            let _ = f.take(1024).read_to_end(&mut buf);
+        }
+        buf
+    };
     if !sniff.is_empty() {
         let probe = sniff.len().min(1024);
         let nul = sniff.iter().take(probe).filter(|&&b| b == 0).count();
@@ -412,7 +421,7 @@ fn search_one_file(
             notes.push(format!(
                 "{}: skipped (binary file, {} bytes)",
                 display_path,
-                sniff.len()
+                meta.len()
             ));
             return Ok(false);
         }

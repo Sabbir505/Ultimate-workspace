@@ -1307,6 +1307,17 @@ pub(super) async fn handle_chat_turn(
     // model that isn't running, spin up the sidecar before the first request.
     if provider_id_str == "local_gguf" {
         if let Some(path) = gguf_path.as_deref() {
+            // Phone-supplied path: only GGUF files the desktop scanner listed
+            // may be spawned — an arbitrary `gguf_path` would point the
+            // sidecar at any file on disk.
+            if !is_known_model_path(db, path) {
+                let err = DesktopMessage::ChatError {
+                    chat_session_id: "warmup".to_string(),
+                    error: format!("unknown local model path: {path}"),
+                };
+                let _ = send_msg(&write, &err).await;
+                return Err("rejected unknown gguf_path".to_string());
+            }
             // Send a status update so the phone shows "Starting local model…"
             let status_msg = DesktopMessage::ChatToken {
                 chat_session_id: "warmup".to_string(),
@@ -2170,6 +2181,39 @@ pub async fn build_available_providers(
     }
 
     providers
+}
+
+/// True when `path` is a GGUF file the desktop scanner actually lists
+/// (default model locations + the user-added folders from Settings). Every
+/// phone-supplied `gguf_path` must resolve here before the desktop spawns
+/// llama-server over it — an arbitrary path would hand a paired peer an
+/// arbitrary-binary-execution primitive. Mirrors the scan in
+/// `build_available_providers` (same sources, same dedup) so a path the
+/// phone received from `AvailableProviders` always validates.
+pub(crate) fn is_known_model_path(db: &Arc<Mutex<Connection>>, path: &str) -> bool {
+    if path.trim().is_empty() {
+        return false;
+    }
+    let mut known = crate::chat::local_models::scan_default_locations();
+    {
+        let conn = db.lock();
+        if let Ok(Some(json)) = db::get_setting(&conn, "localModels.folders") {
+            if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
+                let seen: std::collections::HashSet<String> =
+                    known.iter().map(|f| f.id.clone()).collect();
+                for folder in list.into_iter().filter(|s| !s.trim().is_empty()) {
+                    for file in
+                        crate::chat::local_models::scan_folder(std::path::Path::new(&folder), "user")
+                    {
+                        if !seen.contains(&file.id) {
+                            known.push(file);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    known.iter().any(|f| f.path == path)
 }
 
 /// Trigger on-demand warm-up for a local GGUF model from its file path.

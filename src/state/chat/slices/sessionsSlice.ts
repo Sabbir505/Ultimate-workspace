@@ -39,6 +39,7 @@ import {
   markFullAccessConfirmed,
   markManuallyRenamed,
   maybeEnsureWorktree,
+  mergeOptimistic,
   patchSessions,
   policiesToPermissionMode,
   sortSessions,
@@ -155,12 +156,21 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // Only update messages if the user hasn't clicked away to another session
       // while the fetch was in-flight.
       if (get().activeChatSessionId === chatSessionId) {
-        set({
-          messages: messages ?? [],
+        set((s) => ({
+          // mergeOptimistic, scoped to THIS session's still-optimistic rows: a
+          // re-open while the session's send is mid-persist keeps the in-flight
+          // bubble (same as loadBufferPage) — without the session filter the
+          // OUTGOING session's optimistic bubbles would leak into the new
+          // transcript, since the buffer still holds the previous chat's rows
+          // until this write.
+          messages: mergeOptimistic(
+            s.messages.filter((m) => m.chatSessionId === chatSessionId),
+            messages ?? [],
+          ),
           messagesSessionId: chatSessionId,
           activeChatSessionId: chatSessionId,
           hasMoreHistory: (messages?.length ?? 0) >= 200,
-        });
+        }));
         // Restore this chat's generated artifacts (inline diagrams / file chips)
         // so they reappear when the session is reopened. Skip sessions that are
         // mid-stream — their live buffers are the source of truth. Per-session
@@ -183,16 +193,22 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
             artifactsByMessage: { ...s.artifactsByMessage, ...byMessage },
           }));
         }
-        // Checkpoint chips: keyed by messageId, REPLACED on session open (not
-        // merged — the keys belong to this session's messages only). Baselines
-        // and safety snapshots (messageId null) are backend-only.
+        // Checkpoint chips: keyed by messageId (globally unique). Prune only
+        // THIS session's freshly-loaded message ids, then merge the new chips
+        // in — replacing the whole map on every open used to wipe the other
+        // pane's (and every other session's) chips for the rest of the run.
+        // Baselines and safety snapshots (messageId null) are backend-only.
         if (checkpoints) {
           const byMessage: Record<number, ChatCheckpoint[]> = {};
           for (const c of checkpoints) {
             if (c.messageId == null) continue;
             (byMessage[c.messageId] ??= []).push(c);
           }
-          set({ checkpointsByMessage: byMessage });
+          set((s) => {
+            const next = { ...s.checkpointsByMessage };
+            for (const m of messages ?? []) delete next[m.id];
+            return { checkpointsByMessage: { ...next, ...byMessage } };
+          });
         }
       }
       // Touch and reorder in the background. Rejection-tolerant: a failed

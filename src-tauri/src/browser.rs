@@ -36,12 +36,10 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 use serde::{Deserialize, Serialize};
-#[cfg(any(windows, target_os = "macos"))]
-use tauri::webview::WebviewBuilder;
 #[cfg(target_os = "linux")]
 use tauri::webview::WebviewWindowBuilder;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, Webview, WebviewUrl,
+    AppHandle, Emitter, Manager,
 };
 
 pub(crate) use crate::browser_js::*;
@@ -612,11 +610,17 @@ fn sanitize(rect: Rect) -> Rect {
     }
 }
 
+/// Append budget for `browser.log` before it rotates to `.old` (~5 MB per
+/// file, ~10 MB total across the pair).
+const BROWSER_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
 /// Append one line to `<app-data>/logs/browser.log`. The pane's stderr is
 /// invisible in packaged/dev-direct launches, and the stuck-loading diagnosis
 /// needs the FULL navigation chain visible — create/navigate/nav-start/
 /// nav-complete with error codes. Best-effort: logging must never fail a
-/// browser operation.
+/// browser operation. The file is size-capped: appending past
+/// BROWSER_LOG_MAX_BYTES rotates it to `browser.log.old` (one generation —
+/// the current file stays readable while total size stays bounded).
 pub(crate) fn browser_log(app: &tauri::AppHandle, msg: &str) {
     let dir = crate::user_dirs::app_data_dir(app).join("logs");
     if std::fs::create_dir_all(&dir).is_err() {
@@ -627,10 +631,18 @@ pub(crate) fn browser_log(app: &tauri::AppHandle, msg: &str) {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let line = format!("[{:?}] {msg}\n", ts);
+    let path = dir.join("browser.log");
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len().saturating_add(line.len() as u64) > BROWSER_LOG_MAX_BYTES {
+            // Best-effort rename; a concurrent-writer race just skips one
+            // rotation or loses the .old copy — never the current append.
+            let _ = std::fs::rename(&path, dir.join("browser.log.old"));
+        }
+    }
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("browser.log"))
+        .open(&path)
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
@@ -1668,97 +1680,6 @@ impl BrowserManager {
         Ok(())
     }
 
-    /// Register WebView2 NavigationStarting / NavigationCompleted COM event
-    /// handlers on the pane's webview (best-effort, diagnostics + truthful
-    /// load events). Runs on the main thread via with_webview; the handlers
-    /// are COM-refcounted by WebView2 so they outlive this call.
-    fn attach_navigation_listeners(&self, label: &str) {
-        #[cfg(windows)]
-        {
-            use webview2_com::NavigationCompletedEventHandler;
-            use webview2_com::NavigationStartingEventHandler;
-            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2NavigationCompletedEventArgs;
-            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2NavigationStartingEventArgs;
-
-            let app = self.app.clone();
-            let label_start = label.to_string();
-            let app_complete = self.app.clone();
-            let label_complete = label.to_string();
-            // Registration must marshal through run_on_main_thread: a
-            // with_webview dispatched from this (worker) thread was silently
-            // dropped, so the listeners never attached.
-            let attached = with_core_on_main(&self.app, self.webviews.clone(), label, "attach nav listeners", move |core| {
-                use webview2_com::take_pwstr;
-                use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_WEB_ERROR_STATUS;
-                // NavigationStarting: every navigation attempt (URL +
-                // whether wry's on_navigation allowed it).
-                let start_handler = NavigationStartingEventHandler::create(Box::new(
-                    move |_sender, args: Option<ICoreWebView2NavigationStartingEventArgs>| {
-                        if let Some(args) = args {
-                            let mut pw = windows::core::PWSTR::null();
-                            if unsafe { args.Uri(&mut pw) }.is_ok() {
-                                let uri = take_pwstr(pw);
-                                browser_log(&app, &format!("nav START label={label_start} uri={uri}"));
-                            }
-                        }
-                        // Nav-quiesce gate source: any navigation (typed URL,
-                        // link click, redirect) marks the pane in-flight until
-                        // the matching NavigationCompleted.
-                        if let Some(state) = app.try_state::<crate::BrowserState>() {
-                            state.0.mark_nav_start(&label_start);
-                        }
-                        Ok(())
-                    },
-                ));
-                let mut start_token = 0i64;
-                let _ = unsafe { core.add_NavigationStarting(&start_handler, &mut start_token) };
-                // NavigationCompleted: success/failure + the WebView2 error
-                // code — the ground truth for "stuck loading" reports.
-                let complete_handler = NavigationCompletedEventHandler::create(Box::new(
-                    move |_sender, args: Option<ICoreWebView2NavigationCompletedEventArgs>| {
-                        if let Some(args) = args {
-                            let mut success = windows::core::BOOL::default();
-                            let _ = unsafe { args.IsSuccess(&mut success) };
-                            let mut err = COREWEBVIEW2_WEB_ERROR_STATUS::default();
-                            let _ = unsafe { args.WebErrorStatus(&mut err) };
-                            browser_log(
-                                &app_complete,
-                                &format!(
-                                    "nav COMPLETE label={label_complete} success={} error={}",
-                                    success.as_bool(),
-                                    err.0
-                                ),
-                            );
-                            if let Some(state) = app_complete.try_state::<crate::BrowserState>() {
-                                state.0.mark_nav_end(&label_complete);
-                            }
-                            if success.as_bool() {
-                                // The navigation reached a real load end —
-                                // mirror it through an event the frontend
-                                // can use to clear `loading` truthfully.
-                                let _ = app_complete.emit(
-                                    "browser:load-completed",
-                                    label_complete.clone(),
-                                );
-                            }
-                        }
-                        Ok(())
-                    },
-                ));
-                let mut complete_token = 0i64;
-                let _ = unsafe { core.add_NavigationCompleted(&complete_handler, &mut complete_token) };
-                Ok(())
-            });
-            if let Err(e) = attached {
-                browser_log(&self.app, &format!("attach nav listeners FAILED label={label}: {e}"));
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = label;
-        }
-    }
-
     /// Build the underlying webview and return a uniform `BrowserPane`.
     ///
     /// Windows: create the WebView2 environment + controller DIRECTLY via
@@ -1781,8 +1702,8 @@ impl BrowserManager {
         project_id: Option<&str>,
     ) -> Result<BrowserPane, String> {
         let label = browser_label(pane_id, tab_id);
-        let event_pane_id = pane_id.to_string();
-        let event_tab_id = tab_id.to_string();
+        let _event_pane_id = pane_id.to_string();
+        let _event_tab_id = tab_id.to_string();
         let _app_for_emit = self.app.clone();
 
         // --- Windows: direct webview2-com controller (bypasses tauri) ---

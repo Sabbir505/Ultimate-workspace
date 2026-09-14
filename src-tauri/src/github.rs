@@ -13,6 +13,7 @@
 //! error string the panel renders as an empty/connect state.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
@@ -109,7 +110,12 @@ fn client(token: &str) -> Result<reqwest::Client, String> {
     );
     let mut builder = reqwest::Client::builder()
         .default_headers(headers)
-        .user_agent("relay-desktop");
+        .user_agent("relay-desktop")
+        // Same bounds every other outbound call site uses (automations
+        // post_json, pty_cmds npm probes): without them a wedged request
+        // (VPN handoff, proxy stall) hangs the PR panel command forever.
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10));
     // Route API traffic through the same proxy the user's git uses. Many
     // environments reach github.com ONLY via a local proxy (git push/pull
     // work while api.github.com times out) — a desktop app launched from the

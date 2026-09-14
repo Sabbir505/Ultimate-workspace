@@ -213,6 +213,24 @@ pub(super) fn fs_edit_file(args: &Value) -> ToolOutcome {
         return ToolOutcome::text("Error: edit_file requires a \"path\".");
     }
     let p = std::path::Path::new(&path);
+    // Bound the read: edit_file loads the whole file to count/replace
+    // matches, so an unbounded target could balloon memory for no gain —
+    // find/replace over more than 10 MiB of text is not a sane edit. (The
+    // read used to have no cap at all.)
+    const MAX_EDIT_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
+    match std::fs::metadata(p) {
+        Ok(m) if m.len() > MAX_EDIT_FILE_BYTES => {
+            return ToolOutcome::text(format!(
+                "edit_file: {path} is {} MiB — refusing to load files over {} MiB. \
+                 Split the edit into smaller files, or rewrite the file with write_file.",
+                m.len() / 1024 / 1024,
+                MAX_EDIT_FILE_BYTES / 1024 / 1024
+            ));
+        }
+        // Surface the same error the read below would have produced.
+        Err(e) => return ToolOutcome::text(format!("edit_file failed to read: {e}")),
+        Ok(_) => {}
+    }
     let mut text = match std::fs::read_to_string(p) {
         Ok(t) => t,
         Err(e) => return ToolOutcome::text(format!("edit_file failed to read: {e}")),

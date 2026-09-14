@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use base64::Engine;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::chat::local_models;
 use crate::chat::providers::*;

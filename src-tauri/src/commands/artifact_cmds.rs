@@ -368,70 +368,82 @@ pub async fn update_artifact_cmd(
     artifact_type: String,
     new_spec: ArtifactSpec,
 ) -> Result<ArtifactUpdateResult, String> {
-    let conn = db.0.lock();
-    
-    // Get current artifact for diff
-    let (current_spec, _current_name) = match artifact_type.as_str() {
-        "skill" | "loop" => {
-            let skills = list_skills(&conn, None).map_err(|e| e.to_string())?;
-            let skill = skills.iter().find(|s| s.id == artifact_id)
-                .ok_or_else(|| format!("Artifact {} not found", artifact_id))?;
-            (Some(skill.content.clone()), Some(skill.name.clone()))
-        }
-        "automation" => {
-            let auto = get_automation(&conn, &artifact_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Artifact {} not found", artifact_id))?;
-            (Some(auto.prompt.clone()), Some(auto.name.clone()))
-        }
-        _ => return Err("Unsupported artifact type".to_string()),
-    };
-    
-    // Generate new content
-    let adapted = adapt(&new_spec)?;
-    let new_content = match &adapted {
-        AdaptedArtifact::InstalledSkill(input) => input.content.clone(),
-        AdaptedArtifact::PromptTemplate(input) => input.content.clone(),
-        AdaptedArtifact::Automation(input) => input.prompt.clone(),
-    };
-    
-    // Update based on type
-    match artifact_type.as_str() {
-        "skill" | "loop" => {
-            // Find the skill to update
-            let skills = list_skills(&conn, None).map_err(|e| e.to_string())?;
-            if let Some(_skill) = skills.iter().find(|s| s.id == artifact_id) {
-                update_skill(
-                    &conn,
-                    &artifact_id,
-                    &new_spec.name(),
-                    &format!("/{}", new_spec.slug()),
-                    &new_content,
-                ).map_err(|e| e.to_string())?;
-                
-                // Also update the installed skill on disk
-                save_installed_skill(
-                    new_spec.slug(),
-                    artifact_type.clone(),
-                    new_content.clone(),
-                ).map_err(|e| e.to_string())?;
+    // All DB work happens under one lock hold; the on-disk skill write is
+    // COLLECTED and performed after the guard drops — the DbState mutex
+    // guards SQL only, and holding it across a filesystem write stalled
+    // every other DB consumer for the write's duration.
+    let (current_spec, new_content, skill_fs_write) = {
+        let conn = db.0.lock();
+
+        // Get current artifact for diff
+        let (current_spec, _current_name) = match artifact_type.as_str() {
+            "skill" | "loop" => {
+                let skills = list_skills(&conn, None).map_err(|e| e.to_string())?;
+                let skill = skills.iter().find(|s| s.id == artifact_id)
+                    .ok_or_else(|| format!("Artifact {} not found", artifact_id))?;
+                (Some(skill.content.clone()), Some(skill.name.clone()))
             }
-        }
-        "automation" => {
-            match adapted {
-                AdaptedArtifact::Automation(input) => {
-                    update_automation(&conn, &artifact_id, &input)
-                        .map_err(|e| e.to_string())?;
+            "automation" => {
+                let auto = get_automation(&conn, &artifact_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Artifact {} not found", artifact_id))?;
+                (Some(auto.prompt.clone()), Some(auto.name.clone()))
+            }
+            _ => return Err("Unsupported artifact type".to_string()),
+        };
+
+        // Generate new content
+        let adapted = adapt(&new_spec)?;
+        let new_content = match &adapted {
+            AdaptedArtifact::InstalledSkill(input) => input.content.clone(),
+            AdaptedArtifact::PromptTemplate(input) => input.content.clone(),
+            AdaptedArtifact::Automation(input) => input.prompt.clone(),
+        };
+
+        // Update based on type
+        let skill_fs_write = match artifact_type.as_str() {
+            "skill" | "loop" => {
+                // Find the skill to update
+                let skills = list_skills(&conn, None).map_err(|e| e.to_string())?;
+                if let Some(_skill) = skills.iter().find(|s| s.id == artifact_id) {
+                    update_skill(
+                        &conn,
+                        &artifact_id,
+                        &new_spec.name(),
+                        &format!("/{}", new_spec.slug()),
+                        &new_content,
+                    ).map_err(|e| e.to_string())?;
+
+                    // Defer the installed-skill disk write until after the
+                    // lock is released (see above).
+                    Some((new_spec.slug(), artifact_type.clone(), new_content.clone()))
+                } else {
+                    None
                 }
-                _ => return Err("Adapter mismatch for automation".to_string()),
             }
-        }
-        _ => return Err("Unsupported artifact type".to_string()),
+            "automation" => {
+                match adapted {
+                    AdaptedArtifact::Automation(input) => {
+                        update_automation(&conn, &artifact_id, &input)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    _ => return Err("Adapter mismatch for automation".to_string()),
+                }
+                None
+            }
+            _ => return Err("Unsupported artifact type".to_string()),
+        };
+        (current_spec, new_content, skill_fs_write)
+    };
+
+    // Also update the installed skill on disk — outside the DB lock.
+    if let Some((slug, kind, content)) = skill_fs_write {
+        save_installed_skill(slug, kind, content).map_err(|e| e.to_string())?;
     }
-    
+
     // Compute diff
     let diff = compute_diff(current_spec.as_deref(), &new_content);
-    
+
     Ok(ArtifactUpdateResult {
         success: true,
         artifact_id,

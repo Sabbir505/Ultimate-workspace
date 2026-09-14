@@ -16,6 +16,7 @@ import {
   makeInstalledGlobal,
   readInstalledSkill,
   saveInstalledSkill,
+  toastError,
 } from "../../lib/ipc";
 import { useProjectsStore } from "../../state/projects";
 import { useSkillsStore } from "../../state/skills";
@@ -156,15 +157,27 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
 
   const save = async () => {
     if (!selected) return;
-    await saveInstalledSkill(selected.slug, kind, content);
-    setDirty(false);
-    flash("Saved to disk");
-    void reload();
+    try {
+      await saveInstalledSkill(selected.slug, kind, content);
+      setDirty(false);
+      flash("Saved to disk");
+      void reload();
+    } catch (err) {
+      // Keep the editor dirty so the user can retry the write.
+      toastError(`Couldn't save "${selected.slug}"`, err);
+    }
   };
 
   const create = async () => {
     if (!newName.trim() || !content.trim()) return;
-    const created = await createInstalledSkill(newName.trim(), kind, content);
+    let created: InstalledSkill | null;
+    try {
+      created = await createInstalledSkill(newName.trim(), kind, content);
+    } catch (err) {
+      // Keep the create form + editor content intact for a retry.
+      toastError(`Couldn't create ${kind}`, err);
+      return;
+    }
     if (created) {
       setCreating(false);
       setNewName("");
@@ -175,7 +188,13 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
   };
 
   const remove = async (item: InstalledSkill) => {
-    await deleteInstalledSkill(item.slug, kind);
+    try {
+      await deleteInstalledSkill(item.slug, kind);
+    } catch (err) {
+      // Selection/content stay as-is — nothing was deleted.
+      toastError(`Couldn't delete ${kind}`, err);
+      return;
+    }
     if (selected?.slug === item.slug) {
       setSelected(null);
       setContent("");

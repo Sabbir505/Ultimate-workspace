@@ -1048,7 +1048,7 @@ fn elided_result_stub(content: &str) -> String {
     };
     format!(
         "{ELISION_MARKER} — original {n} chars, first {keep} kept below; re-run the tool if you need the full output again]\n{truncated}{ellipsis}",
-        n = content.len(),
+        n = content.chars().count(),
         keep = ELIDED_RESULT_HEAD_CHARS,
     )
 }
@@ -2332,7 +2332,7 @@ mod tests {
                 assert!(
                     content.contains(&format!(
                         "original {} chars",
-                        1000 + format!("result number {i} — ").len()
+                        1000 + format!("result number {i} — ").chars().count()
                     )),
                     "stub carries the original size: {content}"
                 );
@@ -2360,6 +2360,15 @@ mod tests {
         elide_stale_tool_results(&mut messages, true);
         let twice = serde_json::to_string(&messages).unwrap();
         assert_eq!(once, twice, "second pass must be a no-op");
+    }
+
+    #[test]
+    fn elision_stub_reports_chars_not_bytes() {
+        // 400 em dashes are 1200 UTF-8 bytes but 400 chars — the stub's
+        // "original N chars" used to report the BYTE length.
+        let content = "\u{2014}".repeat(400);
+        let stub = elided_result_stub(&content);
+        assert!(stub.contains("original 400 chars"), "{stub}");
     }
 
     #[test]

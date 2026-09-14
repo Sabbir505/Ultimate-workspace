@@ -93,15 +93,21 @@ pub fn set_corpus_enabled(conn: &Connection, corpus_id: &str, enabled: bool) -> 
 
 /// Remove a corpus and everything it indexed.
 pub fn remove_corpus(conn: &Connection, corpus_id: &str) -> DbResult<()> {
-    conn.execute(
+    // The three deletes are one logical removal: bare, a failure midway (say
+    // chunks gone, corpus row alive) left a half-removed corpus whose stale
+    // doc_files rows a re-index would trust. One unchecked_transaction with
+    // `?` propagation, matching `delete_chat_session` (db/chat.rs).
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "DELETE FROM doc_chunks WHERE corpus_id = ?1",
         params![corpus_id],
     )?;
-    conn.execute(
+    tx.execute(
         "DELETE FROM doc_files WHERE corpus_id = ?1",
         params![corpus_id],
     )?;
-    conn.execute("DELETE FROM doc_corpora WHERE id = ?1", params![corpus_id])?;
+    tx.execute("DELETE FROM doc_corpora WHERE id = ?1", params![corpus_id])?;
+    tx.commit()?;
     Ok(())
 }
 

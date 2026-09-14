@@ -40,7 +40,6 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
 use crate::chat::local_models::query_total_vram_bytes;
@@ -974,30 +973,102 @@ pub async fn start_model_download(
 
     // Read everything we need from the DB up-front; the State guard must
     // not be held across the spawn's await.
-    let (dest_dir, token) = {
+    let (dest_dir, models_dir, token) = {
         let conn = db.0.lock();
-        let d = if let Some(p) = dest_dir.as_ref().filter(|s| !s.is_empty()) {
-            PathBuf::from(p)
-        } else {
-            match resolve_models_dir(&conn) {
-                Ok(d) => d,
+        // The models dir is both the fallback destination and the containment
+        // boundary any explicit dest_dir is gated against below.
+        let models = resolve_models_dir(&conn);
+        let d = match dest_dir.as_ref().filter(|s| !s.is_empty()) {
+            Some(p) => PathBuf::from(p),
+            None => match &models {
+                Ok(d) => d.clone(),
                 Err(e) => {
                     // The slot was already registered above — release it or
                     // this model id stays "in progress" forever (the cleanup
                     // in the spawned task never ran).
                     registry.active.lock().remove(&id);
-                    return Err(e);
+                    return Err(e.clone());
                 }
-            }
+            },
         };
         let t = get_hf_token(&conn);
-        (d, t)
+        (d, models, t)
     };
+
+    // An explicit dest_dir is containment-gated to the models dir: the bytes
+    // come from a URL, so a compromised webview must not aim them at arbitrary
+    // paths (Startup folder etc.). The models dir itself is created first —
+    // on a fresh install neither it nor `<models>/stt` exists yet, and a gate
+    // that cannot canonicalize a missing leaf would refuse every FIRST
+    // download. A not-yet-existing dest_dir is therefore judged by its
+    // NEAREST EXISTING ancestor (the leaf `create_dir_all` makes below can
+    // only appear inside an already-verified parent); whatever still cannot
+    // be canonicalized fails closed, mirroring delete_downloaded_model.
+    if let Ok(models_dir) = models_dir.as_ref() {
+        let _ = fs::create_dir_all(models_dir).await;
+    }
+    if !dest_dir.as_os_str().is_empty() {
+        let probe = if dest_dir.exists() {
+            dest_dir.clone()
+        } else {
+            let existing = dest_dir.ancestors().skip(1).find(|a| a.exists());
+            existing
+                .map(|a| a.to_path_buf())
+                .unwrap_or_else(|| dest_dir.clone())
+        };
+        let gate = match (models_dir.as_ref(), std::fs::canonicalize(&probe)) {
+            (Ok(boundary), Ok(dest)) => match std::fs::canonicalize(boundary) {
+                Ok(base) if crate::util::path_starts_with_ci(&dest, &base) => None,
+                Ok(_) => Some("dest dir is outside the models directory".to_string()),
+                Err(e) => Some(format!("could not canonicalize models dir: {e}")),
+            },
+            (Err(e), _) => Some(e.clone()),
+            (_, Err(_)) => Some(
+                "dest dir must be an existing directory inside the models directory".to_string(),
+            ),
+        };
+        if let Some(err) = gate {
+            registry.active.lock().remove(&id);
+            return Err(err);
+        }
+    }
 
     if let Err(e) = fs::create_dir_all(&dest_dir).await {
         // Same slot-release as above (unwritable destination, etc.).
         registry.active.lock().remove(&id);
         return Err(format!("could not create dest dir: {e}"));
+    }
+
+    // SECURITY: a frontend-supplied dest_dir is only honored INSIDE the
+    // resolved models dir (the Speech panel sends `<models>/stt`) — the same
+    // containment rule delete_downloaded_model enforces for deletes. Both
+    // sides are canonicalized now that they exist, so symlinks or `..` can't
+    // smuggle the multi-GB write (and its .partial sidecars) elsewhere; a
+    // path outside the models dir is rejected rather than silently rewritten.
+    match &models_dir {
+        Ok(models_dir) => {
+            let _ = fs::create_dir_all(models_dir).await;
+            let gate = (|| -> Result<(), String> {
+                let canon_models = std::fs::canonicalize(models_dir)
+                    .map_err(|e| format!("could not canonicalize models dir: {e}"))?;
+                let canon_dest = std::fs::canonicalize(&dest_dir)
+                    .map_err(|e| format!("could not canonicalize dest dir: {e}"))?;
+                if !crate::util::path_starts_with_ci(&canon_dest, &canon_models) {
+                    return Err("destination is outside the models directory".to_string());
+                }
+                Ok(())
+            })();
+            if let Err(e) = gate {
+                registry.active.lock().remove(&id);
+                return Err(e);
+            }
+        }
+        Err(e) => {
+            // Without a resolvable models dir there is no boundary to check
+            // an explicit dest_dir against — refuse (fail closed).
+            registry.active.lock().remove(&id);
+            return Err(e.clone());
+        }
     }
 
     // Sanitize the filename (HF allows a wide range of chars; the OS
@@ -1111,7 +1182,8 @@ impl<E: std::fmt::Display> From<E> for DownloadAbort {
 /// chunks (E3). `tokio::fs::read` used to load the WHOLE partial into RAM
 /// just to hash the prefix — for multi-GB model weights that's a transient
 /// multi-GB allocation on every resume. `None` when the file can't be read
-/// (rare: partial vanished mid-resume) — the caller skips hash verification.
+/// (rare: partial vanished mid-resume) — the caller then ABORTS the download
+/// rather than skip verification of an expected hash.
 async fn prime_hasher_from_file(path: &Path) -> Option<Sha256> {
     use tokio::io::AsyncReadExt;
     let mut file = tokio::fs::File::open(path).await.ok()?;
@@ -1237,7 +1309,7 @@ async fn run_download(
         resp.content_length()
     };
 
-    let mut downloaded: u64 = resume_from;
+    let downloaded: u64 = resume_from;
     let started = Instant::now();
     let mut last_emit = Instant::now();
     // Tell the UI the transfer has STARTED (headers received) even before
@@ -1259,14 +1331,27 @@ async fn run_download(
     // When resuming, the hasher is primed by re-reading the prefix
     // from the partial file (identity-verified via the sidecar .meta
     // file above). This ensures the SHA-256 covers the full file.
-    let mut hasher = if resuming && expected_sha.is_some() {
-        // Re-read the prefix to prime the hasher. We know the partial
-        // exists and was identity-verified above.
-        // E3: stream the prefix in 1 MiB chunks — `tokio::fs::read` pulled
-        // the WHOLE partial (GBs for model weights) into RAM just to hash it.
-        prime_hasher_from_file(partial_path).await
-    } else if !resuming {
-        expected_sha.map(|_| Sha256::new())
+    // E3: stream the prefix in 1 MiB chunks — `tokio::fs::read` pulled
+    // the WHOLE partial (GBs for model weights) into RAM just to hash it.
+    // If the prefix can't be hashed, the final blob could never be
+    // verified — fail the download (partial removed, so the retry starts
+    // fresh) instead of silently shipping an unchecked file.
+    let mut hasher = if expected_sha.is_some() {
+        if resuming {
+            match prime_hasher_from_file(partial_path).await {
+                Some(h) => Some(h),
+                None => {
+                    let _ = fs::remove_file(partial_path).await;
+                    return Err(DownloadAbort::Failed(
+                        "could not hash the existing partial to resume — download aborted; \
+                         retrying will start from zero"
+                            .to_string(),
+                    ));
+                }
+            }
+        } else {
+            Some(Sha256::new())
+        }
     } else {
         None
     };
@@ -1274,7 +1359,7 @@ async fn run_download(
     // Shared body pump (download.rs): write + hashing/progress callback +
     // cancel/stall watchdogs. Error policies: cancel removes the partial;
     // stall/read/write failures keep it (a later attempt may finish it).
-    let (outcome, downloaded) = crate::download::pump_body_to_file(
+    let (outcome, _downloaded) = crate::download::pump_body_to_file(
         resp,
         partial_path,
         resume_from,
@@ -1688,8 +1773,8 @@ mod tests {
 
     #[test]
     fn prime_hasher_degrades_to_none_on_missing_file() {
-        // Parity with the old `tokio::fs::read` fallback: unreadable partial
-        // → None (caller skips hash verification) — never a panic.
+        // Unreadable partial → None (never a panic); run_download then
+        // aborts the resume instead of shipping an unverifiable file.
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("gone.bin");
         assert!(

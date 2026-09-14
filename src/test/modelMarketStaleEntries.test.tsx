@@ -8,7 +8,7 @@
 //      onDownloadComplete on every render, re-subscribing the progress
 //      listener per render. Now it's useCallback-stabilized.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const onProgressMock = vi.fn();
 const downloadMmprojMock = vi.fn();
@@ -114,6 +114,53 @@ describe("ModelMarket auto-mmproj after vision download (C5)", () => {
   function screen_has_vision_card(): boolean {
     return !!document.querySelector(".model-market-grid")?.textContent?.includes("vision");
   }
+});
+
+describe("ModelMarket search/sort out-of-order responses (audit 2026-09-14 #5)", () => {
+  function entryFor(name: string): CatalogEntry {
+    return {
+      ...VISION_ENTRY,
+      id: `author/${name}::m-q4.gguf`,
+      repoId: `author/${name}`,
+      filename: "m-q4.gguf",
+      displayName: name,
+    };
+  }
+
+  it("a late response from an OLDER search never overwrites the newer result", async () => {
+    // Deferred catalog responses: resolution order is controlled by the test.
+    const resolvers: Array<(v: unknown) => void> = [];
+    fetchCatalogMock.mockImplementation(
+      () => new Promise((resolve) => { resolvers.push(resolve); }),
+    );
+    render(<ModelMarket onDownloadComplete={vi.fn()} />);
+    await act(async () => {}); // mount fetch pending → resolvers[0]
+
+    const form = document.querySelector(".model-market-search") as HTMLFormElement;
+    const input = screen.getByPlaceholderText("Search Hugging Face GGUF models…");
+
+    // Search #1 — will resolve LAST (slow popular-term backend).
+    fireEvent.change(input, { target: { value: "slow query" } });
+    fireEvent.submit(form);
+    // Search #2 — resolves FIRST.
+    fireEvent.change(input, { target: { value: "fast query" } });
+    fireEvent.submit(form);
+    expect(resolvers.length).toBe(3);
+
+    await act(async () => {
+      resolvers[2]({ stale: false, hasHuggingFaceToken: false, entries: [entryFor("fast query")] });
+    });
+    const grid = document.querySelector(".model-market-grid")!;
+    expect(grid.textContent).toContain("fast query");
+
+    // The stale response must NOT clobber the newer result.
+    await act(async () => {
+      resolvers[1]({ stale: false, hasHuggingFaceToken: false, entries: [entryFor("slow query")] });
+    });
+    const gridAfter = document.querySelector(".model-market-grid")!;
+    expect(gridAfter.textContent).toContain("fast query");
+    expect(gridAfter.textContent).not.toContain("slow query");
+  });
 });
 
 describe("LocalModelsPanel keeps one progress subscription (C5)", () => {

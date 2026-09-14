@@ -53,6 +53,25 @@ describe("docQa store", () => {
     act(() => useDocQaStore.getState().put(revised));
     expect(useDocQaStore.getState().byPath[revised.path]?.clean).toBe(false);
   });
+
+  it("caps the verdict map so it cannot grow for the whole app run", () => {
+    // Audit 2026-09-14 #9: oldest-inserted paths evict past the cap; newest
+    // survive. Re-putting a path refreshes its slot instead of keeping the
+    // stale position.
+    const path = (i: number) => ["C:", "a", `doc-${i}.pptx`].join(SEP);
+    for (let i = 0; i < 60; i++) {
+      act(() => useDocQaStore.getState().put(report({ path: path(i), filename: `doc-${i}.pptx` })));
+    }
+    let byPath = useDocQaStore.getState().byPath;
+    expect(Object.keys(byPath).length).toBeLessThanOrEqual(50);
+    expect(byPath[path(0)]).toBeUndefined();
+    expect(byPath[path(59)]).toBeDefined();
+    // Re-QA of an evicted-candidate document keeps it (fresh position, new data).
+    act(() => useDocQaStore.getState().put(report({ path: path(10), clean: false, warnings: ["x"] })));
+    byPath = useDocQaStore.getState().byPath;
+    expect(byPath[path(10)]?.clean).toBe(false);
+    expect(byPath[path(0)]).toBeUndefined();
+  });
 });
 
 describe("probe helpers", () => {

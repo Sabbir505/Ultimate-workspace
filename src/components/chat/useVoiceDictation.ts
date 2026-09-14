@@ -43,8 +43,9 @@ export function useVoiceDictation({
   const [transcribing, setTranscribing] = useState(false);
   // Live dictation lands directly in the textarea: while the mic is open,
   // Float32 sample chunks from a ScriptProcessor on a 16 kHz AudioContext
-  // (no MediaRecorder) fill two buffers — the full clip, kept for stop's
-  // repair pass (used only when a segment commit failed), and the current
+  // (no MediaRecorder) fill two buffers — the not-yet-committed clip tail
+  // (chunks are dropped the moment their segment commits, so stop's repair
+  // pass only ever replays failed/un-committed audio), and the current
   // SEGMENT (audio since the last pause) for the live partial. A short
   // silence commits the segment's text into the draft, so it can never
   // vanish when speech continues; the partial after it is re-rendered in
@@ -278,6 +279,12 @@ export function useVoiceDictation({
           voicePartialRef.current = "";
           renderVoiceText();
         }
+        // This segment's words landed, so its raw audio can go: the full-clip
+        // buffer only ever feeds stop's repair pass (a commit that FAILED),
+        // and keeping just the un-committed tail bounds memory on long
+        // dictations instead of retaining the whole session's samples.
+        const done = new Set(chunks);
+        samplesRef.current = samplesRef.current.filter((c) => !done.has(c));
         voiceLog(
           `[voice] commit ${Math.round(performance.now() - t0)}ms for ${chunkSeconds(chunks, rateRef.current).toFixed(1)}s audio`,
         );
@@ -309,13 +316,10 @@ export function useVoiceDictation({
       );
       flushVoiceSegment();
     }
-    const chunks = samplesRef.current;
-    samplesRef.current = [];
     segmentRef.current = [];
     segmentLenRef.current = 0;
     // Segment text already sits in the box and stays visible through the
     // repair pass — and survives it if the pass fails or comes back empty.
-    if (chunks.length === 0) return;
     try {
       // The trailing segment was just queued above and earlier commits may
       // still be in flight: keep the mic spinner on while the last text is
@@ -325,18 +329,26 @@ export function useVoiceDictation({
       const settleT0 = performance.now();
       await commitChainRef.current;
       voiceLog(`[voice] stop: commits settled ${Math.round(performance.now() - settleT0)}ms after flush`);
-      if (commitFailedRef.current) {
+      // Successful commits already dropped their own raw chunks, so whatever
+      // remains in samplesRef is exactly the audio whose words never landed —
+      // the repair pass replays ONLY that, not the whole session.
+      const chunks = samplesRef.current;
+      samplesRef.current = [];
+      if (commitFailedRef.current && chunks.length > 0) {
         // Some segment commit failed, so words may be missing from the box.
-        // Fall back to the polished full-clip pass to repair the text —
-        // normally (every commit succeeded) this O(session) cost is skipped.
+        // Fall back to a transcription of the retained audio to fill the gap —
+        // normally (every commit succeeded) this cost is skipped entirely.
         setTranscribing(true);
         const repairT0 = performance.now();
         const wav = encodeWav16k(joinSamples(chunks, rateRef.current));
         const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
         const text = res?.text ? flattenVoiceText(res.text) : "";
         if (text) {
-          // One polished full-clip pass replaces the pause-by-pause segments.
-          voiceCommittedRef.current = text;
+          // APPEND, not replace: earlier segments' audio was released as they
+          // committed, so a full-clip replacement would erase their words.
+          voiceCommittedRef.current = voiceCommittedRef.current
+            ? `${voiceCommittedRef.current} ${text}`
+            : text;
           voicePartialRef.current = "";
           renderVoiceText();
         }
@@ -382,6 +394,9 @@ export function useVoiceDictation({
     }
     try {
       const ac = new AudioContext({ sampleRate: 16000 });
+      // Registered before anything below can throw, so the catch's
+      // stopCapture() can close the context even if the graph is half-built.
+      captureCtxRef.current = ac;
       rateRef.current = ac.sampleRate;
       const source = ac.createMediaStreamSource(stream);
       const processor = ac.createScriptProcessor(4096, 1, 1);
@@ -416,7 +431,6 @@ export function useVoiceDictation({
       source.connect(processor);
       processor.connect(sink);
       sink.connect(ac.destination);
-      captureCtxRef.current = ac;
       captureNodesRef.current = { source, processor, sink };
       captureStreamRef.current = stream;
 
@@ -485,6 +499,9 @@ export function useVoiceDictation({
         void finishVoiceRecording();
       }
     } catch (e) {
+      // Tear down whatever half-built graph exists — stopping only the stream
+      // tracks could leak the AudioContext/processor wiring created above.
+      stopCapture();
       stream.getTracks().forEach((t) => t.stop());
       toastError("Could not initialize audio recorder.", e);
     }

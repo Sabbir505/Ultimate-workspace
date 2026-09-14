@@ -313,7 +313,10 @@ End your reply with the plan and wait for the user's approval.]"
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        // Diagnosis: per-turn CLIs report dead-turn causes (auth / quota) on
+        // stderr — the reader surfaces its tail when a turn produced no
+        // output (same pattern as the one-shot spawns).
+        .stderr(Stdio::piped());
     // The prompt travels in the process env block (never cmd-parsed) when the
     // Windows wrapper transport is active — see turn_spec.
     if let Some((k, v)) = &prompt_env {
@@ -345,7 +348,16 @@ End your reply with the plan and wait for the user's approval.]"
     if let Some(dir) = watch_dirs.first() {
         cmd.current_dir(dir);
     }
-    let watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
+    // PERF (audit MED-10): build the watches (a full per-dir tree snapshot)
+    // on their own thread, overlapped with the CLI's cold start, instead of
+    // synchronously under the per-session mutex — every per-turn send used to
+    // re-walk the whole spawn dir while holding that lock. The reader joins
+    // this job BEFORE consuming stdout, so the baseline is always complete
+    // before the first parsed output.
+    let watches_job = {
+        let dirs = watch_dirs;
+        std::thread::spawn(move || dirs.into_iter().map(DirWatch::new).collect::<Vec<_>>())
+    };
     no_console_window(&mut cmd);
     let mut child = cmd
         .spawn()
@@ -375,6 +387,18 @@ End your reply with the plan and wait for the user's approval.]"
     }
 
     let stdout = child.stdout.take().ok_or("failed to capture CLI stdout")?;
+    // stderr drain: collected into a channel the reader consumes only when a
+    // turn produced no output (the pipe closes at process exit, so the recv
+    // below never waits long on that path).
+    let stderr = child.stderr.take().ok_or("failed to capture CLI stderr")?;
+    let (etx, erx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let mut stderr = stderr;
+        use std::io::Read as _;
+        let _ = stderr.read_to_string(&mut buf);
+        let _ = etx.send(buf);
+    });
     entry.turn_in_flight.store(true, Ordering::SeqCst);
     entry.child = Some(child);
 
@@ -415,6 +439,7 @@ End your reply with the plan and wait for the user's approval.]"
     let in_flight2 = Arc::clone(&entry.turn_in_flight);
     let session_cell = Arc::clone(&entry.cli_session_id);
     std::thread::spawn(move || {
+        let watches = watches_job.join().unwrap_or_default();
         read_per_turn_stream(
             Some(&app2),
             &db2,
@@ -427,6 +452,7 @@ End your reply with the plan and wait for the user's approval.]"
             watches,
             &proc_generation,
             my_generation,
+            Some(erx),
         );
     });
     Ok(())
@@ -434,7 +460,9 @@ End your reply with the plan and wait for the user's approval.]"
 
 /// Reader loop for one-shot processes: parse events, then close the turn at
 /// EOF (process exit). Usage is taken from the stream when the CLI reports
-/// it; otherwise done carries nulls.
+/// it; otherwise done carries nulls. `stderr_tail` carries the spawn's
+/// drained stderr, consumed only when the turn produced no output at all.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn read_per_turn_stream(
     app: Option<&AppHandle>,
     db: &DbState,
@@ -447,6 +475,7 @@ pub(super) fn read_per_turn_stream(
     mut watches: Vec<DirWatch>,
     proc_generation: &AtomicU64,
     my_generation: u64,
+    stderr_tail: Option<std::sync::mpsc::Receiver<String>>,
 ) {
     let mut full = String::new();
     // Capture the turn's start instant for the "Worked for Xs" label.
@@ -584,6 +613,23 @@ pub(super) fn read_per_turn_stream(
         // turn's accumulator here so it can't linger in the registry.
         crate::chat::turn_perf::unregister(sid);
     } else {
+        // A turn whose stream produced NOTHING means the CLI exited without
+        // replying (auth / quota / crash) — surface the stderr tail instead
+        // of a silent empty bubble (mirrors the one-shot paths' diagnosis).
+        if full.is_empty() && ask.is_none() {
+            let tail = stderr_tail
+                .and_then(|rx| rx.recv_timeout(Duration::from_secs(2)).ok())
+                .unwrap_or_default();
+            emit_error(
+                app,
+                sid,
+                &format!(
+                    "{} produced no output{}",
+                    kind.display(),
+                    stderr_suffix(&tail)
+                ),
+            );
+        }
         // per-turn CLI streams don't reliably expose a model id on their
         // events — the cost rollup falls back to the session's model.
         finish_turn(

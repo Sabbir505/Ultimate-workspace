@@ -149,6 +149,9 @@ export function SubagentPanel() {
   // Follow the tail as the subagent streams — but only when the user is
   // already reading near the bottom (<80px). Forcing scrollTop to the end on
   // EVERY render pinned anyone who scrolled up to re-read the output.
+  // PERF: gated on the parsed segments (memoized on the streamed output), so
+  // unrelated renders don't force a scrollHeight layout read — same
+  // content-change gate useTranscriptScroll applies to the chat transcript.
   useLayoutEffect(() => {
     const panel = panelRef.current;
     if (!panel) return;
@@ -156,7 +159,7 @@ export function SubagentPanel() {
     if (distanceFromBottom < 80) {
       panel.scrollTop = panel.scrollHeight;
     }
-  });
+  }, [segments]);
 
   // When a subagent is selected, make sure the tool panel is actually VISIBLE
   // (the click sites open/focus the agents tab themselves via openAgentsTab —

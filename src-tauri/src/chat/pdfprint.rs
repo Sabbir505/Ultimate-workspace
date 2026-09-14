@@ -83,8 +83,12 @@ pub(crate) fn compose_print_document(model_html: &str, title: &str) -> String {
         html_escape(title),
         base_css(),
     );
-    let lower = model_html.to_ascii_lowercase();
     let trimmed = model_html.trim_start();
+    // ASCII lowering preserves byte offsets, so `lower` indexes `trimmed`
+    // directly — computing it from the untrimmed string shifted every splice
+    // position by the trimmed prefix, corrupting the injected <head> block
+    // (and splitting tags) whenever the model's HTML began with whitespace.
+    let lower = trimmed.to_ascii_lowercase();
 
     if lower.contains("<html") {
         // Full document: splice our block into <head> if present (before the
@@ -402,6 +406,26 @@ mod tests {
         let doc = compose_print_document(model, "T");
         assert!(doc.contains("__renderState"));
         assert!(doc.contains("<title>x</title>"));
+    }
+
+    #[test]
+    fn leading_whitespace_does_not_corrupt_the_head_splice() {
+        // The lowercase search buffer must index the SAME string the splice
+        // cuts. Computed from the untrimmed input, every `</head>` position
+        // shifted by the trimmed prefix and the injection landed mid-tag
+        // (splitting `</head>` apart).
+        let model = "  \n  <html><head><title>x</title></head><body>hi</body></html>";
+        let doc = compose_print_document(model, "T");
+        assert!(
+            doc.contains("</head>"),
+            "</head> must survive intact, got: {doc}"
+        );
+        let ours = doc.find("__renderState").unwrap();
+        let head_close = doc.find("</head>").unwrap();
+        assert!(ours < head_close, "injection must land inside <head>: {doc}");
+        assert!(doc.contains("<title>x</title>"));
+        // No duplicated content either way.
+        assert_eq!(doc.matches("</head>").count(), 1);
     }
 
     #[test]

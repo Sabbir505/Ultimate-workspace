@@ -128,8 +128,10 @@ pub fn list_automation_runs(
     db: State<'_, DbState>,
     automation_id: String,
     limit: Option<i64>,
-    // mi23: keyset pagination — return runs with id < before_id (runs are
-    // id-ordered, newest last). None = latest page.
+    // mi23: keyset pagination — return runs with started_at < before_id (the
+    // runs table is started_at-ordered DESC for display). Despite the
+    // parameter name, the frontend sends the previous page's OLDEST
+    // started_at TIMESTAMP as the cursor, not an id. None = latest page.
     before_id: Option<i64>,
 ) -> Result<Vec<AutomationRun>, String> {
     let conn = db.0.lock();

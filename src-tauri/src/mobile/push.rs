@@ -119,8 +119,10 @@ pub fn push_if_phones_disconnected(app: &AppHandle, title: String, body: String)
 /// Notify about an approval request on a MOBILE-originated chat session.
 /// Desktop-originated sessions never push (the person at the desk is the
 /// audience there); the check reads the `owner_session_id` column that
-/// `SendChatMessage` sets for phone-created sessions.
-pub fn push_approval_for_mobile_session(app: &AppHandle, chat_session_id: &str, summary: &str) {
+/// `SendChatMessage` sets for phone-created sessions. The chat-derived
+/// `summary` is deliberately NOT pushed (plaintext through Expo's cloud) —
+/// see the generic body below.
+pub fn push_approval_for_mobile_session(app: &AppHandle, chat_session_id: &str, _summary: &str) {
     let is_mobile = {
         let Some(db_state) = app.try_state::<crate::DbState>() else {
             return;
@@ -135,7 +137,16 @@ pub fn push_approval_for_mobile_session(app: &AppHandle, chat_session_id: &str, 
         .unwrap_or(false)
     };
     if is_mobile {
-        push_if_phones_disconnected(app, "Relay needs your approval".to_string(), summary.to_string());
+        // The approval summary is model/tool-derived chat content — pushing
+        // it verbatim through Expo's cloud would leak conversation detail in
+        // plaintext to a third party. Ship a generic body instead; the live
+        // socket path still carries the real summary when the phone is
+        // connected. The title stays (no chat-derived content in it).
+        push_if_phones_disconnected(
+            app,
+            "Relay needs your approval".to_string(),
+            "Approval needed — open Relay to review.".to_string(),
+        );
     }
 }
 

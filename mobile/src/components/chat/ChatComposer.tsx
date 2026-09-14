@@ -180,8 +180,15 @@ export default function ChatComposer({
         const name = asset.name;
         const kind = classifyByName(name);
         const uri = asset.uri;
-        const size = asset.size ?? 0;
+        const size = asset.size;
 
+        // Fail closed: a picker result without a size would sail through
+        // every cap below and get read into base64 wholesale — treat it as
+        // over-limit instead of trusting an unbounded read.
+        if (size == null) {
+          setVoiceError(`${name}: file size unknown — attachment skipped.`);
+          continue;
+        }
         if (kind === 'image') {
           if (size > MAX_IMAGE_BYTES) {
             setVoiceError(`${name} exceeds the 15 MB image limit.`);

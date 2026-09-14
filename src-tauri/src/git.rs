@@ -211,8 +211,10 @@ pub fn worktree_path_for(project_path: &Path, branch_name: &str) -> PathBuf {
 
 /// `git worktree add <path> -b <branch>`; returns the new worktree path.
 pub fn create_worktree(project_path: &Path, branch_name: &str) -> Result<String, String> {
-    if branch_name.trim().is_empty() {
-        return Err("branch name must not be empty".into());
+    // Same flag-injection guard create_branch/checkout_branch/delete_branch
+    // use: a leading-dash "branch" would be parsed by git as a flag.
+    if branch_name.starts_with('-') || branch_name.is_empty() {
+        return Err("invalid branch name".into());
     }
     let wt = worktree_path_for(project_path, branch_name);
     let wt_str = wt.to_string_lossy().into_owned();
@@ -970,41 +972,60 @@ pub fn get_git_log(path: &Path) -> Result<Vec<GitLogEntry>, String> {
     )?;
     let mut entries = Vec::new();
     for line in out.lines() {
-        // Graph prefix is everything before the first SHA (short hash pattern).
-        let trimmed = line;
-        // Find where the graph ends: the graph is leading * | / \ characters.
-        let graph_end = trimmed
-            .char_indices()
-            .take_while(|(_, c)| matches!(c, '*' | '|' | '/' | '\\' | ' ' | '_' | '.'))
-            .last()
-            .map(|(i, _)| i + 1)
-            .unwrap_or(0);
-        let graph = trimmed[..graph_end].trim_end().to_string();
-        let rest = trimmed[graph_end..].trim();
-        // rest = "<sha>␟<subject>␟(<refs>)␟<author>␟<date>" — the unit
-        // separator can't appear in any of those fields, so a plain split
-        // is lossless. `refs` comes decorated as " (HEAD -> master, …)".
-        let mut parts = rest.split('\u{1f}');
-        let sha_part = parts.next().unwrap_or(rest).trim();
-        let msg_part = parts.next().unwrap_or("");
-        // Strip the wrapper parens + leading space from the %d decoration.
-        let refs_part = parts.next().unwrap_or("").trim();
-        let refs_part = refs_part
-            .strip_prefix('(')
-            .and_then(|r| r.strip_suffix(')'))
-            .unwrap_or(refs_part);
-        let author = parts.next().unwrap_or("");
-        let date = parts.next().unwrap_or("");
-        entries.push(GitLogEntry {
-            graph,
-            sha: sha_part.to_string(),
-            message: msg_part.to_string(),
-            refs: refs_part.to_string(),
-            author: author.to_string(),
-            date: date.to_string(),
-        });
+        entries.push(parse_git_log_line(line));
     }
     Ok(entries)
+}
+
+/// Parse one `git log --graph --format=%h␟%s␟%d␟%an␟%ci` line into an entry.
+///
+/// The line is `<graph><sha>␟<subject>␟<refs>␟<author>␟<date>`: the graph
+/// prefix is the field before the FIRST unit separator minus the trailing
+/// sha. Splitting on the ␟ boundary (instead of scanning a character class
+/// of ASCII graph glyphs, which stopped at box-drawing glyphs like │ ─ ┼ and
+/// leaked the rest of the graph into the sha field) keeps any glyph shape in
+/// the graph and out of the fields.
+fn parse_git_log_line(line: &str) -> GitLogEntry {
+    let (head, tail) = match line.split_once('\u{1f}') {
+        Some((h, t)) => (h, t),
+        None => (line, ""),
+    };
+    // The sha is the trailing ASCII-hex run of `head`; the graph is the
+    // prefix before it (possibly empty, e.g. a graph-only continuation
+    // line). Walk the boundary back to a char boundary so multi-byte graph
+    // glyphs slice cleanly.
+    let hex_len = head
+        .bytes()
+        .rev()
+        .take_while(|b| b.is_ascii_hexdigit())
+        .count();
+    let mut split = head.len() - hex_len;
+    while split > 0 && !head.is_char_boundary(split) {
+        split -= 1;
+    }
+    let graph = head[..split].trim_end().to_string();
+    let sha = head[split..].trim();
+    // tail = "<subject>␟(<refs>)␟<author>␟<date>" — the unit separator
+    // can't appear in any of those fields, so a plain split is lossless.
+    // `refs` comes decorated as " (HEAD -> master, …)".
+    let mut parts = tail.split('\u{1f}');
+    let msg_part = parts.next().unwrap_or("");
+    // Strip the wrapper parens + leading space from the %d decoration.
+    let refs_part = parts.next().unwrap_or("").trim();
+    let refs_part = refs_part
+        .strip_prefix('(')
+        .and_then(|r| r.strip_suffix(')'))
+        .unwrap_or(refs_part);
+    let author = parts.next().unwrap_or("");
+    let date = parts.next().unwrap_or("");
+    GitLogEntry {
+        graph,
+        sha: sha.to_string(),
+        message: msg_part.to_string(),
+        refs: refs_part.to_string(),
+        author: author.to_string(),
+        date: date.to_string(),
+    }
 }
 
 // ---- per-turn checkpoints (hidden refs, plumbing only) ----
@@ -1241,6 +1262,53 @@ mod tests {
         let s = get_git_status(Path::new("/definitely/not/here-xyz-123"));
         assert!(!s.is_repo);
         assert_eq!(s.branch, None);
+    }
+
+    /// Leading-dash branch names must never reach `git worktree add … -b`
+    /// as a positional arg — git would parse them as flags.
+    #[test]
+    fn worktree_rejects_leading_dash_and_empty_branch() {
+        for bad in ["--force", "-b", "-"] {
+            let err = create_worktree(Path::new("."), bad)
+                .expect_err("leading-dash branch must be rejected");
+            assert_eq!(err, "invalid branch name", "branch {bad:?}");
+        }
+        // Empty name is rejected too (guard fires before any git call).
+        assert!(create_worktree(Path::new("."), "").is_err());
+    }
+
+    /// The graph prefix is derived from the ␟ field boundary, not a scan of
+    /// ASCII graph glyphs — box-drawing glyphs stay in the graph instead of
+    /// corrupting the sha field.
+    #[test]
+    fn git_log_line_parses_graph_sha_and_fields() {
+        let us = '\u{1f}';
+        // Plain one-line history.
+        let e = parse_git_log_line(&format!("* a1b2c3d{us}Fix login{us}(HEAD -> main){us}Ann{us}2026-09-14 10:00:00 +0600"));
+        assert_eq!(e.graph, "*");
+        assert_eq!(e.sha, "a1b2c3d");
+        assert_eq!(e.message, "Fix login");
+        assert_eq!(e.refs, "HEAD -> main");
+        assert_eq!(e.author, "Ann");
+        assert_eq!(e.date, "2026-09-14 10:00:00 +0600");
+
+        // Merged history: multi-glyph ASCII graph + no decoration.
+        let e = parse_git_log_line(&format!("|/  b4c5d6e{us}Merge branch 'x'{us}{us}Bob{us}2026-09-13 09:00:00 +0000"));
+        assert_eq!(e.graph, "|/");
+        assert_eq!(e.sha, "b4c5d6e");
+        assert_eq!(e.refs, "");
+
+        // Box-drawing glyphs (newer git --graph styles) were previously
+        // dropped from the graph and leaked into the sha.
+        let e = parse_git_log_line(&format!("│ * c7d8e9f{us}Use box glyphs{us}{us}Cara{us}2026-09-12 08:00:00 +0000"));
+        assert_eq!(e.graph, "│ *");
+        assert_eq!(e.sha, "c7d8e9f");
+        assert_eq!(e.message, "Use box glyphs");
+
+        // No graph prefix (plain --format output) → empty graph, full sha.
+        let e = parse_git_log_line(&format!("deadbee{us}Solo{us}{us}Dan{us}2026-09-11 07:00:00 +0000"));
+        assert_eq!(e.graph, "");
+        assert_eq!(e.sha, "deadbee");
     }
 
     /// M7: a freshly-`git init`ed repo has an unborn HEAD — `git diff HEAD`

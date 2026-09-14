@@ -2,7 +2,7 @@
 //! 30-day retention window. All query functions take `&Connection` for
 //! in-memory testability.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{new_id, now_ts, DbResult};
 use crate::types::ArtifactRecord;
@@ -38,17 +38,26 @@ pub fn insert_artifact(
 ) -> DbResult<ArtifactRecord> {
     let now = now_ts();
     let expires_at = now + RETENTION_SECS;
-    let updated = conn.execute(
-        "UPDATE artifacts
-          SET chat_session_id = ?2, filename = ?3, kind = ?4, created_at = ?5, expires_at = ?6
-          WHERE path = ?1",
-        params![path, chat_session_id, filename, kind, now, expires_at],
-    )?;
-    if updated > 0 {
-        let id: String = conn.query_row(
-            "SELECT id FROM artifacts WHERE path = ?1 ORDER BY created_at DESC LIMIT 1",
+    // The dedupe target is ONE deterministic row: newest `created_at`, ties
+    // broken by rowid (insertion order). The old `UPDATE … WHERE path = ?1`
+    // bumped EVERY row sharing the path, and its re-SELECT
+    // (`ORDER BY created_at DESC LIMIT 1`) was ambiguous when legacy
+    // duplicates shared a `created_at` second — it could report a different
+    // id than the row just updated.
+    let existing_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM artifacts WHERE path = ?1 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
             params![path],
             |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing_id {
+        conn.execute(
+            "UPDATE artifacts
+              SET chat_session_id = ?2, filename = ?3, kind = ?4, created_at = ?5, expires_at = ?6
+              WHERE id = ?1",
+            params![id, chat_session_id, filename, kind, now, expires_at],
         )?;
         return Ok(ArtifactRecord {
             id,
@@ -219,5 +228,43 @@ mod tests {
         // A genuinely different file still inserts normally.
         insert_artifact(&conn, Some("s2"), "other.md", "/tmp/other.md", "markdown").unwrap();
         assert_eq!(list_artifacts(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn same_second_dedupe_updates_one_deterministic_row() {
+        let conn = super::super::mem();
+        // Two legacy duplicate rows for one path stamped in the SAME second —
+        // the old UPDATE-all-matches + `ORDER BY created_at DESC LIMIT 1`
+        // re-SELECT could report either id for the bump.
+        for (id, session) in [("a1", "s1"), ("a2", "s2")] {
+            conn.execute(
+                "INSERT INTO artifacts (id, chat_session_id, filename, path, kind, created_at, expires_at)
+                 VALUES (?1, ?2, 'old.md', '/tmp/dup.md', 'markdown', 100, 200)",
+                params![id, session],
+            )
+            .unwrap();
+        }
+
+        let rec = insert_artifact(&conn, Some("s9"), "new.md", "/tmp/dup.md", "markdown").unwrap();
+
+        // Exactly ONE row was bumped — the newest tie (highest rowid) — and
+        // the reported id is that same row, not an ambiguous sibling.
+        assert_eq!(rec.id, "a2");
+        let bumped: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM artifacts WHERE filename = 'new.md'")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(bumped, vec!["a2".to_string()]);
+        // The loser keeps its legacy state (untouched, ages out naturally).
+        let loser: (String, i64) = conn
+            .query_row(
+                "SELECT filename, created_at FROM artifacts WHERE id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(loser, ("old.md".to_string(), 100));
     }
 }

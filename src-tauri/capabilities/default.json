@@ -1,11 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability set for the main window",
+  "description": "Default capability set for the main window. Plugin access (fs/dialog/opener/notification/updater) is main-only — auxiliary windows get core-only permissions via browser-windows.json.",
   "windows": [
-    "main",
-    "browser-*",
-    "oauth-*"
+    "main"
   ],
   "permissions": [
     "core:default",

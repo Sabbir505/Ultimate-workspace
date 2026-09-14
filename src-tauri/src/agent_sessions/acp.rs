@@ -289,13 +289,6 @@ pub(super) fn send_acp_turn(
         entry.child = Some(child);
     }
 
-    // Queue the turn. The reader drains `acp_pending` right after the
-    // handshake's session/new response (first turn); later turns write
-    // `session/request` directly below.
-    {
-        let mut g = entry.acp_pending.lock().map_err(|e| e.to_string())?;
-        *g = Some(content.to_string());
-    }
     // Record the prompt for the reader's input-token estimate (Fix: ACP
     // usage) — the reader never sees later turns' content, which goes
     // straight to stdin below.
@@ -304,12 +297,17 @@ pub(super) fn send_acp_turn(
     }
     entry.turn_in_flight.store(true, Ordering::SeqCst);
 
-    // Later turns: the handshake already completed (session id known). Write
-    // the request now — while holding the session_id lock so the reader's
-    // handshake branch (which consumes `acp_pending` under the same lock)
-    // can't race us into sending the first turn twice.
+    // Queue-vs-send decision under ONE acquisition of the session-id lock
+    // (audit MED-9): storing the pending BEFORE locking let a first turn be
+    // sent twice — the reader's handshake branch could store the session id,
+    // drain the queued pending AND send it, after which this path saw the id
+    // and sent the same content directly. The reader consumes `acp_pending`
+    // under this same lock, so whichever side takes the lock first owns the
+    // single send.
     let sess_guard = entry.cli_session_id.lock().map_err(|e| e.to_string())?;
     if let Some(sess) = sess_guard.as_ref() {
+        // Later turn: the handshake already completed (session id known).
+        // Write the request now, still under the session-id lock.
         let rid = crate::acp::next_request_id();
         *entry.acp_request_id.lock().map_err(|e| e.to_string())? = Some(rid);
         let params = crate::acp::user_session_request(sess, content);
@@ -329,6 +327,12 @@ pub(super) fn send_acp_turn(
                 return Err(format!("failed to write to ACP stdin: {e}"));
             }
         }
+    } else {
+        // First turn: queue for the reader — it sends the session/request
+        // right after session/new returns, draining the pending under this
+        // same lock (so the store must happen while we hold it).
+        let mut g = entry.acp_pending.lock().map_err(|e| e.to_string())?;
+        *g = Some(content.to_string());
     }
     Ok(())
 }

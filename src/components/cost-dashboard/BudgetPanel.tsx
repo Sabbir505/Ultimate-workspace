@@ -82,6 +82,8 @@ export function BudgetPanel({ perProject }: Props) {
     try {
       await removeBudget(projectId);
       await refresh();
+    } catch (err) {
+      toastError("Failed to remove budget", err);
     } finally { setBusy(null); }
   };
 

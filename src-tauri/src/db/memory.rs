@@ -415,14 +415,23 @@ pub fn upsert_cursor(
 // ---- misc ----
 
 pub fn bump_memory_access(conn: &Connection, ids: &[String]) -> DbResult<()> {
-    let now = crate::db::now_ts();
-    for id in ids {
-        conn.execute(
-            "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ?2 \
-             WHERE id = ?1",
-            params![id, now],
-        )?;
+    if ids.is_empty() {
+        return Ok(());
     }
+    // One positional UPDATE with IN(...) instead of a statement per id —
+    // same row semantics (each id bumped once), one lock-scope round trip.
+    // Binding order follows SQL text: `last_accessed_at = ?` first, then the
+    // IN list (mark_superseded idiom, params_from_iter borrows the ids).
+    let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
+    let sql = format!(
+        "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? \
+         WHERE id IN ({})",
+        placeholders.join(", ")
+    );
+    let now = crate::db::now_ts().to_string();
+    let params =
+        rusqlite::params_from_iter(std::iter::once(&now).chain(ids.iter()));
+    conn.execute(&sql, params)?;
     Ok(())
 }
 
@@ -549,12 +558,17 @@ pub fn unreflected_sample(
 
 /// Mark memories as folded into (or considered by) a reflection pass.
 pub fn mark_reflected(conn: &Connection, ids: &[String]) -> DbResult<()> {
-    for id in ids {
-        conn.execute(
-            "UPDATE memories SET reflected = 1 WHERE id = ?1",
-            params![id],
-        )?;
+    if ids.is_empty() {
+        return Ok(());
     }
+    // One positional UPDATE with IN(...) instead of a statement per id
+    // (mark_superseded idiom).
+    let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
+    let sql = format!(
+        "UPDATE memories SET reflected = 1 WHERE id IN ({})",
+        placeholders.join(", ")
+    );
+    conn.execute(&sql, rusqlite::params_from_iter(ids))?;
     Ok(())
 }
 

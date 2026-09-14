@@ -12,15 +12,16 @@ import { computePairProof, deriveSessionKey, decryptFrame, encryptFrame } from '
  *  `wss://host/#<token>`. On connect the phone sends an HMAC proof of the
  *  token (never the raw token) as the first WS frame; both sides then derive
  *  an XChaCha20-Poly1305 session key from the token and every further frame
- *  is encrypted Binary (§3.2.11). A desktop that rejects the proof-only Pair
- *  frame (pre-E2E build) gets a legacy raw-token reconnect, which runs the
- *  connection in plaintext. URLs without a fragment fall back to the old
- *  unauthenticated path (legacy / dev). */
+ *  is encrypted Binary (§3.2.11). There is NO legacy raw-token fallback: the
+ *  desktop removed it (it rotates the token on every launch and accepts the
+ *  proof exclusively), so a pairing rejection surfaces as an error with
+ *  capped exponential reconnect backoff — never a plaintext downgrade. */
 const RELAY_URL_STORAGE_KEY = 'relay.relayUrl';
-const RELAY_TOKEN_STORAGE_KEY = 'relay.relayToken';
 // Pre-rebrand keys (conduit.*) written by older builds — read once so a
 // paired phone keeps its URL/token across the rename, then re-homed under
-// the new keys.
+// the new key. The token itself lives ONLY in the URL fragment (extracted on
+// load) — a duplicate `relay.relayToken` key used to keep a second plaintext
+// copy and is no longer written.
 const LEGACY_URL_STORAGE_KEY = 'conduit.relayUrl';
 const LEGACY_TOKEN_STORAGE_KEY = 'conduit.relayToken';
 
@@ -192,28 +193,37 @@ let _token: string | null = null;
 let _e2eKey: Uint8Array | null = null;
 let _outCounter = 0;
 let _inCounter = 0;
-// Flipped when an E2E pair attempt is rejected by a pre-E2E desktop; the
-// reconnect then falls back to legacy raw-token pairing (plaintext). Cleared
-// whenever a new URL is explicitly set (fresh QR scan → maybe new desktop).
-let _desktopLegacy = false;
 // Loaded once from AsyncStorage; connect() awaits this so a persisted URL
-// wins over the loopback default on cold start.
+// wins over the loopback default on cold start. Pre-rebuild builds stored
+// the token under its own key — when the legacy URL carries no fragment, the
+// legacy token is spliced into the migrated URL's fragment (the fragment is
+// the one copy; no separate duplicate key is written).
 const _storedUrlReady: Promise<string | null> = AsyncStorage.getItem(RELAY_URL_STORAGE_KEY)
   .then(async (stored) => {
     if (stored) { _url = stored; _token = extractToken(stored); return stored; }
     const legacyUrl = await AsyncStorage.getItem(LEGACY_URL_STORAGE_KEY).catch(() => null);
     if (!legacyUrl) return null;
-    _url = legacyUrl;
-    _token = extractToken(legacyUrl);
     const legacyToken = await AsyncStorage.getItem(LEGACY_TOKEN_STORAGE_KEY).catch(() => null);
-    if (legacyToken) { _token = legacyToken; }
-    void AsyncStorage.setItem(RELAY_URL_STORAGE_KEY, legacyUrl).catch(() => {});
-    if (legacyToken) { void AsyncStorage.setItem(RELAY_TOKEN_STORAGE_KEY, legacyToken).catch(() => {}); }
-    return legacyUrl;
+    const migrated = extractToken(legacyUrl) || !legacyToken
+      ? legacyUrl
+      : `${legacyUrl.split('#')[0]}#${legacyToken}`;
+    _url = migrated;
+    _token = extractToken(migrated) ?? legacyToken;
+    void AsyncStorage.setItem(RELAY_URL_STORAGE_KEY, migrated).catch(() => {});
+    return migrated;
   })
   .catch(() => null);
 let _connecting = false;
 let _reconnectTimer: any = null;
+// Capped exponential reconnect backoff. The fixed 3s retry used to spin
+// forever against a desktop that is down or rejects pairing (its token
+// rotates on every restart); the delay doubles per failed attempt and
+// resets when a connection actually pairs (first cleanly decrypted E2E
+// frame) or when the user points the app at a URL/token explicitly.
+const RECONNECT_BASE_MS = 3000;
+const RECONNECT_MAX_MS = 60000;
+let _reconnectDelay = RECONNECT_BASE_MS;
+function resetReconnectBackoff() { _reconnectDelay = RECONNECT_BASE_MS; }
 let _pollTimer: any = null;
 // Providers change rarely (key added/removed, local model scanned), and each
 // ListAvailableProviders triggers outbound /v1/models calls per provider on
@@ -288,7 +298,13 @@ function extractToken(url: string): string | null {
 }
 
 function _doConnect(target: string) {
-  if (_ws?.readyState === WebSocket.OPEN && target === _url) return;
+  // Skip when already OPEN *or* CONNECTING to the same target — tearing down
+  // an in-flight CONNECTING socket to redo it reset the pairing handshake
+  // every time a screen mounted and called connect() (e.g. HomeScreen).
+  if (
+    (_ws?.readyState === WebSocket.OPEN || _ws?.readyState === WebSocket.CONNECTING) &&
+    target === _url
+  ) return;
   // Cancel any pending reconnect first: a stale timer closing over the OLD
   // target would fire ~3s later and silently reconnect to the previous
   // desktop, overriding a URL the user just changed (audit M8).
@@ -308,18 +324,15 @@ function _doConnect(target: string) {
       // The relay requires the FIRST frame to be a Pair message (token
       // check at relay.rs). E2E flow (§3.2.11): send an HMAC proof of the
       // token — never the raw token — and derive the session key up front so
-      // every following send is already encrypted. Pre-E2E desktops reject
-      // the proof-only frame with a pairing ChatError and close; the
-      // `_desktopLegacy` fallback then reconnects with the raw token.
-      // No token in the URL (legacy) → skip Pair; the relay rejects with a
-      // ChatError frame and the user sees the connect error state.
+      // every following send is already encrypted. Pairing is proof-
+      // EXCLUSIVE: the desktop removed raw-token pairing (and rotates the
+      // token per launch), so a generic pair rejection must never downgrade
+      // this side into a plaintext retry loop — it could never succeed. No
+      // token in the URL (legacy/dev) → skip Pair; the relay rejects and the
+      // user sees the connect error state.
       if (_token) {
-        if (_desktopLegacy) {
-          ws.send(JSON.stringify({ type: 'Pair', token: _token }));
-        } else {
-          _e2eKey = deriveSessionKey(_token);
-          ws.send(JSON.stringify({ type: 'Pair', proof: computePairProof(_token) }));
-        }
+        _e2eKey = deriveSessionKey(_token);
+        ws.send(JSON.stringify({ type: 'Pair', proof: computePairProof(_token) }));
       }
       _send({ type: 'ListAvailableProviders' });
       _send({ type: 'ListSessions' });
@@ -341,17 +354,15 @@ function _doConnect(target: string) {
           _inCounter++;
           if (!plain) { console.warn('[relay] E2E frame failed to decrypt'); return; }
           text = new TextDecoder().decode(plain);
+          // A frame that decrypts clean proves the desktop verified our
+          // proof (it only enables E2E after that) — pairing succeeded, so
+          // the reconnect backoff resets to the base delay.
+          resetReconnectBackoff();
         } else {
           // Binary frame with no E2E session — protocol violation; ignore.
           return;
         }
         const msg = JSON.parse(text) as DesktopMessage;
-        // A pairing ChatError during an E2E attempt means the desktop build
-        // predates E2E (it can't parse the proof-only Pair frame). Flip to
-        // legacy so the automatic reconnect pairs with the raw token.
-        if (msg.type === 'ChatError' && msg.chat_session_id === 'pair' && _e2eKey && !_desktopLegacy) {
-          _desktopLegacy = true;
-        }
         switch (msg.type) {
           case 'AvailableProviders': np(msg.providers || []); break;
           case 'SessionList': ns((msg.sessions || []).map(toSession)); break;
@@ -404,24 +415,30 @@ function _doConnect(target: string) {
         }
       } catch (e) { console.error('parse error', e); }
     };
-    // Reconnect after 3s — re-reading _url (not the captured target) so a
-    // URL change between close and reconnect wins (audit M8).
-    ws.onclose = () => { _connecting = false; stopPolling(); nc(false); _ws = null; if (_reconnectTimer === null) { _reconnectTimer = setTimeout(() => { _reconnectTimer = null; if (_url) _doConnect(_url); }, 3000); } };
+    // Reconnect with capped exponential backoff (reset on a successful pair
+    // or an explicit URL/token change) — re-reading _url (not the captured
+    // target) so a URL change between close and reconnect wins (audit M8).
+    ws.onclose = () => {
+      _connecting = false; stopPolling(); nc(false); _ws = null;
+      if (_reconnectTimer === null) {
+        const delay = _reconnectDelay;
+        _reconnectDelay = Math.min(delay * 2, RECONNECT_MAX_MS);
+        _reconnectTimer = setTimeout(() => { _reconnectTimer = null; if (_url) _doConnect(_url); }, delay);
+      }
+    };
     ws.onerror = () => { _connecting = false; nc(false); };
   } catch (e) { _connecting = false; nc(false); }
 }
 function globalConnect(url?: string) {
   if (url) {
-    // Explicit URL from the Settings field or QR scan: use it and persist it
-    // so the next cold start reconnects without re-entry. The token is split
-    // out of the fragment and persisted separately for diagnostics. A fresh
-    // URL clears the legacy-desktop flag — the user may have pointed the app
-    // at an updated desktop that speaks E2E.
+    // Explicit URL from the Settings field, a QR scan, or a deep link: use it
+    // and persist it so the next cold start reconnects without re-entry. The
+    // token rides in the URL fragment — that is the ONE stored copy (no
+    // separate duplicate key). A fresh URL restarts the reconnect backoff.
     _url = url;
     _token = extractToken(url);
-    _desktopLegacy = false;
+    resetReconnectBackoff();
     void AsyncStorage.setItem(RELAY_URL_STORAGE_KEY, url).catch(() => {});
-    void AsyncStorage.setItem(RELAY_TOKEN_STORAGE_KEY, _token ?? '').catch(() => {});
     _doConnect(url);
     return;
   }
@@ -430,6 +447,22 @@ function globalConnect(url?: string) {
   // input whenever `connected` is false.
   void _storedUrlReady.then(() => { if (_url) _doConnect(_url); });
 }
+/** Pairing-token update from a token-only deep link (`relay://connect#<token>`).
+ *  Such a link carries NO host, so it must never be fed to connect() as a
+ *  URL — that overwrote the stored relay URL with the bare token string and
+ *  un-paired the phone. Instead the token is spliced into the existing URL's
+ *  fragment and the connection retried. */
+function globalApplyPairingToken(token: string) {
+  const base = _url ? _url.split('#')[0] : null;
+  if (!base) {
+    Alert.alert(
+      'Pairing link',
+      'This link only carries a token. Connect to the desktop once (Settings), then re-scan.',
+    );
+    return;
+  }
+  globalConnect(`${base}#${token}`);
+}
 /** The URL the relay is currently connected/connecting to (null before any
  *  successful or attempted connect). Used to prefill the Settings field. */
 export function getRelayUrl(): string | null { return _url; }
@@ -437,7 +470,7 @@ export function getRelayUrl(): string | null { return _url; }
  *  token is present — legacy/dev connect). Used by the Settings screen to
  *  show the token status. */
 export function getRelayToken(): string | null { return _token; }
-function globalDisconnect() { stopPolling(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } _e2eKey = null; _outCounter = 0; _inCounter = 0; nc(false); }
+function globalDisconnect() { stopPolling(); resetReconnectBackoff(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } _e2eKey = null; _outCounter = 0; _inCounter = 0; nc(false); }
 
 // Stable sender identities (module-level) so screens can safely put them in
 // useEffect dependency arrays — an inline arrow in the return object would
@@ -463,6 +496,7 @@ export function useRelay() {
     return () => { _cl.delete(c); _pl.delete(p); _sl.delete(s); _csl.delete(cs); _cdl.delete(cd); };
   }, []);
   const connect = useCallback((url?: string) => { globalConnect(url); }, []);
+  const applyPairingToken = useCallback((token: string) => { globalApplyPairingToken(token); }, []);
   const disconnect = useCallback(() => { globalDisconnect(); }, []);
   const sendChatTurn = useCallback((pid: string, model: string, msgs: ChatMessage[], opts?: { system?: string; effort?: string; ggufPath?: string }) => {
     const p: MobileChatTurn = { type: 'ChatTurn', provider_id: pid, model, messages: msgs };
@@ -554,7 +588,7 @@ export function useRelay() {
     [],
   );
 
-  return { connected, desktopUnreachable: !connected, sessions, providers, costSummary, costDetails, connect, disconnect, sendChatTurn, sendToSession, getTranscript,
+  return { connected, desktopUnreachable: !connected, sessions, providers, costSummary, costDetails, connect, applyPairingToken, disconnect, sendChatTurn, sendToSession, getTranscript,
     cancelChatTurn: (id: string) => _send({ type: 'CancelChatTurn', chat_session_id: id }),
     refreshProviders: refreshProvidersSend,
     refreshCost: refreshCostSend,

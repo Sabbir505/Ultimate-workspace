@@ -139,7 +139,7 @@ pub(super) fn primer_tail_and_head(
         tail_rev.push(r);
     }
     tail_rev.reverse();
-    let tail_len = tail_rev.len();
+    let _tail_len = tail_rev.len();
     // Head = everything before the first tail record (records with no
     // rendered line are display-only and belong to neither side).
     let first_tail_id = tail_rev.first().map(|r| r.id);

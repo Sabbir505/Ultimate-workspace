@@ -90,7 +90,29 @@ fn create_checkpoint(
             let _ = db::set_checkpoint_ref(conn, id, &ref_name);
         }
     }
-    let ckpt = db::get_checkpoint(conn, id)?.expect("row just inserted");
+    // Audit LOW-13: a read failure here used to `expect("row just inserted")`
+    // and panic the reader thread. Log and return the pre-insert stub instead —
+    // the ref/tree data above is already durably written, so the checkpoint
+    // stays restorable even if this read races something exotic.
+    let ckpt = match db::get_checkpoint(conn, id)? {
+        Some(c) => c,
+        None => {
+            eprintln!(
+                "[checkpoints] row {id} unreadable right after insert (session \
+                 {chat_session_id}) — returning the pre-insert stub"
+            );
+            return Ok(ChatCheckpoint {
+                id,
+                chat_session_id: chat_session_id.to_string(),
+                message_id,
+                ref_name: String::new(),
+                tree_sha: snapshot.tree_sha,
+                repo_path: dir.to_string_lossy().to_string(),
+                files: vec![],
+                created_at: db::now_ts(),
+            });
+        }
+    };
     if let Some(app) = app {
         let _ = app.emit("checkpoint:created", &ckpt);
     }
@@ -126,6 +148,9 @@ fn insert_baseline(
 
 /// Turn-START baseline: only when the session has NO checkpoints yet, so
 /// checkpoint 0 = pre-chat state and even the first turn is undoable.
+/// Production paths use the detached variants below (D3); this inline form
+/// remains for the test-suite's direct DB-lock usage.
+#[cfg(test)]
 pub fn maybe_baseline(
     app: Option<&AppHandle>,
     conn: &Connection,
@@ -169,7 +194,27 @@ pub fn maybe_baseline_detached(
         let conn = db_conn.lock();
         baseline_target(&conn, chat_session_id)
     };
+    maybe_baseline_detached_in_dir(app, db_conn, chat_session_id, dir)
+}
+
+/// [`maybe_baseline_detached`] with a caller-resolved dir. The harness path
+/// needs this: its spawn dir comes from the send's `cwd` (a worktree-bound
+/// session must NOT be baselined against the bound project's path), and
+/// resolving it only takes a short lock before the lock-free snapshot.
+pub fn maybe_baseline_detached_in_dir(
+    app: Option<&AppHandle>,
+    db_conn: &std::sync::Arc<parking_lot::Mutex<Connection>>,
+    chat_session_id: &str,
+    dir: Option<PathBuf>,
+) {
     let Some(dir) = dir else { return };
+    let eligible = {
+        let conn = db_conn.lock();
+        baseline_eligible(&conn, chat_session_id, &dir)
+    };
+    if !eligible {
+        return;
+    }
     let snap = match git::snapshot_working_tree(&dir) {
         Ok(s) => s,
         Err(e) => {
@@ -200,14 +245,55 @@ pub fn after_turn(
             return;
         }
     };
+    after_turn_insert(app, conn, chat_session_id, message_id, &dir, snap);
+}
+
+/// Shared insert half of [`after_turn`] (dedup gate + row creation).
+fn after_turn_insert(
+    app: Option<&AppHandle>,
+    conn: &Connection,
+    chat_session_id: &str,
+    message_id: Option<i64>,
+    dir: &Path,
+    snap: git::CheckpointSnapshot,
+) {
     if let Some(last) = db::latest_checkpoint(conn, chat_session_id).ok().flatten() {
         if last.tree_sha == snap.tree_sha {
             return; // nothing changed this turn
         }
     }
-    if let Err(e) = create_checkpoint(conn, app, chat_session_id, message_id, &dir, snap) {
+    if let Err(e) = create_checkpoint(conn, app, chat_session_id, message_id, dir, snap) {
         eprintln!("[checkpoints] turn checkpoint failed for {chat_session_id}: {e:?}");
     }
+}
+
+/// D3: turn-END checkpoint WITHOUT pinning the global DB mutex across the git
+/// snapshot — the harness readers call this from their turn-finalize path
+/// (same three-phase shape as [`maybe_baseline_detached`]: short lock for the
+/// gates, lock-free snapshot, short lock for the insert).
+pub fn after_turn_detached(
+    app: Option<&AppHandle>,
+    db_conn: &std::sync::Arc<parking_lot::Mutex<Connection>>,
+    chat_session_id: &str,
+    message_id: Option<i64>,
+    dir: &Path,
+) {
+    let checkpointable_dir = {
+        let conn = db_conn.lock();
+        checkpointable(&conn, dir)
+    };
+    let Some(dir) = checkpointable_dir else {
+        return;
+    };
+    let snap = match git::snapshot_working_tree(&dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[checkpoints] turn snapshot failed for {chat_session_id}: {e}");
+            return;
+        }
+    };
+    let conn = db_conn.lock();
+    after_turn_insert(app, &conn, chat_session_id, message_id, &dir, snap);
 }
 
 /// Roll the checkpoint's repo back to its snapshot. Destructive by design —
@@ -271,6 +357,20 @@ pub fn restore(
         safety,
         deleted_messages,
     })
+}
+
+/// Session id a checkpoint belongs to (short read under the caller's lock) —
+/// lets the restore command gate on that session being turn-idle before any
+/// git work starts.
+pub fn checkpoint_session_id(
+    db_conn: &std::sync::Arc<parking_lot::Mutex<Connection>>,
+    checkpoint_id: i64,
+) -> Option<String> {
+    let conn = db_conn.lock();
+    db::get_checkpoint(&conn, checkpoint_id)
+        .ok()
+        .flatten()
+        .map(|c| c.chat_session_id)
 }
 
 /// The conversation half of restore: delete every message after the

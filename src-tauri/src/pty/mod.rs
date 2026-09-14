@@ -96,6 +96,79 @@ fn is_local_dev_url(url: &str) -> bool {
             .unwrap_or(false)
 }
 
+/// Length of the longest prefix of `buf` that ends on complete boundaries:
+/// no trailing incomplete UTF-8 sequence and no trailing unterminated ANSI
+/// escape sequence. Bytes past this point must be carried into the NEXT
+/// frame before any String conversion / ANSI stripping — a frame boundary
+/// in the middle of a code point or escape sequence otherwise corrupts the
+/// emit fallback, the vt100 screen, and the transcript (audit M7).
+fn complete_prefix_len(buf: &[u8]) -> usize {
+    let mut end = complete_utf8_len(buf);
+    if let Some(esc) = buf[..end].iter().rposition(|&b| b == 0x1b) {
+        if !escape_sequence_complete(&buf[esc..end]) {
+            end = esc;
+        }
+    }
+    end
+}
+
+/// Length of the prefix of `buf` holding no trailing incomplete multi-byte
+/// UTF-8 sequence. A genuinely invalid tail (e.g. a lone continuation byte)
+/// is NOT carried over — it would never complete; the lossy conversion at
+/// the flush site renders it as U+FFFD as before.
+fn complete_utf8_len(buf: &[u8]) -> usize {
+    let len = buf.len();
+    // Walk back over up to three continuation bytes (10xxxxxx) to the
+    // potential sequence start.
+    let mut start = len;
+    while start > 0 && len - start < 4 && buf[start - 1] & 0b1100_0000 == 0b1000_0000 {
+        start -= 1;
+    }
+    if start == 0 {
+        return len; // all continuation bytes — invalid; leave for lossy
+    }
+    let first = buf[start - 1];
+    let need = if first >= 0xF0 {
+        4
+    } else if first >= 0xE0 {
+        3
+    } else if first >= 0xC0 {
+        2
+    } else {
+        1 // ASCII (or an invalid byte) — nothing to carry
+    };
+    if need > 1 && len - (start - 1) < need {
+        return start - 1; // sequence announced but truncated — carry it
+    }
+    len
+}
+
+/// True when the bytes from an ESC to the end of `seq` form a COMPLETE ANSI
+/// escape sequence: CSI terminated by a final byte (0x40–0x7E), a string
+/// sequence (OSC/DCS/SOS/PM/APC) terminated by BEL or ST (ESC \), or any
+/// other two-byte escape (ESC 7, ESC =, charset selections, …). A lone ESC
+/// or a prefix of one of the above is incomplete.
+fn escape_sequence_complete(seq: &[u8]) -> bool {
+    match seq.get(1) {
+        None => false, // lone ESC at the buffer end — could become anything
+        Some(b'[') => seq[2..].iter().any(|&b| (0x40..=0x7e).contains(&b)),
+        Some(b']' | b'P' | b'X' | b'^' | b'_') => {
+            // String sequence: BEL (0x07) or ST (ESC \) terminates.
+            let mut it = seq[2..].iter();
+            while let Some(&b) = it.next() {
+                if b == 0x07 {
+                    return true;
+                }
+                if b == 0x1b {
+                    return it.next() == Some(&b'\\');
+                }
+            }
+            false
+        }
+        _ => true,
+    }
+}
+
 /// Rolling stripped transcript cap per pane (CONTRACT.md: ~1MB). Used for
 /// `export_session_markdown`.
 const TRANSCRIPT_CAP: usize = 1024 * 1024;
@@ -821,6 +894,14 @@ impl PtyManager {
                 //    natural frame; forces a flush).
                 let mut frame: Vec<u8> = Vec::with_capacity(16 * 1024);
                 let mut frame_started: Option<Instant> = None;
+                // Carry-over: trailing bytes of a flush that are an
+                // incomplete UTF-8 sequence or an unterminated escape
+                // sequence. They lead the NEXT frame so String conversion /
+                // ANSI stripping only ever see complete sequences (audit
+                // M7); at EOF they are dropped (the sequence never
+                // completes — lossy output for a torn final char would be
+                // noise either way).
+                let mut carry: Vec<u8> = Vec::new();
                 const FRAME_BUDGET: Duration = Duration::from_millis(16);
                 const FRAME_BYTE_LIMIT: usize = 64 * 1024;
 
@@ -829,6 +910,18 @@ impl PtyManager {
                 // when the byte cap is hit, or on EOF / read error.
                 macro_rules! flush_frame {
                     () => {{
+                        // Join anything carried from the previous flush, then
+                        // re-split: only the complete prefix goes out now.
+                        if !carry.is_empty() {
+                            let mut joined = std::mem::take(&mut carry);
+                            joined.extend_from_slice(&frame);
+                            frame = joined;
+                        }
+                        if !frame.is_empty() {
+                            let cut = complete_prefix_len(&frame);
+                            carry.extend_from_slice(&frame[cut..]);
+                            frame.truncate(cut);
+                        }
                         if !frame.is_empty() {
                             // Send raw bytes via the typed channel (preferred
                             // path) — no JSON serialization, no UTF-8 lossy
@@ -974,16 +1067,18 @@ impl PtyManager {
                             break;
                         }
                     }
-                    // Realize the documented 16 ms coalescing budget: hold
-                    // the frame in 3 ms slices until the budget elapses,
-                    // THEN flush. (The old code slept 3 ms and flushed
-                    // unconditionally, so every read produced its own IPC
-                    // frame — the batching this budget exists for never
-                    // actually happened during heavy TUI output.)
+                    // Realize the documented 16 ms coalescing budget: wait
+                    // out the remainder with ONE deadline-based sleep (the
+                    // old loop spun in 3 ms slices — several spurious
+                    // wakeups per frame for no benefit), THEN flush. Reads
+                    // that arrive after the budget already elapsed flushed
+                    // immediately above, so this only paces a frame whose
+                    // budget is still open.
                     if !frame.is_empty() {
                         if let Some(started) = frame_started {
-                            while started.elapsed() < FRAME_BUDGET {
-                                thread::sleep(Duration::from_millis(3));
+                            let elapsed = started.elapsed();
+                            if elapsed < FRAME_BUDGET {
+                                thread::sleep(FRAME_BUDGET - elapsed);
                             }
                             flush_frame!();
                         }
@@ -1275,7 +1370,12 @@ impl PtyManager {
     /// acts (emit/probe/sync) after releasing it.
     fn spawn_monitor(mgr: Arc<PtyManager>) {
         thread::spawn(move || loop {
-            thread::sleep(Duration::from_millis(200));
+            // Idle fast-path: with zero panes there is nothing to tick, so a
+            // fresh 1 s sleep (instead of the 200 ms poll) cuts the wakeups
+            // of an idle app ~5x at the cost of a sub-second delay before the
+            // first pane gets its first tick.
+            let idle = mgr.panes.lock().is_empty();
+            thread::sleep(Duration::from_millis(if idle { 1000 } else { 200 }));
             let panes: Vec<Arc<Pane>> = mgr.panes.lock().values().cloned().collect();
             for pane in panes {
                 if pane.exited.load(Ordering::Relaxed) || pane.killed.load(Ordering::Relaxed) {
@@ -1358,7 +1458,7 @@ impl PtyManager {
 
 #[cfg(test)]
 mod tests {
-    use super::is_local_dev_url;
+    use super::{complete_prefix_len, is_local_dev_url};
 
     #[test]
     fn local_dev_urls_are_detected() {
@@ -1388,5 +1488,37 @@ mod tests {
         // hex/octal/integer shorthand) — conservative beats clever here.
         assert!(!is_local_dev_url("http://0x7f.0.0.1"));
         assert!(!is_local_dev_url("http://2130706433"));
+    }
+
+    /// M7 regression: a read boundary in the middle of a multi-byte code
+    /// point or an escape sequence must split the frame so only COMPLETE
+    /// sequences are converted/stripped, with the tail carried over.
+    #[test]
+    fn complete_prefix_len_carries_split_codepoint_and_escape() {
+        // "a中" — the 3-byte 中 (E4 B8 AD) split after 1 and 2 of its bytes.
+        let cp = "a中".as_bytes();
+        assert_eq!(complete_prefix_len(&cp[..2]), 1, "中 announced but truncated");
+        assert_eq!(complete_prefix_len(&cp[..3]), 1, "2/3 bytes of 中 still incomplete");
+        assert_eq!(complete_prefix_len(cp), 4, "complete output untouched");
+        // 4-byte emoji split 3 bytes in.
+        let emoji = "x\u{1F600}y".as_bytes();
+        assert_eq!(complete_prefix_len(&emoji[..1 + 3]), 1);
+        assert_eq!(complete_prefix_len(emoji), emoji.len());
+        // A CSI sequence split mid-parameters: the ESC onward is carried.
+        let csi: &[u8] = b"ok\x1b[31;1mred";
+        assert_eq!(complete_prefix_len(&csi[..4]), 2, "ESC [ 3 is incomplete");
+        assert_eq!(complete_prefix_len(&csi[..5]), 2);
+        assert_eq!(complete_prefix_len(csi), csi.len(), "final byte 'm' closes it");
+        // OSC terminated by BEL, split before the terminator.
+        let osc: &[u8] = b"\x1b]0;title\x07tail";
+        assert_eq!(complete_prefix_len(&osc[..6]), 0);
+        assert_eq!(complete_prefix_len(osc), osc.len());
+        // A lone trailing ESC is incomplete (it may become any sequence).
+        assert_eq!(complete_prefix_len(b"text\x1b"), 4);
+        // Complete output is returned untouched.
+        let full: &[u8] = b"\x1b[2Jplain \xe4\xb8\xad\x1b]8;;x\x07";
+        assert_eq!(complete_prefix_len(full), full.len());
+        // Invalid garbage (lone continuation byte) is not carried forever.
+        assert_eq!(complete_prefix_len(b"a\x80b"), 3);
     }
 }

@@ -540,15 +540,44 @@ pub async fn stt_set_device(
     stt_status(db, stt).await
 }
 
+/// Register the whisper-server binary the STT sidecar will spawn. The path
+/// passes the native exec gate (exec_gate.rs), like `set_llama_server_path`:
+/// an OS dialog (outside the webview) shows the exact executable and "Allow"
+/// is remembered per path — a compromised renderer cannot point Relay at an
+/// arbitrary binary without the user seeing it. Clearing the path needs no
+/// gate. `app` is Tauri-injected (not a frontend argument).
 #[tauri::command(async)]
-pub fn stt_set_server_path(db: State<'_, DbState>, path: Option<String>) -> CmdResult<()> {
-    let conn = db.0.lock();
-    match path {
-        Some(p) if !p.trim().is_empty() => {
-            db::set_setting(&conn, SERVER_PATH_KEY, p.trim()).map_err(|e| e.to_string())
+pub fn stt_set_server_path(
+    app: tauri::AppHandle,
+    db: State<'_, DbState>,
+    path: Option<String>,
+) -> CmdResult<()> {
+    let trimmed = match path {
+        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+        _ => {
+            let conn = db.0.lock();
+            return db::set_setting(&conn, SERVER_PATH_KEY, "").map_err(|e| e.to_string());
         }
-        _ => db::set_setting(&conn, SERVER_PATH_KEY, "").map_err(|e| e.to_string()),
+    };
+    // confirm_remembered_sync is the thread-pool variant (this is a
+    // `#[tauri::command(async)]` plain fn), so the blocking dialog never runs
+    // on the main thread.
+    if !crate::exec_gate::confirm_remembered_sync(
+        &db.0,
+        &app,
+        "whisper_server",
+        &trimmed,
+        "Relay — use this whisper-server executable?",
+        &format!(
+            "An app window asked to register this executable as the speech-to-text sidecar:\n\n{trimmed}\n\nRelay will spawn it for voice transcription. Allow it? \"Allow\" also remembers this path."
+        ),
+    ) {
+        return Err(
+            "whisper-server path blocked — it was not allowed in the confirmation dialog".into(),
+        );
     }
+    let conn = db.0.lock();
+    db::set_setting(&conn, SERVER_PATH_KEY, &trimmed).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -667,7 +696,7 @@ pub fn maybe_autostart(app: &tauri::AppHandle, db: &DbState) {
     if !auto_start {
         return;
     }
-    let (Some(dir), Some(binary)) = (dir, binary) else {
+    let (Some(dir), Some(_binary)) = (dir, binary) else {
         eprintln!("[stt] auto-start skipped: no models dir or whisper-server binary");
         return;
     };

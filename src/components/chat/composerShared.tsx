@@ -66,57 +66,50 @@ export const tokenAtCaret = (
 };
 
 /**
- * Natural-language artifact-intent detection — the replacement for the old
- * per-message "Save As" / "Find & Update" chips. Matches two shapes:
+ * Natural-language artifact-intent detection — deliberately conservative,
+ * because a match pulls the message OUT of the normal chat turn. Only
+ * unambiguous mint requests trigger:
  *
- * 1. Legacy exact phrases ("turn this into a skill", "create a loop",
- *    "schedule this", …) — kept verbatim so existing phrasings behave the same.
- * 2. Conversation-distill requests: an artifact-type keyword PLUS a reference
- *    to the chat/conversation PLUS a creation verb — e.g. "analyze our chat and
- *    come up with a skill we can reuse" or "turn this conversation into an
- *    automation". The triple match keeps ordinary messages flowing to the
- *    model. "Come up with a/an <type>" is unambiguous enough to match alone.
+ * 1. "Turn/save this (conversation) into/as a <type>" — anchored to the thing
+ *    on screen, so the target is never in doubt.
+ * 2. Direct automation asks — "make this run every/until …" and "create an
+ *    automation".
  *
- * Questions about artifacts ("how do I create a skill in Claude?") never
- * trigger — they must reach the model.
+ * Everything else flows to the MODEL: ambient phrasings (a type keyword plus
+ * any creation verb or conversation reference, "come up with a skill",
+ * "create a loop", "schedule this") are ordinary messages — "loop" and
+ * "skill" are common words and "schedule this" is context-dependent.
+ * Deterministic routing stays available via explicit `/create …` commands
+ * (parseCreateCommand, checked before this), and questions about artifacts
+ * ("how do I create a skill in Claude?") never trigger either.
  */
 export const detectArtifactIntent = (msg: string): { type: ArtifactType; instruction: string } | null => {
   const lower = msg.toLowerCase();
 
   if (/\b(how (do|can|to|does)|what('s| is)|explain)\b/.test(lower)) return null;
 
-  // 1. Legacy exact triggers, verbatim.
+  const conversation = "(?:this|that|it)(?: conversation| chat| thread)?";
   const legacy: Array<[RegExp, ArtifactType]> = [
-    [/turn this into a skill|save this as a skill|create a skill/, "skill"],
-    [/turn this into a loop|make this run until|create a loop/, "loop"],
-    [/save this as a prompt|turn this into a prompt template|create a prompt template/, "prompt_template"],
-    [/make this run every|create an automation|schedule this/, "automation"],
+    [
+      new RegExp(`turn ${conversation} into (?:a |an )?skill|save ${conversation} as a skill`),
+      "skill",
+    ],
+    [
+      new RegExp(`turn ${conversation} into (?:a |an )?loop|make this run until`),
+      "loop",
+    ],
+    [
+      new RegExp(`turn ${conversation} into (?:a |an )?prompt template|save ${conversation} as a prompt`),
+      "prompt_template",
+    ],
+    [
+      new RegExp(`turn ${conversation} into (?:a |an )?automation|make this run every|create an automation`),
+      "automation",
+    ],
   ];
   for (const [re, type] of legacy) {
     if (re.test(lower)) return { type, instruction: msg };
   }
-
-  // 2. Type keyword — plural forms included ("come up with some skills").
-  const type: ArtifactType | null = /prompt\s*template/.test(lower)
-    ? "prompt_template"
-    : /\bskills?\b/.test(lower)
-      ? "skill"
-      : /\bloop\b/.test(lower)
-        ? "loop"
-        : /\bautomations?\b|\bautomate\b/.test(lower)
-          ? "automation"
-          : null;
-  if (!type) return null;
-
-  // "Come up with a skill" is an unambiguous creation ask on its own.
-  const typeWord = type === "prompt_template" ? "prompt ?template" : type;
-  if (new RegExp(`come up with (a |an |some )?${typeWord}`).test(lower)) {
-    return { type, instruction: msg };
-  }
-
-  const conversationRef = /\b(our|this|the) (chat|conversation|thread|discussion)\b/.test(lower);
-  const creationVerb = /\b(come up with|create|make|build|turn|save|derive|extract|distill|summarize)\b/.test(lower);
-  if (conversationRef && creationVerb) return { type, instruction: msg };
 
   return null;
 };

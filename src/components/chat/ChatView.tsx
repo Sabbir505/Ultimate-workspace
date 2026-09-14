@@ -184,6 +184,10 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
       .then((cfg) => {
         if (!cancelled) setHarnessCfg(cfg);
       })
+      .catch(() => {
+        /* harness discovery is best-effort — the static catalog still lists */
+        if (!cancelled) setHarnessCfg(null);
+      })
       .finally(() => {
         if (!cancelled) setHarnessLoading(false);
       });
@@ -601,6 +605,12 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     },
     [activeChatSessionId, setSessionEffort],
   );
+  // Stable callback: the inline arrow used here defeated the ChatComposer
+  // memo and re-rendered the whole composer on every ChatView render.
+  const handleAutoBiasChange = useCallback(
+    (b: string) => setAutoBias(b as "quality" | "balanced" | "economy"),
+    [setAutoBias],
+  );
   // CLI-harness sessions get the HARNESS'S OWN postures in the mode menu
   // (OpenCode build/plan, Claude Code default/acceptEdits/plan/bypass) —
   // no mapping to our dual policies; the pick rides to the CLI verbatim.
@@ -738,7 +748,10 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   // sweeping) from there would hijack the main view's session list.
   const autoStarted = useRef(false);
   useEffect(() => {
-    if (!loaded || !config || isSplitView || activeChatSessionId || autoStarted.current) return;
+    // Popout windows are handed a specific session — auto-starting a fresh
+    // one here would race the sweep (it can delete the very session the
+    // popout is opening) and flash a junk empty chat. Only selection (above).
+    if (!loaded || !config || isSplitView || popoutSessionId || activeChatSessionId || autoStarted.current) return;
     autoStarted.current = true;
     void deleteEmptyChatSessions()
       .then((deleted) => {
@@ -754,7 +767,7 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     // the first send (send_chat_message's auto-warm path).
     const seed = seedSelectionFrom(lastSelection, config);
     void newChat(seed.provider, seed.model, undefined, seed.agent);
-  }, [loaded, isSplitView, activeChatSessionId, config, lastSelection, newChat, loadSessions]);
+  }, [loaded, isSplitView, popoutSessionId, activeChatSessionId, config, lastSelection, newChat, loadSessions]);
 
   // Split pane: load (or re-target) the pinned session's history whenever the
   // pane opens on a different session.
@@ -1227,16 +1240,21 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   // (`msg-N`). Instead, synchronously re-measure ONLY the mounted rows via
   // measureElement(el): fresh offsetHeight per visible row, off-screen cached
   // sizes preserved.
-  // Wrapped in a memo on [items]: the join() used to run inline on every
-  // render — per streaming token — to produce a string that (unchanged) never
-  // re-triggered the effect below anyway.
-  const structureSig = useMemo(
-    () =>
-      items
-        .map((i) => i.key + (i.proposalEntry ? `:${i.proposalEntry.state}` : ""))
-        .join("|"),
-    [items],
-  );
+  // PERF: the remeasure trigger used to join EVERY item key into one string —
+  // an O(messages) allocation on every streaming flush, even though the result
+  // itself almost never changed mid-stream. Item keys only change with
+  // messages.length, the live/typing rows flipping, or a session switch; only
+  // the few proposal cards can change structure independently, so just their
+  // ids + states fold into the signature.
+  const structureSig = useMemo(() => {
+    const proposals = activeChatSessionId
+      ? artifactProposalsBySession[activeChatSessionId] ?? []
+      : [];
+    let sig = `${activeChatSessionId ?? ""}|${persistedItems.length}|${messages.length}|${activeIsStreaming ? 1 : 0}${waitingForFirstToken ? 1 : 0}`;
+    for (const p of proposals) sig += `|${p.id}:${p.state}`;
+    return sig;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [persistedItems, messages.length, activeChatSessionId, activeIsStreaming, waitingForFirstToken, artifactProposalsBySession]);
   useEffect(() => {
     // Reconcile mounted rows whose real DOM height drifted from the
     // virtualizer's cached size. The dangerous case: a row that mounts ALREADY
@@ -1284,9 +1302,16 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
     ? livePerf[activeChatSessionId] ?? null
     : null;
   // Regenerate applies to the most recent assistant message only.
-  const lastAssistantKey = [...items]
-    .reverse()
-    .find((i) => i.role === "assistant" && !i.live && !i.typing)?.key;
+  // PERF: backwards scan — the [...items].reverse().find() copy allocated a
+  // fresh array on every render (every streaming flush) just for this.
+  let lastAssistantKey: string | undefined;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it.role === "assistant" && !it.live && !it.typing) {
+      lastAssistantKey = it.key;
+      break;
+    }
+  }
 
   return (
     <div className="chat-view-wrap">
@@ -1650,7 +1675,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         modelLoading={localLoading}
         localCtx={localCtx}
         autoBias={autoBias}
-        onAutoBiasChange={(b) => setAutoBias(b as "quality" | "balanced" | "economy")}
+        onAutoBiasChange={handleAutoBiasChange}
         onEjectLocalModel={ejectLocalModel}
         localModelActive={isLocal && !!activeLocalModelId}
         localOverridesMap={localOverridesByName}

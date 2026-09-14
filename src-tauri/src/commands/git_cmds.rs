@@ -18,9 +18,49 @@ fn verify_project_path(path: &Path, db: &DbState) -> CmdResult<()> {
     let canon = path
         .canonicalize()
         .map_err(|e| format!("cannot resolve path: {e}"))?;
+    if roots_contain(&allowlisted_roots(db)?, &canon) {
+        return Ok(());
+    }
+    Err("path is outside allowed project roots".to_string())
+}
+
+// ---- allowlisted-root cache ----
+//
+// Both path gates (`verify_project_path` here, `is_path_allowed` in data.rs)
+// used to re-read the projects + sessions tables AND re-canonicalize every
+// root on EVERY call — and `verify_project_path` runs per fs-change burst
+// (each refreshGitStatus), so the same handful of roots was hammered through
+// the DB mutex and the filesystem thousands of times a minute. Cache the
+// canonical roots in-process with a short TTL instead: staleness is bounded
+// (a newly added project starts passing within seconds) and the gate itself
+// never weakens — it is still a component-wise, case-insensitive prefix check
+// against the exact recorded roots.
+
+/// How long the cached root list may be reused before a refresh.
+const ROOTS_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+type CanonicalRoots = std::sync::Arc<Vec<(String, PathBuf)>>;
+
+static CANONICAL_ROOTS: std::sync::LazyLock<
+    parking_lot::Mutex<(std::time::Instant, CanonicalRoots)>,
+> = std::sync::LazyLock::new(|| {
+    parking_lot::Mutex::new((
+        std::time::Instant::now() - ROOTS_TTL,
+        std::sync::Arc::new(Vec::new()),
+    ))
+});
+
+/// Registered project roots + session/chat worktrees as `(raw, canonical)`
+/// pairs, refreshed at most once per [`ROOTS_TTL`]. Shared with data.rs's
+/// `is_path_allowed` so both gates see the same list.
+pub(crate) fn allowlisted_roots(db: &DbState) -> CmdResult<CanonicalRoots> {
+    let mut cache = CANONICAL_ROOTS.lock();
+    if cache.0.elapsed() < ROOTS_TTL {
+        return Ok(std::sync::Arc::clone(&cache.1));
+    }
     // Fetch the allow-listed path STRINGS under the lock, then canonicalize
     // after release (DbState rule: the lock guards SQL only — canonicalize is
-    // filesystem IO, and this runs on every fs-change burst).
+    // filesystem IO).
     let (project_paths, worktree_paths, chat_worktrees) = {
         let conn = db.0.lock();
         let projects = db::list_projects(&conn).map_err(|e| e.to_string())?;
@@ -36,34 +76,23 @@ fn verify_project_path(path: &Path, db: &DbState) -> CmdResult<()> {
             chat_wts,
         )
     };
-    for proj in &project_paths {
-        if let Ok(proj_canon) = Path::new(proj).canonicalize() {
-            if crate::util::path_starts_with_ci(&canon, &proj_canon) {
-                return Ok(());
-            }
+    let mut roots: Vec<(String, PathBuf)> = Vec::new();
+    for raw in project_paths.into_iter().chain(worktree_paths).chain(chat_worktrees) {
+        if let Ok(canon) = Path::new(&raw).canonicalize() {
+            roots.push((raw, canon));
         }
     }
-    // Worktrees are SIBLINGS of the project root (`<parent>/<name>-<branch>`),
-    // so they legitimately sit outside every project prefix — allowlist the
-    // exact paths recorded on sessions rather than loosening the prefix check
-    // (a raw prefix match is what let any same-prefix sibling dir pass).
-    for wt in &worktree_paths {
-        if let Ok(wt_canon) = Path::new(wt).canonicalize() {
-            if crate::util::path_starts_with_ci(&canon, &wt_canon) {
-                return Ok(());
-            }
-        }
-    }
-    // Chat-session worktrees (roadmap P0 §3.1.1) live in the same sibling
-    // layout; allowlist the exact recorded paths the same way.
-    for wt in &chat_worktrees {
-        if let Ok(wt_canon) = Path::new(wt).canonicalize() {
-            if crate::util::path_starts_with_ci(&canon, &wt_canon) {
-                return Ok(());
-            }
-        }
-    }
-    Err("path is outside allowed project roots".to_string())
+    let roots: CanonicalRoots = std::sync::Arc::new(roots);
+    *cache = (std::time::Instant::now(), std::sync::Arc::clone(&roots));
+    Ok(roots)
+}
+
+/// Component-wise, case-insensitive containment check against the cached
+/// canonical roots (same predicate the gates always used).
+pub(crate) fn roots_contain(roots: &[(String, PathBuf)], canon: &Path) -> bool {
+    roots
+        .iter()
+        .any(|(_, root)| crate::util::path_starts_with_ci(canon, root))
 }
 
 // Every git command below that spawns subprocesses is `async` +

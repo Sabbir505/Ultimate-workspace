@@ -385,16 +385,18 @@ pub fn resolve(
     Ok(chain)
 }
 
-/// Display label for a provider id (status-line disclosure).
-pub fn provider_label(provider: &str) -> &'static str {
+/// Display label for a provider id (status-line disclosure). Known ids return
+/// borrowed statics; unknown ids return an owned `Cow` — the old
+/// `Box::leak` fallback grew the process heap on every unseen id.
+pub fn provider_label(provider: &str) -> std::borrow::Cow<'static, str> {
     match provider {
-        "anthropic" => "Anthropic",
-        "openai" => "OpenAI",
-        "openrouter" => "OpenRouter",
-        "anthropic_compatible" => "Anthropic-compatible",
-        "openai_compatible" => "OpenAI-compatible",
-        "local_gguf" => "Local model",
-        other => Box::leak(other.to_string().into_boxed_str()),
+        "anthropic" => std::borrow::Cow::Borrowed("Anthropic"),
+        "openai" => std::borrow::Cow::Borrowed("OpenAI"),
+        "openrouter" => std::borrow::Cow::Borrowed("OpenRouter"),
+        "anthropic_compatible" => std::borrow::Cow::Borrowed("Anthropic-compatible"),
+        "openai_compatible" => std::borrow::Cow::Borrowed("OpenAI-compatible"),
+        "local_gguf" => std::borrow::Cow::Borrowed("Local model"),
+        other => std::borrow::Cow::Owned(other.to_string()),
     }
 }
 
@@ -649,6 +651,14 @@ mod tests {
         assert_eq!(Bias::from_setting(Some("Quality")), Bias::Quality);
         assert_eq!(Bias::from_setting(Some("garbage")), Bias::Balanced);
         assert_eq!(Bias::from_setting(None), Bias::Balanced);
+    }
+
+    #[test]
+    fn provider_label_handles_unknown_ids_without_leaking() {
+        assert_eq!(provider_label("anthropic"), "Anthropic");
+        assert_eq!(provider_label("local_gguf"), "Local model");
+        // Unknown ids used to Box::leak into the process heap on every call.
+        assert_eq!(provider_label("custom_endpoint_x"), "custom_endpoint_x");
     }
 
     #[test]

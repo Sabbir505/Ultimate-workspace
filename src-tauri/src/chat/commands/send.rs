@@ -5,6 +5,34 @@ use super::*;
 
 // ---- Send / cancel ----
 
+/// Decoded-size cap for composer attachments (mirrors preview.rs
+/// `MAX_MEDIA`): larger documents are refused instead of being decoded and
+/// handed to the Office/PDF extractors.
+const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024; // 25 MB
+/// Base64 length that can still decode to [`MAX_ATTACHMENT_BYTES`] — the
+/// cheap pre-check so an oversized payload is never even decoded.
+const MAX_ATTACHMENT_B64_LEN: usize = MAX_ATTACHMENT_BYTES / 3 * 4 + 4;
+
+/// Decode a base64 attachment, refusing payloads past the attachment cap.
+fn decode_attachment_capped(b64: &str) -> Option<Vec<u8>> {
+    if b64.len() > MAX_ATTACHMENT_B64_LEN {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Message-body block for an extracted doc attachment.
+fn attachment_doc_block(name: &str, text: Option<String>) -> String {
+    match text {
+        Some(text) => format!("\n\nAttached file: {name}\n```\n{text}\n```"),
+        None => format!("\n\n[Attached file {name} could not be read as text.]"),
+    }
+}
+
 /// Turn composer attachments into (extra message text, vision images). Text
 /// files and extracted document text are appended to the message body so they
 /// persist in history; images are collected separately to be sent as vision
@@ -25,24 +53,12 @@ pub(crate) fn process_attachments(attachments: &[ChatAttachmentInput]) -> (Strin
             }
             "doc" => {
                 let extracted = match (&a.data, &a.format) {
-                    (Some(b64), Some(fmt)) => base64::engine::general_purpose::STANDARD
-                        .decode(b64)
-                        .ok()
-                        .and_then(|bytes| {
-                            crate::chat::office::doc_to_text(&fmt.to_ascii_lowercase(), &bytes)
-                        }),
+                    (Some(b64), Some(fmt)) => decode_attachment_capped(b64).and_then(|bytes| {
+                        crate::chat::office::doc_to_text(&fmt.to_ascii_lowercase(), &bytes)
+                    }),
                     _ => None,
                 };
-                match extracted {
-                    Some(text) => extra.push_str(&format!(
-                        "\n\nAttached file: {}\n```\n{}\n```",
-                        a.name, text
-                    )),
-                    None => extra.push_str(&format!(
-                        "\n\n[Attached file {} could not be read as text.]",
-                        a.name
-                    )),
-                }
+                extra.push_str(&attachment_doc_block(&a.name, extracted));
             }
             _ => {
                 // "text" (and unknown kinds): inline the provided decoded text.
@@ -56,6 +72,19 @@ pub(crate) fn process_attachments(attachments: &[ChatAttachmentInput]) -> (Strin
         }
     }
     (extra, images)
+}
+
+/// Async twin of [`process_attachments`] for the live send path: the
+/// Office/PDF extractors are CPU-bound (a 25 MB deck or PDF can take
+/// seconds), so the assembly runs on `spawn_blocking` instead of stalling
+/// the async runtime (same pattern as commands/preview.rs).
+pub(crate) async fn process_attachments_async(
+    attachments: &[ChatAttachmentInput],
+) -> Result<(String, Vec<ChatImage>), String> {
+    let owned = attachments.to_vec();
+    tokio::task::spawn_blocking(move || process_attachments(&owned))
+        .await
+        .map_err(|e| format!("attachment processing failed: {e}"))
 }
 
 /// Persists the user message, looks up provider/model/api_key/base_url for the
@@ -458,8 +487,10 @@ pub async fn send_chat_message(
     db: State<'_, DbState>,
     app: AppHandle,
 ) -> CmdResult<()> {
+    // Attachment assembly is CPU-bound (Office/PDF extraction) — it runs on
+    // spawn_blocking so the async command thread isn't stalled (B2).
     let (extra_text, images) = match &attachments {
-        Some(list) => process_attachments(list),
+        Some(list) => process_attachments_async(list).await?,
         None => (String::new(), Vec::new()),
     };
     // Detect research-shaped requests on the *original* (pre-attachment)
@@ -2068,3 +2099,27 @@ pub(crate) fn persist_partial_row(
     let _ = db::touch_chat_session(conn, chat_session_id);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_decode_refuses_oversized_payloads() {
+        use base64::Engine as _;
+        // Under the cap decodes normally.
+        let small = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        assert_eq!(
+            decode_attachment_capped(&small).unwrap(),
+            b"hello".to_vec()
+        );
+        // A payload whose DECODED size passes the cap is refused.
+        let big = base64::engine::general_purpose::STANDARD
+            .encode(vec![0u8; MAX_ATTACHMENT_BYTES + 1]);
+        assert!(decode_attachment_capped(&big).is_none());
+        // A base64 blob too long to decode under the cap is refused before
+        // decoding at all.
+        let b64_too_long = "A".repeat(MAX_ATTACHMENT_B64_LEN + 1);
+        assert!(decode_attachment_capped(&b64_too_long).is_none());
+    }
+}

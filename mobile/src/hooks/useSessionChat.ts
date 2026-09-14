@@ -157,6 +157,7 @@ export function useSessionChat(sessionId: string | null) {
   }, [flushTokens, stopFlushTimer]);
 
   const {
+    connected,
     getSessionMessages,
     sendSessionChat,
     cancelSessionStream,
@@ -199,6 +200,18 @@ export function useSessionChat(sessionId: string | null) {
       endStream();
       setState((s) => {
         if (!s.streaming) return s;
+        // Zero tokens arrived (e.g. an empty reply) — nothing to promote;
+        // close the stream WITHOUT appending an empty assistant bubble.
+        if (!s.streamingContent) {
+          return {
+            ...s,
+            streaming: false,
+            streamingContent: '',
+            lastUsage: usage
+              ? { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, costUsd: usage.cost_usd }
+              : s.lastUsage,
+          };
+        }
         // Promote the streaming buffer to a real assistant message.
         const finalized: SessionMessageRecord = {
           id: -Date.now(), // Negative = ephemeral, never sent to the desktop.
@@ -311,6 +324,31 @@ export function useSessionChat(sessionId: string | null) {
     getSessionMeta(sessionId);
     listSessionArtifacts(sessionId);
   }, [sessionId, getSessionMessages, stopFlushTimer, getSessionMeta, listSessionArtifacts]);
+
+  // Disconnect recovery: a mid-stream disconnect means the Done/Error events
+  // for the in-flight turn will NEVER arrive — the chat used to sit "streaming"
+  // forever. On drop: stop the 50ms flush timer, discard the partial buffer,
+  // and clear the streaming UI so the composer recovers immediately.
+  useEffect(() => {
+    if (connected || currentSessionId.current === null) return;
+    endStream();
+    tokenBuf.current = '';
+    setState((s) =>
+      s.streaming || s.streamingContent
+        ? { ...s, streaming: false, streamingContent: '' }
+        : s,
+    );
+  }, [connected, endStream]);
+
+  // (Re)connect: re-fetch the FIRST page. The session-switch fetch rides the
+  // socket and is silently dropped while offline, so this effect is what
+  // actually populates history when the WS comes up later — and after a
+  // mid-stream reconnect it converges the list with whatever the desktop
+  // persisted for the interrupted turn.
+  useEffect(() => {
+    if (!connected || !sessionId) return;
+    getSessionMessages(sessionId, undefined, 50);
+  }, [connected, sessionId, getSessionMessages]);
 
   // --- actions ---
 

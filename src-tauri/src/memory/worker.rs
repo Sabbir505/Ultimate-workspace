@@ -205,19 +205,23 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
     }
 
     // Transcript backlog since the cursor (paged read, cheap under the lock).
-    // `oldest_pending` feeds the stale-flush bypass below.
-    let (pending, oldest_pending): (Vec<(i64, String, String)>, Option<i64>) = {
+    // `oldest_pending` feeds the stale-flush bypass below. The FULL list is
+    // also kept for the per-chunk rolling summary — re-querying it inside the
+    // chunk loop used to re-read the whole transcript (and hold the DB lock)
+    // once per chunk.
+    let all_messages = {
         let conn = db.0.lock();
-        let all =
-            db::list_active_chat_messages(&conn, chat_session_id).map_err(|e| e_tostring(e))?;
+        db::list_active_chat_messages(&conn, chat_session_id).map_err(|e| e_tostring(e))?
+    };
+    let (pending, oldest_pending): (Vec<(i64, String, String)>, Option<i64>) = {
         let mut oldest: Option<i64> = None;
         let mut out: Vec<(i64, String, String)> = Vec::new();
-        for m in all {
+        for m in &all_messages {
             if m.id > cursor && !m.content.trim().is_empty() {
                 if oldest.is_none() {
                     oldest = Some(m.created_at);
                 }
-                out.push((m.id, m.role, m.content));
+                out.push((m.id, m.role.clone(), m.content.clone()));
             }
         }
         (out, oldest)
@@ -296,12 +300,12 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         }
 
         // Rolling summary: the two messages just before this chunk (Mem0's
-        // rolling-summary input, cheap version — no extra LLM call).
+        // rolling-summary input, cheap version — no extra LLM call). Sliced
+        // from the transcript already fetched above; this used to re-read
+        // the ENTIRE transcript from the DB under the lock once per chunk.
         let rolling_summary: Option<String> = {
-            let conn = db.0.lock();
-            let prior: Vec<_> = db::list_active_chat_messages(&conn, chat_session_id)
-                .map_err(|e| e_tostring(e))?
-                .into_iter()
+            let prior: Vec<_> = all_messages
+                .iter()
                 .filter(|m| m.id < chunk_first_id)
                 .rev()
                 .take(2)

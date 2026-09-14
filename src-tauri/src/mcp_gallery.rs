@@ -293,6 +293,47 @@ impl GallerySession {
 #[derive(Default)]
 pub struct McpGalleryState(pub parking_lot::Mutex<HashMap<String, std::sync::Arc<GallerySession>>>);
 
+/// Unambiguous approval identity for a custom server: command + args joined
+/// with the unit separator (U+001F), so `["a b"]` and `["a", "b"]` can never
+/// share one remembered approval (the old space-joined line collided). The
+/// dialog keeps the human-readable space-joined line; only the remember key
+/// is structured.
+fn mcp_server_ident(def: &McpServerDef) -> String {
+    let mut ident = def.command.clone();
+    for arg in &def.args {
+        ident.push('\u{1f}');
+        ident.push_str(arg);
+    }
+    ident
+}
+
+/// Quote one token for a `cmd.exe /C <line>` command line: cmd re-parses the
+/// whole remainder of the line, so std's automatic Windows quoting (which
+/// only wraps args holding spaces/quotes) is not enough — a bare `&`, `|`,
+/// `^`, `<` or `>` in an argument would be executed or swallowed by cmd.
+/// Wrap exactly the tokens that carry whitespace, a metacharacter, or a
+/// quote; plain tokens stay bare so PATH resolution and flags are unchanged.
+/// (`%` env expansion is left alone deliberately — no argument in the wild
+/// relies on literal `%VAR%` round-tripping, and doubling it would corrupt
+/// the common case.)
+#[cfg(windows)]
+fn cmd_quote(token: &str) -> String {
+    const NEEDS_QUOTES: &[char] = &[' ', '\t', '&', '|', '^', '<', '>', '(', ')', '"'];
+    if !token.chars().any(|c| NEEDS_QUOTES.contains(&c)) {
+        return token.to_string();
+    }
+    let mut out = String::with_capacity(token.len() + 2);
+    out.push('"');
+    for c in token.chars() {
+        if c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
 /// Gate + spawn: every production path that may LAUNCH a server process goes
 /// through here. Gallery (curated-catalog) definitions run fixed package names
 /// and attach freely; CUSTOM definitions (name + command + args + env straight
@@ -304,13 +345,12 @@ pub async fn connect_server_checked(
     def: &McpServerDef,
 ) -> Result<std::sync::Arc<GallerySession>, String> {
     if !def.from_gallery {
-        let command_line = format!("{} {}", def.command, def.args.join(" "));
         let db = app.state::<crate::DbState>().inner().0.clone();
         let allowed = crate::exec_gate::confirm_remembered(
             &db,
             app,
             "mcp_connect",
-            &command_line,
+            &mcp_server_ident(def),
             "Relay — run this MCP server?",
             format!(
                 "An app window asked to launch the MCP server \"{}\":\n\n{}\n{}\n\nA local MCP server executes arbitrary code on this machine with your privileges. Allow it? \"Allow\" also remembers this exact command.",
@@ -343,10 +383,17 @@ pub async fn connect_server(def: &McpServerDef) -> Result<std::sync::Arc<Gallery
     // npm-installed CLIs are `.cmd` shims that CreateProcess cannot execute
     // bare; `cmd.exe /C` restores PATH/PATHEXT resolution (see
     // harness_adapters::resolve_for_spawn — same rule, tokio flavor).
+    // Args are handed to cmd as RAW tokens quoted by cmd_quote: cmd re-parses
+    // the line after /C, so std's automatic quoting alone would let a bare
+    // `&`/`|` in a custom-server arg execute as a command separator.
     #[cfg(windows)]
     if !def.command.eq_ignore_ascii_case("cmd.exe") {
         let mut wrapped = tokio::process::Command::new("cmd.exe");
-        wrapped.arg("/C").arg(&def.command).args(&def.args);
+        wrapped.arg("/C");
+        wrapped.raw_arg(cmd_quote(&def.command));
+        for arg in &def.args {
+            wrapped.raw_arg(cmd_quote(arg));
+        }
         for (k, v) in &def.env {
             wrapped.env(k, v);
         }
@@ -790,6 +837,38 @@ mod tests {
         assert!(find_tool(&entries, "mcp_memory_create_entities").is_some());
         // The RAW name must not match — that's the whole point of prefixing.
         assert!(find_tool(&entries, "create_entities").is_none());
+    }
+
+    #[test]
+    fn server_identities_are_unambiguous() {
+        let def = |args: &[&str]| McpServerDef {
+            command: "npx".into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        // ["a b"] and ["a", "b"] used to share one space-joined approval —
+        // the unit-separator identity keeps them distinct.
+        assert_ne!(mcp_server_ident(&def(&["a b"])), mcp_server_ident(&def(&["a", "b"])));
+        assert_eq!(mcp_server_ident(&def(&["a", "b"])), "npx\u{1f}a\u{1f}b");
+        assert_eq!(mcp_server_ident(&def(&[])), "npx");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn cmd_quoting_is_targeted() {
+        // Plain tokens stay bare (PATH resolution + flags untouched).
+        assert_eq!(cmd_quote("-y"), "-y");
+        assert_eq!(cmd_quote("@modelcontextprotocol/server-memory"), "@modelcontextprotocol/server-memory");
+        assert_eq!(cmd_quote("C:\\tools\\npx.cmd"), "C:\\tools\\npx.cmd");
+        // Metacharacters and whitespace are wrapped so cmd.exe can't execute
+        // or split them.
+        assert_eq!(cmd_quote("a&calc"), "\"a&calc\"");
+        assert_eq!(cmd_quote("a|b"), "\"a|b\"");
+        assert_eq!(cmd_quote("a^b"), "\"a^b\"");
+        assert_eq!(cmd_quote("a<b>c"), "\"a<b>c\"");
+        assert_eq!(cmd_quote("my dir"), "\"my dir\"");
+        // Embedded quotes are backslash-escaped inside the wrapping quotes.
+        assert_eq!(cmd_quote("say \"hi\""), "\"say \\\"hi\\\"\"");
     }
 
     /// Full live round-trip through the exact production path: spawn

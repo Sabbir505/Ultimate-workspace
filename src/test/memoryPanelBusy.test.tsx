@@ -113,4 +113,34 @@ describe("MemoryPanel — IPC failure releases busy (C7)", () => {
     expect(toast).toHaveBeenCalledWith("Couldn't add the memory", expect.anything());
     expect((add as HTMLButtonElement).disabled).toBe(false);
   });
+
+  it("toggleHistory: rejects → toast shown and the pane never sticks on Loading…", async () => {
+    // Audit 2026-09-14 #12: the failed fetch left `history` null forever, so
+    // the History pane spun on "Loading…" with no feedback.
+    seedPanel();
+    const toast = vi.spyOn(ipc, "toastError").mockImplementation(() => {});
+    vi.spyOn(ipc, "memoryDocumentHistory").mockRejectedValue(new Error("boom"));
+    render(<MemoryPanel />);
+    const historyBtn = await screen.findByText("History");
+    await act(async () => {
+      fireEvent.click(historyBtn);
+    });
+    expect(toast).toHaveBeenCalledWith("Couldn't load version history", expect.anything());
+    // Loading state cleared — degraded to the empty-history message.
+    expect(await screen.findByText(/No stored versions yet/)).toBeTruthy();
+    expect(screen.queryByText("Loading…")).toBeNull();
+  });
+
+  it("audit log: lazy load rejects → toast shown and the log degrades to empty", async () => {
+    seedPanel();
+    const toast = vi.spyOn(ipc, "toastError").mockImplementation(() => {});
+    vi.spyOn(ipc, "memoryRecentOps").mockRejectedValue(new Error("boom"));
+    render(<MemoryPanel />);
+    const auditTab = await screen.findByText("Audit log");
+    await act(async () => {
+      fireEvent.click(auditTab);
+    });
+    expect(toast).toHaveBeenCalledWith("Couldn't load the audit log", expect.anything());
+    expect(screen.queryByText("Loading…")).toBeNull();
+  });
 });

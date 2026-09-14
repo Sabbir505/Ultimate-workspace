@@ -12,7 +12,7 @@
 //! store effect of applying insights.
 
 use crate::db;
-use crate::memory::model::{origin, status, MemoryRecord};
+use crate::memory::model::{origin, MemoryRecord};
 use rusqlite::Connection;
 
 /// Trigger: Generative-Agents' threshold of 150 summed importance points,
@@ -259,6 +259,7 @@ pub fn apply_reflection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::model::status;
 
     fn m(id: &str, content: &str, importance: i64, conf: f64) -> MemoryRecord {
         let mut r = MemoryRecord::new_extracted(id, "preference", None, "user", content, importance, None);

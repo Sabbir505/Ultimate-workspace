@@ -65,3 +65,29 @@ describe("mergeOptimistic attachment twins", () => {
     expect(mergeOptimistic(optimistic, fetched)).toHaveLength(2);
   });
 });
+
+describe("mergeOptimistic one-to-one twin matching (audit 2026-09-14 #11)", () => {
+  const IDENTICAL = "same text sent twice";
+
+  it("keeps the SECOND identical optimistic send when only one twin landed", () => {
+    const optimistic = [row(-1, "user", IDENTICAL), row(-2, "user", IDENTICAL)];
+    const fetched = [row(10, "user", IDENTICAL), row(11, "assistant", "ok")];
+    const merged = mergeOptimistic(optimistic, fetched);
+    // The persisted twin explains only the FIRST optimistic row; the second
+    // identical send must stay visible, not be silently dropped.
+    expect(merged).toHaveLength(3);
+    expect(merged.filter((m) => m.id < 0)).toHaveLength(1);
+  });
+
+  it("drops both optimistic rows once both twins landed", () => {
+    const optimistic = [row(-1, "user", IDENTICAL), row(-2, "user", IDENTICAL)];
+    const fetched = [
+      row(10, "user", IDENTICAL),
+      row(11, "user", IDENTICAL),
+      row(12, "assistant", "ok"),
+    ];
+    const merged = mergeOptimistic(optimistic, fetched);
+    expect(merged).toHaveLength(3);
+    expect(merged.every((m) => m.id >= 0)).toBe(true);
+  });
+});

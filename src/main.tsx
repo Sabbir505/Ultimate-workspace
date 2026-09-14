@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import "./styles/global.css";
 // KaTeX CSS (PERF rec #3) is NOT imported here anymore: it only matters once
 // a math block renders, which happens exclusively inside the lazy-loaded
@@ -23,7 +24,14 @@ if (import.meta.env.DEV) {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+// The boundary wraps ONLY the app tree (not the splash/drag guards): a crash
+// anywhere in React renders the recoverable full-screen panel instead of a
+// blank webview with no way forward.
+createRoot(document.getElementById("root")!).render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>,
+);
 
 // Window-level guard for OS file drags. The Tauri window runs with
 // dragDropEnabled: false, so native WebView2 drag events reach the DOM (the

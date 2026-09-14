@@ -99,6 +99,12 @@ export function AutomationRunTable({
   onStopRun?: () => void;
   stopping?: boolean;
 }) {
+  // Hooks must run unconditionally (early returns below used to come first,
+  // so the timer hook's call order changed when runs appeared/disappeared and
+  // crashed React). Compute first, return the empty states after.
+  const inFlight = runs.some((r) => r.status === "running");
+  const nowSec = useNowSeconds(inFlight);
+
   if (loading && runs.length === 0) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -121,9 +127,6 @@ export function AutomationRunTable({
       </div>
     );
   }
-
-  const inFlight = runs.some((r) => r.status === "running");
-  const nowSec = useNowSeconds(inFlight);
 
   return (
     <div className="px-6 py-4">

@@ -181,6 +181,20 @@ fn run_schtasks(args: &[String]) -> Result<String, String> {
     }
 }
 
+/// True when a `schtasks /Query` failure means "the task does not exist" —
+/// the healthy unregistered state — rather than an infrastructure error.
+/// schtasks signals not-found with exit code 1 AND the message below; exit
+/// code alone can't distinguish it from a scheduler-service failure. Only
+/// the English phrasing is matched, so a localized Windows with a different
+/// message surfaces the error (the conservative direction: the UI shows a
+/// real error instead of silently reading "off").
+fn schtasks_task_not_found(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("cannot find the file specified")
+        || e.contains("the task does not exist")
+        || e.contains("does not exist in the system")
+}
+
 /// Whether the global run-due task is registered. Non-Windows: always false.
 ///
 /// `async` + `spawn_blocking`: the query is a `schtasks` subprocess wait.
@@ -189,13 +203,20 @@ pub async fn get_run_while_closed() -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     {
         tokio::task::spawn_blocking(|| {
-            // Exit code 0 = the task exists. Any error (not found, scheduler
-            // service down) reads as "not registered" — the UI toggle stays off
-            // and the user can just flip it on to self-heal.
-            run_schtasks(&query_args()).is_ok()
+            // Task exists → Ok(true). A "task not found" failure is the
+            // healthy off state → Ok(false). ANY other failure (scheduler
+            // service down, access denied) is surfaced as an error instead
+            // of being misread as "not registered" — the old catch-all
+            // `.is_ok()` made a broken scheduler look identical to an
+            // unregistered task and the toggle silently stayed off.
+            match run_schtasks(&query_args()) {
+                Ok(_) => Ok(true),
+                Err(e) if schtasks_task_not_found(&e) => Ok(false),
+                Err(e) => Err(e),
+            }
         })
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -319,6 +340,25 @@ mod tests {
             legacy_delete_args(),
             vec!["/Delete", "/TN", "ConduitAutomations", "/F"]
         );
+    }
+
+    /// The query failure classifier: "task missing" reads as unregistered,
+    /// everything else must surface as an error (never silently "off").
+    #[test]
+    fn schtasks_not_found_is_distinguished_from_other_failures() {
+        // The canonical schtasks not-found text.
+        assert!(schtasks_task_not_found(
+            "schtasks /Query failed: ERROR: The system cannot find the file specified."
+        ));
+        assert!(schtasks_task_not_found(
+            "schtasks /Query failed: ERROR: The task does not exist: RelayAutomations"
+        ));
+        // Infrastructure failures must NOT be classified as "not registered".
+        assert!(!schtasks_task_not_found(
+            "schtasks /Query failed: ERROR: The Task Scheduler service is not running."
+        ));
+        assert!(!schtasks_task_not_found("schtasks /Query failed: Access is denied."));
+        assert!(!schtasks_task_not_found(""));
     }
 
     #[test]

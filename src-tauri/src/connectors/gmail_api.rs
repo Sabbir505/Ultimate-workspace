@@ -190,7 +190,7 @@ pub async fn call_tool(
             )
             .await?;
             let body = resp.text().await.unwrap_or_default();
-            Ok(body)
+            Ok(cap_response_text(body))
         }
         "gmail_get_message" => {
             let message_id = args
@@ -203,12 +203,12 @@ pub async fn call_tool(
                 .unwrap_or("full");
             let resp = crate::util::checked_send_ctx(http .get(format!("{base}/messages/{}", urlencoding::encode(message_id))) .bearer_auth(&token) .query(&[("format", fmt)]) .timeout(std::time::Duration::from_secs(30)), 500, "gmail get_message").await?;
             let body = resp.text().await.unwrap_or_default();
-            Ok(body)
+            Ok(cap_response_text(body))
         }
         "gmail_list_labels" => {
             let resp = crate::util::checked_send_ctx(http .get(format!("{base}/labels")) .bearer_auth(&token) .timeout(std::time::Duration::from_secs(30)), 500, "gmail list_labels").await?;
             let body = resp.text().await.unwrap_or_default();
-            Ok(body)
+            Ok(cap_response_text(body))
         }
         "gmail_create_draft" => {
             let raw = build_mime(args)?;
@@ -298,6 +298,26 @@ pub async fn call_tool(
         }
         other => Err(format!("unknown gmail fallback tool `{other}`")),
     }
+}
+
+/// Cap a fallback-read response before it enters model context: raw API
+/// bodies (threads, messages, Drive files) used to ride back unbounded and
+/// can be megabytes. Byte-truncates on a char boundary with an explicit
+/// marker so the model knows the text was cut.
+pub(crate) fn cap_response_text(body: String) -> String {
+    const MAX_BYTES: usize = 64 * 1024;
+    if body.len() <= MAX_BYTES {
+        return body;
+    }
+    let mut cut = MAX_BYTES;
+    while !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "{}\n…[truncated — showing first {MAX_BYTES} of {} bytes]",
+        &body[..cut],
+        body.len()
+    )
 }
 
 /// Build a minimal RFC 5322 MIME message (plain text) from tool args.

@@ -42,7 +42,7 @@ vi.mock("../lib/ipc", () => ({
   readArtifactPreview: vi.fn(),
 }));
 
-import { getChatMessages, sendChatMessage } from "../lib/ipc";
+import { cancelChatMessage, getChatMessages, sendChatMessage } from "../lib/ipc";
 import { useChatStore } from "../state/chat";
 
 const realSendMessage = useChatStore.getState().sendMessage;
@@ -147,6 +147,76 @@ describe("queued message bubble", () => {
     expect(msgs.some((m) => m.role === "user" && m.content === "queued")).toBe(true);
     // The persisted "first" row is intact too (no duplication).
     expect(msgs.filter((m) => m.content === "first")).toHaveLength(1);
+  });
+});
+
+describe("background-session sends (audit 2026-09-14 #1)", () => {
+  const addS2 = () =>
+    useChatStore.setState((s) => ({
+      sessions: [
+        ...s.sessions,
+        { id: "s2", title: "s2", provider: "local_gguf", model: "m", createdAt: 0, lastActiveAt: 0 } as never,
+      ],
+    }));
+
+  it("a background session's send does NOT append its optimistic bubble to the active transcript", async () => {
+    (sendChatMessage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    addS2();
+    // s2 is neither active nor split — the queue-drain / mesh re-entry shape
+    // (sendMessage with the s2 override).
+    await useChatStore.getState().sendMessage("bg work", undefined, undefined, "s2");
+
+    const s = useChatStore.getState();
+    // The turn STARTED for s2…
+    expect("s2" in s.streaming).toBe(true);
+    // …but NEITHER visible buffer shows the bubble (the persisted row appears
+    // when the session is opened).
+    expect(s.messages.some((m) => m.content === "bg work")).toBe(false);
+    expect(s.splitMessages.some((m) => m.content === "bg work")).toBe(false);
+  });
+
+  it("a split-pane override send still lands in the split buffer", async () => {
+    (sendChatMessage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    addS2();
+    useChatStore.setState({ splitChatSessionId: "s2", splitMessages: [] } as never);
+    await useChatStore.getState().sendMessage("split work", undefined, undefined, "s2");
+
+    const s = useChatStore.getState();
+    expect(s.splitMessages.some((m) => m.content === "split work")).toBe(true);
+    expect(s.messages.some((m) => m.content === "split work")).toBe(false);
+  });
+});
+
+describe("steer vs a failing cancel (audit 2026-09-14 #2)", () => {
+  it("steer still restores the queue and sends when the backend cancel rejects", async () => {
+    let resolveSend: () => void = () => {};
+    (sendChatMessage as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((r) => { resolveSend = r as () => void; }),
+    );
+    void useChatStore.getState().sendMessage("running turn");
+    await Promise.resolve();
+    await Promise.resolve();
+    await useChatStore.getState().sendMessage("first queued");
+    await useChatStore.getState().sendMessage("second queued");
+    const steeredId = useChatStore.getState().messageQueue.s1[1].id;
+
+    // The cancel IPC dies mid-steer — previously this threw out of
+    // cancelStream and the parked queue + steered message were lost.
+    (cancelChatMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("cancel ipc lost"),
+    );
+    (sendChatMessage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    await useChatStore.getState().steerQueuedMessage("s1", steeredId);
+    await new Promise((r) => setTimeout(r, 0));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const after = useChatStore.getState();
+    // The steered message was SENT, not dropped…
+    expect(after.messages.some((m) => m.role === "user" && m.content === "second queued")).toBe(true);
+    // …and the rest of the stack came back for the FIFO drain.
+    expect(after.messageQueue.s1.map((m) => m.content)).toEqual(["first queued"]);
+    expect("s1" in after.streaming).toBe(true);
   });
 });
 

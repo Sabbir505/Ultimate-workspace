@@ -245,11 +245,36 @@ pub(super) async fn get_transcript_arm(
                 let _ = send_msg(&write, &resp).await;
 }
 
+/// Cached (computed_at, today, week) spend summary. The phone polls
+/// GetCostSummary every 5s and each uncached answer scans cost_events twice
+/// with per-row pricing under the global DB mutex; spend only changes when a
+/// turn completes, so a 60s TTL keeps the steady-state poll O(1).
+static COST_SUMMARY_CACHE: std::sync::Mutex<Option<(std::time::Instant, f64, f64)>> =
+    std::sync::Mutex::new(None);
+const COST_SUMMARY_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Aggregate spend for the phone Settings tab: today (UTC) + rolling week.
 pub(super) async fn get_cost_summary_arm(
     db: &Arc<Mutex<Connection>>,
     write: &super::relay_ws::SharedWsWrite,
 ) {
+                // Serve a fresh-enough cache entry without touching
+                // cost_events at all (see the cache doc above). The guard is
+                // dropped before the await — std MutexGuard is !Send and the
+                // handler future must stay Send.
+                let cached = COST_SUMMARY_CACHE
+                    .lock()
+                    .ok()
+                    .and_then(|g| *g)
+                    .filter(|(at, _, _)| at.elapsed() < COST_SUMMARY_TTL);
+                if let Some((_, today, week)) = cached {
+                    let _ = send_msg(
+                        &write,
+                        &DesktopMessage::CostSummary { today, week, version: 2 },
+                    )
+                    .await;
+                    return;
+                }
                 // Aggregate spend for the phone Settings tab: today (UTC) and
                 // the rolling last 7 days. Read-time priced via the shared
                 // pricing module (same source of truth as the desktop rollup).
@@ -310,6 +335,11 @@ pub(super) async fn get_cost_summary_arm(
                     let week = priced_sum(now - 7 * 86_400);
                     (today, week)
                 };
+                // Publish to the cache so the next 60s of 5s polls skip the
+                // scans entirely.
+                if let Ok(mut cache) = COST_SUMMARY_CACHE.lock() {
+                    *cache = Some((std::time::Instant::now(), today, week));
+                }
                 let _ = send_msg(
                     &write,
                     &DesktopMessage::CostSummary {
@@ -330,6 +360,20 @@ pub(super) async fn start_local_model_arm(
     app: &AppHandle,
     write: &super::relay_ws::SharedWsWrite,
 ) {
+                // Phone-supplied path: only GGUF files the desktop scanner
+                // actually listed may be spawned — an arbitrary `gguf_path`
+                // would point llama-server at any file on disk.
+                if !super::relay::is_known_model_path(db, &gguf_path) {
+                    let _ = send_msg(
+                        &write,
+                        &DesktopMessage::LocalModelError {
+                            model,
+                            error: format!("unknown local model path: {gguf_path}"),
+                        },
+                    )
+                    .await;
+                    return;
+                }
                 // The user tapped a (possibly stopped) local model in the
                 // selector. Spawn the sidecar now so it's ready by the time
                 // they send their first message — instead of wedging warm-up

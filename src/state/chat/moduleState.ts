@@ -73,6 +73,10 @@ export const STREAM_TAIL_CAP = 200_000;
 /** Per-session mail history cap in the Git-sidebar Mesh section (older
  *  transitions age out of the UI; the durable audit trail is the DB). */
 export const MESH_MAIL_HISTORY_CAP = 30;
+/** Total mail-record cap for the Mesh store's `meshMail` map (keyed by
+ *  mailId — the per-session lists above cap separately). The durable audit
+ *  trail is the DB; this is only the sidebar's in-memory cache. */
+export const MESH_MAIL_RECORDS_CAP = 100;
 export const STREAM_TAIL_MARGIN = 10_000;
 
 /** Session list with tombstoned (deleted-this-run) sessions removed. */
@@ -113,8 +117,24 @@ export function mergeOptimistic(
   const optimistic = current.filter((m) => m.id < 0);
   if (optimistic.length === 0) return fetched;
   const key = (m: ChatMessageRecord) => `${m.role}\u0000${attachmentBaseText(m.content)}`;
-  const fetchedKeys = new Set(fetched.map(key));
-  const missing = optimistic.filter((o) => !fetchedKeys.has(key(o)));
+  // One-to-one matching: each fetched row consumes (explains) at most ONE
+  // optimistic twin. A Set let the SECOND identical optimistic send (the same
+  // text queued and drained twice) be "explained" by the first send's
+  // persisted row, silently dropping one of the user's messages.
+  const unfetched = new Map<string, number>();
+  for (const f of fetched) {
+    const k = key(f);
+    unfetched.set(k, (unfetched.get(k) ?? 0) + 1);
+  }
+  const missing = optimistic.filter((o) => {
+    const k = key(o);
+    const left = unfetched.get(k) ?? 0;
+    if (left > 0) {
+      unfetched.set(k, left - 1);
+      return false;
+    }
+    return true;
+  });
   return missing.length > 0 ? [...fetched, ...missing] : fetched;
 }
 
@@ -286,6 +306,12 @@ export const HARNESS_PERMISSION_MODES: Record<string, HarnessModeOption[] | unde
  *  plain counter is sufficient. */
 export const queueIdCounter = { next: 1 };
 
+/** Monotonic id for optimistic user bubbles (negative, counting down) — the
+ *  old `-Date.now()` gave two sends in the same millisecond the same id,
+ *  colliding React keys and confusing mergeOptimistic's row accounting.
+ *  Same mechanism as queueIdCounter; in-memory only. */
+export const optimisticMsgIdCounter = { next: -1 };
+
 /**
  * In-memory image bytes for SENT messages. Attachments are persisted as text
  * markers inside `content` (the backend never stores the bytes), so a
@@ -423,6 +449,19 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
   delete supersededPartial[chatSessionId];
   const citationReports = { ...s.citationReports };
   delete citationReports[chatSessionId];
+  const meshMailBySession = { ...s.meshMailBySession };
+  delete meshMailBySession[chatSessionId];
+  const meshChildren = { ...s.meshChildren };
+  delete meshChildren[chatSessionId];
+  // meshMail is keyed by mailId (not session id) — drop the records in which
+  // the deleted session is either party.
+  let meshMail = s.meshMail;
+  for (const [mailId, mail] of Object.entries(s.meshMail)) {
+    if (mail.fromSession === chatSessionId || mail.toSession === chatSessionId) {
+      if (meshMail === s.meshMail) meshMail = { ...s.meshMail };
+      delete meshMail[mailId];
+    }
+  }
   let artifactsByMessage = s.artifactsByMessage;
   let checkpointsByMessage = s.checkpointsByMessage;
   if (s.messagesSessionId === chatSessionId) {
@@ -459,6 +498,9 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
     stoppedPartial,
     supersededPartial,
     citationReports,
+    meshMail,
+    meshMailBySession,
+    meshChildren,
     artifactsByMessage,
     checkpointsByMessage,
     streamingChatSessionId:

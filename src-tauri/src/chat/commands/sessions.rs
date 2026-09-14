@@ -90,18 +90,50 @@ pub fn list_chat_checkpoints(
 /// the checkpointed turn are deleted too (the tree restore is primary; a
 /// message-delete failure is logged and never fails the command). Emits
 /// `checkpoint:created` for the safety snapshot.
-#[tauri::command(async)]
-pub fn restore_chat_checkpoint(
+///
+/// Audit MED-8: the restore races a running turn (the CLI would keep writing
+/// files the tree rollback can't undo) and its seconds-long git work must not
+/// sit on the async runtime — so the session is gated on turn-idle first and
+/// the blocking work runs on a blocking worker.
+#[tauri::command]
+pub async fn restore_chat_checkpoint(
     checkpoint_id: i64,
     rollback_messages: bool,
     app: AppHandle,
     db: State<'_, DbState>,
 ) -> CmdResult<RestoreCheckpointResult> {
+    // Turn-idle gate: reject with a clear error while the session is
+    // streaming (builtin) or has a harness turn in flight. Both busy checks
+    // are the same helpers Session Mesh uses.
+    let session_id = crate::checkpoints::checkpoint_session_id(&db.0, checkpoint_id);
+    if let Some(sid) = session_id {
+        let busy = app
+            .try_state::<crate::ChatState>()
+            .map(|c| c.0.has_active_stream(&sid))
+            .unwrap_or(false)
+            || app
+                .try_state::<crate::agent_sessions::AgentSessionState>()
+                .map(|a| a.0.is_turn_in_flight(&sid))
+                .unwrap_or(false);
+        if busy {
+            return Err(
+                "cannot restore a checkpoint while this session is running a turn — \
+                 wait for it to finish or cancel it first"
+                    .into(),
+            );
+        }
+    }
     // Passes the shared handle, not a held guard: checkpoints::restore scopes
     // the lock itself so the seconds-long git snapshot/restore never pin the
-    // shared DB mutex.
-    crate::checkpoints::restore(&app, &db.0, checkpoint_id, rollback_messages)
-        .map_err(|e| e.to_string())
+    // shared DB mutex — and runs the whole thing on a blocking worker so the
+    // async runtime stays free.
+    let db_handle = std::sync::Arc::clone(&db.0);
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::checkpoints::restore(&app, &db_handle, checkpoint_id, rollback_messages)
+    })
+    .await
+    .map_err(|e| format!("restore task panicked: {e}"))?
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command(async)]

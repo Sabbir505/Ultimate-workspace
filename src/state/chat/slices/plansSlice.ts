@@ -79,7 +79,10 @@ export function createPlansSlice(set: ChatStoreSet, get: ChatStoreGet) {
     },
 
     onPlanUpdated: (payload: ChatPlanUpdatedPayload) => {
-      const { chatSessionId, todos } = payload;
+      const { chatSessionId } = payload;
+      // Malformed payloads (a missing/non-array todos field) used to throw
+      // inside the event listener — guard like onQuestionRequest does.
+      const todos = Array.isArray(payload.todos) ? payload.todos : [];
       set((s) => {
         // The todo list is authoritative when present — mirror it into planSteps
         // (replacing any todo_write-sourced steps, keeping prose-parsed ones) so

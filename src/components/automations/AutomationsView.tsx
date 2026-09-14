@@ -594,22 +594,28 @@ function AutomationDetail({
   const harnessMissing = harnessNeedsInstall(automation.harness, harnesses);
   const missingHarnessName = harnesses.find((h) => h.id === automation.harness)?.displayName;
 
-  const refreshRuns = useCallback(async () => {
-    setRunsLoading(true);
+  const refreshRuns = useCallback(async (background = false) => {
+    // Background polls (the 5s interval) must not flash the table spinner or
+    // rebuild the rows when nothing changed — the detail view otherwise
+    // re-renders fully every 5 s for the lifetime of the screen.
+    if (!background) setRunsLoading(true);
     setRunError(null);
     try {
       const r = await listAutomationRuns(automation.id, 100);
-      setRuns(r ?? []);
+      const next = r ?? [];
+      setRuns((prev) =>
+        JSON.stringify(prev) === JSON.stringify(next) ? prev : next,
+      );
     } catch (e) {
       setRunError(String(e));
     } finally {
-      setRunsLoading(false);
+      if (!background) setRunsLoading(false);
     }
   }, [automation.id]);
 
   useEffect(() => {
     void refreshRuns();
-    const interval = window.setInterval(() => void refreshRuns(), 5000);
+    const interval = window.setInterval(() => void refreshRuns(true), 5000);
     return () => window.clearInterval(interval);
   }, [refreshRuns]);
 
@@ -714,7 +720,11 @@ function AutomationDetail({
 
   const handleDelete = useCallback(() => {
     if (window.confirm("Delete this automation? Past run history is kept.")) {
-      void remove(automation.id).then(onDeleted);
+      // remove hits the backend and can reject (IPC/DB) — toast like the
+      // other actions instead of an unhandled rejection.
+      void remove(automation.id)
+        .then(onDeleted)
+        .catch((e) => toastError("Couldn't delete the automation", e));
     }
   }, [automation.id, remove, onDeleted]);
 

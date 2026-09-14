@@ -65,9 +65,16 @@ export function useLazyComponent<T>(
 ) {
   useEffect(() => {
     let mounted = true;
-    void loader().then((mod) => {
-      if (mounted) onReady(mod);
-    });
+    void loader()
+      .then((mod) => {
+        if (mounted) onReady(mod);
+      })
+      .catch((err) => {
+        // A failed dynamic import (dev-server restart mid-session, disk
+        // error) must not surface as an unhandled rejection — the fallback
+        // stays rendered.
+        console.warn("[activity] lazy component failed to load", err);
+      });
     return () => {
       mounted = false;
     };
@@ -1533,7 +1540,11 @@ export function Markdown({
           would route to whichever session cached first. */}
       {cache
         ? cachedMarkdown(
-            `md:${chatSessionId ?? ""}:${content}${fingerprint ? `|src:${fingerprint}` : ""}`,
+            // PERF: the key used to embed the FULL content — multi-KB strings
+            // held per cached row. Hash + length identifies the content just
+            // as well (a 32-bit djb2 collision on same-length text is the
+            // only risk, negligible at MD_CACHE_MAX entries).
+            `md:${chatSessionId ?? ""}:${hashCode(content)}:${content.length}${fingerprint ? `|src:${fingerprint}` : ""}`,
             build,
           )
         : build()}

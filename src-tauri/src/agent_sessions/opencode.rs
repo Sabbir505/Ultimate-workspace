@@ -366,7 +366,9 @@ pub(super) fn spawn_opencode_server(
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::null())
-    .stderr(Stdio::null());
+    // Diagnosis: a server that dies on startup (port stolen, broken config)
+    // prints the cause here — the not-ready path below surfaces its tail.
+    .stderr(Stdio::piped());
     if let Some(cfg) = bundle
         .as_ref()
         .map(|b| b.opencode_config.clone())
@@ -384,14 +386,44 @@ pub(super) fn spawn_opencode_server(
         cmd.current_dir(dir);
     }
     no_console_window(&mut cmd);
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn opencode serve: {e}"))?;
+    // stderr drain (diagnosis): the tail is surfaced on the failure paths
+    // below; on a healthy server the thread simply lives until it exits.
+    let stderr = child.stderr.take();
+    let (etx, erx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut stderr) = stderr {
+            use std::io::Read as _;
+            let _ = stderr.read_to_string(&mut buf);
+        }
+        let _ = etx.send(buf);
+    });
 
     if !opencode_wait_ready(&base_url, Duration::from_secs(20)) {
-        let mut c = child;
-        kill_child_tree(&mut c);
-        return Err(format!("opencode server not ready at {base_url}"));
+        kill_child_tree(&mut child);
+        let tail = erx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+        return Err(format!(
+            "opencode server not ready at {base_url}{}",
+            stderr_suffix(&tail)
+        ));
+    }
+    // TOCTOU guard (audit LOW-16): if the port was stolen between
+    // opencode_free_port and the server's bind, OUR server exits with
+    // "address in use" while the TCP probe above happily talks to the
+    // squatter. A child that already died here means the ready server is NOT
+    // ours — fail loudly instead of pointing the SSE reader and every later
+    // POST at a stranger's socket.
+    if let Ok(Some(status)) = child.try_wait() {
+        kill_child_tree(&mut child);
+        let tail = erx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+        return Err(format!(
+            "opencode server exited during startup ({status}) — port {port} was \
+             likely taken by another process{}",
+            stderr_suffix(&tail)
+        ));
     }
 
     // Long-lived SSE subscription covering EVERY turn this server handles.
@@ -1070,14 +1102,19 @@ pub(super) fn emit_opencode_tool(
     tools: &mut ToolTracker,
     tool_states: &mut HashMap<String, u8>,
 ) {
-    let pid = match part.get("id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => format!("seq-{}", tools.seq),
-    };
     let name = part.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
     let state = part.get("state").cloned().unwrap_or(json!({}));
     let status = state.get("status").and_then(|s| s.as_str()).unwrap_or("");
     let inp = state.get("input").cloned().unwrap_or(json!({}));
+    let pid = match part.get("id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        // Stable fallback key (audit MED-12): id-less parts are identified by
+        // tool + input, so every state transition attaches to the ONE call
+        // card. The old `seq-{tools.seq}` key was recomputed per event, so
+        // each update minted a new card and the completion never found its
+        // call.
+        _ => format!("anon:{name}:{}", inp.to_string()),
+    };
     let done = matches!(status, "completed" | "error");
 
     // Plan-step progress flows through every update (dedup'd UI-side).
@@ -1196,6 +1233,67 @@ mod tests {
         let ok: Value = serde_json::from_str(r#"{"error":null,"modelID":"m"}"#).unwrap();
         assert_eq!(provider_error_message(&ok), None);
         assert_eq!(provider_error_message(&serde_json::json!({"cost":0})), None);
+    }
+
+    /// MED-12: id-less tool parts (no `id` field) must get a STABLE fallback
+    /// key so the completion attaches to the original call card — the old
+    /// `seq-{tools.seq}` key was recomputed per event, minting a duplicate
+    /// call card per update and orphaning the completion.
+    #[test]
+    fn opencode_idless_tool_part_keeps_one_card_across_transitions() {
+        let full_cell = Arc::new(Mutex::new(String::new()));
+        let think_cell = Arc::new(Mutex::new(false));
+        let mut tools = ToolTracker::new();
+        let mut states: HashMap<String, u8> = HashMap::new();
+
+        let running = json!({
+            "type": "tool", "tool": "bash",
+            "state": { "status": "running", "input": { "command": "ls" } }
+        });
+        emit_opencode_tool(
+            None,
+            "s",
+            &running,
+            &full_cell,
+            &think_cell,
+            &mut tools,
+            &mut states,
+        );
+        let completed = json!({
+            "type": "tool", "tool": "bash",
+            "state": { "status": "completed", "input": { "command": "ls" }, "output": "file.txt" }
+        });
+        emit_opencode_tool(
+            None,
+            "s",
+            &completed,
+            &full_cell,
+            &think_cell,
+            &mut tools,
+            &mut states,
+        );
+        // A late duplicate completion (same id-less part) stays deduped too.
+        emit_opencode_tool(
+            None,
+            "s",
+            &completed,
+            &full_cell,
+            &think_cell,
+            &mut tools,
+            &mut states,
+        );
+        let f = full_cell.lock().unwrap();
+        let cards = f.matches("<tool>").count();
+        let results = f.matches("\"kind\":\"result\"").count()
+            + f.matches("\"kind\": \"result\"").count();
+        // The tool_result card is its own <tool> block (same shape as the
+        // id'd path) — so `cards - results` is the call-card count. The old
+        // bug re-minted a SECOND call card on every state transition.
+        assert_eq!(cards - results, 1, "one call card: {f}");
+        assert_eq!(
+            results, 1,
+            "completion attached to the original card exactly once: {f}"
+        );
     }
 }
 

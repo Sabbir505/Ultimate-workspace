@@ -59,6 +59,7 @@ import { useNewChatAction } from "./hooks/useNewChatAction";
 import { useViewNav } from "./hooks/useViewNav";
 import { usePetEvents } from "./hooks/usePetEvents";
 import { PetTicker } from "./components/pet/PetTicker";
+import { PetCarrier } from "./components/pet/PetCarrier";
 import { useTheme } from "./hooks/useTheme";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
 import { checkAndNotifyHarnessUpdates } from "./lib/harnessUpdates";
@@ -279,16 +280,17 @@ export default function App() {
   // no tool panel). Selecting the requested session happens inside a small
   // effect in the popout branch itself.
   if (popout?.kind === "chat") {
-    return (
-      <div className="popout-chat-root">
-        <Suspense fallback={null}>
-          <DocCodeRunner />
-          <DocDesignRunner />
-        </Suspense>
-        <ChatSelectionToolbar />
-        <ChatView popoutSessionId={popout.session ?? undefined} />
-      </div>
-    );
+  return (
+    <div className="popout-chat-root">
+      <Suspense fallback={null}>
+        <DocCodeRunner />
+        <DocDesignRunner />
+      </Suspense>
+      <ChatSelectionToolbar />
+      <PetCarrier />
+      <ChatView popoutSessionId={popout.session ?? undefined} />
+    </div>
+  );
   }
 
   return (
@@ -300,6 +302,7 @@ export default function App() {
       <ChatSelectionToolbar />
       <ToastHost />
       <PetTicker />
+      <PetCarrier />
       {/* Kept mounted so collapse/expand animates as a width slide instead
           of an unmount flash; the collapsed class hides it after the
           transition (visibility) so it can't be interacted with. */}

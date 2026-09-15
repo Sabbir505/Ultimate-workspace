@@ -261,12 +261,149 @@
   100% { opacity: 0; transform: translateY(54px) rotate(-200deg); }
 }
 
-/* ── Dragging ──────────────────────────────────────────────────────────── */
-.pet-slot-dragging .pet-hit {
+/* ── Catch & carry ─────────────────────────────────────────────────────── */
+/* The hit box offers a grab cursor and keeps touch from hijacking drags. */
+.pet-hit {
+  cursor: grab;
+  touch-action: none;
+}
+.pet-hit:active {
   cursor: grabbing;
 }
-.pet-slot-dragging .pet-actor {
-  animation: none;
+
+/* Landing pads: while the pet is carried, every existing home shows a soft
+   dashed band where it can be dropped — the sidebar strip's band sits on the
+   search bar's top edge; a pane strip is a zero-height overlay, so its band
+   rises from the composer's top seam (where the actor's feet land). */
+.pet-strip-armed::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1.5px dashed rgba(95, 212, 196, 0.38);
+  background: rgba(95, 212, 196, 0.06);
+  pointer-events: none;
+  z-index: 5;
+  animation: pet-pad-in 160ms ease-out;
+}
+.pet-strip-armed.pet-strip-sidebar::before {
+  bottom: -5px;
+}
+.pet-strip-armed.pet-strip-pane::before {
+  top: -31px;
+  height: 42px;
+}
+.pet-strip-drop-hover::before {
+  border-color: rgba(126, 240, 220, 0.95);
+  background: rgba(95, 212, 196, 0.16);
+  box-shadow:
+    0 0 16px rgba(95, 212, 196, 0.4),
+    inset 0 0 12px rgba(95, 212, 196, 0.2);
+}
+@keyframes pet-pad-in {
+  from { opacity: 0; transform: scaleY(0.6); }
+  to { opacity: 1; transform: scaleY(1); }
+}
+
+/* The carried pet: a body-portal copy that the rAF lerp positions via
+   transform on .pet-carrier; the wiggle div adds the dangling squirm. */
+.pet-carrier {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 90;
+  pointer-events: none;
+  will-change: transform;
+}
+.pet-carrier-wiggle {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  margin-left: -24px; /* centre the pet on the cursor */
+  transform-origin: 50% 85%;
+  animation: pet-carry-wiggle 0.5s ease-in-out infinite;
+  filter: drop-shadow(0 0 10px rgba(95, 212, 196, 0.35));
+}
+@keyframes pet-carry-wiggle {
+  0%, 100% { transform: rotate(-7deg) scale(1.04); }
+  50% { transform: rotate(7deg) scale(1.08); }
+}
+.pet-carrier .pet-actor {
+  position: absolute;
+  inset: auto 0 0 0;
+  margin: 0;
+}
+/* no ground shadow mid-air — the aura glow replaces it */
+.pet-carrier .pet-actor::after {
+  display: none;
+}
+
+/* Spirit trail: five ✦ drifting off the carried pet, staggered. */
+.pet-carrier-sparkle {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  font-size: 10px;
+  color: #ffd166;
+  text-shadow: 0 0 6px rgba(255, 209, 102, 0.8);
+  pointer-events: none;
+  opacity: 0;
+  animation: pet-carrier-sparkle 1.2s linear infinite;
+}
+.pet-carrier-sparkle:nth-child(2 of .pet-carrier-sparkle) { --sx: -16px; --sy: -28px; animation-delay: 0s; }
+.pet-carrier-sparkle:nth-child(3 of .pet-carrier-sparkle) { --sx: 15px; --sy: -30px; animation-delay: 0.24s; font-size: 8px; }
+.pet-carrier-sparkle:nth-child(4 of .pet-carrier-sparkle) { --sx: -22px; --sy: -8px; animation-delay: 0.48s; color: #7ef0dc; }
+.pet-carrier-sparkle:nth-child(5 of .pet-carrier-sparkle) { --sx: 22px; --sy: -10px; animation-delay: 0.72s; color: #7ef0dc; font-size: 8px; }
+.pet-carrier-sparkle:nth-child(6 of .pet-carrier-sparkle) { --sx: 2px; --sy: -34px; animation-delay: 0.96s; }
+@keyframes pet-carrier-sparkle {
+  0% { opacity: 0; transform: translate(0, 0) scale(0.4) rotate(0deg); }
+  25% { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--sx), var(--sy)) scale(1) rotate(150deg); }
+}
+
+/* Landing plop: a squash-and-stretch settle on the dropped actor. !important
+   is needed to beat the breathe rule's 5-class :not() specificity above. */
+.pet-slot-landed .pet-actor {
+  animation: pet-land 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+@keyframes pet-land {
+  0% { transform: translateY(-14px) scale(1, 1); }
+  45% { transform: translateY(0) scale(1.12, 0.8); }
+  75% { transform: translateY(0) scale(0.94, 1.06); }
+  100% { transform: translateY(0) scale(1, 1); }
+}
+
+/* Spirit burst at the landing spot: eight sparks fly outward along --ang. */
+.pet-burst {
+  position: absolute;
+  left: 0;
+  bottom: 8px;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 7;
+}
+.pet-burst i {
+  position: absolute;
+  left: -2px;
+  top: -3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: #5fd4c4;
+  opacity: 0;
+  animation: pet-burst-fly 0.55s cubic-bezier(0.16, 0.84, 0.44, 1) forwards;
+}
+.pet-burst i:nth-child(even) {
+  background: #ffd166;
+  animation-duration: 0.68s;
+}
+@keyframes pet-burst-fly {
+  0% { opacity: 0; transform: rotate(var(--ang)) translateY(-2px) scale(0.4); }
+  20% { opacity: 1; }
+  100% { opacity: 0; transform: rotate(var(--ang)) translateY(-30px) scale(1); }
 }
 
 /* ── Panel open button ─────────────────────────────────────────────────── */
@@ -631,10 +768,17 @@ button.pet-focus-btn.is-active:hover {
   .pet-zzz,
   .pet-heart,
   .pet-confetti i,
-  .pet-bubble {
+  .pet-bubble,
+  .pet-slot-landed .pet-actor,
+  .pet-carrier-wiggle,
+  .pet-carrier-sparkle,
+  .pet-burst i,
+  .pet-strip-armed::before {
     animation: none !important;
   }
-  .pet-confetti {
+  .pet-confetti,
+  .pet-carrier-sparkle,
+  .pet-burst {
     display: none;
   }
 }

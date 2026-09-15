@@ -4363,3 +4363,30 @@ button.chat-mermaid-open {
   opacity: 0.4;
   cursor: default;
 }
+
+/* Connector chips on a user message — the message-side counterpart of the
+   composer's attach pills. Parsed from the [Connected: …] content marker
+   (see MessageAttachments.parseAttachments). */
+.msg-connectors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 2px;
+}
+.msg-connector-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.msg-connector-chip svg {
+  flex-shrink: 0;
+  opacity: 0.9;
+}

@@ -6,6 +6,7 @@
 //   [Attached image: NAME]                              → image
 //   Attached file: NAME\n```\nEXTRACTED_TEXT\n```       → doc/text with content
 //   [Attached file NAME could not be read as text.]     → unreadable doc
+//   [Connected: NAME, NAME]                             → connector chips
 //
 // This module parses those markers out of the content, renders each as a
 // rounded preview card (image thumbnail for images, a file card with ext
@@ -40,7 +41,7 @@ export interface ParsedAttachment {
  *  state/chat.ts). Matched in one pass (matchAll) so attachments come out in
  *  document order regardless of kind. */
 const RE_ANY =
-  /(?:\n*\[Attached image: ([^\]]+)\]\n*)|(?:\n*\[Attached file ([^\]]+) could not be read as text\.\]\n*)|(?:\n*Attached file: (.+?)\n```(?:\r?\n)([\s\S]*?)\r?\n```)|(?:\n*\[Attached file: ([^\]]+)\]\n*)/g;
+  /(?:\n*\[Attached image: ([^\]]+)\]\n*)|(?:\n*\[Attached file ([^\]]+) could not be read as text\.\]\n*)|(?:\n*Attached file: (.+?)\n```(?:\r?\n)([\s\S]*?)\r?\n```)|(?:\n*\[Attached file: ([^\]]+)\]\n*)|(?:\n*\[Connected: ([^\]]+)\]\n*)/g;
 
 function extOf(name: string): string {
   const dot = name.lastIndexOf(".");
@@ -57,13 +58,15 @@ function badgeFor(name: string, kind: ParsedAttachment["kind"]): string {
 }
 
 /** Parse attachment markers out of `content`. Returns the list of attachments
- *  (in document order) and the content with every marker stripped, so the
- *  bubble shows clean text + the cards above it. */
+ *  (in document order), the connector names from any `[Connected: …]` marker,
+ *  and the content with every marker stripped, so the bubble shows clean
+ *  text + the cards/chips above it. */
 export function parseAttachments(
   content: string,
   liveAttachments?: ChatAttachmentInput[],
-): { attachments: ParsedAttachment[]; text: string } {
+): { attachments: ParsedAttachment[]; connectors: string[]; text: string } {
   const attachments: ParsedAttachment[] = [];
+  const connectors: string[] = [];
   let i = 0;
 
   // Collect every match in document order, then strip them all in one pass.
@@ -110,10 +113,20 @@ export function parseAttachments(
         kind: ext && ["docx", "pptx", "xlsx", "pdf", "doc", "ppt", "xls"].includes(ext) ? "doc" : "text",
         badge: badgeFor(name, "doc"),
       });
+    } else if (m[6] != null) {
+      // [Connected: NAME, NAME] — the connectors attached to this
+      // conversation at send time (composer @-menu). Chips, not cards.
+      for (const name of m[6].split(",")) {
+        const trimmed = name.trim();
+        if (trimmed) connectors.push(trimmed);
+      }
     }
   }
 
-  const text = attachments.length > 0 ? content.replace(RE_ANY, "") : content;
+  const text =
+    attachments.length > 0 || connectors.length > 0
+      ? content.replace(RE_ANY, "")
+      : content;
 
   // For the optimistic message, attach live image thumbnails by filename match.
   if (liveAttachments && liveAttachments.length > 0) {
@@ -138,7 +151,7 @@ export function parseAttachments(
     }
   }
 
-  return { attachments, text: text.replace(/\n{3,}/g, "\n\n").trim() };
+  return { attachments, connectors, text: text.replace(/\n{3,}/g, "\n\n").trim() };
 }
 
 function FileGlyph({ kind }: { kind: ParsedAttachment["kind"] }) {
@@ -200,6 +213,31 @@ export function MessageAttachments({
     <div className="msg-attachments">
       {attachments.map((a) => (
         <AttachmentPreviewCard key={a.key} att={a} />
+      ))}
+    </div>
+  );
+}
+
+function ConnectorGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9 7V3M15 7V3M8 21a4 4 0 0 1-4-4v-3a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3a4 4 0 0 1-4 4H8zM7 7h10v3H7z" />
+    </svg>
+  );
+}
+
+/** Connector chips rendered above the message text — the message-side
+ *  counterpart of the composer's attach pills, so the turn shows which
+ *  connectors it used. Returns null when there are none. */
+export function MessageConnectors({ connectors }: { connectors: string[] }) {
+  if (connectors.length === 0) return null;
+  return (
+    <div className="msg-connectors">
+      {connectors.map((name) => (
+        <span key={name} className="msg-connector-chip" title={`Connected: ${name}`}>
+          <ConnectorGlyph />
+          {name}
+        </span>
       ))}
     </div>
   );

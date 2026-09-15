@@ -8,17 +8,17 @@
 import { useEffect, useState } from "react";
 import { getSyntaxTheme } from "../lib/syntaxTheme";
 
-export function useSyntaxTheme() {
-  const [style, setStyle] = useState(getSyntaxTheme);
+export function useSyntaxTheme(scope: "root" | "chat-block" = "root") {
+  const [style, setStyle] = useState(() => getSyntaxTheme(scope));
 
   useEffect(() => {
     if (typeof document === "undefined") return;
-    const recompute = () => setStyle(getSyntaxTheme());
+    const recompute = () => setStyle(getSyntaxTheme(scope));
     recompute();
     const obs = new MutationObserver(recompute);
     obs.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     return () => obs.disconnect();
-  }, []);
+  }, [scope]);
 
   return style;
 }

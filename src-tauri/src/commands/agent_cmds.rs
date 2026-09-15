@@ -158,6 +158,12 @@ pub async fn list_harness_models(
     })
     .await
     .map_err(|e| format!("harness model probe join failed: {e}"))?;
+    // Don't cache an empty discovery result: a raced probe (CLI cold start,
+    // login refresh mid-run) would read as "zero models" for the whole TTL.
+    // Leaving the cache unwritten makes the next picker open re-probe.
+    if cfg.models.is_empty() {
+        return Ok(cfg);
+    }
     if let Ok(mut guard) = CACHE.lock() {
         guard.insert(harness_id, (Instant::now(), cfg.clone()));
     }

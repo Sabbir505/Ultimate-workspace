@@ -666,6 +666,13 @@ pub(super) fn handle_commandcode_event(
                         );
                     }
                 }
+                "model_request_start" => {
+                    // The request went out to the provider — open the
+                    // generation window HERE. Without this the window only
+                    // opens at the first delta (microseconds before the first
+                    // token is emitted), collapsing TTFT to ~0 ms.
+                    crate::chat::turn_perf::begin_active_gen(sid);
+                }
                 _ => {
                     // Tool frames: every variant carries toolCallId+toolName.
                     // `tool_running`-style frames open the step's card once

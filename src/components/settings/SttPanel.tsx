@@ -8,6 +8,7 @@ import {
   cancelModelDownload,
   onModelDownloadProgress,
   startModelDownload,
+  sttInstallCuda,
   sttInstallServer,
   sttSetAutoStart,
   sttSetDefault,
@@ -24,10 +25,14 @@ import {
 } from "../../lib/ipc";
 import { formatBytes, shortName } from "../../lib/format";
 import { Modal } from "../common/Modal";
+import { useBuildUpdatesStore } from "../../state/buildUpdates";
 
 /** Progress-event id emitted by `stt_install_server` (backend contract:
  *  commands/stt.rs SERVER_INSTALL_ID). */
 const SERVER_INSTALL_ID = "stt-whisper-server";
+/** Progress-event id emitted by `stt_install_cuda` (backend contract:
+ *  commands/stt.rs CUDA_INSTALL_ID). */
+const CUDA_INSTALL_ID = "stt-whisper-cuda";
 
 export function SttPanel() {
   const [stt, setStt] = useState<SttStatusData | null>(null);
@@ -41,21 +46,35 @@ export function SttPanel() {
   };
   useEffect(refresh, []);
 
+  // Build-updater state (harness-style): what the installed builds' versions
+  // are vs this app's pins, refreshed on panel open.
+  const buildUpdates = useBuildUpdatesStore((s) => s.buildUpdates);
+  const markBuildUpdated = useBuildUpdatesStore((s) => s.markBuildUpdated);
+  const refreshBuildUpdates = useBuildUpdatesStore((s) => s.refreshBuildUpdates);
+  useEffect(() => {
+    void refreshBuildUpdates().catch(() => {});
+  }, [refreshBuildUpdates]);
+
   // Live download bars (same stream the Model Market and Knowledge use).
   useEffect(() => {
     let stale = false;
     let unlisten: (() => void) | null = null;
     void onModelDownloadProgress((p) => {
       if (stale) return;
-      // The whisper-server one-click install rides the same event stream but
-      // has its own toasts/labels — never report it as a "speech model".
-      if (p.id === SERVER_INSTALL_ID) {
+      // The whisper-server one-click installs (CPU + CUDA builds) ride the
+      // same event stream but have their own toasts/labels — never report
+      // them as a "speech model".
+      if (p.id === SERVER_INSTALL_ID || p.id === CUDA_INSTALL_ID) {
         setDownloads((prev) => ({
           ...prev,
           [p.id]: { state: p.state, downloaded: p.downloadedBytes, total: p.totalBytes ?? null },
         }));
         if (p.state === "done") {
-          toastSuccess("whisper-server installed — download a model and start the server");
+          toastSuccess(
+            p.id === CUDA_INSTALL_ID
+              ? "CUDA build installed — you can switch to GPU now"
+              : "whisper-server installed — download a model and start the server",
+          );
           refresh();
         }
         if (p.state === "error" && p.error) {
@@ -142,13 +161,29 @@ export function SttPanel() {
 
   // One-click install of the prebuilt upstream whisper-server binary. The
   // command itself is idempotent — safe to retry after a failed download.
-  const handleInstallServer = async () => {
+  // `force` turns the same command into the build updater's Update action:
+  // re-pull the pinned release over the existing install.
+  const handleInstallServer = async (force = false) => {
     try {
-      const s = await sttInstallServer();
+      const s = await sttInstallServer(force);
       setStt(s);
+      if (force) markBuildUpdated("stt-whisper");
       refresh();
     } catch (err) {
       toastError("Could not install whisper-server", err);
+    }
+  };
+
+  // One-click install/update of the pinned CUDA build (the GPU toggle's
+  // missing piece — previously a manual "drop a build in the folder" chore).
+  const handleInstallCuda = async (force = false) => {
+    try {
+      const s = await sttInstallCuda(force);
+      setStt(s);
+      markBuildUpdated("stt-whisper-cuda");
+      refresh();
+    } catch (err) {
+      toastError("Could not install the CUDA build", err);
     }
   };
 
@@ -190,6 +225,21 @@ export function SttPanel() {
     serverInstall.state !== "cancelled";
   const serverInstallPct = serverInstall?.total
     ? Math.min(100, Math.round((serverInstall.downloaded / serverInstall.total) * 100))
+    : null;
+
+  // Build-updater rows: managed installs behind this app's pinned whisper.cpp
+  // release (or on disk with no version marker at all) get Update buttons.
+  const cpuUpdate = buildUpdates["stt-whisper"];
+  const cudaUpdate = buildUpdates["stt-whisper-cuda"];
+  // CUDA build install/update progress (same stream, its own id).
+  const cudaInstall = downloads[CUDA_INSTALL_ID];
+  const cudaInstalling =
+    !!cudaInstall &&
+    cudaInstall.state !== "done" &&
+    cudaInstall.state !== "error" &&
+    cudaInstall.state !== "cancelled";
+  const cudaInstallPct = cudaInstall?.total
+    ? Math.min(100, Math.round((cudaInstall.downloaded / cudaInstall.total) * 100))
     : null;
 
   return (
@@ -270,6 +320,26 @@ export function SttPanel() {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+            {/* Build updater (harness-style): when the managed CPU build is
+                behind this app's pinned whisper.cpp release, offer the update
+                even though a binary already exists. */}
+            {stt.binaryPath && cpuUpdate?.updateAvailable && (
+              <div style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="primary cta-strong"
+                  disabled={serverInstalling}
+                  title={`v${cpuUpdate.installedVersion ?? "?"} → v${cpuUpdate.latestVersion} — re-downloads the pinned release`}
+                  onClick={() => void handleInstallServer(true)}
+                >
+                  {serverInstalling
+                    ? serverInstallPct !== null
+                      ? `Updating… ${serverInstallPct}%`
+                      : "Updating…"
+                    : `Update whisper-server → ${cpuUpdate.latestVersion}`}
+                </button>
               </div>
             )}
             {/* Auto-start row — same shape as the Notifications toggles:
@@ -380,9 +450,9 @@ export function SttPanel() {
                 )
               ) : stt.device === "gpu" ? (
                 <span style={{ color: "var(--warn, #d29922)" }}>
-                  GPU is selected but no CUDA whisper.cpp build was found. Put one
-                  in the app&apos;s bin/whisper-cpp-cuda folder, or switch back to
-                  CPU — the CPU build the installer provides is used for CPU mode.
+                  GPU is selected but no CUDA whisper.cpp build was found. Install
+                  the pinned CUDA build below, or switch back to CPU — the CPU
+                  build the installer provides is used for CPU mode.
                 </span>
               ) : (
                 <>
@@ -392,6 +462,50 @@ export function SttPanel() {
                 </>
               )}
             </div>
+            {/* CUDA build one-click install/update (harness-style updater row):
+                installs the pinned cublas build — it bundles its own CUDA 12
+                runtime DLLs, so no CUDA toolkit install is needed — and offers
+                an update whenever the installed build is behind the pin. */}
+            {(!stt.gpuAvailable || cudaUpdate?.updateAvailable) && (
+              <div style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="primary cta-strong"
+                  disabled={cudaInstalling}
+                  title={
+                    cudaUpdate?.updateAvailable
+                      ? `v${cudaUpdate.installedVersion ?? "?"} → v${cudaUpdate.latestVersion} — re-downloads the pinned CUDA build`
+                      : "Downloads the pinned CUDA build of whisper.cpp (~640 MB), checksum-verified"
+                  }
+                  onClick={() => void handleInstallCuda(stt.gpuAvailable)}
+                >
+                  {cudaInstalling
+                    ? cudaInstallPct !== null
+                      ? `Installing… ${cudaInstallPct}%`
+                      : "Installing…"
+                    : stt.gpuAvailable
+                      ? `Update CUDA build → ${cudaUpdate?.latestVersion ?? ""}`
+                      : "Install CUDA build (one click, ~640 MB)"}
+                </button>
+                {cudaInstalling && (
+                  <div className="model-card-progress" style={{ padding: 0, marginTop: 8 }}>
+                    <div className="model-card-progress-bar">
+                      <div
+                        className="model-card-progress-fill"
+                        style={{ width: `${cudaInstallPct ?? 0}%` }}
+                      />
+                    </div>
+                    <div className="model-card-progress-info">
+                      <span>
+                        {cudaInstallPct !== null ? `${cudaInstallPct}% · ` : ""}
+                        {formatBytes(cudaInstall?.downloaded ?? 0)}
+                        {cudaInstall?.total ? ` / ${formatBytes(cudaInstall.total)}` : ""}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="settings-note" style={{ marginTop: 4 }}>

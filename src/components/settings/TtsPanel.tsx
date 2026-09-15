@@ -29,6 +29,7 @@ import {
 } from "../../lib/ipc";
 import { formatBytes } from "../../lib/format";
 import { GlassSelect } from "../common/GlassSelect";
+import { useBuildUpdatesStore } from "../../state/buildUpdates";
 
 /** One row's audition button.
  *
@@ -99,6 +100,14 @@ export function TtsPanel() {
   const [downloads, setDownloads] = useState<Record<string, PerDownloadState>>({});
   const [gpu, setGpu] = useState<TtsGpuStatus | null>(null);
   const [busyDevice, setBusyDevice] = useState(false);
+  // Build-updater row for the GPU runtime (harness-style): installed version
+  // vs this app's pinned sherpa-onnx build, refreshed on panel open.
+  const gpuUpdate = useBuildUpdatesStore((s) => s.buildUpdates["tts-gpu"]);
+  const markBuildUpdated = useBuildUpdatesStore((s) => s.markBuildUpdated);
+  const refreshBuildUpdates = useBuildUpdatesStore((s) => s.refreshBuildUpdates);
+  useEffect(() => {
+    void refreshBuildUpdates().catch(() => {});
+  }, [refreshBuildUpdates]);
 
   const refresh = () => {
     void ttsStatus()
@@ -174,10 +183,11 @@ export function TtsPanel() {
     }
   };
 
-  const handleInstallGpu = async () => {
+  const handleInstallGpu = async (force = false) => {
     setBusyDevice(true);
     try {
-      setGpu(await ttsInstallGpu());
+      setGpu(await ttsInstallGpu(force));
+      if (force) markBuildUpdated("tts-gpu");
       toastSuccess("GPU support ready");
     } catch (err) {
       toastError("Could not install GPU support", err);
@@ -434,12 +444,34 @@ export function TtsPanel() {
           )}
         </div>
 
-        {tts.device === "gpu" && gpu && (
+        {(tts.device === "gpu" || gpuUpdate?.updateAvailable) && gpu && (
           <div style={{ marginTop: 8, fontSize: 11 }}>
             {gpu.missing.length === 0 ? (
-              <span style={{ color: "var(--success, #3fb950)" }}>
-                ✓ GPU runtime ready
-              </span>
+              <>
+                <span style={{ color: "var(--success, #3fb950)" }}>
+                  ✓ GPU runtime ready
+                </span>
+                {/* Build updater (harness-style): the installed runtime is
+                    behind this app's pinned sherpa-onnx build — or predates
+                    version markers entirely. */}
+                {gpuUpdate?.updateAvailable && (
+                  <div style={{ marginTop: 8 }}>
+                    <button
+                      type="button"
+                      className="primary cta-strong"
+                      disabled={busyDevice || gpuInstalling}
+                      title={`v${gpuUpdate.installedVersion ?? "?"} → v${gpuUpdate.latestVersion} — re-downloads the pinned runtime`}
+                      onClick={() => void handleInstallGpu(true)}
+                    >
+                      {gpuInstalling
+                        ? gpuInstallPct !== null
+                          ? `Updating… ${gpuInstallPct}%`
+                          : "Updating…"
+                        : `Update GPU runtime → ${gpuUpdate.latestVersion}`}
+                    </button>
+                  </div>
+                )}
+              </>
             ) : (
               <>
                 <div style={{ color: "var(--warn, #d29922)", marginBottom: 6 }}>

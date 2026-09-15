@@ -63,6 +63,7 @@ import { PetTicker } from "./components/pet/PetTicker";
 import { useTheme } from "./hooks/useTheme";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
 import { checkAndNotifyHarnessUpdates } from "./lib/harnessUpdates";
+import { checkAndNotifyBuildUpdates } from "./lib/buildUpdates";
 import { initWorkspacePersistence } from "./lib/workspaceRestore";
 import { initAppFocusTracking } from "./lib/appFocus";
 import { monoFontStack, uiFontStack } from "./lib/fonts";
@@ -231,6 +232,11 @@ export default function App() {
     // CLI lands a bell-panel row that deep-links to Settings → Agent
     // harnesses, where the row's Run login button becomes Update.
     void checkAndNotifyHarnessUpdates();
+
+    // Native-build update check (same quiet once-per-open flow): an out-of-
+    // date whisper/TTS build lands a bell row deep-linking to Settings →
+    // Local Models → Speech, where the build's Install button reads Update.
+    void checkAndNotifyBuildUpdates();
 
     // Auto-updater: wire download-progress + installed events, then check on
     // startup and every 4 hours. A check is a single HTTP GET + semver compare;

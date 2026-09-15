@@ -192,18 +192,33 @@ export const ttsInstallGpu = (force = false) =>
 /** One updatable native build: installed version vs the version this app
  *  pins. Mirrors the harness HarnessUpdateStatus row shape. */
 export interface BuildUpdateStatus {
-  /** "stt-whisper" | "stt-whisper-cuda" | "tts-gpu". */
+  /** "stt-whisper" | "stt-whisper-cuda" | "llama-cuda" | "tts-gpu". */
   id: string;
   title: string;
   installed: boolean;
   installedVersion: string | null;
   latestVersion: string;
   updateAvailable: boolean;
+  /** Row context (e.g. a custom build is in use and what updating does). */
+  note?: string | null;
 }
-/** Check all managed native builds (whisper CPU/CUDA, TTS GPU runtime) for
- *  available updates. */
+/** Check all managed native builds (whisper CPU/CUDA, llama CUDA server,
+ *  TTS GPU runtime) for available updates. */
 export const checkBuildUpdates = () =>
   safeInvoke<BuildUpdateStatus[]>("check_build_updates");
+
+export interface LlamaCudaInstallStatus {
+  installed: boolean;
+  exePath: string | null;
+  version: string | null;
+}
+/** One-click install/update of the pinned official CUDA llama-server
+ *  (Settings → Local Models → My Models → Server builds). Progress arrives
+ *  on `onModelDownloadProgress` under id "llama-cuda-server". `force`
+ *  re-downloads over an existing managed install; the app's llama-server
+ *  path setting is pointed at the managed build afterwards. */
+export const llamaInstallCuda = (force = false) =>
+  safeInvoke<LlamaCudaInstallStatus>("llama_install_cuda", { force });
 
 /** Pop a chat session out into its own OS window (roadmap #17). */
 export const popOutChat = (sessionId: string) =>

@@ -172,17 +172,27 @@ describe("background-session sends (audit 2026-09-14 #1)", () => {
     // …but NEITHER visible buffer shows the bubble (the persisted row appears
     // when the session is opened).
     expect(s.messages.some((m) => m.content === "bg work")).toBe(false);
-    expect(s.splitMessages.some((m) => m.content === "bg work")).toBe(false);
+    expect(Object.values(s.paneBuffers).every((b) => !b.messages.some((m) => m.content === "bg work"))).toBe(true);
   });
 
-  it("a split-pane override send still lands in the split buffer", async () => {
+  it("a pinned-pane override send still lands in that pane's buffer", async () => {
     (sendChatMessage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
     addS2();
-    useChatStore.setState({ splitChatSessionId: "s2", splitMessages: [] } as never);
+    useChatStore.setState({
+      chatPaneTree: {
+        kind: "split",
+        id: "split-1",
+        dir: "row",
+        ratio: 0.5,
+        a: { kind: "leaf", paneId: "main", sessionId: null },
+        b: { kind: "leaf", paneId: "pane-2", sessionId: "s2" },
+      },
+      paneBuffers: { "pane-2": { sessionId: "s2", messages: [], hasMoreHistory: false } },
+    } as never);
     await useChatStore.getState().sendMessage("split work", undefined, undefined, "s2");
 
     const s = useChatStore.getState();
-    expect(s.splitMessages.some((m) => m.content === "split work")).toBe(true);
+    expect(s.paneBuffers["pane-2"]?.messages.some((m) => m.content === "split work")).toBe(true);
     expect(s.messages.some((m) => m.content === "split work")).toBe(false);
   });
 });

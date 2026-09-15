@@ -1,5 +1,6 @@
-// PetStrip — one "home" of the companion pet (above the sidebar search, or
-// above the chat composer). The pet lives in exactly ONE home at a time and
+// PetStrip — one "home" of the companion pet (the sidebar strip, or the
+// top edge of ONE chat pane's composer — "main" or "pane-N"). The pet lives
+// in exactly ONE home at a time and
 // teleports between them: the old home plays a scanline-dissolve (teleout
 // sprite) for the first half of the teleport window, then the new home
 // materialises (telein sprite) in the second half. Only the sidebar home
@@ -19,7 +20,7 @@ const PANEL_CLOSE_MS = 170;
 /** Pointer movement past this (px) turns a press into a drag. */
 const DRAG_THRESHOLD_PX = 6;
 
-export function PetStrip({ myHome }: { myHome: "sidebar" | "composer" }) {
+export function PetStrip({ myHome }: { myHome: string }) {
   const enabled = usePetStore((s) => s.enabled);
   const home = usePetStore((s) => s.home);
   const teleport = usePetStore((s) => s.teleport);
@@ -121,13 +122,19 @@ export function PetStrip({ myHome }: { myHome: "sidebar" | "composer" }) {
   );
 
   const showPet = enabled && (active || vanishing);
-  if (!enabled || (myHome === "composer" && !showPet)) return null;
+  // Non-sidebar strips collapse to nothing while the pet lives elsewhere —
+  // otherwise every open pane would reserve an empty gap above its composer.
+  if (!enabled || (myHome !== "sidebar" && !showPet)) return null;
   const animOverride =
     phase === "vanish" ? ("teleout" as const) : phase === "appear" ? ("telein" as const) : undefined;
   const actorVisible = phase !== "appear" || appearReady;
 
   return (
-    <div ref={stripRef} className={`pet-strip pet-strip-${myHome}`} data-home={myHome}>
+    <div
+      ref={stripRef}
+      className={`pet-strip${myHome === "sidebar" ? " pet-strip-sidebar" : " pet-strip-pane"}`}
+      data-home={myHome}
+    >
       {/* Zero-width slot at the pet's x fraction; the 48px actor centres on it
           via its own negative margin. pointer events live on the small hit box
           around the art: press = pet, press+move = drag to a new spot. */}

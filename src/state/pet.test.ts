@@ -355,13 +355,16 @@ describe("store", () => {
     expect(raw.home).toBe("sidebar");
   });
 
-  it("teleports to the other home when the schedule fires while calm", () => {
+  it("teleports to a random OTHER existing home when the schedule fires while calm", () => {
     const s = usePetStore.getState();
     expect(s.home).toBe("sidebar");
-    usePetStore.setState({ nextTeleportAt: Date.now() - 1 });
+    // Two chat panes open (the pane tree publishes its ids via setPetHomes).
+    usePetStore.setState({ homes: ["sidebar", "main", "pane-3"], nextTeleportAt: Date.now() - 1 });
     usePetStore.getState().tick(Date.now(), 0.016);
     const after = usePetStore.getState();
-    expect(after.home).toBe("composer");
+    // The destination is one of the OTHER homes — random, so membership.
+    expect(after.home).not.toBe("sidebar");
+    expect(["main", "pane-3"]).toContain(after.home);
     expect(after.teleport).not.toBeNull();
     expect(after.teleport?.from).toBe("sidebar");
   });

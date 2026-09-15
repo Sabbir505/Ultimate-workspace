@@ -57,7 +57,8 @@ beforeEach(() => {
   useChatStore.setState({
     activeChatSessionId: "sess-1",
     focusedChatSessionId: null,
-    splitChatSessionId: null,
+    chatPaneTree: null,
+    paneBuffers: {},
     sessions: [CHAT_SESSION as never],
     sessionProjects: { "sess-1": "p1" },
   });

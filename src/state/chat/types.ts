@@ -149,6 +149,16 @@ export interface QueuedChatMessage {
 
 import type { ChatAttachmentInput } from "../../lib/ipc";
 
+/** Message buffer for one pinned split pane — the per-pane twin of the flat
+ *  `messages` / `messagesSessionId` / `hasMoreHistory` triple the main pane
+ *  uses. Keyed by pane id in `paneBuffers`. */
+export interface ChatPaneBuffer {
+  sessionId: string;
+  messages: ChatMessageRecord[];
+  /** True when the backend may hold rows older than the buffer's first row. */
+  hasMoreHistory: boolean;
+}
+
 /** A per-session goal-driven loop (/goal / /loop). The host auto-issues a
  *  follow-up turn whenever the last reply said `LOOP_STATUS: continue`, up to
  *  `max` iterations. `advanceLoop` inspects the sentinel to decide. */
@@ -360,30 +370,60 @@ export interface ChatState {
   /** True when the backend may still hold messages older than the buffer's
    *  first row (false after a short page or when nothing is loaded). */
   hasMoreHistory: boolean;
-  /** --- Split chat view -------------------------------------------------
-   *  A second, independent chat view beside the main one ("Open in split
-   *  view" in a session row's ⋮ menu). The split pane owns its own message
-   *  buffer so BOTH views render full-fidelity histories at once; streaming
-   *  was already session-keyed, so live turns work in both without extra
-   *  state. `splitChatSessionId === activeChatSessionId` is allowed — the
-   *  split pane then follows the main list and the split buffer stays idle. */
-  splitChatSessionId: string | null;
-  splitMessages: ChatMessageRecord[];
-  splitMessagesSessionId: string | null;
-  splitHasMoreHistory: boolean;
-  /** Open the split pane on a session (loading its history). */
-  openChatSplit: (chatSessionId: string) => void;
-  /** Close the split pane and drop its buffer. */
-  closeChatSplit: () => void;
-  loadSplitMessages: (chatSessionId: string) => Promise<void>;
-  loadOlderSplitMessages: (chatSessionId: string) => Promise<number>;
+  /** --- Split chat panes ------------------------------------------------
+   *  Up to MAX_CHAT_PANES full chat views at once, laid out by a binary
+   *  split tree (see ./paneTree.ts). The main leaf follows the active
+   *  session and owns the flat `messages` buffer; every pinned pane owns an
+   *  entry in `paneBuffers` so ALL views render full-fidelity histories at
+   *  once. A session appears in at most one pane, so each chat's live agent
+   *  turn (session-keyed `streaming`) renders in exactly one place. */
+  chatPaneTree: import("./paneTree").ChatPaneNode | null;
+  /** Message buffer per PINNED pane (main uses the flat fields above). */
+  paneBuffers: Record<string, ChatPaneBuffer>;
+  /** The pane the user last interacted with (null = main). Drives the shared
+   *  chrome pin and which pane sidebar picks target. */
+  focusedPaneId: string | null;
+  /** The pane layout remembered when the user clicks a chat that is in NO
+   *  pane while splits are open: the panes collapse to a single view and the
+   *  layout parks here. Clicking any chat that belongs to the remembered
+   *  layout restores it (and focuses that chat's pane). In-memory. */
+  rememberedChatPaneState: {
+    tree: import("./paneTree").ChatPaneNode;
+    /** What the main pane was showing at collapse time — the restored main
+     *  leaf needs a live session distinct from every pinned one. */
+    activeSessionId: string | null;
+  } | null;
+  /** Restore the remembered pane layout because the user clicked one of its
+   *  chats. No-op without a memory or when the chat isn't in it. */
+  restoreChatPaneState: (chatSessionId: string) => Promise<void>;
+  /** Open `chatSessionId` in a new pane (⋮ menu): toggles the pane closed
+   *  when the session is already pinned in one. */
+  openChatSplit: (chatSessionId: string) => Promise<void>;
+  /** Close one pinned pane (its header ✕). The main pane can't close. */
+  closeChatPane: (paneId: string) => void;
+  /** Close every pinned pane and drop the tree (back to the single view). */
+  closeAllChatPanes: () => void;
+  /** Live-drag a split divider: ratio for split node `splitId`. */
+  setChatPaneRatio: (splitId: string, ratio: number) => void;
+  /** Record the pane the user interacted with (null = main). */
+  setFocusedPane: (paneId: string | null) => void;
+  /** Drag-and-drop: open `chatSessionId` on one edge of `targetPaneId`.
+   *  Move semantics — a session already shown elsewhere relocates (its old
+   *  pane collapses / main falls back to another chat). */
+  moveChatSessionToPane: (
+    chatSessionId: string,
+    targetPaneId: string,
+    edge: import("./paneTree").ChatPaneEdge,
+  ) => Promise<void>;
+  /** Load (or re-target) a pinned pane's history page. */
+  loadPaneMessages: (paneId: string, chatSessionId: string) => Promise<void>;
+  /** Prepend the next older page into a pinned pane's buffer. */
+  loadOlderPaneMessages: (paneId: string, chatSessionId: string) => Promise<number>;
   /** Which chat the SHARED chrome (toolbar title, folder/git notches, git
-   *  sidebar) displays. Null = the plain active session (the main view). In
-   *  split view, interacting with the split half pins it to the split
-   *  session; interacting with the main half clears it — so everything in
-   *  the toolbar/git surface reflects the chat the user is working in. */
+   *  sidebar) displays — the focused pane's session, null = the plain active
+   *  session (main view). Maintained by setFocusedPane; interacting with a
+   *  pane re-pins the shared chrome to ITS chat. */
   focusedChatSessionId: string | null;
-  setFocusedChatSession: (chatSessionId: string | null) => void;
   /** Reload the message buffer that displays `chatSessionId` — the main list
    *  when it's the active session, the split buffer when it's the split
    *  pane's session, nothing otherwise. */

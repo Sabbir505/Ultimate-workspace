@@ -728,6 +728,7 @@ export function ActivityStepRow({
   step,
   done,
   live,
+  chatSessionId,
 }: {
   step: ActivityStep;
   done: boolean;
@@ -736,6 +737,11 @@ export function ActivityStepRow({
    *  so only this may show the row as finished. Tool rows carry no ✓/spinner
    *  in any state: while live the label itself is the progress (shine). */
   live?: boolean;
+  /** The chat session this bubble belongs to (pane-scoped in split view).
+   *  Subagent chips must read THAT session's live subagent status — reading
+   *  the global active session made a split pane show its neighbour's
+   *  agent activity inside its own turns. */
+  chatSessionId?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const hasBody = Boolean(
@@ -754,9 +760,7 @@ export function ActivityStepRow({
   const subRole = isSubagentStep ? step.data?.role || "agent" : "";
   const liveStatus = useChatStore((s) => {
     if (!isSubagentStep) return null;
-    const list = s.activeChatSessionId
-      ? s.subagents[s.activeChatSessionId]
-      : undefined;
+    const list = chatSessionId ? s.subagents[chatSessionId] : undefined;
     if (!list) return null;
     const match =
       Object.values(list).find((x) => x.task === subTask && x.role === subRole) ??
@@ -769,8 +773,8 @@ export function ActivityStepRow({
     const settled = liveStatus ? liveStatus !== "running" : done;
     const openAgent = () => {
       const s = useChatStore.getState();
-      const list = s.activeChatSessionId
-        ? Object.values(s.subagents[s.activeChatSessionId] ?? {})
+      const list = chatSessionId
+        ? Object.values(s.subagents[chatSessionId] ?? {})
         : [];
       const match =
         list.find((x) => x.status === "running" && x.task === task) ??
@@ -966,6 +970,7 @@ export function renderProcessBlock(
               step={step}
               done={step.done}
               live={live}
+              chatSessionId={chatSessionId}
             />
           ))}
         </div>
@@ -979,6 +984,7 @@ export function renderProcessBlock(
           count={b.count}
           steps={b.steps}
           live={live}
+          chatSessionId={chatSessionId}
         />
       );
     case "editrow":
@@ -1010,6 +1016,7 @@ export function FoldedStepGroup({
   count,
   steps,
   live,
+  chatSessionId,
 }: {
   title: string;
   icon: string;
@@ -1018,6 +1025,7 @@ export function FoldedStepGroup({
   /** Turn-level streaming flag — see ActivityStepRow. Per-call `done` flips
    *  at call start, so only this may end the live presentation. */
   live?: boolean;
+  chatSessionId?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const isLive = !!live;
@@ -1073,6 +1081,7 @@ export function FoldedStepGroup({
               step={step}
               done={step.done}
               live={isLive}
+              chatSessionId={chatSessionId}
             />
           ))}
         </div>

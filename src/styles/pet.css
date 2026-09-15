@@ -1,7 +1,8 @@
 /* Companion pet — strip, sprite stage, speech bubbles, particles.
    The pet renders a 16×16 pixel sprite sheet at 3× (48px) with
-   image-rendering: pixelated. Both homes (sidebar strip, composer strip)
-   render the same store state, so the pet is "bi-located" but synchronized. */
+   image-rendering: pixelated. All homes (the sidebar strip + one strip per
+   open chat pane) render the same store state, but the pet LIVES in exactly
+   one at a time — it teleports between them. */
 
 .pet-strip {
   position: relative;
@@ -19,8 +20,8 @@
 .pet-strip-sidebar .pet-actor {
   bottom: 0;
 }
-.pet-strip-composer {
-  /* Zero-height OVERLAY: the pet stands ON the composer card's top edge and
+.pet-strip-pane {
+  /* Zero-height OVERLAY (every non-sidebar pane strip): the pet stands ON the composer card's top edge and
      paints over whatever stacks there — the harness question card, queued
      messages, quotes, approvals — instead of consuming a 54px row that
      wedged empty space between the composer and the cards fused onto it.
@@ -31,7 +32,7 @@
   margin: 0;
   z-index: 6;
 }
-.pet-strip-composer .pet-actor {
+.pet-strip-pane .pet-actor {
   /* Feet ON the seam (the card's top edge), same treatment as the sidebar
      home on the search bar — the ground shadow tucks 1px over the border. */
   bottom: 0;

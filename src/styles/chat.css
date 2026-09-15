@@ -411,21 +411,6 @@ div[data-index]:has(.chat-session-row.menu-open) {
   bottom: auto;
   top: calc(100% + 4px);
 }
-/* Split view in the toolbar: just the one-click close — the single title
-   already follows the focused half (main or split). */
-.toolbar-split-close {
-  flex: none;
-  padding: 2px 7px;
-  font-size: 12px;
-  line-height: 1;
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
-}
-.toolbar-split-close:hover {
-  color: var(--text);
-  background: var(--surface-3, var(--surface-2));
-}
-
 /* Scrollable message list */
 .chat-messages {
   flex: 1;
@@ -4158,70 +4143,207 @@ button.chat-mermaid-open {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-/* ---------- Split chat view ----------
-   Two full-fidelity chat views side by side ("Open in split view" in a
-   session row's ⋮ menu). main/side are SIBLINGS of the tool panel inside the
-   chat grid so the panel can DOCK to whichever half the user last interacted
-   with (flex order): focus main → [main | panel | side], focus side →
-   [main | side | panel]. Each chat therefore works with its own right-side
-   panel. The split chat's title lives in the TOP toolbar, not on the pane. */
-.chat-split-main {
-  /* flexGrow/flexBasis are set inline from the draggable split ratio. */
-  flex: 1 1 50%;
+/* ---------- Split chat panes ----------
+   Up to six full-fidelity chat views arranged by a binary split tree (each
+   pane splits left/right or top/bottom, recursively — see ChatPaneGrid).
+   The tree renders inside the chat grid as ONE sibling of the global tool
+   panel (which stays the last column). Every gutter drag-resizes; a session
+   dragged from the sidebar lights up four edge drop zones over each pane.
+   A pinned pane carries a slim header (title + close); the main pane is
+   header-less (its title lives in the top toolbar). */
+.chat-pane-grid {
+  flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   display: flex;
 }
-.chat-split-side {
-  flex: 1 1 50%;
+.chat-pane-split {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+.chat-pane-split.dir-row { flex-direction: row; }
+.chat-pane-split.dir-col { flex-direction: column; }
+/* During a gutter drag the panes stop eating pointer events (the captured
+   resizer owns the pointer); the cursor + grip reflect the drag axis. */
+.chat-pane-split.pane-resizing { user-select: none; }
+.chat-pane-split.pane-resizing.dir-row { cursor: col-resize; }
+.chat-pane-split.pane-resizing.dir-col { cursor: row-resize; }
+.chat-pane-split.pane-resizing .chat-pane-cell,
+.chat-pane-split.pane-resizing .chat-pane { pointer-events: none; }
+
+.chat-pane-cell {
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--border);
 }
-/* Drag handle between the halves: invisible hit zone over the side's border
-   with a grip line that fades in on hover; while dragging, the grip lights
-   up and the panes stop eating pointer events. */
-.chat-split-resizer {
+
+/* One pane: pane chrome (header, drop zones) over a full chat view. */
+.chat-pane {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chat-pane .chat-view-wrap {
+  flex: 1;
+  min-height: 0;
+}
+/* Floating pane close — no title bar per pane (the top toolbar shows the
+   FOCUSED pane's chat title, so a bar here just duplicated it). The ✕ hovers
+   in over the pane's TOP-LEFT corner while the pointer is on the pane: the
+   top-RIGHT corner is occupied by the focused pane's git sidebar, which
+   mounts on the very click that would have hit the button. */
+.chat-pane-float-close {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  z-index: 25;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-solid) 82%, transparent);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.14s var(--ease), background 0.14s var(--ease);
+}
+.chat-pane:hover .chat-pane-float-close,
+.chat-pane-float-close:focus-visible {
+  opacity: 0.85;
+}
+.chat-pane-float-close:hover {
+  opacity: 1;
+  background: var(--surface-3, var(--surface-2));
+}
+
+/* Gutter between two subtrees: invisible hit zone with a grip line that
+   fades in on hover; while dragging, the grip lights up. */
+.chat-pane-resizer {
   flex: none;
-  order: 1;
-  width: 7px;
-  margin: 0 -3px;
   position: relative;
   z-index: 6;
+}
+.chat-pane-resizer[data-dir="row"] {
+  width: 7px;
+  margin: 0 -3px;
   cursor: col-resize;
 }
-.chat-split-resizer::after {
+.chat-pane-resizer[data-dir="col"] {
+  height: 7px;
+  margin: -3px 0;
+  cursor: row-resize;
+}
+.chat-pane-resizer::after {
   content: "";
   position: absolute;
+  /* Always-on hairline so adjacent panes have a visible border; warms to
+     the accent on hover and while the gutter is being dragged. */
+  background: var(--border);
+  transition: background 0.15s var(--ease);
+}
+.chat-pane-resizer[data-dir="row"]::after {
   left: 3px;
   top: 0;
   bottom: 0;
   width: 1px;
-  background: transparent;
-  transition: background 0.15s var(--ease);
 }
-.chat-split-resizer:hover::after,
-.chat-grid-wrap.split-resizing .chat-split-resizer::after {
+.chat-pane-resizer[data-dir="col"]::after {
+  top: 3px;
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+.chat-pane-resizer:hover::after,
+.chat-pane-split.pane-resizing .chat-pane-resizer::after {
   background: color-mix(in srgb, var(--accent) 55%, var(--border));
 }
-.chat-grid-wrap.split-resizing {
-  cursor: col-resize;
-  user-select: none;
+
+/* Drop zones: four edge hit strips over each pane, mounted only while a
+   chat session is being dragged (ChatPaneGrid). Dropping on one opens that
+   chat on that side of the pane. The strips are invisible hit areas — the
+   VISIBLE preview is .chat-pane-drop-preview below, which shows the
+   outcome: a half-pane overlay, equal to the share the existing pane gives
+   up (the same 50/50 split the drop performs). */
+.chat-pane-dropzone {
+  position: absolute;
+  z-index: 30;
 }
-.chat-grid-wrap.split-resizing > *:not(.chat-split-resizer) {
+.chat-pane-dropzone.left { left: 0; top: 0; bottom: 0; width: 30%; }
+.chat-pane-dropzone.right { right: 0; top: 0; bottom: 0; width: 30%; }
+.chat-pane-dropzone.top { top: 0; left: 0; right: 0; height: 30%; }
+.chat-pane-dropzone.bottom { bottom: 0; left: 0; right: 0; height: 30%; }
+.chat-pane-drop-preview {
+  position: absolute;
+  z-index: 29;
   pointer-events: none;
+  border: 1.5px dashed color-mix(in srgb, var(--accent) 70%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
 }
-.chat-split-side .chat-view-wrap {
-  flex: 1;
-}
+.chat-pane-drop-preview.left { left: 6px; top: 6px; bottom: 6px; width: calc(50% - 9px); }
+.chat-pane-drop-preview.right { right: 6px; top: 6px; bottom: 6px; width: calc(50% - 9px); }
+.chat-pane-drop-preview.top { top: 6px; left: 6px; right: 6px; height: calc(50% - 9px); }
+.chat-pane-drop-preview.bottom { bottom: 6px; left: 6px; right: 6px; height: calc(50% - 9px); }
+
 /* The tool panel is GLOBAL — always the last column at the far right, one
-   instance shared by both halves. No per-half docking. */
-.chat-grid-wrap.split-active > .chat-split-main { order: 0; }
-.chat-grid-wrap.split-active > .chat-split-resizer { order: 1; }
-.chat-grid-wrap.split-active > .chat-split-side { order: 1; }
-.chat-grid-wrap.split-active > .tool-panel { order: 2; }
+   instance shared by every pane. */
+.chat-grid-wrap.split-active > .chat-pane-grid { order: 0; }
+.chat-grid-wrap.split-active > .tool-panel { order: 1; }
+
+/* In a split layout every pane's composer flows BELOW its transcript as a
+   normal block — the floating glass overlay kept letting content slide
+   behind it in tiled panes (any scroll position that isn't the exact bottom
+   reads as broken there). The single full-window view keeps the glass.
+   The dock's transcript spacer is overlay-only dead weight in this mode. */
+.chat-grid-wrap.split-active .chat-composer-dock {
+  position: static;
+}
+.chat-grid-wrap.split-active .chat-dock-spacer {
+  display: none;
+}
+
+/* ---------- Responsive chat panes ----------
+   Six panes on a small window get narrow fast. Each pane is a SIZE
+   CONTAINER, so compaction keys off the PANE's own width — not the window's
+   — and every pane compact exactly as much as it needs to. */
+.chat-pane {
+  container-type: inline-size;
+  container-name: chat-pane;
+}
+/* Under ~560px: drop the noisy parts. The turn rail overlays content the
+   pane no longer has room for, and the perf chips row is the widest single
+   strip of the composer (the context meter ring stays — it's small and
+   load-bearing). */
+@container chat-pane (max-width: 560px) {
+  .chat-pane .turn-rail { display: none; }
+  .chat-pane .composer-metrics-chips { display: none; }
+  .chat-pane .chat-messages {
+    gap: 12px;
+    padding: 12px 12px 0;
+  }
+  .chat-pane .chat-composer {
+    padding: 8px 12px 24px;
+  }
+}
+/* Under ~400px: further squeeze — tighter bubbles column, smaller jump pill
+   offsets handled by the dock measurement, hide the citation strip's detail
+   tail (it wraps badly at this width). */
+@container chat-pane (max-width: 400px) {
+  .chat-pane .chat-messages { gap: 8px; }
+  .chat-pane .citation-report-strip { margin: 0 8px 6px; }
+}
 
 /* ---------- Citation-integrity strip (research turns) ---------- */
 

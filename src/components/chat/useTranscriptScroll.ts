@@ -15,20 +15,18 @@ import { setChatScrollToMessage } from "../../lib/chatScroll";
 
 export function useTranscriptScroll({
   activeChatSessionId,
-  isSplitView,
   hasMoreHistory,
-  loadOlderMessages,
-  loadOlderSplitMessages,
+  loadOlder,
   messages,
   streaming,
   approvalKey,
   questionKey,
 }: {
   activeChatSessionId: string | null;
-  isSplitView: boolean;
   hasMoreHistory: boolean;
-  loadOlderMessages: (sessionId: string) => Promise<unknown>;
-  loadOlderSplitMessages: (sessionId: string) => Promise<unknown>;
+  /** Prepend the next older page. ChatView resolves this to the main or the
+   *  pinned-pane loader, so the hook stays split-layout agnostic. */
+  loadOlder: (sessionId: string) => Promise<unknown>;
   /** Dep-only: the follow/pin effect re-runs when the transcript changes. */
   messages: unknown;
   /** Dep-only: the follow/pin effect re-runs while tokens stream. */
@@ -164,10 +162,7 @@ export function useTranscriptScroll({
       loadOlderRef.current = true;
       const prevHeight = container.scrollHeight;
       const prevTop = container.scrollTop;
-      const prepend = isSplitView
-        ? loadOlderSplitMessages(activeChatSessionId)
-        : loadOlderMessages(activeChatSessionId);
-      void prepend
+      void loadOlder(activeChatSessionId)
         .finally(() => {
           loadOlderRef.current = false;
           // Restore the visual anchor: prepended rows pushed everything down.
@@ -184,7 +179,7 @@ export function useTranscriptScroll({
         });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasMoreHistory, activeChatSessionId, isSplitView, loadOlderMessages, loadOlderSplitMessages]);
+  }, [hasMoreHistory, activeChatSessionId, loadOlder]);
 
   /** The scrollTop that pins the viewport to the live edge, computed from
    *  MEASURED content — the last mounted virtual row plus the in-flow tail
@@ -298,6 +293,80 @@ export function useTranscriptScroll({
   //
   // The write is deferred one animation frame: the virtualizer materializes
   // the newly-mounted tail rows a LAYOUT PASS after `messages` changes, so
+  // Sync the virtualized wrapper's height from the MOUNTED tail row's real
+  // rendered bottom (ground truth) — WITHOUT touching scrollTop. This is the
+  // measurement half of patchTailAndPin, shared with the always-on resync
+  // effect below: the pin pass only runs while the view is stuck to the live
+  // edge, so an UNPINNED view (user scrolled up — or a split pane they're
+  // not docked to) used to keep a stale under-counted wrapper height and let
+  // the last rows paint UNDER the floating composer.
+  const syncTailHeight = useCallback(() => {
+    const el = messagesContainerRef.current;
+    const virt = virtualizerImplRef.current;
+    if (!el || !virt) return;
+    const rows = el.querySelectorAll<HTMLElement>("[data-index]");
+    const last = rows[rows.length - 1];
+    if (!last || !last.parentElement) return;
+    const inner = last.parentElement;
+    let total = virt.getTotalSize();
+    // MEASURED TAIL CLAMP: when the tail row IS mounted, its rendered bottom
+    // is ground truth — clamp the wrapper to it, shrinking and growing alike
+    // (rows are transform-positioned, so the rect delta IS the position).
+    if (Number(last.dataset.index) === itemsRef.current.length - 1) {
+      const measuredBottom =
+        last.getBoundingClientRect().bottom - inner.getBoundingClientRect().top;
+      if (measuredBottom > 0 && Math.abs(total - measuredBottom) > 1) {
+        total = measuredBottom;
+      }
+    }
+    if (Math.abs(inner.offsetHeight - total) > 1) {
+      // Instant DOM sync (next React render confirms it via liveTotal —
+      // a plain React style write would otherwise be clobbered by the stale
+      // getTotalSize() that render computes with).
+      inner.style.setProperty("height", `${total}px`, "important");
+    }
+    if (total !== liveTotalRef.current) {
+      liveTotalRef.current = total;
+      setLiveTotal(total);
+    }
+    // Secondary hardening: if the tail row is STILL taller than its cached
+    // slot (async content growth — diagrams, highlighting — measured after
+    // the cache settled), patch the cache with the real height so the next
+    // layout pass stops under-allocating it.
+    const overflow =
+      last.getBoundingClientRect().bottom - last.parentElement.getBoundingClientRect().bottom;
+    if (overflow > 1) {
+      const v = virt as unknown as {
+        itemSizeCache?: Map<string, number>;
+        itemSizeCacheVersion?: number;
+        notify?: (sync: boolean) => void;
+      };
+      let key: string | null = null;
+      for (const [k, e] of rowElsRef.current) {
+        if (e === last) {
+          key = k;
+          break;
+        }
+      }
+      const realH = last.offsetHeight;
+      if (key && realH > 0 && v.itemSizeCache && v.itemSizeCache.get(key) !== realH) {
+        v.itemSizeCache.set(key, realH);
+        if (v.itemSizeCacheVersion != null) v.itemSizeCacheVersion++;
+        v.notify?.(false);
+      }
+    }
+  }, []);
+
+  // Keep the extent truthful even when UNPINNED: one frame after any
+  // transcript change (tokens, turn swap, cards, history prepends), re-sync
+  // the wrapper height. Without this, a view that isn't stuck to the live
+  // edge relied on the (stick-gated) pin pass for corrections, and a stale
+  // under-count let the last messages render under the floating composer.
+  useEffect(() => {
+    const raf = requestAnimationFrame(syncTailHeight);
+    return () => cancelAnimationFrame(raf);
+  }, [syncTailHeight, messages, streaming, approvalKey, questionKey]);
+
   // a synchronous write here reads the STALE scrollHeight and strands the
   // live edge behind the floating composer — exactly the "last turn is
   // stuck at the bottom of the screen under the composer" symptom. The
@@ -313,82 +382,12 @@ export function useTranscriptScroll({
       // the instant write below would cut the glide to a snap. The jump's
       // settle loop runs this once more itself when it lands.
       if (performance.now() < smoothScrollUntilRef.current) return;
-      // MEASURED ROOT CAUSE (pad-debug overlay, 2026-08-27): the virtualizer's
-      // sized wrapper div rendered with a STALE height (inner h=743 while
-      // totalSize=3017) — its measurement cache was already correct, but no
-      // React re-render ever applied it, so the absolutely-positioned rows
-      // overflowed the div by ~2270px and defined the scroll extent
-      // themselves. At max scroll that pins the last row's bottom to the
-      // container's bottom edge — permanently dockHeight behind the floating
-      // composer (GAP=-171 across every code state). Padding and in-flow
-      // spacers can't win against positioned overflow, so sync the wrapper's
-      // height DIRECTLY in the DOM from the live totalSize — no React
-      // re-render required — before pinning.
-      const rows = el.querySelectorAll<HTMLElement>("[data-index]");
-      const last = rows[rows.length - 1];
-      let total = virt.getTotalSize();
-      if (last && last.parentElement) {
-        const inner = last.parentElement;
-        // MEASURED TAIL CLAMP (2026-09-15): totalSize counts the 160px
-        // ESTIMATE for every row never mounted — a freshly switched-to chat
-        // (or one with pages of one-liner history above the viewport) totals
-        // 2-4x its real content height. The excess is scrollable blank space
-        // BELOW the last message: scrolling to the bottom parks the viewport
-        // in it, and the read "enormous gap between the last turn and the
-        // composer". When the tail row IS mounted its rendered bottom is
-        // ground truth — clamp the wrapper to it, shrinking and growing
-        // alike (a real bottom past totalSize means the cache under-counts
-        // async-grown content, and taking it fixes that overlap too). Rows
-        // are positioned with `transform: translateY(...)`, so offsetTop is
-        // always 0 — the bounding rect against the wrapper's is the position.
-        if (Number(last.dataset.index) === itemsRef.current.length - 1) {
-          const measuredBottom =
-            last.getBoundingClientRect().bottom - inner.getBoundingClientRect().top;
-          if (measuredBottom > 0 && Math.abs(total - measuredBottom) > 1) {
-            total = measuredBottom;
-          }
-        }
-        if (Math.abs(inner.offsetHeight - total) > 1) {
-          // Instant DOM sync (next React render confirms it via liveTotal —
-          // a plain React style write would otherwise clobber this with the
-          // stale getTotalSize() it computes at render time).
-          inner.style.setProperty("height", `${total}px`, "important");
-        }
-        // Push the true total into React state so the NEXT render bakes the
-        // correct height into the JSX (Math.max below) even while
-        // getTotalSize() still returns its stale value at render time.
-        if (total !== liveTotalRef.current) {
-          liveTotalRef.current = total;
-          setLiveTotal(total);
-        }
-        // Secondary hardening: if the tail row is STILL taller than its
-        // cached slot (async content growth — diagrams, highlighting —
-        // measured after the cache settled), patch the cache with the real
-        // height so the next layout pass stops under-allocating it.
-        const overflow =
-          last.getBoundingClientRect().bottom -
-          last.parentElement.getBoundingClientRect().bottom;
-        if (overflow > 1) {
-          const v = virt as unknown as {
-            itemSizeCache?: Map<string, number>;
-            itemSizeCacheVersion?: number;
-            notify?: (sync: boolean) => void;
-          };
-          let key: string | null = null;
-          for (const [k, e] of rowElsRef.current) {
-            if (e === last) {
-              key = k;
-              break;
-            }
-          }
-          const realH = last.offsetHeight;
-          if (key && realH > 0 && v.itemSizeCache && v.itemSizeCache.get(key) !== realH) {
-            v.itemSizeCache.set(key, realH);
-            if (v.itemSizeCacheVersion != null) v.itemSizeCacheVersion++;
-            v.notify?.(false);
-          }
-        }
-      }
+      // MEASURED ROOT CAUSE (pad-debug overlay, 2026-08-27): a stale wrapper
+      // height let the absolutely-positioned rows overflow it and define the
+      // scroll extent themselves — at max scroll the last row sat dockHeight
+      // behind the floating composer. Sync the wrapper's height from the
+      // live tail BEFORE pinning (shared with syncTailHeight above).
+      syncTailHeight();
       const target = pinTargetFor(el);
       // Skip the write when already at the live edge: redundant scrollTop
       // writes fire scroll events that keep the virtualizer's isScrolling
@@ -436,6 +435,36 @@ export function useTranscriptScroll({
     return () => {
       clearTimeout(t1);
       clearTimeout(t2);
+    };
+  }, []);
+
+  // Pane/window RESIZES reflow the transcript (narrower → text wraps
+  // taller), and the browser's post-reflow scroll adjustment fires scroll
+  // events that read as user intent — silently UNSTICKING the view. Content
+  // that streams/grows afterwards then sits under the floating composer.
+  // Observe the scroll container: while stuck, re-run the pin settle window
+  // across the reflow (deferred a frame so measurements land post-layout;
+  // the pin's own writes are programmatic-guarded, so they can't unstick).
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let raf = 0;
+    let frame = 0;
+    const step = () => {
+      pinToLiveEdgeRef.current?.();
+      frame++;
+      if (frame < 8) raf = requestAnimationFrame(step);
+    };
+    const ro = new ResizeObserver(() => {
+      if (!stickToBottomRef.current) return;
+      cancelAnimationFrame(raf);
+      frame = 0;
+      raf = requestAnimationFrame(step);
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(raf);
     };
   }, []);
 

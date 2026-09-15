@@ -9,7 +9,12 @@ import type {
   ChatMessageRecord,
   ChatTaskProgressPayload,
 } from "../../../lib/ipc";
-import { optimisticMsgIdCounter, resolvePendingCard } from "../moduleState";
+import {
+  appendUserBubble,
+  bufferTargetFor,
+  optimisticMsgIdCounter,
+  resolvePendingCard,
+} from "../moduleState";
 import type { ChatStoreGet, ChatStoreSet } from "../types";
 
 /** Mirror of the backend's `compose_ask_display` (agent_sessions/ask.rs):
@@ -101,13 +106,11 @@ export function createApprovalsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // transcript shows the answer landed until the assistant's NEXT reply
       // arrived. The persisted row (written inside the backend's send) carries
       // the exact same text, so mergeOptimistic swaps this twin out when the
-      // turn's refetch lands. Only a visible pane gets the bubble — a
+      // turn's refetch lands. Only a VIEWING pane gets the bubble — a
       // background session's answer surfaces when that chat is opened (same
       // contract as broadcastToSessions).
       const s = get();
-      const forActive = s.activeChatSessionId === chatSessionId;
-      const forSplit = s.splitChatSessionId === chatSessionId && !forActive;
-      if (!forActive && !forSplit) return;
+      if (bufferTargetFor(s, chatSessionId) == null) return;
       const userMsg: ChatMessageRecord = {
         id: optimisticMsgIdCounter.next--,
         chatSessionId,
@@ -120,10 +123,7 @@ export function createApprovalsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         startedAt: null,
         completedAt: null,
       };
-      set((st) => ({
-        messages: forActive ? [...st.messages, userMsg] : st.messages,
-        splitMessages: forSplit ? [...st.splitMessages, userMsg] : st.splitMessages,
-      }));
+      set((st) => ({ ...appendUserBubble(st, chatSessionId, userMsg) }));
     },
 
     onCheckpointCreated: (payload: ChatCheckpoint) => {

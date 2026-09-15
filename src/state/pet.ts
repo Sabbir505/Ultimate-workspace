@@ -73,8 +73,11 @@ export interface PetSettings {
   name: string;
   hat: PetHatKey | null;
   enabled: boolean;
-  /** Which home the pet currently lives in — it teleports between them. */
-  home: "sidebar" | "composer";
+  /** Which home the pet currently lives in — it teleports between them.
+   *  Homes are the sidebar strip plus ONE per open chat pane ("main", or the
+   *  pane tree's "pane-N" ids); the registry of currently-existing homes is
+   *  the ephemeral `homes` field. */
+  home: string;
   /** Epoch ms the opt-in focus session ends (0 = not focusing). */
   focusUntil: number;
   /** Epoch ms of the last app session — powers the "while you were away"
@@ -85,7 +88,7 @@ export interface PetSettings {
 /** Active teleport: the pet is vanishing from `from` (first half of the
  *  window) and materialising in `home` (second half). Ephemeral. */
 export interface PetTeleport {
-  from: "sidebar" | "composer";
+  from: string;
   until: number;
 }
 
@@ -395,7 +398,12 @@ function loadPersistedSettings(): PetSettings {
           : PET_SPECIES[species].defaultName,
       hat: typeof parsed.hat === "string" ? (parsed.hat as PetHatKey) : null,
       enabled: parsed.enabled !== false,
-      home: parsed.home === "composer" ? "composer" : "sidebar",
+      home:
+        typeof parsed.home === "string"
+          ? parsed.home === "composer"
+            ? "main"
+            : parsed.home
+          : "sidebar",
       focusUntil:
         typeof parsed.focusUntil === "number" && parsed.focusUntil > Date.now() ? parsed.focusUntil : 0,
       lastSeen: typeof parsed.lastSeen === "number" ? parsed.lastSeen : Date.now(),
@@ -467,12 +475,21 @@ interface PetStoreState extends PetSettings {
   dragging: boolean;
   /** Timestamps of recent pet clicks — the combo that triggers zoomies. */
   petTimes: number[];
+  /** Homes that currently EXIST (sidebar + one per open chat pane). The
+   *  random teleport scheduler picks among these; panes register on mount
+   *  layout changes via setPetHomes. Not persisted. */
+  homes: string[];
+  /** Publish the set of existing homes; relocates the pet instantly if its
+   *  home vanished (pane closed — the vanished strip can't play a dissolve). */
+  setPetHomes: (homes: string[]) => void;
 
   event: (e: PetEvent) => void;
   tick: (now: number, dtSec: number) => void;
-  /** Move the pet to a home with the teleport animation (default: the other
-   *  one). Called by the scheduler and when chat starts streaming. */
-  teleportTo: (home: "sidebar" | "composer") => void;
+  /** Move the pet to a home with the teleport animation. Called by the
+   *  scheduler, the dev hooks, and any UI that relocates the pet. */
+  teleportTo: (home: string) => void;
+  /** Teleport to a random OTHER existing home (random pane hopping). */
+  teleportToRandomOther: () => void;
   /** Drag session: begin clears walks, dragTo moves, end drops the pet at
    *  its new spot (persisted as its stroll home base). */
   beginDrag: () => void;
@@ -533,6 +550,7 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
   heartAt: 0,
   lastBubbleAt: 0,
   teleport: null,
+  homes: ["sidebar", "main"],
   nextTeleportAt: Date.now() + 90_000,
   nextZoomiesAt: Date.now() + 4 * 60_000 + Math.random() * 5 * 60_000,
   levelUpAt: 0,
@@ -617,17 +635,28 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
     }
     if (!teleport && now >= s0.nextTeleportAt) {
       if (patch.core ? patch.core.mood === "idle" : s0.core.mood === "idle") {
-        const to = s0.home === "sidebar" ? "composer" : "sidebar";
-        const base = patch.core ?? s0.core;
-        patch.home = to;
-        patch.teleport = { from: s0.home, until: now + PET_TELEPORT_MS };
-        patch.nextTeleportAt = now + 120_000 + Math.random() * 120_000;
-        patch.core = {
-          ...base,
-          stats: { ...base.stats, teleports: base.stats.teleports + 1 },
-        };
-        changed = true;
-        persist({ ...s0, home: to }, patch.core);
+        // Random destination among the homes that currently exist (sidebar +
+        // one per open chat pane) — with several panes open the pet hops
+        // between chats unpredictably.
+        const candidates = (s0.homes.length > 0 ? s0.homes : ["sidebar", "main"]).filter(
+          (h) => h !== s0.home,
+        );
+        if (candidates.length === 0) {
+          patch.nextTeleportAt = now + 30_000;
+          changed = true;
+        } else {
+          const to = candidates[Math.floor(Math.random() * candidates.length)];
+          const base = patch.core ?? s0.core;
+          patch.home = to;
+          patch.teleport = { from: s0.home, until: now + PET_TELEPORT_MS };
+          patch.nextTeleportAt = now + 60_000 + Math.random() * 90_000;
+          patch.core = {
+            ...base,
+            stats: { ...base.stats, teleports: base.stats.teleports + 1 },
+          };
+          changed = true;
+          persist({ ...s0, home: to }, patch.core);
+        }
       } else {
         // busy, walking or asleep — try again shortly
         patch.nextTeleportAt = now + 15_000;
@@ -635,6 +664,32 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
       }
     }
     if (changed) set(patch);
+  },
+
+  setPetHomes: (homes) => {
+    const next = homes.length > 0 ? homes : ["sidebar", "main"];
+    const s = get();
+    const sameList =
+      next.length === s.homes.length && next.every((h, i) => h === s.homes[i]);
+    if (next.includes(s.home)) {
+      if (!sameList) set({ homes: next });
+      return;
+    }
+    // The pet's home pane closed under it: relocate instantly (no dissolve —
+    // the strip that would play it is gone).
+    const candidates = next.filter((h) => h !== s.home);
+    const to = candidates[Math.floor(Math.random() * candidates.length)] ?? next[0];
+    set({ homes: next, home: to, teleport: null });
+    persist(get(), get().core);
+  },
+
+  teleportToRandomOther: () => {
+    const s = get();
+    const candidates = (s.homes.length > 0 ? s.homes : ["sidebar", "main"]).filter(
+      (h) => h !== s.home,
+    );
+    if (candidates.length === 0) return;
+    get().teleportTo(candidates[Math.floor(Math.random() * candidates.length)]);
   },
 
   teleportTo: (home) => {
@@ -788,9 +843,7 @@ export function installPetDebugHook(): void {
     zoomies: () => usePetStore.getState().zoomies(),
     focus: () => usePetStore.getState().startFocus(),
     unfocus: () => usePetStore.getState().stopFocus(),
-    teleport: () => usePetStore.getState().teleportTo(
-      usePetStore.getState().home === "sidebar" ? "composer" : "sidebar",
-    ),
+    teleport: () => usePetStore.getState().teleportToRandomOther(),
     addXp: (n: number) => {
       const s = usePetStore.getState();
       usePetStore.setState({ core: { ...s.core, xp: s.core.xp + n } });

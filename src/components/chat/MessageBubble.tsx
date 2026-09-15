@@ -9,7 +9,7 @@
 // empty welcome screen — so we lazy-load it via dynamic import() in
 // StepCodeHighlighter below. That moves it out of the initial bundle.
 import { Fragment, createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Pencil } from "lucide-react";
+import { Pencil, Plug } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -192,6 +192,21 @@ function MessageBubbleInner({
     [message.content, message.attachments, chatSessionId],
   );
 
+  // Connector mentions ("@gmail …", completed inline from the composer's
+  // @-menu) render as chips on the bubble — the message-side counterpart of
+  // the composer's attach pills, so the turn shows which connector it used.
+  // The @ must OPEN a word (start-of-text or after whitespace), so email
+  // addresses ("user@example.com") never match; ids keep their `mcp:`-style
+  // prefixes but never swallow trailing punctuation.
+  const connectorMentions = useMemo(() => {
+    if (!isUser) return [];
+    const seen = new Set<string>();
+    for (const m of cleanContent.matchAll(/(?:^|\s)@([a-z0-9][\w:-]*)/gi)) {
+      seen.add(m[1]);
+    }
+    return [...seen];
+  }, [isUser, cleanContent]);
+
   // PERF (PERFORMANCE_AUDIT.md F8): memoize the parse → group chain by
   // content. Previously a `streaming` flip (or any parent re-render) re-ran
   // parseSegments + groupSegments even with identical content. During active
@@ -361,6 +376,30 @@ function MessageBubbleInner({
           <span className="superseded-tag">previous version</span>
         )}
         {msgAttachments.length > 0 && <MessageAttachments attachments={msgAttachments} />}
+        {connectorMentions.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 2 }}>
+            {connectorMentions.map((id) => (
+              <span
+                key={id}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  height: 22,
+                  padding: "0 8px",
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  borderRadius: 999,
+                  color: "var(--accent)",
+                  background: "color-mix(in srgb, var(--accent) 12%, transparent)",
+                  border: "1px solid color-mix(in srgb, var(--accent) 35%, transparent)",
+                }}
+              >
+                <Plug size={11} aria-hidden="true" /> {id}
+              </span>
+            ))}
+          </div>
+        )}
         {/* dir=auto: an Arabic/Hebrew/Urdu answer lays out RTL and right-aligned
             from its own first strong character; Latin text is unchanged. */}
         <div className="chat-bubble-inner" dir="auto">

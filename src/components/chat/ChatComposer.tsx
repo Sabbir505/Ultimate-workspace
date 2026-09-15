@@ -461,22 +461,27 @@ export const ChatComposer = memo(function ChatComposer({
     ...harnessSlashCommands,
   ];
 
-  // Exact slug/trigger matches rank FIRST: typing "/research" must highlight
-  // the /research command, not the first skill whose label merely contains
-  // "research" — Enter applies the highlighted item, and a wrong top hit
-  // silently rewrote the token into an unrelated skill.
+  // Ranked filtering: exact slug/trigger match > slug prefix > label
+  // substring, and built-in commands/templates outrank skills at the same
+  // match quality. Enter applies the HIGHLIGHTED item, so typing "/rese"
+  // must highlight the /research command — with plain menu order (skills
+  // first) a skill whose name merely started with "res" stole the highlight
+  // and read as "I can't select the research command".
   const slashFiltered = slashQuery !== null
     ? (() => {
-        const matches = allSlashItems.filter((it) => {
-          const key = ("slug" in it && it.slug) || ("trigger" in it && it.trigger) || "";
+        const scored: Array<{ item: SlashItem; score: number }> = [];
+        allSlashItems.forEach((it, index) => {
+          const key = (("slug" in it && it.slug) || ("trigger" in it && it.trigger) || "").toLowerCase();
           const label = it.name.toLowerCase();
-          return key.startsWith(slashQuery) || label.includes(slashQuery);
+          let rank: number;
+          if (key === slashQuery) rank = 0;
+          else if (key.startsWith(slashQuery)) rank = 1;
+          else if (label.includes(slashQuery)) rank = 2;
+          else return;
+          const score = rank * 10 + (it.kind === "skill" ? 5 : 0) + index * 0.01;
+          scored.push({ item: it, score });
         });
-        const isExact = (it: SlashItem) => {
-          const key = ("slug" in it && it.slug) || ("trigger" in it && it.trigger) || "";
-          return key.toLowerCase() === slashQuery;
-        };
-        return [...matches.filter(isExact), ...matches.filter((it) => !isExact(it))];
+        return scored.sort((a, b) => a.score - b.score).map((s) => s.item);
       })()
     : [];
 

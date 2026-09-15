@@ -23,6 +23,7 @@ import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
 import { useSettingsStore } from "../../state/settings";
 import { useChatStore } from "../../state/chat";
+import { findPaneForSession } from "../../state/chat/paneTree";
 import { useProjectsStore } from "../../state/projects";
 import { useVoiceDictation } from "./useVoiceDictation";
 import { TemplatePickerModal, BroadcastModal } from "./composerModals";
@@ -157,6 +158,9 @@ interface Props {
   /** Active chat session — the @-attach menu writes attachment rows
    * (connector ids / `mcp:<id>`) against it. Null when no session. */
   chatSessionId?: string | null;
+  /** Which pet home THIS composer's strip hosts — the pane id (or "main").
+   *  The pet lives in one pane at a time and teleports between them. */
+  petHome?: string;
 }
 
 // MEMOIZED: the composer is heavy (pickers, queue rows, HUD) and ChatView
@@ -203,6 +207,7 @@ export const ChatComposer = memo(function ChatComposer({
   onThinkingChange,
   thinkingSupported,
   chatSessionId,
+  petHome,
 }: Props) {
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -982,13 +987,22 @@ export const ChatComposer = memo(function ChatComposer({
           messages: [...s.messages, message],
           messagesSessionId: sessionId,
         }));
-      } else if (message && useChatStore.getState().splitChatSessionId === sessionId) {
-        // The split pane's chat: merge into the SPLIT buffer instead — the
-        // main list belongs to whichever session is globally active.
-        useChatStore.setState((s) => ({
-          splitMessages: [...s.splitMessages, message],
-          splitMessagesSessionId: sessionId,
-        }));
+      } else if (message) {
+        // A pinned split pane's chat: merge into THAT pane's buffer instead —
+        // the main list belongs to whichever session is globally active.
+        const paneId = findPaneForSession(useChatStore.getState().chatPaneTree, sessionId);
+        if (paneId) {
+          useChatStore.setState((s) => {
+            const buf = s.paneBuffers[paneId];
+            if (!buf || buf.sessionId !== sessionId) return s;
+            return {
+              paneBuffers: {
+                ...s.paneBuffers,
+                [paneId]: { ...buf, messages: [...buf.messages, message] },
+              },
+            };
+          });
+        }
       }
     } catch (e) {
       // Keep the proposal usable even if command-message persistence fails.
@@ -1355,9 +1369,10 @@ export const ChatComposer = memo(function ChatComposer({
           ))}
         </div>
       )}
-      {/* Companion pet's second home — strolls along the top edge of the
-          composer card, reacting to the same events as the sidebar twin. */}
-      <PetStrip myHome="composer" />
+      {/* Companion pet's pane home — strolls along the top edge of THIS
+          pane's composer card. The pet lives in one pane at a time and
+          randomly teleports between them (petHome = pane id or "main"). */}
+      <PetStrip myHome={petHome ?? "main"} />
       <div
         className={`chat-composer-card${modeGlowClass}${filesDragOver ? " is-drop-target" : ""}`}
         onDragOver={composerDragOver}

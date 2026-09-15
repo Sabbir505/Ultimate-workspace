@@ -85,20 +85,22 @@ function formatChatError(raw: string): string {
     .trim();
 }
 
-export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?: string; splitSessionId?: string } = {}) {
-  // Split view: `splitSessionId` pins this instance to ONE session regardless
-  // of the global selection — the pane beside the main chat. Everything below
-  // keys off the local `activeChatSessionId`, so per-session maps (streaming,
-  // status, artifacts, tasks, plans, subagents) resolve for the right session
-  // in both modes; only the message buffer needs an explicit split-aware
-  // selector (the store keeps two lists).
+export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string; paneId?: string } = {}) {
+  // Split pane view: `paneId` pins this instance to ONE session via the pane
+  // tree + its own paneBuffers entry — everything below keys off the local
+  // `activeChatSessionId`, so per-session maps (streaming, status, artifacts,
+  // tasks, plans, subagents) resolve for the right chat in both modes. Only
+  // the message buffer needs an explicit pane-aware selector (the store keeps
+  // the flat main list plus one buffer per pinned pane).
   const storeActiveId = useChatStore((s) => s.activeChatSessionId);
-  const isSplitView = splitSessionId != null;
-  const activeChatSessionId = splitSessionId ?? storeActiveId;
-  // Split-view focus pin: which half the shared git rail belongs to (null =
-  // the main half). See the GitToolsSidebar render condition below.
+  const isPaneView = paneId != null;
+  const paneBuf = useChatStore((s) => (paneId ? s.paneBuffers[paneId] : undefined));
+  const storeMessages = useChatStore((s) => s.messages);
+  const activeChatSessionId = paneId ? (paneBuf?.sessionId ?? null) : storeActiveId;
+  // Split-pane focus pin: which pane's chat the shared git rail belongs to
+  // (null = the main half). See the GitToolsSidebar render condition below.
   const focusedPin = useChatStore((s) => s.focusedChatSessionId);
-  const messages = useChatStore((s) => (isSplitView ? s.splitMessages : s.messages));
+  const messages = paneBuf ? paneBuf.messages : storeMessages;
   const streaming = useChatStore((s) => s.streaming);
   const livePerf = useChatStore((s) => s.livePerf);
   const chatStatus = useChatStore((s) => s.chatStatus);
@@ -646,8 +648,16 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   );
 
   const loadOlderMessages = useChatStore((s) => s.loadOlderMessages);
-  const loadOlderSplitMessages = useChatStore((s) => s.loadOlderSplitMessages);
-  const hasMoreHistory = useChatStore((s) => (isSplitView ? s.splitHasMoreHistory : s.hasMoreHistory));
+  const loadOlderPaneMessages = useChatStore((s) => s.loadOlderPaneMessages);
+  const storeHasMore = useChatStore((s) => s.hasMoreHistory);
+  const hasMoreHistory = paneBuf ? paneBuf.hasMoreHistory : storeHasMore;
+  // One older-page loader for the scroll hook, resolved per mode (the pane
+  // variant needs its paneId).
+  const loadOlder = useCallback(
+    (sessionId: string) =>
+      paneId ? loadOlderPaneMessages(paneId, sessionId) : loadOlderMessages(sessionId),
+    [paneId, loadOlderMessages, loadOlderPaneMessages],
+  );
   // Pending approval/question card ids — their mount/unmount shrinks the
   // scroll viewport, so the transcript scroll engine re-anchors across it.
   const approvalKey = activeChatSessionId
@@ -676,10 +686,8 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     jumpToLiveEdge,
   } = useTranscriptScroll({
     activeChatSessionId,
-    isSplitView,
     hasMoreHistory,
-    loadOlderMessages,
-    loadOlderSplitMessages,
+    loadOlder,
     messages,
     streaming,
     approvalKey,
@@ -751,7 +759,10 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     // Popout windows are handed a specific session — auto-starting a fresh
     // one here would race the sweep (it can delete the very session the
     // popout is opening) and flash a junk empty chat. Only selection (above).
-    if (!loaded || !config || isSplitView || popoutSessionId || activeChatSessionId || autoStarted.current) return;
+    // Split panes are likewise never auto-started: they always render an
+    // existing session, and auto-creating (or sweeping) from there would
+    // hijack the main view's session list.
+    if (!loaded || !config || isPaneView || popoutSessionId || activeChatSessionId || autoStarted.current) return;
     autoStarted.current = true;
     void deleteEmptyChatSessions()
       .then((deleted) => {
@@ -767,14 +778,14 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     // the first send (send_chat_message's auto-warm path).
     const seed = seedSelectionFrom(lastSelection, config);
     void newChat(seed.provider, seed.model, undefined, seed.agent);
-  }, [loaded, isSplitView, popoutSessionId, activeChatSessionId, config, lastSelection, newChat, loadSessions]);
+  }, [loaded, isPaneView, popoutSessionId, activeChatSessionId, config, lastSelection, newChat, loadSessions]);
 
   // Split pane: load (or re-target) the pinned session's history whenever the
   // pane opens on a different session.
   useEffect(() => {
-    if (!isSplitView || !splitSessionId || !loaded) return;
-    void useChatStore.getState().loadSplitMessages(splitSessionId);
-  }, [isSplitView, splitSessionId, loaded]);
+    if (!isPaneView || !paneId || !loaded || !paneBuf) return;
+    void useChatStore.getState().loadPaneMessages(paneId, paneBuf.sessionId);
+  }, [isPaneView, paneId, paneBuf?.sessionId, loaded]);
 
 
   // Build the list of items to render: persisted messages, plus a live
@@ -1315,14 +1326,14 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
 
   return (
     <div className="chat-view-wrap">
-    <TurnNavigator />
+    <TurnNavigator sessionId={activeChatSessionId} paneId={paneId} />
     <div className={`chat-view${artifacts && artifacts.length > 0 ? " has-artifacts" : ""}`}>
-      {/* The git rail is mounted by exactly ONE view: in split view only the
-          FOCUSED half hosts it (the pin points at its session); without a
-          split, the main view does. Otherwise both halves would render their
-          own rail and toggling would open it on both. */}
-      {(isSplitView
-        ? focusedPin === splitSessionId
+      {/* The git rail is mounted by exactly ONE pane: in split view only the
+          FOCUSED pane hosts it (the pin points at its session); without a
+          split, the main view does. Otherwise every pane would render its
+          own rail and toggling would open it on all of them. */}
+      {(isPaneView
+        ? focusedPin === activeChatSessionId
         : focusedPin == null) && <GitToolsSidebar />}
       {!activeChatSessionId || hasItems ? (
         <div
@@ -1538,6 +1549,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
               height + breathing room, floored at the original 220px. */}
           <div
             aria-hidden="true"
+            className="chat-dock-spacer"
             style={{
               height:
                 composerDockHeight > 0
@@ -1632,6 +1644,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
 
       <ChatComposer
         sessionId={activeChatSessionId}
+        petHome={paneId ?? "main"}
         draft={draft}
         quotedSelections={quotedSelections}
         onRemoveQuotedSelection={removeQuotedSelection}

@@ -89,7 +89,8 @@ afterAll(() => {
 beforeEach(() => {
   useChatStore.setState({
     activeChatSessionId: "s1",
-    splitChatSessionId: null,
+    chatPaneTree: null,
+    paneBuffers: {},
     loaded: true,
     config: { provider: "openai_compatible", model: "m" } as never,
     sessions: [

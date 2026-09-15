@@ -8,6 +8,10 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 
 import { Folder, GitBranch } from "lucide-react";
 import { relativeTime } from "../../lib/relativeTime";
 import { sessionModelIcon } from "./agentIcons";
+import {
+  endChatSessionDrag,
+  startChatSessionDrag,
+} from "../../lib/chatPaneDnd";
 
 export interface ChatSessionRowData {
   id: string;
@@ -166,6 +170,17 @@ export function ChatSessionRow({
       className={`chat-session-row${active ? " active" : ""}${session.unread ? " unread" : ""}${menuOpen ? " menu-open" : ""}`}
       onClick={() => !editing && onSelect(session.id)}
       title={session.title}
+      // Drag a session row onto any open chat pane's edge (left/right/top/
+      // bottom) to open it there. The payload is mirrored into the
+      // chatPaneDnd module store — dataTransfer is write-only during
+      // dragover, so the pane drop zones can't read it from the event.
+      draggable={!editing}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("application/x-relay-chat-session", session.id);
+        startChatSessionDrag(session.id);
+      }}
+      onDragEnd={endChatSessionDrag}
     >
       {!working && session.starred && (
         <span className="chat-session-star-badge" title="Starred">
@@ -286,7 +301,7 @@ export function ChatSessionRow({
           {onOpenSplit && (
             <button role="menuitem" onClick={(e) => menuAction(e, () => onOpenSplit(session.id))}>
               <span className="chat-menu-icon">⧉</span>
-              Open in split view
+              Open in new pane
             </button>
           )}
           <button

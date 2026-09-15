@@ -134,10 +134,6 @@ export interface UiState {
    *  active, so component state would reset). */
   gitChangesFilter: "unstaged" | "staged" | "branch" | "lastturn";
   setGitChangesFilter: (filter: "unstaged" | "staged" | "branch" | "lastturn") => void;
-  /** Split chat view: share of the chat area (excluding the tool panel)
-   *  given to the MAIN half, 0.2–0.8. Dragging the split divider updates it. */
-  chatSplitRatio: number;
-  setChatSplitRatio: (ratio: number) => void;
   /** Whether the Git tools sidebar (right-side vertical panel) is collapsed. */
   gitSidebarCollapsed: boolean;
   /** Per-section open/closed flags inside the expanded Git sidebar. These are
@@ -326,7 +322,6 @@ export const useUiStore = create<UiState>((set, get) => ({
   toolPanelCollapsed: true,
   contextTipOpen: false,
   toolPanelWidth: 532,
-  chatSplitRatio: 0.5,
   gitChangesFilter: "unstaged",
   // Open by default — it's the primary git surface now.
   gitSidebarCollapsed: true,
@@ -683,8 +678,6 @@ export const useUiStore = create<UiState>((set, get) => ({
   setDiffPanelFile: (diffPanelFile, diffPanelCwd) => set({ diffPanelFile, diffPanelCwd }),
   setToolPanelWidth: (toolPanelWidth) =>
     set({ toolPanelWidth: Math.max(280, Math.min(900, toolPanelWidth)) }),
-  setChatSplitRatio: (chatSplitRatio) =>
-    set({ chatSplitRatio: Math.max(0.2, Math.min(0.8, chatSplitRatio)) }),
   setGitChangesFilter: (gitChangesFilter) => set({ gitChangesFilter }),
   pushToast: (kind, message, detail) => {
     const id = nextToastId++;

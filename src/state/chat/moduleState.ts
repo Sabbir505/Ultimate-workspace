@@ -20,6 +20,7 @@ import {
 } from "../../lib/ipc";
 import { useArtifactsStore } from "../artifacts";
 import { useProjectsStore } from "../projects";
+import { findPaneForSession } from "./paneTree";
 import type {
   ApprovalPolicy,
   ChatState,
@@ -575,9 +576,9 @@ export async function resolvePendingCard(
   }
 }
 
-/** Store-key bundles for the two chat buffers (main pane vs split pane):
- *  loadMessages/loadSplitMessages and the older-page loaders are the same
- *  algorithm over different keys, guarded by the pane's own target session. */
+/** Store-key bundle for the MAIN chat buffer: loadMessages and the older-page
+ *  loader run over these flat fields. Pinned split panes load through
+ *  loadPaneBufferPage / loadPaneBufferOlder instead (paneBuffers record). */
 export const CHAT_BUFFER_KEYS = {
   main: {
     messages: "messages",
@@ -585,14 +586,72 @@ export const CHAT_BUFFER_KEYS = {
     hasMore: "hasMoreHistory",
     target: "activeChatSessionId",
   },
-  split: {
-    messages: "splitMessages",
-    sessionId: "splitMessagesSessionId",
-    hasMore: "splitHasMoreHistory",
-    target: "splitChatSessionId",
-  },
 } as const;
 export type ChatBuffer = keyof typeof CHAT_BUFFER_KEYS;
+
+/** Which buffer displays `chatSessionId`: "main" when it's the active
+ *  session (a pane never duplicates the active one), otherwise the pinned
+ *  pane id showing it, or null when it's displayed nowhere (background
+ *  session — its rows surface when the chat is opened). */
+export function bufferTargetFor(s: ChatState, chatSessionId: string): string | null {
+  if (s.activeChatSessionId === chatSessionId) return "main";
+  return findPaneForSession(s.chatPaneTree, chatSessionId);
+}
+
+/** Patch describing a freshly fetched page's write-back into whichever
+ *  buffer displays `chatSessionId` (main fields or the pinned pane buffer).
+ *  Empty patch when the session is displayed nowhere — a background chat's
+ *  finished turn must never contaminate an open view's list. `merge` wraps
+ *  rows in mergeOptimistic (kept for the live-bubble swap paths). */
+export function bufferWriteBack(
+  s: ChatState,
+  chatSessionId: string,
+  msgs: ChatMessageRecord[],
+  opts: { merge?: boolean } = {},
+): Partial<ChatState> {
+  const target = bufferTargetFor(s, chatSessionId);
+  if (target === "main") {
+    return {
+      messages: opts.merge ? mergeOptimistic(s.messages, msgs) : msgs,
+      messagesSessionId: chatSessionId,
+      hasMoreHistory: msgs.length >= 200,
+    };
+  }
+  if (!target) return {};
+  const buf = s.paneBuffers[target];
+  if (!buf || buf.sessionId !== chatSessionId) return {};
+  return {
+    paneBuffers: {
+      ...s.paneBuffers,
+      [target]: {
+        ...buf,
+        messages: opts.merge ? mergeOptimistic(buf.messages, msgs) : msgs,
+        hasMoreHistory: msgs.length >= 200,
+      },
+    },
+  };
+}
+
+/** Optimistically append a just-sent user bubble to the buffer that displays
+ *  `chatSessionId` (main list, or the pinned pane's buffer). Empty patch for
+ *  a background session — same contract as broadcastToSessions. */
+export function appendUserBubble(
+  s: ChatState,
+  chatSessionId: string,
+  userMsg: ChatMessageRecord,
+): Partial<ChatState> {
+  const target = bufferTargetFor(s, chatSessionId);
+  if (target === "main") return { messages: [...s.messages, userMsg] };
+  if (!target) return {};
+  const buf = s.paneBuffers[target];
+  if (!buf || buf.sessionId !== chatSessionId) return {};
+  return {
+    paneBuffers: {
+      ...s.paneBuffers,
+      [target]: { ...buf, messages: [...buf.messages, userMsg] },
+    },
+  };
+}
 
 /** Shallow-patch one session row by id inside a sessions list — the store
  *  idiom `sessions.map((sess) => sess.id === id ? { ...sess, patch } : sess)`. */
@@ -657,6 +716,78 @@ export async function loadBufferOlder(
       [k.messages]: [...fresh, ...s[k.messages]],
       [k.hasMore]: older.length >= 200,
     } as Partial<ChatState>;
+  });
+  return older.length;
+}
+
+/** Load the latest page into one PINNED pane's buffer (paneBuffers record).
+ *  Same guard contract as loadBufferPage: a slow fetch for a pane the user
+ *  already re-targeted must not clobber the pane's current buffer — the
+ *  write only lands when the pane still pins `chatSessionId`. */
+export async function loadPaneBufferPage(
+  get: () => ChatState,
+  set: ChatStoreSet,
+  paneId: string,
+  chatSessionId: string,
+): Promise<void> {
+  const messages = await getChatMessages(chatSessionId, undefined, 200);
+  set((s) => {
+    const buf = s.paneBuffers[paneId];
+    if (!buf || buf.sessionId !== chatSessionId) return s;
+    return {
+      paneBuffers: {
+        ...s.paneBuffers,
+        [paneId]: {
+          ...buf,
+          // mergeOptimistic: a pane opened while its queued message is
+          // mid-drain keeps the in-flight bubble (same as loadBufferPage).
+          messages: mergeOptimistic(buf.messages, messages ?? []),
+          hasMoreHistory: (messages?.length ?? 0) >= 200,
+        },
+      },
+    };
+  });
+}
+
+/** Prepend one older page into a pinned pane's buffer, deduped by id.
+ *  Returns the number of fresh rows (0 also when the pane's flag says
+ *  history is exhausted). */
+export async function loadPaneBufferOlder(
+  get: () => ChatState,
+  set: ChatStoreSet,
+  paneId: string,
+  chatSessionId: string,
+): Promise<number> {
+  const buf = get().paneBuffers[paneId];
+  const first = buf?.sessionId === chatSessionId ? buf.messages[0] : undefined;
+  if (!first || first.id <= 0 || !buf?.hasMoreHistory) return 0;
+  const older = await getChatMessages(chatSessionId, first.id, 200);
+  if (!older || older.length === 0) {
+    set((s) => {
+      const cur = s.paneBuffers[paneId];
+      if (!cur || cur.sessionId !== chatSessionId) return s;
+      return {
+        paneBuffers: { ...s.paneBuffers, [paneId]: { ...cur, hasMoreHistory: false } },
+      };
+    });
+    return 0;
+  }
+  set((s) => {
+    const cur = s.paneBuffers[paneId];
+    if (!cur || cur.sessionId !== chatSessionId) return s;
+    // Dedupe by id (the page boundary row may overlap).
+    const known = new Set(cur.messages.map((m) => m.id));
+    const fresh = older.filter((m) => !known.has(m.id));
+    return {
+      paneBuffers: {
+        ...s.paneBuffers,
+        [paneId]: {
+          ...cur,
+          messages: [...fresh, ...cur.messages],
+          hasMoreHistory: older.length >= 200,
+        },
+      },
+    };
   });
   return older.length;
 }

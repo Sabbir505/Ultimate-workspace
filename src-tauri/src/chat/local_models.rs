@@ -1302,7 +1302,19 @@ fn resolve_llama_server_binary(user_path: Option<&str>) -> Result<ResolvedBinary
         }
     }
 
-    // 1. Bundled sidecar (highest priority). The `llama-server-<triple>`
+    // 0.5 Managed CUDA build (one-click installer, bin/llama-cpp-cuda).
+    // Beats the bundled CPU sidecar — GPU offload is the whole point of
+    // installing it — loses to an explicit user path above. Windows-only:
+    // the managed installer ships for Windows today.
+    #[cfg(windows)]
+    {
+        let managed = crate::commands::llama_build::llama_cuda_dir_default().join("llama-server.exe");
+        if managed.is_file() {
+            return Ok(to_resolved(managed));
+        }
+    }
+
+    // 1. Bundled sidecar. The `llama-server-<triple>`
     //    launcher Tauri stages as an externalBin, with the sibling .so /
     //    .dll / .dylib files in the same dir (from bundle.resources). The
     //    launcher uses RUNPATH $ORIGIN to find them, so the dir returned
@@ -1404,6 +1416,62 @@ fn resolve_llama_server_binary(user_path: Option<&str>) -> Result<ResolvedBinary
         <drive>:\\llama.cpp\\build\\bin\\llama-server.exe."
             .to_string(),
     )
+}
+
+/// What the app would launch for local models RIGHT NOW — the build
+/// updater's llama-server row: resolved binary path, whether that build is
+/// CUDA-capable (`ggml-cuda` beside it), and its self-reported version line.
+/// None when nothing resolves. Sync and spawns one `--version` — call from
+/// `spawn_blocking`.
+pub fn llama_server_build_probe(
+    user_path: Option<&str>,
+) -> Option<crate::commands::llama_build::ResolvedLlamaServer> {
+    let resolved = resolve_llama_server_binary(user_path).ok()?;
+    let is_cuda = cfg!(windows) && resolved.dir.join("ggml-cuda.dll").is_file()
+        || !cfg!(windows)
+            && (resolved.dir.join("ggml-cuda.so").is_file()
+                || resolved.dir.join("libggml-cuda.so").is_file()
+                || resolved.dir.join("libggml-cuda.dylib").is_file());
+    let version = probe_llama_version(&resolved.path, &resolved.dir);
+    Some(crate::commands::llama_build::ResolvedLlamaServer {
+        path: resolved.path,
+        version,
+        is_cuda,
+    })
+}
+
+/// Run `llama-server --version` with the binary's own dir as CWD (sibling
+/// DLLs must resolve) and return the first output line. Bounded: a hung
+/// probe gives up after 4s and leaks its reader thread — the same cost
+/// model as the harness config probes.
+fn probe_llama_version(exe: &str, dir: &Path) -> Option<String> {
+    use std::sync::mpsc;
+    let exe = exe.to_string();
+    let dir = dir.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+    // Deliberately detached: completion is observed via the channel; a
+    // bounded wait must never be turned into an unconditional join.
+    std::thread::spawn(move || {
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("--version")
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = tx.send(cmd.output().ok().filter(|o| o.status.success()));
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(4))
+        .ok()
+        .flatten()?;
+    let line = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
+    (!line.is_empty()).then_some(line)
 }
 
 /// Resolve the NVIDIA CUDA Toolkit `bin` directory, if installed, so its

@@ -635,8 +635,10 @@ pub fn run() {
             commands::tts_gpu::tts_gpu_status,
             commands::tts_gpu::tts_install_gpu,
             // Update checks for the pinned native builds (whisper CPU/CUDA,
-            // TTS GPU runtime) — the harness-updater shape for binaries.
+            // llama CUDA server, TTS GPU runtime) — the harness-updater shape
+            // for binaries.
             commands::build_updates::check_build_updates,
+            commands::llama_build::llama_install_cuda,
             commands::worktree_cmds::ensure_chat_session_worktree,
             commands::worktree_cmds::set_chat_session_worktree,
             mcp_gallery::mcp_gallery_list,

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use tauri::{Emitter, Manager, State};
+use tauri::{Manager, State};
 
 use crate::commands::local_model_market::DownloadState;
 use crate::db;
@@ -759,55 +759,10 @@ const WHISPER_CUDA_ZIP_URL: &str =
 const WHISPER_CUDA_ZIP_SHA256: &str =
     "c1b17166e1e31a91cc8e9c1f910d3785e3ce757bb2958bf9dce13fdb4880005f";
 
-/// Streaming SHA-256 of a file, lowercase hex. Runs chunked (1 MiB) so an
-/// 8 MB zip never lands wholly in memory. Sync — call from
-/// `spawn_blocking`.
-fn sha256_file_hex(path: &Path) -> Result<String, String> {
-    use sha2::Digest;
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| format!("could not open downloaded zip: {e}"))?;
-    let mut hasher = sha2::Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .map_err(|e| format!("could not read downloaded zip: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
 /// Progress-event id for the CPU server install (distinct from model ids).
 pub const SERVER_INSTALL_ID: &str = "stt-whisper-server";
 /// Progress-event id for the CUDA build install.
 pub const CUDA_INSTALL_ID: &str = "stt-whisper-cuda";
-
-fn emit_progress_for(
-    app: &tauri::AppHandle,
-    id: &str,
-    state: crate::commands::local_model_market::DownloadState,
-    downloaded: u64,
-    total: Option<u64>,
-    final_path: Option<String>,
-    error: Option<String>,
-) {
-    let _ = app.emit(
-        "local-model:download:progress",
-        crate::commands::local_model_market::DownloadProgress {
-            id: id.to_string(),
-            downloaded_bytes: downloaded,
-            total_bytes: total,
-            state,
-            bytes_per_second: 0.0,
-            final_path,
-            error,
-        },
-    );
-}
 
 /// Directory the managed CPU install extracts into.
 fn managed_install_dir(app: &tauri::AppHandle) -> CmdResult<PathBuf> {
@@ -833,151 +788,6 @@ pub fn cpu_build_installed(app: &tauri::AppHandle) -> bool {
 pub fn cuda_build_installed(app: &tauri::AppHandle) -> bool {
     let exe = if cfg!(windows) { "whisper-server.exe" } else { "whisper-server" };
     cuda_install_dir(app).join(exe).is_file()
-}
-
-/// Shared pinned-release install for both whisper one-click installers:
-/// stream the zip to a temp file with throttled progress, verify the SHA-256
-/// BEFORE extracting anything, then flatten the exe/dll entries into
-/// `install_dir` (the zips nest everything under Release/, and
-/// whisper-server.exe needs its sibling ggml*/whisper*.dll files). Callers
-/// confirm their expected exe landed and stamp the version marker.
-#[cfg(windows)]
-async fn install_pinned_zip(
-    app: &tauri::AppHandle,
-    url: &str,
-    sha256: &str,
-    version: &str,
-    install_dir: &Path,
-    progress_id: &str,
-) -> Result<(), String> {
-    use futures_util::StreamExt;
-
-    std::fs::create_dir_all(install_dir)
-        .map_err(|e| format!("could not create install dir: {e}"))?;
-    emit_progress_for(app, progress_id, DownloadState::Starting, 0, None, None, None);
-
-    // Stream to a temp file next to the destination with throttled progress
-    // events (same 150ms cadence as the model downloader). NOT `.no_proxy()`:
-    // this fetches from github.com, and bypassing the system proxy makes the
-    // download fail outright on proxied networks (verified against a local
-    // 127.0.0.1 proxy setup). The no-proxy rule is right for talking to our
-    // own loopback sidecar, wrong for reaching the internet.
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("Relay/", env!("CARGO_PKG_VERSION"), " (desktop)"))
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let resp = client
-        .get(url)
-        .header("User-Agent", "relay-stt-install")
-        .send()
-        .await
-        .map_err(|e| format!("download failed: {e}"))?;
-    if !resp.status().is_success() {
-        let msg = format!("download failed: HTTP {} from {url}", resp.status());
-        emit_progress_for(app, progress_id, DownloadState::Error, 0, None, None, Some(msg.clone()));
-        return Err(msg);
-    }
-    let total = resp.content_length();
-    let zip_path = std::env::temp_dir().join(format!("relay-{progress_id}-{version}.zip"));
-    let mut file = tokio::fs::File::create(&zip_path)
-        .await
-        .map_err(|e| format!("could not write temp file: {e}"))?;
-    let mut stream = resp.bytes_stream();
-    let mut downloaded: u64 = 0;
-    let mut last_emit = std::time::Instant::now();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            let msg = format!("download failed mid-stream: {e}");
-            emit_progress_for(app, progress_id, DownloadState::Error, downloaded, total, None, Some(msg.clone()));
-            // The partial temp zip must not survive a failed install.
-            let _ = std::fs::remove_file(&zip_path);
-            msg
-        })?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
-            .await
-            .map_err(|e| format!("could not write temp file: {e}"))?;
-        downloaded += chunk.len() as u64;
-        if last_emit.elapsed().as_millis() >= 150 {
-            last_emit = std::time::Instant::now();
-            emit_progress_for(app, progress_id, DownloadState::Downloading, downloaded, total, None, None);
-        }
-    }
-    tokio::io::AsyncWriteExt::flush(&mut file)
-        .await
-        .map_err(|e| format!("could not flush temp file: {e}"))?;
-    drop(file);
-
-    // SECURITY: verify the pinned SHA-256 BEFORE extracting or executing
-    // anything from the zip (TLS alone would let a compromised CDN install
-    // arbitrary binaries).
-    emit_progress_for(app, progress_id, DownloadState::Verifying, downloaded, total, None, None);
-    let verify_zip = zip_path.clone();
-    let actual = tauri::async_runtime::spawn_blocking(move || sha256_file_hex(&verify_zip))
-        .await
-        .map_err(|e| format!("verify task failed: {e}"))??;
-    if actual != sha256 {
-        // Remove the bad download — the temp file must never survive a
-        // failed install (it used to be cleaned only on success).
-        let _ = std::fs::remove_file(&zip_path);
-        let msg = format!(
-            "downloaded whisper.cpp release failed SHA-256 verification \
-             (expected {sha256}, got {actual}). Not installing — \
-             check your network/proxy or retry; if it persists the upstream \
-             asset changed and Relay needs an update."
-        );
-        emit_progress_for(app, progress_id, DownloadState::Error, downloaded, total, None, Some(msg.clone()));
-        return Err(msg);
-    }
-
-    let extract_dir = install_dir.to_path_buf();
-    let extract_zip = zip_path.clone();
-    let extracted = tauri::async_runtime::spawn_blocking(move || -> Result<u32, String> {
-        let reader = std::fs::File::open(&extract_zip)
-            .map_err(|e| format!("could not open downloaded zip: {e}"))?;
-        let mut archive = zip::ZipArchive::new(reader)
-            .map_err(|e| format!("bad zip archive: {e}"))?;
-        let mut count = 0u32;
-        for i in 0..archive.len() {
-            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-            if entry.is_dir() {
-                continue;
-            }
-            let name = entry.name().to_string();
-            if !(name.ends_with(".exe") || name.ends_with(".dll")) {
-                continue;
-            }
-            let base = name.rsplit(['/', '\\']).next().unwrap_or(&name).to_string();
-            let out = extract_dir.join(&base);
-            let mut out_file = std::fs::File::create(&out)
-                .map_err(|e| format!("could not write {base}: {e}"))?;
-            std::io::copy(&mut entry, &mut out_file)
-                .map_err(|e| format!("could not extract {base}: {e}"))?;
-            count += 1;
-        }
-        Ok(count)
-    })
-    .await
-    .map_err(|e| format!("extract task failed: {e}"))?;
-
-    let extracted = extracted?;
-    eprintln!("[stt] install extracted {extracted} files into {}", install_dir.display());
-    let _ = std::fs::remove_file(&zip_path);
-    Ok(())
-}
-
-/// Confirm a fresh install actually delivered whisper-server.exe (a release
-/// that repointed its assets could otherwise "succeed" with only DLLs).
-#[cfg(windows)]
-fn require_exe(install_dir: &Path, progress_id: &str, app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let exe_path = install_dir.join("whisper-server.exe");
-    if !exe_path.is_file() {
-        let msg = "downloaded release did not contain whisper-server.exe".to_string();
-        emit_progress_for(app, progress_id, DownloadState::Error, 0, None, None, Some(msg.clone()));
-        return Err(msg);
-    }
-    Ok(exe_path)
 }
 
 /// One-click install of the pinned upstream whisper-server (CPU build), or —
@@ -1012,7 +822,7 @@ pub async fn stt_install_server(
             if exe_path.is_file() {
                 stop_sidecar(&stt).await;
             }
-            install_pinned_zip(
+            crate::commands::pinned_zip::install_pinned_zip(
                 &app,
                 WHISPER_ZIP_URL,
                 WHISPER_ZIP_SHA256,
@@ -1021,7 +831,12 @@ pub async fn stt_install_server(
                 SERVER_INSTALL_ID,
             )
             .await?;
-            require_exe(&install_dir, SERVER_INSTALL_ID, &app)?;
+            crate::commands::pinned_zip::require_entry(
+                &install_dir,
+                "whisper-server.exe",
+                SERVER_INSTALL_ID,
+                &app,
+            )?;
             crate::commands::build_updates::write_build_marker(&install_dir, WHISPER_RELEASE_TAG)?;
         }
 
@@ -1037,7 +852,7 @@ pub async fn stt_install_server(
             )
             .map_err(|e| e.to_string())?;
         }
-        emit_progress_for(
+        crate::commands::pinned_zip::emit_progress_for(
             &app,
             SERVER_INSTALL_ID,
             DownloadState::Done,
@@ -1080,7 +895,7 @@ pub async fn stt_install_cuda(
             if exe_path.is_file() {
                 stop_sidecar(&stt).await;
             }
-            install_pinned_zip(
+            crate::commands::pinned_zip::install_pinned_zip(
                 &app,
                 WHISPER_CUDA_ZIP_URL,
                 WHISPER_CUDA_ZIP_SHA256,
@@ -1089,10 +904,15 @@ pub async fn stt_install_cuda(
                 CUDA_INSTALL_ID,
             )
             .await?;
-            require_exe(&install_dir, CUDA_INSTALL_ID, &app)?;
+            crate::commands::pinned_zip::require_entry(
+                &install_dir,
+                "whisper-server.exe",
+                CUDA_INSTALL_ID,
+                &app,
+            )?;
             crate::commands::build_updates::write_build_marker(&install_dir, WHISPER_RELEASE_TAG)?;
         }
-        emit_progress_for(
+        crate::commands::pinned_zip::emit_progress_for(
             &app,
             CUDA_INSTALL_ID,
             DownloadState::Done,
@@ -1107,7 +927,8 @@ pub async fn stt_install_cuda(
 
 #[cfg(test)]
 mod sha_tests {
-    use super::*;
+    use super::{WHISPER_RELEASE_TAG, WHISPER_ZIP_SHA256, WHISPER_ZIP_URL};
+    use crate::commands::pinned_zip::sha256_file_hex;
 
     #[test]
     fn sha256_file_hex_matches_known_vector_and_rejects_missing() {

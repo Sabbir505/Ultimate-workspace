@@ -12,7 +12,6 @@ import {
   onModelDownloadProgress,
   ttsInstallModel,
   ttsPreload,
-  ttsInstallGpu,
   ttsGpuStatus,
   ttsSetAutoRead,
   ttsSetDevice,
@@ -29,7 +28,7 @@ import {
 } from "../../lib/ipc";
 import { formatBytes } from "../../lib/format";
 import { GlassSelect } from "../common/GlassSelect";
-import { useBuildUpdatesStore } from "../../state/buildUpdates";
+import { ServerBuildsCard } from "./ServerBuildsCard";
 
 /** One row's audition button.
  *
@@ -90,24 +89,12 @@ function VoiceAuditionButton({ voice }: { voice: string }) {
 /** 1x is the model's natural pace; the backend clamps to the same range. */
 const SPEED_PRESETS = [0.75, 1, 1.25, 1.5, 2];
 
-/** Progress-event id shared by both halves of the GPU runtime install
- *  (backend contract: commands/tts_gpu.rs GPU_INSTALL_ID). */
-const GPU_INSTALL_ID = "tts-gpu-runtime";
-
 export function TtsPanel() {
   const [tts, setTts] = useState<TtsStatusData | null>(null);
   const [busy, setBusy] = useState(false);
   const [downloads, setDownloads] = useState<Record<string, PerDownloadState>>({});
   const [gpu, setGpu] = useState<TtsGpuStatus | null>(null);
   const [busyDevice, setBusyDevice] = useState(false);
-  // Build-updater row for the GPU runtime (harness-style): installed version
-  // vs this app's pinned sherpa-onnx build, refreshed on panel open.
-  const gpuUpdate = useBuildUpdatesStore((s) => s.buildUpdates["tts-gpu"]);
-  const markBuildUpdated = useBuildUpdatesStore((s) => s.markBuildUpdated);
-  const refreshBuildUpdates = useBuildUpdatesStore((s) => s.refreshBuildUpdates);
-  useEffect(() => {
-    void refreshBuildUpdates().catch(() => {});
-  }, [refreshBuildUpdates]);
 
   const refresh = () => {
     void ttsStatus()
@@ -180,20 +167,6 @@ export function TtsPanel() {
       toastError("Could not switch the synthesis device", err);
     } finally {
       setBusyDevice(false);
-    }
-  };
-
-  const handleInstallGpu = async (force = false) => {
-    setBusyDevice(true);
-    try {
-      setGpu(await ttsInstallGpu(force));
-      if (force) markBuildUpdated("tts-gpu");
-      toastSuccess("GPU support ready");
-    } catch (err) {
-      toastError("Could not install GPU support", err);
-    } finally {
-      setBusyDevice(false);
-      refresh();
     }
   };
 
@@ -288,18 +261,6 @@ export function TtsPanel() {
       </div>
     );
   }
-
-  // GPU runtime install progress (same event stream the model downloads use,
-  // under its own id).
-  const gpuInstall = downloads[GPU_INSTALL_ID];
-  const gpuInstalling =
-    !!gpuInstall &&
-    gpuInstall.state !== "done" &&
-    gpuInstall.state !== "error" &&
-    gpuInstall.state !== "cancelled";
-  const gpuInstallPct = gpuInstall?.total
-    ? Math.min(100, Math.round((gpuInstall.downloaded / gpuInstall.total) * 100))
-    : null;
 
   const selected = tts.catalog.find((m) => m.id === tts.modelId) ?? null;
 
@@ -444,78 +405,25 @@ export function TtsPanel() {
           )}
         </div>
 
-        {(tts.device === "gpu" || gpuUpdate?.updateAvailable) && gpu && (
+        {tts.device === "gpu" && gpu && (
           <div style={{ marginTop: 8, fontSize: 11 }}>
             {gpu.missing.length === 0 ? (
-              <>
-                <span style={{ color: "var(--success, #3fb950)" }}>
-                  ✓ GPU runtime ready
-                </span>
-                {/* Build updater (harness-style): the installed runtime is
-                    behind this app's pinned sherpa-onnx build — or predates
-                    version markers entirely. */}
-                {gpuUpdate?.updateAvailable && (
-                  <div style={{ marginTop: 8 }}>
-                    <button
-                      type="button"
-                      className="primary cta-strong"
-                      disabled={busyDevice || gpuInstalling}
-                      title={`v${gpuUpdate.installedVersion ?? "?"} → v${gpuUpdate.latestVersion} — re-downloads the pinned runtime`}
-                      onClick={() => void handleInstallGpu(true)}
-                    >
-                      {gpuInstalling
-                        ? gpuInstallPct !== null
-                          ? `Updating… ${gpuInstallPct}%`
-                          : "Updating…"
-                        : `Update GPU runtime → ${gpuUpdate.latestVersion}`}
-                    </button>
-                  </div>
-                )}
-              </>
+              <span style={{ color: "var(--success, #3fb950)" }}>
+                ✓ GPU runtime ready
+              </span>
             ) : (
-              <>
-                <div style={{ color: "var(--warn, #d29922)", marginBottom: 6 }}>
-                  Missing: {gpu.missing.join(", ")}
-                </div>
-                <button
-                  type="button"
-                  className="primary cta-strong"
-                  disabled={busyDevice || gpuInstalling}
-                  onClick={() => void handleInstallGpu()}
-                >
-                  {gpuInstalling
-                    ? gpuInstallPct !== null
-                      ? `Installing… ${gpuInstallPct}%`
-                      : "Installing…"
-                    : "Install GPU support (~876 MB)"}
-                </button>
-                <div style={{ marginTop: 6, color: "var(--text-dim)" }}>
-                  Downloads the CUDA voice engine (456 MB) and the cuDNN 9
-                  runtime (420 MB), both checksum-verified. The NVIDIA CUDA 13
-                  runtime must already be installed.
-                </div>
-                {gpuInstalling && (
-                  <div className="model-card-progress" style={{ padding: 0, marginTop: 8 }}>
-                    <div className="model-card-progress-bar">
-                      <div
-                        className="model-card-progress-fill"
-                        style={{ width: `${gpuInstallPct ?? 0}%` }}
-                      />
-                    </div>
-                    <div className="model-card-progress-info">
-                      <span>
-                        {gpuInstallPct !== null ? `${gpuInstallPct}% · ` : ""}
-                        {formatBytes(gpuInstall?.downloaded ?? 0)}
-                        {gpuInstall?.total ? ` / ${formatBytes(gpuInstall.total)}` : ""}
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </>
+              <div style={{ color: "var(--warn, #d29922)" }}>
+                Missing: {gpu.missing.join(", ")} — install the GPU runtime in
+                Server builds below.
+              </div>
             )}
           </div>
         )}
       </div>
+
+      {/* Server builds — the GPU runtime install/update lives in ONE card
+          (harness-style rows) instead of buttons inside the device card. */}
+      <ServerBuildsCard ids={["tts-gpu"]} onInstalled={refresh} />
 
       <div
         style={{

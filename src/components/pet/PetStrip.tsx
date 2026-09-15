@@ -6,30 +6,36 @@
 // materialises (telein sprite) in the second half. Only the sidebar home
 // carries the paw button (panel) — it renders even while the pet is elsewhere.
 //
-// The pet is draggable: press + move repositions it along the strip (and the
-// new spot becomes its stroll home base, persisted); a press without movement
-// is a pet.
+// The pet is catch-and-carry: press + move LIFTS it out of the strip (the
+// PetCarrier portal copy follows the cursor) and every existing home arms as
+// a landing pad — release over another home drops it there; release over its
+// own home (or dead space) settles it back. A press without movement is a
+// pet. Dropping into a new home counts a teleport (Globetrotter) and plays a
+// landing plop + sparkle burst.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PawPrint } from "lucide-react";
 
 import { PetActor } from "./PetActor";
 import { PetPanel } from "./PetPanel";
+import { finalizePetDrop, trackPetCarry } from "../../lib/pets/carry";
 import { PET_TELEPORT_MS, usePetStore } from "../../state/pet";
 
 const PANEL_CLOSE_MS = 170;
-/** Pointer movement past this (px) turns a press into a drag. */
+/** Pointer movement past this (px) turns a press into a catch. */
 const DRAG_THRESHOLD_PX = 6;
+/** How long the landing plop/burst plays after a drop. */
+const LAND_MS = 700;
 
 export function PetStrip({ myHome }: { myHome: string }) {
   const enabled = usePetStore((s) => s.enabled);
   const home = usePetStore((s) => s.home);
   const teleport = usePetStore((s) => s.teleport);
   const dragging = usePetStore((s) => s.dragging);
+  const dragOver = usePetStore((s) => s.dragOver);
+  const landedAt = usePetStore((s) => s.landedAt);
   const name = usePetStore((s) => s.name);
   const x = usePetStore((s) => s.core.x);
   const beginDrag = usePetStore((s) => s.beginDrag);
-  const dragTo = usePetStore((s) => s.dragTo);
-  const endDrag = usePetStore((s) => s.endDrag);
   const petThePet = usePetStore((s) => s.petThePet);
   const [panel, setPanel] = useState<"closed" | "open" | "closing">("closed");
   // Mirror of `panel` for event handlers (the outside-click closer and the
@@ -43,7 +49,7 @@ export function PetStrip({ myHome }: { myHome: string }) {
   const [appearReady, setAppearReady] = useState(false);
   const pawRef = useRef<HTMLButtonElement>(null);
   const stripRef = useRef<HTMLDivElement>(null);
-  const drag = useRef<{ pointerId: number; startX: number; moved: boolean } | null>(null);
+  const drag = useRef<{ pointerId: number; startX: number; startY: number; moved: boolean } | null>(null);
 
   // The arriving pet mounts in the SECOND half of the teleport window: the
   // vanish finishes before the materialise starts (sequential, not a
@@ -90,7 +96,7 @@ export function PetStrip({ myHome }: { myHome: string }) {
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0) return;
-      drag.current = { pointerId: e.pointerId, startX: e.clientX, moved: false };
+      drag.current = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, moved: false };
       (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
     },
     [],
@@ -99,48 +105,85 @@ export function PetStrip({ myHome }: { myHome: string }) {
     (e: React.PointerEvent) => {
       const d = drag.current;
       if (!d || d.pointerId !== e.pointerId) return;
-      if (!d.moved && Math.abs(e.clientX - d.startX) > DRAG_THRESHOLD_PX) {
+      if (!d.moved) {
+        const dx = e.clientX - d.startX;
+        const dy = e.clientY - d.startY;
+        if (Math.hypot(dx, dy) <= DRAG_THRESHOLD_PX) return;
         d.moved = true;
-        beginDrag();
-      }
-      if (d.moved) {
-        const rect = stripRef.current?.getBoundingClientRect();
-        if (rect && rect.width > 0) dragTo((e.clientX - rect.left) / rect.width);
+        beginDrag(e.clientX, e.clientY); // caught!
+        // Tracking continues in the window listeners below — the actor moves
+        // into the PetCarrier portal on commit, and pointer capture dies with
+        // the unmounted hit box.
       }
     },
-    [beginDrag, dragTo],
+    [beginDrag],
   );
   const onPointerUp = useCallback(
     (e: React.PointerEvent) => {
       const d = drag.current;
       if (!d || d.pointerId !== e.pointerId) return;
       drag.current = null;
-      if (d.moved) endDrag();
+      if (d.moved) finalizePetDrop(e.clientX, e.clientY);
       else petThePet();
     },
-    [endDrag, petThePet],
+    [petThePet],
   );
 
+  // Window-level drag plumbing, attached by EVERY armed strip (the store
+  // guards make duplicates harmless; carry.ts dedupes the move events). After
+  // beginDrag the hit box unmounts — the actor moves into the PetCarrier
+  // portal and pointer capture dies with it — so the drag continues from
+  // these listeners: move tracks cursor + hovered landing home, up/cancel/
+  // Escape release the pet.
+  const armed = enabled && dragging;
+  useEffect(() => {
+    if (!armed) return;
+    const onMove = (e: PointerEvent) => trackPetCarry(e);
+    const onUp = (e: PointerEvent) => finalizePetDrop(e.clientX, e.clientY);
+    const onCancel = () => usePetStore.getState().endDrag();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") usePetStore.getState().endDrag(); // squirm free
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [armed]);
+
   const showPet = enabled && (active || vanishing);
-  // Non-sidebar strips collapse to nothing while the pet lives elsewhere —
-  // otherwise every open pane would reserve an empty gap above its composer.
-  if (!enabled || (myHome !== "sidebar" && !showPet)) return null;
+  // While carrying, every existing home stays mounted as an armed landing
+  // pad (pane strips normally unmount when the pet lives elsewhere).
+  if (!enabled || (myHome !== "sidebar" && !showPet && !armed)) return null;
   const animOverride =
     phase === "vanish" ? ("teleout" as const) : phase === "appear" ? ("telein" as const) : undefined;
   const actorVisible = phase !== "appear" || appearReady;
+  const justLanded = enabled && landedAt > 0 && Date.now() - landedAt < LAND_MS && home === myHome;
 
   return (
     <div
       ref={stripRef}
-      className={`pet-strip${myHome === "sidebar" ? " pet-strip-sidebar" : " pet-strip-pane"}`}
+      className={[
+        "pet-strip",
+        myHome === "sidebar" ? "pet-strip-sidebar" : "pet-strip-pane",
+        armed ? "pet-strip-armed" : "",
+        armed && dragOver === myHome ? "pet-strip-drop-hover" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
       data-home={myHome}
     >
       {/* Zero-width slot at the pet's x fraction; the 48px actor centres on it
           via its own negative margin. pointer events live on the small hit box
-          around the art: press = pet, press+move = drag to a new spot. */}
-      {showPet && actorVisible && (
+          around the art: press = pet, press+move = catch and carry. */}
+      {showPet && actorVisible && !dragging && (
         <div
-          className={`pet-slot${phase ? ` pet-slot-${phase}` : ""}${dragging ? " pet-slot-dragging" : ""}`}
+          className={`pet-slot${phase ? ` pet-slot-${phase}` : ""}${justLanded ? " pet-slot-landed" : ""}`}
           style={{ left: `${x * 100}%` }}
         >
           <div
@@ -150,10 +193,20 @@ export function PetStrip({ myHome }: { myHome: string }) {
             onPointerCancel={onPointerUp}
             role="button"
             aria-label={`Pet ${name} — click to pet, drag to move`}
-            title={`${name} — click to pet, drag to move`}
+            title={`${name} — click to pet, drag to carry`}
           >
             <PetActor animOverride={animOverride} />
           </div>
+          {/* Spirit burst on landing — keyed by landedAt so a re-drop restarts
+              it; the animation ends at opacity 0 and the stale span stays
+              invisible until then. */}
+          {justLanded && (
+            <span className="pet-burst" key={landedAt} aria-hidden>
+              {[0, 45, 90, 135, 180, 225, 270, 315].map((ang) => (
+                <i key={ang} style={{ "--ang": `${ang}deg` } as React.CSSProperties} />
+              ))}
+            </span>
+          )}
         </div>
       )}
       {myHome === "sidebar" && (

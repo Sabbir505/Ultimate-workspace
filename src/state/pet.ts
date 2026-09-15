@@ -28,7 +28,8 @@ export type PetMood =
   | "doze" // idle for a long time
   | "happy" // petted
   | "zoomies" // rare sprint across the strip
-  | "focus"; // opt-in focus-buddy meditation
+  | "focus" // opt-in focus-buddy meditation
+  | "caught"; // lifted by the cursor — carried between homes
 
 export type PetEvent =
   | { type: "chatToken" } // built-in chat streaming
@@ -108,6 +109,11 @@ const WALK_RANGE_MS = 14_000;
 export const PET_TELEPORT_MS = 820;
 /** Zoomies: 4× stroll speed for ~2.6s. */
 export const PET_ZOOMIES_MS = 2_600;
+/** A catch holds the `caught` pose for up to this long — far beyond any real
+ *  drag; endDrag/dropInto always clear it sooner, and tickPet releases it as
+ *  a stuck-drag safety net if the drag source ever vanished without an
+ *  endDrag. */
+export const PET_CAUGHT_HOLD_MS = 5 * 60_000;
 /** Petting this many times inside the window triggers zoomies. */
 export const PET_PET_COMBO = 3;
 const PET_COMBO_WINDOW_MS = 4_000;
@@ -129,6 +135,7 @@ const MOOD_DURATION: Partial<Record<PetMood, number>> = {
 /** Mood priority — higher-rank transient moods aren't downgraded by lower
  *  event streams (a celebration survives chat tokens still arriving). */
 const MOOD_RANK: Record<PetMood, number> = {
+  caught: 6,
   concerned: 5,
   celebrate: 4,
   happy: 3,
@@ -224,6 +231,23 @@ export function reducePet(core: PetCore, event: PetEvent, now: number): PetCore 
   const active = core.moodUntil > now; // transient mood still running
   const rank = MOOD_RANK[core.mood];
 
+  // In the user's hand nothing outranks being carried — but a turn finishing
+  // or a crash landing mid-carry still banks its XP so the event isn't lost.
+  if (core.mood === "caught") {
+    if (event.type === "celebrate") {
+      next.xp = core.xp + (event.source === "automation" ? XP_AWARD.automation : XP_AWARD.turn);
+      next.stats = {
+        ...core.stats,
+        turns: core.stats.turns + (event.source === "turn" ? 1 : 0),
+        automations: core.stats.automations + (event.source === "automation" ? 1 : 0),
+      };
+    } else if (event.type === "concerned" && (event.source === "error" || event.source === "crash")) {
+      next.xp = core.xp + XP_AWARD.error;
+      next.stats = { ...core.stats, errors: core.stats.errors + 1 };
+    }
+    return next;
+  }
+
   switch (event.type) {
     case "chatToken": {
       // Watching = attentive. Never pulls the pet out of a stronger mood,
@@ -306,6 +330,14 @@ export function tickPet(
   dtSec: number,
   rng: () => number = Math.random,
 ): PetCore {
+  // A caught mood that outlived its drag (drag source unmounted without an
+  // endDrag) would freeze the pet for the whole hold window — release it.
+  // While actually dragging the store never calls tick, so this only fires
+  // for the stuck case.
+  if (core.mood === "caught") {
+    return { ...core, mood: "idle", moodUntil: 0, nextWalkAt: now + WALK_MIN_MS };
+  }
+
   // Transient mood still running — nothing ages. Zoomies are the exception:
   // they carry a duration AND a sprint target that must keep moving.
   if (core.moodUntil > now && core.mood !== "zoomies") return core;
@@ -473,6 +505,14 @@ interface PetStoreState extends PetSettings {
   nextZoomiesAt: number;
   levelUpAt: number;
   dragging: boolean;
+  /** Live pointer position while dragging (viewport coords) — the carrier
+   *  copy lerps toward it. Null when not dragging. */
+  dragPointer: { x: number; y: number } | null;
+  /** While dragging: the home whose landing band is under the pointer. */
+  dragOver: string | null;
+  /** Timestamp of the last landing (cross-home drop or same-home release) —
+   *  powers the landing plop and sparkle burst. Not persisted. */
+  landedAt: number;
   /** Timestamps of recent pet clicks — the combo that triggers zoomies. */
   petTimes: number[];
   /** Homes that currently EXIST (sidebar + one per open chat pane). The
@@ -490,11 +530,15 @@ interface PetStoreState extends PetSettings {
   teleportTo: (home: string) => void;
   /** Teleport to a random OTHER existing home (random pane hopping). */
   teleportToRandomOther: () => void;
-  /** Drag session: begin clears walks, dragTo moves, end drops the pet at
-   *  its new spot (persisted as its stroll home base). */
-  beginDrag: () => void;
-  dragTo: (x: number) => void;
-  endDrag: () => void;
+  /** Catch-and-carry: begin catches the pet at the pointer (viewport coords,
+   *  `caught` mood); dragMove tracks the pointer and the hovered home;
+   *  endDrag drops it back into its CURRENT home at strip fraction `x`
+   *  (omitted on cancel — keep the old spot); dropInto releases it into a
+   *  DIFFERENT home, counting a teleport. */
+  beginDrag: (x: number, y: number) => void;
+  dragMove: (x: number, y: number, over: string | null) => void;
+  endDrag: (x?: number) => void;
+  dropInto: (home: string, x: number) => void;
   /** Opt-in focus buddy: 25 minutes of meditation, then a celebration. */
   startFocus: () => void;
   stopFocus: () => void;
@@ -555,6 +599,9 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
   nextZoomiesAt: Date.now() + 4 * 60_000 + Math.random() * 5 * 60_000,
   levelUpAt: 0,
   dragging: false,
+  dragPointer: null,
+  dragOver: null,
+  landedAt: 0,
   petTimes: [],
 
   event: (e) => {
@@ -708,26 +755,80 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
     persist(get(), get().core);
   },
 
-  beginDrag: () => {
+  beginDrag: (x, y) => {
     const s = get();
-    if (!s.dragging) {
-      set({
-        dragging: true,
-        core: { ...s.core, mood: "idle", moodUntil: 0, targetX: null },
-      });
-    }
+    if (s.dragging || !s.enabled) return;
+    const now = Date.now();
+    set({
+      dragging: true,
+      dragPointer: { x, y },
+      dragOver: null,
+      core: {
+        ...s.core,
+        mood: "caught",
+        moodUntil: now + PET_CAUGHT_HOLD_MS,
+        targetX: null,
+      },
+    });
   },
-  dragTo: (x) => {
+  dragMove: (x, y, over) => {
     const s = get();
     if (!s.dragging) return;
-    const clamped = Math.min(0.97, Math.max(0.03, x));
-    set({ core: { ...s.core, x: clamped } });
+    set({ dragPointer: { x, y }, dragOver: over });
   },
-  endDrag: () => {
+  endDrag: (x) => {
     const s = get();
     if (!s.dragging) return;
-    set({ dragging: false, core: { ...s.core, spotX: s.core.x } });
+    const now = Date.now();
+    const nx = typeof x === "number" ? Math.min(0.96, Math.max(0.04, x)) : s.core.x;
+    set({
+      dragging: false,
+      dragPointer: null,
+      dragOver: null,
+      landedAt: now,
+      core: {
+        ...s.core,
+        x: nx,
+        spotX: nx,
+        mood: "idle",
+        moodUntil: 0,
+        nextWalkAt: now + WALK_MIN_MS, // a moment to settle before strolling
+      },
+    });
     persist(get(), get().core);
+  },
+  dropInto: (home, x) => {
+    const s = get();
+    if (!s.dragging || !s.enabled) return;
+    if (home === s.home) {
+      get().endDrag(x);
+      return;
+    }
+    const now = Date.now();
+    const nx = Math.min(0.96, Math.max(0.04, x));
+    set({
+      dragging: false,
+      dragPointer: null,
+      dragOver: null,
+      landedAt: now,
+      home,
+      core: {
+        ...s.core,
+        x: nx,
+        spotX: nx,
+        // face inward — it lands looking into its new pane / the chat view
+        facing: nx < 0.5 ? 1 : -1,
+        mood: "happy",
+        moodUntil: now + HAPPY_MS,
+        nextWalkAt: now + WALK_MIN_MS,
+        stats: { ...s.core.stats, teleports: s.core.stats.teleports + 1 },
+      },
+    });
+    persist(get(), get().core);
+    if (Math.random() < 0.6) {
+      const line = petLine(get().species, "carried", get().name);
+      if (line) queueBubble(get, set, line);
+    }
   },
 
   startFocus: () => {
@@ -821,6 +922,10 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
       core: initialPetCore(Date.now()),
       bubble: null,
       teleport: null,
+      dragging: false,
+      dragPointer: null,
+      dragOver: null,
+      landedAt: 0,
       nextTeleportAt: Date.now() + 90_000,
     });
   },

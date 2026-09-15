@@ -239,18 +239,71 @@ describe("focus buddy", () => {
   });
 });
 
-describe("drag", () => {
-  it("moves the pet within bounds and remembers the new spot", () => {
-    usePetStore.getState().beginDrag();
-    expect(usePetStore.getState().dragging).toBe(true);
-    usePetStore.getState().dragTo(2);
-    expect(usePetStore.getState().core.x).toBeLessThanOrEqual(0.97);
-    usePetStore.getState().dragTo(0.3);
-    usePetStore.getState().endDrag();
+describe("catch & carry", () => {
+  it("catches at the pointer, tracks the drag, and drops back into its home", () => {
+    usePetStore.getState().beginDrag(120, 80);
+    let s = usePetStore.getState();
+    expect(s.dragging).toBe(true);
+    expect(s.core.mood).toBe("caught");
+    expect(s.dragPointer).toEqual({ x: 120, y: 80 });
+    usePetStore.getState().dragMove(300, 200, "pane-2");
+    s = usePetStore.getState();
+    expect(s.dragPointer).toEqual({ x: 300, y: 200 });
+    expect(s.dragOver).toBe("pane-2");
+    usePetStore.getState().endDrag(0.3);
+    s = usePetStore.getState();
+    expect(s.dragging).toBe(false);
+    expect(s.dragPointer).toBeNull();
+    expect(s.dragOver).toBeNull();
+    expect(s.core.mood).toBe("idle");
+    expect(s.core.spotX).toBeCloseTo(0.3, 5);
+    expect(s.landedAt).toBeGreaterThan(0);
+    expect(JSON.parse(localStorage.getItem("relay.pet.v1") ?? "{}").spotX).toBeCloseTo(0.3, 5);
+  });
+
+  it("dropInto moves homes, counts a teleport, and lands happy", () => {
+    const before = usePetStore.getState().core.stats.teleports;
+    usePetStore.getState().beginDrag(10, 10);
+    usePetStore.getState().dropInto("pane-2", 0.42);
     const s = usePetStore.getState();
     expect(s.dragging).toBe(false);
-    expect(s.core.spotX).toBeCloseTo(0.3, 5);
-    expect(JSON.parse(localStorage.getItem("relay.pet.v1") ?? "{}").spotX).toBeCloseTo(0.3, 5);
+    expect(s.home).toBe("pane-2");
+    expect(s.core.x).toBeCloseTo(0.42, 5);
+    expect(s.core.spotX).toBeCloseTo(0.42, 5);
+    expect(s.core.mood).toBe("happy");
+    expect(s.core.stats.teleports).toBe(before + 1);
+    expect(s.landedAt).toBeGreaterThan(0);
+  });
+
+  it("dropInto on the current home falls back to a plain clamped drop", () => {
+    const home = usePetStore.getState().home;
+    usePetStore.getState().beginDrag(10, 10);
+    usePetStore.getState().dropInto(home, 5);
+    const s = usePetStore.getState();
+    expect(s.home).toBe(home);
+    expect(s.dragging).toBe(false);
+    expect(s.core.spotX).toBeCloseTo(0.96, 5);
+  });
+
+  it("a carried pet ignores ambient events but still banks their XP", () => {
+    usePetStore.getState().beginDrag(0, 0);
+    const xpBefore = usePetStore.getState().core.xp;
+    const turnsBefore = usePetStore.getState().core.stats.turns;
+    usePetStore.getState().event({ type: "chatToken" });
+    expect(usePetStore.getState().core.mood).toBe("caught");
+    usePetStore.getState().event({ type: "celebrate", source: "turn" });
+    const s = usePetStore.getState();
+    expect(s.core.mood).toBe("caught");
+    expect(s.core.xp).toBe(xpBefore + 6);
+    expect(s.core.stats.turns).toBe(turnsBefore + 1);
+    usePetStore.getState().endDrag();
+  });
+
+  it("a stuck caught mood releases on the next tick", () => {
+    const stuck = core({ mood: "caught", moodUntil: T0 + 600_000 });
+    const next = tickPet(stuck, T0 + 1, 0.016, fixedRng);
+    expect(next.mood).toBe("idle");
+    expect(next.moodUntil).toBe(0);
   });
 
   it("strolls stay near the pet's spot", () => {
@@ -285,6 +338,7 @@ describe("level-up party", () => {
 
 describe("teleport stat", () => {
   it("counts scheduled and requested teleports", () => {
+    const before = usePetStore.getState().core.stats.teleports;
     usePetStore.setState({
       core: {
         ...usePetStore.getState().core,
@@ -295,10 +349,12 @@ describe("teleport stat", () => {
       nextTeleportAt: Date.now() - 1,
     });
     usePetStore.getState().tick(Date.now(), 0.016);
-    expect(usePetStore.getState().core.stats.teleports).toBe(1);
-    usePetStore.setState({ nextTeleportAt: Date.now() + 999_000, teleport: null });
+    expect(usePetStore.getState().core.stats.teleports).toBe(before + 1);
+    // Pin the home: the tick's scheduler just relocated the pet to a RANDOM
+    // other home, and teleportTo("sidebar") would no-op if it landed there.
+    usePetStore.setState({ nextTeleportAt: Date.now() + 999_000, teleport: null, home: "main" });
     usePetStore.getState().teleportTo("sidebar");
-    expect(usePetStore.getState().core.stats.teleports).toBe(2);
+    expect(usePetStore.getState().core.stats.teleports).toBe(before + 2);
   });
 });
 

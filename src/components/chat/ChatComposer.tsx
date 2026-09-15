@@ -1135,6 +1135,11 @@ export const ChatComposer = memo(function ChatComposer({
 
     onSend(outgoing, attachments, forceResearch || undefined);
     onClearQuotedSelections?.();
+    // Per-message connector semantics: the chip rode THIS message (as the
+    // [Connected: …] chips on the bubble) and the composer clears after
+    // send — re-pick from the @-menu (or mention @gmail) to attach again
+    // for the next turn.
+    for (const rowId of attachedRows) detachSource(rowId);
     setContent("");
     setCommandPill(null);
     setAttachments([]);
@@ -1146,7 +1151,7 @@ export const ChatComposer = memo(function ChatComposer({
     if (ta) {
       ta.style.height = "auto";
     }
-  }, [content, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration, isHarnessSession, effectiveSessionId, quotedSelections, onClearQuotedSelections, commandPill, attachedRows, attachSources, attachLabel]);
+  }, [content, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration, isHarnessSession, effectiveSessionId, quotedSelections, onClearQuotedSelections, commandPill, attachedRows, attachSources, attachLabel, detachSource]);
 
   // Handle ArtifactTypeSelector selection
   const handleCreateTypeSelect = useCallback((type: ArtifactType, instruction?: string) => {

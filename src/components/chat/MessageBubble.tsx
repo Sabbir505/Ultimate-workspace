@@ -361,7 +361,6 @@ function MessageBubbleInner({
           <span className="superseded-tag">previous version</span>
         )}
         {msgAttachments.length > 0 && <MessageAttachments attachments={msgAttachments} />}
-        {msgConnectors.length > 0 && <MessageConnectors connectors={msgConnectors} />}
         {/* dir=auto: an Arabic/Hebrew/Urdu answer lays out RTL and right-aligned
             from its own first strong character; Latin text is unchanged. */}
         <div className="chat-bubble-inner" dir="auto">
@@ -404,9 +403,14 @@ function MessageBubbleInner({
           ) : (
             <CitationFlagContext.Provider value={citationFlags}>
             {isUser ? (
-              cleanContent.trim().length > 0 && (
-                <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} chatSessionId={chatSessionId} />
-              )
+              <div className="msg-user-line">
+                {cleanContent.trim().length > 0 && (
+                  <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} chatSessionId={chatSessionId} />
+                )}
+                {msgConnectors.length > 0 && (
+                  <MessageConnectors connectors={msgConnectors} />
+                )}
+              </div>
             ) : hasProcess ? (
               (() => {
                 // The "Working for Xs / Worked for Xs" header is ALWAYS the

@@ -4366,27 +4366,39 @@ button.chat-mermaid-open {
 
 /* Connector chips on a user message — the message-side counterpart of the
    composer's attach pills. Parsed from the [Connected: …] content marker
-   (see MessageAttachments.parseAttachments). */
+   (see MessageAttachments.parseAttachments). Rendered INLINE at the end of
+   the message text, inside the bubble card. */
 .msg-connectors {
-  display: flex;
+  display: inline-flex;
   flex-wrap: wrap;
   gap: 5px;
-  margin-bottom: 2px;
+  vertical-align: middle;
+  margin: 4px 0 0;
 }
+/* No box at all — the connector is just accent-colored text with a small
+   glyph, exactly the size of the sentence it belongs to. */
 .msg-connector-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 22px;
-  padding: 0 8px;
-  font-size: 11.5px;
+  gap: 0.35em;
+  font-size: inherit;
+  line-height: inherit;
   font-weight: 600;
-  border-radius: 999px;
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
 }
 .msg-connector-chip svg {
   flex-shrink: 0;
+  width: 0.9em;
+  height: 0.9em;
   opacity: 0.9;
+}
+/* Text and connector chip share ONE line, chip right after the text. */
+.msg-user-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.msg-user-line p {
+  margin: 0;
 }

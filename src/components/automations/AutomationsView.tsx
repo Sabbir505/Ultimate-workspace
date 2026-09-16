@@ -188,7 +188,6 @@ export function AutomationsView() {
   const loaded = useAutomationsStore((s) => s.loaded);
   const load = useAutomationsStore((s) => s.load);
   const runningNow = useAutomationsStore((s) => s.runningNow);
-  const setActiveView = useUiStore((s) => s.setActiveView);
   const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showNewForm, setShowNewForm] = useState(false);
@@ -263,13 +262,6 @@ export function AutomationsView() {
             title="Refresh"
           >
             <RefreshCw size={14} strokeWidth={2} />
-          </button>
-          <button
-            onClick={() => setActiveView("chat")}
-            className="automations-btn ghost"
-            title="Back to chat"
-          >
-            ← Back to chat
           </button>
         </div>
       </div>

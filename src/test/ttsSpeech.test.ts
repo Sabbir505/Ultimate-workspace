@@ -135,10 +135,13 @@ describe("markdownToSpeech — numbers and symbols", () => {
     expect(markdownToSpeech("his grade (B) was fine")).toContain("(B)");
   });
 
-  it("speaks initialisms as letters", () => {
-    expect(markdownToSpeech("a Mixture of Experts (MoE) model")).toContain("(M O E)");
-    expect(markdownToSpeech("the MoE runs locally")).toContain("M O E runs");
-    expect(markdownToSpeech("two MoEs")).toContain("M O Es");
+  it("speaks MoE as its expansion and other initialisms as letters", () => {
+    // MoE is voiced as the term it stands for, never "moe" or "M O E" —
+    // either order of the parenthetical pair collapses to one expansion.
+    expect(markdownToSpeech("a Mixture of Experts (MoE) model")).toContain("Mixture of Experts model");
+    expect(markdownToSpeech("the MoE runs locally")).toContain("mixture of experts runs");
+    expect(markdownToSpeech("two MoEs")).toContain("two mixture of experts");
+    expect(markdownToSpeech("MoE (mixture of experts) routing")).toContain("mixture of experts routing");
     expect(markdownToSpeech("an LLM (LLM) call")).toContain("(L L M)");
     // A word with an inner capital is NOT spelled out — this is the case a
     // rule cannot decide, so it must not guess. (The identifier pass may still
@@ -256,12 +259,14 @@ describe("groupSentences", () => {
     expect(grouped.map((c) => c.paragraphStart)).toEqual([false, true]);
   });
 
-  it("folds a too-short paragraph into the next one", () => {
+  it("folds a too-short paragraph into the next one, keeping a spoken breath", () => {
     const sentences = splitSentences("Benchmarks.\n\nIt ran far faster than before.");
     const grouped = groupSentences(sentences, 1000, 200);
-    // A heading is not worth 4.5s of process start on its own.
+    // A heading is not worth 4.5s of process start on its own — but the
+    // paragraph boundary it swallows must not vanish as a run-on, so the
+    // fold joins with a comma (the engine's breath) instead of a space.
     expect(grouped).toHaveLength(1);
-    expect(grouped[0].text).toBe("Benchmarks. It ran far faster than before.");
+    expect(grouped[0].text).toBe("Benchmarks, It ran far faster than before.");
   });
 
   it("never exceeds the budget", () => {
@@ -283,6 +288,27 @@ describe("markdownToSpeech — durations, money, times and citations", () => {
     expect(markdownToSpeech("a 1yr warranty")).toContain("1 year");
     expect(markdownToSpeech("waited 6h")).toContain("6 hours");
     expect(markdownToSpeech("about 45s")).toContain("45 seconds");
+  });
+
+  it("speaks model-card shorthand — price pairs, param ratios, age tags", () => {
+    // Input/output pricing pairs read as two amounts, not "over".
+    expect(markdownToSpeech("Both: $10/$30 per 1M tokens.")).toContain(
+      "10 dollars, 30 dollars per 1 million tokens",
+    );
+    expect(markdownToSpeech("$2/$6")).toContain("2 dollars, 6 dollars");
+    // Parameter ratios (total over active in a MoE card) say their units.
+    expect(markdownToSpeech("2.8T/B parameters")).toContain("2.8 trillion, billion parameters");
+    expect(markdownToSpeech("1T/32B active")).toContain("1 trillion, 32 billion active");
+    // A context/output cap spelled with the K convention.
+    expect(markdownToSpeech("128K max output")).toContain("128 thousand max output");
+    // Bracketed age tags say the duration without bracket clicks.
+    expect(markdownToSpeech("Claude [6d]")).toContain("Claude 6 days");
+    expect(markdownToSpeech("[2h] old")).toContain("2 hours old");
+    // A word-bearing tag keeps its word and loses the clicking brackets.
+    expect(markdownToSpeech("status: [ongoing]")).toContain("ongoing");
+    // Markdown links and citations are untouched by the bracket cleanup.
+    expect(markdownToSpeech("[label](https://x.dev)")).toBe("label");
+    expect(markdownToSpeech("see [3]")).toContain("source 3");
   });
 
   it("does not mistake decades, watts or approximations for durations", () => {

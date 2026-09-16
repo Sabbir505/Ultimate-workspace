@@ -24,7 +24,7 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
 
 import { ChatPaneGrid } from "../components/chat/ChatPaneGrid";
 import { endChatSessionDrag, startChatSessionDrag } from "../lib/chatPaneDnd";
-import { findPaneForSession, insertChatPaneSplit } from "../state/chat/paneTree";
+import { findPaneForSession, insertChatPaneSplit, mainPaneLeaf } from "../state/chat/paneTree";
 import { useChatStore } from "../state/chat";
 
 function session(id: string) {
@@ -90,6 +90,30 @@ afterEach(() => {
 });
 
 describe("ChatPaneGrid", () => {
+  it("hides the floating close ✕ in the single (unsplit) view — nothing to close", () => {
+    useChatStore.setState({
+      loaded: true,
+      sessions: [session("s1")],
+      activeChatSessionId: "s1",
+      messages: [],
+      messagesSessionId: "s1",
+      chatPaneTree: null,
+      paneBuffers: {},
+      focusedPaneId: null,
+      focusedChatSessionId: null,
+      streaming: {},
+      chatStatus: {},
+    } as never);
+    render(<ChatPaneGrid node={mainPaneLeaf()} />);
+    expect(document.querySelectorAll(".chat-pane").length).toBe(1);
+    expect(document.querySelectorAll(".chat-pane-float-close").length).toBe(0);
+    // Split panes keep the ✕, so the narrower deliverable is the pane chrome.
+    cleanup();
+    const tree = seed();
+    render(<ChatPaneGrid node={tree} />);
+    expect(document.querySelectorAll(".chat-pane-float-close").length).toBe(2);
+  });
+
   it("renders one pane per leaf with a floating close ✕ on EVERY pane (no title bar)", () => {
     const tree = seed();
     render(<ChatPaneGrid node={tree} />);

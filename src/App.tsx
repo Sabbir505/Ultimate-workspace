@@ -86,8 +86,7 @@ const AutomationsView = lazy(() => import("./components/automations/AutomationsV
 const WelcomeWizard = lazy(() => import("./components/onboarding/WelcomeWizard").then((m) => ({ default: m.WelcomeWizard })));
 // Split-chat pane tree (recursive resizable panes + drag-and-drop targets).
 import { ChatPaneGrid } from "./components/chat/ChatPaneGrid";
-import { chatPaneIds, mainPaneLeaf } from "./state/chat/paneTree";
-import { usePetStore } from "./state/pet";
+import { mainPaneLeaf } from "./state/chat/paneTree";
 
 export default function App() {
   const activeView = useUiStore((s) => s.activeView);
@@ -163,18 +162,12 @@ export default function App() {
     return null;
   }, []);
 
-  // The companion pet lives in ONE home at a time — the sidebar strip or the
-  // composer strip of ONE open chat pane. Publish the existing pane ids so
-  // its random teleport scheduler only picks homes that exist (and relocates
-  // instantly when its home pane closes). Popout windows have no sidebar —
-  // their only home is the single chat view.
-  const petHomes = useMemo(
-    () => (popout?.kind === "chat" ? ["main"] : ["sidebar", ...chatPaneIds(chatPaneTree)]),
-    [chatPaneTree, popout],
-  );
-  useEffect(() => {
-    usePetStore.getState().setPetHomes(petHomes);
-  }, [petHomes]);
+  // The companion pet's homes register THEMSELVES: the sidebar strip plus
+  // each rendered chat composer's strip announce their existence to the pet
+  // store on mount (see PetStrip), so the random teleport scheduler only
+  // picks homes that can actually show the pet. (Publishing the pane tree's
+  // ids instead let the pet teleport to a home whose strip wasn't rendered —
+  // it vanished until the layout happened to bring the strip back.)
 
   // Bootstrap: settings first (theme), then projects/sessions/harnesses, skills.
   useEffect(() => {

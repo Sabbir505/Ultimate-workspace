@@ -620,6 +620,29 @@ pub(super) fn pi_message_text(msg: Option<&Value>) -> Option<String> {
     (!text.trim().is_empty()).then(|| text)
 }
 
+/// Strip CommandCode's internal usage trailer —
+/// `<usage>total_tokens: … tool_uses: … turns: … duration_ms: …</usage>` —
+/// from tool-result text. It is CLI metadata, not the agent's work (same
+/// family as claude's async launch receipt): forwarded verbatim it lands at
+/// the end of a subagent panel output or transcript and renders as literal
+/// text. No regex — cut every `<usage>…</usage>` occurrence; an unterminated
+/// trailer (truncated stream) drops the tail.
+pub(super) fn strip_usage_trailer(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<usage>") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("</usage>") {
+            // `end` is relative to `rest[start..]` (which begins at the
+            // opening tag), so the closing tag ends at start + end + len.
+            Some(end) => rest = &rest[start + end + 8..],
+            None => rest = "",
+        }
+    }
+    out.push_str(rest);
+    out.trim_end().to_string()
+}
+
 /// CommandCode `-p --output-format json` NDJSON events. Verified live
 /// (v1.44): frames are `{"type":"event","event":{…}}` wrapping inner
 /// AgentEvents (`run_start` with `sessionId`, `turn_start`, `message_start`,
@@ -710,9 +733,10 @@ pub(super) fn handle_commandcode_event(
                     ) {
                         // Tool execution begins — close the generation window.
                         crate::chat::turn_perf::end_active_gen(sid);
-                        let result_text = extract_result_text(
+                        let raw_result = extract_result_text(
                             inner.get("result").or_else(|| inner.get("output")),
                         );
+                        let result_text = strip_usage_trailer(&raw_result);
                         let already_open = seen_tools.contains(call_id);
                         if already_open && !result_text.is_empty() {
                             // Completion frame for a card already on screen.
@@ -853,12 +877,14 @@ pub(super) fn handle_commandcode_event(
             // finalText on thinking/tool turns and the whole reply used to
             // land a second time.
             if let Some(text) = v.get("finalText").and_then(|t| t.as_str()) {
+                // Defensive: the trailer must not ride the reply either.
+                let text = strip_usage_trailer(text);
                 if !text.is_empty() {
                     let suffix = match text.strip_prefix(text_streamed.as_str()) {
                         Some(s) => s,
                         // Nothing streamed (renamed event types): recover the
                         // whole reply from finalText.
-                        None if text_streamed.is_empty() => text,
+                        None if text_streamed.is_empty() => text.as_str(),
                         // Streamed text diverged from finalText (e.g.
                         // finalText carries only the LAST message of a
                         // multi-turn reply): everything was already delivered

@@ -3352,6 +3352,21 @@ mod tests {
         assert!(tools.by_tool_use.is_empty());
     }
 
+    /// CommandCode appends an internal `<usage>` trailer to tool results —
+    /// forwarded verbatim it rendered as literal text at the end of a
+    /// subagent panel ("total_tokens: … tool_uses: … turns: …
+    /// duration_ms: …"). It is CLI metadata, not the agent's work.
+    #[test]
+    fn commandcode_usage_trailer_is_stripped_from_result_text() {
+        let raw = "Found vectorbt on PyPI.\n\n<usage>total_tokens: 109007 tool_uses: 8 \
+                   turns: 3 duration_ms: 67912</usage>";
+        assert_eq!(strip_usage_trailer(raw), "Found vectorbt on PyPI.");
+        // Unterminated trailer (truncated stream) drops the tail too.
+        assert_eq!(strip_usage_trailer("answer <usage>total_tokens: 1"), "answer");
+        // Trailer-free text passes through (trailing whitespace still trimmed).
+        assert_eq!(strip_usage_trailer("plain result\n"), "plain result");
+    }
+
     /// EOF drain for adapters that queue subagents ONLY in the FIFO (kimi /
     /// pi / omp / commandcode — no CLI tool_use id): a CLI exit mid-subagent
     /// used to leave the panel entry spinning forever because fail_pending

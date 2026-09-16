@@ -507,6 +507,14 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                     .as_deref()
                     .and_then(crate::harness_adapters::canonical_model_key)
             });
+            // Pricing gets one more chance than grouping does: when the
+            // canonical map doesn't know the session's model either (a newer
+            // GLM/Kimi/DeepSeek release, a provider-prefixed commandcode id),
+            // the RAW id still prices via the rate table's family fallback —
+            // the harnesses that never report a cost (commandcode) otherwise
+            // show real token counts at $0.00 forever. Grouping keeps the
+            // canonical key so the per-model table doesn't fragment.
+            let pricing_key = key.or(session_model.as_deref());
             // Local models: derive cost from electricity (power × duration × rate).
             // No rate table — they run on the user's hardware. Cloud models keep
             // the per-token rate calculation. Harness-backed sessions prefer the
@@ -526,10 +534,15 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                     let c = local_model_electricity_cost(gpu_watts, duration_s, elec_rate);
                     (c > 0.0).then_some(c)
                 }
+                // Local rows without electricity settings stay UNPRICED: a
+                // GGUF basename often carries a family substring
+                // ("qwen2.5-…gguf") and the rate table's family fallback
+                // would otherwise price the user's own hardware at API rates.
+                Some("local_gguf") => None,
                 _ if is_harness_session => {
-                    reported_cost.or_else(|| price_usage(&usage, key, &overrides))
+                    reported_cost.or_else(|| price_usage(&usage, pricing_key, &overrides))
                 }
-                _ => price_usage(&usage, key, &overrides),
+                _ => price_usage(&usage, pricing_key, &overrides),
             };
             if is_harness_session {
                 if let Some(r) = reported_cost {
@@ -592,7 +605,7 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                 entry.1 += i.unwrap_or(0);
                 entry.2 += o.unwrap_or(0);
             }
-            totals.cache_savings_usd_via_helper += cache_savings(&usage, key, &overrides);
+            totals.cache_savings_usd_via_helper += cache_savings(&usage, pricing_key, &overrides);
             by_kind.uncached_input_tokens += i.unwrap_or(0);
             by_kind.cached_input_tokens += cc.unwrap_or(0) + cr.unwrap_or(0);
             by_kind.output_tokens += o.unwrap_or(0) + reasoning.unwrap_or(0);
@@ -1013,6 +1026,56 @@ mod tests {
             r.cost_quality.provider_reported_pct > 0.0,
             "harness-reported cost must surface in cost quality: {}",
             r.cost_quality.provider_reported_pct
+        );
+    }
+
+    #[test]
+    fn commandcode_unknown_model_prices_at_family_rate() {
+        // The commandcode case: the CLI reports usage but NEVER a cost or a
+        // model id, so the row carries cost_usd NULL / model_key NULL and the
+        // rollup's only lead is the session's model. For an id the rate table
+        // has never heard of ("zai/glm-5.3" — canonical_model_key knows only
+        // glm-5.1/5.2) the row used to show real tokens at $0.00 forever. The
+        // family-rate fallback prices it at glm-5.2's researched rate.
+        let conn = super::super::mem();
+        let cs = super::super::create_chat_session(
+            &conn,
+            "harness:commandcode",
+            "zai/glm-5.3",
+            None,
+        )
+        .unwrap();
+        super::super::add_chat_message(
+            &conn,
+            super::super::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "answered",
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(500_000),
+                cost_usd: None,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                provider: Some("commandcode"),
+                model_key: None,
+                pricing_estimated_usd: None,
+                started_at: None,
+                completed_at: None,
+                llm_time_ms: None,
+                tool_time_ms: None,
+                ttft_ms: None,
+                tokens_per_second: None,
+            },
+        )
+        .unwrap();
+        let r = rollups_for_tests(&conn);
+        // glm family fallback (glm-5.2: $1.4 in / $4.4 out): 1M in + 0.5M out
+        // = 1.4 + 2.2 = $3.60 instead of $0.00.
+        assert!(
+            (r.totals.raw_token_cost_usd - 3.6).abs() < 1e-6,
+            "unknown glm id must price at the family rate: got {}",
+            r.totals.raw_token_cost_usd
         );
     }
 

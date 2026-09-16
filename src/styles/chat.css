@@ -77,13 +77,6 @@
   background: var(--surface-3, var(--surface-2));
 }
 
-.chat-session-star-badge {
-  flex: none;
-  font-size: 11px;
-  line-height: 1;
-  margin-top: 3px;
-  color: var(--accent);
-}
 .chat-session-unread-dot {
   flex: none;
   width: 7px;
@@ -93,8 +86,50 @@
   background: var(--accent);
 }
 
+/* Left-edge quick pin (same "keep at top" feature as the ⋮ menu item): a
+   fixed slot on every row so titles align; at rest it only shows the unread
+   dot, hovering the row reveals the pin toggle, and pinned rows keep the
+   filled pin visible without hover. */
+.chat-session-pin-btn {
+  position: relative;
+  flex: none;
+  width: 12px;
+  height: 14px;
+  margin-top: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s var(--ease), color 0.15s var(--ease);
+}
+.chat-session-pin-btn .chat-session-unread-dot {
+  position: absolute;
+  margin: 0;
+}
+.chat-session-row:hover .chat-session-pin-btn,
+.chat-session-pin-btn.pinned {
+  opacity: 1;
+  pointer-events: auto;
+}
+.chat-session-row:hover .chat-session-pin-btn .chat-session-unread-dot {
+  opacity: 0;
+}
+.chat-session-pin-btn.pinned,
+.chat-session-pin-btn:hover {
+  color: var(--accent);
+}
+
 /* Spinning ring shown on a chat row while its response is still streaming,
-   so the user can tell which chats are working after navigating away. */
+   so the user can tell which chats are working after navigating away. It
+   shares the meta slot with the ⋮ options button — hovering swaps one for
+   the other, never both at once. */
 .chat-session-working {
   flex: none;
   width: 11px;
@@ -103,6 +138,11 @@
   border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
   border-top-color: var(--accent);
   animation: chat-session-spin 0.7s linear infinite;
+  transition: opacity 0.15s var(--ease);
+}
+.chat-session-row:hover .chat-session-working,
+.chat-session-row.menu-open .chat-session-working {
+  opacity: 0;
 }
 /* Inbox second row: project · branch context on the left, the session's
    provider/harness/local-model brand icon on the right. */
@@ -1202,6 +1242,17 @@ div[data-index]:has(.chat-session-row.menu-open) {
   white-space: nowrap;
 }
 .chat-agent-chip-check { flex-shrink: 0; color: #3fb970; font-weight: 700; }
+/* Spinner on a subagent chip whose agent is still running — same ring as the
+   sidebar's working dot; the ✓ only appears once the store reports settled. */
+.chat-agent-chip-spinner {
+  flex-shrink: 0;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, #5aa7f0 30%, transparent);
+  border-top-color: #5aa7f0;
+  animation: chat-session-spin 0.7s linear infinite;
+}
 .chat-agent-chip.running .chat-agent-chip-btn {
   border-color: color-mix(in srgb, #5aa7f0 40%, var(--border));
 }

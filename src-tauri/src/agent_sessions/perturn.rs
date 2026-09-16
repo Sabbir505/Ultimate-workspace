@@ -478,6 +478,13 @@ pub(super) fn read_per_turn_stream(
     stderr_tail: Option<std::sync::mpsc::Receiver<String>>,
 ) {
     let mut full = String::new();
+    // Crash-flush accumulator (see PartialFlush): keeps a seconds-stale
+    // snapshot of the live reply in the DB so a mid-turn crash doesn't leave
+    // the chat with a user bubble and nothing under it.
+    let mut partial = PartialFlush::new();
+    // The resume id in play when the turn started — a turn that RESUMED and
+    // then produced nothing is the stale-id signature (recovery below).
+    let resumed_with: Option<String> = session_cell.lock().ok().and_then(|g| g.clone());
     // Capture the turn's start instant for the "Worked for Xs" label.
     let started_at = crate::db::now_ts();
     // One accumulator per turn (this whole reader IS one turn): the chat's
@@ -591,6 +598,7 @@ pub(super) fn read_per_turn_stream(
                 &mut seen_tools,
             ),
         }
+        partial.maybe_flush(db, sid, &full);
     }
     // Process exit closes the turn. Persist any captured CLI session id so
     // the next turn (even after cancel or an app restart) resumes the same
@@ -605,6 +613,9 @@ pub(super) fn read_per_turn_stream(
     } else {
         split_relay_ask(full)
     };
+    // Hand persistence back to finish_turn's real insert (or the cancel's
+    // discard): keeping the crash-flush row would double-render the turn.
+    partial.discard(db);
     // E-5 gate: only the CURRENT turn's reader may clear the shared flag —
     // an old reader's late EOF after a superseding send must leave it (the
     // new turn set it true and owns it).
@@ -633,6 +644,49 @@ pub(super) fn read_per_turn_stream(
                     stderr_suffix(&tail)
                 ),
             );
+            // Stale-resume recovery (mirrors the claude_code reader): a turn
+            // that RESUMED from a stored CLI session id but produced zero
+            // output is the signature of that id failing on the CLI side —
+            // expired, GC'd, or wiped by a crash/update ("no session found to
+            // resume"). Without this the chat resume-fails FOREVER; dropping
+            // the id makes the next send take the context-primer path, which
+            // replays the DB history. A false positive only costs one primer
+            // replay.
+            if resumed_with.is_some() {
+                if let Ok(mut g) = session_cell.lock() {
+                    *g = None;
+                }
+                {
+                    let conn = db.0.lock();
+                    // Audit MED-7 (claude reader): only drop the PERSISTED id
+                    // while this chat still runs this harness — a harness
+                    // switch keeps the stored id so switching back resumes.
+                    let still_same = crate::db::get_chat_session(&conn, sid)
+                        .ok()
+                        .flatten()
+                        .map(|cs| {
+                            cs.agent.as_deref()
+                                == Some(&format!("harness:{}", kind.harness_id()))
+                        })
+                        .unwrap_or(true);
+                    if still_same {
+                        let _ = crate::db::delete_setting(
+                            &conn,
+                            &cli_session_key(kind.harness_id(), sid),
+                        );
+                    }
+                }
+                eprintln!(
+                    "[context] {} resume failed (no turn output); dropping stale CLI session id — the next send replays the context primer",
+                    kind.harness_id()
+                );
+                crate::chat::stream_events::emit_status_reason(
+                    app,
+                    sid,
+                    "context_primer_pending",
+                    "CLI session expired — the next send replays the conversation context",
+                );
+            }
         }
         // per-turn CLI streams don't reliably expose a model id on their
         // events — the cost rollup falls back to the session's model.

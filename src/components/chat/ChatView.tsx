@@ -37,7 +37,7 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 // edit-tool call. None of these appear on the empty welcome screen.
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
 const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m) => ({ default: m.ArtifactProposalCard })));
-import { listHarnessModels, stopLocalModel, localModelStatus, deleteEmptyChatSessions, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel, getResearchCitationReport, PROVIDER_INPUT_INCLUDES_CACHE, providerKindOf } from "../../lib/ipc";
+import { listHarnessModels, stopLocalModel, localModelStatus, deleteEmptyChatSessions, reconcileAgentSessions, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel, getResearchCitationReport, PROVIDER_INPUT_INCLUDES_CACHE, providerKindOf } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatSelectionPrefill } from "../../lib/chatSelection";
 import { useTranscriptScroll } from "./useTranscriptScroll";
@@ -348,13 +348,16 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   // stripped from it. The provider-counted lastInputTokens half gets the
   // same treatment on inclusive providers (OpenAI-style input embeds the
   // cache read); Anthropic-style input is reported uncached already.
-  // Live count wins for local sessions (exact /tokenize). For cloud and
-  // harness sessions the polled backend estimate is live (it includes the
-  // just-sent user message and reflects compaction immediately) while the
-  // last assistant turn's input_tokens is provider-counted — take the
-  // larger of the two so neither a stale figure nor an underestimate can
-  // hide a filling window. Either way, the meter's percentage is a real
-  // number, never fabricated.
+  // Source choice: the two figures are different scales (a ~4 chars/token
+  // estimate vs the provider's tokenizer count), so taking max() of them —
+  // the old behavior — flipped the tooltip between the two scales on every
+  // turn, which read as the context number jumping around. The
+  // provider-counted figure now leads whenever it exists (one figure, one
+  // scale; updates once per turn), and the live estimate leads only while
+  // there is no provider figure yet (fresh session) or right after a
+  // compaction (the provider figure predates the compact and is stale-high
+  // until the next turn lands). Local sessions keep the exact /tokenize
+  // poll as always.
   const cachedTokens = liveUsage.cachedTokens ?? 0;
   const providerIncludesCache = PROVIDER_INPUT_INCLUDES_CACHE.has(
     activeSession?.provider ?? "",
@@ -367,9 +370,30 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
     lastInputTokens != null && providerIncludesCache
       ? Math.max(0, lastInputTokens - cachedTokens)
       : lastInputTokens;
+  // A compaction landed since the last provider figure: `compacted` flips on
+  // when compactionRevision moves and off when a new turn's inputTokens
+  // arrives (fresh provider figure, post-compact). Session switches are
+  // covered because lastInputTokens moves off the old session's value.
+  const [compactedSinceLastTurn, setCompactedSinceLastTurn] = useState(false);
+  const compactionRevRef = useRef(compactionRevision);
+  useEffect(() => {
+    if (compactionRevision !== compactionRevRef.current) {
+      compactionRevRef.current = compactionRevision;
+      setCompactedSinceLastTurn(true);
+    }
+  }, [compactionRevision]);
+  const lastInputRef = useRef(lastInputTokens);
+  useEffect(() => {
+    if (lastInputTokens !== lastInputRef.current) {
+      lastInputRef.current = lastInputTokens;
+      setCompactedSinceLastTurn(false);
+    }
+  }, [lastInputTokens]);
   const usedTokens = isLocal
     ? (pollUncached ?? lastUncached)
-    : Math.max(pollUncached ?? 0, lastUncached ?? 0) || lastUncached;
+    : lastUncached != null && !compactedSinceLastTurn
+      ? lastUncached
+      : (pollUncached ?? lastUncached);
 
 
   const handleModelChange = useCallback(
@@ -747,6 +771,21 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   useEffect(() => {
     if (!config) void loadConfig();
   }, [config, loadConfig]);
+
+  // Crash recovery, once per frontend boot: after a crash (or webview
+  // reload with the backend surviving) a mid-turn chat reopens showing only
+  // its user message and rejected every send with "a turn is already
+  // running". The backend command clears that in-memory flag for sessions
+  // whose reader and child process are both gone; genuinely running turns
+  // keep their flag (the rejection is honest while a CLI still streams).
+  const reconciled = useRef(false);
+  useEffect(() => {
+    if (reconciled.current) return;
+    reconciled.current = true;
+    void reconcileAgentSessions().catch(() => {
+      /* best-effort: an unrecovered wedged turn behaves as before */
+    });
+  }, []);
 
   // Entering chat with no session selected always starts a FRESH chat so the
   // user can type immediately. First sweep any empty "Untitled" rows — chats

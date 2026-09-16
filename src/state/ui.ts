@@ -239,7 +239,7 @@ export interface UiState {
    *  an existing agents tab is re-focused and re-targeted, a new instance is
    *  only created when none is open. Spawning agents never auto-opens —
    *  this runs only on an explicit click (chat chip or sidebar row). */
-  openAgentsTab: (subagentId: string) => void;
+  openAgentsTab: (subagentId: string | null) => void;
   /** Open a generated artifact (code/html/image/pdf/markdown/…) as its own
    *  main tab (auto-opens). Dedupes by path: if a matching artifact tab is
    *  already open, just activates it. */
@@ -547,11 +547,14 @@ export const useUiStore = create<UiState>((set, get) => ({
   // strip with an instance per click. Reuses an open agents tab when present.
   openAgentsTab: (subagentId) =>
     set((s) => {
+      // Tab instances store "no subagent" as undefined (activeSubagentId as
+      // null) — normalize so the fallback open-with-null shows the list.
+      const sub = subagentId ?? undefined;
       const existing = s.openTabs.find((t) => t.kind === "agents");
       if (existing) {
         return {
           openTabs: s.openTabs.map((t) =>
-            t.instanceId === existing.instanceId ? { ...t, subagentId } : t,
+            t.instanceId === existing.instanceId ? { ...t, subagentId: sub } : t,
           ),
           activeTabId: existing.instanceId,
           toolPanelTab: "agents",
@@ -563,7 +566,7 @@ export const useUiStore = create<UiState>((set, get) => ({
       const tab: ToolPanelTabInstance = {
         instanceId,
         kind: "agents",
-        subagentId,
+        subagentId: sub,
       };
       return {
         openTabs: [...s.openTabs, tab],

@@ -604,6 +604,10 @@ pub(super) fn read_per_turn_stream(
         }
         partial.maybe_flush(db, sid, &full);
     }
+    // Process exit with subagent dispatches still queued: their completion
+    // frames never arrived — finalize the panel entries so they don't spin
+    // forever (mirrors the claude reader's EOF drain).
+    tools.fail_pending(app, sid, "The CLI exited before this agent reported completion.");
     // Process exit closes the turn. Persist any captured CLI session id so
     // the next turn (even after cancel or an app restart) resumes the same
     // conversation. If the turn was cancelled, discard the partial reply —

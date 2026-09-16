@@ -143,13 +143,19 @@ pub fn build_instructions_md(
              available, call `get_capabilities` on `relay-tools` — never run \
              `claude mcp list` (or similar probes) in your terminal: that spawns \
              processes to re-derive what the app already knows and reads your \
-             config file instead of the live session. Delegating sub-work to \
-             ANOTHER coding agent is what Relay\'s mesh is for: spawn a dedicated \
-             chat with the relay-tools `spawn_session` tool (optionally `model`, \
-             e.g. \"opencode::mimo-v2.5-free\") instead of launching a coding-agent \
-             CLI in your shell — an externally launched agent opens a stray \
-             terminal window and is invisible to Relay: unwatchable, \
-             unresumable, and unknown to the Session Mesh."
+             config file instead of the live session. For sub-work inside THIS \
+             conversation, use your OWN Task/Agent tool — it runs an in-session \
+             subagent whose result returns to you directly. The relay-tools \
+             `spawn_session` tool (optionally `model`, \
+             e.g. \"opencode::mimo-v2.5-free\") is for a DIFFERENT kind of \
+             delegation: a dedicated, sidebar-visible chat in another engine \
+             the user can watch and resume — use it when the user asks for a \
+             separate chat/session or the work should run in a different \
+             engine. When a spawned session finishes its task, its result is \
+             automatically messaged back into this session. Never launch a \
+             coding-agent CLI in your shell instead: an externally launched \
+             agent opens a stray terminal window and is invisible to Relay: \
+             unwatchable, unresumable, and unknown to the Session Mesh."
         ));
     } else {
         parts.push(format!(

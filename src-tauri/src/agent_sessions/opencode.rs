@@ -167,7 +167,10 @@ pub(super) fn send_opencode_turn(
             &sid2,
             crate::chat::turn_perf::TurnPerf::new_opt(Some(app2.clone()), &sid2),
         );
-        let mut watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
+        let mut watches: Vec<DirWatch> = watch_dirs
+            .into_iter()
+            .map(|(dir, broad)| DirWatch::new(dir, broad))
+            .collect();
 
         // Resolve or create the server-side session id (resume across
         // restarts). Plain thread → block_on inside the HTTP call is legal.
@@ -382,7 +385,7 @@ pub(super) fn spawn_opencode_server(
     }
     // Serve from the workspace dir so relative tool paths land in the project.
     let watch_dirs = turn_watch_dirs(cwd, &db.0);
-    if let Some(dir) = watch_dirs.first() {
+    if let Some((dir, _)) = watch_dirs.first() {
         cmd.current_dir(dir);
     }
     no_console_window(&mut cmd);

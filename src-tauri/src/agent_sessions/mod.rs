@@ -3092,7 +3092,7 @@ mod tests {
 
         let after = snapshot_dir(dir);
         assert_eq!(
-            changed_previewable_files(&before, &after),
+            changed_previewable_files(&before, &after, previewable_ext),
             vec![
                 "keep.txt".to_string(),
                 "report.md".to_string(),
@@ -3101,7 +3101,7 @@ mod tests {
         );
         // Diffing an unchanged tree reports nothing.
         let again = snapshot_dir(dir);
-        assert!(changed_previewable_files(&after, &again).is_empty());
+        assert!(changed_previewable_files(&after, &again, previewable_ext).is_empty());
     }
 
     /// The artifact watch covers BOTH the spawn dir and the configured
@@ -3127,8 +3127,12 @@ mod tests {
             2,
             "spawn dir + configured artifacts dir: {dirs:?}"
         );
-        assert_eq!(canon(&dirs[0]), canon(proj.path()));
-        assert_eq!(canon(&dirs[1]), canon(arts.path()));
+        // The spawn dir keeps the narrow (deliverables-only) role; the
+        // artifacts dir entry gets the broad role.
+        assert!(!dirs[0].1, "spawn dir must be the narrow role");
+        assert!(dirs[1].1, "artifacts dir must be the broad role");
+        assert_eq!(canon(&dirs[0].0), canon(proj.path()));
+        assert_eq!(canon(&dirs[1].0), canon(arts.path()));
     }
 
     /// With no project and no configured dir, the spawn dir and the artifacts
@@ -3140,6 +3144,8 @@ mod tests {
         let db = Arc::new(parking_lot::Mutex::new(conn));
         let dirs = turn_watch_dirs(None, &db);
         assert_eq!(dirs.len(), 1, "{dirs:?}");
+        // The deduped dir IS the artifacts fallback dir: broad role.
+        assert!(dirs[0].1, "coincident spawn/artifacts dir must be broad");
     }
 
     /// F4 regression: the raw-stdout preview was sliced at BYTE 200

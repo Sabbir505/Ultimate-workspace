@@ -825,13 +825,27 @@ div[data-index]:has(.chat-session-row.menu-open) {
   width: 16px;
   height: 16px;
 }
+/* An image attachment without a live thumbnail (every persisted image —
+   bytes are not stored across turns) keeps the full-size tile so the card
+   still reads as an image, with a faint inset framing the placeholder
+   glyph like an empty picture frame. */
+.msg-attachment-card.img-placeholder .msg-attachment-thumb {
+  height: 88px;
+  border: 1px dashed var(--border-strong);
+  background: color-mix(in srgb, var(--surface-glass-2) 55%, transparent);
+}
+.msg-attachment-card.img-placeholder .msg-attachment-thumb svg {
+  width: 26px;
+  height: 26px;
+  opacity: 0.75;
+}
 .msg-attachment-card.no-thumb .msg-attachment-meta {
   flex: 1;
   min-width: 0;
 }
 .msg-attachment-card.no-thumb .msg-attachment-preview {
   width: 100%;
-  max-height: 10.2em; /* ~7 mono lines */
+  max-height: calc(7 * 1.45em + 8px); /* ~7 mono lines */
   padding: 4px 6px;
 }
 .msg-attachment-meta {
@@ -866,6 +880,11 @@ div[data-index]:has(.chat-session-row.menu-open) {
   color: var(--state-diff);
   border-color: color-mix(in srgb, var(--state-diff) 35%, transparent);
 }
+/* Truncation: an exact line multiple + a bottom fade (the .doc-card-snippet
+   recipe). The old -webkit-line-clamp: 4 never actually hid lines here —
+   with white-space: pre-wrap Chromium still paints the next line past the
+   clamp point, so every preview ended in an ellipsis followed by a
+   half-cut glyph row. */
 .msg-attachment-preview {
   font-family: var(--font-mono);
   font-size: 10.5px;
@@ -874,13 +893,12 @@ div[data-index]:has(.chat-session-row.menu-open) {
   background: var(--surface-solid);
   border-radius: var(--radius-xs);
   padding: 6px 8px;
-  max-height: 72px;
+  max-height: calc(4 * 1.45em + 12px);
   overflow: hidden;
   white-space: pre-wrap;
   word-break: break-word;
-  display: -webkit-box;
-  -webkit-line-clamp: 4;
-  -webkit-box-orient: vertical;
+  -webkit-mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
 }
 
 /* â”€â”€ Codex-style thinking / reasoning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -4641,7 +4659,10 @@ button.chat-mermaid-open {
 /* Connector chips on a user message — the message-side counterpart of the
    composer's attach pills. Parsed from the [Connected: …] content marker
    (see MessageAttachments.parseAttachments). Rendered INLINE at the end of
-   the message text, inside the bubble card. */
+   the message text, inside the bubble card, as a compact pill matching the
+   composer token pill (bare accent text was DIMMER than the surrounding
+   message text in the dark palette — ~3.5:1 contrast — and read as
+   disabled, not as a connector). */
 .msg-connectors {
   display: inline-flex;
   flex-wrap: wrap;
@@ -4649,21 +4670,31 @@ button.chat-mermaid-open {
   vertical-align: middle;
   margin: 4px 0 0;
 }
-/* No box at all — the connector is just accent-colored text with a small
-   glyph, exactly the size of the sentence it belongs to. */
 .msg-connector-chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.35em;
-  font-size: inherit;
-  line-height: inherit;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  line-height: 1;
   font-weight: 600;
-  color: var(--accent);
+  letter-spacing: 0.01em;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+:root[data-theme="light"] .msg-connector-chip {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.12);
 }
 .msg-connector-chip svg {
   flex-shrink: 0;
-  width: 0.9em;
-  height: 0.9em;
+  width: 12px;
+  height: 12px;
+  color: var(--accent);
   opacity: 0.9;
 }
 /* Text and connector chip share ONE line, chip right after the text. */

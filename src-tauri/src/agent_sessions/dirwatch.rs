@@ -38,13 +38,21 @@ pub(super) fn spawn_dir(
 /// Watching only the spawn dir silently drops every MCP-generated docx/pptx/
 /// pdf: no artifact row, no `chat:artifact` event, no canvas auto-open.
 /// Deduped (canonicalized); spawn dir first.
+///
+/// Each dir carries its ARTIFACT ROLE: `false` = a project/workspace dir
+/// whose changed files only count as artifacts when they are deliverables
+/// (documents, images, web reports — code and data files are working files,
+/// tracked by the turn's git checkpoint, not the gallery); `true` = the
+/// dedicated artifacts dir, where everything previewable is gallery material.
+/// When no project is selected the spawn dir IS the artifacts fallback dir —
+/// the deduped entry keeps the broad role (`true`).
 pub(super) fn turn_watch_dirs(
     cwd: Option<&str>,
     db: &Arc<parking_lot::Mutex<rusqlite::Connection>>,
-) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
+) -> Vec<(PathBuf, bool)> {
+    let mut dirs: Vec<(PathBuf, bool)> = Vec::new();
     if let Some(d) = spawn_dir(cwd, db) {
-        dirs.push(d);
+        dirs.push((d, false));
     }
     // Mirror dispatch::artifacts_dir's default without needing an AppHandle:
     // configured dir, else <Documents>/Relay (falling back to home).
@@ -61,8 +69,11 @@ pub(super) fn turn_watch_dirs(
         let _ = std::fs::create_dir_all(&a);
         let canon = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
         let a_canon = canon(&a);
-        if !dirs.iter().any(|d| canon(d) == a_canon) {
-            dirs.push(a);
+        match dirs.iter_mut().find(|(d, _)| canon(d) == a_canon) {
+            // The spawn dir IS the artifacts fallback dir: it serves both
+            // roles, so its entries get the broad filter.
+            Some((_, broad)) => *broad = true,
+            None => dirs.push((a, true)),
         }
     }
     dirs
@@ -80,6 +91,10 @@ pub(super) fn turn_watch_dirs(
 /// created (dir missing) or reported an error/overflow.
 pub(super) struct DirWatch {
     pub(super) dir: PathBuf,
+    /// `true` when this dir is the dedicated artifacts dir: everything
+    /// previewable counts. `false` (project/workspace dirs) narrows to
+    /// deliverable formats only — see `deliverable_ext`.
+    pub(super) broad_artifacts: bool,
     pub(super) before: HashMap<String, (SystemTime, u64)>,
     /// Touched relative paths ('/'-normalized) since the last `changed()`.
     /// `None` = poisoned (watcher failed/overflowed) → full-walk fallback.
@@ -106,7 +121,7 @@ pub(super) fn watch_path_allowed(rel: &str) -> bool {
 }
 
 impl DirWatch {
-    pub(super) fn new(dir: PathBuf) -> Self {
+    pub(super) fn new(dir: PathBuf, broad_artifacts: bool) -> Self {
         use notify::{RecursiveMode, Watcher};
         let before = snapshot_dir(&dir);
         let touched: Arc<Mutex<Option<std::collections::HashSet<String>>>> =
@@ -151,6 +166,7 @@ impl DirWatch {
         }
         Self {
             dir,
+            broad_artifacts,
             before,
             touched,
             _watcher: watcher,
@@ -193,11 +209,11 @@ impl DirWatch {
                         }
                     }
                 }
-                // Same previewable-extension filter the full-walk path
-                // applies via changed_previewable_files.
+                // Extension gate: the broad previewable list for the
+                // dedicated artifacts dir, deliverables-only elsewhere.
                 let mut filtered: Vec<String> = changed
                     .into_iter()
-                    .filter(|rel| previewable_ext(rel))
+                    .filter(|rel| self.ext_allowed(rel))
                     .collect();
                 filtered.sort();
                 filtered
@@ -205,10 +221,22 @@ impl DirWatch {
             Some(_) => Vec::new(), // watcher healthy, nothing touched
             None => {
                 let after = snapshot_dir(&self.dir);
-                let changed = changed_previewable_files(&self.before, &after);
+                let changed = changed_previewable_files(&self.before, &after, |rel| {
+                    self.ext_allowed(rel)
+                });
                 self.before = after;
                 changed
             }
+        }
+    }
+
+    /// Extension gate for changed files: everything previewable in the
+    /// dedicated artifacts dir; deliverables only in project/workspace dirs.
+    fn ext_allowed(&self, rel: &str) -> bool {
+        if self.broad_artifacts {
+            previewable_ext(rel)
+        } else {
+            previewable_ext(rel) && deliverable_ext(rel)
         }
     }
 }
@@ -253,11 +281,13 @@ pub(super) fn snapshot_dir(dir: &Path) -> HashMap<String, (SystemTime, u64)> {
 }
 
 /// Files that are NEW or MODIFIED (mtime or length changed) between the two
-/// snapshots AND whose extension the artifact preview supports — the same
-/// classification read_artifact_preview uses (text/code, image, pdf, office).
+/// snapshots AND whose extension passes `ext_allowed` — the previewable
+/// classification read_artifact_preview uses (text/code, image, pdf, office),
+/// narrowed per-watch-role by `ext_allowed`.
 pub(super) fn changed_previewable_files(
     before: &HashMap<String, (SystemTime, u64)>,
     after: &HashMap<String, (SystemTime, u64)>,
+    ext_allowed: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     let mut out: Vec<String> = after
         .iter()
@@ -265,11 +295,40 @@ pub(super) fn changed_previewable_files(
             Some(prev) => prev != *meta,
             None => true,
         })
-        .filter(|(rel, _)| previewable_ext(rel))
+        .filter(|(rel, _)| ext_allowed(rel))
         .map(|(rel, _)| rel.clone())
         .collect();
     out.sort();
     out
+}
+
+/// Deliverable formats a PROJECT-directory watch surfaces as artifacts:
+/// documents, images and web outputs. Code and data files the agent writes
+/// into a project (.py/.ts/.json/.csv/.md/…) are working files — tracked by
+/// the turn's git checkpoint / turn-changes list, not the gallery. Always
+/// used TOGETHER WITH `previewable_ext` (this is a strict subset).
+pub(crate) fn deliverable_ext(path: &str) -> bool {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "pdf"
+            | "docx"
+            | "pptx"
+            | "xlsx"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "svg"
+            | "html"
+            | "htm"
+    )
 }
 
 /// Extension allow-list mirrored from read_artifact_preview's classification
@@ -326,4 +385,64 @@ pub(crate) fn previewable_ext(path: &str) -> bool {
             | "pptx"
             | "xlsx"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deliverable_ext_accepts_documents_images_and_web() {
+        for path in [
+            "report.pdf",
+            "C:/proj/quarterly.docx",
+            "deck.pptx",
+            "budget.xlsx",
+            "chart.png",
+            "C:/proj/photo.JPG",
+            "diagram.svg",
+            "dashboard.html",
+            "index.htm",
+        ] {
+            assert!(deliverable_ext(path), "must be deliverable: {path}");
+            assert!(previewable_ext(path), "deliverables are previewable: {path}");
+        }
+    }
+
+    #[test]
+    fn code_and_data_files_are_not_project_deliverables() {
+        for path in [
+            "analyze.py",
+            "main.rs",
+            "app.tsx",
+            "C:/proj/data.json",
+            "C:/proj/notes.md",
+            "README.md",
+            "out.csv",
+            "config.yaml",
+            "query.sql",
+            "run.sh",
+            "notes.txt",
+        ] {
+            assert!(previewable_ext(path), "still previewable: {path}");
+            assert!(!deliverable_ext(path), "must not be a project deliverable: {path}");
+        }
+    }
+
+    #[test]
+    fn changed_files_respect_the_role_filter() {
+        let before: HashMap<String, (SystemTime, u64)> = HashMap::new();
+        let mut after: HashMap<String, (SystemTime, u64)> = HashMap::new();
+        after.insert("src/main.py".into(), (SystemTime::UNIX_EPOCH, 1));
+        after.insert("report.pdf".into(), (SystemTime::UNIX_EPOCH, 1));
+        after.insert("notes.md".into(), (SystemTime::UNIX_EPOCH, 1));
+
+        let broad = changed_previewable_files(&before, &after, previewable_ext);
+        assert_eq!(broad, vec!["notes.md", "report.pdf", "src/main.py"]);
+
+        let narrow = changed_previewable_files(&before, &after, |p| {
+            previewable_ext(p) && deliverable_ext(p)
+        });
+        assert_eq!(narrow, vec!["report.pdf"]);
+    }
 }

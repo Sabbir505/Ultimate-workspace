@@ -5,6 +5,7 @@
 // runtime fallback when parsing fails.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { renderAsync } from "docx-preview";
+import { sanitizeOfficeDocumentHtml } from "../../lib/sanitize";
 
 function dataUriToBuffer(dataUri: string): ArrayBuffer {
   const b64 = dataUri.slice(dataUri.indexOf(",") + 1);
@@ -50,6 +51,12 @@ export function DocxViewer({
     const container = containerRef.current;
     const wrapper = container?.querySelector<HTMLElement>(".docx-wrapper");
     if (!container || !wrapper) return;
+    // docx-preview centers pages with `align-items: center` — a page wider
+    // than the pane gets a NEGATIVE left offset that scroll can never reach,
+    // so the left edge of the document is permanently clipped (and the fit
+    // math below would shift it further left). The transform owns centering,
+    // so flatten the wrapper to a plain block before measuring.
+    wrapper.style.display = "block";
     if (!naturalPageWidth.current) {
       wrapper.style.transform = "";
       wrapper.style.height = "";
@@ -66,8 +73,11 @@ export function DocxViewer({
       wrapper.style.transform = `translateX(${offsetX.toFixed(1)}px) scale(${scale.toFixed(4)})`;
       wrapper.style.height = `${Math.ceil(naturalPageHeight.current * scale)}px`;
     } else {
+      // Wide pane: the unscaled page fits, so hand centering back to the
+      // wrapper's stock flex layout.
       wrapper.style.transform = "";
       wrapper.style.height = "";
+      wrapper.style.display = "";
     }
   }, []);
 
@@ -118,7 +128,7 @@ export function DocxViewer({
         className="artifact-preview-html office docx"
         title={filename}
         sandbox=""
-        srcDoc={fallbackHtml}
+        srcDoc={sanitizeOfficeDocumentHtml(fallbackHtml)}
       />
     );
   }

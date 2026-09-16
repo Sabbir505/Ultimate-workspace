@@ -215,9 +215,10 @@
 
 /* Hover/click context menu popover. */
 .chat-session-menu {
-  position: absolute;
-  top: 30px;
-  right: 6px;
+  /* PORTALED to document.body and position:fixed (inline) — inside the
+     sidebar its backdrop-filter sat under the sidebar's own backdrop-filter,
+     whose backdrop root blinded the frost and left a near-transparent sheet.
+     Anchored from the ⋮ button's rect in ChatSessionRow. */
   z-index: 30;
   min-width: 176px;
   padding: 6px;
@@ -259,15 +260,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-session-row.menu-open {
   z-index: 60;
 }
-/* When the row sits near the bottom of the sidebar's scroll viewport, the
-   downward menu would be clipped. Flip it to open upward from the row's top
-   edge instead (chat-session-menu-btn is ~30px tall; bottom: 100% anchors the
-   menu's bottom to the row's top, growing upward). */
+/* When the row sits near the bottom of the window, the portaled menu flips
+   above the button — invert the shadow direction so it reads naturally. */
 .chat-session-menu[data-above] {
-  top: auto;
-  bottom: 100%;
-  margin-bottom: 2px;
-  /* Invert the shadow direction so the shadow reads naturally above. */
   box-shadow: var(--glass-rim), var(--glass-drop-up);
 }
 .chat-session-menu button {
@@ -281,6 +276,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
   border-radius: var(--radius-sm);
   border: none;
   background: transparent;
+  /* tokens.css skins every <button> with a glass rim; on a menu item it
+     reads as a border box around the label (same bug as the queue rows). */
+  box-shadow: none;
   color: var(--text);
   cursor: pointer;
   box-sizing: border-box;
@@ -4396,6 +4394,26 @@ button.chat-mermaid-open {
   .chat-pane .citation-report-strip { margin: 0 8px 6px; }
 }
 
+/* Turn-rail clearance: the rail overlays the pane's left edge (22px wide;
+   ticks reach ~18px at rest and ~31px on hover) while the messages/composer
+   padding floors are 14–16px — so between the rail's hide threshold above
+   and the centered-column takeover at ~840px, turn content (agent-turn text,
+   timestamps, the per-message action rows) slid under the ticks. Once the
+   rail is mounted, lift the left edge clear of it; wider panes already get
+   ≥30px from the centered-column formula, so the max() no-ops there. The
+   popout window has no chat-pane container (and no hide threshold), so it
+   needs its own unguarded rules. */
+@container chat-pane (min-width: 561px) {
+  .chat-pane:has(.turn-rail) .chat-messages,
+  .chat-pane:has(.turn-rail) .chat-composer {
+    padding-left: max(30px, calc((100% - 780px) / 2));
+  }
+}
+.popout-chat-root:has(.turn-rail) .chat-messages,
+.popout-chat-root:has(.turn-rail) .chat-composer {
+  padding-left: max(30px, calc((100% - 780px) / 2));
+}
+
 /* ---------- Citation-integrity strip (research turns) ---------- */
 
 /* Rendered above the composer after a research turn completes: what the
@@ -4601,6 +4619,23 @@ button.chat-mermaid-open {
 .tts-bar-btn:disabled {
   opacity: 0.4;
   cursor: default;
+}
+/* Live speed cluster: down arrow, readout, up arrow — pinned between the
+   sentence skips and Stop. The readout is tabular so stepping 1×→1.25×→1.5×
+   doesn't wiggle the transport width. */
+.tts-bar-speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin: 0 3px;
+}
+.tts-bar-rate {
+  min-width: 34px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Connector chips on a user message — the message-side counterpart of the

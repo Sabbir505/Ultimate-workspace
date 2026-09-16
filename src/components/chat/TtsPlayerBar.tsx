@@ -7,9 +7,20 @@
 // means its icons come from lib/icons rather than ActivitySteps — pulling that
 // module (react-markdown, katex, highlight.js) into the entry chunk for four
 // small glyphs would undo a deliberate bundle split.
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { NextIcon, PauseIcon, PlayIcon, PrevIcon, SpeakerIcon, StopIcon } from "../../lib/icons";
 import { ttsPlayer } from "../../lib/tts";
 import { useTtsStore } from "../../state/tts";
+
+/** Rate steps: quarter-turns between half and double — enough spread to feel
+ *  responsive, coarse enough to hit from the arrows without hunting. */
+const RATE_MIN = 0.5;
+const RATE_MAX = 2;
+const RATE_STEP = 0.25;
+
+function formatRate(rate: number): string {
+  return `${Number.isInteger(rate) ? rate : rate.toFixed(2).replace(/0$/, "")}×`;
+}
 
 export function TtsPlayerBar() {
   const phase = useTtsStore((s) => s.phase);
@@ -17,6 +28,7 @@ export function TtsPlayerBar() {
   const index = useTtsStore((s) => s.index);
   const total = useTtsStore((s) => s.total);
   const error = useTtsStore((s) => s.error);
+  const rate = useTtsStore((s) => s.rate);
 
   if (phase === "idle" && !error) return null;
 
@@ -25,6 +37,8 @@ export function TtsPlayerBar() {
   // between sentences, so pause/skip/stop all still mean something.
   const buffering = phase === "buffering";
   const playing = phase === "playing" || buffering;
+  const stepRate = (delta: number) =>
+    ttsPlayer.setRate(Math.round((rate + delta) * 100) / 100);
 
   return (
     <div className="tts-bar" role="status" aria-live="polite">
@@ -87,6 +101,34 @@ export function TtsPlayerBar() {
             >
               <NextIcon />
             </button>
+            {/* Live speed: arrows nudge the playback-rate multiplier in
+                quarter steps and are audible on the sentence already
+                sounding — no replay, no re-synthesis. */}
+            <span className="tts-bar-speed">
+              <button
+                type="button"
+                className="tts-bar-btn"
+                title="Slower"
+                aria-label="Read slower"
+                disabled={loading || rate <= RATE_MIN}
+                onClick={() => stepRate(-RATE_STEP)}
+              >
+                <ChevronDown size={14} strokeWidth={2} />
+              </button>
+              <span className="tts-bar-rate" title="Playback speed">
+                {formatRate(rate)}
+              </span>
+              <button
+                type="button"
+                className="tts-bar-btn"
+                title="Faster"
+                aria-label="Read faster"
+                disabled={loading || rate >= RATE_MAX}
+                onClick={() => stepRate(RATE_STEP)}
+              >
+                <ChevronUp size={14} strokeWidth={2} />
+              </button>
+            </span>
           </>
         )}
         <button

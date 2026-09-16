@@ -1,6 +1,17 @@
 // Ephemeral UI state: which overlay view is open, command palette, peek panel,
 // and the "grid is full — replace LRU pane?" confirmation (§4.3 step 4).
 import { create } from "zustand";
+import { ttsPlayer } from "../lib/tts";
+import { useTtsStore } from "./tts";
+
+/** Stop the read-aloud of a tool-panel artifact, if that is what is playing.
+ *  The player is global, so a pane the user closed would otherwise keep
+ *  talking with nothing on screen to show for it. */
+function stopArtifactReadIfPlaying(path: string | undefined): void {
+  if (!path) return;
+  const tts = useTtsStore.getState();
+  if (tts.key === `artifact:${path}`) ttsPlayer.stop();
+}
 
 export type ActiveView = "chat" | "settings" | "skills" | "cost" | "automations";
 
@@ -626,7 +637,10 @@ export const useUiStore = create<UiState>((set, get) => ({
       };
     }),
   // Close a tab by instance id.
-  closeTab: (instanceId) =>
+  closeTab: (instanceId) => {
+    // A read of THIS artifact would outlive its tab — the floating bar and
+    // the composer's Stop state would keep running with the content gone.
+    stopArtifactReadIfPlaying(get().openTabs.find((t) => t.instanceId === instanceId)?.artifactPath);
     set((s) => {
       const idx = s.openTabs.findIndex((t) => t.instanceId === instanceId);
       if (idx === -1) return {};
@@ -648,7 +662,8 @@ export const useUiStore = create<UiState>((set, get) => ({
         toolPanelTab,
         toolPanelCollapsed: openTabs.length === 0 ? true : s.toolPanelCollapsed,
       };
-    }),
+    });
+  },
   // Activate (focus) an existing tab instance.
   activateTab: (instanceId) =>
     set((s) => {
@@ -668,9 +683,23 @@ export const useUiStore = create<UiState>((set, get) => ({
       return { openTabs };
     }),
   setActiveSubagentId: (activeSubagentId) => set({ activeSubagentId }),
-  setToolPanelCollapsed: (toolPanelCollapsed) => set({ toolPanelCollapsed }),
+  setToolPanelCollapsed: (toolPanelCollapsed) => {
+    // Closing the whole panel stops any artifact read: every artifact tab is
+    // now hidden, and the only thing left of the read would be a floating
+    // bar talking to itself. Message/chat reads are untouched — those live
+    // in the transcript, not the panel.
+    if (toolPanelCollapsed && useTtsStore.getState().key?.startsWith("artifact:")) {
+      ttsPlayer.stop();
+    }
+    set({ toolPanelCollapsed });
+  },
   setContextTipOpen: (contextTipOpen) => set({ contextTipOpen }),
-  toggleToolPanel: () => set((s) => ({ toolPanelCollapsed: !s.toolPanelCollapsed })),
+  toggleToolPanel: () => {
+    if (!get().toolPanelCollapsed && useTtsStore.getState().key?.startsWith("artifact:")) {
+      ttsPlayer.stop();
+    }
+    set((s) => ({ toolPanelCollapsed: !s.toolPanelCollapsed }));
+  },
   toggleGitSidebar: () => set((s) => ({ gitSidebarCollapsed: !s.gitSidebarCollapsed })),
   toggleGitSectionGit: () => set((s) => ({ gitSectionGitOpen: !s.gitSectionGitOpen })),
   toggleGitSectionPlans: () => set((s) => ({ gitSectionPlansOpen: !s.gitSectionPlansOpen })),

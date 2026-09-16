@@ -193,13 +193,22 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: 1 1 0;
+  /* Size to the chips, not the bar: the "+" then sits right after the last
+     open tab instead of pinned to the far edge. `min-width: 0` keeps the
+     shrink path (many tabs → scroll) intact. */
+  flex: 0 1 auto;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
   -ms-overflow-style: none;
-  /* Soft fade at the right edge hints there's more to scroll. */
+}
+/* Fade + trailing pad only when the strip actually overflows — the pad is
+   what keeps the fade zone over empty space instead of dimming the last
+   chip's close button, but holding it when everything fits pushes the "+"
+   away from the chips. */
+.tool-panel-tabbar-chips.scrollable {
+  padding-right: 16px;
   mask-image: linear-gradient(to right, black calc(100% - 16px), transparent 100%);
   -webkit-mask-image: linear-gradient(to right, black calc(100% - 16px), transparent 100%);
 }
@@ -372,6 +381,20 @@
   text-align: center;
   color: var(--text-dim);
   font-size: 12px;
+}
+/* Explicit action in the empty state (e.g. "Open a terminal") — the terminal
+   no longer spawns itself, because its exec-gate dialog made the spawn
+   visible; an invisible automatic spawn must not also be a silent one. */
+.tool-panel-empty-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text);
+}
+.tool-panel-empty-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 /* Collapsed strip — same UX as the diff panel / browser pane minimize. */
 

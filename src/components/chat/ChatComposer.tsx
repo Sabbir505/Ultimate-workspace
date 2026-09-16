@@ -1342,22 +1342,6 @@ export const ChatComposer = memo(function ChatComposer({
               onClose={() => setBroadcastOpen(false)}
             />
           )}
-      {queuedMessages.length > 0 && effectiveSessionId && (
-        <div className="composer-queue" aria-label="Queued messages">
-          {queuedMessages.map((m, i) => (
-            <QueuedMessageRow
-              key={m.id}
-              message={m}
-              index={i}
-              count={queuedMessages.length}
-              onSteer={() => void steerQueuedMessage(effectiveSessionId, m.id)}
-              onEdit={(text) => editQueuedMessage(effectiveSessionId, m.id, text)}
-              onDelete={() => removeQueuedMessage(effectiveSessionId, m.id)}
-              onReorder={(from, to) => moveQueuedMessage(effectiveSessionId, from, to)}
-            />
-          ))}
-        </div>
-      )}
       {quotedSelections && quotedSelections.length > 0 && (
         <div className="composer-quotes" aria-label="Quoted selections">
           {quotedSelections.map((q) => (
@@ -1379,6 +1363,24 @@ export const ChatComposer = memo(function ChatComposer({
         onDragLeave={composerDragLeave}
         onDrop={composerDrop}
       >
+        {/* Queued messages live INSIDE the card as one notch (full-bleed
+            section above the textarea, hairline-separated). */}
+        {queuedMessages.length > 0 && effectiveSessionId && (
+          <div className="composer-queue" aria-label="Queued messages">
+            {queuedMessages.map((m, i) => (
+              <QueuedMessageRow
+                key={m.id}
+                message={m}
+                index={i}
+                count={queuedMessages.length}
+                onSteer={() => void steerQueuedMessage(effectiveSessionId, m.id)}
+                onEdit={(text) => editQueuedMessage(effectiveSessionId, m.id, text)}
+                onDelete={() => removeQueuedMessage(effectiveSessionId, m.id)}
+                onReorder={(from, to) => moveQueuedMessage(effectiveSessionId, from, to)}
+              />
+            ))}
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="composer-attachments">
             {attachments.map((a) => (

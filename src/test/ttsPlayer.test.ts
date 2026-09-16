@@ -18,6 +18,8 @@ class FakeSource {
   /** The offset `start()` was given, or null while the source is unstarted. */
   startedWith: number | null = null;
   stopped = false;
+  /** AudioParam stand-in — the live rate multiplier writes here. */
+  playbackRate = { value: 1, setTargetAtTime(value: number) { this.value = value; } };
   connect() {}
   start(_when: number, offset: number) {
     this.startedWith = offset;

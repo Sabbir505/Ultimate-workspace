@@ -292,8 +292,13 @@ export interface ChatState {
   meshMail: Record<string, SessionMailPayload>;
   meshMailBySession: Record<string, string[]>;
   /** Sessions this session spawned (chat:session-spawn), parent id → children
-   *  in spawn order. The rows click through to the child chat. */
-  meshChildren: Record<string, { childId: string; title: string; agent: string }[]>;
+   *  in spawn order. The rows click through to the child chat. `model` is
+   *  what the child runs on (subagent-model orchestration — usually the
+   *  parent's own model unless overridden). */
+  meshChildren: Record<
+    string,
+    { childId: string; title: string; agent: string; model?: string }[]
+  >;
   onSessionMail: (payload: SessionMailPayload) => void;
   onSessionSpawn: (payload: SessionSpawnPayload) => void;
   /** Per-turn owner session id (mobile app's session identifier) keyed by

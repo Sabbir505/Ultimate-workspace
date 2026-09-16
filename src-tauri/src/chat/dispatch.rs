@@ -790,10 +790,13 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
 }
 
 /// Spawn a streaming sub-turn for the `Task` tool. Resolves the session's
-/// provider/model/api_key/base_url from the DB, makes a streaming SSE
-/// completion call with the subagent's prompt as the sole user message, and
-/// emits each token chunk as `chat:subagent-tokens`. Returns the full
-/// accumulated output as the tool result.
+/// provider/model/api_key/base_url from the DB, then applies the subagent-model
+/// orchestration pick (explicit `model` tool arg → `chat.subagentModel`
+/// setting) so the subagent can run on a different model than the parent —
+/// see `chat::subagent_model`. Makes a streaming SSE completion call with the
+/// subagent's prompt as the sole user message, and emits each token chunk as
+/// `chat:subagent-tokens`. Returns the full accumulated output as the tool
+/// result.
 async fn run_task_subagent(
     app: &AppHandle,
     sid: &str,
@@ -849,9 +852,6 @@ async fn run_task_subagent(
         let conn = db_state.0.lock();
         secrets::get_chat_api_key(&conn, &provider_str)
     };
-    if api_key.is_none() && provider_str != "local_gguf" {
-        return "Error: no API key configured for this provider.".to_string();
-    }
     let api_key = api_key.unwrap_or_default();
     let base_url = {
         let db_state = app.state::<crate::DbState>();
@@ -880,6 +880,23 @@ async fn run_task_subagent(
     } else {
         model_str
     };
+
+    // Subagent-model orchestration: an explicit `model` tool arg wins, then
+    // the Settings pick (`chat.subagentModel`), then the session resolution
+    // above. The key check runs AFTER the pick so a cross-provider override
+    // is judged by ITS provider's key, not the session's.
+    let model_pick = {
+        let db_state = app.state::<crate::DbState>();
+        let conn = db_state.0.lock();
+        crate::chat::subagent_model::pick_for_call(&conn, args)
+    };
+    let (provider_str, model, api_key, base_url) =
+        crate::chat::subagent_model::apply_task_pick(
+            app, provider_str, model, api_key, base_url, model_pick,
+        );
+    if api_key.trim().is_empty() && provider_str != "local_gguf" {
+        return "Error: no API key configured for this provider.".to_string();
+    }
 
     // Build a role-aware system prompt. The `role` (subagent_type) enum is now
     // reflected in the instructions instead of being ignored, and the project
@@ -925,6 +942,9 @@ async fn run_task_subagent(
             role: role.clone(),
             task: description.to_string(),
             prompt: prompt.to_string(),
+            // The model this subagent actually runs on (post-orchestration) —
+            // the Agents panel shows it so a different-model spawn is visible.
+            model: Some(model.clone()),
         },
     );
 

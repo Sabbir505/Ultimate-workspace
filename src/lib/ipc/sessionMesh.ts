@@ -28,6 +28,8 @@ export interface SessionSpawnPayload {
   childSessionId: string;
   title: string;
   agent: string;
+  /** Model the child runs on (post subagent-model orchestration). */
+  model?: string;
 }
 
 export const listenSessionMail = (handler: (payload: SessionMailPayload) => void) =>

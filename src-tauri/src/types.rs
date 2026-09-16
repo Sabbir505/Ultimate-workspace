@@ -639,6 +639,9 @@ pub struct SessionSpawnPayload {
     pub child_session_id: String,
     pub title: String,
     pub agent: String,
+    /// The model the child runs on (post subagent-model orchestration —
+    /// explicit tool arg → `chat.subagentModel` setting → parent's model).
+    pub model: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1173,6 +1176,10 @@ pub struct SubagentSpawnPayload {
     pub task: String,
     /// The prompt the subagent was started with.
     pub prompt: String,
+    /// The model the subagent runs on, when Relay chose it (built-in Task
+    /// subagents, post subagent-model orchestration). `None` for CLI-native
+    /// subagents, whose model the CLI owns.
+    pub model: Option<String>,
 }
 
 /// A single chunk of subagent output (token or line). Emitted repeatedly as

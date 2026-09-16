@@ -4,7 +4,6 @@
 //! never moved), hand the webview the bytes as a data URL (no asset-protocol
 //! scope needed), and keep the stored location in `sidebar.artPath`.
 
-use std::path::PathBuf;
 
 use tauri::{AppHandle, State};
 

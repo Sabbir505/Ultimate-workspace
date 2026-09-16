@@ -27,6 +27,7 @@ import {
 } from "../../../lib/ipc";
 import type { ChatCheckpoint } from "../../../lib/ipc";
 import type { ApprovalPolicy, ChatArtifact, SandboxPolicy, WatchMode } from "../types";
+import { useAutomationsStore } from "../../automations";
 import { useProjectsStore } from "../../projects";
 import { useUiStore } from "../../ui";
 import {
@@ -255,15 +256,22 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // (e.g. the auto-started default chat) should not leave an empty session
       // row behind in the sidebar. deleteChat() tombstones it, so the relist
       // above can't resurrect it.
-      // Harness/ACP sessions are exempt: every automation run log is agent-
-      // tagged, often still empty when first opened (the run hasn't written
-      // yet), and deleting it here tombstones the id for the whole app run —
-      // after which every artifact / Open button pointing at it silently
-      // no-ops in this guard below and the previous chat appears stuck. The
-      // backend sweeper already protects run-log sessions for the same reason.
+      // Harness/ACP sessions get a narrower guard: they can be automation run
+      // logs — the run-log chat is bound on first run and artifact/Open
+      // buttons point at it, so only sweep one when no automation references
+      // it. Any other empty harness chat (e.g. the auto-started default after
+      // a harness pick) goes the same way as an empty built-in chat.
       if (outgoingId && outgoingId !== chatSessionId && outgoingEmpty) {
         const outgoingSession = get().sessions.find((s) => s.id === outgoingId);
-        if (!isCliAgent(outgoingSession?.agent)) {
+        if (isCliAgent(outgoingSession?.agent)) {
+          const autos = useAutomationsStore.getState();
+          if (!autos.loaded) await autos.load().catch(() => {});
+          const { loaded, automations } = useAutomationsStore.getState();
+          // Store not loaded (IPC failure): can't rule out a run log — skip.
+          if (loaded && !automations.some((a) => a.chatSessionId === outgoingId)) {
+            void get().deleteChat(outgoingId);
+          }
+        } else {
           void get().deleteChat(outgoingId);
         }
       }

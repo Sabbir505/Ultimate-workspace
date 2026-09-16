@@ -35,31 +35,72 @@ fn cache_multiplier(key: &str) -> f64 {
 pub fn resolve_rate(key: &str, settings: &HashMap<String, ModelRate>) -> Option<ModelRate> {
     let override_rate = settings.get(key).copied();
     match default_rates(key) {
-        Some((in_def, out_def)) => {
-            let mut rate = ModelRate {
-                input_per_mtok: in_def,
-                // Family-aware default (see cache_multiplier); the
-                // default_rates_v2 override table is a layered replacement,
-                // not a recompute from this default.
-                cache_read_per_mtok: in_def * cache_multiplier(key),
-                output_per_mtok: out_def,
-            };
-            if let Some(o) = override_rate {
+        Some((in_def, out_def)) => Some(layer_rate(key, in_def, out_def, override_rate)),
+        // No built-in default for THIS id. Two ways it can still price:
+        // a family rate (new GLM/Kimi/DeepSeek releases, provider-prefixed
+        // CLI ids like "zai/glm-5.3"), else a bare exact-key override.
+        None => match family_default_rates(key) {
+            Some((in_def, out_def)) => Some(layer_rate(key, in_def, out_def, override_rate)),
+            None => override_rate.map(|o| {
+                let mut rate = ModelRate { input_per_mtok: 0.0, cache_read_per_mtok: 0.0, output_per_mtok: 0.0 };
                 if o.input_per_mtok > 0.0 { rate.input_per_mtok = o.input_per_mtok; }
                 if o.cache_read_per_mtok > 0.0 { rate.cache_read_per_mtok = o.cache_read_per_mtok; }
                 if o.output_per_mtok > 0.0 { rate.output_per_mtok = o.output_per_mtok; }
-            }
-            Some(rate)
-        }
-        // No built-in default, but the user keyed an override for this model
-        // (any OpenAI/OpenRouter/local model) — the override alone prices it.
-        None => override_rate.map(|o| {
-            let mut rate = ModelRate { input_per_mtok: 0.0, cache_read_per_mtok: 0.0, output_per_mtok: 0.0 };
-            if o.input_per_mtok > 0.0 { rate.input_per_mtok = o.input_per_mtok; }
-            if o.cache_read_per_mtok > 0.0 { rate.cache_read_per_mtok = o.cache_read_per_mtok; }
-            if o.output_per_mtok > 0.0 { rate.output_per_mtok = o.output_per_mtok; }
-            rate
-        }),
+                rate
+            }),
+        },
+    }
+}
+
+/// The default rate layered with an exact-key override (user-set in Settings
+/// or learned from a provider-reported cost): the override wins per field,
+/// blank fields keep the default.
+fn layer_rate(
+    key: &str,
+    in_def: f64,
+    out_def: f64,
+    override_rate: Option<ModelRate>,
+) -> ModelRate {
+    let mut rate = ModelRate {
+        input_per_mtok: in_def,
+        // Family-aware default (see cache_multiplier); the
+        // default_rates_v2 override table is a layered replacement,
+        // not a recompute from this default.
+        cache_read_per_mtok: in_def * cache_multiplier(key),
+        output_per_mtok: out_def,
+    };
+    if let Some(o) = override_rate {
+        if o.input_per_mtok > 0.0 { rate.input_per_mtok = o.input_per_mtok; }
+        if o.cache_read_per_mtok > 0.0 { rate.cache_read_per_mtok = o.cache_read_per_mtok; }
+        if o.output_per_mtok > 0.0 { rate.output_per_mtok = o.output_per_mtok; }
+    }
+    rate
+}
+
+/// Family fallback for model ids the rate table has never heard of: the
+/// closest RESEARCHED rate by model family. Without this, a harness that
+/// doesn't self-report cost (kimi, commandcode) running a model the hardcoded
+/// table lags behind (e.g. a newer GLM release) showed real token counts at
+/// $0.00 forever — the observed-rate learner only learns from
+/// provider-REPORTED cost, which such harnesses never send. Only families
+/// whose members are priced similarly get a catch-all: claude/gpt tiers span
+/// 5×, so an unknown id there stays unpriced rather than mispriced. Exact
+/// keys (and exact-key overrides/observed rates) always win — these
+/// catch-alls only fire for unknown ids.
+fn family_default_rates(key: &str) -> Option<(f64, f64)> {
+    let k = key.to_ascii_lowercase();
+    if k.contains("glm") {
+        default_rates("glm-5.2")
+    } else if k.contains("kimi") || k.contains("moonshot") {
+        default_rates("kimi-k2.6")
+    } else if k.contains("deepseek") {
+        default_rates("deepseek-v4-pro")
+    } else if k.contains("minimax") {
+        default_rates("minimax-m3")
+    } else if k.contains("qwen") {
+        default_rates("qwen3.7-plus")
+    } else {
+        None
     }
 }
 
@@ -152,6 +193,31 @@ mod tests {
             cache_creation_input_tokens: None, cache_read_input_tokens: None,
             reasoning_output_tokens: None, cost_usd: None };
         assert!(price_usage(&u, Some("some-future-model"), &empty()).is_none());
+    }
+
+    #[test]
+    fn price_usage_unknown_family_model_prices_at_family_rate() {
+        // A provider-prefixed CLI id the rate table has never heard of still
+        // prices — at its family's researched rate — instead of $0.00. This
+        // is the commandcode case: the harness reports tokens but never a
+        // cost or model id, so the session id ("zai/glm-5.3") is all the
+        // rollup has.
+        let u = UsageInfo { input_tokens: Some(1_000_000), output_tokens: Some(500_000),
+            cache_creation_input_tokens: None, cache_read_input_tokens: None,
+            reasoning_output_tokens: None, cost_usd: None };
+        // glm family: glm-5.2's rate is 1.4 in / 4.4 out.
+        let cost = price_usage(&u, Some("zai/glm-5.3"), &empty()).expect("glm family must price");
+        assert!((cost - (1.4 + 2.2)).abs() < 1e-9, "got {cost}");
+        // kimi family via a vendor id ("moonshotai/…") — kimi-k2.6: 0.95 / 4.0.
+        let cost = price_usage(&u, Some("moonshotai/kimi-k4"), &empty()).expect("kimi family must price");
+        assert!((cost - (0.95 + 2.0)).abs() < 1e-9, "got {cost}");
+        // An exact-key override still wins over the family default.
+        let mut s = empty();
+        s.insert("zai/glm-5.3".into(), ModelRate { input_per_mtok: 9.0, cache_read_per_mtok: 0.0, output_per_mtok: 9.0 });
+        let cost = price_usage(&u, Some("zai/glm-5.3"), &s).expect("override must price");
+        assert!((cost - 13.5).abs() < 1e-9, "got {cost}");
+        // No family substring at all → stays unpriced (same as before).
+        assert!(price_usage(&u, Some("acme/ultra-model"), &empty()).is_none());
     }
 
     #[test]

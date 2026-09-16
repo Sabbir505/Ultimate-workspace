@@ -27,6 +27,9 @@ export interface ToolData {
    *  renders as the "SubAgent <role> · <task>" chip (shine while running). */
   role?: string;
   task?: string;
+  /** The spawned agent's store id (chat:subagent-spawn payload) — lets the
+   *  chip correlate exactly instead of matching task/role text. */
+  subId?: string;
   /** Optional result text rendered once the call completes. The backend
    *  doesn't populate this today (tool output is summarized by the model in
    *  the following narration), but the expandable step detail shows args/code
@@ -40,12 +43,67 @@ export type Segment =
   | { type: "think"; text: string; done: boolean }
   | { type: "tool"; data: ToolData | null; done: boolean };
 
+/** Marker the backend appends to per-turn harness prompts (agent_sessions/
+ *  ask.rs): the model must end its reply with one `RELAY_ASK: {json}` line
+ *  carrying the question card. The backend strips that line from the PERSISTED
+ *  reply, but the raw line streams into the live transcript first — it used to
+ *  sit on screen as a stuck JSON blob until chat:done refetched the cleaned
+ *  text. Mirrors the backend's rule with a streaming allowance: the LAST
+ *  marker line wins; a line that is still streaming (the open tail of the
+ *  buffer) hides as soon as it looks like the channel — bare marker or a `{`
+ *  payload; a closed line only stays hidden when its payload parses as a JSON
+ *  object (wrapped backticks tolerated), so ordinary text mentioning
+ *  "RELAY_ASK:" is never mistaken for a question. */
+export function maskRelayAsk(content: string): string {
+  const lines = content.split("\n");
+  let idx = -1;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i].trimStart().startsWith(RELAY_ASK_MARKER)) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) return content;
+  const openTail = idx === lines.length - 1 && !content.endsWith("\n");
+  const rest = lines[idx]
+    .trim()
+    .slice(RELAY_ASK_MARKER.length)
+    .trim()
+    .replace(/^`+/, "")
+    .replace(/`+$/, "")
+    .trim();
+  // Open tail = the marker line is still streaming: hide from the marker on
+  // once it looks like the channel (the JSON brace may not have arrived yet).
+  if (openTail && (rest === "" || rest.startsWith("{"))) {
+    return lines.slice(0, idx).join("\n");
+  }
+  if (!rest.startsWith("{")) return content;
+  let parses = false;
+  try {
+    const v = JSON.parse(rest) as unknown;
+    parses = v != null && typeof v === "object";
+  } catch {
+    parses = false;
+  }
+  // Closed but not a question payload — show the text, same as the backend's
+  // strip-or-keep decision on the persisted reply.
+  if (!parses) return content;
+  lines.splice(idx, 1);
+  return lines.join("\n").trimEnd();
+}
+
+const RELAY_ASK_MARKER = "RELAY_ASK:";
+
 /** Split an assistant message into ordered segments: plain markdown text,
  *  `<think>` reasoning blocks, and `<tool>` process cards. A block whose
  *  closing tag hasn't streamed in yet is marked `done: false`. */
 export function parseSegments(content: string): Segment[] {
+  // Live-mask the RELAY_ASK question channel before any other parsing so the
+  // raw directive line never renders (or gets read aloud by TTS auto-read).
+  // Persisted replies are already stripped backend-side, so this is a no-op
+  // for history.
+  let rest = maskRelayAsk(content);
   const segs: Segment[] = [];
-  let rest = content;
   const tagRe = /<(think|tool)>/;
   for (;;) {
     const m = tagRe.exec(rest);

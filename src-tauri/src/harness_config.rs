@@ -385,11 +385,13 @@ fn opencode_config() -> HarnessModelConfig {
         cfg.models.iter().map(|m| m.id.clone()).collect();
     for id in opencode_live_models() {
         if !known.contains(&id) {
-            cfg.models.push(HarnessModelInfo::new(
-                id.rsplit('/').next().unwrap_or(&id).to_string(),
-                id.clone(),
-                "cli",
-            ));
+            // Keep the provider-qualified id as the model id: both
+            // `opencode run -m` and the server's per-message override only
+            // accept "provider/model", and a bare id here leaks into session
+            // state where automations would send it verbatim and the CLI
+            // silently falls back to its default model. The label already
+            // showed the qualified form, so the picker display is unchanged.
+            cfg.models.push(HarnessModelInfo::new(id.clone(), id.clone(), "cli"));
         }
     }
     cfg

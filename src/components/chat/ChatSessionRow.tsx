@@ -5,7 +5,7 @@
 // unread, delete) on hover. Styled to match the existing .session-row and
 // .project-row patterns.
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Folder, GitBranch } from "lucide-react";
+import { Folder, GitBranch, Pin } from "lucide-react";
 import { relativeTime } from "../../lib/relativeTime";
 import { sessionModelIcon } from "./agentIcons";
 import {
@@ -182,14 +182,26 @@ export function ChatSessionRow({
       }}
       onDragEnd={endChatSessionDrag}
     >
-      {!working && session.starred && (
-        <span className="chat-session-star-badge" title="Starred">
-          ★
-        </span>
-      )}
-      {!working && session.unread && !session.starred && (
-        <span className="chat-session-unread-dot" aria-label="Unread" />
-      )}
+      {/* Left-edge quick pin: a fixed slot on every row so titles stay
+          aligned. At rest it only shows the unread dot (when present); hover
+          reveals the pin toggle, and pinned rows keep the filled pin visible
+          without hover. Same "keep at top" feature as the ⋮ menu item. */}
+      <button
+        type="button"
+        className={`chat-session-pin-btn${session.starred ? " pinned" : ""}`}
+        title={session.starred ? "Pinned to top — click to unpin" : "Pin to top"}
+        aria-label={session.starred ? "Unpin chat" : "Pin chat"}
+        aria-pressed={session.starred}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleStar(session.id, !session.starred);
+        }}
+      >
+        <Pin size={11} strokeWidth={2.2} {...(session.starred ? { fill: "currentColor" } : {})} />
+        {!session.starred && session.unread && (
+          <span className="chat-session-unread-dot" aria-label="Unread" />
+        )}
+      </button>
       <div className="chat-session-info">
         {/* Title + spinner/timer on the same row */}
         <div className="chat-session-title-row">

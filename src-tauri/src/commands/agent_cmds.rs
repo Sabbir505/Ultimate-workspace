@@ -124,6 +124,23 @@ pub async fn cancel_agent_chat_message(
         .map_err(|e| format!("cancel task panicked: {e}"))?
 }
 
+/// Crash recovery for in-flight turns, called once when the frontend boots
+/// (fresh mount after an app launch or a webview reload). A turn's busy flag
+/// lives in backend memory: after a reload the chat looks empty yet rejects
+/// every send with "a turn is already running", and a panic-killed reader can
+/// wedge the flag permanently. Clears the flag for sessions whose reader and
+/// child process are both gone; genuinely running turns keep it. Returns the
+/// recovered chat session ids.
+#[tauri::command]
+pub async fn reconcile_agent_sessions(
+    state: State<'_, AgentSessionState>,
+) -> Result<Vec<String>, String> {
+    let mgr = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || Ok(mgr.reconcile_wedged_turns()))
+        .await
+        .map_err(|e| format!("reconcile task panicked: {e}"))?
+}
+
 /// The models/endpoint discovered in the CLI harness's own config files
 /// (settings.json / config.toml / opencode.json) — see harness_config.rs.
 ///

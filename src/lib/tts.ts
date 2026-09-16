@@ -80,11 +80,6 @@ const LEAD_SECS = 6;
  *  boundary would turn an engine running at ~1x into a stutter of small waits. */
 const LEAD_FLOOR_SECS = 4;
 
-/** Synthesis requests the background walk keeps in flight. Two is enough to
- *  keep a serial engine fed across the request round-trip, and low enough that
- *  GPU mode never has more than a couple of engine processes alive at once. */
-const MAX_INFLIGHT = 2;
-
 // ---- Text preparation ----
 
 /** A rule: what to match, and either the replacement text or a function that
@@ -786,8 +781,23 @@ class TtsPlayer {
   private voice: string | null = null;
   private speed = 1;
   private device: string | null = null;
-  /** Synthesis requests in flight (see topUp). */
-  private inflight = 0;
+  /** Synthesis requests in flight — read straight off the `pending` map, so
+   *  the count is exact across replays (a new read does not have to guess
+   *  how many superseded fetches are still settling). */
+  private get inflight(): number {
+    return this.pending.size;
+  }
+  /** Cap on in-flight synthesis requests, by device. CPU: requests queue
+   *  behind the engine's single lock, so a deeper queue just keeps the
+   *  engine fed across each request's IPC + decode round-trip — with a
+   *  2-deep queue the engine idled between chunks and every boundary read
+   *  as "stopped and waiting". GPU: every call spawns its own CUDA process
+   *  (~4.5s start, VRAM), so more than two at once contend with each other
+   *  and a failed child leaves a hole that re-synthesizes cold at the
+   *  boundary. */
+  private get maxInflight(): number {
+    return this.device === "gpu" ? 2 : 4;
+  }
   /** Invalidates in-flight work after stop()/replay — every async step checks
    *  it before touching the audio graph or the store. */
   private token = 0;
@@ -797,7 +807,6 @@ class TtsPlayer {
     const my = (this.token += 1);
     this.skipTarget = null;
     this.pausePending = false;
-    this.inflight = 0; // a new read starts a fresh pipeline
     this.stopSource("stopped");
     const store = useTtsStore.getState();
     store.set({ key, label: label ?? null, error: null, phase: "loading", index: 0, total: 0 });
@@ -1015,11 +1024,19 @@ class TtsPlayer {
 
   private async playSentence(my: number, ctx: AudioContext): Promise<SentenceResult> {
     const index = this.index;
-    // The chunk about to be PLAYED is requested before the lookahead: the
-    // backend voices one chunk at a time behind a single engine lock, so
-    // issuing the prefetch first put the sentence the user is waiting for at
-    // the BACK of that queue — behind everything the lookahead asked for.
-    const buffer = await this.bufferFor(ctx, index);
+    // The chunk about to be PLAYED is requested first — the backend voices
+    // one chunk at a time behind a single engine lock, so it must be at the
+    // FRONT of that queue — but the lookahead is issued immediately after,
+    // in the same tick, not after this chunk's full round trip. Waiting for
+    // the buffer left the engine idle for the whole first synthesis (the
+    // small warm-up chunk was voiced with nothing queued behind it) and
+    // refilled the queue a round-trip late at every boundary: the read
+    // computed a little, waited for it to finish playing, then computed the
+    // rest. The requests still arrive in order, so playback is never pushed
+    // behind the prefetch.
+    const bufferPromise = this.bufferFor(ctx, index);
+    this.topUp(ctx, index);
+    const buffer = await bufferPromise;
     if (my !== this.token) return "stopped";
     if (!buffer) {
       // One failed sentence must not kill the whole read — report it and move
@@ -1027,7 +1044,6 @@ class TtsPlayer {
       useTtsStore.getState().set({ error: "Could not synthesize part of this text" });
       return "ended";
     }
-    this.topUp(ctx, index);
     await this.awaitLead(my, ctx, index, buffer);
     if (my !== this.token) return "stopped";
     // A next/prev/pause that arrived while this chunk was being fetched or
@@ -1097,20 +1113,18 @@ class TtsPlayer {
   private topUp(ctx: AudioContext, index: number): void {
     const my = this.token;
     for (let j = index + 1; j < this.chunks.length; j += 1) {
-      if (this.inflight >= MAX_INFLIGHT) return;
+      if (this.inflight >= this.maxInflight) return;
       const text = this.chunks[j]?.text;
       if (!text) return;
       const key = `${this.cachePrefix}|${text}`;
       // Voiced already, or being voiced right now — either way this walk is not
       // the thing that will make it ready, so it moves on.
       if (this.buffers.has(key) || this.pending.has(key)) continue;
-      this.inflight += 1;
       void this.bufferForText(ctx, text).finally(() => {
-        // A stalled request must not leave the counter stuck above zero: a new
-        // read resets it, and the decrement cannot go negative.
-        this.inflight = Math.max(0, this.inflight - 1);
         // Only while the read is live: a paused or stopped read should not keep
-        // grinding through the rest of the artifact.
+        // grinding through the rest of the artifact. (The in-flight count is
+        // the pending map's job — see the getter — so there is nothing to
+        // decrement here; this callback only re-feeds the walk.)
         if (my !== this.token) return;
         const phase = useTtsStore.getState().phase;
         if (phase === "playing" || phase === "buffering") this.topUp(ctx, this.index);

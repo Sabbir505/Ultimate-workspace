@@ -129,13 +129,27 @@ function SubagentListItem({
 
 export function SubagentPanel() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
-  const subagents = useChatStore(
-    (s) => (activeChatSessionId ? s.subagents[activeChatSessionId] ?? {} : {}),
-  );
+  const subagentsBySession = useChatStore((s) => s.subagents);
   const activeSubagentId = useUiStore((s) => s.activeSubagentId);
   const setActiveSubagentId = useUiStore((s) => s.setActiveSubagentId);
   const panelRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Resolve the selected subagent across ALL sessions' maps: a chip click in
+  // a split pane targets THAT pane's session, which isn't necessarily the
+  // globally-active one — reading only the active session's map reset the
+  // selection right back to the list and the pane showed nothing.
+  const { subagents, ownerSessionId } = useMemo(() => {
+    if (activeSubagentId != null) {
+      const owner = Object.entries(subagentsBySession).find(
+        ([, map]) => map[activeSubagentId],
+      );
+      if (owner) return { subagents: owner[1], ownerSessionId: owner[0] };
+    }
+    const map =
+      (activeChatSessionId ? subagentsBySession[activeChatSessionId] : undefined) ?? {};
+    return { subagents: map, ownerSessionId: activeChatSessionId };
+  }, [activeSubagentId, activeChatSessionId, subagentsBySession]);
 
   const selectedSub =
     activeSubagentId != null ? subagents[activeSubagentId] : undefined;
@@ -170,12 +184,18 @@ export function SubagentPanel() {
     }
   }, [selectedSub?.id]);
 
-  // Navigate back to the list when the selected sub is gone (e.g., session switch)
+  // Navigate back to the list when the selected sub is gone everywhere
+  // (deleted session, cleared store) — NOT merely absent from the active
+  // session's map: a split-pane click selects an agent owned by the other
+  // pane's session, and resetting on that made the panel show nothing.
   useEffect(() => {
-    if (activeSubagentId && !subagents[activeSubagentId]) {
+    if (
+      activeSubagentId != null &&
+      !Object.values(subagentsBySession).some((map) => map[activeSubagentId])
+    ) {
       setActiveSubagentId(null);
     }
-  }, [activeSubagentId, subagents]);
+  }, [activeSubagentId, subagentsBySession, setActiveSubagentId]);
 
   if (!activeChatSessionId || Object.keys(subagents).length === 0) {
     return (

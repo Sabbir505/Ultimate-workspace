@@ -997,6 +997,39 @@ impl AgentSessionManager {
             }
         }
     }
+
+    /// Boot/reload reconciliation (crash recovery). `turn_in_flight` lives in
+    /// backend memory, so a webview crash/reload (backend survives) reloads
+    /// the UI into a chat that shows nothing yet rejects every send with "a
+    /// turn is already running" — and a reader that died via panic (unwinding
+    /// past its cleanup tail) can wedge the flag for the backend's whole
+    /// lifetime. For every session whose flag is up but which has NO live
+    /// reader and NO live child process, clear the flag. A genuinely running
+    /// turn (child alive) keeps its flag: the send rejection is then honest.
+    pub fn reconcile_wedged_turns(&self) -> Vec<String> {
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut recovered = Vec::new();
+        for (sid, entry) in sessions.iter() {
+            let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
+            if !c.turn_in_flight.load(Ordering::SeqCst) {
+                continue;
+            }
+            // A live reader (claude/ACP set this via ReaderAliveGuard) may
+            // still be streaming or about to clear the flag at EOF — leave it.
+            if c.reader_alive.load(Ordering::SeqCst) {
+                continue;
+            }
+            let child_gone = match c.child.as_mut() {
+                None => true,
+                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
+            };
+            if child_gone {
+                c.turn_in_flight.store(false, Ordering::SeqCst);
+                recovered.push(sid.clone());
+            }
+        }
+        recovered
+    }
 }
 
 mod lifecycle;

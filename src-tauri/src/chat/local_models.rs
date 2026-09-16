@@ -438,6 +438,22 @@ pub struct SidecarHandle {
     /// The effective `--n-gpu-layers` value that succeeded. Exposed to the UI
     /// so users can see partial offload (e.g., 32 layers on GPU, rest on CPU).
     pub n_gpu_layers: i32,
+    /// Fingerprint of the resolved overrides this sidecar was launched with
+    /// (see `overrides_sig`). A `start()` for the same model with the same
+    /// fingerprint reuses the running server instead of paying a full
+    /// unload + load ladder; a different fingerprint (user tweaked the gear
+    /// panel) forces a real restart so the new flags take effect.
+    pub overrides_sig: String,
+}
+
+/// Fingerprint of the overrides that shape a spawn. `last_good_ngl` is
+/// deliberately excluded: it is a CACHE the first successful start writes, so
+/// including it would make every later `start()` look "changed" (persisted
+/// blob now carries a ngl the first spawn did not have) and defeat reuse.
+fn overrides_sig(ovr: &LlamaOverrides) -> String {
+    let mut probe = ovr.clone();
+    probe.last_good_ngl = None;
+    serde_json::to_string(&probe).unwrap_or_default()
 }
 
 pub struct LocalModelRegistry {
@@ -449,6 +465,65 @@ impl LocalModelRegistry {
         Self {
             handles: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// A live chat sidecar the caller can reuse instead of a fresh spawn: same
+    /// model, same effective overrides, process still alive, HTTP still
+    /// answering. Returns None (leaving the handle in place for `stop_kind` to
+    /// reap) when anything is off — a dead or hung server must fall through to
+    /// a real spawn, never be handed out as "running".
+    async fn reusable_chat_sidecar(&self, model_id: &str, sig: &str) -> Option<StartedModel> {
+        let (port, n_ctx, n_gpu_layers) = {
+            let mut handles = self.handles.lock();
+            let key = handles
+                .iter()
+                .find(|(_, h)| {
+                    h.kind == SidecarKind::Chat
+                        && h.model_id == model_id
+                        && h.overrides_sig == sig
+                })
+                .map(|(k, _)| k.clone())?;
+            let h = handles.get_mut(&key)?;
+            // An exited child means the server died mid-session (crash, OOM
+            // kill, manual kill). Prune it here too — `status()` prunes
+            // lazily, but a reuse attempt must never hand out a corpse.
+            match h.child.try_wait() {
+                Ok(None) => {}
+                _ => {
+                    handles.remove(&key);
+                    return None;
+                }
+            }
+            (h.port, h.n_ctx, h.n_gpu_layers)
+        };
+        // Liveness of the PROCESS is not liveness of the SERVER: a hung
+        // llama-server answers nothing. Probe /health with a short timeout
+        // before treating the sidecar as reusable.
+        let health_url = format!("http://127.0.0.1:{port}/health");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .ok()?;
+        let healthy = client
+            .get(&health_url)
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if !healthy {
+            eprintln!(
+                "[local-models] sidecar for model_id={model_id} (port {port}) is not answering /health; respawning"
+            );
+            return None;
+        }
+        eprintln!("[local-models] reusing running chat sidecar for {model_id} (port {port})");
+        Some(StartedModel {
+            model_id: model_id.to_string(),
+            port,
+            n_ctx,
+            n_gpu_layers,
+            base_url: format!("http://127.0.0.1:{port}"),
+        })
     }
 }
 
@@ -635,6 +710,18 @@ impl LocalModelRegistry {
         overrides: Option<&LlamaOverrides>,
         user_llama_server_path: Option<String>,
     ) -> Result<StartedModel, String> {
+        let ovr = overrides.cloned().unwrap_or_default();
+        let sig = overrides_sig(&ovr);
+        // Reuse a live sidecar for the SAME model with the SAME effective
+        // overrides instead of kill + respawn: re-picking the model (or
+        // re-opening its chat, or the send path's warm respawn) used to pay a
+        // full unload + health-check ladder + prompt warmup for a server that
+        // was already serving exactly this model — the "re-warming mid
+        // session" symptom. A changed fingerprint (gear-panel tweaks) skips
+        // reuse so the new flags take effect.
+        if let Some(reuse) = self.reusable_chat_sidecar(&model_id, &sig).await {
+            return Ok(reuse);
+        }
         // Stop any running chat sidecar.
         self.stop_kind(SidecarKind::Chat).await;
 
@@ -661,7 +748,6 @@ impl LocalModelRegistry {
         // The last-good rung is the "cached ngl" — a restart that previously
         // settled at, say, 40 layers starts there (one spawn+health-check)
         // instead of re-running the full probe ladder.
-        let ovr = overrides.cloned().unwrap_or_default();
         let ngl = ovr
             .ngl
             .or(ovr.last_good_ngl)
@@ -846,6 +932,7 @@ impl LocalModelRegistry {
                     kind: SidecarKind::Chat,
                     n_ctx: ctx,
                     n_gpu_layers: try_ngl,
+                    overrides_sig: sig,
                 };
                 self.handles.lock().insert(model_id.clone(), handle);
                 if try_ngl == 0 {
@@ -976,9 +1063,35 @@ impl LocalModelRegistry {
     /// sidecars are deliberately invisible here — the warmup path keys on
     /// this, and an embedding-only registry must not look like "a chat model
     /// is running".
+    ///
+    /// Prunes handles whose process has exited first: a llama-server that died
+    /// mid-session (crash, OOM kill, manual kill) must stop answering
+    /// `status()` as alive, or the send path skips the respawn and every
+    /// request dies on the stale port ("failed to connect" until the user
+    /// re-picks the model or restarts the app).
     pub fn status(&self) -> Option<ActiveLocalModel> {
-        self.handles
-            .lock()
+        let mut handles = self.handles.lock();
+        let keys: Vec<String> = handles.keys().cloned().collect();
+        let mut dead: Vec<String> = Vec::new();
+        for k in keys {
+            let exited = handles.get_mut(&k).map(|h| match h.child.try_wait() {
+                Ok(None) => false,
+                // Exited, or un-queryable — either way it is not serving.
+                _ => true,
+            });
+            if exited.unwrap_or(false) {
+                dead.push(k);
+            }
+        }
+        for k in dead {
+            if let Some(h) = handles.remove(&k) {
+                eprintln!(
+                    "[local-models] sidecar for model_id={} (port {}) has exited; pruning",
+                    k, h.port
+                );
+            }
+        }
+        handles
             .values()
             .find(|h| h.kind == SidecarKind::Chat)
             .map(|h| ActiveLocalModel {
@@ -1091,6 +1204,7 @@ impl LocalModelRegistry {
                         kind: SidecarKind::Embedding,
                         n_ctx: 2048,
                         n_gpu_layers: try_ngl,
+                        overrides_sig: String::new(),
                     },
                 );
                 eprintln!("[local-models] embedding sidecar up on port {port} (ngl={try_ngl})");

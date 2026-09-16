@@ -131,7 +131,12 @@ describe("lead", () => {
 
     void ttsPlayer.play({ key: "k", text: `${heading}\n\n${para}` });
     await tick();
-    expect(calls).toEqual([heading]);
+    // The current sentence is requested first AND the lookahead is primed in
+    // the same breath — the engine never idles through the first synthesis.
+    // (Issuing the prefetch before the current chunk used to put the audio
+    // the user was waiting for at the back of the queue; the walk is capped
+    // so the playing chunk keeps its place at the front.)
+    expect(calls).toEqual([heading, para]);
 
     gates.get(heading)!.resolve(audio(1000));
     await tick();
@@ -161,6 +166,11 @@ describe("lead", () => {
     // that this one already covers.
     await vi.waitFor(() => expect(ctx.started()).toHaveLength(1));
     expect(ctx.started()[0].buffer?.duration).toBe(12);
+    // Release the held sentence: an unsettled fetch would keep its pipeline
+    // slot forever (the in-flight count is the pending set), starving every
+    // later test in this file of its queue budget.
+    gates.get(second)!.resolve(audio(2000));
+    await tick();
   });
 
   it("does not stop at every sentence boundary once the lead is built", async () => {
@@ -246,10 +256,17 @@ describe("background pipeline", () => {
     const held = new Promise<void>((r) => (release = () => r()));
     vi.mocked(ttsSpeak).mockImplementation((text: string) => {
       calls.push(text);
-      // Holding BOTH in-flight slots is what parks the walk — with only one
-      // held, each landing request frees a slot and the walk keeps going, which
-      // is the whole point of it.
-      if (parts[1] === text || parts[2] === text) return held.then(() => audio(5000));
+      // Holding the playing chunk AND all three queued lookaheads pins the
+      // pipeline at its cap of four: nothing settles, so the walk cannot
+      // creep further while the test stops the read.
+      if (
+        parts[0] === text ||
+        parts[1] === text ||
+        parts[2] === text ||
+        parts[3] === text
+      ) {
+        return held.then(() => audio(5000));
+      }
       return Promise.resolve(audio(durations.get(text) ?? 1000));
     });
 
@@ -259,9 +276,9 @@ describe("background pipeline", () => {
     release();
     await tick();
     await tick();
-    // The read is over: nothing past what was already in flight is requested,
+    // The read is over: nothing past the four in-flight requests is issued,
     // so a stopped read is not still grinding through the artifact.
-    expect(calls).not.toContain(parts[3]);
+    expect(calls).not.toContain(parts[4]);
   });
 });
 

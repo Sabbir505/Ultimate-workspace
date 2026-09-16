@@ -603,6 +603,14 @@ export const sendAgentChatMessage = (
 export const cancelAgentChatMessage = (chatSessionId: string) =>
   safeInvoke<void>("cancel_agent_chat_message", { chatSessionId });
 
+/** Crash recovery (run once on frontend boot): clears the backend's
+ *  in-memory "turn in flight" flag for chats whose reader and child process
+ *  are both gone. After a crash/reload the chat looks empty but every send
+ *  was rejected with "a turn is already running". Returns the recovered
+ *  chat session ids. */
+export const reconcileAgentSessions = () =>
+  safeInvoke<string[]>("reconcile_agent_sessions");
+
 /** Models/endpoint discovered in a CLI harness's own config files
  *  (harness_config.rs): settings.json / config.toml / opencode.json. */
 export interface HarnessModelInfo {

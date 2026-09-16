@@ -758,32 +758,42 @@ export function ActivityStepRow({
   const isSubagentStep = step.data?.kind === "subagent";
   const subTask = isSubagentStep ? step.data?.task || step.data?.detail || "" : "";
   const subRole = isSubagentStep ? step.data?.role || "agent" : "";
+  const subId = isSubagentStep ? step.data?.subId : undefined;
   const liveStatus = useChatStore((s) => {
     if (!isSubagentStep) return null;
     const list = chatSessionId ? s.subagents[chatSessionId] : undefined;
     if (!list) return null;
+    const vals = Object.values(list);
+    // Exact store-id match first (the marker carries the spawn event's id);
+    // task/role text is the legacy fallback for markers from before the id
+    // was added.
     const match =
-      Object.values(list).find((x) => x.task === subTask && x.role === subRole) ??
-      Object.values(list).find((x) => x.task === subTask);
+      (subId ? vals.find((x) => x.id === subId) : undefined) ??
+      vals.find((x) => x.task === subTask && x.role === subRole) ??
+      vals.find((x) => x.task === subTask);
     return match ? match.status : null;
   });
   if (isSubagentStep) {
     const role = subRole;
     const task = subTask;
-    const settled = liveStatus ? liveStatus !== "running" : done;
+    // No store status + a live turn = still working (spawn event not yet in,
+    // or the store entry was lost) — never fall back to the marker's `done`,
+    // which is true from the instant the spawn is parsed and showed ✓ while
+    // the agent was still running.
+    const settled = liveStatus ? liveStatus !== "running" : done && !live;
     const openAgent = () => {
       const s = useChatStore.getState();
       const list = chatSessionId
         ? Object.values(s.subagents[chatSessionId] ?? {})
         : [];
       const match =
+        (subId ? list.find((x) => x.id === subId) : undefined) ??
         list.find((x) => x.status === "running" && x.task === task) ??
         list.find((x) => x.task === task) ??
         list.find((x) => x.role === role && x.status === "running");
-      if (match) {
-        // Opens exactly THIS agent; reuses the Agents pane (no tab spam).
-        useUiStore.getState().openAgentsTab(match.id);
-      }
+      // Even with no store entry (persisted history, missed spawn event) open
+      // the Agents pane showing the list — a dead click reads as broken.
+      useUiStore.getState().openAgentsTab(match?.id ?? null);
     };
     return (
       <div className={`chat-agent-chip${settled ? "" : " running"}`}>
@@ -813,7 +823,9 @@ export function ActivityStepRow({
             </span>
           ) : settled ? (
             <span className="chat-agent-chip-check" aria-hidden="true">✓</span>
-          ) : null}
+          ) : (
+            <span className="chat-agent-chip-spinner" aria-hidden="true" />
+          )}
         </button>
       </div>
     );

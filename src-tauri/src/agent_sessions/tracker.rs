@@ -220,6 +220,12 @@ impl ToolTracker {
         let mut v = value;
         if let Some(obj) = v.as_object_mut() {
             obj.insert("id".to_string(), json!(id));
+            // Carry the spawn event's store id in the marker too: the chat
+            // chip correlates by it exactly. Task/role text matching breaks
+            // when a model puts the summary under "task"/"summary" (store
+            // task = "" vs chip task = text) or when two agents share a
+            // description.
+            obj.insert("subId".to_string(), json!(sub_id));
         }
         // Emit the spawn event so the frontend creates the subagent immediately.
         if let Some(app) = app {

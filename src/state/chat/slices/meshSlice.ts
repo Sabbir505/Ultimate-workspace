@@ -23,6 +23,7 @@ export function createMeshSlice(set: ChatStoreSet, _get: ChatStoreGet) {
           prompt: payload.prompt,
           output: "",
           status: "running",
+          model: payload.model ?? null,
         };
         return { subagents: { ...s.subagents, [payload.chatSessionId]: sessionSubagents } };
       });
@@ -115,7 +116,12 @@ export function createMeshSlice(set: ChatStoreSet, _get: ChatStoreGet) {
           ? list
           : [
               ...list,
-              { childId: payload.childSessionId, title: payload.title, agent: payload.agent },
+              {
+                childId: payload.childSessionId,
+                title: payload.title,
+                agent: payload.agent,
+                model: payload.model,
+              },
             ];
         // The spawned session's first turn starts right after this event —
         // pre-create its streaming entry so its tokens stream (see

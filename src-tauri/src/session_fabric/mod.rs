@@ -66,6 +66,19 @@ fn mesh_disabled_note() -> String {
         .to_string()
 }
 
+/// Harness families that carry the relay-tools MCP server through per-turn
+/// Relay-owned config files (claude/kimi/opencode). commandcode carries it
+/// too — but via a registration in its OWN config (`ensure_commandcode_
+/// bridge`, verified dynamically per turn since there is no per-turn config
+/// flag), and pi/omp have no MCP support at all, so every prompt that
+/// advertises message_session/spawn_session must be gated on what the
+/// caller actually verified. Advertising the tools to a CLI that doesn't
+/// have them produced exactly that: the model correctly reporting
+/// "I have no relay-tools session spawn".
+pub fn harness_has_relay_tools(harness: &str) -> bool {
+    matches!(harness, "claude_code" | "kimi_code" | "opencode")
+}
+
 // ── Runtime state ─────────────────────────────────────────────────────────
 
 /// Tauri-managed mesh runtime. Everything here is process-local bookkeeping;
@@ -180,7 +193,11 @@ pub fn registry_block(conn: &Connection, self_sid: Option<&str>) -> Option<Strin
          Nearby peers (same project first; `list_sessions` for the full index, \
          `read_session`/`search_sessions` for depth):\n{}\n\
          Peers are separate conversations with the same user. Consult them instead of \
-         guessing what happened elsewhere; ask before duplicating in-progress work.",
+         guessing what happened elsewhere; ask before duplicating in-progress work. \
+         spawn_session accepts `model` (bare id, \"provider::model\", or an engine \
+         pair like \"claude_code::sonnet\") — delegate to a different model or CLI \
+         engine than yours when the task warrants it (cheap models for mechanical \
+         sub-work); the app-wide default is Settings → Subagent model.",
         lines.join("\n")
     ))
 }
@@ -201,9 +218,11 @@ fn project_label(conn: &Connection, project_id: &str) -> String {
 /// resumed chat (app restarted, days later) then had the mesh TOOLS but no
 /// prompting connecting "what did we do last session" to them — it answered
 /// from its own CLI's session data instead. Cheap (one line), rides every
-/// turn like RELAY_ASK_DIRECTIVE. None when the mesh is disabled.
-pub fn resumed_turn_hint(conn: &Connection, self_sid: &str) -> Option<String> {
-    if !mesh_enabled(conn) {
+/// turn like RELAY_ASK_DIRECTIVE. None when the mesh is disabled or the
+/// caller reports no relay-tools for this harness (prompt-only CLIs have no
+/// mesh tools to steer into).
+pub fn resumed_turn_hint(conn: &Connection, has_relay_tools: bool, self_sid: &str) -> Option<String> {
+    if !mesh_enabled(conn) || !has_relay_tools {
         return None;
     }
     Some(format!(
@@ -1119,35 +1138,78 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
         Ok(Some(r)) => r,
         _ => return "Error: parent session not found.".into(),
     };
-    // Inherit the parent's engine unless the caller named one. Cross-harness
-    // delegation (claude → opencode) is the point; accept any harness id the
-    // session registry knows.
-    let agent = agent_arg.unwrap_or_else(|| {
-        parent_row
-            .agent
-            .clone()
-            .unwrap_or_else(|| "builtin".to_string())
+    // Subagent-model orchestration: an explicit `model` tool arg wins, then
+    // the Settings pick (`chat.subagentModel`), then the parent's model.
+    // A pick naming a CLI engine (`claude_code::sonnet`) re-homes the child
+    // onto that engine unless the caller named one explicitly — cross-engine
+    // delegation via `agent` always wins, and a mismatched pick's model is
+    // dropped (its model ids belong to its own engine).
+    let model_pick = {
+        let conn = db.0.lock();
+        crate::chat::subagent_model::pick_for_call(&conn, args)
+    };
+    // A local_gguf pick only holds while the sidecar is actually serving
+    // that model — otherwise the child's first turn would die on a dead
+    // base URL. Drop to the parent's resolution (logged).
+    let model_pick = model_pick.and_then(|p| {
+        if p.provider.as_deref() != Some("local_gguf") {
+            return Some(p);
+        }
+        let running = app
+            .try_state::<crate::chat::local_models::LocalModelState>()
+            .and_then(|s| s.0.status())
+            .map_or(false, |a| a.model_id == p.model);
+        if running {
+            Some(p)
+        } else {
+            eprintln!(
+                "[subagent-model] local_gguf::{} ignored — sidecar not running it",
+                p.model
+            );
+            None
+        }
     });
-    let agent = if agent.contains(':') || agent == "builtin" || agent == "local" {
-        agent
-    } else {
-        format!("harness:{agent}")
+    let pick_engine_id = model_pick
+        .as_ref()
+        .and_then(crate::chat::subagent_model::pick_engine);
+    let normalize_agent = |a: String| -> String {
+        if a.contains(':') || a == "builtin" || a == "local" {
+            a
+        } else {
+            format!("harness:{a}")
+        }
+    };
+    let agent = match agent_arg {
+        Some(a) => normalize_agent(a),
+        None => match pick_engine_id {
+            Some(e) => e,
+            None => normalize_agent(
+                parent_row
+                    .agent
+                    .clone()
+                    .unwrap_or_else(|| "builtin".to_string()),
+            ),
+        },
+    };
+    let model_pick_for_child = model_pick.filter(|p| {
+        crate::chat::subagent_model::pick_engine(p).map_or(true, |e| e == agent)
+    });
+    let harness_child = agent.starts_with("harness:") || agent.starts_with("acp:");
+    let (provider, model) = {
+        let conn = db.0.lock();
+        crate::chat::subagent_model::resolve_spawn_model(
+            &conn,
+            &parent_row.provider,
+            &parent_row.model,
+            harness_child,
+            model_pick_for_child,
+        )
     };
 
     let child = {
         let conn = db.0.lock();
         // `create_chat_session` writes full-auto defaults, matching how the
         // composer creates chats.
-        let provider = if agent == "builtin" || agent == "local" {
-            parent_row.provider.clone()
-        } else {
-            parent_row.provider.clone()
-        };
-        let model = if !parent_row.model.is_empty() {
-            parent_row.model.clone()
-        } else {
-            "auto".to_string()
-        };
         let row = crate::db::create_chat_session(&conn, &provider, &model, parent_row.project_id.as_deref());
         match row {
             Ok(mut r) => {
@@ -1172,6 +1234,7 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             child_session_id: child.id.clone(),
             title: child.title.clone().unwrap_or_else(|| "spawned session".into()),
             agent: agent.clone(),
+            model: child.model.clone(),
         },
     );
 
@@ -1197,14 +1260,16 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
 
     if !wait {
         return format!(
-            "Spawned session \"{}\" (id {}). It received the task as its first turn and \
-             is running — the user can watch it in the sidebar. Message it with \
-             message_session(session_id=\"{}\") or read its output with \
-             read_session(session_id=\"{}\", mode=\"recent_turns\").",
+            "Spawned session \"{}\" (id {}, engine {}, model {}). It received the task \
+             as its first turn and is running — the user can watch it in the sidebar. \
+             Message it with message_session(session_id=\"{}\") or read its output \
+             with read_session(session_id=\"{}\", mode=\"recent_turns\").",
             child.title.clone().unwrap_or_default(),
             child.id,
+            agent,
+            child.model,
             child.id,
-            child.id
+            child.id,
         );
     }
 

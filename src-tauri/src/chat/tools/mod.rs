@@ -729,7 +729,8 @@ const RUN_SHELL_DESC: &str = "Run a native shell command (cmd.exe / sh) with \
 const TASK_DESC: &str = "Spawn a focused subagent that runs ONE task with its \
     own model turn and reports back — delegate self-contained sub-tasks \
     (explore a codebase, research a topic, draft a section) so the main turn \
-    stays lean. Runs the SAME provider+model as this session; output streams \
+    stays lean. Runs this session's provider+model by default; pass `model` to override. \
+    Output streams \
     live to the Agents panel; the final text is returned as the tool result. \
     For INDEPENDENT subtasks, call Task multiple times in the same turn — the \
     calls run in parallel (subagents have read-only tools: they can read files \

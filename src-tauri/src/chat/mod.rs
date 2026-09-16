@@ -36,6 +36,7 @@ pub mod python_runtime;
 pub mod reconnect;
 pub mod stream_events;
 pub mod streaming;
+pub mod subagent_model;
 pub mod tasks;
 pub mod tools;
 pub mod totp;

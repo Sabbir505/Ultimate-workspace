@@ -231,6 +231,9 @@ impl ToolTracker {
                     role: role.to_string(),
                     task: task.to_string(),
                     prompt: prompt.to_string(),
+                    // Relay only observes CLI-native subagents — the CLI owns
+                    // their model choice, so there is nothing to report.
+                    model: None,
                 },
             );
         }

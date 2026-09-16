@@ -732,10 +732,13 @@ export function ActivityStepRow({
 }: {
   step: ActivityStep;
   done: boolean;
-  /** Turn-level streaming flag. Per-call `done` is untrustworthy while the
-   *  turn streams — the backend closes every <tool> marker at call START —
-   *  so only this may show the row as finished. Tool rows carry no ✓/spinner
-   *  in any state: while live the label itself is the progress (shine). */
+  /** True only while THIS call is the newest activity of a streaming turn —
+   *  the caller passes it for the last process block / last call in a run,
+   *  never for the whole turn. Per-call `done` is untrustworthy (the backend
+   *  closes every <tool> marker at call START), but anything that follows a
+   *  call — narration, thinking, the next call — proves it finished. While
+   *  live the row carries no ✓/spinner and the label itself is the progress
+   *  (shine); once superseded it settles to plain static text. */
   live?: boolean;
   /** The chat session this bubble belongs to (pane-scoped in split view).
    *  Subagent chips must read THAT session's live subagent status — reading
@@ -979,9 +982,10 @@ export function ProcessSummary({
  *  remounts a block whenever the block at that index changes kind (e.g. a
  *  think block that gains a tool run below it mid-stream), losing collapse
  *  state. Diff blocks key on their file path, which is unique per turn.
- *  `live` is the TURN-level streaming flag — tool rows use it to render the
- *  live (shining title, latest-call badge) state instead of trusting the
- *  per-call `done`, which flips at call start. */
+ *  `live` is passed only for the NEWEST call of a streaming turn (see
+ *  MessageBubble): tool rows use it to render the live (shining title,
+ *  latest-call badge) state instead of trusting the per-call `done`, which
+ *  flips at call start. */
 export function renderProcessBlock(
   b: Block,
   i: number,
@@ -1000,7 +1004,7 @@ export function renderProcessBlock(
               key={`${step.data?.kind ?? "step"}:${step.data?.path ?? step.data?.title ?? j}:${j}`}
               step={step}
               done={step.done}
-              live={live}
+              live={live && j === b.group.steps.length - 1}
               chatSessionId={chatSessionId}
             />
           ))}
@@ -1035,12 +1039,14 @@ export function renderProcessBlock(
  *  ("⌗ Terminal · 2 commands ⌄") — nine stacked search rows drowned the
  *  transcript. Expanded, it renders the original per-call rows.
  *
- *  The collapsed row never carries a ✓/spinner in any state. While the turn
- *  is LIVE it reads as what's happening: the title carries the progress with
- *  a shine that sweeps first word → last word on a loop until the calls end,
- *  and the "N calls" count is replaced by the run's latest call (its target
- *  or command). Once done it settles to the plain title + count. Expanding
- *  still shows every call, as before. */
+ *  The collapsed row never carries a ✓/spinner in any state. While the run
+ *  is the NEWEST activity of a streaming turn it reads as what's happening:
+ *  the title carries the progress with a shine that sweeps first word →
+ *  last word on a loop, and the "N calls" count is replaced by the run's
+ *  latest call (its target or command). The moment a newer block lands —
+ *  narration, thinking, another call — or the turn ends, the run is done
+ *  and settles to the plain title + count. Expanding still shows every
+ *  call, as before. */
 export function FoldedStepGroup({
   title,
   icon,
@@ -1053,8 +1059,9 @@ export function FoldedStepGroup({
   icon: string;
   count: number;
   steps: ActivityStep[];
-  /** Turn-level streaming flag — see ActivityStepRow. Per-call `done` flips
-   *  at call start, so only this may end the live presentation. */
+  /** True only while this run is the newest activity of a streaming turn —
+   *  see ActivityStepRow. Per-call `done` flips at call start, so only this
+   *  may end the live presentation. */
   live?: boolean;
   chatSessionId?: string | null;
 }) {
@@ -1111,7 +1118,7 @@ export function FoldedStepGroup({
               key={`${step.data?.kind ?? "step"}:${j}`}
               step={step}
               done={step.done}
-              live={isLive}
+              live={isLive && j === steps.length - 1}
               chatSessionId={chatSessionId}
             />
           ))}

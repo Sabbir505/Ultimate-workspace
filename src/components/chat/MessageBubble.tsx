@@ -447,7 +447,12 @@ function MessageBubbleInner({
                       label={processLabel}
                       keepExpandedOnEnd={endedByStop}
                     >
-                      {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact, mdCache, sources, chatSessionId, live === true))}
+                      {/* Only the NEWEST call is "live" (shining title): the
+                          last block, with nothing streamed after it. Anything
+                          that follows a call — narration, thinking, the next
+                          call — proves that call finished; the per-call done
+                          flag can't (markers close at call start). */}
+                      {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact, mdCache, sources, chatSessionId, live === true && i === blocks.length - 1))}
                     </ProcessSummary>
                     {outside.map((b, i) => textBlock(b, `out:${i}`))}
                   </>

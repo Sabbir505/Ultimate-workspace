@@ -103,11 +103,20 @@ fn connector_opencode_entry(s: &HarnessMcpServer) -> Value {
 ///
 /// `context_section` carries caller-computed additive context (connector/MCP
 /// manifest, persistent-memory document) that needs the DB; empty skips it.
+///
+/// `relay_tools` must match what the CLI can actually reach: claude/kimi/
+/// opencode get the relay-tools MCP server and hear about its tools; pi/omp/
+/// commandcode have no channel to them (no MCP, or a registration that would
+/// pin a per-process token), so their variant omits every relay-tools/
+/// relay-browser/skill/automation reference — advertising tools a CLI
+/// doesn't have made it answer "I have no relay-tools session spawn" instead
+/// of delegating.
 pub fn build_instructions_md(
     project_path: &str,
     artifacts_dir: &str,
     artifacts_section: &str,
     context_section: &str,
+    relay_tools: bool,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     // Project-less sessions get a bundle too (connectors + relay-tools) —
@@ -117,24 +126,42 @@ pub fn build_instructions_md(
     } else {
         format!("The project is at `{project_path}`.")
     };
-    parts.push(format!(
-        "You are running inside Relay. {location} \
-         Generated documents and diagrams must go to `{artifacts_dir}` via the \
-         `relay-tools` MCP tools — do not hand-build docx/pptx/pdf yourself. \
-         For a polished docx/pptx/pdf, PREFER `plan_document`: you author a \
-         structured plan (outline, layouts, slot text, chart data); Relay \
-         validates it, compiles it against the design system, and runs design \
-         QA. Fix any QA warnings by re-calling with a revised plan, or make \
-         copy tweaks with `revise_document` (targeted patches, no full \
-         regeneration). Fall back to `generate_document` for xlsx or when the \
-         planner is unavailable. Use `get_skill` to load the detailed guidance \
-         for a skill before producing it. To check which connectors / MCP \
-         servers / skills are \
-         available, call `get_capabilities` on `relay-tools` — never run \
-         `claude mcp list` (or similar probes) in your terminal: that spawns \
-         processes to re-derive what the app already knows and reads your \
-         config file instead of the live session."
-    ));
+    if relay_tools {
+        parts.push(format!(
+            "You are running inside Relay. {location} \
+             Generated documents and diagrams must go to `{artifacts_dir}` via the \
+             `relay-tools` MCP tools — do not hand-build docx/pptx/pdf yourself. \
+             For a polished docx/pptx/pdf, PREFER `plan_document`: you author a \
+             structured plan (outline, layouts, slot text, chart data); Relay \
+             validates it, compiles it against the design system, and runs design \
+             QA. Fix any QA warnings by re-calling with a revised plan, or make \
+             copy tweaks with `revise_document` (targeted patches, no full \
+             regeneration). Fall back to `generate_document` for xlsx or when the \
+             planner is unavailable. Use `get_skill` to load the detailed guidance \
+             for a skill before producing it. To check which connectors / MCP \
+             servers / skills are \
+             available, call `get_capabilities` on `relay-tools` — never run \
+             `claude mcp list` (or similar probes) in your terminal: that spawns \
+             processes to re-derive what the app already knows and reads your \
+             config file instead of the live session. Delegating sub-work to \
+             ANOTHER coding agent is what Relay\'s mesh is for: spawn a dedicated \
+             chat with the relay-tools `spawn_session` tool (optionally `model`, \
+             e.g. \"opencode::mimo-v2.5-free\") instead of launching a coding-agent \
+             CLI in your shell — an externally launched agent opens a stray \
+             terminal window and is invisible to Relay: unwatchable, \
+             unresumable, and unknown to the Session Mesh."
+        ));
+    } else {
+        parts.push(format!(
+            "You are running inside Relay. {location} \
+             Generated documents, charts and exports must be written into \
+             `{artifacts_dir}` with your file tools — Relay lists that folder \
+             as the app's artifacts. Do NOT delegate work by launching other \
+             coding-agent CLIs (claude, opencode, …) from your shell: they pop \
+             a stray external terminal window Relay can't see or manage. Do the \
+             work directly and tell the user if something needs a different agent."
+        ));
+    }
     // Harness CLIs never see the built-in chat's per-turn system prompt, so
     // without this they have no idea what today is ("latest news" /
     // "this week" reasoning rides the training cutoff).
@@ -147,53 +174,55 @@ pub fn build_instructions_md(
     if !context_section.trim().is_empty() {
         parts.push(context_section.to_string());
     }
-    if let Some(catalog) = crate::chat::prompts::available_skills_segment() {
-        parts.push(catalog);
+    if relay_tools {
+        if let Some(catalog) = crate::chat::prompts::available_skills_segment() {
+            parts.push(catalog);
+        }
+        // Automation parity with the built-in chat's CORE prompt: without this the
+        // CLIs answer "I can't schedule things" to "run X every morning" even
+        // though the relay-tools MCP exposes the same CRUD tools the built-in chat
+        // gets as native tools.
+        parts.push(format!(
+            "## Automations\n\
+             Relay schedules headless agent runs — cron \"automations\", managed in the \
+             app's Automations view and via the `relay-tools` MCP tools \
+             `list_automations`, `create_automation`, `update_automation`, \
+             `delete_automation`, `run_automation_now`. When the user asks to \
+             schedule/repeat/automate a task, create one — never claim scheduling \
+             is impossible; confirm an ambiguous schedule first. `schedule` is a \
+             5-field local-time cron (\"0 9 * * 1-5\" = 09:00 weekdays); `agent` \
+             is one of claude_code, opencode, pi, omp, commandcode, anthropic, \
+             openai, openrouter, anthropic_compatible, openai_compatible, \
+             local_gguf. The `prompt` must be fully self-contained — each run \
+             executes it unattended, with no conversation memory and no user to \
+             answer questions — and fires only while the app is running; every \
+             run is logged to its own chat session and the Automations view."
+        ));
+        // Browser section stays behavioral only: the MCP `tools/list` response
+        // already delivers each tool's name/params/description to the CLI, so
+        // restating them here is duplicate tokens. What the schemas can't carry —
+        // the observe→act loop, triage policy, and routing decisions — stays.
+        parts.push(format!(
+            "## In-app browser pane\n\
+             You control the visible in-app browser pane via the `relay-browser` MCP server \
+             (tools prefixed `mcp__relay-browser__`). You are a GUI-capable agent, not a headless \
+             CLI — when the user asks you to browse, search, test a web app, or interact with a \
+             site, use these tools; never say you can't because you're in a terminal. Every action \
+             is visible on screen in real time.\n\n\
+             Workflow: `navigate(url)` → `read_page(mode:\"interactive\")` for the element tree → \
+             `click`/`type_text` by selector or description → `wait_for(\"navigation\")` if the page \
+             changed → `read_page` again (refs expire after navigation).\n\n\
+             Routing: browse/research/E2E-test → navigate + read_page + click/type_text + wait_for. \
+             Silent text-only fetch the user needn't watch → `fetch_url`. Opening a site for the \
+             user → `navigate` (or the built-in `open_url`) — always prefer these over fetch_url \
+             when the user should see the page.\n\n\
+             Previewing an app you built: a STATIC app (HTML/CSS/JS files on disk) needs NO local \
+             server — `navigate` straight to its index.html via a file:/// URL (e.g. \
+             file:///C:/proj/index.html). Only framework dev servers (vite/next/…) need starting \
+             first as a background task, then navigate to http://localhost:PORT. Never leave a \
+             serve command blocking in the foreground."
+        ));
     }
-    // Automation parity with the built-in chat's CORE prompt: without this the
-    // CLIs answer "I can't schedule things" to "run X every morning" even
-    // though the relay-tools MCP exposes the same CRUD tools the built-in chat
-    // gets as native tools.
-    parts.push(format!(
-        "## Automations\n\
-         Relay schedules headless agent runs — cron \"automations\", managed in the \
-         app's Automations view and via the `relay-tools` MCP tools \
-         `list_automations`, `create_automation`, `update_automation`, \
-         `delete_automation`, `run_automation_now`. When the user asks to \
-         schedule/repeat/automate a task, create one — never claim scheduling \
-         is impossible; confirm an ambiguous schedule first. `schedule` is a \
-         5-field local-time cron (\"0 9 * * 1-5\" = 09:00 weekdays); `agent` \
-         is one of claude_code, opencode, pi, omp, commandcode, anthropic, \
-         openai, openrouter, anthropic_compatible, openai_compatible, \
-         local_gguf. The `prompt` must be fully self-contained — each run \
-         executes it unattended, with no conversation memory and no user to \
-         answer questions — and fires only while the app is running; every \
-         run is logged to its own chat session and the Automations view."
-    ));
-    // Browser section stays behavioral only: the MCP `tools/list` response
-    // already delivers each tool's name/params/description to the CLI, so
-    // restating them here is duplicate tokens. What the schemas can't carry —
-    // the observe→act loop, triage policy, and routing decisions — stays.
-    parts.push(format!(
-        "## In-app browser pane\n\
-         You control the visible in-app browser pane via the `relay-browser` MCP server \
-         (tools prefixed `mcp__relay-browser__`). You are a GUI-capable agent, not a headless \
-         CLI — when the user asks you to browse, search, test a web app, or interact with a \
-         site, use these tools; never say you can't because you're in a terminal. Every action \
-         is visible on screen in real time.\n\n\
-         Workflow: `navigate(url)` → `read_page(mode:\"interactive\")` for the element tree → \
-         `click`/`type_text` by selector or description → `wait_for(\"navigation\")` if the page \
-         changed → `read_page` again (refs expire after navigation).\n\n\
-         Routing: browse/research/E2E-test → navigate + read_page + click/type_text + wait_for. \
-         Silent text-only fetch the user needn't watch → `fetch_url`. Opening a site for the \
-         user → `navigate` (or the built-in `open_url`) — always prefer these over fetch_url \
-         when the user should see the page.\n\n\
-         Previewing an app you built: a STATIC app (HTML/CSS/JS files on disk) needs NO local \
-         server — `navigate` straight to its index.html via a file:/// URL (e.g. \
-         file:///C:/proj/index.html). Only framework dev servers (vite/next/…) need starting \
-         first as a background task, then navigate to http://localhost:PORT. Never leave a \
-         serve command blocking in the foreground."
-    ));
     parts.join("\n\n")
 }
 
@@ -208,7 +237,11 @@ pub fn build_instructions_md(
 /// answered "what did we do in previous sessions" with artifact names. It now
 /// labels the list as this session's own output and points past-session
 /// questions at the Session Mesh tools.
-pub fn build_artifacts_section(default_export_dir: &str, recent: &[String]) -> String {
+pub fn build_artifacts_section(
+    default_export_dir: &str,
+    recent: &[String],
+    relay_tools: bool,
+) -> String {
     if default_export_dir.trim().is_empty() && recent.is_empty() {
         return String::new();
     }
@@ -225,13 +258,27 @@ pub fn build_artifacts_section(default_export_dir: &str, recent: &[String]) -> S
         ". When the user asks about an artifact — a report, a document, a chart, \
          an export, even by an approximate name — list and read files from that \
          folder and the project folder with your file tools instead of saying \
-         you don't have it. For the live list call the relay-tools `list_artifacts` \
-         tool (filename-filterable, returns absolute paths).\n\n\
-         IMPORTANT — artifacts are FILES, not conversation history. Do not answer \
-         questions about past work or previous conversations from this section: \
-         for those, use the relay-tools `list_sessions` / `read_session` / \
-         `search_sessions` tools, which cover every Relay chat session.\n",
+         you don't have it.",
     );
+    if relay_tools {
+        s.push_str(
+            " For the live list call the relay-tools `list_artifacts` \
+             tool (filename-filterable, returns absolute paths).",
+        );
+    }
+    s.push_str(
+        "\n\n\
+         IMPORTANT — artifacts are FILES, not conversation history. Do not answer \
+         questions about past work or previous conversations from this section",
+    );
+    if relay_tools {
+        s.push_str(
+            ": \
+             for those, use the relay-tools `list_sessions` / `read_session` / \
+             `search_sessions` tools, which cover every Relay chat session.",
+        );
+    }
+    s.push('n');
     if !recent.is_empty() {
         s.push_str("\nArtifacts THIS session produced (most recent first):\n");
         for line in recent {
@@ -319,6 +366,8 @@ pub fn build_claude_settings_json(
 
 /// Kimi `--agent-file` content: Markdown agent definition whose body is the
 /// harness instructions. Frontmatter per kimi-code's agent file format.
+/// Kimi carries the relay-tools MCP server, so the instructions always
+/// include its tools.
 pub fn build_kimi_agent_md(
     project_path: &str,
     artifacts_dir: &str,
@@ -327,7 +376,7 @@ pub fn build_kimi_agent_md(
 ) -> String {
     format!(
         "---\nname: relay\ndescription: Relay-assisted agent with document generation skills\n---\n\n{}",
-        build_instructions_md(project_path, artifacts_dir, artifacts_section, context_section)
+        build_instructions_md(project_path, artifacts_dir, artifacts_section, context_section, true)
     )
 }
 
@@ -454,6 +503,12 @@ pub struct HarnessBundlePaths {
     pub kimi_agent: PathBuf,
     pub kimi_mcp: PathBuf,
     pub opencode_config: PathBuf,
+    /// Instructions for the PROMPT-ONLY harnesses (pi/omp/commandcode): same
+    /// environment minus every relay-tools/relay-browser/skill/automation
+    /// reference — those CLIs have no MCP channel to receive the tools, and
+    /// advertising them made the models answer "I have no relay-tools spawn".
+    /// Read as the first-turn prompt prefix instead of `claude_instructions`.
+    pub prompt_only_instructions: PathBuf,
 }
 
 /// Sanitize a project id into a filesystem-safe segment.
@@ -484,6 +539,8 @@ pub fn write_bundle(
     gallery: &[GalleryMcpServer],
     artifacts_section: &str,
     context_section: &str,
+    artifacts_section_no_tools: &str,
+    context_section_no_tools: &str,
 ) -> Option<HarnessBundlePaths> {
     let base = data_dir.join("harness").join(safe_id(project_id));
     if std::fs::create_dir_all(&base).is_err() {
@@ -500,6 +557,7 @@ pub fn write_bundle(
     let claude_instructions = claude_dir.join("instructions.md");
     let claude_settings = claude_dir.join("settings.json");
     let kimi_agent = kimi_dir.join("agent.md");
+    let prompt_only_instructions = base.join("instructions_prompt_only.md");
 
     // Write errors must not be swallowed: the returned paths feed CLI spawn
     // args (`--mcp-config-file`, `--agent-file`, …) — a missing file surfaces
@@ -520,7 +578,20 @@ pub fn write_bundle(
 
     let ok_instructions = write_or_none(
         &claude_instructions,
-        build_instructions_md(pp, ad, artifacts_section, context_section),
+        build_instructions_md(pp, ad, artifacts_section, context_section, true),
+    );
+    // The prompt-only harness variant (pi/omp/commandcode): same environment
+    // minus the relay-tool advertising. Fatal like the core instructions —
+    // these CLIs read their instructions from this file.
+    let ok_prompt_only = write_or_none(
+        &prompt_only_instructions,
+        build_instructions_md(
+            pp,
+            ad,
+            artifacts_section_no_tools,
+            context_section_no_tools,
+            false,
+        ),
     );
     let ok_settings = write_or_none(
         &claude_settings,
@@ -531,7 +602,7 @@ pub fn write_bundle(
         &kimi_agent,
         build_kimi_agent_md(pp, ad, artifacts_section, context_section),
     );
-    if !ok_instructions || !ok_settings || !ok_agent {
+    if !ok_instructions || !ok_settings || !ok_agent || !ok_prompt_only {
         return None;
     }
 
@@ -541,6 +612,7 @@ pub fn write_bundle(
         kimi_agent,
         kimi_mcp: kimi_dir.join("mcp.json"),
         opencode_config: base.join("opencode.json"),
+        prompt_only_instructions,
     };
 
     // MCP registration needs the sidecar binary; skip silently if absent.
@@ -624,7 +696,7 @@ mod tests {
 
     #[test]
     fn instructions_contain_preamble_and_skill_catalog() {
-        let md = build_instructions_md("C:/work/proj", "C:/work/out", "", "");
+        let md = build_instructions_md("C:/work/proj", "C:/work/out", "", "", true);
         assert!(md.contains("You are running inside Relay"));
         assert!(md.contains("C:/work/proj"));
         assert!(md.contains("C:/work/out"));
@@ -646,10 +718,31 @@ mod tests {
     }
 
     #[test]
+    fn prompt_only_instructions_omit_every_relay_tool_reference() {
+        // pi/omp/commandcode variant: no relay-tools/relay-browser/skills/
+        // automations advertising — those CLIs have no MCP channel to the
+        // tools, and pointing at them made models refuse delegation with
+        // "I have no relay-tools session spawn".
+        let md = build_instructions_md("C:/work/proj", "C:/work/out", "", "", false);
+        assert!(md.contains("You are running inside Relay"));
+        assert!(md.contains("C:/work/out"), "artifacts dir guidance stays");
+        assert!(!md.contains("relay-tools"));
+        assert!(!md.contains("relay-browser"));
+        assert!(!md.contains("plan_document"));
+        assert!(!md.contains("get_skill"));
+        assert!(!md.contains("## Automations"));
+        assert!(!md.contains("## In-app browser pane"));
+        assert!(!md.contains("docx"), "skill catalog is tool-delivered");
+        // Datetime still rides (tool-independent).
+        assert!(md.to_lowercase().contains("today"));
+    }
+
+    #[test]
     fn artifacts_section_lists_dir_and_recent_files() {
         let section = build_artifacts_section(
             "C:/Users/x/Documents/Relay",
             &["- report.docx (docx, 2026-09-01)".into()],
+            true,
         );
         assert!(section.contains("## Artifacts"));
         assert!(section.contains("C:/Users/x/Documents/Relay"));
@@ -662,25 +755,36 @@ mod tests {
         assert!(section.contains("list_sessions"));
 
         // Nothing known → no section at all (the instructions skip it).
-        assert!(build_artifacts_section("", &[]).is_empty());
+        assert!(build_artifacts_section("", &[], true).is_empty());
 
         // No OWN artifacts but a known dir → dir guidance without any list
         // that could read as history.
-        let own = build_artifacts_section("C:/out", &[]);
+        let own = build_artifacts_section("C:/out", &[], true);
         assert!(own.contains("## Artifacts"));
         assert!(!own.contains("produced"));
 
         // The section is only appended when non-empty.
-        let md = build_instructions_md("C:/work/proj", "C:/work/out", "", "");
+        let md = build_instructions_md("C:/work/proj", "C:/work/out", "", "", true);
         assert!(!md.contains("## Artifacts"));
         let md = build_instructions_md(
             "C:/work/proj",
             "C:/work/out",
-            &build_artifacts_section("C:/export", &["- a.csv (csv, 2026-09-04)".into()]),
+            &build_artifacts_section("C:/export", &["- a.csv (csv, 2026-09-04)".into()], true),
             "",
+            true,
         );
         assert!(md.contains("## Artifacts"));
         assert!(md.contains("a.csv"));
+
+        // Prompt-only variant: same file guidance, no relay-tool pointers.
+        let no_tools = build_artifacts_section(
+            "C:/Users/x/Documents/Relay",
+            &["- report.docx (docx, 2026-09-01)".into()],
+            false,
+        );
+        assert!(no_tools.contains("report.docx"));
+        assert!(!no_tools.contains("list_sessions"));
+        assert!(!no_tools.contains("relay-tools"));
     }
 
     #[test]
@@ -726,7 +830,7 @@ mod tests {
     fn project_less_bundle_tolerates_empty_project_path() {
         // Sessions with no selected project still get a bundle (connectors +
         // relay-tools); instructions and settings must not emit empty paths.
-        let md = build_instructions_md("", "C:/work/out", "", "");
+        let md = build_instructions_md("", "C:/work/out", "", "", true);
         assert!(md.contains("No project folder is selected"));
         assert!(!md.contains("The project is at ``"));
         let v = build_claude_settings_json("", "C:/work/out", None, None);
@@ -853,6 +957,7 @@ mod tests {
             kimi_agent,
             kimi_mcp,
             opencode_config: PathBuf::from("C:/b/oc.json"),
+            prompt_only_instructions: PathBuf::from("C:/b/po.md"),
         };
         // Fresh session: --agent-file + --mcp-config-file + --add-dir.
         let args = kimi_bundle_args(&paths, "C:/work/out", false);
@@ -885,13 +990,22 @@ mod tests {
             &[],
             "",
             "",
+            "",
+            "",
         );
         let b = b.expect("base dir should create");
         assert!(b.claude_instructions.exists(), "claude instructions written");
         assert!(b.claude_settings.exists(), "claude settings written");
         assert!(b.kimi_agent.exists(), "kimi agent written");
+        assert!(
+            b.prompt_only_instructions.exists(),
+            "prompt-only instructions written"
+        );
         let md = std::fs::read_to_string(&b.claude_instructions).unwrap();
         assert!(md.contains("You are running inside Relay"));
+        let po = std::fs::read_to_string(&b.prompt_only_instructions).unwrap();
+        assert!(po.contains("You are running inside Relay"));
+        assert!(!po.contains("relay-tools"), "prompt-only variant omits tool refs");
         // The settings.json always has bypassPermissions under the new regime
         // (the CLI spawn uses --dangerously-skip-permissions, the settings file must agree).
         let settings: Value = serde_json::from_str(
@@ -917,6 +1031,7 @@ mod tests {
             kimi_agent: PathBuf::from("C:/b/a.md"),
             kimi_mcp: PathBuf::from("C:/b/km.json"),
             opencode_config: PathBuf::from("C:/b/oc.json"),
+            prompt_only_instructions: PathBuf::from("C:/b/po.md"),
         };
         let args = claude_bundle_args(&paths, "C:/work/out");
         let s: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -957,7 +1072,7 @@ mod tests {
             &["notion".to_string()],
             &["memory".to_string()],
         );
-        let md = build_instructions_md("C:/p", "C:/out", "", &ctx);
+        let md = build_instructions_md("C:/p", "C:/out", "", &ctx, true);
         // G5: harness CLIs get no other date anchor.
         assert!(md.contains("## Current date & time"), "date section missing");
         assert!(md.contains("Today is "));
@@ -967,7 +1082,7 @@ mod tests {
         assert!(md.contains("memory"));
         assert!(md.contains("No data connectors") == false);
         // Empty context → no manifest section at all.
-        let md = build_instructions_md("C:/p", "C:/out", "", "");
+        let md = build_instructions_md("C:/p", "C:/out", "", "", true);
         assert!(!md.contains("## Connectors & MCP servers"));
         // All-empty manifest also collapses to nothing.
         assert!(build_mcp_context_section(&[], &[]).is_empty());
@@ -1061,7 +1176,7 @@ mod tests {
         let ctx = build_mcp_context_section(&["gmail".to_string()], &["memory".to_string()]);
         let b = write_bundle(
             &dir, "p1", Some("C:/p"), Some("C:/out"), None, None, 7681,
-            &[], &[], "", &ctx,
+            &[], &[], "", &ctx, "", "",
         );
         let b = b.expect("bundle writes");
         let md = std::fs::read_to_string(&b.claude_instructions).unwrap();

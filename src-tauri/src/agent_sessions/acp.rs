@@ -177,7 +177,7 @@ pub(super) fn send_acp_turn(
     content: &str,
     entry: &mut AgentChild,
     cwd: Option<&str>,
-    _project_id: Option<&str>,
+    project_id: Option<&str>,
     acp_id: &str,
 ) -> Result<(), String> {
     let agent = {
@@ -208,8 +208,9 @@ pub(super) fn send_acp_turn(
         if let Ok(mut g) = entry.cli_session_id.lock() {
             *g = None;
         }
-        // Relay-owned bundle is not part of ACP v1 (no MCP servers, no
-        // permission flags) — the agent's own config governs its tools.
+        // ACP v1 has no permission-flag channel (the agent's own config
+        // governs those), but the session DOES get Relay's MCP servers via
+        // session/new below.
         let spec = resolve_for_spawn(&CommandSpec {
             program: agent.command.clone(),
             args: agent.args.clone(),
@@ -267,6 +268,14 @@ pub(super) fn send_acp_turn(
         entry.reader_alive.store(true, Ordering::SeqCst);
         let reader_alive2 = Arc::clone(&entry.reader_alive);
         let generation_cell2 = Arc::clone(&entry.proc_generation);
+        // The ACP spec's session/new carries the client's MCP servers — the
+        // same relay bridge claude/kimi/opencode get via their config files.
+        // The agent spawns the stdio binary itself; the bridge reaches the
+        // app's WS with the current run's token.
+        let acp_mcp_servers = crate::browser_mcp_register::acp_mcp_servers(
+            app,
+            project_id.unwrap_or(super::bundle::NO_PROJECT_BUNDLE_SLUG),
+        );
         std::thread::spawn(move || {
             let _alive = ReaderAliveGuard(reader_alive2);
             read_acp_stream(
@@ -284,6 +293,7 @@ pub(super) fn send_acp_turn(
                 &generation_cell2,
                 generation,
                 watches,
+                acp_mcp_servers,
             );
         });
         entry.child = Some(child);
@@ -357,6 +367,7 @@ pub(super) fn read_acp_stream(
     proc_generation: &AtomicU64,
     my_generation: u64,
     mut watches: Vec<DirWatch>,
+    acp_mcp_servers: Value,
 ) {
     let mut full = String::new();
     // Snapshot-suffix state for the text/reasoning streams. ACP agents
@@ -467,7 +478,7 @@ pub(super) fn read_acp_stream(
                         .unwrap_or_default();
                     let new_id = crate::acp::next_request_id();
                     awaiting_session_new = Some(new_id);
-                    let params = json!({ "cwd": cwd_str, "mcpServers": {} });
+                    let params = json!({ "cwd": cwd_str, "mcpServers": acp_mcp_servers });
                     let _ = write_line_shared(
                         &shared_stdin,
                         &crate::acp::encode_request(new_id, "session/new", &params),

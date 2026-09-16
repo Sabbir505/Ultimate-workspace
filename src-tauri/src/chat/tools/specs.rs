@@ -1160,6 +1160,13 @@ fn task_parameters() -> Value {
                 "description": "Role label for the Agents panel.",
                 "enum": ["explore", "edit", "analyze", "research", "write", "test", "refactor"],
             },
+            "model": {
+                "type": "string",
+                "description": "Model override when the subagent should run on a different \
+                     model: bare id keeps the session\'s provider; \"provider::model\"\
+                     targets another (API providers only; CLI engines go via \
+                     spawn_session). Omit for the session default.",
+            },
             "background": {
                 "type": "boolean",
                 "description": "Run WITHOUT blocking the main conversation. Returns a task id immediately; poll get_task_status with it (the result lands there when the subagent finishes) and cancel_task to abort. Prefer this for anything long."
@@ -1224,7 +1231,7 @@ const SEARCH_SESSIONS_DESC: &str = "Full-text search across ALL Relay chat sessi
 
 const MESSAGE_SESSION_DESC: &str = "Send a message to another Relay chat session.     mode=\"question\" (default) waits up to timeout_s for that session's answer and     returns it; on timeout the reply still arrives later as a follow-up turn.     mode=\"notify\" delivers without expecting a reply. The target receives it as a     turn marked as coming from you (NOT the user) — the user sees the exchange in     the UI. Use to consult a peer's context or request something of it; NOT for     chatting with the user.";
 
-const SPAWN_SESSION_DESC: &str = "Spawn a NEW Relay chat session to delegate work:     create a real, sidebar-visible session (any installed engine — it may differ     from yours) whose first turn is `task`. mode=\"background\" (default) returns the     new session's id immediately; mode=\"wait\" blocks (bounded) and returns its     first-turn output. The user can watch and take over the spawned session at any     time. Prefer this over doing a big parallel task inside this conversation.";
+const SPAWN_SESSION_DESC: &str = "Spawn a NEW Relay chat session to delegate work:     create a real, sidebar-visible session (any installed engine — it may differ     from yours) whose first turn is `task`. Pass `model` for a different model or CLI engine. mode=\"background\"     (default) returns the new session's id immediately; mode=\"wait\" blocks     (bounded) and returns its first-turn output. The user can watch and take over     the spawned session at any time. Prefer this over doing a big parallel task     inside this conversation.";
 
 fn list_sessions_parameters() -> Value {
     json!({
@@ -1334,6 +1341,10 @@ fn spawn_session_parameters() -> Value {
             "agent": {
                 "type": "string",
                 "description": "Engine for the new session, e.g. \"claude_code\",                     \"opencode\", \"builtin\", \"local\" (defaults to yours)."
+            },
+            "model": {
+                "type": "string",
+                "description": "Model/engine for the child: bare id keeps your provider; \"provider::model\" switches provider (builtin); \"claude_code::sonnet\" runs another CLI harness. Omit for the configured default."
             },
             "mode": {
                 "type": "string",
@@ -1816,9 +1827,12 @@ mod tests {
         // giving sibling-session awareness, messaging, and spawning. The read
         // trio replaces asking the user about other chats; the write pair
         // replaces re-doing work that already happened elsewhere.
+        // Bumped 42_000→42_500 for subagent-model orchestration: an optional
+        // `model` parameter on `task` and `spawn_session` (~0.4k) so a parent
+        // can route spawned work to a different model/CLI engine.
         assert!(
-            total < 42_000,
-            "default tool specs total {total} chars (budget 42_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            total < 42_500,
+            "default tool specs total {total} chars (budget 42_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
         let all_on_caps = ToolCaps {
             browser: true,
@@ -1829,9 +1843,11 @@ mod tests {
             .map(|s| serde_json::to_string(s).unwrap_or_default().len())
             .sum();
         println!("all-on specs JSON: {all_on} chars");
+        // Same orchestration bump: 45_000→45_500 (the `model` params ride
+        // the all-on surface too).
         assert!(
-            all_on < 45_000,
-            "all-on tool specs total {all_on} chars (budget 45_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 45_500,
+            "all-on tool specs total {all_on} chars (budget 45_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 

@@ -99,7 +99,7 @@ function SubagentListItem({
   selected,
   onClick,
 }: {
-  sub: { id: string; role: string; task: string; status: "running" | "completed" | "error" };
+  sub: { id: string; role: string; task: string; status: "running" | "completed" | "error"; model?: string | null };
   selected: boolean;
   onClick: () => void;
 }) {
@@ -113,11 +113,20 @@ function SubagentListItem({
     <button
       className={`subagent-list-item${selected ? " selected" : ""}`}
       onClick={onClick}
-      title={`${sub.role}: ${sub.task}`}
+      title={`${sub.role}${sub.model ? ` · ${sub.model}` : ""}: ${sub.task}`}
     >
       <span className={dotClass} />
       <span className="subagent-list-role">{sub.role}</span>
       <span className="subagent-list-task">{sub.task}</span>
+      {sub.model && (
+        <span
+          className="subagent-list-role"
+          title="Model this subagent runs on"
+          style={{ opacity: 0.75 }}
+        >
+          {sub.model}
+        </span>
+      )}
       {sub.status === "running" && (
         <span className="subagent-list-spinner" />
       )}
@@ -202,6 +211,15 @@ export function SubagentPanel() {
           </button>
           <span className="subagent-panel-title">
             <span className="subagent-panel-role">{selectedSub.role}</span>
+            {selectedSub.model && (
+              <span
+                className="subagent-panel-role"
+                title="Model this subagent runs on"
+                style={{ opacity: 0.75 }}
+              >
+                {selectedSub.model}
+              </span>
+            )}
             <span className="subagent-panel-task-truncate" title={selectedSub.task}>
               {selectedSub.task}
             </span>

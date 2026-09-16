@@ -767,6 +767,17 @@ export function ActivityStepRow({
       Object.values(list).find((x) => x.task === subTask);
     return match ? match.status : null;
   });
+  // Model the subagent runs on, when Relay chose it (orchestration override)
+  // — shown on the chip so a different-model spawn is visible in the flow.
+  const liveModel = useChatStore((s) => {
+    if (!isSubagentStep) return null;
+    const list = chatSessionId ? s.subagents[chatSessionId] : undefined;
+    if (!list) return null;
+    const match =
+      Object.values(list).find((x) => x.task === subTask && x.role === subRole) ??
+      Object.values(list).find((x) => x.task === subTask);
+    return match?.model ?? null;
+  });
   if (isSubagentStep) {
     const role = subRole;
     const task = subTask;
@@ -801,6 +812,14 @@ export function ActivityStepRow({
           </svg>
           <span className="chat-agent-chip-label">SubAgent</span>
           <span className="chat-agent-chip-role">{role}</span>
+          {liveModel && (
+            <>
+              <span className="chat-agent-chip-sep" aria-hidden="true">·</span>
+              <span className="chat-agent-chip-role" title="Model this subagent runs on">
+                {liveModel}
+              </span>
+            </>
+          )}
           <span className="chat-agent-chip-sep" aria-hidden="true">·</span>
           <span className="chat-agent-chip-task">{task}</span>
           {liveStatus === "error" ? (

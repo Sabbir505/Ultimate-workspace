@@ -595,6 +595,27 @@ impl AgentSessionManager {
         // kimi receive the same content via --append-system-prompt-file /
         // --agent-file and must NOT get it twice. Failure degrades to no
         // prefix (same contract as bundle failure everywhere else).
+        // Which relay-tool surface this harness can actually reach — picks the
+        // instructions variant and gates every mesh prompt. claude/kimi/
+        // opencode get the bridge via per-turn Relay-owned config files;
+        // commandcode has no per-turn channel, so Relay registers the bridge
+        // in its own `cmd mcp` config instead (idempotent: one marker-file
+        // read in steady state, re-registered when the WS token rotates);
+        // pi/omp have no MCP support at all.
+        let has_relay_tools = if crate::session_fabric::harness_has_relay_tools(harness) {
+            true
+        } else if harness == "commandcode" {
+            match spawn_dir(cwd, &db.0) {
+                Some(dir) => crate::browser_mcp_register::ensure_commandcode_bridge(
+                    app,
+                    &dir,
+                    project_id.unwrap_or(bundle::NO_PROJECT_BUNDLE_SLUG),
+                ),
+                None => false,
+            }
+        } else {
+            false
+        };
         let instructions_prefix = if fresh_cli && harness_needs_prompt_instructions(harness) {
             resolve_harness_bundle(
                 app,
@@ -606,7 +627,17 @@ impl AgentSessionManager {
                 None,
                 Some(chat_session_id),
             )
-            .and_then(|b| std::fs::read_to_string(&b.claude_instructions).ok())
+            .and_then(|b| {
+                // Tool-carrying harnesses read the full instructions; the
+                // rest get the stripped variant that advertises nothing
+                // their CLI can't call.
+                let path = if has_relay_tools {
+                    &b.claude_instructions
+                } else {
+                    &b.prompt_only_instructions
+                };
+                std::fs::read_to_string(path).ok()
+            })
             .filter(|s| !s.trim().is_empty())
         } else {
             None
@@ -626,7 +657,11 @@ impl AgentSessionManager {
             // first turn states it — this is what lets a harness CLI address
             // `message_session`/`spawn_session` calls as itself. First turn
             // only (like the instructions prefix): the CLI retains it.
-            if fresh_cli {
+            // Tool-less harnesses (pi/omp/commandcode) skip it — the line
+            // advertises tools their bundle doesn't register, and a model
+            // told about spawn_session it can't call refuses delegation
+            // outright ("I have no relay-tools session spawn").
+            if fresh_cli && has_relay_tools {
                 base.push_str(&format!(
                     "\n\n[Relay Session Mesh] Your Relay session id is \
                      {chat_session_id} — pass it as the `caller_session_id` argument \
@@ -671,7 +706,7 @@ impl AgentSessionManager {
         let effective = if !fresh_cli {
             let hint = {
                 let conn = db.0.lock();
-                crate::session_fabric::resumed_turn_hint(&conn, chat_session_id)
+                crate::session_fabric::resumed_turn_hint(&conn, has_relay_tools, chat_session_id)
             };
             match hint {
                 Some(h) => format!("{effective}\n\n{h}"),

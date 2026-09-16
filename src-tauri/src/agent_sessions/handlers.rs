@@ -388,8 +388,32 @@ pub(super) fn handle_opencode_event(
             let value = tool_meta_generic(name, &inp);
             if is_subagent_tool_name(name) {
                 // Subagent spawn (claude "Agent"/"Task"): extract
-                // role/task/prompt and emit a spawn event.
-                emit_subagent_spawn(tools, full, app, sid, name, value, &inp);
+                // role/task/prompt and emit a spawn event. Per-turn opencode
+                // reports a tool's output INLINE on this same event — there
+                // is no separate result frame — so a part carrying its output
+                // must spawn AND finalize the panel entry in one step: a
+                // plain spawn queues a FIFO slot nothing will ever pop and
+                // the Agents entry spins forever.
+                let role = inp
+                    .get("subagent_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("agent");
+                let task = inp
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let prompt = inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                let out_text = part.pointer("/state/output").and_then(|o| o.as_str());
+                let err_text = part.pointer("/state/error").and_then(|e| e.as_str());
+                if out_text.is_some() || err_text.is_some() {
+                    let marker = tools.subagent_use_with_output(
+                        name, value, app, sid, role, task, prompt, out_text, err_text,
+                    );
+                    full.push_str(&marker);
+                    emit_token(app, sid, &marker);
+                } else {
+                    emit_subagent_spawn(tools, full, app, sid, name, value, &inp);
+                }
             } else {
                 // OpenCode reports a tool's completed output inline on the same
                 // part (`state.output` / `state.error`); attach it for shell tools.
@@ -709,10 +733,50 @@ pub(super) fn handle_commandcode_event(
                                 .unwrap_or(inner.get("input").cloned().unwrap_or(json!({})));
                             emit_todowrite_steps(app, sid, name, &inp);
                             let value = tool_meta_generic(name, &inp);
-                            // A start frame that already carries the output is
-                            // self-contained (opencode's inline shape) — open
-                            // the card WITH its result attached.
-                            let marker = if !result_text.is_empty() {
+                            // Subagent dispatch must be checked BEFORE the
+                            // generic branches: a Task/Agent call piped
+                            // through them rendered the chat chip but never
+                            // emitted chat:subagent-spawn — the Agents pane
+                            // stayed empty and the entry never finalized.
+                            let marker = if is_subagent_tool_name(name) {
+                                let role = inp
+                                    .get("subagent_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("agent");
+                                let task = inp
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let prompt =
+                                    inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                                if !result_text.is_empty() {
+                                    // Start frame already carries the output —
+                                    // spawn and finalize the panel entry in
+                                    // one step (nothing will arrive later).
+                                    let err_text = inner
+                                        .get("error")
+                                        .and_then(|e| e.as_str())
+                                        .filter(|s| !s.is_empty());
+                                    tools.subagent_use_with_output(
+                                        name,
+                                        value,
+                                        app,
+                                        sid,
+                                        role,
+                                        task,
+                                        prompt,
+                                        Some(&result_text),
+                                        err_text,
+                                    )
+                                } else {
+                                    tools.subagent_use(
+                                        name, value, app, sid, role, task, prompt, "", false,
+                                    )
+                                }
+                            } else if !result_text.is_empty() {
+                                // A start frame that already carries the output is
+                                // self-contained (opencode's inline shape) — open
+                                // the card WITH its result attached.
                                 let err_text = inner
                                     .get("error")
                                     .and_then(|e| e.as_str())

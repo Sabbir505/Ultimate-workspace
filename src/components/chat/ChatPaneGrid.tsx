@@ -34,8 +34,11 @@ import { ChatView } from "./ChatView";
 /** One pane: a full-fidelity chat view plus pane chrome (focus pin, floating
  *  close ✕, drag-and-drop edge zones). There is deliberately NO title bar —
  *  the top toolbar already shows the FOCUSED pane's chat title, so a bar per
- *  pane just duplicated it (in the single view it read as a double header). */
-function PaneLeafView({ leaf }: { leaf: ChatPaneLeaf }) {
+ *  pane just duplicated it (in the single view it read as a double header).
+ *  `single` marks the ONE unsplit view: there is nothing to close (the main
+ *  pane is permanent), so the floating ✕ is hidden there — with a single chat
+ *  view it rendered as a dangling control over the transcript. */
+function PaneLeafView({ leaf, single = false }: { leaf: ChatPaneLeaf; single?: boolean }) {
   // The follower is the leaf with NO pinned session — after a main close the
   // promoted leaf keeps its original pane id, so paneId is not the identity.
   const isMain = leaf.sessionId == null;
@@ -56,16 +59,19 @@ function PaneLeafView({ leaf }: { leaf: ChatPaneLeaf }) {
     >
       {/* Floating close — hovers in over the pane's top-right corner (the
           chat title lives in the top toolbar, focused-pane aware). Closing
-          the main pane promotes the first remaining pane to follower. */}
-      <button
-        type="button"
-        className="chat-pane-float-close"
-        onClick={() => closeChatPane(leaf.paneId)}
-        title={`Close “${title ?? "chat"}”`}
-        aria-label={`Close pane: ${title ?? "chat"}`}
-      >
-        ✕
-      </button>
+          the main pane promotes the first remaining pane to follower. Hidden
+          in the single (unsplit) view: nothing to close. */}
+      {!single && (
+        <button
+          type="button"
+          className="chat-pane-float-close"
+          onClick={() => closeChatPane(leaf.paneId)}
+          title={`Close “${title ?? "chat"}”`}
+          aria-label={`Close pane: ${title ?? "chat"}`}
+        >
+          ✕
+        </button>
+      )}
       {isMain ? <ChatView /> : <ChatView paneId={leaf.paneId} />}
       <PaneDropZones paneId={leaf.paneId} />
     </div>
@@ -195,7 +201,7 @@ function SplitNodeView({ node }: { node: ChatPaneSplit }) {
       className={`chat-pane-split dir-${node.dir}${resizing ? " pane-resizing" : ""}`}
     >
       <div className="chat-pane-cell" style={{ flexGrow: node.ratio, flexBasis: 0 }}>
-        <ChatPaneGrid node={node.a} />
+        <PaneNode node={node.a} />
       </div>
       <div
         className="chat-pane-resizer"
@@ -207,15 +213,24 @@ function SplitNodeView({ node }: { node: ChatPaneSplit }) {
         onPointerDown={startResize}
       />
       <div className="chat-pane-cell" style={{ flexGrow: 1 - node.ratio, flexBasis: 0 }}>
-        <ChatPaneGrid node={node.b} />
+        <PaneNode node={node.b} />
       </div>
     </div>
   );
 }
 
-/** Recursive tree renderer. Also used for the tree-less layout: App passes a
- *  bare main leaf so the single view gets the same chrome and drop targets. */
-export function ChatPaneGrid({ node }: { node: ChatPaneNode }) {
+/** Recursive child renderer — children of a split are never the single root
+ *  view, so their floating close ✕ always stays. */
+function PaneNode({ node }: { node: ChatPaneNode }) {
   if (node.kind === "leaf") return <PaneLeafView leaf={node} />;
+  return <SplitNodeView node={node} />;
+}
+
+/** Recursive tree renderer for the ROOT of the chat pane layout. Also used
+ *  for the tree-less layout: App passes a bare main leaf so the single view
+ *  gets the same chrome and drop targets — minus the floating close, which
+ *  only makes sense when another pane exists to fall back on. */
+export function ChatPaneGrid({ node }: { node: ChatPaneNode }) {
+  if (node.kind === "leaf") return <PaneLeafView leaf={node} single />;
   return <SplitNodeView node={node} />;
 }

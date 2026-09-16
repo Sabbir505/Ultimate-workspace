@@ -382,6 +382,9 @@ pub(super) fn read_acp_stream(
     // whole (a genuinely new block).
     let mut last_text = String::new();
     let mut last_reasoning = String::new();
+    // Live subagent dispatches (the agent's own Agent/Task tool calls). ACP
+    // never reports a dispatch's completion — the turn end settles them.
+    let mut tools = ToolTracker::new();
     // "Worked for Xs" label: the turn window runs from when we start watching
     // for the turn's output until session/finish. Reset at each finish so the
     // next turn (sent directly by send_acp_turn) gets its own window.
@@ -574,8 +577,29 @@ pub(super) fn read_acp_stream(
                                 last_reasoning.push_str(&t);
                             }
                             AcpEvent::ToolCall { id, name, input } => {
-                                let marker =
-                                    format!("<tool>{}</tool>", tool_meta_generic(&name, &input));
+                                // Subagent dispatches must register the panel
+                                // entry (chat:subagent-spawn + correlated
+                                // chip), not fall through to the generic
+                                // card — that left the Agents pane empty
+                                // while the chip rendered in chat.
+                                let value = tool_meta_generic(&name, &input);
+                                let marker = if is_subagent_tool_name(&name) {
+                                    let role = input
+                                        .get("subagent_type")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("agent");
+                                    let task = input
+                                        .get("description")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let prompt =
+                                        input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                                    tools.subagent_use(
+                                        &name, value, app, sid, role, task, prompt, &id, false,
+                                    )
+                                } else {
+                                    format!("<tool>{value}</tool>")
+                                };
                                 full.push_str(&marker);
                                 emit_token(app, sid, &marker);
                                 // v1 does not execute ACP tools — answer with
@@ -583,7 +607,16 @@ pub(super) fn read_acp_stream(
                                 // forever on a result that never comes.
                                 reply_acp_tool_error(&shared_stdin, session_cell, &id);
                             }
-                            AcpEvent::Finished | AcpEvent::Failed(_) | AcpEvent::PromptIgnored => {}
+                            AcpEvent::Finished => {
+                                // The turn ended: whatever dispatches are still
+                                // live completed as far as this protocol can
+                                // tell — settle them so no panel entry spins.
+                                tools.settle_live_subagents(app, sid, None);
+                            }
+                            AcpEvent::Failed(msg) => {
+                                tools.settle_live_subagents(app, sid, Some(&msg));
+                            }
+                            AcpEvent::PromptIgnored => {}
                         }
                     }
                 }
@@ -728,6 +761,10 @@ pub(super) fn read_acp_stream(
     // EOF: the process died. If a turn was in flight it never finished —
     // surface that instead of leaving the spinner up forever (unless we
     // killed it ourselves via cancel, which already emitted chat:done).
+    // Any subagent dispatch still live dies with the process — finalize the
+    // panel entries so they don't spin forever (mirrors the claude reader's
+    // EOF drain).
+    tools.settle_live_subagents(app, sid, Some("The ACP agent exited before this agent reported completion."));
     if !handshake_done {
         emit_error(
             app,

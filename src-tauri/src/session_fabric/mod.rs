@@ -964,6 +964,79 @@ async fn push_follow_up_answer(app: &AppHandle, mail: &store::MailRow, answer: &
     }
 }
 
+/// Watch one freshly spawned child's first (task) turn and notify-mail its
+/// result back to the parent session. Without this a background spawn is
+/// fire-and-forget: the child finishes and the parent session never learns
+/// the outcome unless the user relays it manually. The notify mail arrives as
+/// a turn in the parent (busy parent → the pump delivers it after its current
+/// turn) — the same path late question answers ride. Bounded like
+/// watch_answer: one re-arm while the child is still busy; on the second
+/// expiry the parent gets a "still working" notice instead of silence.
+fn spawn_spawn_result_reporter(app: AppHandle, parent: String, child_id: String) {
+    tauri::async_runtime::spawn(async move {
+        let mut deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(WATCHER_CEILING_SECS);
+        // Give the turn time to actually start before polling for its end.
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_MS * 2)).await;
+        let mut rearmed = false;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                if !rearmed && session_busy(&app, &child_id) {
+                    rearmed = true;
+                    deadline = std::time::Instant::now()
+                        + std::time::Duration::from_secs(WATCHER_CEILING_SECS);
+                } else {
+                    break;
+                }
+            }
+            if !session_busy(&app, &child_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
+        }
+        // Turn ended (or ceiling hit) — grace for the final row to persist.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let db = app.state::<DbState>();
+        let (result, depth) = {
+            let conn = db.0.lock();
+            (
+                store::last_assistant_message_after(&conn, &child_id, 0)
+                    .ok()
+                    .flatten(),
+                store::spawn_depth(&conn, &child_id).unwrap_or(1),
+            )
+        };
+        let still_busy = session_busy(&app, &child_id);
+        let body = if still_busy {
+            format!(
+                "Your spawned session is STILL working on the delegated task (~{} min \
+                 elapsed). Its result will not be reported again — read it later with \
+                 read_session(session_id=\"{child_id}\", mode=\"recent_turns\").",
+                WATCHER_CEILING_SECS * 2 / 60
+            )
+        } else {
+            match result {
+                Some(r) if !r.trim().is_empty() => format!(
+                    "Task result from your spawned session:\n\n{}",
+                    crate::util::truncate_chars(&r, MAX_MAIL_CHARS)
+                ),
+                _ => "Your spawned session ended its task turn without producing output."
+                    .to_string(),
+            }
+        };
+        drop(db);
+        let mail = {
+            let db = app.state::<DbState>();
+            let conn = db.0.lock();
+            store::insert_mail(&conn, &child_id, &parent, "notify", &body, depth)
+        };
+        if let Ok(m) = mail {
+            emit_mail(&app, &m);
+            let _ = deliver_or_queue(&app, &m).await;
+        }
+    });
+}
+
 /// Resolve a parked question tool call. Returns true when a live receiver
 /// took the answer; false means the asker's call is gone (timeout or the
 /// queued path) and the caller must deliver the answer another way.
@@ -1259,11 +1332,17 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
     }
 
     if !wait {
+        // The child reports its result back into this session when the task
+        // turn finishes — without this a background spawn is silent forever
+        // and the parent never learns the outcome.
+        spawn_spawn_result_reporter(app.clone(), parent.clone(), child.id.clone());
         return format!(
             "Spawned session \"{}\" (id {}, engine {}, model {}). It received the task \
              as its first turn and is running — the user can watch it in the sidebar. \
-             Message it with message_session(session_id=\"{}\") or read its output \
-             with read_session(session_id=\"{}\", mode=\"recent_turns\").",
+             When it finishes the task, its result is automatically messaged back into \
+             this session. You can also message it with \
+             message_session(session_id=\"{}\") or read its output with \
+             read_session(session_id=\"{}\", mode=\"recent_turns\").",
             child.title.clone().unwrap_or_default(),
             child.id,
             agent,
@@ -1294,13 +1373,20 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             child.id,
             crate::util::truncate_chars(&r, 6_000)
         ),
-        None => format!(
-            "Spawned session \"{}\" (id {}) started; no output captured yet — read it \
-             later with read_session(session_id=\"{}\").",
-            child.title.clone().unwrap_or_default(),
-            child.id,
-            child.id
-        ),
+        None => {
+            // The wait window elapsed while the child is still running —
+            // report its result back here when the turn finishes, instead of
+            // leaving the outcome dangling.
+            spawn_spawn_result_reporter(app.clone(), parent.clone(), child.id.clone());
+            format!(
+                "Spawned session \"{}\" (id {}) started; no output captured yet — its \
+                 result will be messaged back into this session when the turn finishes, \
+                 or read it later with read_session(session_id=\"{}\").",
+                child.title.clone().unwrap_or_default(),
+                child.id,
+                child.id
+            )
+        }
     }
 }
 

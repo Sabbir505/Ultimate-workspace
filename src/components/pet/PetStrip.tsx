@@ -51,6 +51,16 @@ export function PetStrip({ myHome }: { myHome: string }) {
   const stripRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ pointerId: number; startX: number; startY: number; moved: boolean } | null>(null);
 
+  // Registry: this strip announces its home while MOUNTED, so the teleport
+  // scheduler only ever sends the pet to a home that can show it (and the
+  // pet relocates instantly if its own home strip unmounts — pane closed,
+  // view switched). The store guards make duplicate announcements harmless.
+  const registerPetStrip = usePetStore((s) => s.registerPetStrip);
+  useEffect(() => {
+    registerPetStrip(myHome, true);
+    return () => registerPetStrip(myHome, false);
+  }, [myHome, registerPetStrip]);
+
   // The arriving pet mounts in the SECOND half of the teleport window: the
   // vanish finishes before the materialise starts (sequential, not a
   // cross-fade).

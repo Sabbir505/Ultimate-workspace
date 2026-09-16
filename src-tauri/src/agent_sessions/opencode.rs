@@ -824,6 +824,14 @@ pub(super) fn read_opencode_server_events(
                 }
             }
         }
+        // SSE connection ended: any subagent dispatch still live dies with it
+        // — finalize the panel entries so they don't spin forever (mirrors
+        // the claude reader's EOF drain).
+        tools.fail_pending(
+            app,
+            sid,
+            "The opencode server disconnected before this agent reported completion.",
+        );
     });
 }
 
@@ -1128,11 +1136,12 @@ pub(super) fn emit_opencode_tool(
         // A tool call ends any open thinking block (keeps markers outside it).
         close_opencode_think(app, sid, think_cell, full_cell);
         let value = tool_meta_generic(name, &inp);
-        let marker = if done {
-            let out = state.get("output").and_then(|o| o.as_str());
-            let err = state.get("error").and_then(|e| e.as_str());
-            tools.tool_use_with_output(name, value, out, err)
-        } else if is_subagent_tool_name(name) {
+        // Subagent dispatch must be checked BEFORE the done short-circuit: a
+        // part can arrive already finished (status completed on first sight),
+        // and routing it to tool_use_with_output emitted the chat chip but
+        // never chat:subagent-spawn — the Agents pane stayed "No subagents
+        // yet" while the agent had already run.
+        let marker = if is_subagent_tool_name(name) {
             let role = inp
                 .get("subagent_type")
                 .and_then(|v| v.as_str())
@@ -1142,7 +1151,19 @@ pub(super) fn emit_opencode_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let prompt = inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-            tools.subagent_use(name, value, app, sid, role, task, prompt, "", false)
+            if done {
+                let out = state.get("output").and_then(|o| o.as_str());
+                let err = state.get("error").and_then(|e| e.as_str());
+                tools.subagent_use_with_output(
+                    name, value, app, sid, role, task, prompt, out, err,
+                )
+            } else {
+                tools.subagent_use(name, value, app, sid, role, task, prompt, "", false)
+            }
+        } else if done {
+            let out = state.get("output").and_then(|o| o.as_str());
+            let err = state.get("error").and_then(|e| e.as_str());
+            tools.tool_use_with_output(name, value, out, err)
         } else {
             tools.tool_use(name, vec![value])
         };
@@ -1189,6 +1210,80 @@ mod tests {
     #[test]
     fn fnv1a_missing_file_is_none() {
         assert!(fnv1a_file(std::path::Path::new("Z:/definitely/missing.json")).is_none());
+    }
+
+    /// A Task part that arrives already completed must route through the
+    /// subagent spawn path — the done short-circuit used to swallow it into
+    /// the generic self-contained marker: chip in chat, but no
+    /// chat:subagent-spawn, so the Agents pane stayed "No subagents yet".
+    #[test]
+    fn completed_subagent_part_spawns_panel_entry_not_a_generic_card() {
+        let full_cell = Arc::new(Mutex::new(String::new()));
+        let think_cell = Arc::new(Mutex::new(false));
+        let mut tools = ToolTracker::new();
+        let mut states = HashMap::new();
+        let part = json!({
+            "id": "part1",
+            "tool": "task",
+            "state": {
+                "status": "completed",
+                "input": {
+                    "subagent_type": "general",
+                    "description": "Research proper thesis guide",
+                    "prompt": "p"
+                },
+                "output": "final report"
+            }
+        });
+        emit_opencode_tool(
+            None,
+            "s1",
+            &part,
+            &full_cell,
+            &think_cell,
+            &mut tools,
+            &mut states,
+        );
+
+        // The chip marker is the subagent shape carrying the store id (the
+        // spawn/done events ride the same code path as the running-first
+        // case), and nothing queues on the tool FIFO.
+        let full = full_cell.lock().unwrap();
+        assert!(full.contains("\"subId\""), "{full}");
+        assert!(tools.pending.is_empty());
+        assert_eq!(states.get("part1"), Some(&2u8), "part marked completed");
+    }
+
+    /// A completed NON-subagent part must keep the generic self-contained
+    /// card (no subId in its marker) — the reordering must not leak the
+    /// subagent treatment onto ordinary tools.
+    #[test]
+    fn completed_plain_part_stays_a_generic_card() {
+        let full_cell = Arc::new(Mutex::new(String::new()));
+        let think_cell = Arc::new(Mutex::new(false));
+        let mut tools = ToolTracker::new();
+        let mut states = HashMap::new();
+        let part = json!({
+            "id": "part2",
+            "tool": "websearch",
+            "state": {
+                "status": "completed",
+                "input": {"query": "thesis structure"},
+                "output": "results"
+            }
+        });
+        emit_opencode_tool(
+            None,
+            "s1",
+            &part,
+            &full_cell,
+            &think_cell,
+            &mut tools,
+            &mut states,
+        );
+        let full = full_cell.lock().unwrap();
+        assert!(!full.contains("\"subId\""), "{full}");
+        assert_eq!(states.get("part2"), Some(&2u8));
     }
 
 

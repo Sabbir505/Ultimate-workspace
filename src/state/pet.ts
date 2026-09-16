@@ -515,13 +515,17 @@ interface PetStoreState extends PetSettings {
   landedAt: number;
   /** Timestamps of recent pet clicks — the combo that triggers zoomies. */
   petTimes: number[];
-  /** Homes that currently EXIST (sidebar + one per open chat pane). The
-   *  random teleport scheduler picks among these; panes register on mount
-   *  layout changes via setPetHomes. Not persisted. */
+  /** Homes whose pet strips are CURRENTLY MOUNTED (the sidebar strip, plus
+   *  one per rendered chat composer — panes register via PetStrip mount).
+   *  The teleport scheduler picks only among these, so the pet can never be
+   *  sent to a home that isn't showing (the "vanished pet" bug). Not
+   *  persisted. */
   homes: string[];
-  /** Publish the set of existing homes; relocates the pet instantly if its
-   *  home vanished (pane closed — the vanished strip can't play a dissolve). */
-  setPetHomes: (homes: string[]) => void;
+  /** Pet strips call this on mount/unmount. Unmounting a home that the pet
+   *  currently lives in (pane closed, view switched, popout shut) relocates
+   *  it instantly to a still-mounted home — the vanished strip can't play a
+   *  dissolve, so without this the pet would be invisible until return. */
+  registerPetStrip: (home: string, present: boolean) => void;
 
   event: (e: PetEvent) => void;
   tick: (now: number, dtSec: number) => void;
@@ -594,7 +598,7 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
   heartAt: 0,
   lastBubbleAt: 0,
   teleport: null,
-  homes: ["sidebar", "main"],
+  homes: [],
   nextTeleportAt: Date.now() + 90_000,
   nextZoomiesAt: Date.now() + 4 * 60_000 + Math.random() * 5 * 60_000,
   levelUpAt: 0,
@@ -674,7 +678,8 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
     // Teleport lifecycle: clear the window when it lapses, and schedule a new
     // hop when the timer fires. Only a pet that is plainly idle teleports —
     // never mid-walk, mid-zoomies, and NEVER out of its sleep (a nap is
-    // sacred).
+    // sacred). Destinations are only homes with a MOUNTED strip, so the pet
+    // can never materialise somewhere it wouldn't be visible.
     const teleport = s0.teleport;
     if (teleport && now >= teleport.until) {
       patch.teleport = null;
@@ -682,10 +687,10 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
     }
     if (!teleport && now >= s0.nextTeleportAt) {
       if (patch.core ? patch.core.mood === "idle" : s0.core.mood === "idle") {
-        // Random destination among the homes that currently exist (sidebar +
-        // one per open chat pane) — with several panes open the pet hops
-        // between chats unpredictably.
-        const candidates = (s0.homes.length > 0 ? s0.homes : ["sidebar", "main"]).filter(
+        // Random destination among the mounted strips (sidebar + rendered
+        // chat composers) — with several panes open the pet hops between
+        // chats unpredictably.
+        const candidates = (s0.homes.length > 0 ? s0.homes : ["sidebar"]).filter(
           (h) => h !== s0.home,
         );
         if (candidates.length === 0) {
@@ -713,26 +718,49 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
     if (changed) set(patch);
   },
 
-  setPetHomes: (homes) => {
-    const next = homes.length > 0 ? homes : ["sidebar", "main"];
+  registerPetStrip: (home, present) => {
     const s = get();
-    const sameList =
-      next.length === s.homes.length && next.every((h, i) => h === s.homes[i]);
-    if (next.includes(s.home)) {
-      if (!sameList) set({ homes: next });
+    const has = s.homes.includes(home);
+    if (present === has) return;
+    if (present) {
+      // A strip mounted (sidebar boot, chat view opened, pane split). If the
+      // pet's home isn't among the mounted strips — a stale persisted home
+      // ("pane-3" from last run's split) or first boot — relocate it NOW,
+      // otherwise it would render nowhere until the next teleport.
+      const homes = [...s.homes, home];
+      const patch: Partial<PetStoreState> = { homes };
+      if (!homes.includes(s.home)) {
+        const candidates = homes.filter((h) => h !== s.home);
+        const to = candidates[Math.floor(Math.random() * candidates.length)];
+        if (to) {
+          patch.home = to;
+          patch.teleport = null;
+        }
+      }
+      set(patch);
+      if (patch.home) persist(get(), get().core);
       return;
     }
-    // The pet's home pane closed under it: relocate instantly (no dissolve —
-    // the strip that would play it is gone).
-    const candidates = next.filter((h) => h !== s.home);
-    const to = candidates[Math.floor(Math.random() * candidates.length)] ?? next[0];
-    set({ homes: next, home: to, teleport: null });
-    persist(get(), get().core);
+    // A strip unmounted (pane closed, view switched to Files/Settings,
+    // popout shut). If the pet lived there it would vanish with the strip —
+    // relocate instantly (the vanished strip can't play a dissolve).
+    const homes = s.homes.filter((h) => h !== home);
+    const patch: Partial<PetStoreState> = { homes };
+    if (!homes.includes(s.home)) {
+      const candidates = homes.filter((h) => h !== s.home);
+      const to = candidates[Math.floor(Math.random() * candidates.length)] ?? homes[0];
+      if (to) {
+        patch.home = to;
+        patch.teleport = null;
+      }
+    }
+    set(patch);
+    if (patch.home) persist(get(), get().core);
   },
 
   teleportToRandomOther: () => {
     const s = get();
-    const candidates = (s.homes.length > 0 ? s.homes : ["sidebar", "main"]).filter(
+    const candidates = (s.homes.length > 0 ? s.homes : ["sidebar"]).filter(
       (h) => h !== s.home,
     );
     if (candidates.length === 0) return;

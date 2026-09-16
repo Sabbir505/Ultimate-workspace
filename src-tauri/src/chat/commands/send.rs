@@ -1081,6 +1081,18 @@ pub async fn send_chat_message(
         crate::chat::compaction::load_compaction_entries(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
     };
+    // Research turns: the `/research` token is a relay affordance, not model
+    // vocabulary — sent verbatim it reads as an unknown command and the turn
+    // degrades into an ordinary answer even though the scaffolding is loaded.
+    // Rewrite the model-bound copy to the plain topic (in-memory only; the DB
+    // row and the chat transcript keep what the user typed).
+    if research_mode {
+        if let Some(last) = messages.last_mut() {
+            if last.message.role == "user" {
+                last.message.content = crate::chat::strip_research_prefix(&last.message.content);
+            }
+        }
+    }
     // Attach this turn's images to the just-persisted user message so they are
     // sent as vision content. Images are not persisted, so they only apply to
     // the live turn (not to regenerated/older turns).

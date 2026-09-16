@@ -20,6 +20,7 @@ import { createComposerSlice } from "./slices/composerSlice";
 import { createConfigSlice } from "./slices/configSlice";
 import { createLoopsSlice } from "./slices/loopsSlice";
 import { createMeshSlice } from "./slices/meshSlice";
+import { createPanesSlice } from "./slices/panesSlice";
 import { createPerfSlice } from "./slices/perfSlice";
 import { createPlansSlice } from "./slices/plansSlice";
 import { createSessionsSlice } from "./slices/sessionsSlice";
@@ -65,11 +66,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   messagesSessionId: null,
   hasMoreHistory: false,
-  splitChatSessionId: null,
-  splitMessages: [],
-  splitMessagesSessionId: null,
-  splitHasMoreHistory: false,
   focusedChatSessionId: null,
+  chatPaneTree: null,
+  paneBuffers: {},
+  rememberedChatPaneState: null,
+  focusedPaneId: null,
   streaming: {},
   streamingChatSessionId: null,
   chatStatus: {},
@@ -129,6 +130,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   ...createSessionsSlice(set, get),
   ...createBuffersSlice(set, get),
+  ...createPanesSlice(set, get),
   ...createComposerSlice(set, get),
   ...createLoopsSlice(set, get),
   ...createStreamingSlice(set, get),

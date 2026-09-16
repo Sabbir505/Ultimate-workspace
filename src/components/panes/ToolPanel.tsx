@@ -163,6 +163,25 @@ export function ToolPanel() {
   // Ref to the chips scroll container — needed for the wheel handler.
   const chipsRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  // True only when the chips strip actually overflows. The fade mask and its
+  // trailing pad live behind this class — applied unconditionally they held
+  // the "+" a 16px gap away from the last chip even when everything fit.
+  const [chipsScrollable, setChipsScrollable] = useState(false);
+  useEffect(() => {
+    const el = chipsRef.current;
+    if (!el) return;
+    const update = () => setChipsScrollable(el.scrollWidth > el.clientWidth + 1);
+    update();
+    // Panel resize (the drag splitter) changes the box; tab/list changes
+    // re-run this effect. Both paths re-measure.
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    window.addEventListener("resize", update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, [openTabs, panes]);
 
   // Only show running terminals (not exited ones).
   const terminals = useMemo(
@@ -213,8 +232,14 @@ export function ToolPanel() {
   // if the IPC failed, floated over the UI as a ghost.
   const browserTabActive = activeInstance?.kind === "browser";
 
-  // Auto-open content when a tab is selected while empty — the Terminal and
-  // Browser tabs spawn their own content instead of showing an "open" button.
+  // Auto-open BROWSER content when a tab is selected while empty — the
+  // browser tab spawns its own pane instead of showing an "open" button (a
+  // browser pane needs no exec-gate dialog, so spawning it unprompted is
+  // quiet). The TERMINAL deliberately does NOT auto-spawn: opening a shell
+  // goes through the native exec-gate dialog, and a spawn the user never
+  // asked for made that OS-level "run powershell.exe?" prompt pop open
+  // whenever the panel expanded onto an empty Terminal tab. The terminal
+  // empty state offers an explicit button instead.
   // The ref guards against double-spawns while the async spawn is in flight.
   // `activeInstance` must exist: with NO chips open the panel shows the
   // picker grid and activeKind falls back to "terminal" — spawning there
@@ -224,12 +249,7 @@ export function ToolPanel() {
   const spawningRef = useRef(false);
   useEffect(() => {
     if (collapsed || spawningRef.current || !activeInstance) return;
-    if (activeKind === "terminal" && terminals.length === 0) {
-      spawningRef.current = true;
-      void openShellTerminal().finally(() => {
-        spawningRef.current = false;
-      });
-    } else if (activeKind === "browser" && browsers.length === 0 && minimizedBrowsers.length === 0) {
+    if (activeKind === "browser" && browsers.length === 0 && minimizedBrowsers.length === 0) {
       spawningRef.current = true;
       openBrowserPane();
       // openBrowserPane updates the panes store synchronously, but this
@@ -241,7 +261,7 @@ export function ToolPanel() {
         spawningRef.current = false;
       }, 0);
     }
-  }, [activeKind, activeInstance, collapsed, terminals.length, browsers.length, minimizedBrowsers.length]);
+  }, [activeKind, activeInstance, collapsed, browsers.length, minimizedBrowsers.length]);
 
   // Drop Browser chips whose pane is gone (closing a pane's last tab closes
   // the whole pane). Without this, the chip dangles and — via the MRU
@@ -405,7 +425,10 @@ export function ToolPanel() {
           {/* Tab bar — Shows one chip per open tab INSTANCE + a "+" that pops a
               menu of panes to add. Chips are scrollable + drag-to-reorder. */}
           <div className="tool-panel-tabbar">
-            <div className="tool-panel-tabbar-chips" ref={chipsRef}>
+            <div
+              className={`tool-panel-tabbar-chips${chipsScrollable ? " scrollable" : ""}`}
+              ref={chipsRef}
+            >
               {openTabs.map((inst, index) => {
                 const tabDef = TABS.find((tb) => tb.id === inst.kind);
                 const label = tabLabel(inst, tabDef?.label ?? inst.kind, panes);
@@ -487,8 +510,19 @@ export function ToolPanel() {
                 <>
                   {terminals.length === 0 ? (
                     <div className="tool-panel-empty">
-                      <div>{terminalPanes(panes).length > 0 ? "No running terminals" : "Starting terminal…"}</div>
-                      <div>{terminalPanes(panes).length > 0 ? "All terminals have exited." : ""}</div>
+                      <div>
+                        {terminalPanes(panes).length > 0
+                          ? "No running terminals"
+                          : "No terminal open"}
+                      </div>
+                      {terminalPanes(panes).length > 0 && <div>All terminals have exited.</div>}
+                      <button
+                        type="button"
+                        className="ghost tool-panel-empty-btn"
+                        onClick={() => void openShellTerminal()}
+                      >
+                        Open a terminal
+                      </button>
                     </div>
                   ) : (
                     <>

@@ -42,7 +42,7 @@ import { sameTurnFile, TurnChangesRow } from "./TurnChangesRow";
 // must render synchronously with the rest of the message.
 const InlineDiagram = lazy(() => import("./InlineDiagram").then((m) => ({ default: m.InlineDiagram })));
 const MermaidDiagram = lazy(() => import("./MermaidDiagram").then((m) => ({ default: m.MermaidDiagram })));
-import { MessageAttachments, parseAttachments } from "./MessageAttachments";
+import { MessageAttachments, MessageConnectors, parseAttachments } from "./MessageAttachments";
 import { useSyntaxTheme } from "../../hooks/useSyntaxTheme";
 import type { SyntaxHighlighterProps, SyntaxStyle } from "../../lib/syntaxHighlighter";
 import { loadSyntaxHighlighter } from "../../lib/syntaxHighlighter";
@@ -183,7 +183,7 @@ function MessageBubbleInner({
   // instead of collapsing to name+badge glyphs when the reply arrives.
   // Memoized: the multi-regex pass runs on EVERY render otherwise (each
   // streaming flush re-renders the parent list).
-  const { attachments: msgAttachments, text: cleanContent } = useMemo(
+  const { attachments: msgAttachments, connectors: msgConnectors, text: cleanContent } = useMemo(
     () =>
       parseAttachments(
         message.content,
@@ -403,9 +403,14 @@ function MessageBubbleInner({
           ) : (
             <CitationFlagContext.Provider value={citationFlags}>
             {isUser ? (
-              cleanContent.trim().length > 0 && (
-                <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} chatSessionId={chatSessionId} />
-              )
+              <div className="msg-user-line">
+                {cleanContent.trim().length > 0 && (
+                  <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} chatSessionId={chatSessionId} />
+                )}
+                {msgConnectors.length > 0 && (
+                  <MessageConnectors connectors={msgConnectors} />
+                )}
+              </div>
             ) : hasProcess ? (
               (() => {
                 // The "Working for Xs / Worked for Xs" header is ALWAYS the

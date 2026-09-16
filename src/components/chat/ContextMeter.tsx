@@ -176,11 +176,17 @@ export function ContextMeter({
   const [panelPos, setPanelPos] = useState<{ left: number; bottom: number } | null>(null);
   const circleRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const breakdownKey = chatSessionId ?? "";
+  // The breakdown is session- AND selection-scoped: the backend resolves it
+  // against the session's CURRENT provider/model — local sessions count via
+  // the running sidecar's /tokenize, cloud sessions estimate per category.
+  // Cache it under the full key so switching provider or model (local ↔
+  // cloud included) invalidates it; keying by session id alone kept serving
+  // the local model's numbers after a switch back to a hosted provider.
+  const breakdownKey = `${chatSessionId ?? ""}|${provider ?? ""}|${model ?? ""}|${isLocal ? 1 : 0}`;
   const lastKey = useRef(breakdownKey);
   if (lastKey.current !== breakdownKey) {
     lastKey.current = breakdownKey;
-    setBreakdown(undefined); // session changed — refetch on next hover
+    setBreakdown(undefined); // session or model/provider changed — refetch on next hover
   }
 
   // While the panel is showing, tell native browser webviews to hide: they
@@ -220,7 +226,11 @@ export function ContextMeter({
       setPanelPos({ left, bottom: window.innerHeight - r.top + 6 });
     }
     setShowPanel(true);
-    if (breakdown === undefined && chatSessionId) {
+    // `undefined` = nothing fetched yet for this key; `null` = the last fetch
+    // came back empty (hover before the local sidecar finished loading, or a
+    // transient backend miss). Retry the null case on the next hover instead
+    // of pinning "Breakdown unavailable" for the rest of the session.
+    if ((breakdown === undefined || breakdown === null) && chatSessionId) {
       // Every provider resolves through the backend now: local sessions
       // return exact /tokenize counts, cloud/harness sessions return a
       // char-based estimate per category (system prompt, history, tool

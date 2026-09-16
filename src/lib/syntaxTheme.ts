@@ -22,10 +22,32 @@ import { useSettingsStore } from "../state/settings";
 let cachedThemeKey: string | null = null;
 let cachedStyle: SyntaxStyle | null = null;
 
-/** Returns the current theme's syntax style by reading CSS custom properties
- *  off the document root. Reactivity comes from the data-theme attribute
- *  change; callers should re-invoke this when the theme changes. */
-export function getSyntaxTheme(): SyntaxStyle {
+/** Hidden probe element that lives INSIDE a `.chat-code-block`. The chat's
+ *  code blocks are fixed-dark (ChatGPT-style) in both themes, so their token
+ *  palette must be resolved through the block's own `--syntax-*` scope — not
+ *  the document root, whose light-theme values are dark-on-light and unreadable
+ *  on a near-black surface. chat.css pins the dark token set to the block under
+ *  light themes; resolving here picks that up. Custom properties compute
+ *  without layout, so a hidden probe resolves them fine. */
+let chatProbe: HTMLElement | null = null;
+function chatBlockProbe(): HTMLElement {
+  if (!chatProbe) {
+    chatProbe = document.createElement("div");
+    chatProbe.className = "chat-code-block";
+    chatProbe.setAttribute("aria-hidden", "true");
+    chatProbe.style.cssText =
+      "position:absolute;width:0;height:0;overflow:hidden;visibility:hidden;pointer-events:none";
+    document.body.appendChild(chatProbe);
+  }
+  return chatProbe;
+}
+
+/** Returns the current theme's syntax style by reading CSS custom properties.
+ *  `scope` "root" resolves against <html> (theme-following); "chat-block"
+ *  resolves inside a .chat-code-block probe so the fixed-dark chat code
+ *  palette wins even in light themes. Reactivity comes from the data-theme
+ *  attribute change; callers should re-invoke this when the theme changes. */
+export function getSyntaxTheme(scope: "root" | "chat-block" = "root"): SyntaxStyle {
   if (typeof document === "undefined") return {};
   const theme = document.documentElement.getAttribute("data-theme") || "";
   // data-theme is only the resolved light/dark BASE — a custom theme layers
@@ -34,10 +56,10 @@ export function getSyntaxTheme(): SyntaxStyle {
   // the cache key, or theme A's resolved colors are served forever after
   // switching to theme B (audit #24).
   const customThemeId = useSettingsStore.getState().customThemeId ?? "";
-  const themeKey = `${customThemeId}\u0000${theme}`;
+  const themeKey = `${scope}\u0000${customThemeId}\u0000${theme}`;
   if (cachedStyle && cachedThemeKey === themeKey) return cachedStyle;
 
-  const cs = getComputedStyle(document.documentElement);
+  const cs = getComputedStyle(scope === "chat-block" ? chatBlockProbe() : document.documentElement);
   const cssVar = (name: string) => cs.getPropertyValue(name).trim();
 
   const v = (name: string, fallback: string): string => cssVar(name) || fallback;

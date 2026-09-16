@@ -103,6 +103,16 @@ export function CopyIcon() {
   );
 }
 
+/** The `</>` glyph shown left of the language label in code-block headers. */
+export function CodeLangIcon() {
+  return (
+    <svg {...iconProps} width={13} height={13} aria-hidden="true">
+      <polyline points="16 18 22 12 16 6" />
+      <polyline points="8 6 2 12 8 18" />
+    </svg>
+  );
+}
+
 export function CheckIcon() {
   return (
     <svg {...iconProps} aria-hidden="true">
@@ -653,7 +663,11 @@ export function InlineDiff({ diffText }: { diffText: string }) {
  *  the user sees content immediately; it upgrades to highlighted once the
  *  chunk lands. */
 export function StepCodeHighlighter({ code, language }: { code: string; language: string }) {
-  const theme = useSyntaxTheme();
+  // "chat-block" scope: the block is fixed-dark in both themes, so token
+  // colors resolve through the block's own --syntax-* scope (chat.css pins
+  // the dark palette there under light themes) — not the root's
+  // dark-on-light light-theme values.
+  const theme = useSyntaxTheme("chat-block");
   // `comp` resolves to the lazy-loaded Prism component after first use.
   const [comp, setComp] = useState<SyntaxHighlighterComponent | null>(null);
   // The loaded value IS a function component — pass it via an updater fn,
@@ -714,6 +728,7 @@ export function ActivityStepRow({
   step,
   done,
   live,
+  chatSessionId,
 }: {
   step: ActivityStep;
   done: boolean;
@@ -725,6 +740,11 @@ export function ActivityStepRow({
    *  live the row carries no ✓/spinner and the label itself is the progress
    *  (shine); once superseded it settles to plain static text. */
   live?: boolean;
+  /** The chat session this bubble belongs to (pane-scoped in split view).
+   *  Subagent chips must read THAT session's live subagent status — reading
+   *  the global active session made a split pane show its neighbour's
+   *  agent activity inside its own turns. */
+  chatSessionId?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const hasBody = Boolean(
@@ -741,34 +761,53 @@ export function ActivityStepRow({
   const isSubagentStep = step.data?.kind === "subagent";
   const subTask = isSubagentStep ? step.data?.task || step.data?.detail || "" : "";
   const subRole = isSubagentStep ? step.data?.role || "agent" : "";
+  const subId = isSubagentStep ? step.data?.subId : undefined;
   const liveStatus = useChatStore((s) => {
     if (!isSubagentStep) return null;
-    const list = s.activeChatSessionId
-      ? s.subagents[s.activeChatSessionId]
-      : undefined;
+    const list = chatSessionId ? s.subagents[chatSessionId] : undefined;
+    if (!list) return null;
+    const vals = Object.values(list);
+    // Exact store-id match first (the marker carries the spawn event's id);
+    // task/role text is the legacy fallback for markers from before the id
+    // was added.
+    const match =
+      (subId ? vals.find((x) => x.id === subId) : undefined) ??
+      vals.find((x) => x.task === subTask && x.role === subRole) ??
+      vals.find((x) => x.task === subTask);
+    return match ? match.status : null;
+  });
+  // Model the subagent runs on, when Relay chose it (orchestration override)
+  // — shown on the chip so a different-model spawn is visible in the flow.
+  const liveModel = useChatStore((s) => {
+    if (!isSubagentStep) return null;
+    const list = chatSessionId ? s.subagents[chatSessionId] : undefined;
     if (!list) return null;
     const match =
       Object.values(list).find((x) => x.task === subTask && x.role === subRole) ??
       Object.values(list).find((x) => x.task === subTask);
-    return match ? match.status : null;
+    return match?.model ?? null;
   });
   if (isSubagentStep) {
     const role = subRole;
     const task = subTask;
-    const settled = liveStatus ? liveStatus !== "running" : done;
+    // No store status + a live turn = still working (spawn event not yet in,
+    // or the store entry was lost) — never fall back to the marker's `done`,
+    // which is true from the instant the spawn is parsed and showed ✓ while
+    // the agent was still running.
+    const settled = liveStatus ? liveStatus !== "running" : done && !live;
     const openAgent = () => {
       const s = useChatStore.getState();
-      const list = s.activeChatSessionId
-        ? Object.values(s.subagents[s.activeChatSessionId] ?? {})
+      const list = chatSessionId
+        ? Object.values(s.subagents[chatSessionId] ?? {})
         : [];
       const match =
+        (subId ? list.find((x) => x.id === subId) : undefined) ??
         list.find((x) => x.status === "running" && x.task === task) ??
         list.find((x) => x.task === task) ??
         list.find((x) => x.role === role && x.status === "running");
-      if (match) {
-        // Opens exactly THIS agent; reuses the Agents pane (no tab spam).
-        useUiStore.getState().openAgentsTab(match.id);
-      }
+      // Even with no store entry (persisted history, missed spawn event) open
+      // the Agents pane showing the list — a dead click reads as broken.
+      useUiStore.getState().openAgentsTab(match?.id ?? null);
     };
     return (
       <div className={`chat-agent-chip${settled ? "" : " running"}`}>
@@ -786,6 +825,14 @@ export function ActivityStepRow({
           </svg>
           <span className="chat-agent-chip-label">SubAgent</span>
           <span className="chat-agent-chip-role">{role}</span>
+          {liveModel && (
+            <>
+              <span className="chat-agent-chip-sep" aria-hidden="true">·</span>
+              <span className="chat-agent-chip-role" title="Model this subagent runs on">
+                {liveModel}
+              </span>
+            </>
+          )}
           <span className="chat-agent-chip-sep" aria-hidden="true">·</span>
           <span className="chat-agent-chip-task">{task}</span>
           {liveStatus === "error" ? (
@@ -798,7 +845,9 @@ export function ActivityStepRow({
             </span>
           ) : settled ? (
             <span className="chat-agent-chip-check" aria-hidden="true">✓</span>
-          ) : null}
+          ) : (
+            <span className="chat-agent-chip-spinner" aria-hidden="true" />
+          )}
         </button>
       </div>
     );
@@ -831,7 +880,10 @@ export function ActivityStepRow({
             ) : (
               <div className="chat-code-block">
                 <div className="chat-code-header">
-                  <span className="chat-code-lang">{step.data.lang || "text"}</span>
+                  <span className="chat-code-lang">
+                    <CodeLangIcon />
+                    {step.data.lang || "text"}
+                  </span>
                   <CopyButton code={step.data.code} />
                 </div>
                 <StepCodeHighlighter code={step.data.code} language={step.data.lang || "text"} />
@@ -953,6 +1005,7 @@ export function renderProcessBlock(
               step={step}
               done={step.done}
               live={live && j === b.group.steps.length - 1}
+              chatSessionId={chatSessionId}
             />
           ))}
         </div>
@@ -966,6 +1019,7 @@ export function renderProcessBlock(
           count={b.count}
           steps={b.steps}
           live={live}
+          chatSessionId={chatSessionId}
         />
       );
     case "editrow":
@@ -999,6 +1053,7 @@ export function FoldedStepGroup({
   count,
   steps,
   live,
+  chatSessionId,
 }: {
   title: string;
   icon: string;
@@ -1008,6 +1063,7 @@ export function FoldedStepGroup({
    *  see ActivityStepRow. Per-call `done` flips at call start, so only this
    *  may end the live presentation. */
   live?: boolean;
+  chatSessionId?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const isLive = !!live;
@@ -1063,6 +1119,7 @@ export function FoldedStepGroup({
               step={step}
               done={step.done}
               live={isLive && j === steps.length - 1}
+              chatSessionId={chatSessionId}
             />
           ))}
         </div>
@@ -1290,9 +1347,18 @@ export function CopyButton({ code }: { code: string }) {
     await copyToClipboard(code);
   }, [code, copyToClipboard]);
 
+  // Icon-only, ChatGPT-style: a quiet glyph in the header that flips to a
+  // check when the copy lands (color shift handled by .copy-code-btn in
+  // chat.css). Lives only inside .chat-code-block headers.
   return (
-    <button className="ghost copy-code-btn" onClick={handleCopy}>
-      {copied ? "Copied" : "Copy"}
+    <button
+      type="button"
+      className={`copy-code-btn${copied ? " copied" : ""}`}
+      onClick={handleCopy}
+      aria-label={copied ? "Copied" : "Copy code"}
+      title={copied ? "Copied" : "Copy code"}
+    >
+      {copied ? <CheckIcon /> : <CopyIcon />}
     </button>
   );
 }
@@ -1557,7 +1623,10 @@ export function Markdown({
             return (
               <div className="chat-code-block">
                 <div className="chat-code-header">
-                  <span className="chat-code-lang">{match ? match[1] : "text"}</span>
+                  <span className="chat-code-lang">
+                    <CodeLangIcon />
+                    {match ? match[1] : "text"}
+                  </span>
                   <CopyButton code={codeString} />
                 </div>
                 <StepCodeHighlighter code={codeString} language={match ? match[1] : "text"} />

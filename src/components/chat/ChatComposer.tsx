@@ -23,6 +23,7 @@ import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
 import { useSettingsStore } from "../../state/settings";
 import { useChatStore } from "../../state/chat";
+import { findPaneForSession } from "../../state/chat/paneTree";
 import { useProjectsStore } from "../../state/projects";
 import { useVoiceDictation } from "./useVoiceDictation";
 import { TemplatePickerModal, BroadcastModal } from "./composerModals";
@@ -157,6 +158,9 @@ interface Props {
   /** Active chat session — the @-attach menu writes attachment rows
    * (connector ids / `mcp:<id>`) against it. Null when no session. */
   chatSessionId?: string | null;
+  /** Which pet home THIS composer's strip hosts — the pane id (or "main").
+   *  The pet lives in one pane at a time and teleports between them. */
+  petHome?: string;
 }
 
 // MEMOIZED: the composer is heavy (pickers, queue rows, HUD) and ChatView
@@ -203,6 +207,7 @@ export const ChatComposer = memo(function ChatComposer({
   onThinkingChange,
   thinkingSupported,
   chatSessionId,
+  petHome,
 }: Props) {
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -307,7 +312,9 @@ export const ChatComposer = memo(function ChatComposer({
   const [slashIndex, setSlashIndex] = useState(0);
   // The picked slash command rendered as an inline pill (icon + label) in the
   // composer; serialized back to the `/slug` prefix on send so the backend's
-  // token parsing (invoked skills, /create) sees exactly what it did before.
+  // token parsing (invoked skills, /create, /research) sees exactly what it
+  // did before. Picking a command CONSUMES the typed token — the pill is the
+  // selection, not text the user has to keep editing around.
   const [commandPill, setCommandPill] = useState<{ slug: string; label: string } | null>(null);
   // Prompt templates (roadmap #14): loaded alongside skills for the slash menu.
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
@@ -334,6 +341,16 @@ export const ChatComposer = memo(function ChatComposer({
   // token UNDER THE CURSOR, not off the whole content, so "/" works anywhere
   // in the sentence (text before and after the command is preserved).
   const [caret, setCaret] = useState(0);
+  // Live mirrors for the popup apply path: a selection can land in a handler
+  // whose view of the draft is one keystroke behind (async skill list
+  // swapping in, a programmatic caret write after the last input event) —
+  // resolving the token from that stale view left the partial "/res" text
+  // sitting in the box next to the applied pill. The apply path below
+  // re-resolves the token against the CURRENT draft through these refs.
+  const contentRef = useRef(content);
+  contentRef.current = content;
+  const caretRef = useRef(caret);
+  caretRef.current = caret;
   // Escape-dismiss latches: the exact token (position + query) whose popup
   // was dismissed. Any edit to the token re-opens the menu; the dismissal is
   // non-destructive (it no longer wipes the draft).
@@ -403,6 +420,12 @@ export const ChatComposer = memo(function ChatComposer({
     },
     {
       kind: "command",
+      name: "Research",
+      slug: "research",
+      description: "Force multi-source research mode for this message (plan → search → read → cite → synthesize)",
+    },
+    {
+      kind: "command",
       name: "Create artifact",
       slug: "create",
       description: "Create a reusable skill / loop / prompt template / automation",
@@ -449,12 +472,28 @@ export const ChatComposer = memo(function ChatComposer({
     ...harnessSlashCommands,
   ];
 
+  // Ranked filtering: exact slug/trigger match > slug prefix > label
+  // substring, and built-in commands/templates outrank skills at the same
+  // match quality. Enter applies the HIGHLIGHTED item, so typing "/rese"
+  // must highlight the /research command — with plain menu order (skills
+  // first) a skill whose name merely started with "res" stole the highlight
+  // and read as "I can't select the research command".
   const slashFiltered = slashQuery !== null
-    ? allSlashItems.filter((it) => {
-        const key = ("slug" in it && it.slug) || ("trigger" in it && it.trigger) || "";
-        const label = it.name.toLowerCase();
-        return key.startsWith(slashQuery) || label.includes(slashQuery);
-      })
+    ? (() => {
+        const scored: Array<{ item: SlashItem; score: number }> = [];
+        allSlashItems.forEach((it, index) => {
+          const key = (("slug" in it && it.slug) || ("trigger" in it && it.trigger) || "").toLowerCase();
+          const label = it.name.toLowerCase();
+          let rank: number;
+          if (key === slashQuery) rank = 0;
+          else if (key.startsWith(slashQuery)) rank = 1;
+          else if (label.includes(slashQuery)) rank = 2;
+          else return;
+          const score = rank * 10 + (it.kind === "skill" ? 5 : 0) + index * 0.01;
+          scored.push({ item: it, score });
+        });
+        return scored.sort((a, b) => a.score - b.score).map((s) => s.item);
+      })()
     : [];
 
   // Reset the highlight whenever the query changes.
@@ -603,8 +642,10 @@ export const ChatComposer = memo(function ChatComposer({
   const applyAttachSource = useCallback(
     (source: AttachSource) => {
       if (!chatSessionId) return;
-      // Drop the partial "@query" token from the input; text before and
-      // after it stays untouched.
+      // Drop the partial "@query" token from the input; the attach chip
+      // (below) is the visible selection, and the sent message carries the
+      // connectors as a [Connected: …] marker that renders as chips on the
+      // bubble. Text before and after the token stays untouched.
       if (atToken) replaceTokenSpan(atToken, "");
       void addSessionConnector(chatSessionId, source.rowId)
         .then(() => refreshAttached())
@@ -659,18 +700,37 @@ export const ChatComposer = memo(function ChatComposer({
   // token IS the whole draft, and are spliced into the text in place
   // otherwise — the text before and after the token is always preserved.
   const applySlashItem = useCallback((item: SlashItem) => {
+    // Re-resolve the token against the LIVE draft (see the mirror refs): the
+    // render-closure token can be a keystroke behind, and splicing the stale
+    // span left the partial "/rese" text sitting in the box next to the
+    // applied item.
+    const live = tokenAtCaret(contentRef.current, caretRef.current, "/");
+    // Fallback for a caret state that no longer points into the token (a
+    // programmatic caret write after the last input event): when the WHOLE
+    // draft is the bare partial token, applying an item must still consume
+    // it — the pill may never sit next to the text it stands for.
+    const token =
+      live ??
+      (/^[ \t]*\/\S*$/.test(contentRef.current)
+        ? {
+            start: 0,
+            end: contentRef.current.length,
+            query: contentRef.current.trim().slice(1).toLowerCase(),
+          }
+        : null);
     if (item.kind === "command") {
       if (item.slug === "create") {
         // Drop just the token; any other draft text stays for after the
         // type selector closes.
-        if (slashToken) replaceTokenSpan(slashToken, "");
+        if (token) replaceTokenSpan(token, "");
         setCreateInstruction("");
         setCreateTypeOpen(true);
       } else {
         // Commands are message-level directives — they ride the command
         // pill (serialized back to the leading `/slug` on send) while the
-        // rest of the draft is kept verbatim.
-        if (slashToken) replaceTokenSpan(slashToken, "");
+        // rest of the draft is kept verbatim. Picking with a bare "/" is
+        // enough: no need to type the command out.
+        if (token) replaceTokenSpan(token, "");
         setCommandPill({ slug: item.slug, label: item.name });
       }
       return;
@@ -682,11 +742,11 @@ export const ChatComposer = memo(function ChatComposer({
       if (!template) return;
       const variables = templateVariables(template.body);
       if (variables.length > 0) {
-        if (slashToken) replaceTokenSpan(slashToken, "");
+        if (token) replaceTokenSpan(token, "");
         setFillingTemplate(template);
         setFillValues({});
-      } else if (slashToken) {
-        replaceTokenSpan(slashToken, template.body);
+      } else if (token) {
+        replaceTokenSpan(token, template.body);
       } else {
         insertTemplateText(template.body);
       }
@@ -696,14 +756,14 @@ export const ChatComposer = memo(function ChatComposer({
     // affordance; anywhere else the `/slug ` token is inserted at the
     // cursor so surrounding text survives and the backend's token-aware
     // skill parsing still sees it.
-    if (slashToken && slashToken.start === 0 && slashToken.end === content.length) {
+    if (token && token.start === 0 && token.end === contentRef.current.length) {
       setCommandPill({ slug: item.slug, label: item.name });
       setContent("");
       setCaret(0);
       const ta = textareaRef.current;
       ta?.focus();
-    } else if (slashToken) {
-      replaceTokenSpan(slashToken, `/${item.slug} `);
+    } else if (token) {
+      replaceTokenSpan(token, `/${item.slug} `);
     } else {
       setCommandPill({ slug: item.slug, label: item.name });
       setContent("");
@@ -711,7 +771,7 @@ export const ChatComposer = memo(function ChatComposer({
       const ta = textareaRef.current;
       ta?.focus();
     }
-  }, [insertTemplateText, promptTemplates, slashToken, content, replaceTokenSpan]);
+  }, [insertTemplateText, promptTemplates, replaceTokenSpan]);
 
   // Voice dictation engine (carved to useVoiceDictation.ts): owns the mic
   // capture / segment-commit machinery; dictated text splices into this
@@ -927,13 +987,22 @@ export const ChatComposer = memo(function ChatComposer({
           messages: [...s.messages, message],
           messagesSessionId: sessionId,
         }));
-      } else if (message && useChatStore.getState().splitChatSessionId === sessionId) {
-        // The split pane's chat: merge into the SPLIT buffer instead — the
-        // main list belongs to whichever session is globally active.
-        useChatStore.setState((s) => ({
-          splitMessages: [...s.splitMessages, message],
-          splitMessagesSessionId: sessionId,
-        }));
+      } else if (message) {
+        // A pinned split pane's chat: merge into THAT pane's buffer instead —
+        // the main list belongs to whichever session is globally active.
+        const paneId = findPaneForSession(useChatStore.getState().chatPaneTree, sessionId);
+        if (paneId) {
+          useChatStore.setState((s) => {
+            const buf = s.paneBuffers[paneId];
+            if (!buf || buf.sessionId !== sessionId) return s;
+            return {
+              paneBuffers: {
+                ...s.paneBuffers,
+                [paneId]: { ...buf, messages: [...buf.messages, message] },
+              },
+            };
+          });
+        }
       }
     } catch (e) {
       // Keep the proposal usable even if command-message persistence fails.
@@ -973,8 +1042,9 @@ export const ChatComposer = memo(function ChatComposer({
   const handleSend = useCallback(() => {
     if (needsModel || agentLocked) return;
     // The command pill contributes its `/slug` token to the message text so
-    // every downstream parser (invoked skills, /create routing) sees the same
-    // content it would have seen with a plain-text token.
+    // every downstream parser (invoked skills, /create routing, /research
+    // detection) sees the same content it would have seen with a plain-text
+    // token.
     // Quoted selections (the selection toolbar's "Ask") ride ABOVE the
     // composer and prepend to the outgoing message — the typed draft is never
     // touched. A quote keeps the composed text from leading with a slash
@@ -987,6 +1057,27 @@ export const ChatComposer = memo(function ChatComposer({
       .join("\n\n");
     const trimmed = quoted ? (base ? `${quoted}\n\n${base}` : quoted) : base;
     if (!trimmed && attachments.length === 0) return;
+
+    // Attached connectors ride the message as a [Connected: …] marker — the
+    // same trick file attachments use. It persists with the message and
+    // parseAttachments turns it into chips on the bubble, so the turn shows
+    // which connectors it used (the composer chip is conversation-scoped and
+    // vanishes on switch). The marker is plain text to the model — accurate
+    // context, not noise.
+    const connectorNames = attachedRows
+      .map((rowId) => attachSources.find((s) => s.rowId === rowId)?.name ?? attachLabel(rowId))
+      .filter(Boolean);
+    const outgoing =
+      connectorNames.length > 0
+        ? `${trimmed}\n\n[Connected: ${connectorNames.join(", ")}]`
+        : trimmed;
+
+    // NOTE: /research is deliberately NOT intercepted here. The slug stays
+    // in the message ("/research about cancer") so the user bubble shows the
+    // command that ran; the backend detects the prefix (is_research_request),
+    // turns research mode on, and strips the token from the model-bound copy.
+    // Harness sessions carry it the same way — sendMessage flags the turn and
+    // the protocol rides the CLI-facing appendix.
 
     // --- /compact: universal context compaction, routed by engine ---
     // CLI harness sessions: forwarded verbatim — the CLI runs its own
@@ -1049,7 +1140,6 @@ export const ChatComposer = memo(function ChatComposer({
       // is heuristic, so the user's words must stay recoverable — they can
       // edit/resend them normally if the proposal card isn't what they wanted.
       void triggerArtifactGeneration(intent.type, intent.instruction);
-      setCommandPill(null);
       setAttachments([]);
       setAttachError(null);
       setForceResearch(false);
@@ -1057,8 +1147,13 @@ export const ChatComposer = memo(function ChatComposer({
       return;
     }
 
-    onSend(trimmed, attachments, forceResearch || undefined);
+    onSend(outgoing, attachments, forceResearch || undefined);
     onClearQuotedSelections?.();
+    // Per-message connector semantics: the chip rode THIS message (as the
+    // [Connected: …] chips on the bubble) and the composer clears after
+    // send — re-pick from the @-menu (or mention @gmail) to attach again
+    // for the next turn.
+    for (const rowId of attachedRows) detachSource(rowId);
     setContent("");
     setCommandPill(null);
     setAttachments([]);
@@ -1070,7 +1165,7 @@ export const ChatComposer = memo(function ChatComposer({
     if (ta) {
       ta.style.height = "auto";
     }
-  }, [content, commandPill, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration, isHarnessSession, effectiveSessionId, quotedSelections, onClearQuotedSelections]);
+  }, [content, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration, isHarnessSession, effectiveSessionId, quotedSelections, onClearQuotedSelections, commandPill, attachedRows, attachSources, attachLabel, detachSource]);
 
   // Handle ArtifactTypeSelector selection
   const handleCreateTypeSelect = useCallback((type: ArtifactType, instruction?: string) => {
@@ -1247,22 +1342,6 @@ export const ChatComposer = memo(function ChatComposer({
               onClose={() => setBroadcastOpen(false)}
             />
           )}
-      {queuedMessages.length > 0 && effectiveSessionId && (
-        <div className="composer-queue" aria-label="Queued messages">
-          {queuedMessages.map((m, i) => (
-            <QueuedMessageRow
-              key={m.id}
-              message={m}
-              index={i}
-              count={queuedMessages.length}
-              onSteer={() => void steerQueuedMessage(effectiveSessionId, m.id)}
-              onEdit={(text) => editQueuedMessage(effectiveSessionId, m.id, text)}
-              onDelete={() => removeQueuedMessage(effectiveSessionId, m.id)}
-              onReorder={(from, to) => moveQueuedMessage(effectiveSessionId, from, to)}
-            />
-          ))}
-        </div>
-      )}
       {quotedSelections && quotedSelections.length > 0 && (
         <div className="composer-quotes" aria-label="Quoted selections">
           {quotedSelections.map((q) => (
@@ -1274,15 +1353,34 @@ export const ChatComposer = memo(function ChatComposer({
           ))}
         </div>
       )}
-      {/* Companion pet's second home — strolls along the top edge of the
-          composer card, reacting to the same events as the sidebar twin. */}
-      <PetStrip myHome="composer" />
+      {/* Companion pet's pane home — strolls along the top edge of THIS
+          pane's composer card. The pet lives in one pane at a time and
+          randomly teleports between them (petHome = pane id or "main"). */}
+      <PetStrip myHome={petHome ?? "main"} />
       <div
         className={`chat-composer-card${modeGlowClass}${filesDragOver ? " is-drop-target" : ""}`}
         onDragOver={composerDragOver}
         onDragLeave={composerDragLeave}
         onDrop={composerDrop}
       >
+        {/* Queued messages live INSIDE the card as one notch (full-bleed
+            section above the textarea, hairline-separated). */}
+        {queuedMessages.length > 0 && effectiveSessionId && (
+          <div className="composer-queue" aria-label="Queued messages">
+            {queuedMessages.map((m, i) => (
+              <QueuedMessageRow
+                key={m.id}
+                message={m}
+                index={i}
+                count={queuedMessages.length}
+                onSteer={() => void steerQueuedMessage(effectiveSessionId, m.id)}
+                onEdit={(text) => editQueuedMessage(effectiveSessionId, m.id, text)}
+                onDelete={() => removeQueuedMessage(effectiveSessionId, m.id)}
+                onReorder={(from, to) => moveQueuedMessage(effectiveSessionId, from, to)}
+              />
+            ))}
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="composer-attachments">
             {attachments.map((a) => (

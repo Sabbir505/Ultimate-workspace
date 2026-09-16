@@ -28,7 +28,8 @@ export type PetMood =
   | "doze" // idle for a long time
   | "happy" // petted
   | "zoomies" // rare sprint across the strip
-  | "focus"; // opt-in focus-buddy meditation
+  | "focus" // opt-in focus-buddy meditation
+  | "caught"; // lifted by the cursor — carried between homes
 
 export type PetEvent =
   | { type: "chatToken" } // built-in chat streaming
@@ -73,8 +74,11 @@ export interface PetSettings {
   name: string;
   hat: PetHatKey | null;
   enabled: boolean;
-  /** Which home the pet currently lives in — it teleports between them. */
-  home: "sidebar" | "composer";
+  /** Which home the pet currently lives in — it teleports between them.
+   *  Homes are the sidebar strip plus ONE per open chat pane ("main", or the
+   *  pane tree's "pane-N" ids); the registry of currently-existing homes is
+   *  the ephemeral `homes` field. */
+  home: string;
   /** Epoch ms the opt-in focus session ends (0 = not focusing). */
   focusUntil: number;
   /** Epoch ms of the last app session — powers the "while you were away"
@@ -85,7 +89,7 @@ export interface PetSettings {
 /** Active teleport: the pet is vanishing from `from` (first half of the
  *  window) and materialising in `home` (second half). Ephemeral. */
 export interface PetTeleport {
-  from: "sidebar" | "composer";
+  from: string;
   until: number;
 }
 
@@ -105,6 +109,11 @@ const WALK_RANGE_MS = 14_000;
 export const PET_TELEPORT_MS = 820;
 /** Zoomies: 4× stroll speed for ~2.6s. */
 export const PET_ZOOMIES_MS = 2_600;
+/** A catch holds the `caught` pose for up to this long — far beyond any real
+ *  drag; endDrag/dropInto always clear it sooner, and tickPet releases it as
+ *  a stuck-drag safety net if the drag source ever vanished without an
+ *  endDrag. */
+export const PET_CAUGHT_HOLD_MS = 5 * 60_000;
 /** Petting this many times inside the window triggers zoomies. */
 export const PET_PET_COMBO = 3;
 const PET_COMBO_WINDOW_MS = 4_000;
@@ -126,6 +135,7 @@ const MOOD_DURATION: Partial<Record<PetMood, number>> = {
 /** Mood priority — higher-rank transient moods aren't downgraded by lower
  *  event streams (a celebration survives chat tokens still arriving). */
 const MOOD_RANK: Record<PetMood, number> = {
+  caught: 6,
   concerned: 5,
   celebrate: 4,
   happy: 3,
@@ -221,6 +231,23 @@ export function reducePet(core: PetCore, event: PetEvent, now: number): PetCore 
   const active = core.moodUntil > now; // transient mood still running
   const rank = MOOD_RANK[core.mood];
 
+  // In the user's hand nothing outranks being carried — but a turn finishing
+  // or a crash landing mid-carry still banks its XP so the event isn't lost.
+  if (core.mood === "caught") {
+    if (event.type === "celebrate") {
+      next.xp = core.xp + (event.source === "automation" ? XP_AWARD.automation : XP_AWARD.turn);
+      next.stats = {
+        ...core.stats,
+        turns: core.stats.turns + (event.source === "turn" ? 1 : 0),
+        automations: core.stats.automations + (event.source === "automation" ? 1 : 0),
+      };
+    } else if (event.type === "concerned" && (event.source === "error" || event.source === "crash")) {
+      next.xp = core.xp + XP_AWARD.error;
+      next.stats = { ...core.stats, errors: core.stats.errors + 1 };
+    }
+    return next;
+  }
+
   switch (event.type) {
     case "chatToken": {
       // Watching = attentive. Never pulls the pet out of a stronger mood,
@@ -303,6 +330,14 @@ export function tickPet(
   dtSec: number,
   rng: () => number = Math.random,
 ): PetCore {
+  // A caught mood that outlived its drag (drag source unmounted without an
+  // endDrag) would freeze the pet for the whole hold window — release it.
+  // While actually dragging the store never calls tick, so this only fires
+  // for the stuck case.
+  if (core.mood === "caught") {
+    return { ...core, mood: "idle", moodUntil: 0, nextWalkAt: now + WALK_MIN_MS };
+  }
+
   // Transient mood still running — nothing ages. Zoomies are the exception:
   // they carry a duration AND a sprint target that must keep moving.
   if (core.moodUntil > now && core.mood !== "zoomies") return core;
@@ -395,7 +430,12 @@ function loadPersistedSettings(): PetSettings {
           : PET_SPECIES[species].defaultName,
       hat: typeof parsed.hat === "string" ? (parsed.hat as PetHatKey) : null,
       enabled: parsed.enabled !== false,
-      home: parsed.home === "composer" ? "composer" : "sidebar",
+      home:
+        typeof parsed.home === "string"
+          ? parsed.home === "composer"
+            ? "main"
+            : parsed.home
+          : "sidebar",
       focusUntil:
         typeof parsed.focusUntil === "number" && parsed.focusUntil > Date.now() ? parsed.focusUntil : 0,
       lastSeen: typeof parsed.lastSeen === "number" ? parsed.lastSeen : Date.now(),
@@ -465,19 +505,44 @@ interface PetStoreState extends PetSettings {
   nextZoomiesAt: number;
   levelUpAt: number;
   dragging: boolean;
+  /** Live pointer position while dragging (viewport coords) — the carrier
+   *  copy lerps toward it. Null when not dragging. */
+  dragPointer: { x: number; y: number } | null;
+  /** While dragging: the home whose landing band is under the pointer. */
+  dragOver: string | null;
+  /** Timestamp of the last landing (cross-home drop or same-home release) —
+   *  powers the landing plop and sparkle burst. Not persisted. */
+  landedAt: number;
   /** Timestamps of recent pet clicks — the combo that triggers zoomies. */
   petTimes: number[];
+  /** Homes whose pet strips are CURRENTLY MOUNTED (the sidebar strip, plus
+   *  one per rendered chat composer — panes register via PetStrip mount).
+   *  The teleport scheduler picks only among these, so the pet can never be
+   *  sent to a home that isn't showing (the "vanished pet" bug). Not
+   *  persisted. */
+  homes: string[];
+  /** Pet strips call this on mount/unmount. Unmounting a home that the pet
+   *  currently lives in (pane closed, view switched, popout shut) relocates
+   *  it instantly to a still-mounted home — the vanished strip can't play a
+   *  dissolve, so without this the pet would be invisible until return. */
+  registerPetStrip: (home: string, present: boolean) => void;
 
   event: (e: PetEvent) => void;
   tick: (now: number, dtSec: number) => void;
-  /** Move the pet to a home with the teleport animation (default: the other
-   *  one). Called by the scheduler and when chat starts streaming. */
-  teleportTo: (home: "sidebar" | "composer") => void;
-  /** Drag session: begin clears walks, dragTo moves, end drops the pet at
-   *  its new spot (persisted as its stroll home base). */
-  beginDrag: () => void;
-  dragTo: (x: number) => void;
-  endDrag: () => void;
+  /** Move the pet to a home with the teleport animation. Called by the
+   *  scheduler, the dev hooks, and any UI that relocates the pet. */
+  teleportTo: (home: string) => void;
+  /** Teleport to a random OTHER existing home (random pane hopping). */
+  teleportToRandomOther: () => void;
+  /** Catch-and-carry: begin catches the pet at the pointer (viewport coords,
+   *  `caught` mood); dragMove tracks the pointer and the hovered home;
+   *  endDrag drops it back into its CURRENT home at strip fraction `x`
+   *  (omitted on cancel — keep the old spot); dropInto releases it into a
+   *  DIFFERENT home, counting a teleport. */
+  beginDrag: (x: number, y: number) => void;
+  dragMove: (x: number, y: number, over: string | null) => void;
+  endDrag: (x?: number) => void;
+  dropInto: (home: string, x: number) => void;
   /** Opt-in focus buddy: 25 minutes of meditation, then a celebration. */
   startFocus: () => void;
   stopFocus: () => void;
@@ -533,10 +598,14 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
   heartAt: 0,
   lastBubbleAt: 0,
   teleport: null,
+  homes: [],
   nextTeleportAt: Date.now() + 90_000,
   nextZoomiesAt: Date.now() + 4 * 60_000 + Math.random() * 5 * 60_000,
   levelUpAt: 0,
   dragging: false,
+  dragPointer: null,
+  dragOver: null,
+  landedAt: 0,
   petTimes: [],
 
   event: (e) => {
@@ -609,7 +678,8 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
     // Teleport lifecycle: clear the window when it lapses, and schedule a new
     // hop when the timer fires. Only a pet that is plainly idle teleports —
     // never mid-walk, mid-zoomies, and NEVER out of its sleep (a nap is
-    // sacred).
+    // sacred). Destinations are only homes with a MOUNTED strip, so the pet
+    // can never materialise somewhere it wouldn't be visible.
     const teleport = s0.teleport;
     if (teleport && now >= teleport.until) {
       patch.teleport = null;
@@ -617,17 +687,28 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
     }
     if (!teleport && now >= s0.nextTeleportAt) {
       if (patch.core ? patch.core.mood === "idle" : s0.core.mood === "idle") {
-        const to = s0.home === "sidebar" ? "composer" : "sidebar";
-        const base = patch.core ?? s0.core;
-        patch.home = to;
-        patch.teleport = { from: s0.home, until: now + PET_TELEPORT_MS };
-        patch.nextTeleportAt = now + 120_000 + Math.random() * 120_000;
-        patch.core = {
-          ...base,
-          stats: { ...base.stats, teleports: base.stats.teleports + 1 },
-        };
-        changed = true;
-        persist({ ...s0, home: to }, patch.core);
+        // Random destination among the mounted strips (sidebar + rendered
+        // chat composers) — with several panes open the pet hops between
+        // chats unpredictably.
+        const candidates = (s0.homes.length > 0 ? s0.homes : ["sidebar"]).filter(
+          (h) => h !== s0.home,
+        );
+        if (candidates.length === 0) {
+          patch.nextTeleportAt = now + 30_000;
+          changed = true;
+        } else {
+          const to = candidates[Math.floor(Math.random() * candidates.length)];
+          const base = patch.core ?? s0.core;
+          patch.home = to;
+          patch.teleport = { from: s0.home, until: now + PET_TELEPORT_MS };
+          patch.nextTeleportAt = now + 60_000 + Math.random() * 90_000;
+          patch.core = {
+            ...base,
+            stats: { ...base.stats, teleports: base.stats.teleports + 1 },
+          };
+          changed = true;
+          persist({ ...s0, home: to }, patch.core);
+        }
       } else {
         // busy, walking or asleep — try again shortly
         patch.nextTeleportAt = now + 15_000;
@@ -635,6 +716,55 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
       }
     }
     if (changed) set(patch);
+  },
+
+  registerPetStrip: (home, present) => {
+    const s = get();
+    const has = s.homes.includes(home);
+    if (present === has) return;
+    if (present) {
+      // A strip mounted (sidebar boot, chat view opened, pane split). If the
+      // pet's home isn't among the mounted strips — a stale persisted home
+      // ("pane-3" from last run's split) or first boot — relocate it NOW,
+      // otherwise it would render nowhere until the next teleport.
+      const homes = [...s.homes, home];
+      const patch: Partial<PetStoreState> = { homes };
+      if (!homes.includes(s.home)) {
+        const candidates = homes.filter((h) => h !== s.home);
+        const to = candidates[Math.floor(Math.random() * candidates.length)];
+        if (to) {
+          patch.home = to;
+          patch.teleport = null;
+        }
+      }
+      set(patch);
+      if (patch.home) persist(get(), get().core);
+      return;
+    }
+    // A strip unmounted (pane closed, view switched to Files/Settings,
+    // popout shut). If the pet lived there it would vanish with the strip —
+    // relocate instantly (the vanished strip can't play a dissolve).
+    const homes = s.homes.filter((h) => h !== home);
+    const patch: Partial<PetStoreState> = { homes };
+    if (!homes.includes(s.home)) {
+      const candidates = homes.filter((h) => h !== s.home);
+      const to = candidates[Math.floor(Math.random() * candidates.length)] ?? homes[0];
+      if (to) {
+        patch.home = to;
+        patch.teleport = null;
+      }
+    }
+    set(patch);
+    if (patch.home) persist(get(), get().core);
+  },
+
+  teleportToRandomOther: () => {
+    const s = get();
+    const candidates = (s.homes.length > 0 ? s.homes : ["sidebar"]).filter(
+      (h) => h !== s.home,
+    );
+    if (candidates.length === 0) return;
+    get().teleportTo(candidates[Math.floor(Math.random() * candidates.length)]);
   },
 
   teleportTo: (home) => {
@@ -653,26 +783,80 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
     persist(get(), get().core);
   },
 
-  beginDrag: () => {
+  beginDrag: (x, y) => {
     const s = get();
-    if (!s.dragging) {
-      set({
-        dragging: true,
-        core: { ...s.core, mood: "idle", moodUntil: 0, targetX: null },
-      });
-    }
+    if (s.dragging || !s.enabled) return;
+    const now = Date.now();
+    set({
+      dragging: true,
+      dragPointer: { x, y },
+      dragOver: null,
+      core: {
+        ...s.core,
+        mood: "caught",
+        moodUntil: now + PET_CAUGHT_HOLD_MS,
+        targetX: null,
+      },
+    });
   },
-  dragTo: (x) => {
+  dragMove: (x, y, over) => {
     const s = get();
     if (!s.dragging) return;
-    const clamped = Math.min(0.97, Math.max(0.03, x));
-    set({ core: { ...s.core, x: clamped } });
+    set({ dragPointer: { x, y }, dragOver: over });
   },
-  endDrag: () => {
+  endDrag: (x) => {
     const s = get();
     if (!s.dragging) return;
-    set({ dragging: false, core: { ...s.core, spotX: s.core.x } });
+    const now = Date.now();
+    const nx = typeof x === "number" ? Math.min(0.96, Math.max(0.04, x)) : s.core.x;
+    set({
+      dragging: false,
+      dragPointer: null,
+      dragOver: null,
+      landedAt: now,
+      core: {
+        ...s.core,
+        x: nx,
+        spotX: nx,
+        mood: "idle",
+        moodUntil: 0,
+        nextWalkAt: now + WALK_MIN_MS, // a moment to settle before strolling
+      },
+    });
     persist(get(), get().core);
+  },
+  dropInto: (home, x) => {
+    const s = get();
+    if (!s.dragging || !s.enabled) return;
+    if (home === s.home) {
+      get().endDrag(x);
+      return;
+    }
+    const now = Date.now();
+    const nx = Math.min(0.96, Math.max(0.04, x));
+    set({
+      dragging: false,
+      dragPointer: null,
+      dragOver: null,
+      landedAt: now,
+      home,
+      core: {
+        ...s.core,
+        x: nx,
+        spotX: nx,
+        // face inward — it lands looking into its new pane / the chat view
+        facing: nx < 0.5 ? 1 : -1,
+        mood: "happy",
+        moodUntil: now + HAPPY_MS,
+        nextWalkAt: now + WALK_MIN_MS,
+        stats: { ...s.core.stats, teleports: s.core.stats.teleports + 1 },
+      },
+    });
+    persist(get(), get().core);
+    if (Math.random() < 0.6) {
+      const line = petLine(get().species, "carried", get().name);
+      if (line) queueBubble(get, set, line);
+    }
   },
 
   startFocus: () => {
@@ -766,6 +950,10 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
       core: initialPetCore(Date.now()),
       bubble: null,
       teleport: null,
+      dragging: false,
+      dragPointer: null,
+      dragOver: null,
+      landedAt: 0,
       nextTeleportAt: Date.now() + 90_000,
     });
   },
@@ -788,9 +976,7 @@ export function installPetDebugHook(): void {
     zoomies: () => usePetStore.getState().zoomies(),
     focus: () => usePetStore.getState().startFocus(),
     unfocus: () => usePetStore.getState().stopFocus(),
-    teleport: () => usePetStore.getState().teleportTo(
-      usePetStore.getState().home === "sidebar" ? "composer" : "sidebar",
-    ),
+    teleport: () => usePetStore.getState().teleportToRandomOther(),
     addXp: (n: number) => {
       const s = usePetStore.getState();
       usePetStore.setState({ core: { ...s.core, xp: s.core.xp + n } });

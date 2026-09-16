@@ -66,6 +66,19 @@ fn mesh_disabled_note() -> String {
         .to_string()
 }
 
+/// Harness families that carry the relay-tools MCP server through per-turn
+/// Relay-owned config files (claude/kimi/opencode). commandcode carries it
+/// too — but via a registration in its OWN config (`ensure_commandcode_
+/// bridge`, verified dynamically per turn since there is no per-turn config
+/// flag), and pi/omp have no MCP support at all, so every prompt that
+/// advertises message_session/spawn_session must be gated on what the
+/// caller actually verified. Advertising the tools to a CLI that doesn't
+/// have them produced exactly that: the model correctly reporting
+/// "I have no relay-tools session spawn".
+pub fn harness_has_relay_tools(harness: &str) -> bool {
+    matches!(harness, "claude_code" | "kimi_code" | "opencode")
+}
+
 // ── Runtime state ─────────────────────────────────────────────────────────
 
 /// Tauri-managed mesh runtime. Everything here is process-local bookkeeping;
@@ -180,7 +193,11 @@ pub fn registry_block(conn: &Connection, self_sid: Option<&str>) -> Option<Strin
          Nearby peers (same project first; `list_sessions` for the full index, \
          `read_session`/`search_sessions` for depth):\n{}\n\
          Peers are separate conversations with the same user. Consult them instead of \
-         guessing what happened elsewhere; ask before duplicating in-progress work.",
+         guessing what happened elsewhere; ask before duplicating in-progress work. \
+         spawn_session accepts `model` (bare id, \"provider::model\", or an engine \
+         pair like \"claude_code::sonnet\") — delegate to a different model or CLI \
+         engine than yours when the task warrants it (cheap models for mechanical \
+         sub-work); the app-wide default is Settings → Subagent model.",
         lines.join("\n")
     ))
 }
@@ -201,9 +218,11 @@ fn project_label(conn: &Connection, project_id: &str) -> String {
 /// resumed chat (app restarted, days later) then had the mesh TOOLS but no
 /// prompting connecting "what did we do last session" to them — it answered
 /// from its own CLI's session data instead. Cheap (one line), rides every
-/// turn like RELAY_ASK_DIRECTIVE. None when the mesh is disabled.
-pub fn resumed_turn_hint(conn: &Connection, self_sid: &str) -> Option<String> {
-    if !mesh_enabled(conn) {
+/// turn like RELAY_ASK_DIRECTIVE. None when the mesh is disabled or the
+/// caller reports no relay-tools for this harness (prompt-only CLIs have no
+/// mesh tools to steer into).
+pub fn resumed_turn_hint(conn: &Connection, has_relay_tools: bool, self_sid: &str) -> Option<String> {
+    if !mesh_enabled(conn) || !has_relay_tools {
         return None;
     }
     Some(format!(
@@ -945,6 +964,79 @@ async fn push_follow_up_answer(app: &AppHandle, mail: &store::MailRow, answer: &
     }
 }
 
+/// Watch one freshly spawned child's first (task) turn and notify-mail its
+/// result back to the parent session. Without this a background spawn is
+/// fire-and-forget: the child finishes and the parent session never learns
+/// the outcome unless the user relays it manually. The notify mail arrives as
+/// a turn in the parent (busy parent → the pump delivers it after its current
+/// turn) — the same path late question answers ride. Bounded like
+/// watch_answer: one re-arm while the child is still busy; on the second
+/// expiry the parent gets a "still working" notice instead of silence.
+fn spawn_spawn_result_reporter(app: AppHandle, parent: String, child_id: String) {
+    tauri::async_runtime::spawn(async move {
+        let mut deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(WATCHER_CEILING_SECS);
+        // Give the turn time to actually start before polling for its end.
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_MS * 2)).await;
+        let mut rearmed = false;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                if !rearmed && session_busy(&app, &child_id) {
+                    rearmed = true;
+                    deadline = std::time::Instant::now()
+                        + std::time::Duration::from_secs(WATCHER_CEILING_SECS);
+                } else {
+                    break;
+                }
+            }
+            if !session_busy(&app, &child_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
+        }
+        // Turn ended (or ceiling hit) — grace for the final row to persist.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let db = app.state::<DbState>();
+        let (result, depth) = {
+            let conn = db.0.lock();
+            (
+                store::last_assistant_message_after(&conn, &child_id, 0)
+                    .ok()
+                    .flatten(),
+                store::spawn_depth(&conn, &child_id).unwrap_or(1),
+            )
+        };
+        let still_busy = session_busy(&app, &child_id);
+        let body = if still_busy {
+            format!(
+                "Your spawned session is STILL working on the delegated task (~{} min \
+                 elapsed). Its result will not be reported again — read it later with \
+                 read_session(session_id=\"{child_id}\", mode=\"recent_turns\").",
+                WATCHER_CEILING_SECS * 2 / 60
+            )
+        } else {
+            match result {
+                Some(r) if !r.trim().is_empty() => format!(
+                    "Task result from your spawned session:\n\n{}",
+                    crate::util::truncate_chars(&r, MAX_MAIL_CHARS)
+                ),
+                _ => "Your spawned session ended its task turn without producing output."
+                    .to_string(),
+            }
+        };
+        drop(db);
+        let mail = {
+            let db = app.state::<DbState>();
+            let conn = db.0.lock();
+            store::insert_mail(&conn, &child_id, &parent, "notify", &body, depth)
+        };
+        if let Ok(m) = mail {
+            emit_mail(&app, &m);
+            let _ = deliver_or_queue(&app, &m).await;
+        }
+    });
+}
+
 /// Resolve a parked question tool call. Returns true when a live receiver
 /// took the answer; false means the asker's call is gone (timeout or the
 /// queued path) and the caller must deliver the answer another way.
@@ -1119,35 +1211,78 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
         Ok(Some(r)) => r,
         _ => return "Error: parent session not found.".into(),
     };
-    // Inherit the parent's engine unless the caller named one. Cross-harness
-    // delegation (claude → opencode) is the point; accept any harness id the
-    // session registry knows.
-    let agent = agent_arg.unwrap_or_else(|| {
-        parent_row
-            .agent
-            .clone()
-            .unwrap_or_else(|| "builtin".to_string())
+    // Subagent-model orchestration: an explicit `model` tool arg wins, then
+    // the Settings pick (`chat.subagentModel`), then the parent's model.
+    // A pick naming a CLI engine (`claude_code::sonnet`) re-homes the child
+    // onto that engine unless the caller named one explicitly — cross-engine
+    // delegation via `agent` always wins, and a mismatched pick's model is
+    // dropped (its model ids belong to its own engine).
+    let model_pick = {
+        let conn = db.0.lock();
+        crate::chat::subagent_model::pick_for_call(&conn, args)
+    };
+    // A local_gguf pick only holds while the sidecar is actually serving
+    // that model — otherwise the child's first turn would die on a dead
+    // base URL. Drop to the parent's resolution (logged).
+    let model_pick = model_pick.and_then(|p| {
+        if p.provider.as_deref() != Some("local_gguf") {
+            return Some(p);
+        }
+        let running = app
+            .try_state::<crate::chat::local_models::LocalModelState>()
+            .and_then(|s| s.0.status())
+            .map_or(false, |a| a.model_id == p.model);
+        if running {
+            Some(p)
+        } else {
+            eprintln!(
+                "[subagent-model] local_gguf::{} ignored — sidecar not running it",
+                p.model
+            );
+            None
+        }
     });
-    let agent = if agent.contains(':') || agent == "builtin" || agent == "local" {
-        agent
-    } else {
-        format!("harness:{agent}")
+    let pick_engine_id = model_pick
+        .as_ref()
+        .and_then(crate::chat::subagent_model::pick_engine);
+    let normalize_agent = |a: String| -> String {
+        if a.contains(':') || a == "builtin" || a == "local" {
+            a
+        } else {
+            format!("harness:{a}")
+        }
+    };
+    let agent = match agent_arg {
+        Some(a) => normalize_agent(a),
+        None => match pick_engine_id {
+            Some(e) => e,
+            None => normalize_agent(
+                parent_row
+                    .agent
+                    .clone()
+                    .unwrap_or_else(|| "builtin".to_string()),
+            ),
+        },
+    };
+    let model_pick_for_child = model_pick.filter(|p| {
+        crate::chat::subagent_model::pick_engine(p).map_or(true, |e| e == agent)
+    });
+    let harness_child = agent.starts_with("harness:") || agent.starts_with("acp:");
+    let (provider, model) = {
+        let conn = db.0.lock();
+        crate::chat::subagent_model::resolve_spawn_model(
+            &conn,
+            &parent_row.provider,
+            &parent_row.model,
+            harness_child,
+            model_pick_for_child,
+        )
     };
 
     let child = {
         let conn = db.0.lock();
         // `create_chat_session` writes full-auto defaults, matching how the
         // composer creates chats.
-        let provider = if agent == "builtin" || agent == "local" {
-            parent_row.provider.clone()
-        } else {
-            parent_row.provider.clone()
-        };
-        let model = if !parent_row.model.is_empty() {
-            parent_row.model.clone()
-        } else {
-            "auto".to_string()
-        };
         let row = crate::db::create_chat_session(&conn, &provider, &model, parent_row.project_id.as_deref());
         match row {
             Ok(mut r) => {
@@ -1172,6 +1307,7 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             child_session_id: child.id.clone(),
             title: child.title.clone().unwrap_or_else(|| "spawned session".into()),
             agent: agent.clone(),
+            model: child.model.clone(),
         },
     );
 
@@ -1196,15 +1332,23 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
     }
 
     if !wait {
+        // The child reports its result back into this session when the task
+        // turn finishes — without this a background spawn is silent forever
+        // and the parent never learns the outcome.
+        spawn_spawn_result_reporter(app.clone(), parent.clone(), child.id.clone());
         return format!(
-            "Spawned session \"{}\" (id {}). It received the task as its first turn and \
-             is running — the user can watch it in the sidebar. Message it with \
+            "Spawned session \"{}\" (id {}, engine {}, model {}). It received the task \
+             as its first turn and is running — the user can watch it in the sidebar. \
+             When it finishes the task, its result is automatically messaged back into \
+             this session. You can also message it with \
              message_session(session_id=\"{}\") or read its output with \
              read_session(session_id=\"{}\", mode=\"recent_turns\").",
             child.title.clone().unwrap_or_default(),
             child.id,
+            agent,
+            child.model,
             child.id,
-            child.id
+            child.id,
         );
     }
 
@@ -1229,13 +1373,20 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             child.id,
             crate::util::truncate_chars(&r, 6_000)
         ),
-        None => format!(
-            "Spawned session \"{}\" (id {}) started; no output captured yet — read it \
-             later with read_session(session_id=\"{}\").",
-            child.title.clone().unwrap_or_default(),
-            child.id,
-            child.id
-        ),
+        None => {
+            // The wait window elapsed while the child is still running —
+            // report its result back here when the turn finishes, instead of
+            // leaving the outcome dangling.
+            spawn_spawn_result_reporter(app.clone(), parent.clone(), child.id.clone());
+            format!(
+                "Spawned session \"{}\" (id {}) started; no output captured yet — its \
+                 result will be messaged back into this session when the turn finishes, \
+                 or read it later with read_session(session_id=\"{}\").",
+                child.title.clone().unwrap_or_default(),
+                child.id,
+                child.id
+            )
+        }
     }
 }
 

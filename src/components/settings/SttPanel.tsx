@@ -8,7 +8,6 @@ import {
   cancelModelDownload,
   onModelDownloadProgress,
   startModelDownload,
-  sttInstallServer,
   sttSetAutoStart,
   sttSetDefault,
   sttSetDevice,
@@ -24,10 +23,7 @@ import {
 } from "../../lib/ipc";
 import { formatBytes, shortName } from "../../lib/format";
 import { Modal } from "../common/Modal";
-
-/** Progress-event id emitted by `stt_install_server` (backend contract:
- *  commands/stt.rs SERVER_INSTALL_ID). */
-const SERVER_INSTALL_ID = "stt-whisper-server";
+import { ServerBuildsCard } from "./ServerBuildsCard";
 
 export function SttPanel() {
   const [stt, setStt] = useState<SttStatusData | null>(null);
@@ -47,22 +43,6 @@ export function SttPanel() {
     let unlisten: (() => void) | null = null;
     void onModelDownloadProgress((p) => {
       if (stale) return;
-      // The whisper-server one-click install rides the same event stream but
-      // has its own toasts/labels — never report it as a "speech model".
-      if (p.id === SERVER_INSTALL_ID) {
-        setDownloads((prev) => ({
-          ...prev,
-          [p.id]: { state: p.state, downloaded: p.downloadedBytes, total: p.totalBytes ?? null },
-        }));
-        if (p.state === "done") {
-          toastSuccess("whisper-server installed — download a model and start the server");
-          refresh();
-        }
-        if (p.state === "error" && p.error) {
-          toastError("whisper-server install failed", p.error);
-        }
-        return;
-      }
       setDownloads((prev) => ({
         ...prev,
         [p.id]: { state: p.state, downloaded: p.downloadedBytes, total: p.totalBytes ?? null },
@@ -140,18 +120,6 @@ export function SttPanel() {
     }
   };
 
-  // One-click install of the prebuilt upstream whisper-server binary. The
-  // command itself is idempotent — safe to retry after a failed download.
-  const handleInstallServer = async () => {
-    try {
-      const s = await sttInstallServer();
-      setStt(s);
-      refresh();
-    } catch (err) {
-      toastError("Could not install whisper-server", err);
-    }
-  };
-
   const handleSetDefault = async (filename: string) => {
     try {
       await sttSetDefault(filename);
@@ -179,17 +147,6 @@ export function SttPanel() {
     !!detailDl && detailDl.state !== "done" && detailDl.state !== "cancelled" && detailDl.state !== "error";
   const detailPct = detailDl?.total
     ? Math.min(100, Math.round((detailDl.downloaded / detailDl.total) * 100))
-    : null;
-
-  // whisper-server one-click install progress (same stream as model downloads).
-  const serverInstall = downloads[SERVER_INSTALL_ID];
-  const serverInstalling =
-    !!serverInstall &&
-    serverInstall.state !== "done" &&
-    serverInstall.state !== "error" &&
-    serverInstall.state !== "cancelled";
-  const serverInstallPct = serverInstall?.total
-    ? Math.min(100, Math.round((serverInstall.downloaded / serverInstall.total) * 100))
     : null;
 
   return (
@@ -230,48 +187,11 @@ export function SttPanel() {
                 </>
               ) : (
                 <span style={{ color: "var(--warn, #d29922)" }}>
-                  whisper-server binary not found — install it with one click below, or point at
-                  an existing build.
+                  whisper-server binary not found — install it in Server builds
+                  below, or point at an existing build.
                 </span>
               )}
             </div>
-            {/* One-click install — the primary path when no binary exists.
-                Downloads the pinned upstream release (~8 MB) and saves the
-                path automatically; the manual path input below stays as the
-                escape hatch for custom builds. */}
-            {!stt.binaryPath && (
-              <div style={{ marginTop: 8 }}>
-                <button
-                  type="button"
-                  className="primary cta-strong"
-                  disabled={serverInstalling}
-                  onClick={() => void handleInstallServer()}
-                >
-                  {serverInstalling
-                    ? serverInstallPct !== null
-                      ? `Installing… ${serverInstallPct}%`
-                      : "Installing…"
-                    : "Install whisper-server (one click)"}
-                </button>
-                {serverInstalling && (
-                  <div className="model-card-progress" style={{ padding: 0, marginTop: 8 }}>
-                    <div className="model-card-progress-bar">
-                      <div
-                        className="model-card-progress-fill"
-                        style={{ width: `${serverInstallPct ?? 0}%` }}
-                      />
-                    </div>
-                    <div className="model-card-progress-info">
-                      <span>
-                        {serverInstallPct !== null ? `${serverInstallPct}% · ` : ""}
-                        {formatBytes(serverInstall?.downloaded ?? 0)}
-                        {serverInstall?.total ? ` / ${formatBytes(serverInstall.total)}` : ""}
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
             {/* Auto-start row — same shape as the Notifications toggles:
                 label left, switch pinned to the far-right edge. */}
             <div
@@ -337,6 +257,11 @@ export function SttPanel() {
             )}
           </div>
 
+          {/* Server builds — the whisper CPU/CUDA installs and their updates
+              live in ONE card (harness-style rows) instead of buttons
+              floating next to unrelated controls. */}
+          <ServerBuildsCard ids={["stt-whisper", "stt-whisper-cuda"]} onInstalled={refresh} />
+
           <div className="settings-note" style={{ marginTop: 4 }}>
             <div
               style={{
@@ -380,15 +305,15 @@ export function SttPanel() {
                 )
               ) : stt.device === "gpu" ? (
                 <span style={{ color: "var(--warn, #d29922)" }}>
-                  GPU is selected but no CUDA whisper.cpp build was found. Put one
-                  in the app&apos;s bin/whisper-cpp-cuda folder, or switch back to
-                  CPU — the CPU build the installer provides is used for CPU mode.
+                  GPU is selected but no CUDA whisper.cpp build was found —
+                  install it in Server builds above, or switch back to CPU.
                 </span>
               ) : (
                 <>
                   No CUDA build of whisper.cpp found, so only CPU is available.
-                  CPU transcription is fast for short dictation and leaves the GPU
-                  free for a loaded model.
+                  Install the CUDA build (Server builds above) for faster
+                  transcription; CPU is fine for short dictation and leaves the
+                  GPU free for a loaded model.
                 </>
               )}
             </div>

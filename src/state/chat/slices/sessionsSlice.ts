@@ -27,6 +27,7 @@ import {
 } from "../../../lib/ipc";
 import type { ChatCheckpoint } from "../../../lib/ipc";
 import type { ApprovalPolicy, ChatArtifact, SandboxPolicy, WatchMode } from "../types";
+import { useAutomationsStore } from "../../automations";
 import { useProjectsStore } from "../../projects";
 import { useUiStore } from "../../ui";
 import {
@@ -46,6 +47,7 @@ import {
   withoutDeleted,
   clearManuallyRenamed,
 } from "../moduleState";
+import { findPaneForSession } from "../paneTree";
 import type { ChatStoreGet, ChatStoreSet } from "../types";
 
 export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
@@ -107,6 +109,35 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // Ignore selects for sessions deleted this run (stale sidebar row, in-
       // flight click). The tombstone is the source of truth until restart.
       if (isDeletedSession(chatSessionId)) return;
+      const tree = get().chatPaneTree;
+      // Uniqueness invariant: a session pinned in a split pane is ALREADY on
+      // screen — selecting it focuses that pane (shared chrome follows) and
+      // leaves the active session alone. Copying it into the main view would
+      // mirror one chat — and its live agent turn — into two panes.
+      const pinnedPaneId = findPaneForSession(tree, chatSessionId);
+      if (pinnedPaneId) {
+        get().setFocusedPane(pinnedPaneId);
+        return;
+      }
+      if (tree) {
+        // The click names a chat shown in NO pane: leave the split layout for
+        // a plain single chat — but REMEMBER the layout so clicking any of
+        // its chats later brings the panes back exactly as they were.
+        set((s) => ({
+          rememberedChatPaneState: { tree, activeSessionId: s.activeChatSessionId },
+          chatPaneTree: null,
+          focusedPaneId: null,
+          focusedChatSessionId: null,
+        }));
+      } else {
+        // Panes are closed — is the clicked chat part of a remembered pane
+        // layout? Then bring the panes back (and focus the clicked one).
+        const remembered = get().rememberedChatPaneState;
+        if (remembered && findPaneForSession(remembered.tree, chatSessionId)) {
+          await get().restoreChatPaneState(chatSessionId);
+          return;
+        }
+      }
       // Capture the outgoing session's emptiness BEFORE the switch: the
       // `messages` buffer is replaced by the target session's messages below,
       // so the post-switch check would always see a non-empty buffer.
@@ -225,15 +256,22 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // (e.g. the auto-started default chat) should not leave an empty session
       // row behind in the sidebar. deleteChat() tombstones it, so the relist
       // above can't resurrect it.
-      // Harness/ACP sessions are exempt: every automation run log is agent-
-      // tagged, often still empty when first opened (the run hasn't written
-      // yet), and deleting it here tombstones the id for the whole app run —
-      // after which every artifact / Open button pointing at it silently
-      // no-ops in this guard below and the previous chat appears stuck. The
-      // backend sweeper already protects run-log sessions for the same reason.
+      // Harness/ACP sessions get a narrower guard: they can be automation run
+      // logs — the run-log chat is bound on first run and artifact/Open
+      // buttons point at it, so only sweep one when no automation references
+      // it. Any other empty harness chat (e.g. the auto-started default after
+      // a harness pick) goes the same way as an empty built-in chat.
       if (outgoingId && outgoingId !== chatSessionId && outgoingEmpty) {
         const outgoingSession = get().sessions.find((s) => s.id === outgoingId);
-        if (!isCliAgent(outgoingSession?.agent)) {
+        if (isCliAgent(outgoingSession?.agent)) {
+          const autos = useAutomationsStore.getState();
+          if (!autos.loaded) await autos.load().catch(() => {});
+          const { loaded, automations } = useAutomationsStore.getState();
+          // Store not loaded (IPC failure): can't rule out a run log — skip.
+          if (loaded && !automations.some((a) => a.chatSessionId === outgoingId)) {
+            void get().deleteChat(outgoingId);
+          }
+        } else {
           void get().deleteChat(outgoingId);
         }
       }
@@ -382,6 +420,20 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // DELETE. Cleared on a full app restart.
       markDeleted(chatSessionId);
       clearManuallyRenamed(chatSessionId);
+      // A deleted split-pane session closes its pane (the tree collapses
+      // around it; focus resets if that pane held it).
+      const paneId = findPaneForSession(get().chatPaneTree, chatSessionId);
+      if (paneId) get().closeChatPane(paneId);
+      // A remembered pane layout naming the deleted chat is no longer
+      // restorable intact — drop it.
+      const remembered = get().rememberedChatPaneState;
+      if (
+        remembered &&
+        (remembered.activeSessionId === chatSessionId ||
+          findPaneForSession(remembered.tree, chatSessionId))
+      ) {
+        set({ rememberedChatPaneState: null });
+      }
       set((s) => ({
         // Strip every per-session key (H3), plus the session row and — when
         // the deleted chat was active — the message buffer, so switching
@@ -392,15 +444,8 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         messages: s.activeChatSessionId === chatSessionId ? [] : s.messages,
         messagesSessionId:
           s.activeChatSessionId === chatSessionId ? null : s.messagesSessionId,
-        // A deleted split-pane session closes the split view outright.
-        splitChatSessionId: s.splitChatSessionId === chatSessionId ? null : s.splitChatSessionId,
         focusedChatSessionId:
-          s.splitChatSessionId === chatSessionId ? null : s.focusedChatSessionId,
-        splitMessages: s.splitChatSessionId === chatSessionId ? [] : s.splitMessages,
-        splitMessagesSessionId:
-          s.splitChatSessionId === chatSessionId ? null : s.splitMessagesSessionId,
-        splitHasMoreHistory:
-          s.splitChatSessionId === chatSessionId ? false : s.splitHasMoreHistory,
+          s.focusedChatSessionId === chatSessionId ? null : s.focusedChatSessionId,
       }));
     },
 
@@ -426,10 +471,10 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         activeChatSessionId: null,
         messages: [],
         messagesSessionId: null,
-        splitChatSessionId: null,
-        splitMessages: [],
-        splitMessagesSessionId: null,
-        splitHasMoreHistory: false,
+        chatPaneTree: null,
+        paneBuffers: {},
+        rememberedChatPaneState: null,
+        focusedPaneId: null,
         focusedChatSessionId: null,
         streaming: {},
         streamingChatSessionId: null,

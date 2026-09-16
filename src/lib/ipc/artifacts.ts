@@ -584,6 +584,11 @@ export const sendAgentChatMessage = (
   // markers/extracted text are folded into the persisted message; image/doc
   // bytes are saved to disk paths the CLI's own file tools can open.
   attachments?: ChatAttachmentInput[],
+  // Force research mode for this turn. Like the built-in path, the
+  // transcript keeps what the user typed: the backend folds the research
+  // protocol into the CLI-facing appendix, which never reaches the
+  // persisted message.
+  forceResearch?: boolean,
 ) =>
   safeInvoke<void>("send_agent_chat_message", {
     chatSessionId,
@@ -593,9 +598,18 @@ export const sendAgentChatMessage = (
     cwd: cwd ?? null,
     projectId: projectId ?? null,
     attachments: attachments ?? null,
+    forceResearch: forceResearch || null,
   });
 export const cancelAgentChatMessage = (chatSessionId: string) =>
   safeInvoke<void>("cancel_agent_chat_message", { chatSessionId });
+
+/** Crash recovery (run once on frontend boot): clears the backend's
+ *  in-memory "turn in flight" flag for chats whose reader and child process
+ *  are both gone. After a crash/reload the chat looks empty but every send
+ *  was rejected with "a turn is already running". Returns the recovered
+ *  chat session ids. */
+export const reconcileAgentSessions = () =>
+  safeInvoke<string[]>("reconcile_agent_sessions");
 
 /** Models/endpoint discovered in a CLI harness's own config files
  *  (harness_config.rs): settings.json / config.toml / opencode.json. */

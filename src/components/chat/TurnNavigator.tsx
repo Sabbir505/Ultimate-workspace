@@ -41,11 +41,23 @@ function cleanPreview(text: string): string {
     .slice(0, PREVIEW_MAX);
 }
 
-export function TurnNavigator() {
-  const messages = useChatStore((s) => s.messages);
-  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
-  // Split view: dispatch the jump to the FOCUSED half's view — the rail
-  // renders the main buffer here, so target the global active chat.
+export function TurnNavigator({
+  sessionId,
+  paneId,
+}: {
+  /** The session THIS ChatView instance renders — pane-scoped, so the rail
+   *  always describes the chat beside which it floats. */
+  sessionId: string | null;
+  /** Set when this view is a pinned split pane: read THAT pane's buffer,
+   *  not the global main list (which belongs to the active session). */
+  paneId?: string;
+}) {
+  const storeMessages = useChatStore((s) => s.messages);
+  const paneBuf = useChatStore((s) => (paneId ? s.paneBuffers[paneId] : undefined));
+  const messages = paneBuf ? paneBuf.messages : storeMessages;
+  const activeChatSessionId = sessionId;
+  // Split view: dispatch the jump to the FOCUSED half's view — the registry
+  // is keyed by session id, and each view registers under its own.
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
   const turns: Turn[] = useMemo(() => {

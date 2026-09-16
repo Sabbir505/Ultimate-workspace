@@ -2,8 +2,8 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 
 /** Shared pointer-drag lifecycle for resize handles: subscribe pointermove /
  *  pointerup / pointercancel for the duration of the drag and tear down
- *  cleanly on release. `onMove` receives the pointer's clientX; `onEnd`
- *  (optional) fires once on release.
+ *  cleanly on release. `onMove` receives the pointer's clientX and clientY
+ *  (vertical resizers need Y); `onEnd` (optional) fires once on release.
  *
  *  With `capture`, the pointer is captured on the initiating element so the
  *  drag keeps tracking when the cursor leaves the handle's hit area, and
@@ -11,7 +11,7 @@ import type { PointerEvent as ReactPointerEvent } from "react";
  *  `window` (the original window-listener resize pattern). */
 export function startPointerDrag(
   e: ReactPointerEvent<Element>,
-  onMove: (clientX: number) => void,
+  onMove: (clientX: number, clientY: number) => void,
   onEnd?: () => void,
   opts?: { capture?: boolean },
 ): void {
@@ -23,7 +23,10 @@ export function startPointerDrag(
   const target: EventTarget = opts?.capture ? handle : window;
   // Typed as the widest listener so one pair of handlers serves both targets
   // (window's overloads and the element's differ).
-  const onMoveEv: EventListener = (ev) => onMove((ev as PointerEvent).clientX);
+  const onMoveEv: EventListener = (ev) => {
+    const pe = ev as PointerEvent;
+    onMove(pe.clientX, pe.clientY);
+  };
   // A drag ends once. The capture path can see two endings in a row (a release
   // that also emits lostpointercapture), and `onEnd` must not run twice.
   let done = false;

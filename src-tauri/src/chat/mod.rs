@@ -36,6 +36,7 @@ pub mod python_runtime;
 pub mod reconnect;
 pub mod stream_events;
 pub mod streaming;
+pub mod subagent_model;
 pub mod tasks;
 pub mod tools;
 pub mod totp;
@@ -53,8 +54,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 // System-prompt assembly (CORE prompt, STRICT addendum, tool guide, research
 // scaffolding, and the final assembler) lives in `prompts.rs`. Re-export the
-// two entry points that `commands.rs` calls via `crate::chat::*`.
-pub use prompts::{build_system_prompt, is_research_request};
+// entry points that `commands.rs` calls via `crate::chat::*`.
+pub use prompts::{build_system_prompt, is_research_request, strip_research_prefix};
 
 use crate::db;
 use crate::types::*;
@@ -442,10 +443,18 @@ impl ChatManager {
         // Cancel any existing stream for this session.
         self.cancel(&chat_session_id);
 
+        // Research turns synthesize their whole report — title, summary,
+        // findings, and the full Sources ledger — as ONE generate_file
+        // tool-call input, which shares the round's max_tokens. At the
+        // default 4096 the Anthropic path cuts that call off at
+        // stop_reason=max_tokens mid-JSON and the report arrives truncated
+        // (or not at all), which read as "research stops halfway". The cap
+        // is a ceiling, not a target: non-research turns keep 4096.
+        let max_tokens = if research_mode { 8192 } else { 4096 };
         let chat_req = ChatRequest {
             model,
             messages,
-            max_tokens: Some(4096),
+            max_tokens: Some(max_tokens),
             system: system.filter(|s| !s.trim().is_empty()),
             effort,
             thinking,
@@ -2194,6 +2203,39 @@ mod tests {
         // /research bypasses the single-fact guards even with no trigger phrase.
         assert!(is_research_request("/research the evolution of CPUs"));
         assert!(is_research_request("/Research something niche"));
+    }
+
+    #[test]
+    fn research_triggers_match_word_boundaries() {
+        // A trigger at the very END of the message (the old trailing-space
+        // substring match missed these).
+        assert!(is_research_request("please research"));
+        assert!(is_research_request("help me compare"));
+        assert!(is_research_request("Can you investigate?"));
+        // Whole words only: a word CONTAINING a trigger is not the trigger.
+        assert!(!is_research_request("the researcher joined the team"));
+        assert!(!is_research_request("a comparative literature degree"));
+    }
+
+    #[test]
+    fn strip_research_prefix_leaves_the_plain_topic() {
+        assert_eq!(
+            strip_research_prefix("/research the evolution of CPUs"),
+            "the evolution of CPUs"
+        );
+        assert_eq!(strip_research_prefix("/research: CRDTs"), "CRDTs");
+        assert_eq!(
+            strip_research_prefix("/Research 2042 AI benchmarks"),
+            "2042 AI benchmarks"
+        );
+        // Bare "/research" still asks for research — just without the token.
+        assert_eq!(
+            strip_research_prefix("/research"),
+            "Perform in-depth multi-source research on the topic of this conversation \
+             and write a cited report."
+        );
+        // No prefix: the content passes through untouched.
+        assert_eq!(strip_research_prefix("plain question"), "plain question");
     }
 
     #[test]

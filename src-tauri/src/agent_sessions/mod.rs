@@ -392,6 +392,24 @@ impl AgentSessionManager {
         )
     }
 
+    /// Research-mode protocol for harness turns. Harnesses have no Relay
+    /// research scaffolding (that rides the built-in provider's tool loop),
+    /// so `force_research` on a harness send folds the protocol into the
+    /// CLI-facing appendix — it reaches the model but never enters the
+    /// persisted user message, so the transcript shows exactly what the
+    /// user typed (same contract as the built-in path). The `## Sources`
+    /// tail is what Relay's citation renderer parses back into source chips.
+    pub fn research_directive() -> String {
+        format!(
+            "\n\n---\n\n## Research mode\n\
+             The user request above is a multi-source RESEARCH task, not a chat answer.\n\
+             Do not answer from memory. Break it into 3-5 sub-questions; for each, search the web\n\
+             (your web search / page fetch tools), read what you find, prefer independent sources,\n\
+             and write a report that ends with a `## Sources` section listing every URL you actually\n\
+             used, cited inline as [1], [2], \u{2026}"
+        )
+    }
+
     /// Send one user turn. The harness id comes from the chat session's
     /// `agent` field ("harness:<id>"), passed by the command layer.
     /// `attach_prompt` is the CLI-facing appendix built by
@@ -577,6 +595,27 @@ impl AgentSessionManager {
         // kimi receive the same content via --append-system-prompt-file /
         // --agent-file and must NOT get it twice. Failure degrades to no
         // prefix (same contract as bundle failure everywhere else).
+        // Which relay-tool surface this harness can actually reach — picks the
+        // instructions variant and gates every mesh prompt. claude/kimi/
+        // opencode get the bridge via per-turn Relay-owned config files;
+        // commandcode has no per-turn channel, so Relay registers the bridge
+        // in its own `cmd mcp` config instead (idempotent: one marker-file
+        // read in steady state, re-registered when the WS token rotates);
+        // pi/omp have no MCP support at all.
+        let has_relay_tools = if crate::session_fabric::harness_has_relay_tools(harness) {
+            true
+        } else if harness == "commandcode" {
+            match spawn_dir(cwd, &db.0) {
+                Some(dir) => crate::browser_mcp_register::ensure_commandcode_bridge(
+                    app,
+                    &dir,
+                    project_id.unwrap_or(bundle::NO_PROJECT_BUNDLE_SLUG),
+                ),
+                None => false,
+            }
+        } else {
+            false
+        };
         let instructions_prefix = if fresh_cli && harness_needs_prompt_instructions(harness) {
             resolve_harness_bundle(
                 app,
@@ -588,7 +627,17 @@ impl AgentSessionManager {
                 None,
                 Some(chat_session_id),
             )
-            .and_then(|b| std::fs::read_to_string(&b.claude_instructions).ok())
+            .and_then(|b| {
+                // Tool-carrying harnesses read the full instructions; the
+                // rest get the stripped variant that advertises nothing
+                // their CLI can't call.
+                let path = if has_relay_tools {
+                    &b.claude_instructions
+                } else {
+                    &b.prompt_only_instructions
+                };
+                std::fs::read_to_string(path).ok()
+            })
             .filter(|s| !s.trim().is_empty())
         } else {
             None
@@ -608,7 +657,11 @@ impl AgentSessionManager {
             // first turn states it — this is what lets a harness CLI address
             // `message_session`/`spawn_session` calls as itself. First turn
             // only (like the instructions prefix): the CLI retains it.
-            if fresh_cli {
+            // Tool-less harnesses (pi/omp/commandcode) skip it — the line
+            // advertises tools their bundle doesn't register, and a model
+            // told about spawn_session it can't call refuses delegation
+            // outright ("I have no relay-tools session spawn").
+            if fresh_cli && has_relay_tools {
                 base.push_str(&format!(
                     "\n\n[Relay Session Mesh] Your Relay session id is \
                      {chat_session_id} — pass it as the `caller_session_id` argument \
@@ -653,7 +706,7 @@ impl AgentSessionManager {
         let effective = if !fresh_cli {
             let hint = {
                 let conn = db.0.lock();
-                crate::session_fabric::resumed_turn_hint(&conn, chat_session_id)
+                crate::session_fabric::resumed_turn_hint(&conn, has_relay_tools, chat_session_id)
             };
             match hint {
                 Some(h) => format!("{effective}\n\n{h}"),
@@ -978,6 +1031,39 @@ impl AgentSessionManager {
                 kill_child_tree(&mut child);
             }
         }
+    }
+
+    /// Boot/reload reconciliation (crash recovery). `turn_in_flight` lives in
+    /// backend memory, so a webview crash/reload (backend survives) reloads
+    /// the UI into a chat that shows nothing yet rejects every send with "a
+    /// turn is already running" — and a reader that died via panic (unwinding
+    /// past its cleanup tail) can wedge the flag for the backend's whole
+    /// lifetime. For every session whose flag is up but which has NO live
+    /// reader and NO live child process, clear the flag. A genuinely running
+    /// turn (child alive) keeps its flag: the send rejection is then honest.
+    pub fn reconcile_wedged_turns(&self) -> Vec<String> {
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut recovered = Vec::new();
+        for (sid, entry) in sessions.iter() {
+            let mut c = entry.lock().unwrap_or_else(|e| e.into_inner());
+            if !c.turn_in_flight.load(Ordering::SeqCst) {
+                continue;
+            }
+            // A live reader (claude/ACP set this via ReaderAliveGuard) may
+            // still be streaming or about to clear the flag at EOF — leave it.
+            if c.reader_alive.load(Ordering::SeqCst) {
+                continue;
+            }
+            let child_gone = match c.child.as_mut() {
+                None => true,
+                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
+            };
+            if child_gone {
+                c.turn_in_flight.store(false, Ordering::SeqCst);
+                recovered.push(sid.clone());
+            }
+        }
+        recovered
     }
 }
 
@@ -1373,6 +1459,20 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_directive_is_appendix_shaped_and_carries_the_protocol() {
+        let d = AgentSessionManager::research_directive();
+        // Appendix shape: the directive is appended AFTER the user message,
+        // so it must reference it as "above" and open with the appendix
+        // separator the attachment appendix uses.
+        assert!(d.starts_with("\n\n---\n\n## Research mode"));
+        assert!(d.contains("user request above"));
+        assert!(d.contains("## Sources"));
+        // The topic itself is NOT part of the directive — it stays in the
+        // persisted user message.
+        assert!(!d.contains("topic"));
+    }
 
     #[test]
     fn truncate_output_never_panics_on_multibyte_tail_boundary() {
@@ -2992,7 +3092,7 @@ mod tests {
 
         let after = snapshot_dir(dir);
         assert_eq!(
-            changed_previewable_files(&before, &after),
+            changed_previewable_files(&before, &after, previewable_ext),
             vec![
                 "keep.txt".to_string(),
                 "report.md".to_string(),
@@ -3001,7 +3101,7 @@ mod tests {
         );
         // Diffing an unchanged tree reports nothing.
         let again = snapshot_dir(dir);
-        assert!(changed_previewable_files(&after, &again).is_empty());
+        assert!(changed_previewable_files(&after, &again, previewable_ext).is_empty());
     }
 
     /// The artifact watch covers BOTH the spawn dir and the configured
@@ -3027,8 +3127,12 @@ mod tests {
             2,
             "spawn dir + configured artifacts dir: {dirs:?}"
         );
-        assert_eq!(canon(&dirs[0]), canon(proj.path()));
-        assert_eq!(canon(&dirs[1]), canon(arts.path()));
+        // The spawn dir keeps the narrow (deliverables-only) role; the
+        // artifacts dir entry gets the broad role.
+        assert!(!dirs[0].1, "spawn dir must be the narrow role");
+        assert!(dirs[1].1, "artifacts dir must be the broad role");
+        assert_eq!(canon(&dirs[0].0), canon(proj.path()));
+        assert_eq!(canon(&dirs[1].0), canon(arts.path()));
     }
 
     /// With no project and no configured dir, the spawn dir and the artifacts
@@ -3040,6 +3144,8 @@ mod tests {
         let db = Arc::new(parking_lot::Mutex::new(conn));
         let dirs = turn_watch_dirs(None, &db);
         assert_eq!(dirs.len(), 1, "{dirs:?}");
+        // The deduped dir IS the artifacts fallback dir: broad role.
+        assert!(dirs[0].1, "coincident spawn/artifacts dir must be broad");
     }
 
     /// F4 regression: the raw-stdout preview was sliced at BYTE 200
@@ -3187,6 +3293,302 @@ mod tests {
         let out = tools.tool_result("report", false, None, "s1", None);
         assert!(out.is_none());
         assert!(tools.pending.is_empty());
+    }
+
+    /// opencode can deliver the Task part ALREADY finished (status completed
+    /// on first sight). Routing it through the generic done branch emitted the
+    /// chat chip but never `chat:subagent-spawn`, so the Agents pane stayed
+    /// "No subagents yet" while the chat chip spun forever. The self-contained
+    /// spawn must carry the store id in the chip marker (chip ↔ panel
+    /// correlation) and queue no FIFO slot — nothing will arrive to match one,
+    /// and a stale slot would eat the NEXT tool's result. (Events can't be
+    /// captured here — the emit fns take the concrete Wry handle — but they
+    /// share the exact spawn/finish_subagent blocks the running-first path
+    /// uses, which production exercises.)
+    #[test]
+    fn done_first_subagent_part_spawns_finalizes_and_queues_no_slot() {
+        let mut tools = ToolTracker::new();
+        let marker = tools.subagent_use_with_output(
+            "task",
+            json!({"kind": "subagent", "detail": "Research proper thesis guide", "role": "general", "prompt": "p"}),
+            None,
+            "s1",
+            "general",
+            "Research proper thesis guide",
+            "p",
+            Some("final report"),
+            None,
+        );
+
+        // The chip marker carries the store id so the chat chip correlates to
+        // the panel entry exactly instead of by task/role text.
+        assert!(marker.contains("\"subId\""), "{marker}");
+        assert!(marker.contains("\"kind\":\"subagent\""), "{marker}");
+        // No pending slot (would poison the FIFO) and no live registration
+        // (no later event will attribute to this agent).
+        assert!(tools.pending.is_empty());
+        assert!(tools.by_tool_use.is_empty());
+    }
+
+    /// The error variant of the done-first part: same bookkeeping — the panel
+    /// entry must land as an error (done event with the error flag), not hang
+    /// as running.
+    #[test]
+    fn done_first_subagent_part_with_error_finalizes_as_error() {
+        let mut tools = ToolTracker::new();
+        let marker = tools.subagent_use_with_output(
+            "task",
+            json!({"kind": "subagent"}),
+            None,
+            "s1",
+            "general",
+            "t",
+            "p",
+            None,
+            Some("provider exploded"),
+        );
+        assert!(marker.contains("\"subId\""), "{marker}");
+        assert!(tools.pending.is_empty());
+        assert!(tools.by_tool_use.is_empty());
+    }
+
+    /// EOF drain for adapters that queue subagents ONLY in the FIFO (kimi /
+    /// pi / omp / commandcode — no CLI tool_use id): a CLI exit mid-subagent
+    /// used to leave the panel entry spinning forever because fail_pending
+    /// only drained the by-tool-use map.
+    #[test]
+    fn eof_drain_finalizes_fifo_only_subagent_slots() {
+        let mut tools = ToolTracker::new();
+        tools.subagent_use(
+            "Task",
+            json!({"kind": "subagent"}),
+            None,
+            "s1",
+            "role",
+            "t",
+            "p",
+            "", // no CLI id — FIFO-only registration
+            false,
+        );
+        assert_eq!(tools.pending.len(), 1);
+        tools.fail_pending(None, "s1", "the CLI exited");
+        assert!(tools.pending.is_empty(), "queued entry finalized");
+        assert!(tools.by_tool_use.is_empty());
+    }
+
+    /// Claude-style subagents are registered in BOTH containers — the drain
+    /// must clear both without leaving stale slots behind.
+    #[test]
+    fn eof_drain_clears_registered_and_queued_registrations() {
+        let mut tools = ToolTracker::new();
+        tools.subagent_use(
+            "Task",
+            json!({"kind": "subagent"}),
+            None,
+            "s1",
+            "role",
+            "t",
+            "p",
+            "call_1",
+            false,
+        );
+        assert_eq!(tools.by_tool_use.len(), 1);
+        assert_eq!(tools.pending.len(), 1);
+        tools.fail_pending(None, "s1", "the CLI exited");
+        assert!(tools.pending.is_empty());
+        assert!(tools.by_tool_use.is_empty());
+    }
+
+    /// commandcode had NO subagent handling: a Task/Agent tool frame piped
+    /// through the generic branches rendered the chat chip but never emitted
+    /// chat:subagent-spawn, and its FIFO slot finalized as nothing — chip
+    /// visible, Agents pane empty, entry never completed. The spawn must
+    /// register the entry for the completion frame to finalize.
+    #[test]
+    fn commandcode_subagent_frames_spawn_and_finalize_the_panel_entry() {
+        let mut tools = ToolTracker::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut full = String::new();
+        let mut text_streamed = String::new();
+        let session_cell = Arc::new(Mutex::new(None));
+        let (mut input, mut output, mut cr, mut cc) = (None, None, None, None);
+        let mut in_think = false;
+        let frame = |inner: Value| json!({ "type": "event", "event": inner });
+
+        // tool_running frame for a Task dispatch: spawns the panel entry.
+        handle_commandcode_event(
+            None,
+            "s1",
+            &frame(json!({
+                "type": "tool_running",
+                "toolCallId": "call_1",
+                "toolName": "task",
+                "args": {
+                    "subagent_type": "general",
+                    "description": "Research proper thesis guide",
+                    "prompt": "p"
+                }
+            })),
+            &mut full,
+            &mut text_streamed,
+            &session_cell,
+            &mut input,
+            &mut output,
+            &mut cr,
+            &mut cc,
+            &mut in_think,
+            &mut tools,
+            &mut seen,
+        );
+        assert!(full.contains("\"subId\""), "spawn marker: {full}");
+        assert!(full.contains("\"kind\":\"subagent\""), "{full}");
+        assert_eq!(tools.pending.len(), 1, "queued for its completion frame");
+
+        // Completion frame: finalizes the entry via the FIFO slot.
+        handle_commandcode_event(
+            None,
+            "s1",
+            &frame(json!({
+                "type": "tool_running",
+                "toolCallId": "call_1",
+                "toolName": "task",
+                "result": "final report"
+            })),
+            &mut full,
+            &mut text_streamed,
+            &session_cell,
+            &mut input,
+            &mut output,
+            &mut cr,
+            &mut cc,
+            &mut in_think,
+            &mut tools,
+            &mut seen,
+        );
+        assert!(tools.pending.is_empty(), "entry finalized");
+    }
+
+    /// commandcode's self-contained variant: a start frame already carrying
+    /// the output spawns AND finalizes at once — no slot may queue (nothing
+    /// will arrive to pop it).
+    #[test]
+    fn commandcode_inline_output_subagent_spawns_and_finalizes_at_once() {
+        let mut tools = ToolTracker::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut full = String::new();
+        let mut text_streamed = String::new();
+        let session_cell = Arc::new(Mutex::new(None));
+        let (mut input, mut output, mut cr, mut cc) = (None, None, None, None);
+        let mut in_think = false;
+        handle_commandcode_event(
+            None,
+            "s1",
+            &json!({ "type": "event", "event": {
+                "type": "tool_running",
+                "toolCallId": "call_1",
+                "toolName": "agent",
+                "args": {"subagent_type": "general", "description": "t", "prompt": "p"},
+                "result": "final report"
+            }}),
+            &mut full,
+            &mut text_streamed,
+            &session_cell,
+            &mut input,
+            &mut output,
+            &mut cr,
+            &mut cc,
+            &mut in_think,
+            &mut tools,
+            &mut seen,
+        );
+        assert!(full.contains("\"subId\""), "{full}");
+        assert!(tools.pending.is_empty(), "no slot for a self-contained part");
+    }
+
+    /// Per-turn opencode reports tool output INLINE on the tool_use event
+    /// (no separate result frame) — a subagent part carrying its output must
+    /// spawn AND finalize the panel entry in one step. A plain spawn queued a
+    /// FIFO slot nothing would ever pop, spinning the entry forever.
+    #[test]
+    fn opencode_perturn_inline_output_subagent_finalizes_at_once() {
+        let mut tools = ToolTracker::new();
+        let mut full = String::new();
+        let session_cell = Arc::new(Mutex::new(None));
+        let (mut input, mut output, mut cr, mut cc, mut cost) = (None, None, None, None, None);
+        let (mut last_text, mut last_reasoning) = (String::new(), String::new());
+        let mut in_think = false;
+        handle_opencode_event(
+            None,
+            "s1",
+            &json!({
+                "type": "tool_use",
+                "part": {
+                    "tool": "task",
+                    "state": {
+                        "status": "completed",
+                        "input": {
+                            "subagent_type": "general",
+                            "description": "Research proper thesis guide",
+                            "prompt": "p"
+                        },
+                        "output": "final report"
+                    }
+                }
+            }),
+            &mut full,
+            &session_cell,
+            &mut input,
+            &mut output,
+            &mut cr,
+            &mut cc,
+            &mut cost,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut in_think,
+            &mut tools,
+        );
+        assert!(full.contains("\"subId\""), "spawn marker: {full}");
+        assert!(tools.pending.is_empty(), "entry finalized immediately");
+    }
+
+    /// Same path, but the part is still RUNNING (no inline output): the
+    /// spawn must still register the entry — the turn-end EOF drain now
+    /// finalizes whatever never completed.
+    #[test]
+    fn opencode_perturn_running_subagent_still_spawns() {
+        let mut tools = ToolTracker::new();
+        let mut full = String::new();
+        let session_cell = Arc::new(Mutex::new(None));
+        let (mut input, mut output, mut cr, mut cc, mut cost) = (None, None, None, None, None);
+        let (mut last_text, mut last_reasoning) = (String::new(), String::new());
+        let mut in_think = false;
+        handle_opencode_event(
+            None,
+            "s1",
+            &json!({
+                "type": "tool_use",
+                "part": {
+                    "tool": "task",
+                    "state": {
+                        "status": "running",
+                        "input": {"subagent_type": "general", "description": "t", "prompt": "p"}
+                    }
+                }
+            }),
+            &mut full,
+            &session_cell,
+            &mut input,
+            &mut output,
+            &mut cr,
+            &mut cc,
+            &mut cost,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut in_think,
+            &mut tools,
+        );
+        assert!(full.contains("\"subId\""), "{full}");
+        assert_eq!(tools.pending.len(), 1, "queued until it completes or EOF");
     }
 
     #[test]

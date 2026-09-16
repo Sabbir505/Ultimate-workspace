@@ -488,6 +488,7 @@ pub fn run() {
             commands::chat_cmds::persist_partial_chat_message,
             commands::agent_cmds::send_agent_chat_message,
             commands::agent_cmds::cancel_agent_chat_message,
+            commands::agent_cmds::reconcile_agent_sessions,
             commands::agent_cmds::list_harness_models,
             commands::agent_cmds::list_acp_agents,
             commands::agent_cmds::chat_token_subscribe,
@@ -614,6 +615,7 @@ pub fn run() {
             commands::stt::stt_start,
             commands::stt::stt_stop,
             commands::stt::stt_install_server,
+            commands::stt::stt_install_cuda,
             commands::stt::stt_set_default,
             commands::stt::stt_set_auto_start,
             commands::stt::stt_set_server_path,
@@ -633,6 +635,11 @@ pub fn run() {
             commands::tts::tts_set_keep_loaded,
             commands::tts_gpu::tts_gpu_status,
             commands::tts_gpu::tts_install_gpu,
+            // Update checks for the pinned native builds (whisper CPU/CUDA,
+            // llama CUDA server, TTS GPU runtime) — the harness-updater shape
+            // for binaries.
+            commands::build_updates::check_build_updates,
+            commands::llama_build::llama_install_cuda,
             commands::worktree_cmds::ensure_chat_session_worktree,
             commands::worktree_cmds::set_chat_session_worktree,
             mcp_gallery::mcp_gallery_list,

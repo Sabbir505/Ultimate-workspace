@@ -38,7 +38,7 @@ import { JsxPreview } from "./JsxPreview";
 import { MarkdownTable } from "./MarkdownTable";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { PdfViewer } from "./PdfViewer";
-import { sanitizeHtml } from "../../lib/sanitize";
+import { sanitizeOfficeDocumentHtml, sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
 import { linkCitations, parseChatSources } from "../../lib/chatCitations";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
@@ -287,7 +287,7 @@ function OfficePreview({ preview }: { preview: ArtifactPreview }) {
         className={`artifact-preview-html office ${ext}`}
         title={preview.filename}
         sandbox=""
-        srcDoc={sanitizeHtml(text ?? "")}
+        srcDoc={sanitizeOfficeDocumentHtml(text ?? "")}
       />
     );
 

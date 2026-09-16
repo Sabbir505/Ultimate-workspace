@@ -907,9 +907,25 @@ pub fn delete_chat_message(conn: &Connection, message_id: i64) -> DbResult<bool>
     Ok(changed > 0)
 }
 
+/// In-place content refresh for a PARTIAL assistant row (the harness readers'
+/// crash-flush): the row already exists from an earlier flush of the live
+/// turn, so updating it must not bump its id or created_at ordering.
+pub fn update_chat_message_content(
+    conn: &Connection,
+    message_id: i64,
+    content: &str,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_messages SET content = ?2 WHERE id = ?1",
+        params![message_id, content],
+    )?;
+    Ok(())
+}
+
 /// Delete every message with id strictly greater than `after_id` in a
 /// session — the conversation-rollback half of checkpoint restore (undo
 /// turns N+1.., keep the checkpointed turn and everything before it).
+///
 /// `None` deletes the session's whole conversation (restore to the pre-chat
 /// baseline). Artifacts attributed to the removed messages are detached
 /// (not deleted — same policy as `delete_chat_message`). Returns the number

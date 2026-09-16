@@ -199,6 +199,55 @@ impl ToolTracker {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn subagent_use(
         &mut self,
+        name: &str,
+        value: Value,
+        app: Option<&AppHandle>,
+        sid: &str,
+        role: &str,
+        task: &str,
+        prompt: &str,
+        cli_tool_use_id: &str,
+        background: bool,
+    ) -> String {
+        self.subagent_use_inner(
+            name, value, app, sid, role, task, prompt, cli_tool_use_id, background, None,
+        )
+    }
+    /// Self-contained subagent variant for CLIs that report the Task call AND
+    /// its completed output in one event (opencode tool parts can arrive
+    /// already finished). Emits the spawn event + correlated chip marker
+    /// exactly like `subagent_use`, then finalizes the panel entry with the
+    /// output immediately — and queues NO pending slot: nothing will arrive
+    /// later to match, and a stale slot would eat the NEXT tool's result.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn subagent_use_with_output(
+        &mut self,
+        name: &str,
+        value: Value,
+        app: Option<&AppHandle>,
+        sid: &str,
+        role: &str,
+        task: &str,
+        prompt: &str,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) -> String {
+        self.subagent_use_inner(
+            name,
+            value,
+            app,
+            sid,
+            role,
+            task,
+            prompt,
+            "",
+            false,
+            Some((output.or(error).unwrap_or(""), error.is_some())),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn subagent_use_inner(
+        &mut self,
         _name: &str,
         value: Value,
         app: Option<&AppHandle>,
@@ -208,6 +257,7 @@ impl ToolTracker {
         prompt: &str,
         cli_tool_use_id: &str,
         background: bool,
+        final_output: Option<(&str, bool)>,
     ) -> String {
         let id = self.seq;
         self.seq += 1;
@@ -220,6 +270,12 @@ impl ToolTracker {
         let mut v = value;
         if let Some(obj) = v.as_object_mut() {
             obj.insert("id".to_string(), json!(id));
+            // Carry the spawn event's store id in the marker too: the chat
+            // chip correlates by it exactly. Task/role text matching breaks
+            // when a model puts the summary under "task"/"summary" (store
+            // task = "" vs chip task = text) or when two agents share a
+            // description.
+            obj.insert("subId".to_string(), json!(sub_id));
         }
         // Emit the spawn event so the frontend creates the subagent immediately.
         if let Some(app) = app {
@@ -231,8 +287,30 @@ impl ToolTracker {
                     role: role.to_string(),
                     task: task.to_string(),
                     prompt: prompt.to_string(),
+                    // Relay only observes CLI-native subagents — the CLI owns
+                    // their model choice, so there is nothing to report.
+                    model: None,
                 },
             );
+        }
+        let marker = format!("<tool>{v}</tool>");
+        if let Some((text, is_error)) = final_output {
+            // The part already carries its final output: finalize the panel
+            // entry now (tokens + done) and skip the pending bookkeeping —
+            // no result event will ever arrive for this call.
+            self.finish_subagent(
+                app,
+                sid,
+                &SubagentMeta {
+                    id: sub_id,
+                    agent_id: None,
+                    background: false,
+                    streamed: false,
+                },
+                Some(text),
+                is_error,
+            );
+            return marker;
         }
         if !cli_tool_use_id.is_empty() {
             self.by_tool_use.insert(
@@ -255,7 +333,7 @@ impl ToolTracker {
                 Some(cli_tool_use_id.to_string())
             },
         });
-        format!("<tool>{v}</tool>")
+        marker
     }
     /// Consume the next result slot (in call order, or — when the CLI exposes
     /// tool_use ids — the EXACT call the result belongs to). Returns a result
@@ -505,11 +583,48 @@ impl ToolTracker {
     }
     /// The CLI process ended with agents still awaiting completion (crash,
     /// cancel, session delete). Finalize them as errors so no panel entry
-    /// spins forever.
+    /// spins forever. Covers BOTH registrations: the by-tool-use map (claude)
+    /// and the FIFO-only slots (kimi/pi/omp/commandcode, whose adapters pass
+    /// no CLI tool_use id).
     pub(super) fn fail_pending(&mut self, app: Option<&AppHandle>, sid: &str, reason: &str) {
-        let drained: Vec<SubagentMeta> = self.by_tool_use.drain().map(|(_, m)| m).collect();
-        for meta in &drained {
+        self.settle_live_subagents(app, sid, Some(reason));
+    }
+    /// Finalize EVERY live subagent — registered and FIFO-queued — with no
+    /// result on the wire. `error: None` settles them as completed (turn-end
+    /// settlement for protocols that never report a subagent's completion
+    /// inline, e.g. ACP: the agent's turn finished, so its dispatch is done);
+    /// `Some(reason)` settles them as errored (process exit mid-subagent).
+    pub(super) fn settle_live_subagents(
+        &mut self,
+        app: Option<&AppHandle>,
+        sid: &str,
+        error: Option<&str>,
+    ) {
+        let mut metas: Vec<SubagentMeta> = self.by_tool_use.drain().map(|(_, m)| m).collect();
+        // Registered agents also hold a FIFO slot — drop it (deduped below,
+        // so the same agent never finalizes twice).
+        for meta in &metas {
             self.drop_pending_sub(&meta.id);
+        }
+        // FIFO-only subagents (adapters without tool_use ids queue them ONLY
+        // in `pending`) — skip ids already drained from by_tool_use, or the
+        // same agent finalizes twice.
+        let queued: Vec<String> = self
+            .pending
+            .iter()
+            .filter_map(|s| s.subagent_id.clone())
+            .filter(|id| !metas.iter().any(|m| &m.id == id))
+            .collect();
+        for sub_id in queued {
+            self.drop_pending_sub(&sub_id);
+            metas.push(SubagentMeta {
+                id: sub_id,
+                agent_id: None,
+                background: false,
+                streamed: false,
+            });
+        }
+        for meta in &metas {
             if let Some(app) = app {
                 let _ = app.emit(
                     "chat:subagent-done",
@@ -517,7 +632,7 @@ impl ToolTracker {
                         chat_session_id: sid.to_string(),
                         id: meta.id.clone(),
                         output: String::new(),
-                        error: Some(reason.to_string()),
+                        error: error.map(|e| e.to_string()),
                     },
                 );
             }

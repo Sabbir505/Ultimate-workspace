@@ -39,7 +39,7 @@ const EMPTY_STEPS: PlanStep[] = [];
 const EMPTY_SUBAGENTS: Record<string, SubagentInfo> = {};
 const EMPTY_ACCEPTED: import("../../lib/ipc").ChatPlanRecord[] = [];
 const EMPTY_MAIL_IDS: string[] = [];
-const EMPTY_CHILDREN: { childId: string; title: string; agent: string }[] = [];
+const EMPTY_CHILDREN: { childId: string; title: string; agent: string; model?: string }[] = [];
 
 const SIDEBAR_VISIBLE_CAP = 4;
 
@@ -893,7 +893,7 @@ export function GitToolsSidebar() {
                     key={c.childId}
                     className={`git-sidebar-mesh-row spawned${running ? " running" : ""}`}
                     onClick={() => openMeshSession(c.childId)}
-                    title={`Spawned session: ${c.title} (${c.agent})`}
+                    title={`Spawned session: ${c.title} (${c.agent}${c.model ? ` · ${c.model}` : ""})`}
                   >
                     <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
                       <path d="M12 5v5M12 10l-6 6M12 10l6 6" />
@@ -901,6 +901,12 @@ export function GitToolsSidebar() {
                     </svg>
                     <span className="git-sidebar-mesh-label">Spawned</span>
                     <span className="git-sidebar-mesh-peer">{c.title}</span>
+                    {c.model && <span className="git-sidebar-mesh-dot-sep" aria-hidden="true">·</span>}
+                    {c.model && (
+                      <span className="git-sidebar-mesh-status" title="Model this session runs on">
+                        {c.model}
+                      </span>
+                    )}
                     {running && <span className="git-sidebar-mesh-dot-sep" aria-hidden="true">·</span>}
                     {running && <span className="git-sidebar-mesh-status status-running">running</span>}
                   </button>

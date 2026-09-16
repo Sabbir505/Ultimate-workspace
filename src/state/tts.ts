@@ -20,6 +20,10 @@ export interface TtsPlaybackState {
   index: number;
   /** Total sentences in the current text. */
   total: number;
+  /** Live playback-rate multiplier the player is voicing at (0.5–2). Mirrors
+   *  the player's field so the bar's speed readout reacts to its own arrows
+   *  and any future external rate control. */
+  rate: number;
   phase: TtsPhase;
   /** Last failure, surfaced inline instead of as a toast — a read-aloud
    *  failure is never important enough to interrupt with a popup. */
@@ -35,6 +39,7 @@ export const useTtsStore = create<TtsPlaybackState>((set) => ({
   label: null,
   index: 0,
   total: 0,
+  rate: 1,
   phase: "idle",
   error: null,
   autoRead: false,

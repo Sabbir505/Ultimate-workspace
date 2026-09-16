@@ -70,18 +70,26 @@ pub(super) fn gallery_servers_for_bundle(app: &AppHandle) -> Vec<crate::harness_
 /// standing memory identity core (on-demand loading is a per-turn job the
 /// static bundle can't do). DB errors degrade to fewer sections; never fail
 /// the bundle.
+///
+/// `relay_tools: false` (pi/omp/commandcode) keeps only the memory core —
+/// the connector manifest describes `mcp__<name>__` tools those CLIs can't
+/// reach, and the Session Mesh registry advertises tools their bundle
+/// doesn't register.
 pub(super) fn harness_context_section(
     app: &AppHandle,
     project_id: Option<&str>,
     connectors: &[crate::connectors::HarnessMcpServer],
     gallery: &[crate::harness_bundle::GalleryMcpServer],
+    relay_tools: bool,
 ) -> String {
     let attached: Vec<String> = connectors.iter().map(|c| c.name.clone()).collect();
     let gallery_names: Vec<String> = gallery.iter().map(|g| g.name.clone()).collect();
     let mut parts: Vec<String> = Vec::new();
-    let mcp = crate::harness_bundle::build_mcp_context_section(&attached, &gallery_names);
-    if !mcp.is_empty() {
-        parts.push(mcp);
+    if relay_tools {
+        let mcp = crate::harness_bundle::build_mcp_context_section(&attached, &gallery_names);
+        if !mcp.is_empty() {
+            parts.push(mcp);
+        }
     }
     if let Some(db) = app.try_state::<DbState>() {
         let conn = db.0.lock();
@@ -106,9 +114,12 @@ pub(super) fn harness_context_section(
         // §4.3). The bundle is per-PROJECT (shared by every chat in it), so
         // self_sid=None: no per-chat identity line here — `AgentSession
         // Manager::send` adds it to the first turn's prompt instead.
-        if let Some(block) = crate::session_fabric::registry_block(&conn, None) {
-            if !block.trim().is_empty() {
-                parts.push(block);
+        // Tool-less harnesses skip it: no relay-tools MCP, no mesh tools.
+        if relay_tools {
+            if let Some(block) = crate::session_fabric::registry_block(&conn, None) {
+                if !block.trim().is_empty() {
+                    parts.push(block);
+                }
             }
         }
     }
@@ -178,10 +189,17 @@ pub(crate) fn resolve_harness_bundle(
                 .collect()
         })
         .unwrap_or_default();
+    // Two variants: the tool-carrying families (claude/kimi/opencode) hear
+    // about relay-tools; the prompt-only families (pi/omp/commandcode) get
+    // the same environment with every tool reference stripped.
     let artifacts_section =
-        crate::harness_bundle::build_artifacts_section(&default_export_dir, &recent);
+        crate::harness_bundle::build_artifacts_section(&default_export_dir, &recent, true);
+    let artifacts_section_no_tools =
+        crate::harness_bundle::build_artifacts_section(&default_export_dir, &recent, false);
     let gallery = gallery_servers_for_bundle(app);
-    let context_section = harness_context_section(app, project_id, connectors, &gallery);
+    let context_section = harness_context_section(app, project_id, connectors, &gallery, true);
+    let context_section_no_tools =
+        harness_context_section(app, project_id, connectors, &gallery, false);
     crate::harness_bundle::write_bundle(
         &data_dir,
         project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG),
@@ -194,5 +212,7 @@ pub(crate) fn resolve_harness_bundle(
         &gallery,
         &artifacts_section,
         &context_section,
+        &artifacts_section_no_tools,
+        &context_section_no_tools,
     )
 }

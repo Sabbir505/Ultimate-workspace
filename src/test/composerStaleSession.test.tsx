@@ -30,7 +30,7 @@ const generateMock = vi.mocked(generateArtifact);
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
-  useChatStore.setState({ activeChatSessionId: null, splitChatSessionId: null });
+  useChatStore.setState({ activeChatSessionId: null, chatPaneTree: null, paneBuffers: {} });
 });
 
 function composerProps() {
@@ -41,7 +41,7 @@ describe("ChatComposer /create targets the current session", () => {
   it("rerenders with a different session, then /create writes to the NEW session", async () => {
     // Neither the active pointer nor the split pointer names s1/s2, so the
     // command message lands nowhere — the IPC session id is the contract.
-    useChatStore.setState({ activeChatSessionId: null, splitChatSessionId: null });
+    useChatStore.setState({ activeChatSessionId: null, chatPaneTree: null, paneBuffers: {} });
     const props = composerProps();
     const view = render(<ChatComposer {...props} sessionId="s1" />);
     // Session switch: ChatView passes the new active id without a remount.

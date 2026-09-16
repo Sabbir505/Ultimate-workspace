@@ -21,6 +21,7 @@ import { ModelMarket, FitBadge } from "./ModelMarket";
 import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { MemoryPanel } from "./MemoryPanel";
+import { SubagentModelPanel } from "./SubagentModelPanel";
 import { ImprovementsPanel } from "./ImprovementsPanel";
 import { SttPanel } from "./SttPanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
@@ -93,6 +94,7 @@ import {
   Globe,
   TerminalSquare,
   GitBranch,
+  GitFork,
   Pencil,
   Trash2,
   Eye,
@@ -113,6 +115,7 @@ type Category =
   | "notifications"
   | "assistant"
   | "improvements"
+  | "subagent"
   | "harnesses"
   | "localmodels"
   | "apikeys"
@@ -131,6 +134,7 @@ const CATEGORY_KEYS: Category[] = [
   "notifications",
   "assistant",
   "improvements",
+  "subagent",
   "harnesses",
   "localmodels",
   "apikeys",
@@ -158,6 +162,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "notifications": return <Bell {...props} />;
     case "assistant": return <Bot {...props} />;
     case "improvements": return <Sparkles {...props} />;
+    case "subagent": return <GitFork {...props} />;
     case "apikeys": return <KeyRound {...props} />;
     case "websearch": return <Globe {...props} />;
     case "localmodels": return <Cpu {...props} />;
@@ -200,6 +205,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
       { key: "apikeys", label: "API Keys", sub: "Chat provider keys" },
       { key: "websearch", label: "Web Search", sub: "Keyless or BYO-key engine" },
       { key: "localmodels", label: "Local Models", sub: "GGUF via llama-server" },
+      { key: "subagent", label: "Subagent model", sub: "Orchestration default" },
     ],
   },
   {
@@ -626,6 +632,8 @@ export function SettingsView() {
               )}
 
               {category === "localmodels" && <LocalModelsPanel />}
+
+              {category === "subagent" && <SubagentModelPanel />}
 
               {category === "apikeys" && <ApiKeysPanel />}
 

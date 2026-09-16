@@ -378,13 +378,15 @@ pub(crate) fn current_datetime_segment() -> String {
 /// everyday "what's the capital of France" turn stays fast and direct.
 ///
 /// `/research` as a leading token forces research mode (bypasses the
-/// single-fact guards); trigger phrases ("research the…", "find out about",
-/// "what's the current state of…", "compare", "survey", etc.) also activate
-/// it unless a single-fact guard ("capital of", "ceo of", …) matches and no
-/// trigger phrase does. This is a coarse text heuristic, intentionally
-/// permissive — the cost of a false positive is a slightly heavier prompt on
-/// one turn, while a false negative just means the model researches without
-/// the structured scaffolding.
+/// single-fact guards); trigger words/phrases ("research the…", "find out
+/// about", "what's the current state of…", "compare", "survey", etc.) also
+/// activate it. Triggers match on word boundaries, so "please research" and
+/// "help me compare" (trigger at the end of the message) count — a trailing
+/// space once made them miss. A guard alone ("capital of", "ceo of", …) never
+/// triggers: this is a coarse text heuristic, intentionally permissive — the
+/// cost of a false positive is a slightly heavier prompt on one turn, while a
+/// false negative just means the model researches without the structured
+/// scaffolding.
 pub fn is_research_request(content: &str) -> bool {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -397,36 +399,73 @@ pub fn is_research_request(content: &str) -> bool {
     let lower = trimmed.to_ascii_lowercase();
 
     const TRIGGERS: &[&str] = &[
-        "research ",
-        "research the",
+        "research",
         "find out about",
         "what's the current state of",
         "what is the current state of",
-        "compare ",
-        "survey ",
-        "survey of",
+        "compare",
+        "survey",
         "literature review",
         "state of the art",
         "deep dive on",
-        "investigate ",
+        "investigate",
     ];
-    const GUARDS: &[&str] = &[
-        "capital of",
-        "ceo of",
-        "who is the",
-        "who was the",
-        "when is",
-        "how tall is",
-        "population of",
-        "what time is it",
-        "definition of",
-    ];
-    let has_trigger = TRIGGERS.iter().any(|t| lower.contains(t));
-    let has_guard = GUARDS.iter().any(|g| lower.contains(g));
-    has_trigger && !(has_guard && !has_trigger)
-    // The `!(has_guard && !has_trigger)` term is a no-op when has_trigger is
-    // already true (its left operand); kept explicit to document intent: a
-    // guard alone never triggers, a trigger always does.
+    TRIGGERS.iter().any(|t| contains_word(&lower, t))
+}
+
+/// Whole-word containment on an already-lowercased haystack: the match must
+/// not be glued to a letter/digit on either side ("researcher" is not
+/// "research"; "comparing" is not "compare"). No regex — the prompt layer
+/// stays dependency-light and this runs on every send.
+fn contains_word(haystack: &str, word: &str) -> bool {
+    let mut from = 0;
+    while let Some(at) = haystack[from..].find(word) {
+        let start = from + at;
+        let end = start + word.len();
+        let before_is_word = haystack[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+        let after_is_word = haystack[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+        if !before_is_word && !after_is_word {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// Rewrite a leading `/research` token into the plain research ask the model
+/// should see. The token is a relay affordance (the composer renders it as a
+/// pill and the skill catalog tells the model `/slug` is a USER-side
+/// invocation) — sent verbatim it reads as an unknown command and the turn
+/// degrades into an ordinary chat answer even though research mode is on.
+/// Returns the topic text, or a generic instruction when nothing follows the
+/// token (bare "/research"). The DB row keeps what the user typed; this only
+/// shapes the model-bound copy.
+pub fn strip_research_prefix(content: &str) -> String {
+    let trimmed = content.trim();
+    // Case-insensitive token match ("/Research" triggers research mode too);
+    // `get(..9)` doubles as the char-boundary check before slicing.
+    let has_prefix = trimmed.get(..9).map(str::to_ascii_lowercase).as_deref() == Some("/research");
+    let rest = if has_prefix {
+        trimmed[9..]
+            .trim_start()
+            .trim_start_matches([':', '-', '\u{2014}'])
+            .trim()
+    } else {
+        trimmed
+    };
+    if rest.is_empty() {
+        "Perform in-depth multi-source research on the topic of this conversation \
+         and write a cited report."
+            .to_string()
+    } else {
+        rest.to_string()
+    }
 }
 
 /// Plan/Execute/Synthesize scaffolding, appended after the CORE prompt only on

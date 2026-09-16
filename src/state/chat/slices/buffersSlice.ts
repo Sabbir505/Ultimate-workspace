@@ -1,6 +1,7 @@
-// Buffers slice: the two message buffers (main + split pane), their page
-// loaders, and the message-level operations (regenerate / edit-to-fork /
-// delete) that act on whichever buffer displays the target session.
+// Buffers slice: the chat message buffers (main + one per pinned split pane),
+// their page loaders, and the message-level operations (regenerate /
+// edit-to-fork / delete) that act on whichever buffer displays the target
+// session.
 import {
   deleteChatMessage,
   getChatMessages,
@@ -8,14 +9,23 @@ import {
   toastError,
 } from "../../../lib/ipc";
 import {
+  bufferWriteBack,
   loadBufferOlder,
   loadBufferPage,
-  mergeOptimistic,
+  loadPaneBufferOlder,
+  loadPaneBufferPage,
 } from "../moduleState";
+import { findPaneForSession } from "../paneTree";
 import type { ChatMessageRecord } from "../../../lib/ipc";
 import type { ChatStoreGet, ChatStoreSet } from "../types";
 
 export function createBuffersSlice(set: ChatStoreSet, get: ChatStoreGet) {
+  // The pinned pane (if any) whose buffer an override-targeted action should
+  // read/write. Null = the flat main list. Uniqueness invariant: a session
+  // never appears in a pane AND the main list at once.
+  const paneBufferFor = (sessionId: string): string | null =>
+    findPaneForSession(get().chatPaneTree, sessionId);
+
   return {
     loadMessages: async (chatSessionId: string) => {
       await loadBufferPage(get, set, "main", chatSessionId);
@@ -23,40 +33,20 @@ export function createBuffersSlice(set: ChatStoreSet, get: ChatStoreGet) {
 
     loadOlderMessages: async (chatSessionId: string) => loadBufferOlder(get, set, "main", chatSessionId),
 
-    // --- Split chat view (session-row ⋮ → "Open in split view") ---
-    openChatSplit: (chatSessionId: string) => {
-      set((s) => ({
-        splitChatSessionId: chatSessionId,
-        // Reopening on the SAME session keeps the loaded buffer (scroll pos
-        // resets anyway); a different session starts a fresh buffer.
-        splitMessages:
-          s.splitMessagesSessionId === chatSessionId ? s.splitMessages : [],
-        splitMessagesSessionId:
-          s.splitMessagesSessionId === chatSessionId ? s.splitMessagesSessionId : null,
-        splitHasMoreHistory:
-          s.splitMessagesSessionId === chatSessionId ? s.splitHasMoreHistory : false,
-      }));
+    loadPaneMessages: async (paneId: string, chatSessionId: string) => {
+      await loadPaneBufferPage(get, set, paneId, chatSessionId);
     },
 
-    closeChatSplit: () => {
-      set({ splitChatSessionId: null, splitMessages: [], splitMessagesSessionId: null, splitHasMoreHistory: false, focusedChatSessionId: null });
-    },
-
-    setFocusedChatSession: (chatSessionId: string | null) => set({ focusedChatSessionId: chatSessionId }),
-
-    loadSplitMessages: async (chatSessionId: string) => {
-      // Mirrors loadMessages but fills the SPLIT pane's buffer; guarded so a
-      // slow fetch for a pane the user already re-targeted can't clobber it.
-      await loadBufferPage(get, set, "split", chatSessionId);
-    },
-
-    loadOlderSplitMessages: async (chatSessionId: string) =>
-      loadBufferOlder(get, set, "split", chatSessionId),
+    loadOlderPaneMessages: async (paneId: string, chatSessionId: string) =>
+      loadPaneBufferOlder(get, set, paneId, chatSessionId),
 
     reloadFor: async (chatSessionId: string) => {
       const s = get();
       if (s.activeChatSessionId === chatSessionId) await get().loadMessages(chatSessionId);
-      else if (s.splitChatSessionId === chatSessionId) await get().loadSplitMessages(chatSessionId);
+      else {
+        const paneId = paneBufferFor(chatSessionId);
+        if (paneId) await get().loadPaneMessages(paneId, chatSessionId);
+      }
     },
 
     // Regenerate resends the most recent user message. The backend appends a
@@ -72,10 +62,10 @@ export function createBuffersSlice(set: ChatStoreSet, get: ChatStoreGet) {
     // doesn't keep seeing the stale answer being regenerated.
     regenerate: async (sessionIdOverride?: string) => {
       const activeChatSessionId = sessionIdOverride ?? get().activeChatSessionId;
-      const list =
-        activeChatSessionId === get().splitChatSessionId && activeChatSessionId !== get().activeChatSessionId
-          ? get().splitMessages
-          : get().messages;
+      const paneId = sessionIdOverride ? paneBufferFor(sessionIdOverride) : null;
+      const list = paneId
+        ? (get().paneBuffers[paneId]?.messages ?? [])
+        : get().messages;
       // Don't regenerate mid-stream — per-session check (the legacy scalar can
       // name a different concurrently-streaming chat, which used to block
       // regenerate in an idle chat or allow it mid-stream in this one).
@@ -122,20 +112,24 @@ export function createBuffersSlice(set: ChatStoreSet, get: ChatStoreGet) {
     // generated files — the artifact library still lists them.
     deleteMessage: async (messageId: number, sessionIdOverride?: string) => {
       const activeChatSessionId = sessionIdOverride ?? get().activeChatSessionId;
-      const inSplit =
-        activeChatSessionId === get().splitChatSessionId && activeChatSessionId !== get().activeChatSessionId;
+      const paneId = sessionIdOverride ? paneBufferFor(sessionIdOverride) : null;
       set((s) => {
         // Drop the bubble from the list that shows it. Negative ids are
         // optimistic just-sent bubbles that never round-tripped to the DB, so
         // a missing match here is fine — the local filter simply doesn't
         // remove anything.
         const drop = (list: ChatMessageRecord[]) => list.filter((m) => m.id !== messageId);
-        if (inSplit) {
-          const nextSplit = drop(s.splitMessages);
-          if (nextSplit.length !== s.splitMessages.length) {
+        if (paneId) {
+          const buf = s.paneBuffers[paneId];
+          if (!buf) return {};
+          const next = drop(buf.messages);
+          if (next.length !== buf.messages.length) {
             const nextByMessage = { ...s.artifactsByMessage };
             delete nextByMessage[messageId];
-            return { splitMessages: nextSplit, artifactsByMessage: nextByMessage };
+            return {
+              paneBuffers: { ...s.paneBuffers, [paneId]: { ...buf, messages: next } },
+              artifactsByMessage: nextByMessage,
+            };
           }
           return {};
         }
@@ -153,8 +147,8 @@ export function createBuffersSlice(set: ChatStoreSet, get: ChatStoreGet) {
       try {
         await deleteChatMessage(messageId);
       } catch (err) {
-        // Rollback: the backend rejected the delete (e.g. DB error, or the row
-        // was already gone via another path). Re-fetch so the local list
+        // Rollback: the backend rejected the delete (e.g. DB error, or the
+        // row was already gone via another path). Re-fetch so the local list
         // matches persisted state instead of staying out of sync.
         toastError("Couldn't delete the message", err);
         if (activeChatSessionId) {
@@ -163,24 +157,10 @@ export function createBuffersSlice(set: ChatStoreSet, get: ChatStoreGet) {
             // rollback refetch must not pull the full history.
             const msgs = await getChatMessages(activeChatSessionId, undefined, 200);
             // Re-derive which buffer currently displays this session AFTER the
-            // await: a session switch while the delete/refetch was in flight
-            // must not write the old session's rows into the other chat's
+            // await: a pane re-pin while the delete/refetch was in flight
+            // must not write the old session's rows into the other pane's
             // buffer (same guard contract as cancelStream / onDone).
-            const isActiveSession = get().activeChatSessionId === activeChatSessionId;
-            const isSplitTarget =
-              get().splitChatSessionId === activeChatSessionId && !isActiveSession;
-            if (isActiveSession)
-              set({
-                messages: msgs ?? [],
-                messagesSessionId: activeChatSessionId,
-                hasMoreHistory: (msgs?.length ?? 0) >= 200,
-              });
-            else if (isSplitTarget)
-              set({
-                splitMessages: msgs ?? [],
-                splitMessagesSessionId: activeChatSessionId,
-                splitHasMoreHistory: (msgs?.length ?? 0) >= 200,
-              });
+            if (msgs) set((s) => bufferWriteBack(s, activeChatSessionId, msgs));
           } catch {
             /* best-effort rollback */
           }

@@ -36,6 +36,7 @@ const MOOD_ANIM: Record<PetMood, PetAnimKey> = {
   happy: "happy",
   zoomies: "zoomies",
   focus: "idle",
+  caught: "happy", // dangling in the hand — the paws-up row + the carrier's wriggle
 };
 
 function useReducedMotion(): boolean {

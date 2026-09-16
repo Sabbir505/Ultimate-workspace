@@ -43,6 +43,11 @@ pub async fn send_agent_chat_message(
     cwd: Option<String>,
     project_id: Option<String>,
     attachments: Option<Vec<crate::types::ChatAttachmentInput>>,
+    // Force research mode for this turn (composer "+" toggle / /research
+    // route). Like the built-in path, the transcript keeps what the user
+    // typed: the protocol rides the CLI-facing appendix (agent_sessions::
+    // research_directive), which reaches the model but is never persisted.
+    force_research: Option<bool>,
 ) -> Result<(), String> {
     // Snapshot the session's attached connectors (refreshing OAuth tokens)
     // BEFORE the sync spawn path — the CLIs only read static MCP config at
@@ -59,6 +64,15 @@ pub async fn send_agent_chat_message(
             (format!("{content}{display_extra}"), prompt)
         }
         _ => (content, String::new()),
+    };
+    let attach_prompt = if force_research.unwrap_or(false) {
+        format!(
+            "{}{}",
+            attach_prompt,
+            crate::agent_sessions::AgentSessionManager::research_directive()
+        )
+    } else {
+        attach_prompt
     };
     // Primer summary (engine-switch handoff): when a fresh CLI session is
     // about to lose older turns to the primer's char budget, pre-summarize
@@ -110,6 +124,23 @@ pub async fn cancel_agent_chat_message(
         .map_err(|e| format!("cancel task panicked: {e}"))?
 }
 
+/// Crash recovery for in-flight turns, called once when the frontend boots
+/// (fresh mount after an app launch or a webview reload). A turn's busy flag
+/// lives in backend memory: after a reload the chat looks empty yet rejects
+/// every send with "a turn is already running", and a panic-killed reader can
+/// wedge the flag permanently. Clears the flag for sessions whose reader and
+/// child process are both gone; genuinely running turns keep it. Returns the
+/// recovered chat session ids.
+#[tauri::command]
+pub async fn reconcile_agent_sessions(
+    state: State<'_, AgentSessionState>,
+) -> Result<Vec<String>, String> {
+    let mgr = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || Ok(mgr.reconcile_wedged_turns()))
+        .await
+        .map_err(|e| format!("reconcile task panicked: {e}"))?
+}
+
 /// The models/endpoint discovered in the CLI harness's own config files
 /// (settings.json / config.toml / opencode.json) — see harness_config.rs.
 ///
@@ -144,6 +175,12 @@ pub async fn list_harness_models(
     })
     .await
     .map_err(|e| format!("harness model probe join failed: {e}"))?;
+    // Don't cache an empty discovery result: a raced probe (CLI cold start,
+    // login refresh mid-run) would read as "zero models" for the whole TTL.
+    // Leaving the cache unwritten makes the next picker open re-probe.
+    if cfg.models.is_empty() {
+        return Ok(cfg);
+    }
     if let Ok(mut guard) = CACHE.lock() {
         guard.insert(harness_id, (Instant::now(), cfg.clone()));
     }

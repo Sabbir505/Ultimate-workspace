@@ -148,10 +148,13 @@ pub fn run_one_shot(
     // (spawn dir + artifacts dir) after the turn and surface created/modified
     // files.
     let watch_dirs = turn_watch_dirs(cwd, db);
-    if let Some(dir) = watch_dirs.first() {
+    if let Some((dir, _)) = watch_dirs.first() {
         cmd.current_dir(dir);
     }
-    let watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
+    let watches: Vec<DirWatch> = watch_dirs
+        .into_iter()
+        .map(|(dir, broad)| DirWatch::new(dir, broad))
+        .collect();
     no_console_window(&mut cmd);
     let mut child = cmd
         .spawn()

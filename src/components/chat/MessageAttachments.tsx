@@ -173,15 +173,22 @@ function FileGlyph({ kind }: { kind: ParsedAttachment["kind"] }) {
   );
 }
 
-/** A single attachment preview card. Images with a live thumbnail show it;
- *  otherwise a compact file row (small glyph, name, ext/label badge, and an
- *  optional content preview) — a full-height image tile on a text/doc card
- *  rendered as a huge empty block that broke the bubble layout. */
+/** A single attachment preview card. Images always keep the thumbnail-tile
+ *  silhouette — with the live base64 image when one exists, otherwise the
+ *  picture glyph in the tile — so an attachment stays recognizable as an
+ *  image across the optimistic→persisted transition instead of collapsing
+ *  into a generic file row (images are never persisted with their bytes, so
+ *  history can only show the placeholder). Docs/text render as a compact
+ *  document row (small glyph left, name + ext badge beside it, preview
+ *  clamped under). */
 function AttachmentPreviewCard({ att }: { att: ParsedAttachment }) {
   const isImage = att.kind === "image";
   const hasThumb = isImage && !!att.thumbDataUri;
   return (
-    <div className={`msg-attachment-card${hasThumb ? "" : " no-thumb"}`} title={att.name}>
+    <div
+      className={`msg-attachment-card${isImage ? "" : " no-thumb"}${hasThumb ? "" : isImage ? " img-placeholder" : ""}`}
+      title={att.name}
+    >
       <div className="msg-attachment-thumb">
         {hasThumb ? (
           <img src={att.thumbDataUri} alt={att.name} loading="lazy" />

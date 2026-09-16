@@ -171,9 +171,61 @@ pub fn delete_expired_artifacts(conn: &Connection) -> DbResult<Vec<String>> {
     Ok(paths)
 }
 
+/// Delete every row whose path is transient scratch (lock files, tmp
+/// intermediates — `is_temp` is the shared predicate), returning the number
+/// of rows removed. Only ROWS are deleted: unlike the expiry sweep, the
+/// files themselves live in the user's project/workspace dirs and stay.
+/// Runs at startup so rows recorded before the temp filter existed age out
+/// of the gallery immediately instead of lingering for the retention window.
+pub fn delete_temp_like_artifacts(
+    conn: &Connection,
+    mut is_temp: impl FnMut(&str) -> bool,
+) -> DbResult<usize> {
+    let paths: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT DISTINCT path FROM artifacts")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()?
+    };
+    let mut removed = 0usize;
+    for path in &paths {
+        if is_temp(path) {
+            removed += conn.execute("DELETE FROM artifacts WHERE path = ?1", params![path])?;
+        }
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temp_like_rows_are_swept_real_rows_stay() {
+        let conn = super::super::mem();
+        insert_artifact(&conn, Some("s1"), "tmp8f3a.png", "C:/out/tmp8f3a.png", "png").unwrap();
+        insert_artifact(
+            &conn,
+            Some("s1"),
+            "~$report.docx",
+            "C:/out/~$report.docx",
+            "docx",
+        )
+        .unwrap();
+        let real =
+            insert_artifact(&conn, Some("s1"), "report.docx", "C:/out/report.docx", "docx")
+                .unwrap();
+
+        let removed = delete_temp_like_artifacts(
+            &conn,
+            crate::chat::stream_events::is_temp_like_artifact,
+        )
+        .unwrap();
+
+        assert_eq!(removed, 2);
+        let list = list_artifacts(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, real.id);
+    }
 
     #[test]
     fn artifact_round_trip_and_expiry() {

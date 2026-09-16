@@ -224,10 +224,13 @@ pub(super) fn send_acp_turn(
             cmd.env(k, v);
         }
         let watch_dirs = turn_watch_dirs(cwd, &db.0);
-        if let Some(dir) = watch_dirs.first() {
+        if let Some((dir, _)) = watch_dirs.first() {
             cmd.current_dir(dir);
         }
-        let watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
+        let watches: Vec<DirWatch> = watch_dirs
+            .into_iter()
+            .map(|(dir, broad)| DirWatch::new(dir, broad))
+            .collect();
         no_console_window(&mut cmd);
         let mut child = cmd
             .spawn()

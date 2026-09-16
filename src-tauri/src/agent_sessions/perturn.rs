@@ -345,7 +345,7 @@ End your reply with the plan and wait for the user's approval.]"
     // afterwards and surface files the CLI created as artifacts (spawn dir +
     // the artifacts dir relay-tools MCP writes into, when different).
     let watch_dirs = turn_watch_dirs(cwd, &db.0);
-    if let Some(dir) = watch_dirs.first() {
+    if let Some((dir, _)) = watch_dirs.first() {
         cmd.current_dir(dir);
     }
     // PERF (audit MED-10): build the watches (a full per-dir tree snapshot)
@@ -356,7 +356,11 @@ End your reply with the plan and wait for the user's approval.]"
     // before the first parsed output.
     let watches_job = {
         let dirs = watch_dirs;
-        std::thread::spawn(move || dirs.into_iter().map(DirWatch::new).collect::<Vec<_>>())
+        std::thread::spawn(move || {
+            dirs.into_iter()
+                .map(|(dir, broad)| DirWatch::new(dir, broad))
+                .collect::<Vec<_>>()
+        })
     };
     no_console_window(&mut cmd);
     let mut child = cmd

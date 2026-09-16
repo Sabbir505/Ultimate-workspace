@@ -1406,8 +1406,9 @@ pub use chat::{
 
 // artifacts
 pub use artifacts::{
-    attach_artifacts_to_message, delete_artifact, delete_expired_artifacts, insert_artifact,
-    list_artifacts, list_artifacts_for_chat, list_artifacts_for_message,
+    attach_artifacts_to_message, delete_artifact, delete_expired_artifacts,
+    delete_temp_like_artifacts, insert_artifact, list_artifacts, list_artifacts_for_chat,
+    list_artifacts_for_message,
 };
 
 // source ledger (research mode)

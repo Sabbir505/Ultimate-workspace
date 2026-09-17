@@ -36,6 +36,7 @@ pub mod python_runtime;
 pub mod reconnect;
 pub mod stream_events;
 pub mod streaming;
+pub mod subagent_model;
 pub mod tasks;
 pub mod tools;
 pub mod totp;
@@ -53,8 +54,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 // System-prompt assembly (CORE prompt, STRICT addendum, tool guide, research
 // scaffolding, and the final assembler) lives in `prompts.rs`. Re-export the
-// two entry points that `commands.rs` calls via `crate::chat::*`.
-pub use prompts::{build_system_prompt, is_research_request};
+// entry points that `commands.rs` calls via `crate::chat::*`.
+pub use prompts::{build_system_prompt, is_research_request, strip_research_prefix};
 
 use crate::db;
 use crate::types::*;
@@ -442,10 +443,18 @@ impl ChatManager {
         // Cancel any existing stream for this session.
         self.cancel(&chat_session_id);
 
+        // Research turns synthesize their whole report — title, summary,
+        // findings, and the full Sources ledger — as ONE generate_file
+        // tool-call input, which shares the round's max_tokens. At the
+        // default 4096 the Anthropic path cuts that call off at
+        // stop_reason=max_tokens mid-JSON and the report arrives truncated
+        // (or not at all), which read as "research stops halfway". The cap
+        // is a ceiling, not a target: non-research turns keep 4096.
+        let max_tokens = if research_mode { 8192 } else { 4096 };
         let chat_req = ChatRequest {
             model,
             messages,
-            max_tokens: Some(4096),
+            max_tokens: Some(max_tokens),
             system: system.filter(|s| !s.trim().is_empty()),
             effort,
             thinking,
@@ -1209,17 +1218,33 @@ impl ChatManager {
                                 let report2 = report.clone();
                                 let orphan_numbers2 = orphan_numbers.clone();
                                 tauri::async_runtime::spawn(async move {
-                                    let verdicts = citation_verify::verify_via_provider(
-                                        &client2,
-                                        provider_id,
-                                        &base2,
-                                        &key2,
-                                        &model2,
-                                        &verify_claims,
+                                    // Bounded: this is a detached best-effort
+                                    // task on the shared (no-body-timeout)
+                                    // client — a wedged endpoint used to leak
+                                    // the task plus its AppHandle/DB clones for
+                                    // the process lifetime (audit M-4).
+                                    let verdicts = match tokio::time::timeout(
+                                        std::time::Duration::from_secs(120),
+                                        citation_verify::verify_via_provider(
+                                            &client2,
+                                            provider_id,
+                                            &base2,
+                                            &key2,
+                                            &model2,
+                                            &verify_claims,
+                                        ),
                                     )
-                                    .await;
-                                    let Ok(verdicts) = verdicts else {
-                                        return; // silent: verification is best-effort
+                                    .await
+                                    {
+                                        Ok(Ok(v)) => v,
+                                        Ok(Err(e)) => {
+                                            eprintln!("[citations] verify failed: {e}");
+                                            return;
+                                        }
+                                        Err(_) => {
+                                            eprintln!("[citations] verify timed out after 120s");
+                                            return;
+                                        }
                                     };
                                     let supported: Vec<u32> = verdicts
                                         .iter()
@@ -1358,6 +1383,14 @@ impl ChatManager {
                             }
                         });
                     }
+
+                    // Auto-distill the session abstract (throttled, background
+                    // task) so Session Mesh peers can glance at what this chat
+                    // covered without a manual read_session.
+                    crate::session_fabric::maybe_spawn_summary(
+                        &crate::DbState(std::sync::Arc::clone(&db)),
+                        &sid,
+                    );
                 }
                 Err(e) => {
                     // The stream failed (HTTP status, SSE stall, tool loop
@@ -1394,9 +1427,22 @@ impl ChatManager {
             crate::chat::turn_perf::unregister(&sid);
         });
 
-        self.streams
-            .lock()
-            .insert(chat_session_id.clone(), handle.abort_handle());
+        {
+            let mut streams = self.streams.lock();
+            let abort = handle.abort_handle();
+            // Insert only while the task is still alive: a fast failure let
+            // the task's own cleanup run BEFORE this insert, which used to
+            // register a dead handle — "turn in flight" forever, and a stale
+            // entry as the wrong cancel target when two sends overlap
+            // (audit M-2). The re-check closes the residual window where the
+            // task finished between the check and the insert.
+            if !handle.is_finished() {
+                streams.insert(chat_session_id.clone(), abort);
+            }
+            if handle.is_finished() {
+                streams.remove(&chat_session_id);
+            }
+        }
     }
 
     /// Whether `task_id` is still the registered stream for this session.
@@ -2194,6 +2240,39 @@ mod tests {
         // /research bypasses the single-fact guards even with no trigger phrase.
         assert!(is_research_request("/research the evolution of CPUs"));
         assert!(is_research_request("/Research something niche"));
+    }
+
+    #[test]
+    fn research_triggers_match_word_boundaries() {
+        // A trigger at the very END of the message (the old trailing-space
+        // substring match missed these).
+        assert!(is_research_request("please research"));
+        assert!(is_research_request("help me compare"));
+        assert!(is_research_request("Can you investigate?"));
+        // Whole words only: a word CONTAINING a trigger is not the trigger.
+        assert!(!is_research_request("the researcher joined the team"));
+        assert!(!is_research_request("a comparative literature degree"));
+    }
+
+    #[test]
+    fn strip_research_prefix_leaves_the_plain_topic() {
+        assert_eq!(
+            strip_research_prefix("/research the evolution of CPUs"),
+            "the evolution of CPUs"
+        );
+        assert_eq!(strip_research_prefix("/research: CRDTs"), "CRDTs");
+        assert_eq!(
+            strip_research_prefix("/Research 2042 AI benchmarks"),
+            "2042 AI benchmarks"
+        );
+        // Bare "/research" still asks for research — just without the token.
+        assert_eq!(
+            strip_research_prefix("/research"),
+            "Perform in-depth multi-source research on the topic of this conversation \
+             and write a cited report."
+        );
+        // No prefix: the content passes through untouched.
+        assert_eq!(strip_research_prefix("plain question"), "plain question");
     }
 
     #[test]

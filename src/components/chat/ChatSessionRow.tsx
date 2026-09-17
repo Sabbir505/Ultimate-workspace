@@ -5,9 +5,14 @@
 // unread, delete) on hover. Styled to match the existing .session-row and
 // .project-row patterns.
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Folder, GitBranch } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Folder, GitBranch, Pin } from "lucide-react";
 import { relativeTime } from "../../lib/relativeTime";
 import { sessionModelIcon } from "./agentIcons";
+import {
+  endChatSessionDrag,
+  startChatSessionDrag,
+} from "../../lib/chatPaneDnd";
 
 export interface ChatSessionRowData {
   id: string;
@@ -59,6 +64,8 @@ export function ChatSessionRow({
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAbove, setMenuAbove] = useState(false);
+  /** Fixed-viewport position for the portaled menu (null until measured). */
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(session.title);
   const rowRef = useRef<HTMLDivElement>(null);
@@ -84,11 +91,16 @@ export function ChatSessionRow({
     return () => ro.disconnect();
   }, [session.title]);
 
-  // Close the menu on any outside click / Escape.
+  // Close the menu on any outside click / Escape. The menu PORTALS to
+  // document.body (see below), so "inside" covers both the row (the ⋮
+  // toggle) and the portaled menu node.
   useEffect(() => {
     if (!menuOpen) return;
     const close = (e: MouseEvent) => {
-      if (rowRef.current && !rowRef.current.contains(e.target as Node)) setMenuOpen(false);
+      const t = e.target as Node;
+      if (rowRef.current?.contains(t)) return;
+      if (menuRef.current?.contains(t)) return;
+      setMenuOpen(false);
     };
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMenuOpen(false);
     document.addEventListener("mousedown", close);
@@ -106,31 +118,28 @@ export function ChatSessionRow({
     }
   }, [editing]);
 
-  // Flip the context menu upward when opening it downward would overflow the
-  // sidebar's scroll viewport (e.g. the row is the last in the list). The
-  // sidebar clips overflow, so a downward menu at the bottom is invisible —
-  // measure the button's position against the nearest scroll container and
-  // place the menu above the button when there's more room up than down.
+  // Position the portaled menu against the WINDOW. (It used to be absolutely
+  // positioned inside the row, but the sidebar's own backdrop-filter forms a
+  // backdrop root: the menu's frost could not sample anything past the
+  // sidebar and rendered as a near-transparent sheet — the rows behind read
+  // through it sharp. Portal + fixed positioning re-anchors it to the page,
+  // where the composer-grade glass actually blurs.) Flip above when the
+  // window edge is close — the old sidebar-scroll-viewport measurement is
+  // obsolete now that nothing clips the menu.
   useLayoutEffect(() => {
     if (!menuOpen) return;
     const btn = menuBtnRef.current;
     const menu = menuRef.current;
     if (!btn || !menu) return;
     const btnRect = btn.getBoundingClientRect();
-    // Walk up to the first scrollable ancestor to get the clipping viewport.
-    let scrollEl: HTMLElement | null = btn.parentElement;
-    while (scrollEl) {
-      const style = getComputedStyle(scrollEl);
-      if (/(auto|scroll)/.test(style.overflowY) && scrollEl.scrollHeight > scrollEl.clientHeight) {
-        break;
-      }
-      scrollEl = scrollEl.parentElement;
-    }
-    const view = scrollEl ?? document.documentElement;
-    const viewRect = view.getBoundingClientRect();
-    const spaceBelow = viewRect.bottom - btnRect.bottom;
-    const menuHeight = menu.offsetHeight;
-    setMenuAbove(spaceBelow < menuHeight + 8 && btnRect.top - viewRect.top > menuHeight + 8);
+    const menuH = menu.offsetHeight;
+    const menuW = menu.offsetWidth;
+    const margin = 8;
+    const above = window.innerHeight - btnRect.bottom < menuH + margin && btnRect.top > menuH + margin;
+    setMenuAbove(above);
+    const top = above ? btnRect.top - menuH - 4 : btnRect.bottom + 4;
+    const left = Math.max(margin, Math.min(btnRect.right - menuW, window.innerWidth - menuW - margin));
+    setMenuPos({ top, left });
   }, [menuOpen]);
 
   const openMenu = useCallback((e: React.MouseEvent) => {
@@ -166,15 +175,38 @@ export function ChatSessionRow({
       className={`chat-session-row${active ? " active" : ""}${session.unread ? " unread" : ""}${menuOpen ? " menu-open" : ""}`}
       onClick={() => !editing && onSelect(session.id)}
       title={session.title}
+      // Drag a session row onto any open chat pane's edge (left/right/top/
+      // bottom) to open it there. The payload is mirrored into the
+      // chatPaneDnd module store — dataTransfer is write-only during
+      // dragover, so the pane drop zones can't read it from the event.
+      draggable={!editing}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("application/x-relay-chat-session", session.id);
+        startChatSessionDrag(session.id);
+      }}
+      onDragEnd={endChatSessionDrag}
     >
-      {!working && session.starred && (
-        <span className="chat-session-star-badge" title="Starred">
-          ★
-        </span>
-      )}
-      {!working && session.unread && !session.starred && (
-        <span className="chat-session-unread-dot" aria-label="Unread" />
-      )}
+      {/* Left-edge quick pin: a fixed slot on every row so titles stay
+          aligned. At rest it only shows the unread dot (when present); hover
+          reveals the pin toggle, and pinned rows keep the filled pin visible
+          without hover. Same "keep at top" feature as the ⋮ menu item. */}
+      <button
+        type="button"
+        className={`chat-session-pin-btn${session.starred ? " pinned" : ""}`}
+        title={session.starred ? "Pinned to top — click to unpin" : "Pin to top"}
+        aria-label={session.starred ? "Unpin chat" : "Pin chat"}
+        aria-pressed={session.starred}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleStar(session.id, !session.starred);
+        }}
+      >
+        <Pin size={11} strokeWidth={2.2} {...(session.starred ? { fill: "currentColor" } : {})} />
+        {!session.starred && session.unread && (
+          <span className="chat-session-unread-dot" aria-label="Unread" />
+        )}
+      </button>
       <div className="chat-session-info">
         {/* Title + spinner/timer on the same row */}
         <div className="chat-session-title-row">
@@ -253,52 +285,62 @@ export function ChatSessionRow({
         </div>
       </div>
 
-      {menuOpen && (
-        <div
-          ref={menuRef}
-          className="chat-session-menu"
-          data-above={menuAbove ? "" : undefined}
-          role="menu"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            role="menuitem"
-            onClick={(e) => menuAction(e, () => onToggleStar(session.id, !session.starred))}
+      {menuOpen &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="chat-session-menu"
+            data-above={menuAbove ? "" : undefined}
+            role="menu"
+            style={{
+              position: "fixed",
+              top: menuPos?.top ?? 0,
+              left: menuPos?.left ?? 0,
+              // Hidden until the layout pass positions it — no flash at 0,0.
+              visibility: menuPos ? undefined : "hidden",
+              zIndex: 9999,
+            }}
+            onClick={(e) => e.stopPropagation()}
           >
-            <span className="chat-menu-icon">★</span>
-            {session.starred ? "Remove from top" : "Keep at top"}
-          </button>
-          <button role="menuitem" onClick={startRename}>
-            <span className="chat-menu-icon">✎</span>
-            Rename
-          </button>
-          <button
-            role="menuitem"
-            onClick={(e) => menuAction(e, () => onSetUnread(session.id, !session.unread))}
-          >
-            <span className="chat-menu-icon">●</span>
-            {session.unread ? "Mark as read" : "Mark as unread"}
-          </button>
-          <button role="menuitem" onClick={(e) => menuAction(e, () => onExport(session.id))}>
-            <span className="chat-menu-icon">↓</span>
-            Export as zip
-          </button>
-          {onOpenSplit && (
-            <button role="menuitem" onClick={(e) => menuAction(e, () => onOpenSplit(session.id))}>
-              <span className="chat-menu-icon">⧉</span>
-              Open in split view
+            <button
+              role="menuitem"
+              onClick={(e) => menuAction(e, () => onToggleStar(session.id, !session.starred))}
+            >
+              <span className="chat-menu-icon">★</span>
+              {session.starred ? "Remove from top" : "Keep at top"}
             </button>
-          )}
-          <button
-            role="menuitem"
-            className="danger"
-            onClick={(e) => menuAction(e, () => onDelete(session.id))}
-          >
-            <span className="chat-menu-icon">🗑</span>
-            Delete
-          </button>
-        </div>
-      )}
+            <button role="menuitem" onClick={startRename}>
+              <span className="chat-menu-icon">✎</span>
+              Rename
+            </button>
+            <button
+              role="menuitem"
+              onClick={(e) => menuAction(e, () => onSetUnread(session.id, !session.unread))}
+            >
+              <span className="chat-menu-icon">●</span>
+              {session.unread ? "Mark as read" : "Mark as unread"}
+            </button>
+            <button role="menuitem" onClick={(e) => menuAction(e, () => onExport(session.id))}>
+              <span className="chat-menu-icon">↓</span>
+              Export as zip
+            </button>
+            {onOpenSplit && (
+              <button role="menuitem" onClick={(e) => menuAction(e, () => onOpenSplit(session.id))}>
+                <span className="chat-menu-icon">⧉</span>
+                Open in new pane
+              </button>
+            )}
+            <button
+              role="menuitem"
+              className="danger"
+              onClick={(e) => menuAction(e, () => onDelete(session.id))}
+            >
+              <span className="chat-menu-icon">🗑</span>
+              Delete
+            </button>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

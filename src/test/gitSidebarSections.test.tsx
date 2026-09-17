@@ -216,3 +216,62 @@ describe("GitToolsSidebar — section disclosure", () => {
     expect(screen.queryByText("master")).toBeNull();
   });
 });
+
+describe("GitToolsSidebar — collapsed task pill", () => {
+  beforeEach(() => {
+    useUiStore.setState({ gitSidebarCollapsed: true });
+    useChatStore.setState({
+      activeChatSessionId: "sess-task",
+      sessionProjects: {},
+      sessions: [
+        { id: "sess-task", title: "t", provider: "openai", model: "m", createdAt: 1, lastActiveAt: 2 } as ChatSession,
+      ],
+      tasks: {},
+      planSteps: {
+        "sess-task": [
+          { stepId: "p1", label: "Locate an existing image asset", status: "in_progress", source: "todo_write", planIndex: 0, stepIndex: 0 },
+          { stepId: "p2", label: "Second step", status: "pending", source: "todo_write", planIndex: 0, stepIndex: 1 },
+        ],
+      },
+      subagents: {},
+      messages: [],
+    });
+    useProjectsStore.setState({ projects: [], gitStatuses: {} });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("renders the current task as a pill with the arrow INSIDE the capsule, and clicking it expands the sidebar", () => {
+    render(<GitToolsSidebar />);
+    const pill = screen.getByRole("button", { name: /expand git tools — current task/i });
+    // The arrow is a descendant of the pill button — it must never render as
+    // a detached sibling outside the capsule border.
+    expect(pill.querySelector(".git-sidebar-task-pill-arrow")).not.toBeNull();
+    expect(pill.textContent).toContain("Locate an existing image asset");
+    fireEvent.click(pill);
+    expect(useUiStore.getState().gitSidebarCollapsed).toBe(false);
+  });
+
+  it("prefers the in-progress step as the pill label", () => {
+    render(<GitToolsSidebar />);
+    expect(
+      screen.getByRole("button", { name: /current task: Locate an existing image asset/i }),
+    ).toBeTruthy();
+  });
+
+  it("falls back to the next pending step when nothing is in progress", () => {
+    useChatStore.setState({
+      planSteps: {
+        "sess-task": [
+          { stepId: "p2", label: "Second step", status: "pending", source: "todo_write", planIndex: 0, stepIndex: 1 },
+        ],
+      },
+    });
+    render(<GitToolsSidebar />);
+    expect(
+      screen.getByRole("button", { name: /current task: Second step/i }),
+    ).toBeTruthy();
+  });
+});

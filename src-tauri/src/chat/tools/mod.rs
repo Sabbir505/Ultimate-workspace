@@ -726,11 +726,14 @@ const RUN_SHELL_DESC: &str = "Run a native shell command (cmd.exe / sh) with \
     (that is open_file's job). ALWAYS approval-gated. Prefer download_file \
     for plain URL downloads and run_code for short snippets.";
 
-const TASK_DESC: &str = "Spawn a focused subagent that runs ONE task with its \
+const TASK_DESC: &str = "Spawn a focused IN-SESSION subagent that runs ONE task with its \
     own model turn and reports back — delegate self-contained sub-tasks \
     (explore a codebase, research a topic, draft a section) so the main turn \
-    stays lean. Runs the SAME provider+model as this session; output streams \
-    live to the Agents panel; the final text is returned as the tool result. \
+    stays lean. The subagent lives inside THIS conversation (a chip in the \
+    chat, NOT a new sidebar session — that is spawn_session) and its final \
+    text returns directly as this tool's result. Runs this session's \
+    provider+model by default; pass `model` to override. Output streams \
+    live to the Agents panel. \
     For INDEPENDENT subtasks, call Task multiple times in the same turn — the \
     calls run in parallel (subagents have read-only tools: they can read files \
     and fetch pages); only sequence them when one subtask genuinely depends on \
@@ -789,7 +792,11 @@ const ENTER_PLAN_MODE_DESC: &str = "Switch this session into plan mode before \
     requirements, or hard-to-reverse actions (deletes, moves, migrations, \
     shell commands). In plan mode you research with read-only tools (file \
     reads, search, web) — mutating tools are blocked until the user approves a \
-    plan via present_plan. Do NOT use it for quick questions, single-file \
+    plan via present_plan. Only enter plan mode when the user explicitly asked \
+    to plan first or the work genuinely needs sign-off before anything is \
+    touched — NEVER on your own initiative for an ordinary request: it blocks \
+    mutations and pops an approval card the user didn't ask for. Do NOT use it \
+    for quick questions, single-file \
     tweaks, or pure research; and if you have ALREADY started making changes, \
     keep going and track progress with todo_write instead.";
 

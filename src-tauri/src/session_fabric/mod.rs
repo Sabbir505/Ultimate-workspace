@@ -66,6 +66,19 @@ fn mesh_disabled_note() -> String {
         .to_string()
 }
 
+/// Harness families that carry the relay-tools MCP server through per-turn
+/// Relay-owned config files (claude/kimi/opencode). commandcode carries it
+/// too — but via a registration in its OWN config (`ensure_commandcode_
+/// bridge`, verified dynamically per turn since there is no per-turn config
+/// flag), and pi/omp have no MCP support at all, so every prompt that
+/// advertises message_session/spawn_session must be gated on what the
+/// caller actually verified. Advertising the tools to a CLI that doesn't
+/// have them produced exactly that: the model correctly reporting
+/// "I have no relay-tools session spawn".
+pub fn harness_has_relay_tools(harness: &str) -> bool {
+    matches!(harness, "claude_code" | "kimi_code" | "opencode")
+}
+
 // ── Runtime state ─────────────────────────────────────────────────────────
 
 /// Tauri-managed mesh runtime. Everything here is process-local bookkeeping;
@@ -152,9 +165,20 @@ pub fn registry_block(conn: &Connection, self_sid: Option<&str>) -> Option<Strin
             .as_deref()
             .map(|pid| project_label(conn, pid))
             .unwrap_or_else(|| "no project".to_string());
-        let sum = summary_of(&p.id)
-            .map(|s| crate::util::truncate_chars(&s, 110))
-            .unwrap_or_else(|| "no summary yet".to_string());
+        let sum = match summary_of(&p.id) {
+            Some(s) => crate::util::truncate_chars(&s, 110),
+            None => {
+                // Glanceability before the distillation lands: the tail of
+                // the peer's latest reply stands in for the missing
+                // abstract, so a registry line is never a dead "no summary
+                // yet".
+                store::last_assistant_message_after(conn, &p.id, 0)
+                    .ok()
+                    .flatten()
+                    .map(|t| format!("last: {}", crate::util::truncate_chars(t.trim(), 100)))
+                    .unwrap_or_else(|| "no summary yet".to_string())
+            }
+        };
         lines.push(format!(
             "- \"{}\" (id {}…, {}, {}, idle {}) — {}",
             title,
@@ -180,7 +204,11 @@ pub fn registry_block(conn: &Connection, self_sid: Option<&str>) -> Option<Strin
          Nearby peers (same project first; `list_sessions` for the full index, \
          `read_session`/`search_sessions` for depth):\n{}\n\
          Peers are separate conversations with the same user. Consult them instead of \
-         guessing what happened elsewhere; ask before duplicating in-progress work.",
+         guessing what happened elsewhere; ask before duplicating in-progress work. \
+         spawn_session accepts `model` (bare id, \"provider::model\", or an engine \
+         pair like \"claude_code::sonnet\") — delegate to a different model or CLI \
+         engine than yours when the task warrants it (cheap models for mechanical \
+         sub-work); the app-wide default is Settings → Subagent model.",
         lines.join("\n")
     ))
 }
@@ -196,14 +224,82 @@ fn project_label(conn: &Connection, project_id: &str) -> String {
     .unwrap_or_else(|| format!("project {}", &project_id[..project_id.len().min(8)]))
 }
 
+/// "While you were away" — the workspace-level bridge. Lists same-project
+/// sibling sessions whose last activity is NEWER than this session's last
+/// completed turn, each with its distilled abstract (or, before one
+/// exists, the tail of its latest reply). Injected into the NEXT turn's
+/// context by both the built-in loop and the harness send paths, so
+/// switching between sessions no longer means the new session has zero
+/// idea what was decided elsewhere. None when the mesh is off, this
+/// session never finished a turn (no "left off" to resume from), or no
+/// peer moved since.
+pub fn workspace_update_block(conn: &Connection, self_sid: &str) -> Option<String> {
+    if !mesh_enabled(conn) {
+        return None;
+    }
+    let self_row = crate::db::get_chat_session(conn, self_sid).ok().flatten()?;
+    // No completed turns yet → there is no "left off" to resume from; the
+    // first turn's own instructions already carry the task context, and a
+    // zero baseline would otherwise list EVERY peer as new.
+    let my_last_turn = store::last_message_created_at(conn, self_sid).ok()?;
+    if my_last_turn == 0 {
+        return None;
+    }
+    let peers = store::peers_active_since(
+        conn,
+        self_sid,
+        self_row.project_id.as_deref(),
+        my_last_turn,
+        3,
+    )
+    .ok()?;
+    if peers.is_empty() {
+        return None;
+    }
+    let ids: Vec<String> = peers.iter().map(|p| p.id.clone()).collect();
+    let summaries = store::summaries_for(conn, &ids).unwrap_or_default();
+    let mut lines = Vec::new();
+    for p in peers {
+        let title = p.title.clone().unwrap_or_else(|| "(untitled)".into());
+        let distilled = summaries
+            .iter()
+            .find(|s| s.chat_session_id == p.id)
+            .map(|s| crate::util::truncate_chars(s.summary.as_str(), 140));
+        let what = match distilled {
+            Some(s) => s,
+            None => store::last_assistant_message_after(conn, &p.id, 0)
+                .ok()
+                .flatten()
+                .map(|t| crate::util::truncate_chars(t.trim(), 140))
+                .unwrap_or_else(|| "no captured output".to_string()),
+        };
+        lines.push(format!(
+            "- \"{}\" (id {}…, active {}): {}",
+            title,
+            &p.id[..p.id.len().min(8)],
+            age_str(p.last_active_at),
+            what
+        ));
+    }
+    Some(format!(
+        "[Relay workspace update — since your last turn, sibling sessions in this \
+         workspace moved:\n{}\nConsult them before redoing work (read_session for \
+         depth, message_session to ask); this notice is informational only and is \
+         NOT typed by the user.]",
+        lines.join("\n")
+    ))
+}
+
 /// Compact PER-TURN mesh hint for RESUMED harness CLI sessions. The full
 /// registry rides a fresh session's first-turn instructions only, and a
 /// resumed chat (app restarted, days later) then had the mesh TOOLS but no
 /// prompting connecting "what did we do last session" to them — it answered
 /// from its own CLI's session data instead. Cheap (one line), rides every
-/// turn like RELAY_ASK_DIRECTIVE. None when the mesh is disabled.
-pub fn resumed_turn_hint(conn: &Connection, self_sid: &str) -> Option<String> {
-    if !mesh_enabled(conn) {
+/// turn like RELAY_ASK_DIRECTIVE. None when the mesh is disabled or the
+/// caller reports no relay-tools for this harness (prompt-only CLIs have no
+/// mesh tools to steer into).
+pub fn resumed_turn_hint(conn: &Connection, has_relay_tools: bool, self_sid: &str) -> Option<String> {
+    if !mesh_enabled(conn) || !has_relay_tools {
         return None;
     }
     Some(format!(
@@ -232,12 +328,34 @@ fn age_str(ts: i64) -> String {
 
 // ── Summary worker (lazy distillation) ────────────────────────────────────
 
+/// Per-session last summary attempt. A turn END marks the stored abstract
+/// stale (last_active_at moves past it), so without this window every turn
+/// completion would re-summarize and burn provider tokens on each reply.
+const SUMMARY_ATTEMPT_WINDOW: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+static SUMMARY_ATTEMPTS: std::sync::OnceLock<Mutex<HashMap<String, std::time::Instant>>> =
+    std::sync::OnceLock::new();
+
+fn summary_attempts() -> &'static Mutex<HashMap<String, std::time::Instant>> {
+    SUMMARY_ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Spawn a background summarizer when this session's abstract is missing or
-/// stale and the session has enough content to be worth one. Called lazily
-/// from the registry block / `list_sessions` / after mesh-triggered turns —
-/// never from a turn's critical path.
+/// stale and the session has enough content to be worth one. Called from the
+/// turn-completion hooks (harness `finish_turn` and the built-in done path —
+/// one call per session per window, throttled) and lazily from the registry
+/// block / `list_sessions` / after mesh-triggered turns. Never blocks the
+/// turn: the distillation runs on its own task.
 pub fn maybe_spawn_summary(db: &DbState, sid: &str) {
     let should = {
+        // Throttle FIRST (cheap, in-memory): even a session being hammered
+        // turn after turn summarizes at most once per window.
+        let mut attempts = summary_attempts().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = attempts.get(sid) {
+            if at.elapsed() < SUMMARY_ATTEMPT_WINDOW {
+                return;
+            }
+        }
+        attempts.insert(sid.to_string(), std::time::Instant::now());
         let conn = db.0.lock();
         if !mesh_enabled(&conn) {
             return;
@@ -267,7 +385,10 @@ pub fn maybe_spawn_summary(db: &DbState, sid: &str) {
 }
 
 /// Build and store the abstract for one session. Best-effort: every failure
-/// is silent (the next lazy trigger retries).
+/// is silent (the next window retries). The summarizer model resolves from
+/// the dedicated cloud summarizer settings first, then falls back to the
+/// session's own provider/model — a relay-only setup (openai_compatible
+/// with no Anthropic/OpenAI/OpenRouter key) previously summarized NOTHING.
 async fn summarize_session(db: &DbState, sid: &str) -> Result<(), String> {
     let transcript = {
         let conn = db.0.lock();
@@ -278,8 +399,11 @@ async fn summarize_session(db: &DbState, sid: &str) -> Result<(), String> {
     }
     let (provider_id, base, api_key, model) = {
         let conn = db.0.lock();
-        crate::chat::commands::resolve_cloud_summarizer(&conn)
-            .ok_or_else(|| "no cloud provider configured for summarization".to_string())?
+        match crate::chat::commands::resolve_cloud_summarizer(&conn) {
+            Some(resolved) => resolved,
+            None => crate::chat::commands::resolve_session_summarizer(&conn, sid)
+                .ok_or_else(|| "no provider configured for summarization".to_string())?,
+        }
     };
     let entry = crate::chat::compaction::CompactionEntry {
         id: 0,
@@ -661,8 +785,13 @@ async fn mesh_message_session(app: &AppHandle, caller_sid: Option<&str>, args: &
     // Guards: rate limit, target existence, depth chain.
     let (target_exists, depth) = {
         let conn = db.0.lock();
-        let sent = store::count_mail_from_since(&conn, &from, crate::db::now_ts() - 3600)
-            .unwrap_or(MAX_MAIL_PER_HOUR);
+        let sent = match store::count_mail_from_since(&conn, &from, crate::db::now_ts() - 3600) {
+            Ok(n) => n,
+            // A transient DB read failure used to report "rate limit reached"
+            // — fail-closed with a message that sent the model waiting for a
+            // limit that wasn't real (audit L-2).
+            Err(e) => return format!("Error: could not check the mail rate limit: {e}"),
+        };
         if sent >= MAX_MAIL_PER_HOUR {
             return format!(
                 "Error: mail rate limit reached ({MAX_MAIL_PER_HOUR} messages/hour). \
@@ -866,12 +995,31 @@ async fn watch_answer(app: AppHandle, mail: store::MailRow, watermark: i64) {
                 deadline = std::time::Instant::now()
                     + std::time::Duration::from_secs(WATCHER_CEILING_SECS);
             } else {
-                let db = app.state::<DbState>();
-                let conn = db.0.lock();
-                let _ = store::set_mail_status(&conn, &mail.id, store::MAIL_EXPIRED, None);
-                drop(conn);
-                emit_mail_status(&app, &mail, store::MAIL_EXPIRED, None);
-                resolve_waiter(&app, &mail.id, None);
+                // Scoped: State/MutexGuard are not Send — nothing may be held
+                // across the push_follow_up_answer await below.
+                let had_live_waiter = {
+                    let db = app.state::<DbState>();
+                    let conn = db.0.lock();
+                    let _ = store::set_mail_status(&conn, &mail.id, store::MAIL_EXPIRED, None);
+                    drop(conn);
+                    emit_mail_status(&app, &mail, store::MAIL_EXPIRED, None);
+                    resolve_waiter(&app, &mail.id, None)
+                };
+                if !had_live_waiter {
+                    // The tool call already returned (timeout / queued path),
+                    // and `message_session` promised the answer would arrive
+                    // as a follow-up turn. At final expiry push an explicit
+                    // expiry notice instead of letting the promise dangle
+                    // silently (audit L-1).
+                    push_follow_up_answer(
+                        &app,
+                        &mail,
+                        "(No answer arrived within the 30-minute watch window — \
+                         this session may still answer later; use read_session \
+                         for its latest output.)",
+                    )
+                    .await;
+                }
                 return;
             }
         }
@@ -943,6 +1091,79 @@ async fn push_follow_up_answer(app: &AppHandle, mail: &store::MailRow, answer: &
         }
         Err(_) => {} // audit row lost — the answer still sits in the original mail
     }
+}
+
+/// Watch one freshly spawned child's first (task) turn and notify-mail its
+/// result back to the parent session. Without this a background spawn is
+/// fire-and-forget: the child finishes and the parent session never learns
+/// the outcome unless the user relays it manually. The notify mail arrives as
+/// a turn in the parent (busy parent → the pump delivers it after its current
+/// turn) — the same path late question answers ride. Bounded like
+/// watch_answer: one re-arm while the child is still busy; on the second
+/// expiry the parent gets a "still working" notice instead of silence.
+fn spawn_spawn_result_reporter(app: AppHandle, parent: String, child_id: String) {
+    tauri::async_runtime::spawn(async move {
+        let mut deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(WATCHER_CEILING_SECS);
+        // Give the turn time to actually start before polling for its end.
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_MS * 2)).await;
+        let mut rearmed = false;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                if !rearmed && session_busy(&app, &child_id) {
+                    rearmed = true;
+                    deadline = std::time::Instant::now()
+                        + std::time::Duration::from_secs(WATCHER_CEILING_SECS);
+                } else {
+                    break;
+                }
+            }
+            if !session_busy(&app, &child_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
+        }
+        // Turn ended (or ceiling hit) — grace for the final row to persist.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let db = app.state::<DbState>();
+        let (result, depth) = {
+            let conn = db.0.lock();
+            (
+                store::last_assistant_message_after(&conn, &child_id, 0)
+                    .ok()
+                    .flatten(),
+                store::spawn_depth(&conn, &child_id).unwrap_or(1),
+            )
+        };
+        let still_busy = session_busy(&app, &child_id);
+        let body = if still_busy {
+            format!(
+                "Your spawned session is STILL working on the delegated task (~{} min \
+                 elapsed). Its result will not be reported again — read it later with \
+                 read_session(session_id=\"{child_id}\", mode=\"recent_turns\").",
+                WATCHER_CEILING_SECS * 2 / 60
+            )
+        } else {
+            match result {
+                Some(r) if !r.trim().is_empty() => format!(
+                    "Task result from your spawned session:\n\n{}",
+                    crate::util::truncate_chars(&r, MAX_MAIL_CHARS)
+                ),
+                _ => "Your spawned session ended its task turn without producing output."
+                    .to_string(),
+            }
+        };
+        drop(db);
+        let mail = {
+            let db = app.state::<DbState>();
+            let conn = db.0.lock();
+            store::insert_mail(&conn, &child_id, &parent, "notify", &body, depth)
+        };
+        if let Ok(m) = mail {
+            emit_mail(&app, &m);
+            let _ = deliver_or_queue(&app, &m).await;
+        }
+    });
 }
 
 /// Resolve a parked question tool call. Returns true when a live receiver
@@ -1119,35 +1340,78 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
         Ok(Some(r)) => r,
         _ => return "Error: parent session not found.".into(),
     };
-    // Inherit the parent's engine unless the caller named one. Cross-harness
-    // delegation (claude → opencode) is the point; accept any harness id the
-    // session registry knows.
-    let agent = agent_arg.unwrap_or_else(|| {
-        parent_row
-            .agent
-            .clone()
-            .unwrap_or_else(|| "builtin".to_string())
+    // Subagent-model orchestration: an explicit `model` tool arg wins, then
+    // the Settings pick (`chat.subagentModel`), then the parent's model.
+    // A pick naming a CLI engine (`claude_code::sonnet`) re-homes the child
+    // onto that engine unless the caller named one explicitly — cross-engine
+    // delegation via `agent` always wins, and a mismatched pick's model is
+    // dropped (its model ids belong to its own engine).
+    let model_pick = {
+        let conn = db.0.lock();
+        crate::chat::subagent_model::pick_for_call(&conn, args)
+    };
+    // A local_gguf pick only holds while the sidecar is actually serving
+    // that model — otherwise the child's first turn would die on a dead
+    // base URL. Drop to the parent's resolution (logged).
+    let model_pick = model_pick.and_then(|p| {
+        if p.provider.as_deref() != Some("local_gguf") {
+            return Some(p);
+        }
+        let running = app
+            .try_state::<crate::chat::local_models::LocalModelState>()
+            .and_then(|s| s.0.status())
+            .map_or(false, |a| a.model_id == p.model);
+        if running {
+            Some(p)
+        } else {
+            eprintln!(
+                "[subagent-model] local_gguf::{} ignored — sidecar not running it",
+                p.model
+            );
+            None
+        }
     });
-    let agent = if agent.contains(':') || agent == "builtin" || agent == "local" {
-        agent
-    } else {
-        format!("harness:{agent}")
+    let pick_engine_id = model_pick
+        .as_ref()
+        .and_then(crate::chat::subagent_model::pick_engine);
+    let normalize_agent = |a: String| -> String {
+        if a.contains(':') || a == "builtin" || a == "local" {
+            a
+        } else {
+            format!("harness:{a}")
+        }
+    };
+    let agent = match agent_arg {
+        Some(a) => normalize_agent(a),
+        None => match pick_engine_id {
+            Some(e) => e,
+            None => normalize_agent(
+                parent_row
+                    .agent
+                    .clone()
+                    .unwrap_or_else(|| "builtin".to_string()),
+            ),
+        },
+    };
+    let model_pick_for_child = model_pick.filter(|p| {
+        crate::chat::subagent_model::pick_engine(p).map_or(true, |e| e == agent)
+    });
+    let harness_child = agent.starts_with("harness:") || agent.starts_with("acp:");
+    let (provider, model) = {
+        let conn = db.0.lock();
+        crate::chat::subagent_model::resolve_spawn_model(
+            &conn,
+            &parent_row.provider,
+            &parent_row.model,
+            harness_child,
+            model_pick_for_child,
+        )
     };
 
     let child = {
         let conn = db.0.lock();
         // `create_chat_session` writes full-auto defaults, matching how the
         // composer creates chats.
-        let provider = if agent == "builtin" || agent == "local" {
-            parent_row.provider.clone()
-        } else {
-            parent_row.provider.clone()
-        };
-        let model = if !parent_row.model.is_empty() {
-            parent_row.model.clone()
-        } else {
-            "auto".to_string()
-        };
         let row = crate::db::create_chat_session(&conn, &provider, &model, parent_row.project_id.as_deref());
         match row {
             Ok(mut r) => {
@@ -1172,6 +1436,7 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             child_session_id: child.id.clone(),
             title: child.title.clone().unwrap_or_else(|| "spawned session".into()),
             agent: agent.clone(),
+            model: child.model.clone(),
         },
     );
 
@@ -1196,15 +1461,23 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
     }
 
     if !wait {
+        // The child reports its result back into this session when the task
+        // turn finishes — without this a background spawn is silent forever
+        // and the parent never learns the outcome.
+        spawn_spawn_result_reporter(app.clone(), parent.clone(), child.id.clone());
         return format!(
-            "Spawned session \"{}\" (id {}). It received the task as its first turn and \
-             is running — the user can watch it in the sidebar. Message it with \
+            "Spawned session \"{}\" (id {}, engine {}, model {}). It received the task \
+             as its first turn and is running — the user can watch it in the sidebar. \
+             When it finishes the task, its result is automatically messaged back into \
+             this session. You can also message it with \
              message_session(session_id=\"{}\") or read its output with \
              read_session(session_id=\"{}\", mode=\"recent_turns\").",
             child.title.clone().unwrap_or_default(),
             child.id,
+            agent,
+            child.model,
             child.id,
-            child.id
+            child.id,
         );
     }
 
@@ -1229,13 +1502,20 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             child.id,
             crate::util::truncate_chars(&r, 6_000)
         ),
-        None => format!(
-            "Spawned session \"{}\" (id {}) started; no output captured yet — read it \
-             later with read_session(session_id=\"{}\").",
-            child.title.clone().unwrap_or_default(),
-            child.id,
-            child.id
-        ),
+        None => {
+            // The wait window elapsed while the child is still running —
+            // report its result back here when the turn finishes, instead of
+            // leaving the outcome dangling.
+            spawn_spawn_result_reporter(app.clone(), parent.clone(), child.id.clone());
+            format!(
+                "Spawned session \"{}\" (id {}) started; no output captured yet — its \
+                 result will be messaged back into this session when the turn finishes, \
+                 or read it later with read_session(session_id=\"{}\").",
+                child.title.clone().unwrap_or_default(),
+                child.id,
+                child.id
+            )
+        }
     }
 }
 
@@ -1728,5 +2008,78 @@ mod tests {
         assert!(!is_busy_race_error("failed to spawn claude CLI: not found"));
         assert!(!is_busy_race_error("target session vanished"));
         assert!(!is_busy_race_error(""));
+    }
+
+    fn insert_message(conn: &Connection, sid: &str, role: &str, content: &str, at: i64) {
+        conn.execute(
+            "INSERT INTO chat_messages (chat_session_id, role, content, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![sid, role, content, at],
+        )
+        .unwrap();
+    }
+
+    /// The workspace update is the automatic bridge: same-project siblings
+    /// that moved AFTER this session's last completed turn appear with their
+    /// distilled abstract; peers in other projects and peers that went quiet
+    /// BEFORE the last turn must not.
+    #[test]
+    fn workspace_update_lists_same_project_peers_active_since_my_last_turn() {
+        let conn = mem_conn();
+        seed(&conn, "me", "Me", Some("p1"), None);
+        insert_message(&conn, "me", "assistant", "my last turn", 100);
+        // Same-project peer moved after my last turn.
+        seed(&conn, "moved", "Moved peer", Some("p1"), None);
+        conn.execute("UPDATE chat_sessions SET last_active_at = 150 WHERE id = 'moved'", []).unwrap();
+        insert_message(&conn, "moved", "assistant", "Decided: SQLite FTS for search.", 140);
+        // Different project — different workspace, must not appear.
+        seed(&conn, "elsewhere", "Elsewhere peer", Some("p9"), None);
+        conn.execute("UPDATE chat_sessions SET last_active_at = 160 WHERE id = 'elsewhere'", []).unwrap();
+        // Same project but quiet BEFORE my last turn — not news.
+        seed(&conn, "stale", "Stale peer", Some("p1"), None);
+        conn.execute("UPDATE chat_sessions SET last_active_at = 50 WHERE id = 'stale'", []).unwrap();
+
+        let block = workspace_update_block(&conn, "me").expect("moved peer → block");
+        assert!(block.contains("Moved peer"), "{block}");
+        assert!(block.contains("Decided: SQLite FTS"), "{block}");
+        assert!(!block.contains("Elsewhere peer"), "{block}");
+        assert!(!block.contains("Stale peer"), "{block}");
+    }
+
+    /// A session that never finished a turn has no "left off" baseline — the
+    /// block must not fire (a zero timestamp would list EVERY peer as new
+    /// and bury a brand-new chat's first turn in foreign context).
+    #[test]
+    fn workspace_update_skips_sessions_that_never_finished_a_turn() {
+        let conn = mem_conn();
+        seed(&conn, "fresh", "Fresh", Some("p1"), None);
+        seed(&conn, "moved", "Moved peer", Some("p1"), None);
+        conn.execute("UPDATE chat_sessions SET last_active_at = 500 WHERE id = 'moved'", []).unwrap();
+        assert!(workspace_update_block(&conn, "fresh").is_none());
+    }
+
+    /// Glanceability ladder: the distilled abstract wins when it exists;
+    /// otherwise the peer's latest reply tail stands in; otherwise a clear
+    /// "no captured output".
+    #[test]
+    fn workspace_update_prefers_summary_over_raw_tail() {
+        let conn = mem_conn();
+        seed(&conn, "me", "Me", Some("p1"), None);
+        insert_message(&conn, "me", "assistant", "x", 100);
+        seed(&conn, "moved", "Moved peer", Some("p1"), None);
+        conn.execute("UPDATE chat_sessions SET last_active_at = 150 WHERE id = 'moved'", []).unwrap();
+        store::upsert_session_summary(&conn, "moved", "Refactored the auth module.", "", None).unwrap();
+        insert_message(&conn, "moved", "assistant", "raw tail text", 140);
+
+        let block = workspace_update_block(&conn, "me").unwrap();
+        assert!(block.contains("Refactored the auth module."), "{block}");
+        assert!(!block.contains("raw tail text"), "{block}");
+
+        // No summary stored → raw tail fallback.
+        seed(&conn, "moved2", "Raw peer", Some("p1"), None);
+        conn.execute("UPDATE chat_sessions SET last_active_at = 160 WHERE id = 'moved2'", []).unwrap();
+        insert_message(&conn, "moved2", "assistant", "raw only", 150);
+        let block = workspace_update_block(&conn, "me").unwrap();
+        assert!(block.contains("raw only"), "{block}");
     }
 }

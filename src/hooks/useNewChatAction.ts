@@ -9,6 +9,7 @@ import { useCallback } from "react";
 import { useChatStore } from "../state/chat";
 import { useUiStore } from "../state/ui";
 import { seedSelectionFrom } from "../lib/lastSelection";
+import { toastError } from "../lib/ipc";
 
 export function useNewChatAction() {
   const newChat = useChatStore((s) => s.newChat);
@@ -18,8 +19,10 @@ export function useNewChatAction() {
 
   return useCallback(() => {
     const seed = seedSelectionFrom(lastSelection, chatConfig);
-    void newChat(seed.provider, seed.model, undefined, seed.agent).then((session) => {
-      if (session) setActiveView("chat");
-    });
+    newChat(seed.provider, seed.model, undefined, seed.agent)
+      .then((session) => {
+        if (session) setActiveView("chat");
+      })
+      .catch((e) => toastError("Couldn't create the chat", e));
   }, [newChat, lastSelection, chatConfig, setActiveView]);
 }

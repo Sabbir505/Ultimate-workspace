@@ -254,7 +254,7 @@ export function Sidebar() {
 
   const handleDeleteChat = useCallback(
     (id: string) => {
-      void deleteChat(id);
+      deleteChat(id).catch((e) => toastError("Couldn't delete the chat", e));
     },
     [deleteChat],
   );
@@ -288,15 +288,11 @@ export function Sidebar() {
       .catch((err) => toastError("Chat export failed", err));
   }, []);
 
-  // Open the chat in the split pane beside the main view; clicking the item
-  // for the already-split chat closes the pane (toggle).
+  // Open the chat in a NEW split pane beside the focused one; clicking the
+  // item for a chat that's already pinned in a pane closes that pane (toggle
+  // — decided inside the store action).
   const handleOpenSplitChat = useCallback((id: string) => {
-    const chat = useChatStore.getState();
-    if (chat.splitChatSessionId === id) {
-      chat.closeChatSplit();
-    } else {
-      chat.openChatSplit(id);
-    }
+    void useChatStore.getState().openChatSplit(id);
   }, []);
 
   useEffect(() => {

@@ -48,6 +48,11 @@ pub const GPU_DIR_KEY: &str = "tts.gpuDir";
 /// Progress id shared by both halves of the GPU runtime install.
 pub const GPU_INSTALL_ID: &str = "tts-gpu-runtime";
 
+/// Version of the pinned CUDA bundle below — the "latest version" the build
+/// updater (`check_build_updates`) compares against the install's marker.
+/// Bump together with GPU_BUNDLE_URL/DIR.
+pub const GPU_BUNDLE_VERSION: &str = "v1.13.8";
+
 /// Pinned CUDA build. The version pairing is a compatibility contract: this
 /// archive is built against CUDA 13.x + cuDNN 9.x, so the match strings in the
 /// URL, the cuDNN wheel below, and `detect_cuda_runtime`'s `cudart64_13.dll`
@@ -489,14 +494,18 @@ fn extract_cudnn_dlls(wheel: &Path, dest: &Path) -> CmdResult<u32> {
 /// Install the GPU runtime (Settings button): the CUDA build of the engine plus
 /// the cuDNN runtime it needs. Idempotent — each half is skipped when already
 /// present, so a retry after a failed second download does not re-fetch 456 MB.
+/// `force` (the build updater's Update button) re-downloads BOTH halves so an
+/// older pinned build is replaced; the engine extracts into a versioned
+/// directory, so the new bundle never fights the old one's files.
 #[tauri::command]
 pub async fn tts_install_gpu(
     app: tauri::AppHandle,
     db: State<'_, DbState>,
+    force: Option<bool>,
 ) -> CmdResult<TtsGpuStatus> {
     #[cfg(not(windows))]
     {
-        let _ = (&app, &db);
+        let _ = (&app, &db, &force);
         return Err(
             "GPU synthesis is Windows-only for now — the vendor publishes CUDA builds for Windows and Linux, but only the Windows pair is pinned and verified here."
                 .into(),
@@ -505,10 +514,11 @@ pub async fn tts_install_gpu(
 
     #[cfg(windows)]
     {
+        let force = force == Some(true);
         let root = gpu_root(&app);
         let downloads = root.join("downloads");
 
-        if gpu_exe(&root).is_none() {
+        if force || gpu_exe(&root).is_none() {
             let archive = downloads.join("sherpa-cuda.tar.bz2");
             download_pinned(
                 &app,
@@ -534,7 +544,7 @@ pub async fn tts_install_gpu(
             }
         }
 
-        if !gpu_cudnn_dir(&root).join("cudnn64_9.dll").is_file() {
+        if force || !gpu_cudnn_dir(&root).join("cudnn64_9.dll").is_file() {
             let wheel = downloads.join("cudnn-cu13.whl");
             download_pinned(
                 &app,
@@ -557,6 +567,7 @@ pub async fn tts_install_gpu(
         }
 
         let _ = std::fs::remove_dir(&downloads);
+        crate::commands::build_updates::write_build_marker(&root, GPU_BUNDLE_VERSION)?;
         {
             let conn = db.0.lock();
             db::set_setting(&conn, GPU_DIR_KEY, &root.to_string_lossy())
@@ -565,6 +576,11 @@ pub async fn tts_install_gpu(
         emit_progress(&app, GPU_INSTALL_ID, DownloadState::Done, 0, None, None);
         Ok(gpu_status_of(&root))
     }
+}
+
+/// The CUDA voice engine binary is on disk (any pinned version).
+pub fn gpu_build_installed(app: &tauri::AppHandle) -> bool {
+    gpu_exe(&gpu_root(app)).is_some()
 }
 
 #[tauri::command]

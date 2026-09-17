@@ -1,6 +1,17 @@
 // Ephemeral UI state: which overlay view is open, command palette, peek panel,
 // and the "grid is full — replace LRU pane?" confirmation (§4.3 step 4).
 import { create } from "zustand";
+import { ttsPlayer } from "../lib/tts";
+import { useTtsStore } from "./tts";
+
+/** Stop the read-aloud of a tool-panel artifact, if that is what is playing.
+ *  The player is global, so a pane the user closed would otherwise keep
+ *  talking with nothing on screen to show for it. */
+function stopArtifactReadIfPlaying(path: string | undefined): void {
+  if (!path) return;
+  const tts = useTtsStore.getState();
+  if (tts.key === `artifact:${path}`) ttsPlayer.stop();
+}
 
 export type ActiveView = "chat" | "settings" | "skills" | "cost" | "automations";
 
@@ -134,10 +145,6 @@ export interface UiState {
    *  active, so component state would reset). */
   gitChangesFilter: "unstaged" | "staged" | "branch" | "lastturn";
   setGitChangesFilter: (filter: "unstaged" | "staged" | "branch" | "lastturn") => void;
-  /** Split chat view: share of the chat area (excluding the tool panel)
-   *  given to the MAIN half, 0.2–0.8. Dragging the split divider updates it. */
-  chatSplitRatio: number;
-  setChatSplitRatio: (ratio: number) => void;
   /** Whether the Git tools sidebar (right-side vertical panel) is collapsed. */
   gitSidebarCollapsed: boolean;
   /** Per-section open/closed flags inside the expanded Git sidebar. These are
@@ -243,7 +250,7 @@ export interface UiState {
    *  an existing agents tab is re-focused and re-targeted, a new instance is
    *  only created when none is open. Spawning agents never auto-opens —
    *  this runs only on an explicit click (chat chip or sidebar row). */
-  openAgentsTab: (subagentId: string) => void;
+  openAgentsTab: (subagentId: string | null) => void;
   /** Open a generated artifact (code/html/image/pdf/markdown/…) as its own
    *  main tab (auto-opens). Dedupes by path: if a matching artifact tab is
    *  already open, just activates it. */
@@ -326,7 +333,6 @@ export const useUiStore = create<UiState>((set, get) => ({
   toolPanelCollapsed: true,
   contextTipOpen: false,
   toolPanelWidth: 532,
-  chatSplitRatio: 0.5,
   gitChangesFilter: "unstaged",
   // Open by default — it's the primary git surface now.
   gitSidebarCollapsed: true,
@@ -552,11 +558,14 @@ export const useUiStore = create<UiState>((set, get) => ({
   // strip with an instance per click. Reuses an open agents tab when present.
   openAgentsTab: (subagentId) =>
     set((s) => {
+      // Tab instances store "no subagent" as undefined (activeSubagentId as
+      // null) — normalize so the fallback open-with-null shows the list.
+      const sub = subagentId ?? undefined;
       const existing = s.openTabs.find((t) => t.kind === "agents");
       if (existing) {
         return {
           openTabs: s.openTabs.map((t) =>
-            t.instanceId === existing.instanceId ? { ...t, subagentId } : t,
+            t.instanceId === existing.instanceId ? { ...t, subagentId: sub } : t,
           ),
           activeTabId: existing.instanceId,
           toolPanelTab: "agents",
@@ -568,7 +577,7 @@ export const useUiStore = create<UiState>((set, get) => ({
       const tab: ToolPanelTabInstance = {
         instanceId,
         kind: "agents",
-        subagentId,
+        subagentId: sub,
       };
       return {
         openTabs: [...s.openTabs, tab],
@@ -628,7 +637,10 @@ export const useUiStore = create<UiState>((set, get) => ({
       };
     }),
   // Close a tab by instance id.
-  closeTab: (instanceId) =>
+  closeTab: (instanceId) => {
+    // A read of THIS artifact would outlive its tab — the floating bar and
+    // the composer's Stop state would keep running with the content gone.
+    stopArtifactReadIfPlaying(get().openTabs.find((t) => t.instanceId === instanceId)?.artifactPath);
     set((s) => {
       const idx = s.openTabs.findIndex((t) => t.instanceId === instanceId);
       if (idx === -1) return {};
@@ -650,7 +662,8 @@ export const useUiStore = create<UiState>((set, get) => ({
         toolPanelTab,
         toolPanelCollapsed: openTabs.length === 0 ? true : s.toolPanelCollapsed,
       };
-    }),
+    });
+  },
   // Activate (focus) an existing tab instance.
   activateTab: (instanceId) =>
     set((s) => {
@@ -670,9 +683,23 @@ export const useUiStore = create<UiState>((set, get) => ({
       return { openTabs };
     }),
   setActiveSubagentId: (activeSubagentId) => set({ activeSubagentId }),
-  setToolPanelCollapsed: (toolPanelCollapsed) => set({ toolPanelCollapsed }),
+  setToolPanelCollapsed: (toolPanelCollapsed) => {
+    // Closing the whole panel stops any artifact read: every artifact tab is
+    // now hidden, and the only thing left of the read would be a floating
+    // bar talking to itself. Message/chat reads are untouched — those live
+    // in the transcript, not the panel.
+    if (toolPanelCollapsed && useTtsStore.getState().key?.startsWith("artifact:")) {
+      ttsPlayer.stop();
+    }
+    set({ toolPanelCollapsed });
+  },
   setContextTipOpen: (contextTipOpen) => set({ contextTipOpen }),
-  toggleToolPanel: () => set((s) => ({ toolPanelCollapsed: !s.toolPanelCollapsed })),
+  toggleToolPanel: () => {
+    if (!get().toolPanelCollapsed && useTtsStore.getState().key?.startsWith("artifact:")) {
+      ttsPlayer.stop();
+    }
+    set((s) => ({ toolPanelCollapsed: !s.toolPanelCollapsed }));
+  },
   toggleGitSidebar: () => set((s) => ({ gitSidebarCollapsed: !s.gitSidebarCollapsed })),
   toggleGitSectionGit: () => set((s) => ({ gitSectionGitOpen: !s.gitSectionGitOpen })),
   toggleGitSectionPlans: () => set((s) => ({ gitSectionPlansOpen: !s.gitSectionPlansOpen })),
@@ -683,8 +710,6 @@ export const useUiStore = create<UiState>((set, get) => ({
   setDiffPanelFile: (diffPanelFile, diffPanelCwd) => set({ diffPanelFile, diffPanelCwd }),
   setToolPanelWidth: (toolPanelWidth) =>
     set({ toolPanelWidth: Math.max(280, Math.min(900, toolPanelWidth)) }),
-  setChatSplitRatio: (chatSplitRatio) =>
-    set({ chatSplitRatio: Math.max(0.2, Math.min(0.8, chatSplitRatio)) }),
   setGitChangesFilter: (gitChangesFilter) => set({ gitChangesFilter }),
   pushToast: (kind, message, detail) => {
     const id = nextToastId++;

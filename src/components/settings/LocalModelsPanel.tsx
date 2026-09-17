@@ -32,6 +32,7 @@ import { ModelMarket, FitBadge } from "./ModelMarket";
 import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { SttPanel } from "./SttPanel";
 import { TtsPanel } from "./TtsPanel";
+import { ServerBuildsCard } from "./ServerBuildsCard";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { GlassSelect } from "../common/GlassSelect";
 import { Modal } from "../common/Modal";
@@ -505,6 +506,17 @@ export function LocalModelsPanel() {
             )}
           </button>
         </div>
+      )}
+
+      {/* Server builds — the CUDA llama-server install/update (harness-style
+          rows). Installing points the app at the managed, SHA-verified
+          prebuilt; a custom build elsewhere is never touched. */}
+      {tab === "models" && (
+        <ServerBuildsCard
+          ids={["llama-cuda"]}
+          title="Server builds"
+          note="The CUDA llama-server build for GPU offload — pinned, checksum-verified, kept up to date."
+        />
       )}
 
       {tab === "models" && (

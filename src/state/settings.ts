@@ -55,6 +55,10 @@ export const DEFAULT_CLOUD_PIN_EXCHANGES = 6;
 const K_CLOUD_CONTEXT_LIMIT = "chat.cloud.context_limit";
 // Auto model routing cost/quality preference (chat/auto_router.rs reads it).
 const K_AUTO_BIAS = "chat.auto.bias";
+// Subagent-model orchestration default (chat/subagent_model.rs reads it):
+// "model" keeps each parent's provider, "provider::model" targets another
+// one, "" = subagents inherit their parent session's model.
+const K_SUBAGENT_MODEL = "chat.subagentModel";
 
 // Chat text zoom. A multiplier on the chat message/composer/code font sizes
 // via the --chat-zoom CSS var. (The Ctrl +/-/0 shortcuts now drive the
@@ -86,6 +90,9 @@ const K_MONO_FONT = "fonts.mono";
 export interface ProviderModelEntry {
   id: string;
   contextWindow: number;
+  /** Free-text annotation rendered beside the model in the picker —
+   *  deals, promos, pricing quirks. Empty = nothing shown. */
+  note: string;
 }
 const selectedModelsKey = (provider: string) => `chat.${provider}.selected_models`;
 /** Index of providers that HAVE a curated list (stored lists are never
@@ -163,6 +170,10 @@ interface SettingsState {
   /** Auto model routing cost/quality preference: "quality" | "balanced"
    *  | "economy" (the Auto pane footer in the composer picker). */
   autoBias: "quality" | "balanced" | "economy";
+  /** Default model for spawned work (Task subagents + mesh spawn_session):
+   *  a bare model id, "provider::model", or "" = inherit the parent
+   *  session's model. Overridable per call by the model itself. */
+  subagentModel: string;
   /** Per-provider curated model lists with per-model window pins. */
   providerModels: Record<string, ProviderModelEntry[]>;
   /** Chat text zoom multiplier (0.7–1.6). Scales chat message text, the
@@ -203,6 +214,8 @@ interface SettingsState {
   setCloudCompactionEnabled: (enabled: boolean) => void;
   /** Set the Auto routing bias (persisted as chat.auto.bias). */
   setAutoBias: (bias: "quality" | "balanced" | "economy") => void;
+  /** Set the default subagent model (persisted as chat.subagentModel). */
+  setSubagentModel: (pick: string) => void;
   setCloudCompactionThreshold: (threshold: number) => void;
   setCloudPinExchanges: (exchanges: number) => void;
   setCloudContextLimit: (limit: number) => void;
@@ -258,6 +271,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   cloudPinExchanges: DEFAULT_CLOUD_PIN_EXCHANGES,
   cloudContextLimit: 0,
   autoBias: "balanced",
+  subagentModel: "",
   providerModels: {},
   localCompactionSummarizer: "sidecar",
   localCompactionRebuildFromRaw: true,
@@ -267,7 +281,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   monoFont: DEFAULT_MONO_FONT,
 
   load: async () => {
-    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, autoBiasRaw, chatZoomRaw, appZoomRaw, uiFontRaw, monoFontRaw] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, autoBiasRaw, chatZoomRaw, appZoomRaw, uiFontRaw, monoFontRaw, subagentModelRaw] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
       getSetting(K_NOTIFY_SOUND),
@@ -292,6 +306,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       getSetting(K_APP_ZOOM),
       getSetting(K_UI_FONT),
       getSetting(K_MONO_FONT),
+      getSetting(K_SUBAGENT_MODEL),
     ]);
     // Per-provider curated model lists: the index names the providers that
     // have one; each list is then read from its own key. A missing or
@@ -318,7 +333,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         try {
           const parsed = JSON.parse(raw) as ProviderModelEntry[];
           if (Array.isArray(parsed) && parsed.length > 0) {
-            providerModels[providers[i]] = parsed.filter((e) => e && typeof e.id === "string");
+            providerModels[providers[i]] = parsed
+              .filter((e) => e && typeof e.id === "string")
+              .map((e) => ({ ...e, note: typeof e.note === "string" ? e.note : "" }));
           }
         } catch { /* skip malformed list */ }
       }
@@ -408,6 +425,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       if (autoBiasRaw === "economy" || autoBiasRaw === "quality" || autoBiasRaw === "balanced") {
         next.autoBias = autoBiasRaw;
       }
+      if (subagentModelRaw) next.subagentModel = subagentModelRaw.trim();
       if (chatZoomRaw) {
         const v = Number(chatZoomRaw);
         if (Number.isFinite(v) && v >= CHAT_ZOOM_MIN && v <= CHAT_ZOOM_MAX) next.chatZoom = v;
@@ -555,6 +573,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     persistSetting(K_AUTO_BIAS, bias);
   },
 
+  setSubagentModel: (pick) => {
+    const value = pick.trim();
+    set({ subagentModel: value });
+    persistSetting(K_SUBAGENT_MODEL, value);
+  },
+
   setCloudCompactionThreshold: (threshold) => {
     if (!Number.isFinite(threshold) || threshold < 0.25 || threshold > 0.99) return;
     set({ cloudCompactionThreshold: threshold });
@@ -580,6 +604,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       .map((e) => ({
         id: e.id.trim(),
         contextWindow: Math.max(0, Math.floor(e.contextWindow || 0)),
+        note: (e.note ?? "").trim().slice(0, 60),
       }));
     set((s) => ({
       providerModels: { ...s.providerModels, [provider]: cleaned },

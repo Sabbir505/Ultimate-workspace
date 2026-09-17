@@ -194,10 +194,16 @@ export const listCompactedMessages = (chatSessionId: string, summaryId: number) 
 
 /** Live per-model context windows from a provider's own models API (the
  *  backend holds the API key and caches for 24h). Anthropic publishes
- *  `context_window` per model id; providers without a keyed models API
- *  return an empty map (the static registry fallback stands). */
-export const fetchProviderModelWindows = (provider: string) =>
-  safeInvoke<Record<string, number>>("fetch_provider_model_windows", { provider });
+ *  `context_window` per model id; OpenAI-compatible relays commonly mirror
+ *  OpenRouter's `context_length`; the opencode harness serves its catalog
+ *  from the chat's own server (pass `chatSessionId` for that arm).
+ *  Providers without window data return an empty map (the static registry
+ *  fallback stands). */
+export const fetchProviderModelWindows = (provider: string, chatSessionId?: string | null) =>
+  safeInvoke<Record<string, number>>("fetch_provider_model_windows", {
+    provider,
+    chatSessionId: chatSessionId ?? null,
+  });
 
 export const listenChatToken = (handler: (payload: ChatTokenPayload) => void) =>
   safeListen<ChatTokenPayload>("chat:token", handler);

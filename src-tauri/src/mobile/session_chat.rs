@@ -821,12 +821,17 @@ fn handle_list_session_artifacts(
 /// dispatch chain (which can run ON a runtime worker), so the result is
 /// joined via a plain channel — `block_on` from inside a runtime would
 /// panic, a channel recv is safe from any thread.
-fn blocking_read<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+/// `Err(String)` on either failure mode: sender dropped (join failed) or the
+/// closure panicked. The old `expect` re-panicked on the CALLING thread —
+/// the relay's WebSocket task — tearing down the phone's whole connection
+/// over one bad read (audit L-11). Callers map this into an ordinary error
+/// reply.
+fn blocking_read<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     tauri::async_runtime::spawn_blocking(move || {
         let _ = tx.send(f());
     });
-    rx.recv().expect("blocking artifact read panicked")
+    rx.recv().map_err(|_| "blocking task terminated without a result".to_string())
 }
 
 fn handle_read_artifact(
@@ -878,6 +883,7 @@ fn handle_read_artifact(
     if is_text {
         let read_path = path.to_string();
         let bytes = blocking_read(move || std::fs::read(&read_path))
+            .map_err(|_| "artifact read panicked".to_string())?
             .map_err(|e| format!("failed to read artifact: {e}"))?;
         let truncated = bytes.len() > TEXT_PREVIEW_CAP;
         let take = if truncated {
@@ -907,7 +913,8 @@ fn handle_read_artifact(
                 let bytes =
                     std::fs::read(&read_path).map_err(|e| format!("failed to read artifact: {e}"))?;
                 Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
-            })?;
+            })
+            .map_err(|_| "artifact read panicked".to_string())??;
             Ok(vec![DesktopMessage::ArtifactContent {
                 session_id: owner_session_id,
                 path: path.to_string(),

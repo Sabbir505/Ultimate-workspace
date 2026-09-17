@@ -177,7 +177,7 @@ pub(super) fn send_acp_turn(
     content: &str,
     entry: &mut AgentChild,
     cwd: Option<&str>,
-    _project_id: Option<&str>,
+    project_id: Option<&str>,
     acp_id: &str,
 ) -> Result<(), String> {
     let agent = {
@@ -208,8 +208,9 @@ pub(super) fn send_acp_turn(
         if let Ok(mut g) = entry.cli_session_id.lock() {
             *g = None;
         }
-        // Relay-owned bundle is not part of ACP v1 (no MCP servers, no
-        // permission flags) — the agent's own config governs its tools.
+        // ACP v1 has no permission-flag channel (the agent's own config
+        // governs those), but the session DOES get Relay's MCP servers via
+        // session/new below.
         let spec = resolve_for_spawn(&CommandSpec {
             program: agent.command.clone(),
             args: agent.args.clone(),
@@ -223,10 +224,13 @@ pub(super) fn send_acp_turn(
             cmd.env(k, v);
         }
         let watch_dirs = turn_watch_dirs(cwd, &db.0);
-        if let Some(dir) = watch_dirs.first() {
+        if let Some((dir, _)) = watch_dirs.first() {
             cmd.current_dir(dir);
         }
-        let watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
+        let watches: Vec<DirWatch> = watch_dirs
+            .into_iter()
+            .map(|(dir, broad)| DirWatch::new(dir, broad))
+            .collect();
         no_console_window(&mut cmd);
         let mut child = cmd
             .spawn()
@@ -267,6 +271,14 @@ pub(super) fn send_acp_turn(
         entry.reader_alive.store(true, Ordering::SeqCst);
         let reader_alive2 = Arc::clone(&entry.reader_alive);
         let generation_cell2 = Arc::clone(&entry.proc_generation);
+        // The ACP spec's session/new carries the client's MCP servers — the
+        // same relay bridge claude/kimi/opencode get via their config files.
+        // The agent spawns the stdio binary itself; the bridge reaches the
+        // app's WS with the current run's token.
+        let acp_mcp_servers = crate::browser_mcp_register::acp_mcp_servers(
+            app,
+            project_id.unwrap_or(super::bundle::NO_PROJECT_BUNDLE_SLUG),
+        );
         std::thread::spawn(move || {
             let _alive = ReaderAliveGuard(reader_alive2);
             read_acp_stream(
@@ -284,6 +296,7 @@ pub(super) fn send_acp_turn(
                 &generation_cell2,
                 generation,
                 watches,
+                acp_mcp_servers,
             );
         });
         entry.child = Some(child);
@@ -357,6 +370,7 @@ pub(super) fn read_acp_stream(
     proc_generation: &AtomicU64,
     my_generation: u64,
     mut watches: Vec<DirWatch>,
+    acp_mcp_servers: Value,
 ) {
     let mut full = String::new();
     // Snapshot-suffix state for the text/reasoning streams. ACP agents
@@ -368,6 +382,9 @@ pub(super) fn read_acp_stream(
     // whole (a genuinely new block).
     let mut last_text = String::new();
     let mut last_reasoning = String::new();
+    // Live subagent dispatches (the agent's own Agent/Task tool calls). ACP
+    // never reports a dispatch's completion — the turn end settles them.
+    let mut tools = ToolTracker::new();
     // "Worked for Xs" label: the turn window runs from when we start watching
     // for the turn's output until session/finish. Reset at each finish so the
     // next turn (sent directly by send_acp_turn) gets its own window.
@@ -467,7 +484,7 @@ pub(super) fn read_acp_stream(
                         .unwrap_or_default();
                     let new_id = crate::acp::next_request_id();
                     awaiting_session_new = Some(new_id);
-                    let params = json!({ "cwd": cwd_str, "mcpServers": {} });
+                    let params = json!({ "cwd": cwd_str, "mcpServers": acp_mcp_servers });
                     let _ = write_line_shared(
                         &shared_stdin,
                         &crate::acp::encode_request(new_id, "session/new", &params),
@@ -560,8 +577,29 @@ pub(super) fn read_acp_stream(
                                 last_reasoning.push_str(&t);
                             }
                             AcpEvent::ToolCall { id, name, input } => {
-                                let marker =
-                                    format!("<tool>{}</tool>", tool_meta_generic(&name, &input));
+                                // Subagent dispatches must register the panel
+                                // entry (chat:subagent-spawn + correlated
+                                // chip), not fall through to the generic
+                                // card — that left the Agents pane empty
+                                // while the chip rendered in chat.
+                                let value = tool_meta_generic(&name, &input);
+                                let marker = if is_subagent_tool_name(&name) {
+                                    let role = input
+                                        .get("subagent_type")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("agent");
+                                    let task = input
+                                        .get("description")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let prompt =
+                                        input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                                    tools.subagent_use(
+                                        &name, value, app, sid, role, task, prompt, &id, false,
+                                    )
+                                } else {
+                                    format!("<tool>{value}</tool>")
+                                };
                                 full.push_str(&marker);
                                 emit_token(app, sid, &marker);
                                 // v1 does not execute ACP tools — answer with
@@ -569,7 +607,16 @@ pub(super) fn read_acp_stream(
                                 // forever on a result that never comes.
                                 reply_acp_tool_error(&shared_stdin, session_cell, &id);
                             }
-                            AcpEvent::Finished | AcpEvent::Failed(_) | AcpEvent::PromptIgnored => {}
+                            AcpEvent::Finished => {
+                                // The turn ended: whatever dispatches are still
+                                // live completed as far as this protocol can
+                                // tell — settle them so no panel entry spins.
+                                tools.settle_live_subagents(app, sid, None);
+                            }
+                            AcpEvent::Failed(msg) => {
+                                tools.settle_live_subagents(app, sid, Some(&msg));
+                            }
+                            AcpEvent::PromptIgnored => {}
                         }
                     }
                 }
@@ -714,6 +761,10 @@ pub(super) fn read_acp_stream(
     // EOF: the process died. If a turn was in flight it never finished —
     // surface that instead of leaving the spinner up forever (unless we
     // killed it ourselves via cancel, which already emitted chat:done).
+    // Any subagent dispatch still live dies with the process — finalize the
+    // panel entries so they don't spin forever (mirrors the claude reader's
+    // EOF drain).
+    tools.settle_live_subagents(app, sid, Some("The ACP agent exited before this agent reported completion."));
     if !handshake_done {
         emit_error(
             app,

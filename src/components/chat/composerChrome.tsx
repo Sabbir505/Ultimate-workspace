@@ -40,10 +40,23 @@ export function QueuedMessageRow({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(message.content);
   const [dragging, setDragging] = useState(false);
-  // Drag bookkeeping lives in a ref: the store reorder re-renders the list,
-  // but the pointer capture stays on the grip, so tracking survives.
+  // Drag bookkeeping lives in refs, and the move/up listeners live on the
+  // WINDOW for the duration of the drag: the reorder re-renders (and DOM-
+  // moves) the dragged row, which implicitly releases pointer capture — a
+  // capture-on-grip grip never saw pointerup after the first reorder and
+  // left the row's dragging tint stuck on.
   const dragIndex = useRef(index);
   const dragPointerId = useRef<number | null>(null);
+  const gripRef = useRef<HTMLSpanElement>(null);
+  // Removes the window drag listeners if the row unmounts mid-drag
+  // (auto-drain) before onUp ever runs (audit L-21).
+  const cleanupDrag = useRef<(() => void) | null>(null);
+  useEffect(
+    () => () => {
+      cleanupDrag.current?.();
+    },
+    [],
+  );
 
   const label =
     message.content ||
@@ -55,23 +68,14 @@ export function QueuedMessageRow({
     setEditing(false);
   };
 
-  const endDrag = () => {
-    dragPointerId.current = null;
-    setDragging(false);
-  };
-
   const onGripPointerDown = (e: React.PointerEvent<HTMLSpanElement>) => {
     if (editing) return;
     e.preventDefault();
     e.stopPropagation();
     dragIndex.current = index;
     dragPointerId.current = e.pointerId;
-    e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(true);
-  };
 
-  const onGripPointerMove = (e: React.PointerEvent<HTMLSpanElement>) => {
-    if (dragPointerId.current !== e.pointerId) return;
     // Which row slot is the pointer over RIGHT NOW? Rects are queried live so
     // the tracking survives the list re-rendering after each reorder. The
     // hit-test is scoped to THIS composer's queue: split view mounts one
@@ -79,31 +83,50 @@ export function QueuedMessageRow({
     // other pane's rows too — their (overlapping viewport) rects won the
     // last-match-wins loop and produced an out-of-range index that silently
     // no-op'd the reorder.
-    const queue = e.currentTarget.closest<HTMLDivElement>(".composer-queue");
-    let target = dragIndex.current;
-    if (queue) {
-      queue.querySelectorAll<HTMLDivElement>(".composer-queue-row").forEach((el, i) => {
-        const r = el.getBoundingClientRect();
-        if (e.clientY >= r.top && e.clientY <= r.bottom) target = i;
-      });
-    }
-    if (target !== dragIndex.current) {
-      const from = dragIndex.current;
-      dragIndex.current = target;
-      onReorder(from, target);
-    }
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== dragPointerId.current) return;
+      const queue = gripRef.current?.closest<HTMLDivElement>(".composer-queue");
+      let target = dragIndex.current;
+      if (queue) {
+        queue.querySelectorAll<HTMLDivElement>(".composer-queue-row").forEach((el, i) => {
+          const r = el.getBoundingClientRect();
+          if (ev.clientY >= r.top && ev.clientY <= r.bottom) target = i;
+        });
+      }
+      if (target !== dragIndex.current) {
+        const from = dragIndex.current;
+        dragIndex.current = target;
+        onReorder(from, target);
+      }
+    };
+    const onUp = () => {
+      dragPointerId.current = null;
+      setDragging(false);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      cleanupDrag.current = null;
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    // If the row unmounts mid-drag (auto-drain), remove the window listeners
+    // instead of letting onMove fire against a mutating queue (audit L-21).
+    cleanupDrag.current = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
   };
 
   return (
     <div className={`composer-queue-row${dragging ? " dragging" : ""}`}>
       <span
+        ref={gripRef}
         className="composer-queue-grip"
         title="Drag to reorder"
         aria-hidden="true"
         onPointerDown={onGripPointerDown}
-        onPointerMove={onGripPointerMove}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
       >
         <GripVertical size={12} strokeWidth={2} />
       </span>

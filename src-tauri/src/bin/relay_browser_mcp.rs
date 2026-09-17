@@ -1057,7 +1057,7 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "spawn_session",
-            "description": "Spawn a NEW Relay chat session to delegate work: create a real, sidebar-visible session (any installed engine — it may differ from yours) whose first turn is `task`. mode=\"background\" (default) returns the new session's id immediately; mode=\"wait\" blocks (bounded) and returns its first-turn output. The user can watch and take over the spawned session at any time. Prefer this over doing a big parallel task inside this conversation.",
+            "description": "Spawn a NEW Relay chat session to delegate work: create a real, sidebar-visible session (any installed engine — it may differ from yours) whose first turn is `task`. Pass `model` to run it on a different model than yours (cheap models for mechanical sub-work) or on another CLI engine (\"claude_code::sonnet\"). mode=\"background\" (default) returns the new session's id immediately; mode=\"wait\" blocks (bounded) and returns its first-turn output. The user can watch and take over the spawned session at any time. Prefer this over doing a big parallel task inside this conversation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1065,6 +1065,7 @@ fn tool_schemas() -> Vec<Value> {
                     "task": { "type": "string", "description": "The new session's first instruction — a complete, self-contained task description." },
                     "title": { "type": "string", "description": "Short sidebar title (defaults to the task's first words)." },
                     "agent": { "type": "string", "description": "Engine for the new session, e.g. \"claude_code\", \"opencode\", \"builtin\", \"local\" (defaults to yours)." },
+                    "model": { "type": "string", "description": "Model for the new session when it should differ from yours: bare model id keeps your provider; \"provider::model\" (e.g. \"anthropic::claude-haiku-4-5\") also switches provider for builtin engines. Omit to use the session-wide subagent model from Relay Settings, else your own model." },
                     "mode": { "type": "string", "enum": ["background", "wait"], "description": "\"background\" (default) returns the session id now; \"wait\" blocks for the first turn's output (bounded)." }
                 },
                 "required": ["task"]

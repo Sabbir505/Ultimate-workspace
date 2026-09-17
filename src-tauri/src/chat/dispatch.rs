@@ -745,60 +745,136 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
                 .get("background")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if !background {
-                return run_task_subagent(app, sid, args, &tasks).await;
-            }
             let prompt = args
                 .get("prompt")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim();
             if prompt.is_empty() {
-                "Error: Task requires a non-empty \"prompt\".".to_string()
-            } else {
-                let description = args
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("subagent")
-                    .trim()
-                    .to_string();
-                let mut sub = tasks.0.register_subagent(&description);
-                let task_id = sub.task_id.clone();
-                let app2 = app.clone();
-                let sid2 = sid.to_string();
-                let args2 = args.clone();
-                tauri::async_runtime::spawn(async move {
-                    let tasks_state = app2.state::<crate::TaskState>();
-                    tokio::select! {
-                        out = run_task_subagent(&app2, &sid2, &args2, &tasks_state) => {
-                            let failed = out.starts_with("Error");
-                            let tail = crate::util::truncate_chars(&out, 400);
-                            sub.finish(Some(&app2), &sid2, failed, tail);
-                        }
-                        _ = &mut sub.cancel_rx => {
-                            sub.mark_cancelled(Some(&app2), &sid2);
-                        }
-                    }
-                });
-                format!(
-                    "Started background subagent (task {task_id}). Continue the main conversation now;                      poll get_task_status with task_id=\"{task_id}\" (state: running → completed/failed),                      and surface the final message to the user when it finishes. cancel_task aborts it."
-                )
+                // The Task chip marker is already streaming into the
+                // transcript (the round opens it before the tool executes) —
+                // register the panel entry and finalize it as the failure so
+                // the Agents pane shows the error instead of an empty list.
+                emit_failed_task_panel_entry(app, sid, args, "Task requires a non-empty \"prompt\".");
+                return "Error: Task requires a non-empty \"prompt\".".to_string();
             }
+            if !background {
+                let sub_id = next_subagent_id();
+                return run_task_subagent(app, sid, args, &tasks, &sub_id).await;
+            }
+            let description = args
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("subagent")
+                .trim()
+                .to_string();
+            let mut sub = tasks.0.register_subagent(&description);
+            let task_id = sub.task_id.clone();
+            let app2 = app.clone();
+            let sid2 = sid.to_string();
+            let args2 = args.clone();
+            let sub_id2 = next_subagent_id();
+            tauri::async_runtime::spawn(async move {
+                let tasks_state = app2.state::<crate::TaskState>();
+                tokio::select! {
+                    out = run_task_subagent(&app2, &sid2, &args2, &tasks_state, &sub_id2) => {
+                        let failed = out.starts_with("Error");
+                        let tail = crate::util::truncate_chars(&out, 400);
+                        sub.finish(Some(&app2), &sid2, failed, tail);
+                    }
+                    _ = &mut sub.cancel_rx => {
+                        sub.mark_cancelled(Some(&app2), &sid2);
+                        // The dropped future never reaches its
+                        // chat:subagent-done arms — finalize the Agents panel
+                        // entry here or it spins forever after a cancel.
+                        let _ = app2.emit(
+                            "chat:subagent-done",
+                            crate::types::SubagentDonePayload {
+                                chat_session_id: sid2.clone(),
+                                id: sub_id2,
+                                output: String::new(),
+                                error: Some("Cancelled before completion.".to_string()),
+                            },
+                        );
+                    }
+                }
+            });
+            format!(
+                "Started background subagent (task {task_id}). Continue the main conversation now;                      poll get_task_status with task_id=\"{task_id}\" (state: running → completed/failed),                      and surface the final message to the user when it finishes. cancel_task aborts it."
+            )
         }
         other => format!("Error: unknown system tool \"{other}\"."),
     }
 }
 
+/// Mint the Agents-panel id for one Task dispatch (`sub-<ts>-<n>`). The
+/// counter suffix is load-bearing: a round's Task calls spawn CONCURRENTLY —
+/// subagents created in the same second used to collide on the plain
+/// timestamp id and overwrite each other in the frontend store (keyed by id).
+fn next_subagent_id() -> String {
+    static SUB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let sub_seq = SUB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("sub-{}-{sub_seq}", crate::db::now_ts())
+}
+
+/// Register a Task call's Agents-panel entry and immediately finalize it as
+/// the failure. The Task chip marker is already streaming into the transcript
+/// (the round opens it before the tool executes), so a bail-out that skipped
+/// the spawn emit left the chip on screen with no panel entry — the pane
+/// showed "No subagents yet" and the dead chip click read as broken.
+fn emit_failed_task_panel_entry(app: &AppHandle, sid: &str, args: &Value, reason: &str) {
+    let role = args
+        .get("subagent_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("agent");
+    let task = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let sub_id = next_subagent_id();
+    let _ = app.emit(
+        "chat:subagent-spawn",
+        crate::types::SubagentSpawnPayload {
+            chat_session_id: sid.to_string(),
+            id: sub_id.clone(),
+            role: role.to_string(),
+            task: task.to_string(),
+            prompt: prompt.to_string(),
+            model: None,
+        },
+    );
+    let _ = app.emit(
+        "chat:subagent-done",
+        crate::types::SubagentDonePayload {
+            chat_session_id: sid.to_string(),
+            id: sub_id,
+            output: String::new(),
+            error: Some(reason.to_string()),
+        },
+    );
+}
+
 /// Spawn a streaming sub-turn for the `Task` tool. Resolves the session's
-/// provider/model/api_key/base_url from the DB, makes a streaming SSE
-/// completion call with the subagent's prompt as the sole user message, and
-/// emits each token chunk as `chat:subagent-tokens`. Returns the full
-/// accumulated output as the tool result.
+/// provider/model/api_key/base_url from the DB, then applies the subagent-model
+/// orchestration pick (explicit `model` tool arg → `chat.subagentModel`
+/// setting) so the subagent can run on a different model than the parent —
+/// see `chat::subagent_model`. Makes a streaming SSE completion call with the
+/// subagent's prompt as the sole user message, and emits each token chunk as
+/// `chat:subagent-tokens`. Returns the full accumulated output as the tool
+/// result. `sub_id` is the panel id minted by the caller (which also drives
+/// the background-cancel finalize).
 async fn run_task_subagent(
     app: &AppHandle,
     sid: &str,
     args: &Value,
     _tasks: &crate::TaskState,
+    sub_id: &str,
 ) -> String {
     use crate::chat::providers::AnthropicProvider;
     use crate::secrets;
@@ -819,8 +895,15 @@ async fn run_task_subagent(
         .and_then(|v| v.as_str())
         .unwrap_or("agent")
         .to_string();
+    // A bail-out below happens AFTER the Task chip is already streaming but
+    // BEFORE the spawn emit — register the panel entry and finalize it as the
+    // failure so the pane shows the error instead of an empty list.
+    let bail = |reason: &str| -> String {
+        emit_failed_task_panel_entry(app, sid, args, reason);
+        format!("Error: {reason}")
+    };
     if prompt.is_empty() {
-        return "Error: Task requires a non-empty \"prompt\".".to_string();
+        return bail("Task requires a non-empty \"prompt\".");
     }
 
     // Resolve the session's provider + model + key + base_url + project cwd.
@@ -829,7 +912,7 @@ async fn run_task_subagent(
         let conn = db_state.0.lock();
         match db::get_chat_session(&conn, sid) {
             Ok(Some(cs)) => (cs.provider, cs.model, cs.project_id),
-            _ => return "Error: chat session not found.".to_string(),
+            _ => return bail("chat session not found."),
         }
     };
     // Resolve the project root (cwd) the subagent operates in, if any. The
@@ -849,9 +932,6 @@ async fn run_task_subagent(
         let conn = db_state.0.lock();
         secrets::get_chat_api_key(&conn, &provider_str)
     };
-    if api_key.is_none() && provider_str != "local_gguf" {
-        return "Error: no API key configured for this provider.".to_string();
-    }
     let api_key = api_key.unwrap_or_default();
     let base_url = {
         let db_state = app.state::<crate::DbState>();
@@ -871,7 +951,7 @@ async fn run_task_subagent(
     let model = if model_str.trim().is_empty() {
         match model_override {
             Some(m) if !m.trim().is_empty() => m,
-            _ => return "Error: no model configured.".to_string(),
+            _ => return bail("no model configured."),
         }
     } else if provider_str == "local_gguf" {
         model_override
@@ -880,6 +960,23 @@ async fn run_task_subagent(
     } else {
         model_str
     };
+
+    // Subagent-model orchestration: an explicit `model` tool arg wins, then
+    // the Settings pick (`chat.subagentModel`), then the session resolution
+    // above. The key check runs AFTER the pick so a cross-provider override
+    // is judged by ITS provider's key, not the session's.
+    let model_pick = {
+        let db_state = app.state::<crate::DbState>();
+        let conn = db_state.0.lock();
+        crate::chat::subagent_model::pick_for_call(&conn, args)
+    };
+    let (provider_str, model, api_key, base_url) =
+        crate::chat::subagent_model::apply_task_pick(
+            app, provider_str, model, api_key, base_url, model_pick,
+        );
+    if api_key.trim().is_empty() && provider_str != "local_gguf" {
+        return bail("no API key configured for this provider.");
+    }
 
     // Build a role-aware system prompt. The `role` (subagent_type) enum is now
     // reflected in the instructions instead of being ignored, and the project
@@ -910,21 +1007,20 @@ async fn run_task_subagent(
          edits in your answer instead of applying them."
     );
 
-    // Generate a subagent id and emit the spawn event. The counter suffix is
-    // load-bearing now that a round's Task calls spawn CONCURRENTLY — subagents
-    // created in the same second used to collide on the plain timestamp id and
-    // overwrite each other in the frontend store (keyed by id).
-    static SUB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let sub_seq = SUB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let sub_id = format!("sub-{}-{sub_seq}", crate::db::now_ts());
+    // Emit the spawn event so the frontend creates the subagent immediately
+    // (the panel id comes from the caller, which also drives the
+    // background-cancel finalize).
     let _ = app.emit(
         "chat:subagent-spawn",
         SubagentSpawnPayload {
             chat_session_id: sid.to_string(),
-            id: sub_id.clone(),
+            id: sub_id.to_string(),
             role: role.clone(),
             task: description.to_string(),
             prompt: prompt.to_string(),
+            // The model this subagent actually runs on (post-orchestration) —
+            // the Agents panel shows it so a different-model spawn is visible.
+            model: Some(model.clone()),
         },
     );
 
@@ -954,7 +1050,7 @@ async fn run_task_subagent(
             // back into the follow-up rounds' assistant messages.
             "thinking": {"type": "enabled", "budget_tokens": 2048},
         });
-        run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, &sub_id, true).await
+        run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, sub_id, true).await
     } else {
         // Audit: compatible/local endpoints REQUIRE a configured base URL —
         // the api.openai.com fallback used to send the user's key and the
@@ -974,7 +1070,7 @@ async fn run_task_subagent(
                         {"role": "user", "content": prompt},
                     ],
                 });
-                run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, &sub_id, false)
+                run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, sub_id, false)
                     .await
             }
         }
@@ -986,7 +1082,7 @@ async fn run_task_subagent(
                 "chat:subagent-done",
                 SubagentDonePayload {
                     chat_session_id: sid.to_string(),
-                    id: sub_id,
+                    id: sub_id.to_string(),
                     output: output.clone(),
                     error: None,
                 },
@@ -998,7 +1094,7 @@ async fn run_task_subagent(
                 "chat:subagent-done",
                 SubagentDonePayload {
                     chat_session_id: sid.to_string(),
-                    id: sub_id,
+                    id: sub_id.to_string(),
                     output: String::new(),
                     error: Some(e.clone()),
                 },

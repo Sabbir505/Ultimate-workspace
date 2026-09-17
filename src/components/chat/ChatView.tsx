@@ -19,9 +19,13 @@ import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
 import { QuestionCard } from "./QuestionCard";
 import { PlanProposalCard } from "./PlanProposalCard";
-import type { PermissionMode } from "../../state/chat";
+import type { PermissionMode, ChatTaskProgress } from "../../state/chat";
 import { HARNESS_PERMISSION_MODES, permissionModeToPolicies } from "../../state/chat";
 import type { ChatPerfPayload } from "../../lib/ipc";
+// Stable fallback for the tasks-map selector below: a fresh `{}` literal per
+// store notification defeats zustand's Object.is bail-out and re-renders the
+// whole ChatView on every keystroke/token flush (audit H-3).
+const EMPTY_TASKS: Record<string, ChatTaskProgress> = {};
 // TypingIndicator is tiny and eager — imported from its own module so the
 // entry chunk doesn't statically pull in MessageBubble (react-markdown).
 import { TypingIndicator } from "./TypingIndicator";
@@ -37,7 +41,7 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 // edit-tool call. None of these appear on the empty welcome screen.
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
 const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m) => ({ default: m.ArtifactProposalCard })));
-import { listHarnessModels, stopLocalModel, localModelStatus, deleteEmptyChatSessions, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel, getResearchCitationReport, PROVIDER_INPUT_INCLUDES_CACHE, providerKindOf } from "../../lib/ipc";
+import { listHarnessModels, stopLocalModel, localModelStatus, deleteEmptyChatSessions, reconcileAgentSessions, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel, getResearchCitationReport, PROVIDER_INPUT_INCLUDES_CACHE, providerKindOf } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatSelectionPrefill } from "../../lib/chatSelection";
 import { useTranscriptScroll } from "./useTranscriptScroll";
@@ -85,20 +89,22 @@ function formatChatError(raw: string): string {
     .trim();
 }
 
-export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?: string; splitSessionId?: string } = {}) {
-  // Split view: `splitSessionId` pins this instance to ONE session regardless
-  // of the global selection — the pane beside the main chat. Everything below
-  // keys off the local `activeChatSessionId`, so per-session maps (streaming,
-  // status, artifacts, tasks, plans, subagents) resolve for the right session
-  // in both modes; only the message buffer needs an explicit split-aware
-  // selector (the store keeps two lists).
+export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string; paneId?: string } = {}) {
+  // Split pane view: `paneId` pins this instance to ONE session via the pane
+  // tree + its own paneBuffers entry — everything below keys off the local
+  // `activeChatSessionId`, so per-session maps (streaming, status, artifacts,
+  // tasks, plans, subagents) resolve for the right chat in both modes. Only
+  // the message buffer needs an explicit pane-aware selector (the store keeps
+  // the flat main list plus one buffer per pinned pane).
   const storeActiveId = useChatStore((s) => s.activeChatSessionId);
-  const isSplitView = splitSessionId != null;
-  const activeChatSessionId = splitSessionId ?? storeActiveId;
-  // Split-view focus pin: which half the shared git rail belongs to (null =
-  // the main half). See the GitToolsSidebar render condition below.
+  const isPaneView = paneId != null;
+  const paneBuf = useChatStore((s) => (paneId ? s.paneBuffers[paneId] : undefined));
+  const storeMessages = useChatStore((s) => s.messages);
+  const activeChatSessionId = paneId ? (paneBuf?.sessionId ?? null) : storeActiveId;
+  // Split-pane focus pin: which pane's chat the shared git rail belongs to
+  // (null = the main half). See the GitToolsSidebar render condition below.
   const focusedPin = useChatStore((s) => s.focusedChatSessionId);
-  const messages = useChatStore((s) => (isSplitView ? s.splitMessages : s.messages));
+  const messages = paneBuf ? paneBuf.messages : storeMessages;
   const streaming = useChatStore((s) => s.streaming);
   const livePerf = useChatStore((s) => s.livePerf);
   const chatStatus = useChatStore((s) => s.chatStatus);
@@ -143,7 +149,7 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   const getArtifactProposals = useChatStore((s) => s.getArtifactProposals);
   const editArtifactProposal = useChatStore((s) => s.editArtifactProposal);
   const sessionTaskMap = useChatStore((s) =>
-    activeChatSessionId ? (s.tasks[activeChatSessionId] ?? {}) : null,
+    activeChatSessionId ? (s.tasks[activeChatSessionId] ?? EMPTY_TASKS) : null,
   );
   const sessionTasks = /*@__PURE__*/ useMemo(
     () => (sessionTaskMap ? Object.values(sessionTaskMap) : []),
@@ -346,13 +352,16 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   // stripped from it. The provider-counted lastInputTokens half gets the
   // same treatment on inclusive providers (OpenAI-style input embeds the
   // cache read); Anthropic-style input is reported uncached already.
-  // Live count wins for local sessions (exact /tokenize). For cloud and
-  // harness sessions the polled backend estimate is live (it includes the
-  // just-sent user message and reflects compaction immediately) while the
-  // last assistant turn's input_tokens is provider-counted — take the
-  // larger of the two so neither a stale figure nor an underestimate can
-  // hide a filling window. Either way, the meter's percentage is a real
-  // number, never fabricated.
+  // Source choice: the two figures are different scales (a ~4 chars/token
+  // estimate vs the provider's tokenizer count), so taking max() of them —
+  // the old behavior — flipped the tooltip between the two scales on every
+  // turn, which read as the context number jumping around. The
+  // provider-counted figure now leads whenever it exists (one figure, one
+  // scale; updates once per turn), and the live estimate leads only while
+  // there is no provider figure yet (fresh session) or right after a
+  // compaction (the provider figure predates the compact and is stale-high
+  // until the next turn lands). Local sessions keep the exact /tokenize
+  // poll as always.
   const cachedTokens = liveUsage.cachedTokens ?? 0;
   const providerIncludesCache = PROVIDER_INPUT_INCLUDES_CACHE.has(
     activeSession?.provider ?? "",
@@ -365,9 +374,30 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     lastInputTokens != null && providerIncludesCache
       ? Math.max(0, lastInputTokens - cachedTokens)
       : lastInputTokens;
+  // A compaction landed since the last provider figure: `compacted` flips on
+  // when compactionRevision moves and off when a new turn's inputTokens
+  // arrives (fresh provider figure, post-compact). Session switches are
+  // covered because lastInputTokens moves off the old session's value.
+  const [compactedSinceLastTurn, setCompactedSinceLastTurn] = useState(false);
+  const compactionRevRef = useRef(compactionRevision);
+  useEffect(() => {
+    if (compactionRevision !== compactionRevRef.current) {
+      compactionRevRef.current = compactionRevision;
+      setCompactedSinceLastTurn(true);
+    }
+  }, [compactionRevision]);
+  const lastInputRef = useRef(lastInputTokens);
+  useEffect(() => {
+    if (lastInputTokens !== lastInputRef.current) {
+      lastInputRef.current = lastInputTokens;
+      setCompactedSinceLastTurn(false);
+    }
+  }, [lastInputTokens]);
   const usedTokens = isLocal
     ? (pollUncached ?? lastUncached)
-    : Math.max(pollUncached ?? 0, lastUncached ?? 0) || lastUncached;
+    : lastUncached != null && !compactedSinceLastTurn
+      ? lastUncached
+      : (pollUncached ?? lastUncached);
 
 
   const handleModelChange = useCallback(
@@ -646,8 +676,16 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   );
 
   const loadOlderMessages = useChatStore((s) => s.loadOlderMessages);
-  const loadOlderSplitMessages = useChatStore((s) => s.loadOlderSplitMessages);
-  const hasMoreHistory = useChatStore((s) => (isSplitView ? s.splitHasMoreHistory : s.hasMoreHistory));
+  const loadOlderPaneMessages = useChatStore((s) => s.loadOlderPaneMessages);
+  const storeHasMore = useChatStore((s) => s.hasMoreHistory);
+  const hasMoreHistory = paneBuf ? paneBuf.hasMoreHistory : storeHasMore;
+  // One older-page loader for the scroll hook, resolved per mode (the pane
+  // variant needs its paneId).
+  const loadOlder = useCallback(
+    (sessionId: string) =>
+      paneId ? loadOlderPaneMessages(paneId, sessionId) : loadOlderMessages(sessionId),
+    [paneId, loadOlderMessages, loadOlderPaneMessages],
+  );
   // Pending approval/question card ids — their mount/unmount shrinks the
   // scroll viewport, so the transcript scroll engine re-anchors across it.
   const approvalKey = activeChatSessionId
@@ -676,10 +714,8 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     jumpToLiveEdge,
   } = useTranscriptScroll({
     activeChatSessionId,
-    isSplitView,
     hasMoreHistory,
-    loadOlderMessages,
-    loadOlderSplitMessages,
+    loadOlder,
     messages,
     streaming,
     approvalKey,
@@ -740,6 +776,21 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     if (!config) void loadConfig();
   }, [config, loadConfig]);
 
+  // Crash recovery, once per frontend boot: after a crash (or webview
+  // reload with the backend surviving) a mid-turn chat reopens showing only
+  // its user message and rejected every send with "a turn is already
+  // running". The backend command clears that in-memory flag for sessions
+  // whose reader and child process are both gone; genuinely running turns
+  // keep their flag (the rejection is honest while a CLI still streams).
+  const reconciled = useRef(false);
+  useEffect(() => {
+    if (reconciled.current) return;
+    reconciled.current = true;
+    void reconcileAgentSessions().catch(() => {
+      /* best-effort: an unrecovered wedged turn behaves as before */
+    });
+  }, []);
+
   // Entering chat with no session selected always starts a FRESH chat so the
   // user can type immediately. First sweep any empty "Untitled" rows — chats
   // opened but never typed into (including the auto-started one from the
@@ -751,7 +802,10 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     // Popout windows are handed a specific session — auto-starting a fresh
     // one here would race the sweep (it can delete the very session the
     // popout is opening) and flash a junk empty chat. Only selection (above).
-    if (!loaded || !config || isSplitView || popoutSessionId || activeChatSessionId || autoStarted.current) return;
+    // Split panes are likewise never auto-started: they always render an
+    // existing session, and auto-creating (or sweeping) from there would
+    // hijack the main view's session list.
+    if (!loaded || !config || isPaneView || popoutSessionId || activeChatSessionId || autoStarted.current) return;
     autoStarted.current = true;
     void deleteEmptyChatSessions()
       .then((deleted) => {
@@ -767,14 +821,14 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     // the first send (send_chat_message's auto-warm path).
     const seed = seedSelectionFrom(lastSelection, config);
     void newChat(seed.provider, seed.model, undefined, seed.agent);
-  }, [loaded, isSplitView, popoutSessionId, activeChatSessionId, config, lastSelection, newChat, loadSessions]);
+  }, [loaded, isPaneView, popoutSessionId, activeChatSessionId, config, lastSelection, newChat, loadSessions]);
 
   // Split pane: load (or re-target) the pinned session's history whenever the
   // pane opens on a different session.
   useEffect(() => {
-    if (!isSplitView || !splitSessionId || !loaded) return;
-    void useChatStore.getState().loadSplitMessages(splitSessionId);
-  }, [isSplitView, splitSessionId, loaded]);
+    if (!isPaneView || !paneId || !loaded || !paneBuf) return;
+    void useChatStore.getState().loadPaneMessages(paneId, paneBuf.sessionId);
+  }, [isPaneView, paneId, paneBuf?.sessionId, loaded]);
 
 
   // Build the list of items to render: persisted messages, plus a live
@@ -1315,14 +1369,14 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
 
   return (
     <div className="chat-view-wrap">
-    <TurnNavigator />
+    <TurnNavigator sessionId={activeChatSessionId} paneId={paneId} />
     <div className={`chat-view${artifacts && artifacts.length > 0 ? " has-artifacts" : ""}`}>
-      {/* The git rail is mounted by exactly ONE view: in split view only the
-          FOCUSED half hosts it (the pin points at its session); without a
-          split, the main view does. Otherwise both halves would render their
-          own rail and toggling would open it on both. */}
-      {(isSplitView
-        ? focusedPin === splitSessionId
+      {/* The git rail is mounted by exactly ONE pane: in split view only the
+          FOCUSED pane hosts it (the pin points at its session); without a
+          split, the main view does. Otherwise every pane would render its
+          own rail and toggling would open it on all of them. */}
+      {(isPaneView
+        ? focusedPin === activeChatSessionId
         : focusedPin == null) && <GitToolsSidebar />}
       {!activeChatSessionId || hasItems ? (
         <div
@@ -1337,6 +1391,12 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
               // React — see patchTailAndPin); liveTotal is the truth kept by
               // the pin pass, so the wrapper never renders too short and
               // lets the positioned rows overflow the scroll extent.
+              // liveTotal carries the MEASURED tail bottom (see the tail
+              // clamp in patchTailAndPin), so once the pin pass has run this
+              // converges to real content height — the estimate-inflated
+              // totalSize no longer reserves scrollable blank space below
+              // the last turn. Until then the DOM !important write holds
+              // the clamped height against this render-time value.
               // flexShrink 0: WITHOUT this, flexbox squeezes this child to a
               // fraction of its height (measured 755px vs 3958px specified)
               // because its absolutely-positioned rows give it zero
@@ -1532,6 +1592,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
               height + breathing room, floored at the original 220px. */}
           <div
             aria-hidden="true"
+            className="chat-dock-spacer"
             style={{
               height:
                 composerDockHeight > 0
@@ -1626,6 +1687,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
 
       <ChatComposer
         sessionId={activeChatSessionId}
+        petHome={paneId ?? "main"}
         draft={draft}
         quotedSelections={quotedSelections}
         onRemoveQuotedSelection={removeQuotedSelection}
@@ -1705,7 +1767,13 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       )}
       {fullAccessConfirmingFor && (
         <FullAutoConfirmModal
-          onConfirm={() => void confirmFullAccess(fullAccessConfirmingFor!)}
+          onConfirm={() =>
+            confirmFullAccess(fullAccessConfirmingFor!).catch((e) =>
+              // The store keeps the modal open for retry, but the user needs
+              // to SEE why the switch failed (audit L-19).
+              console.error("approval-mode switch failed:", e),
+            )
+          }
           onCancel={cancelFullAccessConfirm}
         />
       )}

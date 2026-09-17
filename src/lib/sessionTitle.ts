@@ -14,7 +14,13 @@ export const TITLE_MAX_LENGTH = 40;
  * - Returns null when the prompt has no usable text (caller keeps "Untitled").
  */
 export function generateSessionTitle(firstPrompt: string): string | null {
-  const cleaned = firstPrompt.replace(/\s+/g, " ").trim();
+  // Strip structural markers that are content, not a title: the connector
+  // stamp the composer appends ("[Connected: Gmail]") would otherwise become
+  // the whole sidebar entry for a short first message.
+  const cleaned = firstPrompt
+    .replace(/\s*\[Connected:[^\]]*\]\s*/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (cleaned.length === 0) return null;
   if (cleaned.length <= TITLE_MAX_LENGTH) return cleaned;
   // Cut at a word boundary when possible so the ellipsis doesn't split a word.

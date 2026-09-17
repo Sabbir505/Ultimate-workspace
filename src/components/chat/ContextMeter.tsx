@@ -46,6 +46,10 @@ interface Props {
    *  gates the live context-window derivation (OpenRouter's models endpoint
    *  is the one major API that exposes per-model context_length). */
   provider?: string | null;
+  /** Agent id of the active session ("builtin", "harness:opencode", …) —
+   *  harness sessions derive their live window from the CLI's own model
+   *  catalog instead of a cloud provider API. */
+  agent?: string | null;
   isLocal: boolean;
   localCtx?: number;
   /** Live context-window cap from the running llama-server. Takes precedence
@@ -98,6 +102,7 @@ export function ContextMeter({
   usedTokens,
   model,
   provider,
+  agent,
   isLocal,
   localCtx,
   liveMaxTokens,
@@ -113,13 +118,17 @@ export function ContextMeter({
   const pinned = pinnedWindow && pinnedWindow > 0 ? pinnedWindow : null;
   const baseMax = pinned ?? contextWindowFor(model, isLocal, localCtx, contextLimitOverride);
   const [dynamicMax, setDynamicMax] = useState<number | null>(null);
+  // Which live layer produced dynamicMax, so the hover panel can say where
+  // the window figure came from ("provider API" vs "harness catalog").
+  const [dynamicSource, setDynamicSource] = useState<string>("");
   useEffect(() => {
     setDynamicMax(null);
+    setDynamicSource("");
     if (isLocal) return;
     // A pinned window IS the answer — no live refinement can override it.
     if (pinned) return;
     let cancelled = false;
-    void contextWindowForModel(model, provider).then((w) => {
+    void contextWindowForModel(model, provider, { agent, chatSessionId }).then((w) => {
       if (!cancelled && w && w > 0) {
         // The user's cap shrinks the live figure too — same min() contract
         // as the registry path (a cap never RAISES a window).
@@ -128,12 +137,19 @@ export function ContextMeter({
             ? Math.min(w, contextLimitOverride)
             : w,
         );
+        setDynamicSource(
+          agent?.startsWith("harness:")
+            ? "harness-catalog"
+            : provider === "openrouter"
+              ? "openrouter-live"
+              : "provider-live",
+        );
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [model, provider, isLocal, contextLimitOverride, pinned]);
+  }, [model, provider, agent, chatSessionId, isLocal, contextLimitOverride, pinned]);
   // Prefer the live cap (what llama-server was actually started with) over
   // the slider-derived cap. Falls back to the slider / 16K default for the
   // brief window before the first poll resolves, and for cloud sessions
@@ -147,12 +163,23 @@ export function ContextMeter({
     : pinned != null
       ? "pinned"
       : dynamicMax != null
-        ? "openrouter-live"
+        ? dynamicSource || "live"
         : isLocal
           ? "local-default"
           : registryWindowFor(model) != null
             ? "registry"
             : "registry-fallback";
+  // Human label for the hover panel: where the window figure came from.
+  const capSourceLabel: Record<string, string> = {
+    "sidecar-live": "llama-server (live)",
+    pinned: "your pinned setting",
+    "openrouter-live": "provider API",
+    "provider-live": "provider API",
+    "harness-catalog": "harness model catalog",
+    "local-default": "local default",
+    registry: "built-in estimate",
+    "registry-fallback": "estimate — unknown model",
+  };
   const pct = max > 0 ? Math.min(1, used / max) : 0;
   const level = pct >= PCT_CRIT ? "crit" : pct >= PCT_WARN ? "warn" : "ok";
   // Dash the circle so the filled portion grows from the top clockwise.
@@ -176,11 +203,17 @@ export function ContextMeter({
   const [panelPos, setPanelPos] = useState<{ left: number; bottom: number } | null>(null);
   const circleRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const breakdownKey = chatSessionId ?? "";
+  // The breakdown is session- AND selection-scoped: the backend resolves it
+  // against the session's CURRENT provider/model — local sessions count via
+  // the running sidecar's /tokenize, cloud sessions estimate per category.
+  // Cache it under the full key so switching provider or model (local ↔
+  // cloud included) invalidates it; keying by session id alone kept serving
+  // the local model's numbers after a switch back to a hosted provider.
+  const breakdownKey = `${chatSessionId ?? ""}|${provider ?? ""}|${model ?? ""}|${isLocal ? 1 : 0}`;
   const lastKey = useRef(breakdownKey);
   if (lastKey.current !== breakdownKey) {
     lastKey.current = breakdownKey;
-    setBreakdown(undefined); // session changed — refetch on next hover
+    setBreakdown(undefined); // session or model/provider changed — refetch on next hover
   }
 
   // While the panel is showing, tell native browser webviews to hide: they
@@ -220,14 +253,28 @@ export function ContextMeter({
       setPanelPos({ left, bottom: window.innerHeight - r.top + 6 });
     }
     setShowPanel(true);
-    if (breakdown === undefined && chatSessionId) {
+    // `undefined` = nothing fetched yet for this key; `null` = the last fetch
+    // came back empty (hover before the local sidecar finished loading, or a
+    // transient backend miss). Retry the null case on the next hover instead
+    // of pinning "Breakdown unavailable" for the rest of the session.
+    if ((breakdown === undefined || breakdown === null) && chatSessionId) {
       // Every provider resolves through the backend now: local sessions
       // return exact /tokenize counts, cloud/harness sessions return a
       // char-based estimate per category (system prompt, history, tool
       // schema — whatever that path actually sends).
+      // Stale guard: the breakdown is identity-keyed (line above), so a
+      // session switch mid-flight resets it — but the in-flight fetch used
+      // to resolve AFTER the reset and land the OLD session's rows (the
+      // refetch gate then never re-fired). Drop resolutions whose identity
+      // changed (audit M-15).
+      const key = breakdownKey;
       countContextBreakdown(chatSessionId)
-        .then((b) => setBreakdown(b))
-        .catch(() => setBreakdown(null));
+        .then((b) => {
+          if (lastKey.current === key) setBreakdown(b);
+        })
+        .catch(() => {
+          if (lastKey.current === key) setBreakdown(null);
+        });
     }
   };
 
@@ -344,6 +391,17 @@ export function ContextMeter({
               <span className="context-meter-panel-total"> / {formatTokens(max)}</span>
               <span className="context-meter-panel-pct">({Math.round(pct * 100)}%)</span>
             </span>
+          </div>
+          {/* Where the window figure came from — a provider-published
+              number, the user's own pin, or a family estimate — plus the
+              user cap when it shrank the effective window. Without this the
+              tooltip shows a total with no provenance and a wrong-looking
+              figure can't be told apart from a right one. */}
+          <div className="context-meter-panel-note">
+            Window: {formatTokens(max)} ({capSourceLabel[capSource] ?? capSource})
+            {contextLimitOverride && contextLimitOverride > 0 && !pinned
+              ? ` · capped by your limit (${formatTokens(contextLimitOverride)})`
+              : ""}
           </div>
           {/* Slider visualization — always rendered, even at 0% */}
           <div className="context-meter-panel-bar">

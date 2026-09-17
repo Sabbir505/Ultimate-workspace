@@ -5,6 +5,7 @@
 // runtime fallback when parsing fails.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { renderAsync } from "docx-preview";
+import { sanitizeOfficeDocumentHtml } from "../../lib/sanitize";
 
 function dataUriToBuffer(dataUri: string): ArrayBuffer {
   const b64 = dataUri.slice(dataUri.indexOf(",") + 1);
@@ -27,6 +28,9 @@ export function DocxViewer({
   const containerRef = useRef<HTMLDivElement>(null);
   const naturalPageWidth = useRef(0);
   const naturalPageHeight = useRef(0);
+  // True from render start until renderAsync settles — the ResizeObserver
+  // must not measure the document while it is still being built (audit L-23).
+  const renderInFlight = useRef(false);
   // Render epoch: bumped at the start of every render attempt; after each
   // await the epoch must still be current or the render is abandoned. Without
   // this, switching documents quickly lets two overlapping `renderAsync`
@@ -50,6 +54,18 @@ export function DocxViewer({
     const container = containerRef.current;
     const wrapper = container?.querySelector<HTMLElement>(".docx-wrapper");
     if (!container || !wrapper) return;
+    // Never measure mid-render: the ResizeObserver fires as soon as the
+    // FIRST page exists, and the old code cached that partial width/height
+    // permanently (the 0-guard never re-measured), producing a wrong
+    // fit-to-width scale and clipped page height (audit L-23). The render's
+    // own post-completion call does the real measurement.
+    if (renderInFlight.current) return;
+    // docx-preview centers pages with `align-items: center` — a page wider
+    // than the pane gets a NEGATIVE left offset that scroll can never reach,
+    // so the left edge of the document is permanently clipped (and the fit
+    // math below would shift it further left). The transform owns centering,
+    // so flatten the wrapper to a plain block before measuring.
+    wrapper.style.display = "block";
     if (!naturalPageWidth.current) {
       wrapper.style.transform = "";
       wrapper.style.height = "";
@@ -66,8 +82,11 @@ export function DocxViewer({
       wrapper.style.transform = `translateX(${offsetX.toFixed(1)}px) scale(${scale.toFixed(4)})`;
       wrapper.style.height = `${Math.ceil(naturalPageHeight.current * scale)}px`;
     } else {
+      // Wide pane: the unscaled page fits, so hand centering back to the
+      // wrapper's stock flex layout.
       wrapper.style.transform = "";
       wrapper.style.height = "";
+      wrapper.style.display = "";
     }
   }, []);
 
@@ -77,6 +96,7 @@ export function DocxViewer({
     const epoch = ++renderEpoch.current;
     naturalPageWidth.current = 0;
     naturalPageHeight.current = 0;
+    renderInFlight.current = true;
     try {
       container.innerHTML = "";
       await renderAsync(dataUriToBuffer(dataUri), container, container, {
@@ -94,10 +114,14 @@ export function DocxViewer({
       // A newer render took over the container — abandon this stale one
       // rather than scaling/failing state off mixed content.
       if (epoch !== renderEpoch.current) return;
+      // Render complete: NOW measurement is valid (the in-flight guard above
+      // suppressed every mid-render ResizeObserver pass).
+      renderInFlight.current = false;
       fitToWidth();
       setFailed(false);
     } catch (err) {
       if (epoch !== renderEpoch.current) return;
+      renderInFlight.current = false;
       console.warn(`[DocxViewer] docx-preview failed for ${filename}`, err);
       setFailed(true);
     }
@@ -118,7 +142,7 @@ export function DocxViewer({
         className="artifact-preview-html office docx"
         title={filename}
         sandbox=""
-        srcDoc={fallbackHtml}
+        srcDoc={sanitizeOfficeDocumentHtml(fallbackHtml)}
       />
     );
   }

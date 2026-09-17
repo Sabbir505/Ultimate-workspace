@@ -63,8 +63,16 @@ export const sttStop = () => safeInvoke<void>("stt_stop");
 /** One-click install: downloads the pinned upstream whisper.cpp release,
  *  extracts whisper-server.exe (+ DLLs) into the app-data bin dir, and saves
  *  its path into `stt.whisperServerPath`. Progress arrives on
- *  `onModelDownloadProgress` under id "stt-whisper-server". */
-export const sttInstallServer = () => safeInvoke<SttStatus>("stt_install_server");
+ *  `onModelDownloadProgress` under id "stt-whisper-server". `force` re-pulls
+ *  the pinned release over an existing install (the build updater's Update
+ *  button); without it an existing install is only re-pointed. */
+export const sttInstallServer = (force = false) =>
+  safeInvoke<SttStatus>("stt_install_server", { force });
+/** One-click install/update of the pinned CUDA build (the cublas variant of
+ *  the same whisper.cpp release — bundles its own CUDA 12 runtime). Progress
+ *  arrives under id "stt-whisper-cuda". */
+export const sttInstallCuda = (force = false) =>
+  safeInvoke<SttStatus>("stt_install_cuda", { force });
 export const sttSetDefault = (filename: string) =>
   safeInvoke<void>("stt_set_default", { filename });
 export const sttSetAutoStart = (autoStart: boolean) =>
@@ -174,8 +182,43 @@ export const ttsSetKeepLoaded = (keep: boolean) =>
 export const ttsGpuStatus = () => safeInvoke<TtsGpuStatus>("tts_gpu_status");
 /** One-click GPU runtime: the CUDA voice engine (~456 MB) plus the cuDNN 9
  *  runtime (~420 MB), both SHA-256 pinned. Progress arrives on
- *  `onModelDownloadProgress` under id "tts-gpu-runtime". */
-export const ttsInstallGpu = () => safeInvoke<TtsGpuStatus>("tts_install_gpu");
+ *  `onModelDownloadProgress` under id "tts-gpu-runtime". `force` re-downloads
+ *  both halves (the build updater's Update button). */
+export const ttsInstallGpu = (force = false) =>
+  safeInvoke<TtsGpuStatus>("tts_install_gpu", { force });
+
+// ---- Native build updates (the harness-updater shape for binaries) ----
+
+/** One updatable native build: installed version vs the version this app
+ *  pins. Mirrors the harness HarnessUpdateStatus row shape. */
+export interface BuildUpdateStatus {
+  /** "stt-whisper" | "stt-whisper-cuda" | "llama-cuda" | "tts-gpu". */
+  id: string;
+  title: string;
+  installed: boolean;
+  installedVersion: string | null;
+  latestVersion: string;
+  updateAvailable: boolean;
+  /** Row context (e.g. a custom build is in use and what updating does). */
+  note?: string | null;
+}
+/** Check all managed native builds (whisper CPU/CUDA, llama CUDA server,
+ *  TTS GPU runtime) for available updates. */
+export const checkBuildUpdates = () =>
+  safeInvoke<BuildUpdateStatus[]>("check_build_updates");
+
+export interface LlamaCudaInstallStatus {
+  installed: boolean;
+  exePath: string | null;
+  version: string | null;
+}
+/** One-click install/update of the pinned official CUDA llama-server
+ *  (Settings → Local Models → My Models → Server builds). Progress arrives
+ *  on `onModelDownloadProgress` under id "llama-cuda-server". `force`
+ *  re-downloads over an existing managed install; the app's llama-server
+ *  path setting is pointed at the managed build afterwards. */
+export const llamaInstallCuda = (force = false) =>
+  safeInvoke<LlamaCudaInstallStatus>("llama_install_cuda", { force });
 
 /** Pop a chat session out into its own OS window (roadmap #17). */
 export const popOutChat = (sessionId: string) =>

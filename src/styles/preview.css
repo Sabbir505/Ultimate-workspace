@@ -98,14 +98,18 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 12px;
+  /* Roomier than it looks: this row sits flush under the tool panel's tab
+     strip, and at 8px the buttons read as glued to the pane chrome. */
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-2);
 }
 
 .artifact-preview-header-actions {
   display: flex;
-  gap: 2px;
+  /* 2px visually welded the stop/speaker button to the Download pill (the
+     first two controls in the row); 8px gives each control its own footprint. */
+  gap: 8px;
   flex-shrink: 0;
 }
 .artifact-preview-header-btn {
@@ -693,13 +697,19 @@
 .pdf-pages {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  /* NO align-items: center — a centered page WIDER than the scroll area
+     overflows BOTH edges and the left overflow is unreachable (scrollLeft
+     can't go negative): zoomed-in PDFs lost their left columns. Auto margins
+     on the page center when there's room and collapse to 0 on overflow, so
+     the overflow stays one-sided and scrollable. */
+  align-items: flex-start;
   gap: 14px;
   padding: 16px;
 }
 .pdf-page {
   position: relative;
   flex: 0 0 auto;
+  margin: 0 auto;
   background: #fff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
   overflow: hidden;

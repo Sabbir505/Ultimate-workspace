@@ -1340,7 +1340,11 @@ pub(crate) async fn run_openai_tool_loop(
     // [prompt-audit]: final wire composition. On local models the --jinja
     // chat template renders the `tools` array into the prompt, so the tools
     // JSON size — not just the system prompt — drives prompt_tokens.
-    {
+    // Env-gated (RELAY_PROMPT_AUDIT=1): this ran on EVERY round of every
+    // OpenAI-family turn and re-serialized the full tool-spec JSON per round
+    // — measurable hot-path cost plus unbounded stderr noise in long
+    // agentic turns (audit L-7).
+    if std::env::var("RELAY_PROMPT_AUDIT").ok().as_deref() == Some("1") {
         let tools_json = serde_json::to_string(&tool_specs).unwrap_or_default();
         let hist_chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
         let retrieval_chars: usize = req.local_docs_retrieval.iter().map(|s| s.len()).sum();

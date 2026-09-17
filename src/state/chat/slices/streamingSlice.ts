@@ -24,13 +24,15 @@ import { useProjectsStore } from "../../projects";
 import {
   STREAM_TAIL_CAP,
   STREAM_TAIL_MARGIN,
+  appendUserBubble,
+  bufferTargetFor,
+  bufferWriteBack,
   clearStreamState,
   cliAgentId,
   hasManuallyRenamed,
   isCliAgent,
   isDeletedSession,
   markManuallyRenamed,
-  mergeOptimistic,
   omitKey,
   optimisticMsgIdCounter,
   patchSessions,
@@ -46,7 +48,6 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
   return {
     sendMessage: async (content: string, attachments?: ChatAttachmentInput[], forceResearch?: boolean, sessionIdOverride?: string) => {
       const {
-        messages,
         sessions,
         effort,
         toolsEnabled,
@@ -144,25 +145,17 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
         completedAt: null,
       };
       set((s) => {
-        // A split-pane send (override names the split session, which is not
-        // the global active one) lands in the SPLIT buffer so the main view's
-        // list stays untouched; a plain (or self-named) send appends to the
-        // active list. A BACKGROUND send — drainQueue re-entering sendMessage
-        // with an override naming a session that is neither active nor split —
-        // must touch NEITHER buffer: `messages` only ever holds the active
-        // session's list (same contract as broadcastToSessions below), and the
-        // persisted row surfaces when that session is opened.
-        const forActive = activeChatSessionId === s.activeChatSessionId;
-        const forSplit =
-          sessionIdOverride != null &&
-          sessionIdOverride === s.splitChatSessionId &&
-          !forActive;
+        // The optimistic bubble lands in whichever buffer displays the target
+        // session: the main list (active session), the pinned pane's buffer
+        // (split-pane send), or NEITHER — a background send (drainQueue
+        // re-entering with a session no view displays) must touch no open
+        // buffer; the persisted row surfaces when that session is opened
+        // (appendUserBubble handles all three cases).
         // A fresh turn supersedes any stop-marker for this session.
         const stoppedPartial = { ...s.stoppedPartial };
         delete stoppedPartial[activeChatSessionId];
         return {
-          messages: forActive ? [...messages, userMsg] : s.messages,
-          splitMessages: forSplit ? [...s.splitMessages, userMsg] : s.splitMessages,
+          ...appendUserBubble(s, activeChatSessionId, userMsg),
           streamingChatSessionId: activeChatSessionId,
           streaming: { ...get().streaming, [activeChatSessionId]: "" },
           chatStatus: { ...get().chatStatus, [activeChatSessionId]: { reason: "thinking", message: "" } },
@@ -213,6 +206,12 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
       if (session && isCliAgent(session.agent)) {
         const projects = useProjectsStore.getState();
         const cwd = workingDir;
+        // A typed "/research …" carries the flag itself: the slug STAYS in
+        // the message (the bubble shows the command that ran — built-in
+        // sessions strip it from the model-bound copy backend-side), and the
+        // flag engages the CLI-facing research appendix here.
+        const researchTurn =
+          !!forceResearch || /^\/research\b/i.test(content.trimStart());
         try {
           await sendAgentChatMessage(
             activeChatSessionId,
@@ -227,6 +226,7 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
             // extracted doc text into the persisted message and saves image/
             // doc bytes to disk paths the CLI's own file tools can open.
             attachments ?? undefined,
+            researchTurn,
           );
         } catch (err) {
           console.error('[agent] sendAgentChatMessage failed:', err);
@@ -343,6 +343,10 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
               session.model || undefined,
               workingDir,
               projectsState.selectedProjectId ?? undefined,
+              undefined,
+              // Typed "/research …" carries the flag itself; same appendix
+              // contract as the single-session harness send.
+              !!forceResearch || /^\/research\b/i.test(content.trimStart()),
             );
           } else {
             // Pass the store's tool flags (audit B-22): ipc.ts maps omitted
@@ -464,29 +468,14 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
         try {
           // Same 200-row page cap as loadMessages (M10 / audit B-23): the
           // unbounded refetch deserialized the FULL history and desynced
-          // hasMoreHistory. Each write is scoped to the buffer that still
-          // displays this session: the active view, or the split pane (Stop
-          // pressed on a split session — without that branch the live bubble
-          // vanished and the persisted partial never landed until a reload;
-          // same contract as onDone's isSplitTarget write-back).
+          // hasMoreHistory. bufferWriteBack scopes the write to whichever
+          // buffer still displays this session — the active view's list or
+          // the pinned pane's (Stop pressed on a split session — without
+          // that the live bubble vanished and the persisted partial never
+          // landed until a reload; same contract as onDone).
           const messages = await getChatMessages(streamingChatSessionId, undefined, 200);
           if (messages) {
-            const isActiveSession = get().activeChatSessionId === streamingChatSessionId;
-            const isSplitTarget =
-              get().splitChatSessionId === streamingChatSessionId && !isActiveSession;
-            if (isActiveSession) {
-              set((s) => ({
-                messages: mergeOptimistic(s.messages, messages),
-                messagesSessionId: streamingChatSessionId,
-                hasMoreHistory: messages.length >= 200,
-              }));
-            } else if (isSplitTarget) {
-              set((s) => ({
-                splitMessages: mergeOptimistic(s.splitMessages, messages),
-                splitMessagesSessionId: streamingChatSessionId,
-                splitHasMoreHistory: messages.length >= 200,
-              }));
-            }
+            set((s) => bufferWriteBack(s, streamingChatSessionId, messages, { merge: true }));
           }
         } catch {
           /* best-effort refresh */
@@ -517,37 +506,20 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // chat event, and failure paths can die before emitting one).
       if (!(chatSessionId in get().streaming)) return;
       set((s) => clearStreamState(s, chatSessionId));
-      // Surface the persisted reply: an active or split-pane viewer refetches
-      // the page (same isSplitTarget contract as cancelStream / onDone);
-      // everyone else gets the unread mark (same posture as onDone).
-      if (
-        get().activeChatSessionId !== chatSessionId &&
-        get().splitChatSessionId !== chatSessionId
-      ) {
+      // Surface the persisted reply: a viewer (active view or the pinned pane
+      // showing this session) refetches the page (same bufferWriteBack
+      // contract as cancelStream / onDone); everyone else gets the unread
+      // mark (same posture as onDone).
+      if (bufferTargetFor(get(), chatSessionId) == null) {
         void setChatSessionUnread(chatSessionId, true).catch(() => {});
         return;
       }
       try {
         const messages = await getChatMessages(chatSessionId, undefined, 200);
         if (messages && !(chatSessionId in get().streaming)) {
-          // Same post-await pane derivation as cancelStream: a switch
-          // mid-fetch must not write the rows into the other view's buffer.
-          const isActiveSession = get().activeChatSessionId === chatSessionId;
-          const isSplitTarget =
-            get().splitChatSessionId === chatSessionId && !isActiveSession;
-          if (isActiveSession) {
-            set({
-              messages: mergeOptimistic(get().messages, messages),
-              messagesSessionId: chatSessionId,
-              hasMoreHistory: messages.length >= 200,
-            });
-          } else if (isSplitTarget) {
-            set({
-              splitMessages: mergeOptimistic(get().splitMessages, messages),
-              splitMessagesSessionId: chatSessionId,
-              splitHasMoreHistory: messages.length >= 200,
-            });
-          }
+          // Scoped post-await write: a pane re-pin mid-fetch must not write
+          // the rows into another view's buffer.
+          set((s) => bufferWriteBack(s, chatSessionId, messages, { merge: true }));
         }
       } catch {
         /* best-effort: the sidebar relist picks it up on the next interaction */
@@ -659,7 +631,10 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // finished one unread, so it surfaces in the sidebar. Best-effort: this
       // handler must ALWAYS reach the streaming-state cleanup below — an
       // awaited IPC rejection here would wedge the session in "working" state.
-      if (get().activeChatSessionId !== chatSessionId) {
+      // Pane-displayed sessions count as viewed too: in split view both panes
+      // are on screen, so marking the un-focused-but-visible one unread while
+      // the user watches it complete was wrong (audit L-25).
+      if (bufferTargetFor(get(), chatSessionId) == null) {
         void setChatSessionUnread(chatSessionId, true).catch(() => {});
       }
       // Capture the finished turn's final metrics for the composer's idle row
@@ -733,11 +708,6 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
           // is keyed by the persisted message id (globally unique), so the chips
           // will be there when the user opens that session — previously they were
           // silently discarded while the pending buffer was cleared regardless.
-          // Only the flat `messages` buffer (the active session's list) stays
-          // gated on the active session so two sessions finishing simultaneously
-          // don't cross-contaminate.
-          const isActiveSession = s.activeChatSessionId === chatSessionId;
-          const isSplitTarget = s.splitChatSessionId === chatSessionId && !isActiveSession;
           const pending = s.pendingArtifacts[chatSessionId] ?? [];
           const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
           const artifactsByMessage =
@@ -747,16 +717,10 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
           const nextPending = { ...s.pendingArtifacts };
           delete nextPending[chatSessionId];
           return {
-            messages: isActiveSession ? mergeOptimistic(s.messages, messages) : s.messages,
-            messagesSessionId: isActiveSession ? chatSessionId : s.messagesSessionId,
-            hasMoreHistory: isActiveSession
-              ? messages.length >= 200
-              : s.hasMoreHistory,
-            // The split pane gets the same final-rows write-back for its own
-            // session so its history updates in place — no reload needed.
-            splitMessages: isSplitTarget ? mergeOptimistic(s.splitMessages, messages) : s.splitMessages,
-            splitMessagesSessionId: isSplitTarget ? chatSessionId : s.splitMessagesSessionId,
-            splitHasMoreHistory: isSplitTarget ? messages.length >= 200 : s.splitHasMoreHistory,
+            // The final-rows write-back lands in whichever buffer displays
+            // this session (active view or its pinned pane) so the history
+            // updates in place — no reload needed.
+            ...bufferWriteBack(s, chatSessionId, messages, { merge: true }),
             artifactsByMessage,
             pendingArtifacts: nextPending,
           };
@@ -883,25 +847,10 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
             await persistPartialChatMessage(chatSessionId, partial).catch(() => {});
             const messages = await getChatMessages(chatSessionId, undefined, 200);
             if (messages) {
-              // Same isSplitTarget-aware write-back as cancelStream: the split
+              // Same bufferWriteBack scoping as cancelStream: the pinned
               // pane's errored session must surface its partial too, and a
-              // background session must not write into the active buffer.
-              const isActiveSession = get().activeChatSessionId === chatSessionId;
-              const isSplitTarget =
-                get().splitChatSessionId === chatSessionId && !isActiveSession;
-              if (isActiveSession) {
-                set((s) => ({
-                  messages: mergeOptimistic(s.messages, messages),
-                  messagesSessionId: chatSessionId,
-                  hasMoreHistory: messages.length >= 200,
-                }));
-              } else if (isSplitTarget) {
-                set((s) => ({
-                  splitMessages: mergeOptimistic(s.splitMessages, messages),
-                  splitMessagesSessionId: chatSessionId,
-                  splitHasMoreHistory: messages.length >= 200,
-                }));
-              }
+              // background session must not write into an open buffer.
+              set((s) => bufferWriteBack(s, chatSessionId, messages, { merge: true }));
             }
           } catch {
             /* best-effort: the partial still shows on the next turn */

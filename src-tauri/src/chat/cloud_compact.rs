@@ -205,10 +205,16 @@ pub(crate) async fn summarize_via_provider(
         )
     };
 
-    let resp = resp
-        .send()
-        .await
-        .map_err(|e| format!("summarize request failed: {e}"))?;
+    // Non-streaming call on the shared (connect-timeout-only) client: bound
+    // the whole exchange or a wedged endpoint parks compact-and-retry forever
+    // with the UI stuck on the compaction notice (audit M-3).
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        async { resp.send().await.and_then(|r| r.error_for_status()) },
+    )
+    .await
+    .map_err(|_| "summarize request timed out after 180s".to_string())?
+    .map_err(|e| format!("summarize request failed: {e}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let err_body = resp.text().await.unwrap_or_default();

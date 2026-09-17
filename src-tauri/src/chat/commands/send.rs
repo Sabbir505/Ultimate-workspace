@@ -1021,11 +1021,21 @@ pub async fn send_chat_message(
         // sites; only the interactive turn needs the block). Auto-model
         // fail-over rebuilds prompts from SystemPromptInputs and skips the
         // block for that one fallback attempt — awareness resumes next turn.
+        // The workspace update rides beside it: same-project siblings that
+        // moved SINCE this session's last turn, so picking up where another
+        // chat left off needs no manual message_session bridge.
         let built = built.map(|sys| {
-            match crate::session_fabric::registry_block(&conn, Some(&chat_session_id)) {
+            let mut sys = match crate::session_fabric::registry_block(&conn, Some(&chat_session_id))
+            {
                 Some(block) if !block.trim().is_empty() => format!("{sys}\n\n{block}"),
                 _ => sys,
+            };
+            if let Some(update) =
+                crate::session_fabric::workspace_update_block(&conn, &chat_session_id)
+            {
+                sys = format!("{sys}\n\n{update}");
             }
+            sys
         });
         // [prompt-audit] inputs captured before `custom`/`skills` are consumed.
         let audit = (
@@ -1081,6 +1091,18 @@ pub async fn send_chat_message(
         crate::chat::compaction::load_compaction_entries(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
     };
+    // Research turns: the `/research` token is a relay affordance, not model
+    // vocabulary — sent verbatim it reads as an unknown command and the turn
+    // degrades into an ordinary answer even though the scaffolding is loaded.
+    // Rewrite the model-bound copy to the plain topic (in-memory only; the DB
+    // row and the chat transcript keep what the user typed).
+    if research_mode {
+        if let Some(last) = messages.last_mut() {
+            if last.message.role == "user" {
+                last.message.content = crate::chat::strip_research_prefix(&last.message.content);
+            }
+        }
+    }
     // Attach this turn's images to the just-persisted user message so they are
     // sent as vision content. Images are not persisted, so they only apply to
     // the live turn (not to regenerated/older turns).

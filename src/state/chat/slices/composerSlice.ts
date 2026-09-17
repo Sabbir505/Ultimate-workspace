@@ -1,6 +1,6 @@
 // Composer slice: drafts, the per-session FIFO queue, the global send toggles,
 // and drainQueue (which re-enters sendMessage via get()).
-import type { ChatStoreGet, ChatStoreSet } from "../types";
+import type { ChatStoreGet, ChatStoreSet, QueuedChatMessage } from "../types";
 import { queueIdCounter } from "../moduleState";
 
 export function createComposerSlice(set: ChatStoreSet, get: ChatStoreGet) {
@@ -24,14 +24,24 @@ export function createComposerSlice(set: ChatStoreSet, get: ChatStoreGet) {
       })),
 
     steerQueuedMessage: async (chatSessionId: string, id: number) => {
-      const queue = get().messageQueue[chatSessionId] ?? [];
-      const steered = queue.find((m) => m.id === id);
+      // Park the rest of the stack FIRST — and capture it ATOMICALLY inside
+      // the same set(): cancelStream drains the queue on completion, so a
+      // separate read-then-park left a window where drainQueue popped the
+      // head and the stale snapshot was then restored, re-inserting the
+      // already-sent message (it went out TWICE) and dropping anything
+      // drained in between (audit M-17).
+      let steered: QueuedChatMessage | undefined;
+      let remaining: QueuedChatMessage[] = [];
+      set((s) => {
+        const q = s.messageQueue[chatSessionId] ?? [];
+        steered = q.find((m) => m.id === id);
+        remaining = q.filter((m) => m.id !== id);
+        return { messageQueue: { ...s.messageQueue, [chatSessionId]: [] } };
+      });
+      // The queue already drained this message into a starting turn —
+      // nothing left to steer.
       if (!steered) return;
-      const remaining = queue.filter((m) => m.id !== id);
-      // Park the rest of the stack FIRST: cancelStream drains the queue on
-      // completion (chat.ts cancel path), and without this it would fire the
-      // WRONG (FIFO-next) message ahead of the steered one.
-      set((s) => ({ messageQueue: { ...s.messageQueue, [chatSessionId]: [] } }));
+      const steeredMsg = steered;
       if (chatSessionId in get().streaming) {
         // Steering = interrupt. Stop the in-flight turn, then dispatch the
         // steered message as the very next turn (the partial reply survives
@@ -40,10 +50,12 @@ export function createComposerSlice(set: ChatStoreSet, get: ChatStoreGet) {
         // globally active, not the one being steered (audit B-21).
         await get().cancelStream(chatSessionId);
       }
-      // Put the not-yet-sent messages back — they drain FIFO once the steered
-      // turn finishes (onDone → drainQueue).
-      set((s) => ({ messageQueue: { ...s.messageQueue, [chatSessionId]: remaining } }));
-      void get().sendMessage(steered.content, steered.attachments, steered.forceResearch, chatSessionId);
+      // Put the parked stack back, PLUS anything queued while the cancel was
+      // in flight (the park window is user-visible).
+      const queuedDuring = get().messageQueue[chatSessionId] ?? [];
+      const merged = [...remaining, ...queuedDuring.filter((m) => m.id !== id)];
+      set((s) => ({ messageQueue: { ...s.messageQueue, [chatSessionId]: merged } }));
+      void get().sendMessage(steeredMsg.content, steeredMsg.attachments, steeredMsg.forceResearch, chatSessionId);
     },
 
     editQueuedMessage: (chatSessionId: string, id: number, content: string) =>

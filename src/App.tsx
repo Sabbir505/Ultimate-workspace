@@ -10,11 +10,10 @@
 // CommandPalette is also lazy: it pulls in fuzzy search + relative-time libs
 // (~6 KB) and is invisible until the user hits Cmd/Ctrl+K. Sidebar stays
 // eager because it's the first thing visible on every page.
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ArrowLeft, ArrowRight, MessageCirclePlus } from "lucide-react";
 import { Modal } from "./components/common/Modal";
-import { startPointerDrag } from "./lib/pointerDrag";
 import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
 import { WorktreeNudgeBanner } from "./components/onboarding/WorktreeNudgeBanner";
@@ -60,9 +59,11 @@ import { useNewChatAction } from "./hooks/useNewChatAction";
 import { useViewNav } from "./hooks/useViewNav";
 import { usePetEvents } from "./hooks/usePetEvents";
 import { PetTicker } from "./components/pet/PetTicker";
+import { PetCarrier } from "./components/pet/PetCarrier";
 import { useTheme } from "./hooks/useTheme";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
 import { checkAndNotifyHarnessUpdates } from "./lib/harnessUpdates";
+import { checkAndNotifyBuildUpdates } from "./lib/buildUpdates";
 import { initWorkspacePersistence } from "./lib/workspaceRestore";
 import { initAppFocusTracking } from "./lib/appFocus";
 import { monoFontStack, uiFontStack } from "./lib/fonts";
@@ -83,6 +84,9 @@ const AutomationsView = lazy(() => import("./components/automations/AutomationsV
 // Welcome wizard (PRD §9): lazy like the overlays — existing users never see
 // it, so its chunk shouldn't ride along with the entry bundle.
 const WelcomeWizard = lazy(() => import("./components/onboarding/WelcomeWizard").then((m) => ({ default: m.WelcomeWizard })));
+// Split-chat pane tree (recursive resizable panes + drag-and-drop targets).
+import { ChatPaneGrid } from "./components/chat/ChatPaneGrid";
+import { mainPaneLeaf } from "./state/chat/paneTree";
 
 export default function App() {
   const activeView = useUiStore((s) => s.activeView);
@@ -111,70 +115,16 @@ export default function App() {
     gitPromptProjectId ? s.projects.find((p) => p.id === gitPromptProjectId) ?? null : null,
   );
   const markGitRepo = useProjectsStore((s) => s.markGitRepo);
-  // Chat header contents: the FOCUSED chat's title — in split view that's
-  // whichever half the user last interacted with; without a split, the plain
+  // Chat header contents: the FOCUSED chat's title — with split panes that's
+  // whichever pane the user last interacted with; without one, the plain
   // active session. Project/git chips and the git sidebar follow the same
   // session (selectContextSessionId), so all shared chrome reflects the chat
   // the user is working in.
-  const splitChatId = useChatStore((s) => s.splitChatSessionId);
-  // Which split half the user last interacted with — the tool panel docks to
-  // the RIGHT of that half (flex order), so each chat effectively carries its
-  // own side panel. Pointer-down on a column updates it.
-  const [splitFocus, setSplitFocus] = useState<"main" | "side">("side");
+  const chatPaneTree = useChatStore((s) => s.chatPaneTree);
   const chatTitle = useChatStore((s) => {
     const id = s.focusedChatSessionId ?? s.activeChatSessionId;
     return id ? (s.sessions.find((x) => x.id === id)?.title?.trim() || "New chat") : null;
   });
-  // Pin the shared chrome to the focused chat (null = main view's session).
-  useEffect(() => {
-    useChatStore.getState().setFocusedChatSession(
-      splitChatId && splitFocus === "side" ? splitChatId : null,
-    );
-  }, [splitChatId, splitFocus]);
-  // Draggable split width: ratio of the chat area (excluding the tool panel)
-  // given to the MAIN half. Persisted in the ui store across split sessions.
-  const splitRatio = useUiStore((s) => s.chatSplitRatio);
-  const setSplitRatio = useUiStore((s) => s.setChatSplitRatio);
-  const chatGridRef = useRef<HTMLDivElement>(null);
-  const [splitResizing, setSplitResizing] = useState(false);
-  // Live-drag the split divider: ratio = pointer X within the chat area
-  // (grid width minus the tool panel's own width). Clamped so neither half
-  // can collapse; released capture ends the drag.
-  const startSplitResize = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      e.preventDefault();
-      const grid = chatGridRef.current;
-      if (!grid) return;
-      setSplitResizing(true);
-      // PERF: pointermove fires at input frequency (up to ~1000 Hz) and every
-      // raw setSplitRatio re-rendered the whole App tree. Keep the latest X in
-      // a local and commit the ratio at most once per animation frame.
-      let latestX = e.clientX;
-      let frame: number | null = null;
-      const applyRatio = () => {
-        frame = null;
-        const panel = grid.querySelector<HTMLElement>(":scope > .tool-panel");
-        const panelW = panel ? panel.offsetWidth : 0;
-        const total = Math.max(240, grid.clientWidth - panelW);
-        const left = grid.getBoundingClientRect().left;
-        const ratio = (latestX - left) / total;
-        setSplitRatio(Math.min(0.8, Math.max(0.2, ratio)));
-      };
-      startPointerDrag(
-        e,
-        (x) => {
-          latestX = x;
-          if (frame === null) frame = requestAnimationFrame(applyRatio);
-        },
-        () => {
-          if (frame !== null) cancelAnimationFrame(frame);
-          setSplitResizing(false);
-        },
-        { capture: true },
-      );
-    },
-    [setSplitRatio],
-  );
 
   // Title-bar maximize glyph state: the toolbar doubles as the window title
   // bar (decorations:false), so the maximize button must track the real
@@ -212,6 +162,13 @@ export default function App() {
     return null;
   }, []);
 
+  // The companion pet's homes register THEMSELVES: the sidebar strip plus
+  // each rendered chat composer's strip announce their existence to the pet
+  // store on mount (see PetStrip), so the random teleport scheduler only
+  // picks homes that can actually show the pet. (Publishing the pane tree's
+  // ids instead let the pet teleport to a home whose strip wasn't rendered —
+  // it vanished until the layout happened to bring the strip back.)
+
   // Bootstrap: settings first (theme), then projects/sessions/harnesses, skills.
   useEffect(() => {
     void useSettingsStore.getState().load();
@@ -231,6 +188,11 @@ export default function App() {
     // CLI lands a bell-panel row that deep-links to Settings → Agent
     // harnesses, where the row's Run login button becomes Update.
     void checkAndNotifyHarnessUpdates();
+
+    // Native-build update check (same quiet once-per-open flow): an out-of-
+    // date whisper/TTS build lands a bell row deep-linking to Settings →
+    // Local Models → Speech, where the build's Install button reads Update.
+    void checkAndNotifyBuildUpdates();
 
     // Auto-updater: wire download-progress + installed events, then check on
     // startup and every 4 hours. A check is a single HTTP GET + semver compare;
@@ -311,16 +273,17 @@ export default function App() {
   // no tool panel). Selecting the requested session happens inside a small
   // effect in the popout branch itself.
   if (popout?.kind === "chat") {
-    return (
-      <div className="popout-chat-root">
-        <Suspense fallback={null}>
-          <DocCodeRunner />
-          <DocDesignRunner />
-        </Suspense>
-        <ChatSelectionToolbar />
-        <ChatView popoutSessionId={popout.session ?? undefined} />
-      </div>
-    );
+  return (
+    <div className="popout-chat-root">
+      <Suspense fallback={null}>
+        <DocCodeRunner />
+        <DocDesignRunner />
+      </Suspense>
+      <ChatSelectionToolbar />
+      <PetCarrier />
+      <ChatView popoutSessionId={popout.session ?? undefined} />
+    </div>
+  );
   }
 
   return (
@@ -332,6 +295,7 @@ export default function App() {
       <ChatSelectionToolbar />
       <ToastHost />
       <PetTicker />
+      <PetCarrier />
       {/* Kept mounted so collapse/expand animates as a width slide instead
           of an unmount flash; the collapsed class hides it after the
           transition (visibility) so it can't be interacted with. */}
@@ -406,18 +370,8 @@ export default function App() {
               >
                 {chatTitle}
               </span>
-              {/* Split view: the title above already follows the FOCUSED half
-                  (main/split) — this is just the one-click close. */}
-              {splitChatId && (
-                <button
-                  className="ghost toolbar-split-close"
-                  onClick={() => useChatStore.getState().closeChatSplit()}
-                  title="Close split view"
-                  aria-label="Close split view"
-                >
-                  ✕
-                </button>
-              )}
+              {/* Split panes close from their own header ✕ (each pane is
+                  independent) — no global toolbar close anymore. */}
               <FolderNotch />
               <GitHubNotch />
             </>
@@ -497,36 +451,12 @@ export default function App() {
     terminal/browser panes every time a footer icon was clicked; the panes
     hide themselves via browserOcclusion (activeView !== "chat") instead. */}
 {activeView !== "automations" ? (
-        <div
-          ref={chatGridRef}
-          className={`grid-wrap chat-grid-wrap${splitChatId ? ` split-active${splitFocus === "main" ? " split-focus-main" : ""}${splitResizing ? " split-resizing" : ""}` : ""}`}
-        >
-          <div
-            className="chat-split-main"
-            style={splitChatId ? { flexGrow: splitRatio, flexBasis: 0 } : undefined}
-            onPointerDownCapture={() => setSplitFocus("main")}
-          >
-            <ChatView />
-          </div>
-          {splitChatId && (
-            <>
-              <div
-                className="chat-split-resizer"
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Drag to resize the split chats"
-                title="Drag to resize"
-                onPointerDown={startSplitResize}
-              />
-              <div
-                className="chat-split-side"
-                style={{ flexGrow: 1 - splitRatio, flexBasis: 0 }}
-                onPointerDownCapture={() => setSplitFocus("side")}
-              >
-                <ChatView splitSessionId={splitChatId} />
-              </div>
-            </>
-          )}
+        <div className={`grid-wrap chat-grid-wrap${chatPaneTree ? " split-active" : ""}`}>
+          {/* The split-chat pane tree (up to six full chat views, resizable
+              gutters, drag-a-session-onto-an-edge). With no splits open the
+              same renderer draws the single main pane — identical drop
+              targets, so the FIRST drag can create the first split. */}
+          <ChatPaneGrid node={chatPaneTree ?? mainPaneLeaf()} />
           <Suspense fallback={null}>
             <ToolPanel />
           </Suspense>

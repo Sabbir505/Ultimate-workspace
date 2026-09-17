@@ -44,17 +44,24 @@ import { relayNotify } from "../lib/notifyCenter";
 import { sessionDisplayTitle } from "../lib/sessionTitle";
 import { autoReadFinishedTurn } from "./useTtsAutoRead";
 import { useChatStore } from "../state/chat";
+import { bufferTargetFor } from "../state/chat/moduleState";
 import { useDocQaStore } from "../state/docQa";
 import { useUiStore } from "../state/ui";
 
 /** Is the user LOOKING at this session right now — Relay focused AND the
- *  session is the visible (focused/active) chat? Completion toasts + chimes
- *  are suppressed for the session the user is watching; background chats and
- *  unfocused-app completions still notify. */
+ *  session is on screen (focused/active chat, or any session displayed in an
+ *  open split pane)? Completion toasts + chimes are suppressed for sessions
+ *  the user is watching; background chats and unfocused-app completions
+ *  still notify. Pane-displayed sessions count because in split view both
+ *  panes are visible, yet only the focused one used to suppress — the other
+ *  visible pane chimed and toggled unread while the user watched it
+ *  complete (audit L-25). */
 function isViewingSession(chatSessionId: string): boolean {
+  if (!isAppFocused()) return false;
   const chat = useChatStore.getState();
   const focusedId = chat.focusedChatSessionId ?? chat.activeChatSessionId;
-  return isAppFocused() && chatSessionId === focusedId;
+  if (chatSessionId === focusedId) return true;
+  return bufferTargetFor(chat, chatSessionId) != null;
 }
 
 function sessionName(chatSessionId: string): string {

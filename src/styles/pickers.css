@@ -77,6 +77,16 @@
 .model-effort-item.selected {
   font-weight: 600;
 }
+/* User annotation beside a model's name (deals, promos, pricing quirks —
+   edited per curated entry in Settings → API provider → Model list). Dim
+   and bracketed so it reads as a tag, never as part of the model id. */
+.model-note-badge {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  opacity: 0.9;
+}
 .model-effort-check {
   color: var(--accent, var(--text));
 }

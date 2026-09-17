@@ -11,7 +11,8 @@
 //! "mcp" section, so `write_opencode_config` writes that shape into the same
 //! Relay-owned dir and spawns point at it via the `OPENCODE_CONFIG` env var.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::{json, Value};
 
@@ -187,9 +188,232 @@ pub fn write_opencode_config(
     Some(path)
 }
 
+/// Build the ACP `session/new` `mcpServers` payload: relay-browser +
+/// relay-tools as spec-shaped stdio servers. ACP agents spawn the MCP
+/// binary themselves and reach the app's WS directly — Relay only hands
+/// over the connection details (same env contract as the config files).
+/// Pure core of [`acp_mcp_servers`]; an absent sidecar binary yields an
+/// empty array (the agent keeps its own tools, no error).
+pub fn acp_mcp_servers_for(
+    mcp_binary_path: Option<&str>,
+    project_id: &str,
+    ws_port: u16,
+    auth_token: &str,
+) -> Value {
+    let Some(bin) = mcp_binary_path else {
+        return json!([]);
+    };
+    let env = json!([
+        { "name": "RELAY_PROJECT_ID", "value": project_id },
+        { "name": "RELAY_WS_PORT", "value": ws_port.to_string() },
+        { "name": "RELAY_MCP_AUTH_TOKEN", "value": auth_token },
+    ]);
+    json!([
+        { "name": "relay-browser", "kind": "stdio", "command": bin, "args": [], "env": env },
+        { "name": "relay-tools", "kind": "stdio", "command": bin, "args": [], "env": env },
+    ])
+}
+
+/// The [`acp_mcp_servers_for`] payload for a live app: resolved binary +
+/// current WS port/token, or `[]` when the sidecar is absent.
+pub fn acp_mcp_servers(app: &tauri::AppHandle, project_id: &str) -> Value {
+    acp_mcp_servers_for(
+        mcp_binary_path().map(|b| b.to_string_lossy().into_owned()).as_deref(),
+        project_id,
+        crate::browser_mcp::bound_port(),
+        crate::browser_mcp::mcp_auth_token(),
+    )
+}
+
+// ---- CommandCode bridge registration ----
+//
+// CommandCode speaks MCP but has no per-turn `--mcp-config` flag — servers
+// live in its own config, managed via `cmd mcp add-json`. Relay registers
+// the bridge there (scope `local`, keyed to the project dir) and re-registers
+// whenever the WS token/port change, which is EVERY app run: the token is
+// per-process. A marker file records what was last registered so the steady
+// state costs one small file read per turn, not two CLI spawns.
+
+/// Marker payload check, pure so tests can run it: current iff the stored
+/// token+port+cwd all match what the app would register now.
+fn commandcode_marker_matches(
+    marker: &Option<(String, String, String)>,
+    token: &str,
+    port: u16,
+    cwd: &Path,
+) -> bool {
+    marker.as_ref().map_or(false, |(t, p, dir)| {
+        t == token && *p == port.to_string() && Path::new(dir) == cwd
+    })
+}
+
+fn commandcode_bridge_marker_path(data_dir: &Path, project_slug: &str) -> PathBuf {
+    let safe: String = project_slug
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    data_dir.join("mcp").join(format!("commandcode_bridge_{safe}.json"))
+}
+
+/// True when commandcode's config already carries a current bridge
+/// registration for this project (marker read only — no CLI spawn).
+pub fn commandcode_bridge_current(
+    app: &tauri::AppHandle,
+    cwd: &Path,
+    project_slug: &str,
+) -> bool {
+    let data_dir = crate::user_dirs::app_data_dir(app);
+    let path = commandcode_bridge_marker_path(&data_dir, project_slug);
+    let marker = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| {
+            let token = v["token"].as_str()?.to_string();
+            let port = v["port"].as_str()?.to_string();
+            let dir = v["cwd"].as_str()?.to_string();
+            Some((token, port, dir))
+        });
+    commandcode_marker_matches(
+        &marker,
+        crate::browser_mcp::mcp_auth_token(),
+        crate::browser_mcp::bound_port(),
+        cwd,
+    )
+}
+
+/// Register (or refresh) the relay bridge in commandcode's own MCP config so
+/// its sessions can call relay-tools/relay-browser like claude/kimi/opencode.
+/// Idempotent: a current marker short-circuits; otherwise the stale entry is
+/// replaced via `mcp remove` + `mcp add-json` (scope `local`, keyed to the
+/// project dir). Returns true when the bridge is registered and current —
+/// callers use it to decide whether commandcode prompts may advertise the
+/// relay tools. The registration is user-visible via `cmd mcp list` and
+/// removable with `cmd mcp remove relay-tools -s local`.
+///
+/// WINDOWS-ONLY: the npm shim is a `.cmd` invoked through cmd.exe. On other
+/// hosts the spawn always failed, so the bridge silently never registered and
+/// `run()` burned two failed spawns per token/port change per project — gate
+/// the whole path and report "not registered" instead (audit L-15).
+#[cfg(windows)]
+pub fn ensure_commandcode_bridge(
+    app: &tauri::AppHandle,
+    cwd: &Path,
+    project_slug: &str,
+) -> bool {
+    let data_dir = crate::user_dirs::app_data_dir(app);
+    let token = crate::browser_mcp::mcp_auth_token();
+    let port = crate::browser_mcp::bound_port();
+    let marker_path = commandcode_bridge_marker_path(&data_dir, project_slug);
+    let marker = std::fs::read_to_string(&marker_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| {
+            let token = v["token"].as_str()?.to_string();
+            let port = v["port"].as_str()?.to_string();
+            let dir = v["cwd"].as_str()?.to_string();
+            Some((token, port, dir))
+        });
+    if commandcode_marker_matches(&marker, token, port, cwd) {
+        return true;
+    }
+    let Some(bin) = mcp_binary_path() else {
+        return false;
+    };
+    let bin_str = bin.to_string_lossy().replace('\\', "/");
+    let server_json = serde_json::to_string(&json!({
+        "type": "stdio",
+        "command": bin_str,
+        "env": {
+            "RELAY_PROJECT_ID": project_slug,
+            "RELAY_WS_PORT": port.to_string(),
+            "RELAY_MCP_AUTH_TOKEN": token,
+        }
+    }))
+    .unwrap_or_default();
+
+    // The npm shim is a .cmd — go through cmd.exe. The two calls together
+    // run only when the token/port actually changed (once per app run per
+    // project); a missing/failing CLI leaves the marker unwritten so the
+    // next turn retries and callers keep advertising nothing.
+    let run = |args: &[&str]| -> bool {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").arg("commandcode").args(args).current_dir(cwd);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    };
+    let _ = run(&["mcp", "remove", "relay-tools", "-s", "local"]);
+    let ok = run(&["mcp", "add-json", "relay-tools", "-s", "local", &server_json]);
+    if !ok {
+        eprintln!("[relay:mcp] commandcode bridge registration failed — its sessions keep CLI-native tools only");
+        return false;
+    }
+    let marker_json = serde_json::to_string(&json!({
+        "token": token,
+        "port": port.to_string(),
+        "cwd": cwd.to_string_lossy(),
+    }))
+    .unwrap_or_default();
+    let _ = std::fs::create_dir_all(marker_path.parent().unwrap_or(&data_dir));
+    if std::fs::write(&marker_path, marker_json).is_err() {
+        return false;
+    }
+    true
+}
+
+/// Non-Windows stub: the npm shim is a `.cmd` invoked through cmd.exe, so the
+/// bridge can never register elsewhere (see the windows variant, audit L-15).
+#[cfg(not(windows))]
+pub fn ensure_commandcode_bridge(
+    _app: &tauri::AppHandle,
+    _cwd: &Path,
+    _project_slug: &str,
+) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acp_mcp_servers_shape_both_servers_or_empty() {
+        let v = acp_mcp_servers_for(Some("C:/app/relay-browser-mcp.exe"), "proj-9", 7681, "tok");
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["name"], "relay-browser");
+        assert_eq!(arr[1]["name"], "relay-tools");
+        for srv in arr {
+            assert_eq!(srv["kind"], "stdio");
+            assert_eq!(srv["command"], "C:/app/relay-browser-mcp.exe");
+            assert_eq!(srv["env"][2]["name"], "RELAY_MCP_AUTH_TOKEN");
+        }
+        // No sidecar binary → no servers, not an error.
+        assert!(acp_mcp_servers_for(None, "proj-9", 7681, "tok").as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn commandcode_marker_requires_token_port_and_dir_match() {
+        let cwd = Path::new("C:/work/proj");
+        let cur = Some(("tok".to_string(), "7681".to_string(), "C:/work/proj".to_string()));
+        assert!(commandcode_marker_matches(&cur, "tok", 7681, cwd));
+        // Token rotates every app run — a stale marker must NOT count.
+        assert!(!commandcode_marker_matches(&cur, "tok2", 7681, cwd));
+        assert!(!commandcode_marker_matches(&cur, "tok", 7682, cwd));
+        assert!(!commandcode_marker_matches(
+            &Some(("tok".into(), "7681".into(), "C:/other".into())),
+            "tok",
+            7681,
+            cwd
+        ));
+        assert!(!commandcode_marker_matches(&None, "tok", 7681, cwd));
+    }
 
     #[test]
     fn mcp_config_json_shapes_server_and_env() {

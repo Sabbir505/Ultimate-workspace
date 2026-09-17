@@ -148,10 +148,13 @@ pub fn run_one_shot(
     // (spawn dir + artifacts dir) after the turn and surface created/modified
     // files.
     let watch_dirs = turn_watch_dirs(cwd, db);
-    if let Some(dir) = watch_dirs.first() {
+    if let Some((dir, _)) = watch_dirs.first() {
         cmd.current_dir(dir);
     }
-    let watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
+    let watches: Vec<DirWatch> = watch_dirs
+        .into_iter()
+        .map(|(dir, broad)| DirWatch::new(dir, broad))
+        .collect();
     no_console_window(&mut cmd);
     let mut child = cmd
         .spawn()
@@ -443,8 +446,12 @@ pub(super) fn harness_oneshot_blocking(
                 // E-9c: the model id rides the cmd.exe wrapper line via an
                 // unquoted `%*` — reject cmd metacharacters up front.
                 crate::harness_adapters::ensure_cmd_safe_model(model)?;
+                // `run -m` takes "provider/model" only — qualify bare ids
+                // (sessions stored before the picker kept qualified ids, or a
+                // hand-typed automation model) or the CLI silently uses its
+                // configured default.
                 flags.push("-m".into());
-                flags.push(model.into());
+                flags.push(crate::harness_config::resolve_opencode_model(model));
             }
             let (spec, env, transport) = crate::harness_adapters::turn_spec(
                 crate::harness_adapters::TurnHarness::OpenCode,

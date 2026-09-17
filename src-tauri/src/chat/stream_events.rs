@@ -71,22 +71,27 @@ pub fn unregister(session_id: &str) {
 /// if the consumer dropped, and we silently drop in that case (the
 /// frontend will reconnect via re-subscribe).
 pub fn try_send(session_id: &str, payload: &ChatTokenPayload) -> bool {
-    let registry = REGISTRY.lock();
-    if let Some(ch) = registry.by_session.get(session_id) {
-        match ch.send(payload.clone()) {
-            Ok(()) => true,
-            Err(_) => {
-                // Consumer dropped mid-send. Clean up so future calls fall
-                // back to emit (the frontend has presumably re-mounted with
-                // a new channel via re-subscribe, but the registry entry
-                // is now stale).
-                drop(registry);
-                unregister(session_id);
-                false
-            }
+    // Clone the channel OUT from under the registry lock: this runs per token
+    // for every streaming session, and the send (payload clone + IPC write)
+    // under the global mutex serialized every other session's emits
+    // (audit M-7).
+    let ch = {
+        let registry = REGISTRY.lock();
+        registry.by_session.get(session_id).cloned()
+    };
+    let Some(ch) = ch else {
+        return false;
+    };
+    match ch.send(payload.clone()) {
+        Ok(()) => true,
+        Err(_) => {
+            // Consumer dropped mid-send. Clean up so future calls fall
+            // back to emit (the frontend has presumably re-mounted with
+            // a new channel via re-subscribe, but the registry entry
+            // is now stale).
+            unregister(session_id);
+            false
         }
-    } else {
-        false
     }
 }
 
@@ -210,10 +215,107 @@ pub fn emit_artifact<R: tauri::Runtime>(app: Option<&AppHandle<R>>, payload: Cha
     }
 }
 
+/// True when a created/modified file is transient scratch — editor/Office
+/// lock files, swap/partial writes, tmp-named intermediates, anything inside
+/// a scratch directory or the system temp dir — and must NOT surface as a
+/// library artifact. The agent churns through such files constantly (draft
+/// notes, probe scripts, atomic-save partials); the gallery is for
+/// deliverables, and `~$report.docx` or `tmp8f3a.png` in it reads as broken.
+/// Deliberately conservative about real files: `template.pdf` survives (the
+/// `temp` prefix only counts when followed by a separator/digit/end), and a
+/// plain `notes.md` scratch file still lands in the gallery — only files
+/// whose NAME advertises transience are filtered.
+pub(crate) fn is_temp_like_artifact(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let normalized = lower.replace('\\', "/");
+    let name = normalized.rsplit('/').next().unwrap_or(&normalized);
+
+    // Hidden files (`.env`, `.#lock`, `.deepseek_source.md`).
+    if name.starts_with('.') {
+        return true;
+    }
+    // Office owner/lock files (`~$report.docx`) and emacs backups (`file~`).
+    if name.starts_with('~') || name.ends_with('~') {
+        return true;
+    }
+    // Emacs autosave wrappers (`#file#`).
+    if name.len() > 1 && name.starts_with('#') && name.ends_with('#') {
+        return true;
+    }
+    // Atomic-save partials (`report.tmp.md`).
+    if name.contains(".tmp.") {
+        return true;
+    }
+    // `tmp`-prefixed intermediates (`tmp8f3a.png`, `tmp_out.md`) and
+    // `temp`-prefixed ones when a separator/digit/end follows — so real words
+    // like `template.pdf` never match (`temp.md`, `temp-2.json`, `temp` do).
+    let temp_prefixed = match name.strip_prefix("temp") {
+        None => false,
+        Some(rest) => {
+            rest.is_empty()
+                || rest.starts_with(['.', '-', '_', ' '])
+                || rest.starts_with(|c: char| c.is_ascii_digit())
+        }
+    };
+    if name.starts_with("tmp") || temp_prefixed {
+        return true;
+    }
+    let ext = name.rsplit('.').next().unwrap_or("");
+    if name.contains('.')
+        && matches!(
+            ext,
+            "tmp" | "temp"
+                | "swp"
+                | "swo"
+                | "swn"
+                | "bak"
+                | "orig"
+                | "rej"
+                | "part"
+                | "partial"
+                | "crdownload"
+                | "download"
+                | "cache"
+        )
+    {
+        return true;
+    }
+    // Any segment of the path that is a scratch directory (`tmp/x.md`,
+    // `project/temp/out.json`).
+    if normalized
+        .split('/')
+        .any(|seg| matches!(seg, "tmp" | "temp" | ".tmp" | ".temp"))
+    {
+        return true;
+    }
+    // The system temp dir itself (tempfile-style scripts write there). The
+    // prefix must end at a segment boundary — `/tmp` must not swallow
+    // `/tmpfoo.md`.
+    if let Some(tmp) = std::env::temp_dir().to_str() {
+        let tmp_lower = tmp.to_ascii_lowercase().replace('\\', "/");
+        let tmp_trimmed = tmp_trim_separators(&tmp_lower);
+        if !tmp_trimmed.is_empty() {
+            if let Some(rest) = normalized.strip_prefix(tmp_trimmed) {
+                if rest.is_empty() || rest.starts_with('/') {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn tmp_trim_separators(s: &str) -> &str {
+    s.trim_end_matches('/')
+}
+
 /// Persist an artifact row (30-day retention sidebar) and emit `chat:artifact`.
 /// The kind is derived from the file extension exactly as every former
 /// copy-paste site did. Best-effort on the DB half — a row insert failure
 /// must not block the chat turn; the caller owns the `DbState` lock.
+///
+/// Transient files (see [`is_temp_like_artifact`]) are skipped entirely —
+/// no row, no event — so agent scratch never reaches the gallery.
 pub fn insert_and_emit_artifact<R: tauri::Runtime>(
     app: Option<&AppHandle<R>>,
     conn: &rusqlite::Connection,
@@ -221,6 +323,9 @@ pub fn insert_and_emit_artifact<R: tauri::Runtime>(
     path: &str,
     filename: &str,
 ) {
+    if is_temp_like_artifact(path) {
+        return;
+    }
     let kind = std::path::Path::new(filename)
         .extension()
         .and_then(|e| e.to_str())
@@ -235,6 +340,69 @@ pub fn insert_and_emit_artifact<R: tauri::Runtime>(
             filename: filename.to_string(),
         },
     );
+}
+
+#[cfg(test)]
+mod temp_filter_tests {
+    use super::is_temp_like_artifact;
+
+    #[test]
+    fn transients_are_filtered() {
+        for path in [
+            // Office / editor lock + backup files.
+            "C:/out/~$report.docx",
+            "C:/out/report.docx~",
+            "C:/proj/#notes.md#",
+            ".#report.docx",
+            // Hidden dotfiles.
+            "C:/proj/.env",
+            "C:/proj/.prettierrc",
+            // Partial / atomic writes.
+            "C:/out/report.tmp.md",
+            "C:/out/report.docx.bak",
+            "C:/out/data.json.orig",
+            "C:/dl/movie.mp4.crdownload",
+            "C:/out/backup.zip.part",
+            // tmp/temp names (separator, digit, or end after the prefix).
+            "C:/out/tmp8f3a2.png",
+            "C:/out/tmp_out.md",
+            "C:/out/temp.md",
+            "C:/out/temp-2.json",
+            "C:/out/temp_2026.csv",
+            "C:/out/TEMP NOTES.txt",
+            "c:/out/temp",
+            // Scratch directories anywhere in the path.
+            "C:/proj/tmp/summary.md",
+            "C:/proj/temp/out.json",
+            "C:/proj/.tmp/render.svg",
+        ] {
+            assert!(is_temp_like_artifact(path), "must filter: {path}");
+        }
+    }
+
+    #[test]
+    fn real_deliverables_survive() {
+        for path in [
+            "C:/out/report.docx",
+            "C:/out/quarterly-report.pdf",
+            "C:/proj/notes.md",
+            "C:/out/traffic-graph.svg",
+            "C:/out/data.json",
+            "C:/out/app.tsx",
+            // "template" starts with "temp" but is a real word.
+            "C:/out/template.pdf",
+            "C:/out/templates.json",
+            // Plain "temporary" (letter follows the prefix) survives too.
+            "C:/out/temporary-notes.md",
+            // "attempt" contains tmp? no — and even "atmp…" isn't tmp-prefixed.
+            "C:/out/attempt.log",
+            // Browser screenshots and generated decks keep landing.
+            "C:/out/browser-shot-169.png",
+            "C:/out/launch-deck.pptx",
+        ] {
+            assert!(!is_temp_like_artifact(path), "must keep: {path}");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -91,6 +91,9 @@ export interface SubagentInfo {
   output: string;
   status: "running" | "completed" | "error";
   error?: string;
+  /** Model the subagent runs on (built-in Task subagents, post orchestration
+   *  override); null for CLI-native subagents, whose model the CLI owns. */
+  model?: string | null;
 }
 
 export interface SubagentSpawnPayload {
@@ -99,6 +102,8 @@ export interface SubagentSpawnPayload {
   role: string;
   task: string;
   prompt: string;
+  /** Mirrors crate::types::SubagentSpawnPayload::model. */
+  model?: string | null;
 }
 
 export interface SubagentTokenPayload {

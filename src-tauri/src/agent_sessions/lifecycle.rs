@@ -114,6 +114,76 @@ impl Drop for ReaderAliveGuard {
     }
 }
 
+/// Crash-flush for the live turn's partial reply (shared by the harness
+/// readers).
+///
+/// A reader accumulates the assistant text in a thread-local `String` and
+/// `finish_turn` persists it only at EOF — so an app crash (or a killed
+/// process tree) mid-turn lost every streamed token while the user message
+/// (persisted up front) survived. Reopening the chat then showed a bare user
+/// bubble above nothing. The flush writes the accumulated text into a partial
+/// assistant row every few seconds instead; the graceful end of the turn
+/// discards the row right before `finish_turn`'s real insert, and a crash
+/// leaves the last flushed snapshot in the transcript — seconds stale at
+/// worst instead of gone.
+pub(super) struct PartialFlush {
+    /// The partial row's id once created (None until the first flush).
+    message_id: Option<i64>,
+    /// Content length at the last flush — the cheap change detector.
+    flushed_len: usize,
+    /// Last flush timestamp (db `now_ts()` seconds).
+    last_ts: i64,
+}
+
+impl PartialFlush {
+    pub(super) fn new() -> Self {
+        Self {
+            message_id: None,
+            flushed_len: 0,
+            last_ts: 0,
+        }
+    }
+
+    pub(super) fn maybe_flush(&mut self, db: &DbState, sid: &str, full: &str) {
+        let now = crate::db::now_ts();
+        if full.len() == self.flushed_len || now - self.last_ts < 3 {
+            return;
+        }
+        self.last_ts = now;
+        self.flushed_len = full.len();
+        if full.trim().is_empty() {
+            return;
+        }
+        let conn = db.0.lock();
+        match self.message_id {
+            None => {
+                let record = crate::db::add_chat_message(
+                    &conn,
+                    crate::db::NewChatMessage::assistant(sid, full),
+                );
+                if let Ok(record) = record {
+                    self.message_id = Some(record.id);
+                }
+            }
+            Some(id) => {
+                let _ = crate::db::update_chat_message_content(&conn, id, full);
+            }
+        }
+    }
+
+    /// Remove the partial row — the graceful end of the turn hands persistence
+    /// over to `finish_turn`'s real insert (a cancel discards the reply
+    /// entirely), and a duplicate would double-render the turn. Must also run
+    /// on every turn boundary of a reader that outlives turns (claude), so a
+    /// stale id never points at a previous turn's row.
+    pub(super) fn discard(&mut self, db: &DbState) {
+        if let Some(id) = self.message_id.take() {
+            let conn = db.0.lock();
+            let _ = crate::db::delete_chat_message(&conn, id);
+        }
+    }
+}
+
 /// E-5: a reader may only clear `turn_in_flight` while its process is still
 /// the session's CURRENT generation. A respawned process runs with a new
 /// generation, so an old reader's late EOF must leave the flag (it belongs

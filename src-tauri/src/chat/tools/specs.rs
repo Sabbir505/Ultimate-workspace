@@ -1160,6 +1160,13 @@ fn task_parameters() -> Value {
                 "description": "Role label for the Agents panel.",
                 "enum": ["explore", "edit", "analyze", "research", "write", "test", "refactor"],
             },
+            "model": {
+                "type": "string",
+                "description": "Model override when the subagent should run on a different \
+                     model: bare id keeps the session\'s provider; \"provider::model\"\
+                     targets another (API providers only; CLI engines go via \
+                     spawn_session). Omit for the session default.",
+            },
             "background": {
                 "type": "boolean",
                 "description": "Run WITHOUT blocking the main conversation. Returns a task id immediately; poll get_task_status with it (the result lands there when the subagent finishes) and cancel_task to abort. Prefer this for anything long."
@@ -1224,7 +1231,16 @@ const SEARCH_SESSIONS_DESC: &str = "Full-text search across ALL Relay chat sessi
 
 const MESSAGE_SESSION_DESC: &str = "Send a message to another Relay chat session.     mode=\"question\" (default) waits up to timeout_s for that session's answer and     returns it; on timeout the reply still arrives later as a follow-up turn.     mode=\"notify\" delivers without expecting a reply. The target receives it as a     turn marked as coming from you (NOT the user) — the user sees the exchange in     the UI. Use to consult a peer's context or request something of it; NOT for     chatting with the user.";
 
-const SPAWN_SESSION_DESC: &str = "Spawn a NEW Relay chat session to delegate work:     create a real, sidebar-visible session (any installed engine — it may differ     from yours) whose first turn is `task`. mode=\"background\" (default) returns the     new session's id immediately; mode=\"wait\" blocks (bounded) and returns its     first-turn output. The user can watch and take over the spawned session at any     time. Prefer this over doing a big parallel task inside this conversation.";
+const SPAWN_SESSION_DESC: &str = "Spawn a NEW, separate Relay chat session: a real, \
+    sidebar-visible session (any installed engine — it may differ from yours) whose \
+    first turn is `task`. A SEPARATE conversation the user can watch and take over — \
+    NOT an in-session subagent; for that use your engine's Task tool (its result \
+    returns to you directly). Use this when the user explicitly asks for a new/separate \
+    chat or delegation that should outlive this conversation. When the spawned session \
+    finishes the task, its result is automatically messaged back into this session. \
+    mode=\"background\" (default) returns the new session's id immediately; mode=\"wait\" \
+    blocks (bounded) and returns its first-turn output. Pass `model` for a different \
+    model or CLI engine.";
 
 fn list_sessions_parameters() -> Value {
     json!({
@@ -1334,6 +1350,10 @@ fn spawn_session_parameters() -> Value {
             "agent": {
                 "type": "string",
                 "description": "Engine for the new session, e.g. \"claude_code\",                     \"opencode\", \"builtin\", \"local\" (defaults to yours)."
+            },
+            "model": {
+                "type": "string",
+                "description": "Model/engine for the child: bare id keeps your provider; \"provider::model\" switches provider (builtin); \"claude_code::sonnet\" runs another CLI harness. Omit for the configured default."
             },
             "mode": {
                 "type": "string",
@@ -1767,6 +1787,37 @@ pub(crate) fn append_mcp_tools_anthropic(
 mod tests {
     use super::*;
 
+    /// The two delegation tools used to steer models in OPPOSITE directions:
+    /// spawn_session said "Prefer this over doing a big parallel task inside
+    /// this conversation" while users expect a subagent to run in-session —
+    /// so models kept spawning separate sidebar chats whose results never
+    /// reached the parent. Both descriptions must carry the disambiguation
+    /// (Task = in-session, spawn_session = separate chat) and spawn_session
+    /// must document the result auto-report.
+    #[test]
+    fn delegation_tool_descriptions_disambiguate_task_vs_spawn_session() {
+        assert!(
+            TASK_DESC.contains("IN-SESSION subagent"),
+            "Task desc must say in-session: {TASK_DESC}"
+        );
+        assert!(
+            TASK_DESC.contains("spawn_session"),
+            "Task desc must point separate-chat asks at spawn_session: {TASK_DESC}"
+        );
+        assert!(
+            !SPAWN_SESSION_DESC.contains("Prefer this over"),
+            "spawn_session must not claim preference over in-session work: {SPAWN_SESSION_DESC}"
+        );
+        assert!(
+            SPAWN_SESSION_DESC.contains("Task tool"),
+            "spawn_session desc must point subagent asks at the Task tool: {SPAWN_SESSION_DESC}"
+        );
+        assert!(
+            SPAWN_SESSION_DESC.contains("automatically messaged back"),
+            "spawn_session desc must document the result auto-report: {SPAWN_SESSION_DESC}"
+        );
+    }
+
     /// Per-spec size report + regression guard. Tool specs ride EVERY request
     /// (every turn, every tool round), so a single bloated spec taxes every
     /// turn forever. Run with `--nocapture` to see the distribution; the
@@ -1816,9 +1867,17 @@ mod tests {
         // giving sibling-session awareness, messaging, and spawning. The read
         // trio replaces asking the user about other chats; the write pair
         // replaces re-doing work that already happened elsewhere.
+        // Bumped 42_000→42_500 for subagent-model orchestration: an optional
+        // `model` parameter on `task` and `spawn_session` (~0.4k) so a parent
+        // can route spawned work to a different model/CLI engine.
+        // Bumped 42_500→43_000 for the Task ↔ spawn_session disambiguation:
+        // both descriptions now cross-reference each other (users expect
+        // subagents IN-session; the old texts steered models into separate-
+        // chat spawns whose results never reached the parent) and
+        // spawn_session documents the result auto-report.
         assert!(
-            total < 42_000,
-            "default tool specs total {total} chars (budget 42_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            total < 43_000,
+            "default tool specs total {total} chars (budget 43_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
         let all_on_caps = ToolCaps {
             browser: true,
@@ -1829,9 +1888,12 @@ mod tests {
             .map(|s| serde_json::to_string(s).unwrap_or_default().len())
             .sum();
         println!("all-on specs JSON: {all_on} chars");
+        // Same orchestration bump: 45_000→45_500 (the `model` params ride
+        // the all-on surface too); 45_500→46_000 mirrors the default-budget
+        // disambiguation bump above.
         assert!(
-            all_on < 45_000,
-            "all-on tool specs total {all_on} chars (budget 45_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 46_000,
+            "all-on tool specs total {all_on} chars (budget 46_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 

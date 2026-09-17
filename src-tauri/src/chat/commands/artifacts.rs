@@ -106,13 +106,25 @@ pub async fn delete_all_artifacts(app: AppHandle, db: State<'_, DbState>) -> Cmd
 }
 
 /// Sweep artifacts past their 30-day expiry, removing both rows and files.
-/// Called on startup; returns the number of artifacts removed.
+/// Also purges rows for transient scratch files (lock files, tmp
+/// intermediates) that the temp filter now blocks from being recorded —
+/// rows written before the filter existed age out of the gallery on the
+/// next startup instead of lingering for the retention window. Only ROWS
+/// are removed for temp entries: their files live in the user's project
+/// dirs. Called on startup (and Settings → Data); returns the number of
+/// artifacts removed.
 pub fn sweep_expired_artifacts(db: &Arc<parking_lot::Mutex<rusqlite::Connection>>) -> usize {
-    let paths = {
+    let (paths, temp_removed) = {
         let conn = db.lock();
-        db::delete_expired_artifacts(&conn).unwrap_or_default()
+        let paths = db::delete_expired_artifacts(&conn).unwrap_or_default();
+        let temp_removed = db::delete_temp_like_artifacts(
+            &conn,
+            crate::chat::stream_events::is_temp_like_artifact,
+        )
+        .unwrap_or(0);
+        (paths, temp_removed)
     };
-    let n = paths.len();
+    let n = paths.len() + temp_removed;
     for p in paths {
         let _ = std::fs::remove_file(p);
     }

@@ -448,7 +448,12 @@ pub enum TurnPromptTransport {
 /// unwritable (callers then fall back to the legacy argv spec).
 #[cfg(windows)]
 fn ensure_turn_wrappers() -> Option<std::path::PathBuf> {
-    let dir = std::env::temp_dir().join("relay-turn-wrappers");
+    // PID-keyed subdirectory: the shared temp dir let any same-user process
+    // pre-create `relay-turn-wrappers\<wrapper>.cmd` between the read-back
+    // check and the child's execution — the executed batch runs with Relay's
+    // privileges (TOCTOU, audit L-5). A per-process dir is invisible to
+    // pre-staged attacks; stale dirs die with the process.
+    let dir = std::env::temp_dir().join(format!("relay-turn-wrappers-{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok()?;
     let mut bodies: Vec<(&str, &str)> = Vec::new();
     for kind in [TurnHarness::Kimi, TurnHarness::OpenCode, TurnHarness::Pi, TurnHarness::Omp, TurnHarness::CommandCode] {

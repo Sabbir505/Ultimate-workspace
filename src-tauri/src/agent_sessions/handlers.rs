@@ -388,8 +388,32 @@ pub(super) fn handle_opencode_event(
             let value = tool_meta_generic(name, &inp);
             if is_subagent_tool_name(name) {
                 // Subagent spawn (claude "Agent"/"Task"): extract
-                // role/task/prompt and emit a spawn event.
-                emit_subagent_spawn(tools, full, app, sid, name, value, &inp);
+                // role/task/prompt and emit a spawn event. Per-turn opencode
+                // reports a tool's output INLINE on this same event — there
+                // is no separate result frame — so a part carrying its output
+                // must spawn AND finalize the panel entry in one step: a
+                // plain spawn queues a FIFO slot nothing will ever pop and
+                // the Agents entry spins forever.
+                let role = inp
+                    .get("subagent_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("agent");
+                let task = inp
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let prompt = inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                let out_text = part.pointer("/state/output").and_then(|o| o.as_str());
+                let err_text = part.pointer("/state/error").and_then(|e| e.as_str());
+                if out_text.is_some() || err_text.is_some() {
+                    let marker = tools.subagent_use_with_output(
+                        name, value, app, sid, role, task, prompt, out_text, err_text,
+                    );
+                    full.push_str(&marker);
+                    emit_token(app, sid, &marker);
+                } else {
+                    emit_subagent_spawn(tools, full, app, sid, name, value, &inp);
+                }
             } else {
                 // OpenCode reports a tool's completed output inline on the same
                 // part (`state.output` / `state.error`); attach it for shell tools.
@@ -596,6 +620,29 @@ pub(super) fn pi_message_text(msg: Option<&Value>) -> Option<String> {
     (!text.trim().is_empty()).then(|| text)
 }
 
+/// Strip CommandCode's internal usage trailer —
+/// `<usage>total_tokens: … tool_uses: … turns: … duration_ms: …</usage>` —
+/// from tool-result text. It is CLI metadata, not the agent's work (same
+/// family as claude's async launch receipt): forwarded verbatim it lands at
+/// the end of a subagent panel output or transcript and renders as literal
+/// text. No regex — cut every `<usage>…</usage>` occurrence; an unterminated
+/// trailer (truncated stream) drops the tail.
+pub(super) fn strip_usage_trailer(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<usage>") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("</usage>") {
+            // `end` is relative to `rest[start..]` (which begins at the
+            // opening tag), so the closing tag ends at start + end + len.
+            Some(end) => rest = &rest[start + end + 8..],
+            None => rest = "",
+        }
+    }
+    out.push_str(rest);
+    out.trim_end().to_string()
+}
+
 /// CommandCode `-p --output-format json` NDJSON events. Verified live
 /// (v1.44): frames are `{"type":"event","event":{…}}` wrapping inner
 /// AgentEvents (`run_start` with `sessionId`, `turn_start`, `message_start`,
@@ -666,6 +713,13 @@ pub(super) fn handle_commandcode_event(
                         );
                     }
                 }
+                "model_request_start" => {
+                    // The request went out to the provider — open the
+                    // generation window HERE. Without this the window only
+                    // opens at the first delta (microseconds before the first
+                    // token is emitted), collapsing TTFT to ~0 ms.
+                    crate::chat::turn_perf::begin_active_gen(sid);
+                }
                 _ => {
                     // Tool frames: every variant carries toolCallId+toolName.
                     // `tool_running`-style frames open the step's card once
@@ -679,9 +733,10 @@ pub(super) fn handle_commandcode_event(
                     ) {
                         // Tool execution begins — close the generation window.
                         crate::chat::turn_perf::end_active_gen(sid);
-                        let result_text = extract_result_text(
+                        let raw_result = extract_result_text(
                             inner.get("result").or_else(|| inner.get("output")),
                         );
+                        let result_text = strip_usage_trailer(&raw_result);
                         let already_open = seen_tools.contains(call_id);
                         if already_open && !result_text.is_empty() {
                             // Completion frame for a card already on screen.
@@ -702,10 +757,50 @@ pub(super) fn handle_commandcode_event(
                                 .unwrap_or(inner.get("input").cloned().unwrap_or(json!({})));
                             emit_todowrite_steps(app, sid, name, &inp);
                             let value = tool_meta_generic(name, &inp);
-                            // A start frame that already carries the output is
-                            // self-contained (opencode's inline shape) — open
-                            // the card WITH its result attached.
-                            let marker = if !result_text.is_empty() {
+                            // Subagent dispatch must be checked BEFORE the
+                            // generic branches: a Task/Agent call piped
+                            // through them rendered the chat chip but never
+                            // emitted chat:subagent-spawn — the Agents pane
+                            // stayed empty and the entry never finalized.
+                            let marker = if is_subagent_tool_name(name) {
+                                let role = inp
+                                    .get("subagent_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("agent");
+                                let task = inp
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let prompt =
+                                    inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                                if !result_text.is_empty() {
+                                    // Start frame already carries the output —
+                                    // spawn and finalize the panel entry in
+                                    // one step (nothing will arrive later).
+                                    let err_text = inner
+                                        .get("error")
+                                        .and_then(|e| e.as_str())
+                                        .filter(|s| !s.is_empty());
+                                    tools.subagent_use_with_output(
+                                        name,
+                                        value,
+                                        app,
+                                        sid,
+                                        role,
+                                        task,
+                                        prompt,
+                                        Some(&result_text),
+                                        err_text,
+                                    )
+                                } else {
+                                    tools.subagent_use(
+                                        name, value, app, sid, role, task, prompt, "", false,
+                                    )
+                                }
+                            } else if !result_text.is_empty() {
+                                // A start frame that already carries the output is
+                                // self-contained (opencode's inline shape) — open
+                                // the card WITH its result attached.
                                 let err_text = inner
                                     .get("error")
                                     .and_then(|e| e.as_str())
@@ -782,12 +877,14 @@ pub(super) fn handle_commandcode_event(
             // finalText on thinking/tool turns and the whole reply used to
             // land a second time.
             if let Some(text) = v.get("finalText").and_then(|t| t.as_str()) {
+                // Defensive: the trailer must not ride the reply either.
+                let text = strip_usage_trailer(text);
                 if !text.is_empty() {
                     let suffix = match text.strip_prefix(text_streamed.as_str()) {
                         Some(s) => s,
                         // Nothing streamed (renamed event types): recover the
                         // whole reply from finalText.
-                        None if text_streamed.is_empty() => text,
+                        None if text_streamed.is_empty() => text.as_str(),
                         // Streamed text diverged from finalText (e.g.
                         // finalText carries only the LAST message of a
                         // multi-turn reply): everything was already delivered

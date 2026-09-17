@@ -80,11 +80,6 @@ const LEAD_SECS = 6;
  *  boundary would turn an engine running at ~1x into a stutter of small waits. */
 const LEAD_FLOOR_SECS = 4;
 
-/** Synthesis requests the background walk keeps in flight. Two is enough to
- *  keep a serial engine fed across the request round-trip, and low enough that
- *  GPU mode never has more than a couple of engine processes alive at once. */
-const MAX_INFLIGHT = 2;
-
 // ---- Text preparation ----
 
 /** A rule: what to match, and either the replacement text or a function that
@@ -200,6 +195,39 @@ const UNIT_SPELLED: Record<string, string> = {
   hz: "hertz",
 };
 
+/** Magnitude word for a currency suffix ("$5M" → "million"). */
+const CURRENCY_WORDS: Record<string, string> = {
+  k: "thousand",
+  m: "million",
+  b: "billion",
+  t: "trillion",
+};
+
+/** Glued/abbreviated durations ("4d", "4days", "2wks", "3mo") spoken as the
+ *  words they stand for. Single letters are case-SENSITIVE lowercase — "5W"
+ *  is watts, not weeks — and are the ambiguous set; the multi-letter forms
+ *  are safe either case. `m` is deliberately absent: "5m" is minutes in a
+ *  timer, meters in a track answer, and million in "5m users" — no guess is
+ *  better than a wrong one (the existing min/Min rule covers "5 min"). */
+const SHORT_DURATIONS: Record<string, string> = {
+  d: "days",
+  h: "hours",
+  s: "seconds",
+  w: "weeks",
+  yr: "years",
+  yrs: "years",
+  wk: "weeks",
+  wks: "weeks",
+  mo: "months",
+  mos: "months",
+};
+
+/** "1" before a duration reads singular ("1 year"), everything else keeps
+ *  the plural word the map carries. */
+function spokenDuration(num: string, word: string): string {
+  return `${num} ${Number(num) === 1 ? word.replace(/s$/, "") : word}`;
+}
+
 /** Symbols and abbreviations that are read badly or not at all. Applied before
  *  the markdown pass, because several of them (`&`, `→`) also appear inside
  *  constructs the markdown pass has to see intact. */
@@ -222,12 +250,66 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
   [/£\s?(\d+(?:[.,]\d+)?)/g, "$1 pounds"],
   [/₹\s?(\d+(?:[.,]\d+)?)/g, "$1 rupees"],
   [/¥\s?(\d+(?:[.,]\d+)?)/g, "$1 yen"],
+  // Dollar magnitudes and pricing, which the engine reads as a bare letter:
+  // "$5M" is five million dollars, "$3/M" (model pricing) is three dollars
+  // per million. The per-unit form runs first so "$5M/M" splits correctly,
+  // and the input/output price PAIR ("$2/$6", "$10/$30 per 1M tokens")
+  // before that — left to the number-fraction rule it reads "2 over 6".
+  [
+    /\$\s?(\d+(?:[.,]\d+)?)\s*\/\s*\$\s?(\d+(?:[.,]\d+)?)/g,
+    (_m, inPrice: string, outPrice: string) => `${inPrice} dollars, ${outPrice} dollars`,
+  ],
+  [
+    /\$\s?(\d+(?:[.,]\d+)?)\s*\/\s*([KkMm])\b/g,
+    (_m, num: string, unit: string) =>
+      `${num} dollars per ${CURRENCY_WORDS[unit.toLowerCase()] ?? unit}`,
+  ],
+  [
+    /\$\s?(\d+(?:[.,]\d+)?)\s*([KMBT])\b/g,
+    (_m, num: string, unit: string) =>
+      `${num} ${CURRENCY_WORDS[unit.toLowerCase()] ?? unit} dollars`,
+  ],
+  // A dollar rate left glued to its period ("/yr", "/mo") after the amount
+  // became words — "$5M/yr" arrives here as "5 million dollars/yr" and the
+  // slash would read as "slash".
+  [
+    /dollars\s*\/\s*(yr|mo|wk|day|hr)\b/gi,
+    (_m, unit: string) => {
+      const words: Record<string, string> = {
+        yr: "year",
+        mo: "month",
+        wk: "week",
+        day: "day",
+        hr: "hour",
+      };
+      return `dollars per ${words[unit.toLowerCase()] ?? unit}`;
+    },
+  ],
   // Dates first: "2024-01-05" is a date, and the number-range rule below would
   // otherwise read it as two ranges ("2024 to 01 to 05").
   [
     /\b(\d{4})-(\d{2})-(\d{2})\b/g,
     (_m, y: string, m: string, d: string) =>
       `${MONTHS[Number(m) - 1] ?? m} ${Number(d)}, ${y}`,
+  ],
+  // Clock times: "04:00" reads as "zero four…colon…" or a raw digit run.
+  // With a meridiem, "04:00 pm" → "4 p m"; bare, "04:00" → "4 o'clock" and
+  // "14:30" → "14 30" (the engine's natural "fourteen thirty"). The
+  // lookahead keeps "04:00:00" (H:M:S) and "16:9"-style ratios alone, and
+  // "localhost:5173" never matches (no second colon-shaped pair).
+  [
+    /\b(\d{1,2}):(\d{2})\s*([ap])\.?\s?m\.?(?![a-z])/gi,
+    (_m, h: string, mm: string, ap: string) =>
+      mm === "00"
+        ? `${Number(h)} ${ap.toLowerCase()} m`
+        : `${Number(h)} ${Number(mm)} ${ap.toLowerCase()} m`,
+  ],
+  [
+    /(^|[^\w:.])(\d{1,2}):(\d{2})(?![\d:])(?!\s*[ap]\.?\s?m)/gi,
+    (_m, pre: string, h: string, mm: string) =>
+      mm === "00"
+        ? `${pre}${Number(h)} o'clock`
+        : `${pre}${Number(h)} ${Number(mm)}`,
   ],
   // Month abbreviations ("Sep 13", "Oct. 2026") — the engine says "sehp".
   // Two rules: the period is only eaten when a date follows it, so "Sep. 13"
@@ -264,6 +346,54 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
     /\b(\d+(?:\.\d+)?)\s*(mins?|secs?|hrs?)\b/gi,
     (_m, num: string, unit: string) => `${num} ${TIME_WORDS[unit.toLowerCase()] ?? unit}`,
   ],
+  // Bracketed forms run before the duration rules below, which would
+  // otherwise rewrite "6d" inside the brackets and leave them to click.
+  // Age tags from digests and model tables ("Claude [6d]", "[2h] old")
+  // are durations; any remaining word-bearing bracket ("[ongoing]",
+  // "[deprecated]") keeps its words and drops the brackets. Digit-led
+  // content that is not an age tag is citation/array-shaped and stays.
+  // The lookahead keeps markdown links ("[label](url)") intact for the
+  // markdown pass to strip properly.
+  [
+    /(^|[^\w\]])\[(\d{1,2})\s*([dhmw])\](?!\s*[:\(\)])/g,
+    (_m, pre: string, num: string, unit: string) => {
+      const words: Record<string, string> = { d: "days", h: "hours", w: "weeks", m: "minutes" };
+      return `${pre}${num} ${words[unit] ?? unit}`;
+    },
+  ],
+  [
+    /(^|[^\w\]])\[([^\]\n]{1,60})\](?!\s*[:\(\)])/g,
+    (match, pre: string, text: string) => {
+      if (/^\d/.test(text)) return match; // citation/array shapes stay
+      if (/^\s*[xX]?\s*$/.test(text)) return `${pre} `; // markdown checkbox
+      return `${pre} ${text} `;
+    },
+  ],
+  // Glued day/week spellings first ("4days", "2weeks" — the engine reads the
+  // run-on as one mangled word), then the abbreviated durations ("4d",
+  // "3mo", "2wks"). The single-letter set is case-sensitive lowercase so
+  // "10W" stays watts; a 4-digit number before a bare "s" is a decade ("the
+  // 1990s"), and "Ns of" is an approximation ("100s of pages") — both left
+  // alone.
+  [
+    /\b(\d+(?:\.\d+)?)\s*(days?|weeks?|months?|years?)\b/gi,
+    (_m, num: string, unit: string) => `${num} ${unit.toLowerCase()}`,
+  ],
+  [
+    /\b(\d+(?:\.\d+)?)\s*(yr|yrs|wk|wks|mo|mos)\b/gi,
+    (_m, num: string, unit: string) => {
+      const word = SHORT_DURATIONS[unit.toLowerCase()] ?? unit;
+      return spokenDuration(num, word);
+    },
+  ],
+  [
+    /\b(\d+(?:\.\d+)?)\s*([dhsw])\b(?!\s*of\b)/g,
+    (match, num: string, unit: string) => {
+      // "the 1990s" is a decade, not 1990 seconds.
+      if (unit === "s" && num.length === 4) return match;
+      return spokenDuration(num, SHORT_DURATIONS[unit] ?? unit);
+    },
+  ],
   [
     /\b(\d+(?:\.\d+)?)\s*(km|cm|mm|kg|mg|MB|GB|KB|TB|ms|fps|mi|ft|lb|kW|kHz|MHz|Hz)\b(?!\s*per\b)/gi,
     (_m, num: string, unit: string) => `${num} ${UNIT_SPELLED[unit.toLowerCase()] ?? unit}`,
@@ -273,11 +403,26 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
   [/\bv(\d[\d.]*)/g, "version $1"],
   [/#(\d)/g, "number $1"],
   [/\bNo\.\s*(\d)/g, "number $1"],
+  // Parameter-count ratios from model cards ("2.8T/B" — total over active in
+  // a MoE card, "1T/32B"). Both suffixes are spoken as their words, which is
+  // how the shorthand is read aloud; the engine otherwise says "two point
+  // eight t b". Narrow: single uppercase suffixes only, so "Qwen3-30B/A3B"
+  // (a letter after the slash) never matches.
+  [
+    /\b(\d+(?:\.\d+)?)\s*([TBMK])\s*\/\s*(\d+(?:\.\d+)?)\s*([TBMK])\b/g,
+    (_m, num: string, unit: string, num2: string, unit2: string) =>
+      `${num} ${UNIT_WORDS[unit] ?? unit}, ${num2} ${UNIT_WORDS[unit2] ?? unit2}`,
+  ],
+  [
+    /\b(\d+(?:\.\d+)?)\s*([TBMK])\s*\/\s*([TBMK])\b/g,
+    (_m, num: string, unit: string, unit2: string) =>
+      `${num} ${UNIT_WORDS[unit] ?? unit}, ${UNIT_WORDS[unit2] ?? unit2}`,
+  ],
   // "1.5B parameters" — the B/K/M/T convention from model cards, spoken as the
   // number it stands for. Narrow on purpose: "Qwen3-30B-A3B" and "256B of RAM"
   // are not this shape, and reading them as "billion" would be wrong.
   [
-    /\b(\d+(?:\.\d+)?)\s*([BMKT])\b(?=\s+(?:parameters?|params?|tokens?|context))/g,
+    /\b(\d+(?:\.\d+)?)\s*([BMKT])\b(?=\s+(?:parameters?|params?|tokens?|context|max output))/g,
     (_m, num: string, unit: string) => `${num} ${UNIT_WORDS[unit] ?? unit}`,
   ],
   // "30 billion (B) parameters": the parenthesis repeats the word it follows,
@@ -288,6 +433,16 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
     (match, word: string, letter: string) =>
       word[0]?.toUpperCase() === letter ? word : match,
   ],
+  // "MoE" is said as its expansion, never as the letters or the word "moe".
+  // The parenthetical form writers add collapses FIRST, so "MoE (mixture of
+  // experts)" is not voiced twice; the reverse order — the expansion already
+  // spoken, then the acronym in parens ("Mixture of Experts (MoE)") — drops
+  // the redundant parenthetical for the same reason. These run before the
+  // initialism rules below, which would spell it "M o E".
+  [/\bMoEs?\b\s*\((?:the\s+)?mixture[- ]of[- ]experts?\)/gi, "mixture of experts"],
+  [/\b(mixture[- ]of[- ]experts?)\s*\(\s*MoEs?\s*\)/gi, "$1"],
+  [/\((?:the\s+)?mixture[- ]of[- ]experts?\)/gi, "mixture of experts"],
+  [/\bMoEs?\b/g, "mixture of experts"],
   // Initialisms read as letters: the engine says "llm" as a word and "MoE" as
   // "moe", where everyone who writes them says the letters.
   [
@@ -299,6 +454,12 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
     (_m, letters: string, plural: string) =>
       `${letters.toUpperCase().split("").join(" ")}${plural}`,
   ],
+  // Model formats and size codes the engine invents a pronunciation for:
+  // "gguf"/"ggml" are spelled out, and "XXS"/"XS" (quant tiers, clothing
+  // sizes) are the words they stand for.
+  [/\b(gguf|ggml)\b/gi, (_m, w: string) => w.toUpperCase().split("").join(" ")],
+  [/\bxxs\b/gi, "extra extra small"],
+  [/\bxs\b/gi, "extra small"],
   // Symbols the engine either skips or mispronounces.
   [/→/g, " to "],
   [/←/g, " from "],
@@ -340,6 +501,17 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
   // markdown bullet and stays one — `.` does not match a newline.
   [/(.)\+/g, "$1 plus "],
   [/(\d)\s*\*\s*(\d)/g, "$1 times $2"],
+  // A line that is ONE bold span is a pseudo-header ("**Sources**" as a
+  // section label). Handled here — before the leftover-asterisk rule below
+  // strips the markers — so the label gets the full stop and paragraph break
+  // a spoken section break needs instead of running into the next line.
+  [
+    /^[ \t]*(\*\*|__)([^\n]*?\S)\1[ \t]*$/gm,
+    (_m, _mk: string, title: string) => {
+      const clean = title.trim().replace(/[.:;,!?]+$/, "");
+      return clean ? `${clean}.\n\n` : _m;
+    },
+  ],
   // Leftover asterisk (unmatched emphasis, a footnote star) is silence.
   [/\*/g, " "],
   [/(\d)\s*\^\s*(\d)/g, "$1 to the power of $2"],
@@ -385,6 +557,19 @@ const SPEECH_SUBSTITUTIONS: SpeechRule[] = [
   [/ﬄ/g, "ffl"],
   // Handles and email addresses: "user@example.com" is "user at example.com".
   [/@/g, " at "],
+  // Bare numeric citation markers ("[3]", the research reports' "[1,2]"):
+  // the engine clicks on the brackets, so voice them as what they are.
+  // Markdown links ("[1](url)") and reference definitions ("[1]: url") are
+  // excluded and handled by the markdown pass; a word character before the
+  // bracket (an array index like "a[1]") stays untouched.
+  [
+    /\[((?:\d{1,2})(?:,\s*\d{1,2})+)\]/g,
+    (_m, nums: string) => `sources ${nums}`,
+  ],
+  [
+    /(^|[^\w\]])\[(\d{1,2})\](?!\s*[:\)(])/g,
+    (_m, pre: string, num: string) => `${pre}source ${num}`,
+  ],
   [/&/g, " and "],
   [/%/g, " percent"],
 ];
@@ -438,12 +623,15 @@ export function markdownToSpeech(md: string): string {
   out = out.replace(/`([^`]+)`/g, "$1");
   // Inline math.
   out = out.replace(/\$([^$\n]+)\$/g, "$1");
-  // Headings and blockquote markers. The trailing punctuation a heading carries
-  // (or gains here) is what gives the reader a beat before the body text, so
-  // headings end in a full stop rather than running straight on.
+  // Headings and blockquote markers. The trailing punctuation a heading
+  // carries (or gains here) is what gives the reader a beat before the body
+  // text, so headings end in a full stop — and the blank line after them
+  // turns into a real PARAGRAPH break in the splitter (a ~280ms pause),
+  // which a bare newline does not: section headers read as part of the
+  // sentence that follows without it.
   out = out.replace(/^[ \t]{0,3}#{1,6}[ \t]+(.*)$/gm, (_m, title: string) => {
     const clean = title.trim().replace(/[.:;,!?]+$/, "");
-    return clean ? `${clean}.\n` : "";
+    return clean ? `${clean}.\n\n` : "";
   });
   out = out.replace(/^[ \t]{0,3}>[ \t]?/gm, "");
   // List markers: the bullet becomes a full stop so items are separated by a
@@ -452,6 +640,13 @@ export function markdownToSpeech(md: string): string {
   out = out.replace(/^[ \t]*\[[ xX]\][ \t]*/gm, "");
   out = out.replace(/^[ \t]*\d+[.)][ \t]+/gm, "");
   out = out.replace(/^[ \t]*([-*_])[ \t]*\1[ \t]*\1[-*_ \t]*$/gm, "\n\n");
+  // A standalone "Label:" line ("Sources:" above a source list) is a section
+  // header too: the colon is a breath inside a sentence, not the full stop a
+  // section break needs. Short, punctuation-free lines only.
+  out = out.replace(/^[ \t]*([^\W_][^\n:*]{0,58}?)\s*:[ \t]*$/gm, (_m, label: string) => {
+    const clean = label.trim();
+    return /^[!?.,;]+$/.test(clean) ? _m : `${clean}.\n\n`;
+  });
   // Emphasis markers, keeping the words. Only `*`/`**` are touched — a lone
   // underscore is far more likely to be inside an identifier (which the pass
   // above has already spaced out) than to be emphasis in a technical answer.
@@ -545,7 +740,13 @@ export function groupSentences(
     const budget = out.length === 0 ? firstMaxChars : maxChars;
     const startsParagraph = chunk.paragraphStart && (group?.text.length ?? 0) >= minChars;
     if (group && !startsParagraph && group.text.length + 1 + chunk.text.length <= budget) {
-      group = { text: `${group.text} ${chunk.text}`, paragraphStart: group.paragraphStart };
+      // A paragraph boundary this merge SWALLOWS (the group was still under
+      // minChars — a "Sources" list running into the next section header is
+      // the common case) must not read as one run-on: joining with a comma
+      // keeps the engine's breath where the paragraph pause was dropped.
+      const sep = chunk.paragraphStart ? ", " : " ";
+      const head: string = sep === ", " ? group.text.replace(/[.,;]$/, "") : group.text;
+      group = { text: `${head}${sep}${chunk.text}`, paragraphStart: group.paragraphStart };
       continue;
     }
     if (group) out.push(group);
@@ -639,9 +840,30 @@ class TtsPlayer {
   private settle: ((result: SentenceResult) => void) | null = null;
   private voice: string | null = null;
   private speed = 1;
+  /** Live playback-rate multiplier, applied to decoded audio at play time
+   *  (AudioBufferSourceNode.playbackRate) rather than at synthesis: an arrow
+   *  click is audible on the sentence already sounding and re-synthesizes
+   *  nothing. The persisted Settings speed still rides the backend parameter
+   *  (`this.speed`); this multiplies on top of it. */
+  private rate = 1;
   private device: string | null = null;
-  /** Synthesis requests in flight (see topUp). */
-  private inflight = 0;
+  /** Synthesis requests in flight — read straight off the `pending` map, so
+   *  the count is exact across replays (a new read does not have to guess
+   *  how many superseded fetches are still settling). */
+  private get inflight(): number {
+    return this.pending.size;
+  }
+  /** Cap on in-flight synthesis requests, by device. CPU: requests queue
+   *  behind the engine's single lock, so a deeper queue just keeps the
+   *  engine fed across each request's IPC + decode round-trip — with a
+   *  2-deep queue the engine idled between chunks and every boundary read
+   *  as "stopped and waiting". GPU: every call spawns its own CUDA process
+   *  (~4.5s start, VRAM), so more than two at once contend with each other
+   *  and a failed child leaves a hole that re-synthesizes cold at the
+   *  boundary. */
+  private get maxInflight(): number {
+    return this.device === "gpu" ? 2 : 4;
+  }
   /** Invalidates in-flight work after stop()/replay — every async step checks
    *  it before touching the audio graph or the store. */
   private token = 0;
@@ -651,7 +873,6 @@ class TtsPlayer {
     const my = (this.token += 1);
     this.skipTarget = null;
     this.pausePending = false;
-    this.inflight = 0; // a new read starts a fresh pipeline
     this.stopSource("stopped");
     const store = useTtsStore.getState();
     store.set({ key, label: label ?? null, error: null, phase: "loading", index: 0, total: 0 });
@@ -723,7 +944,9 @@ class TtsPlayer {
     }
     // Remember the resume point BEFORE stopping: the source stops here, so
     // this is the last moment `currentTime` still describes the audio position.
-    if (ctx) this.offset = this.currentOffset + (ctx.currentTime - this.startedAt);
+    // Elapsed wallclock covers media seconds at `rate` — the multiplier that
+    // has been squeezing or stretching the sounding buffer since it started.
+    if (ctx) this.offset = this.currentOffset + (ctx.currentTime - this.startedAt) * this.rate;
     // Report the pause from here, not on the pump's next turn: the button must
     // flip to Resume on the click, and resume() refuses while the store still
     // says "playing".
@@ -756,6 +979,28 @@ class TtsPlayer {
 
   prev(): void {
     this.skipTo(this.index - 1);
+  }
+
+  /** Set the live playback-rate multiplier (clamped 0.5–2). Takes effect on
+   *  the sentence already sounding — no replay, no re-synthesis — and rides
+   *  every later sentence of this and future reads (sticky by design: the
+   *  bar's readout persists, so surprise would be the only alternative). */
+  setRate(rate: number): void {
+    const clamped = Math.min(2, Math.max(0.5, Math.round(rate * 100) / 100));
+    if (clamped === this.rate) return;
+    this.rate = clamped;
+    useTtsStore.getState().set({ rate: clamped });
+    const src = this.source;
+    const ctx = sharedAudioContext();
+    if (src && ctx && src.playbackRate) {
+      // Live on the sounding sentence. A short ramp avoids the click a step
+      // change in playbackRate produces mid-waveform.
+      try {
+        src.playbackRate.setTargetAtTime(clamped, ctx.currentTime, 0.015);
+      } catch {
+        src.playbackRate.value = clamped;
+      }
+    }
   }
 
   private skipTo(target: number): void {
@@ -869,11 +1114,19 @@ class TtsPlayer {
 
   private async playSentence(my: number, ctx: AudioContext): Promise<SentenceResult> {
     const index = this.index;
-    // The chunk about to be PLAYED is requested before the lookahead: the
-    // backend voices one chunk at a time behind a single engine lock, so
-    // issuing the prefetch first put the sentence the user is waiting for at
-    // the BACK of that queue — behind everything the lookahead asked for.
-    const buffer = await this.bufferFor(ctx, index);
+    // The chunk about to be PLAYED is requested first — the backend voices
+    // one chunk at a time behind a single engine lock, so it must be at the
+    // FRONT of that queue — but the lookahead is issued immediately after,
+    // in the same tick, not after this chunk's full round trip. Waiting for
+    // the buffer left the engine idle for the whole first synthesis (the
+    // small warm-up chunk was voiced with nothing queued behind it) and
+    // refilled the queue a round-trip late at every boundary: the read
+    // computed a little, waited for it to finish playing, then computed the
+    // rest. The requests still arrive in order, so playback is never pushed
+    // behind the prefetch.
+    const bufferPromise = this.bufferFor(ctx, index);
+    this.topUp(ctx, index);
+    const buffer = await bufferPromise;
     if (my !== this.token) return "stopped";
     if (!buffer) {
       // One failed sentence must not kill the whole read — report it and move
@@ -881,7 +1134,6 @@ class TtsPlayer {
       useTtsStore.getState().set({ error: "Could not synthesize part of this text" });
       return "ended";
     }
-    this.topUp(ctx, index);
     await this.awaitLead(my, ctx, index, buffer);
     if (my !== this.token) return "stopped";
     // A next/prev/pause that arrived while this chunk was being fetched or
@@ -918,7 +1170,9 @@ class TtsPlayer {
    *  a few IPC hops and nothing else — which is why the first read of a text is
    *  the one the lead exists for. */
   private async awaitLead(my: number, ctx: AudioContext, index: number, buffer: AudioBuffer): Promise<void> {
-    const target = index === 0 ? LEAD_SECS : LEAD_FLOOR_SECS;
+    // The lead is measured in MEDIA seconds but consumed at `rate` per
+    // wallclock second — a 1.5x read drains the buffer half again as fast.
+    const target = (index === 0 ? LEAD_SECS : LEAD_FLOOR_SECS) * this.rate;
     let lead = this.leadSecs(index, buffer);
     if (lead >= target) return;
     // A wait the listener can see coming: the bar reports `buffering` rather
@@ -951,20 +1205,18 @@ class TtsPlayer {
   private topUp(ctx: AudioContext, index: number): void {
     const my = this.token;
     for (let j = index + 1; j < this.chunks.length; j += 1) {
-      if (this.inflight >= MAX_INFLIGHT) return;
+      if (this.inflight >= this.maxInflight) return;
       const text = this.chunks[j]?.text;
       if (!text) return;
       const key = `${this.cachePrefix}|${text}`;
       // Voiced already, or being voiced right now — either way this walk is not
       // the thing that will make it ready, so it moves on.
       if (this.buffers.has(key) || this.pending.has(key)) continue;
-      this.inflight += 1;
       void this.bufferForText(ctx, text).finally(() => {
-        // A stalled request must not leave the counter stuck above zero: a new
-        // read resets it, and the decrement cannot go negative.
-        this.inflight = Math.max(0, this.inflight - 1);
         // Only while the read is live: a paused or stopped read should not keep
-        // grinding through the rest of the artifact.
+        // grinding through the rest of the artifact. (The in-flight count is
+        // the pending map's job — see the getter — so there is nothing to
+        // decrement here; this callback only re-feeds the walk.)
         if (my !== this.token) return;
         const phase = useTtsStore.getState().phase;
         if (phase === "playing" || phase === "buffering") this.topUp(ctx, this.index);
@@ -1041,6 +1293,10 @@ class TtsPlayer {
     return new Promise<SentenceResult>((resolve) => {
       const src = ctx.createBufferSource();
       src.buffer = buffer;
+      // Every sentence starts at the live multiplier; mid-sentence changes go
+      // through setRate's ramp on the running node. (Guarded: test doubles and
+      // exotic nodes may not expose the AudioParam.)
+      if (src.playbackRate) src.playbackRate.value = this.rate;
       src.connect(ctx.destination);
       const startAt = Math.min(Math.max(offset, 0), Math.max(buffer.duration - 0.02, 0));
       const done = (result: SentenceResult) => {

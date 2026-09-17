@@ -141,10 +141,13 @@ pub(super) fn spawn_claude(
     // first dir is the spawn dir (the CLI's workspace); the second (when
     // different) is the artifacts dir relay-tools MCP writes into.
     let watch_dirs = turn_watch_dirs(cwd, &db.0);
-    if let Some(dir) = watch_dirs.first() {
+    if let Some((dir, _)) = watch_dirs.first() {
         cmd.current_dir(dir);
     }
-    let watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
+    let watches: Vec<DirWatch> = watch_dirs
+        .into_iter()
+        .map(|(dir, broad)| DirWatch::new(dir, broad))
+        .collect();
     no_console_window(&mut cmd);
     let mut child = cmd
         .spawn()
@@ -536,6 +539,11 @@ pub(super) fn read_claude_stream(
     stderr_tail: Option<std::sync::mpsc::Receiver<String>>,
 ) {
     let mut full = String::new();
+    // Crash-flush accumulator: keeps a seconds-stale snapshot of the live
+    // turn's reply in the DB (see PartialFlush) so a mid-turn crash doesn't
+    // reopen the chat to a bare user bubble. Discarded at each turn boundary
+    // (this reader outlives turns) so the ids never cross turns.
+    let mut partial = PartialFlush::new();
     // Answer text accumulated from `stream_event` deltas ONLY (no think
     // markers, no tool markers). The `result` fallback below diffs it against
     // `result.result` to recover text the CLI never streamed.
@@ -592,6 +600,7 @@ pub(super) fn read_claude_stream(
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        partial.maybe_flush(db, sid, &full);
         match v.get("type").and_then(|t| t.as_str()) {
             // Token streaming (requires --include-partial-messages): raw
             // deltas wrapped in stream_event.
@@ -844,6 +853,7 @@ pub(super) fn read_claude_stream(
                     // Turn was cancelled while in flight: discard the partial
                     // reply — cancel() already emitted `chat:done`.
                     full.clear();
+                    partial.discard(db);
                     crate::chat::turn_perf::unregister(sid);
                     perf = None;
                 } else if ok {
@@ -903,6 +913,9 @@ pub(super) fn read_claude_stream(
                     if let Some(m) = actual_model.as_deref() {
                         persist_actual_model(db, "claude_code", sid, m);
                     }
+                    // Hand persistence over to finish_turn's real insert —
+                    // keeping the crash-flush row would double-render the turn.
+                    partial.discard(db);
                     finish_turn(
                         app,
                         db,
@@ -929,6 +942,7 @@ pub(super) fn read_claude_stream(
                         .unwrap_or("Claude Code turn failed")
                         .to_string();
                     full.clear();
+                    partial.discard(db);
                     emit_error(app, sid, &msg);
                     // The failed turn's accumulator must not leak into the
                     // registry (nothing else unregisters this path).

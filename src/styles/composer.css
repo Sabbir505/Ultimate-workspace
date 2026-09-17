@@ -972,19 +972,20 @@
   background: var(--bg-tint);
 }
 
-/* Message queue — ONE notch card above the composer (Cursor-style) holding
-   the whole stack: rows separated by hairline dividers, each with grip
-   (pointer drag to reorder), expandable text, ↥ Steer, pencil, trash. */
-.composer-queue {
+/* Message queue — lives INSIDE the composer card as one notch: a full-bleed
+   section pinned to the card's top (negative margins cancel the card's own
+   padding), separated from the textarea by a single hairline. No glass or
+   border of its own — the card supplies the chrome. Rows have no dividers
+   between them; hairlines elsewhere read as stray borders. */
+.chat-composer-card .composer-queue {
   display: flex;
   flex-direction: column;
-  margin-bottom: 6px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  box-shadow: var(--glass-drop-soft);
+  flex-shrink: 0;
+  margin: -10px -12px 0;
+  padding: 6px 12px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  /* Clip the dragging-row tint to the card's rounded top corners. */
+  border-radius: 15px 15px 0 0;
   overflow: hidden;
 }
 .composer-queue-row {
@@ -995,9 +996,6 @@
   font-size: 12.5px;
   color: var(--text-dim);
   transition: background 120ms ease;
-}
-.composer-queue-row + .composer-queue-row {
-  border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
 }
 .composer-queue-row.dragging {
   background: color-mix(in srgb, var(--accent) 9%, transparent);
@@ -1026,6 +1024,10 @@
   padding: 0;
   border: none;
   background: transparent;
+  /* tokens.css skins EVERY <button> with a glass rim (box-shadow); on this
+     full-width button that rim renders as a border above and below the text
+     of every row — same bug 52e50cf fixed on the folded/edit rows. */
+  box-shadow: none;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1033,6 +1035,11 @@
   font-size: 12.5px;
   text-align: left;
   cursor: pointer;
+}
+/* button:hover's background outranks a single class — keep the row flat. */
+.composer-queue-text:hover {
+  background: transparent;
+  box-shadow: none;
 }
 .composer-queue-text.expanded {
   white-space: pre-wrap;
@@ -1049,6 +1056,8 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-2);
+  /* Own border only — the inherited button-skin rim doubles the outline. */
+  box-shadow: none;
   color: var(--text);
   font-size: 12px;
   font-weight: 600;
@@ -1071,12 +1080,16 @@
   border: none;
   border-radius: 6px;
   background: transparent;
+  /* Rim shadow from the global button skin read as a rounded border around
+     the pencil/trash glyphs — flat until hovered. */
+  box-shadow: none;
   color: var(--text-dim);
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
 }
 .composer-queue-icon-btn:hover {
   background: var(--surface-2);
+  box-shadow: none;
   color: var(--text);
 }
 /* Inline edit stays ON the row: compact auto-height textarea + Save/× in the
@@ -1103,6 +1116,7 @@
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface-2);
+  box-shadow: none;
   color: var(--text);
   font-size: 11.5px;
   font-weight: 600;

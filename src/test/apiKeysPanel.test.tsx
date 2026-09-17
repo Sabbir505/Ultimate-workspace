@@ -80,6 +80,12 @@ vi.mock("../lib/ipc", () => ({
   getLocalModelOverrides: vi.fn().mockResolvedValue({}),
   setLocalModelOverrides: vi.fn(),
   runLoginFlow: vi.fn(),
+  // Server builds card (rendered inside the speech + local-models panels).
+  sttInstallServer: vi.fn().mockResolvedValue(undefined),
+  sttInstallCuda: vi.fn().mockResolvedValue(undefined),
+  llamaInstallCuda: vi.fn().mockResolvedValue(undefined),
+  ttsInstallGpu: vi.fn().mockResolvedValue(undefined),
+  onModelDownloadProgress: vi.fn().mockResolvedValue(() => {}),
 }));
 
 vi.mock("../state/ui", () => ({

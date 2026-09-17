@@ -60,8 +60,9 @@ export interface PaneData {
   status: "loading" | "ready" | "error";
   /** Rows in list order; label is what's rendered/searched. `thinking` is
    *  the model's own supported effort tiers (omp) — narrows the pane's
-   *  effort slider when present. */
-  rows: { id: string; label: string; thinking?: string[] }[];
+   *  effort slider when present. `note` is the user's free-text annotation
+   *  (deals, promos, pricing quirks) rendered as a bracketed badge. */
+  rows: { id: string; label: string; thinking?: string[]; note?: string }[];
   /** Custom endpoint footnote (harness config relay / provider base URL). */
   endpoint?: string | null;
   /** Harness-derived reasoning effort (read-only — the CLI's own config owns

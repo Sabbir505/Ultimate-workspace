@@ -20,9 +20,9 @@ use crate::DbState;
 
 /// Pinned llama.cpp release: the CUDA 12.4 Windows x64 prebuilt. The pin is
 /// a compatibility contract with the asset (SHA below); bump deliberately,
-/// together with URL + SHA, and the build updater offers the new version.
-/// Also the "latest version" the updater compares installs against when the
-/// GitHub releases API is unreachable (offline fallback).
+/// together with URL + SHA, and the build updater offers the new version —
+/// the pin is ALSO the version the updater compares installs against, so a
+/// live "newer upstream exists" never nags a build the app can't install.
 pub const LLAMA_CPP_TAG: &str = "b10985";
 #[cfg(windows)]
 const LLAMA_CUDA_ZIP_URL: &str =

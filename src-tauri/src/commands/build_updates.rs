@@ -67,43 +67,20 @@ pub const WHISPER_CPU_DIR: &str = "whisper-cpp";
 /// The whisper CUDA build lives in the dir `stt.rs`'s CUDA_SUBDIR names.
 pub const TTS_GPU_DIR: &str = "sherpa-onnx-cuda";
 
-/// Newest llama.cpp build release tag (the `b<number>` tags; non-b releases
-/// like app builds sit in the same list). One GET, 8s budget; None offline —
-/// callers fall back to the pinned tag.
-async fn latest_llama_tag() -> Option<String> {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("Relay/", env!("CARGO_PKG_VERSION"), " (desktop)"))
-        .connect_timeout(std::time::Duration::from_secs(8))
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .ok()?;
-    let releases: serde_json::Value = client
-        .get("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10")
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    releases
-        .as_array()?
-        .iter()
-        .find_map(|r| {
-            let tag = r.get("tag_name")?.as_str()?;
-            tag.starts_with('b').then(|| tag.to_string())
-        })
-}
-
 #[tauri::command]
 pub async fn check_build_updates(
     app: tauri::AppHandle,
     db: State<'_, DbState>,
 ) -> Result<Vec<BuildUpdateStatus>, String> {
-    let latest_llama = latest_llama_tag()
-        .await
-        .unwrap_or_else(|| crate::commands::llama_build::LLAMA_CPP_TAG.to_string());
+    // The llama row compares against the PIN — what an update actually
+    // installs — like every other build. This used to fetch the live GitHub
+    // latest tag instead, which nagged forever: the installer is SHA-pinned
+    // to `LLAMA_CPP_TAG`, so after a successful in-app update to b10985 the
+    // row compared it against upstream's b11027 and offered an "update"
+    // that clicking Update could never deliver.
+    let latest_llama = crate::commands::llama_build::LLAMA_CPP_TAG.to_string();
     // Snapshot the llama-server path setting without parking the guard
-    // across the await above/below (parking_lot is !Send).
+    // across the spawn_blocking below (parking_lot is !Send).
     let llama_user_path = {
         let conn = db.0.lock();
         crate::db::get_setting(&conn, crate::chat::local_models::LLAMA_SERVER_PATH_KEY)

@@ -69,7 +69,6 @@ import {
 } from "../../lib/ipc";
 
 const LOAD_TIMEOUT_MS = 8000;
-const BOUNDS_DEBOUNCE_MS = 50;
 
 interface Props {
   pane: Pane;
@@ -368,29 +367,39 @@ export function BrowserPane({ pane, visible = true }: Props) {
     };
   }, [paneId]);
 
-  // --- Native bounds: track the body div, debounced. Set bounds for VISIBLE
-  // tabs only (occluded tabs are kept off-screen by the occlusion effect). ---
-  // A ref holds the timer id so the cleanup function can cancel pending debounces
-  // even after a re-render swaps the closure.
-  const boundsTimerRef = useRef<number | null>(null);
+  // --- Native bounds: track the body div, coalesced to one IPC per frame.
+  // Set bounds for VISIBLE tabs only (occluded tabs are kept off-screen by the
+  // occlusion effect). ---
+  // The native webview is an OS child window that CSS cannot position, so its
+  // rect must be pushed over IPC. A trailing debounce here STARVED during a
+  // splitter drag: the panel width changes every pointermove, each change
+  // reset the 50ms timer, and the webview only resized after the drag paused
+  // — visibly trailing the panel edge (2026-09-18 report). Coalesce instead:
+  // at most one bounds push per animation frame while resizes keep coming,
+  // and the last notification still lands a final push.
+  // A ref holds the pending frame id so the cleanup can cancel it even after
+  // a re-render swaps the closure.
+  const boundsRafRef = useRef<number | null>(null);
 
   useEffect(() => {
     const body = bodyRef.current;
     if (!body) return;
+    const push = () => {
+      boundsRafRef.current = null;
+      const r = rectOf(body);
+      // Only sync bounds for the active, visible tab — occluded/hidden tabs
+      // should stay off-screen (set by the occlusion effect). Syncing ALL
+      // tabs was pulling occluded webviews back into view after the occlusion
+      // moved them off-screen, causing browser content to bleed through
+      // settings and other overlays.
+      const ts = tabStates.get(activeTabId);
+      if (ts?.nativeOk === true && !occluded) {
+        void browserSetBoundsTab(paneId, activeTabId, r).catch(() => {});
+      }
+    };
     const sync = () => {
-      if (boundsTimerRef.current !== null) window.clearTimeout(boundsTimerRef.current);
-      boundsTimerRef.current = window.setTimeout(() => {
-        const r = rectOf(body);
-        // Only sync bounds for the active, visible tab — occluded/hidden tabs
-        // should stay off-screen (set by the occlusion effect). Syncing ALL
-        // tabs was pulling occluded webviews back into view after the occlusion
-        // moved them off-screen, causing browser content to bleed through
-        // settings and other overlays.
-        const ts = tabStates.get(activeTabId);
-        if (ts?.nativeOk === true && !occluded) {
-          void browserSetBoundsTab(paneId, activeTabId, r).catch(() => {});
-        }
-      }, BOUNDS_DEBOUNCE_MS);
+      if (boundsRafRef.current !== null) return;
+      boundsRafRef.current = requestAnimationFrame(push);
     };
     const observer = new ResizeObserver(sync);
     observer.observe(body);
@@ -399,7 +408,8 @@ export function BrowserPane({ pane, visible = true }: Props) {
     return () => {
       observer.disconnect();
       window.removeEventListener("resize", sync);
-      if (boundsTimerRef.current !== null) window.clearTimeout(boundsTimerRef.current);
+      if (boundsRafRef.current !== null) cancelAnimationFrame(boundsRafRef.current);
+      boundsRafRef.current = null;
     };
   }, [paneId, tabs, tabStates, occluded, activeTabId]);
 

@@ -193,9 +193,19 @@ location.reload();
         ensure_supported()?;
         let rect = sanitize(rect);
         // Zero/degenerate rects make the pane INVISIBLE (black area under the
-        // app UI) while every navigation actually succeeds — log the rect so
-        // "stuck loading" reports can be told apart from "never painted".
-        browser_log(&self.app, &format!("set_bounds pane={pane_id} tab={tab_id} rect={rect:?}"));
+        // app UI) while every navigation actually succeeds — those still log,
+        // so "stuck loading" reports can be told apart from "never painted".
+        // Successful rects used to log per call: the frontend coalesces bounds
+        // to one call per animation frame during a splitter drag, and sync
+        // file I/O (mkdir + metadata + append) on that path added avoidable
+        // latency to a latency-sensitive op (2026-09-18 report: the webview
+        // trailed the panel edge while resizing).
+        if rect.width < 1.0 || rect.height < 1.0 {
+            browser_log(
+                &self.app,
+                &format!("set_bounds DEGENERATE pane={pane_id} tab={tab_id} rect={rect:?}"),
+            );
+        }
         let label = browser_label(pane_id, tab_id);
         let pane = self
             .webviews

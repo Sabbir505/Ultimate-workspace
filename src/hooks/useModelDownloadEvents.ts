@@ -11,6 +11,24 @@ import { relayNotify } from "../lib/notifyCenter";
 import { useEventSubscription } from "./useTauriEvent";
 import { useUiStore } from "../state/ui";
 
+// Runtime builds ride the SAME download stream as Hugging Face models but are
+// not models — llama.cpp / whisper.cpp are pinned, SHA-verified exe/DLL
+// bundles. Progress ids: LLAMA_CUDA_INSTALL_ID (`llama_build.rs`) and the stt
+// install ids (`stt.rs`); titles mirror the Server builds card
+// (`build_updates.rs`). "Model download finished" for a CUDA zip read wrong.
+const BUILD_NAMES: Record<string, string> = {
+  "llama-cuda-server": "Llama server (CUDA build)",
+  "stt-whisper-server": "Whisper server (CPU build)",
+  "stt-whisper-cuda": "Whisper server (CUDA build)",
+};
+
+/** Friendly display name for a download-stream id, or null when the id is a
+ *  plain model id (`repo::file`) and the caller keeps its own derivation. */
+export function downloadDisplayName(id: string): string | null {
+  const name = id.split("::")[0] ?? id;
+  return BUILD_NAMES[name] ?? null;
+}
+
 export function useModelDownloadEvents() {
   const updateModelDownload = useUiStore((s) => s.updateModelDownload);
 
@@ -26,19 +44,20 @@ export function useModelDownloadEvents() {
         finalPath: p.finalPath ?? null,
         error: p.error ?? null,
       });
+      const buildName = downloadDisplayName(p.id);
       if (p.state === "done") {
         relayNotify({
           kind: "completed",
-          title: "Model download finished",
-          body: `${p.id.split("::")[0] ?? p.id} is ready to run.`,
+          title: buildName ? "Build download finished" : "Model download finished",
+          body: `${buildName ?? p.id.split("::")[0] ?? p.id} is ready to run.`,
           view: "settings",
           osToast: false,
         });
       } else if (p.state === "error") {
         relayNotify({
           kind: "error",
-          title: "Model download failed",
-          body: p.error || `${p.id} could not be downloaded.`,
+          title: buildName ? "Build download failed" : "Model download failed",
+          body: p.error || `${buildName ?? p.id} could not be downloaded.`,
           view: "settings",
           osToast: true,
           inAppToast: true,

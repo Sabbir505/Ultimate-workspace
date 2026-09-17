@@ -3,6 +3,7 @@
 // with per-model details. Terminal states (done/error/cancelled) are auto-
 // removed after 3s by the UI store.
 import { formatBytes, formatRate } from "../../lib/format";
+import { downloadDisplayName } from "../../hooks/useModelDownloadEvents";
 import { useUiStore } from "../../state/ui";
 
 export function ModelDownloadIndicator() {
@@ -21,15 +22,18 @@ export function ModelDownloadIndicator() {
   const totalBps = active.reduce((s, d) => s + d.bps, 0);
   const pct = totalSize > 0 ? Math.min(100, Math.round((totalDown / totalSize) * 100)) : null;
 
-  // Short label for the model being downloaded (repo name).
+  // Short label for the downloading item: a friendly build name for runtime
+  // builds (CUDA/whisper), the repo name for model ids (`repo::file`).
   const label =
     entries.length === 1
-      ? entries[0].id.split("::")[0]?.split("/").pop() ?? entries[0].id
-      : `${entries.length} models`;
+      ? downloadDisplayName(entries[0].id) ??
+        entries[0].id.split("::")[0]?.split("/").pop() ??
+        entries[0].id
+      : `${entries.length} downloads`;
 
   const tooltip = entries
     .map((d) => {
-      const name = d.id.split("::")[0]?.split("/").pop() ?? d.id;
+      const name = downloadDisplayName(d.id) ?? d.id.split("::")[0]?.split("/").pop() ?? d.id;
       const pctItem = d.total ? `${Math.round((d.downloaded / d.total) * 100)}%` : "";
       return `${name}: ${d.state} ${pctItem} ${formatBytes(d.downloaded)}${d.total ? ` / ${formatBytes(d.total)}` : ""} ${formatRate(d.bps)}`;
     })

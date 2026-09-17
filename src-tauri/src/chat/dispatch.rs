@@ -125,12 +125,13 @@ pub(crate) fn artifacts_dir(app: &AppHandle) -> std::path::PathBuf {
 ///
 /// This exists because the other shape is a self-deadlock: `parking_lot::Mutex`
 /// is not reentrant, so `artifacts_dir(app)` called with a `DbState` guard held
-/// blocks that thread forever on the global DB mutex. That is exactly what
-/// `preview_scope_roots` (called from every artifact IPC with the lock held) used
-/// to do — one artifact preview or one 2 s `get_file_mtime` poll later the
-/// mutex was owned by a thread that would never release it, every other DB
-/// command waited behind it, and once each runtime worker was parked the whole
-/// IPC surface stopped answering. Pass the connection you already hold.
+/// blocks that thread forever on the global DB mutex. That is exactly what the
+/// former per-IPC preview-scope resolution (called from every artifact IPC with
+/// the lock held) used to do — one artifact preview or one 2 s `get_file_mtime`
+/// poll later the mutex was owned by a thread that would never release it,
+/// every other DB command waited behind it, and once each runtime worker was
+/// parked the whole IPC surface stopped answering. Pass the connection you
+/// already hold.
 pub(crate) fn artifacts_dir_locked<R: tauri::Runtime>(
     conn: &rusqlite::Connection,
     app: &tauri::AppHandle<R>,

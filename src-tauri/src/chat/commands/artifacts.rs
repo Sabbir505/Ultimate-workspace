@@ -134,23 +134,11 @@ pub fn sweep_expired_artifacts(db: &Arc<parking_lot::Mutex<rusqlite::Connection>
 // ---- Artifact download ----
 
 /// Copy a generated artifact to a user-chosen destination path (the frontend
-/// gets `dest` from a save dialog). `src` must sit inside the preview scope —
-/// see [`preview_scope_roots`]; `dest` is user-chosen and unrestricted.
+/// gets `dest` from a save dialog). `src` may be any readable path — the
+/// preview-scope containment (and with it this command's refusal) was lifted
+/// on product decision: these endpoints exist to open the user's files.
 #[tauri::command]
-pub async fn download_artifact(
-    app: AppHandle,
-    db: State<'_, DbState>,
-    src: String,
-    dest: String,
-) -> CmdResult<()> {
-    let roots = preview_scope_roots_blocking(&db, &app).await?;
-    if path_in_preview_scope(&src, &roots).is_none() {
-        return Err(format!(
-            "Refusing to save \"{src}\": it is outside the folders Relay can \
-             access (your projects, chat worktrees, the artifacts folder, and \
-             user-granted roots)."
-        ));
-    }
+pub async fn download_artifact(src: String, dest: String) -> CmdResult<()> {
     tokio::task::spawn_blocking(move || {
         std::fs::copy(&src, &dest).map_err(|e| format!("could not save file: {e}"))?;
         Ok(())
@@ -160,25 +148,14 @@ pub async fn download_artifact(
 }
 
 /// Zip several artifacts into a user-chosen destination `.zip` path. Duplicate
-/// filenames are disambiguated with a numeric suffix. Paths outside the
-/// preview scope (see [`preview_scope_roots`]) are skipped — same silent-skip
-/// behavior as unreadable files.
+/// filenames are disambiguated with a numeric suffix. Unreadable paths are
+/// skipped — same silent-skip behavior as missing files.
 ///
 /// PERF (PERFORMANCE_AUDIT.md B3): the per-file reads + deflate run in
 /// `spawn_blocking` — the sync version blocked the IPC worker for every byte
 /// read and compressed.
 #[tauri::command]
-pub async fn download_artifacts_zip(
-    app: AppHandle,
-    db: State<'_, DbState>,
-    paths: Vec<String>,
-    dest: String,
-) -> CmdResult<()> {
-    let roots = preview_scope_roots_blocking(&db, &app).await?;
-    let allowed: Vec<String> = paths
-        .into_iter()
-        .filter(|p| path_in_preview_scope(p, &roots).is_some())
-        .collect();
+pub async fn download_artifacts_zip(paths: Vec<String>, dest: String) -> CmdResult<()> {
     tokio::task::spawn_blocking(move || {
         use std::io::Write;
         use std::path::Path;
@@ -191,7 +168,7 @@ pub async fn download_artifacts_zip(
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for src in &allowed {
+        for src in &paths {
             let data = match std::fs::read(src) {
                 Ok(d) => d,
                 Err(_) => continue, // skip missing files rather than aborting the whole zip

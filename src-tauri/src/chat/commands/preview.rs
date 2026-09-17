@@ -34,60 +34,9 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
     out
 }
 
-// ---- Artifact preview containment ----
-
-/// The filesystem roots the artifact preview/open/download IPC endpoints may
-/// touch. These commands take paths straight from the webview — which renders
-/// model-controlled content — so without containment, any script execution in
-/// the pane becomes an arbitrary-file read primitive (secrets, SSH keys,
-/// other apps' data). The universe mirrors what `dispatch::run_tool` grants
-/// the model: the artifacts dir, every registered project, its chat
-/// worktrees, roots the user granted from approval cards, and the remembered
-/// working folder.
-pub(super) fn preview_scope_roots<R: tauri::Runtime>(
-    conn: &rusqlite::Connection,
-    app: &tauri::AppHandle<R>,
-) -> Vec<String> {
-    let mut roots: Vec<String> = db::list_projects(conn)
-        .map(|ps| ps.into_iter().map(|p| p.path).collect())
-        .unwrap_or_default();
-    roots.extend(db::chat_worktree_paths(conn, None).unwrap_or_default());
-    // `artifacts_dir_locked`, NOT `artifacts_dir`: every caller of this function
-    // holds the `DbState` guard for `conn`, and `artifacts_dir(app)` locks that
-    // same (non-reentrant) mutex internally — calling it here self-deadlocked
-    // the global DB mutex on every artifact preview and every 2 s
-    // `get_file_mtime` poll, parking runtime workers until no IPC response
-    // could be delivered at all.
-    roots.push(
-        crate::chat::dispatch::artifacts_dir_locked(conn, app)
-            .to_string_lossy()
-            .into_owned(),
-    );
-    if let Some(granted) = db::get_setting(conn, "permissions.grantedRoots")
-        .ok()
-        .flatten()
-        .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
-    {
-        roots.extend(granted);
-    }
-    if let Some(dir) = db::get_setting(conn, "chat.local_gguf.last_working_dir")
-        .ok()
-        .flatten()
-        .filter(|d| !d.trim().is_empty())
-    {
-        roots.push(dir);
-    }
-    roots
-}
-
-/// Gate for the artifact IPC endpoints: the same hard scope check the
-/// mutating FS tools answer to (`permission::path_within_scope` — resolves
-/// symlinks/junctions, segment-boundary prefix). `Ok(None)` lets callers
-/// degrade to "file not found" semantics instead of an error toast where the
-/// frontend has no error UI.
-pub(super) fn path_in_preview_scope(path: &str, roots: &[String]) -> Option<()> {
-    crate::chat::permission::path_within_scope(path, roots).then_some(())
-}
+// ---- Artifact preview ----
+// (the former preview-scope containment was lifted on product decision —
+// these endpoints exist to open the user's files, wherever they live)
 
 /// Silent cap for read-aloud text. `doc_to_text` caps at 250K chars for the
 /// MODEL context, with a visible truncation note; speech wants neither the
@@ -156,28 +105,15 @@ fn speech_text_for(ext: &str, bytes: &[u8]) -> Option<String> {
 /// `text` is the preview HTML and a PDF has no `text` at all, so without it
 /// there would be nothing speakable to hand the TTS player.
 ///
-/// The path must sit inside the artifacts dir, a registered project/worktree,
-/// a user-granted root, or the remembered working folder — see
-/// [`preview_scope_roots`].
+/// Any readable path may be previewed — the artifact IPC endpoints lost their
+/// preview-scope containment on product decision (2026-09): the pane exists
+/// to open the user's files, wherever they live.
 ///
 /// `async` because pptx→pdf shells out to LibreOffice for several seconds —
 /// that work runs on `spawn_blocking` so the IPC handler isn't stalled.
 #[tauri::command]
-pub async fn read_artifact_preview(
-    app: AppHandle,
-    db: State<'_, DbState>,
-    path: String,
-) -> CmdResult<ArtifactPreview> {
+pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
     use std::path::Path;
-
-    let roots = preview_scope_roots_blocking(&db, &app).await?;
-    if path_in_preview_scope(&path, &roots).is_none() {
-        return Err(format!(
-            "Refusing to preview \"{path}\": it is outside the folders Relay can \
-             access (your projects, chat worktrees, the artifacts folder, and \
-             user-granted roots)."
-        ));
-    }
 
     let p = Path::new(&path);
     let filename = p
@@ -478,7 +414,7 @@ pub(crate) fn classify_text_ext(ext: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod preview_tests {
-    use super::{cap_speech_text, classify_text_ext, find_by_basename_walk, get_file_mtime_gated, speech_text_for};
+    use super::{cap_speech_text, classify_text_ext, file_mtime_secs, find_by_basename_walk, speech_text_for};
 
     #[test]
     fn mermaid_sources_classify_as_mermaid_kind() {
@@ -561,67 +497,20 @@ mod preview_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("artifact.html");
         std::fs::write(&file, "<html></html>").expect("write");
-        let roots = vec![dir.path().to_string_lossy().into_owned()];
 
-        let mtime = get_file_mtime_gated(&file.to_string_lossy(), &roots)
+        let mtime = file_mtime_secs(&file.to_string_lossy())
             .expect("existing file has an mtime");
         assert!(mtime > 0, "mtime is secs-since-epoch, got {mtime}");
 
         // A file written later has a >= mtime (same-second writes allowed).
         std::fs::write(&file, "<html>v2</html>").expect("rewrite");
-        let mtime2 = get_file_mtime_gated(&file.to_string_lossy(), &roots).expect("still exists");
+        let mtime2 = file_mtime_secs(&file.to_string_lossy()).expect("still exists");
         assert!(mtime2 >= mtime);
 
         assert_eq!(
-            get_file_mtime_gated(&dir.path().join("gone.html").to_string_lossy(), &roots),
+            file_mtime_secs(&dir.path().join("gone.html").to_string_lossy()),
             None,
             "missing file → None, not an error (preview keeps last render)"
-        );
-    }
-
-    #[test]
-    fn artifact_scope_gate_blocks_outside_paths() {
-        // The preview-scope gate must allow legitimate in-root files and
-        // refuse everything else — siblings with similar names, `..`
-        // traversal, and arbitrary absolute paths.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let roots = vec![dir.path().to_string_lossy().into_owned()];
-
-        std::fs::write(dir.path().join("in_scope.html"), b"x").expect("write");
-        let inside = dir.path().join("in_scope.html");
-        assert!(
-            get_file_mtime_gated(&inside.to_string_lossy(), &roots).is_some(),
-            "in-scope file is readable"
-        );
-
-        // Sibling dir whose name merely extends the root (`root` vs `root2`):
-        // a raw starts_with would allow it — the segment boundary must not.
-        let sibling = dir.path().parent().unwrap().join(format!(
-            "{}2",
-            dir.path().file_name().unwrap().to_string_lossy()
-        ));
-        assert!(
-            get_file_mtime_gated(&sibling.join("secret.txt").to_string_lossy(), &roots).is_none(),
-            "sibling-root path must be refused"
-        );
-
-        // `..` traversal escaping the root.
-        let traversal = dir.path().join("..").join("..").join("etc_passwd.txt");
-        assert!(
-            get_file_mtime_gated(&traversal.to_string_lossy(), &roots).is_none(),
-            "traversal escape must be refused"
-        );
-
-        // Arbitrary absolute path (e.g. C:\\Windows\\system32\\config).
-        assert!(
-            get_file_mtime_gated("C:\\Windows\\win.ini", &roots).is_none(),
-            "arbitrary system path must be refused"
-        );
-
-        // Empty roots → nothing is in scope.
-        assert!(
-            get_file_mtime_gated(&inside.to_string_lossy(), &[]).is_none(),
-            "no granted roots → nothing readable"
         );
     }
 
@@ -764,57 +653,22 @@ pub fn docdesign_qa_complete(
 /// Last-modified time of a file, in seconds since the Unix epoch. The
 /// artifact preview panes poll this (cheap stat) to hot-reload when the model
 /// edits an open artifact file. `None` when the file is gone (deleted while
-/// previewed) — the caller keeps showing the last good preview. Out-of-scope
-/// paths also report `None` (same observable behavior as a vanished file).
+/// previewed) — the caller keeps showing the last good preview.
 ///
 /// `async` is load-bearing, not cosmetic: this is the only command the UI
-/// polls on a timer (every 2 s per open artifact tab), it takes the shared
-/// `DbState` mutex to compute the preview scope, and a non-async command runs
-/// INLINE on the IPC thread — the UI thread. Opening an artifact therefore used
-/// to arm a repeating main-thread mutex acquisition: any concurrent long
-/// holder (a streaming turn's writes, an automation run, a checkpoint) stopped
-/// the window pumping messages for the whole hold, which Windows reports as
-/// "not responding". Run it off the main thread and the same contention
-/// degrades to a late promise the pane already ignores.
+/// polls on a timer (every 2 s per open artifact tab), and a non-async command
+/// runs INLINE on the IPC thread — the UI thread. A stat can still block
+/// briefly on a slow disk, so it runs on the blocking pool.
 #[tauri::command]
-pub async fn get_file_mtime(
-    app: AppHandle,
-    db: State<'_, DbState>,
-    path: String,
-) -> CmdResult<Option<u64>> {
-    let roots = preview_scope_roots_blocking(&db, &app).await?;
-    Ok(get_file_mtime_gated(&path, &roots))
+pub async fn get_file_mtime(path: String) -> CmdResult<Option<u64>> {
+    tokio::task::spawn_blocking(move || Ok(file_mtime_secs(&path)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
-/// [`preview_scope_roots`] evaluated on the BLOCKING pool instead of the async
-/// runtime's worker threads.
-///
-/// Every artifact IPC needs the preview scope, and computing it runs database
-/// queries under the shared `DbState` guard. On a runtime worker that wait
-/// consumes part of the async scheduler itself (only ~CPU-count workers exist),
-/// which is how one wedged lock in this path stopped *every* command in the app
-/// from ever answering. The blocking pool is separate and much larger, so a
-/// stuck wait here costs latency on this one call and nothing anywhere else.
-pub(super) async fn preview_scope_roots_blocking(
-    db: &State<'_, DbState>,
-    app: &AppHandle,
-) -> Result<Vec<String>, String> {
-    let db = Arc::clone(&db.0);
-    let app = app.clone();
-    tokio::task::spawn_blocking(move || {
-        let conn = db.lock();
-        preview_scope_roots(&conn, &app)
-    })
-    .await
-    .map_err(|e| e.to_string())
-}
-
-/// Scope-gated core of [`get_file_mtime`] — split out so the containment
-/// behavior is unit-testable without a Tauri app/state.
-pub(super) fn get_file_mtime_gated(path: &str, roots: &[String]) -> Option<u64> {
-    if path_in_preview_scope(path, roots).is_none() {
-        return None;
-    }
+/// Core of [`get_file_mtime`] — split out so it's unit-testable without a
+/// Tauri app/state.
+pub(super) fn file_mtime_secs(path: &str) -> Option<u64> {
     let meta = std::fs::metadata(path).ok()?;
     let secs = meta
         .modified()
@@ -830,21 +684,11 @@ pub(super) fn get_file_mtime_gated(path: &str, roots: &[String]) -> Option<u64> 
 ///
 /// Recovers preview targets for chat file-change rows whose recorded path no
 /// longer exists — models sometimes state a destination they didn't actually
-/// write to, and files can move between the turn and the click. `dir` must
-/// sit inside the preview scope (see [`preview_scope_roots`]); an
-/// out-of-scope dir reports `None` rather than scanning arbitrary folders.
+/// write to, and files can move between the turn and the click. The walk is
+/// bounded (depth/budget/skip-list), so even a whole-drive `dir` stays cheap.
 #[tauri::command]
-pub async fn find_file_by_basename(
-    app: AppHandle,
-    db: State<'_, DbState>,
-    dir: String,
-    basename: String,
-) -> CmdResult<Option<String>> {
+pub async fn find_file_by_basename(dir: String, basename: String) -> CmdResult<Option<String>> {
     if basename.trim().is_empty() {
-        return Ok(None);
-    }
-    let roots = preview_scope_roots_blocking(&db, &app).await?;
-    if path_in_preview_scope(&dir, &roots).is_none() {
         return Ok(None);
     }
     tokio::task::spawn_blocking(move || {
@@ -919,23 +763,9 @@ pub(super) fn find_by_basename_walk(root: &std::path::Path, basename: &str) -> O
 /// failure RETURNS as an error the pane can surface — the JS path used to
 /// reject inside a `catch (err) console.warn(...)` and the button silently
 /// did nothing. A path that has vanished since the turn is re-discovered by
-/// basename in its directory before giving up. The path (and whatever the
-/// basename recovery finds) must sit inside the preview scope — see
-/// [`preview_scope_roots`].
+/// basename in its directory before giving up.
 #[tauri::command]
-pub async fn open_artifact_external(
-    app: AppHandle,
-    db: State<'_, DbState>,
-    path: String,
-) -> CmdResult<String> {
-    let roots = preview_scope_roots_blocking(&db, &app).await?;
-    if path_in_preview_scope(&path, &roots).is_none() {
-        return Err(format!(
-            "Refusing to open \"{path}\": it is outside the folders Relay can \
-             access (your projects, chat worktrees, the artifacts folder, and \
-             user-granted roots)."
-        ));
-    }
+pub async fn open_artifact_external(path: String) -> CmdResult<String> {
     let resolved = tokio::task::spawn_blocking(move || -> Option<String> {
         let p = std::path::Path::new(&path);
         if p.is_file() {
@@ -950,53 +780,7 @@ pub async fn open_artifact_external(
     .await
     .map_err(|e| e.to_string())?
     .ok_or_else(|| "File not found on disk — it may have been moved or deleted.".to_string())?;
-    // The basename walk stays under the (already gated) recorded parent, but
-    // gate the resolved target anyway — defense in depth before the OS opens it.
-    if path_in_preview_scope(&resolved, &roots).is_none() {
-        return Err("Resolved file is outside the folders Relay can access.".to_string());
-    }
     tauri_plugin_opener::open_path(&resolved, None::<&str>)
         .map(|_| resolved)
         .map_err(|e| format!("Could not open the file: {e}"))
-}
-
-#[cfg(test)]
-mod preview_scope_tests {
-    use super::*;
-    use tauri::Manager;
-
-    /// Regression (commit 3cd241c9): `preview_scope_roots` is always called with
-    /// the `DbState` guard held — every artifact IPC does `{ let conn =
-    /// db.0.lock(); preview_scope_roots(&conn, &app) }`. It used to resolve the
-    /// artifacts dir with `dispatch::artifacts_dir(app)`, which locks that same
-    /// mutex internally; `parking_lot::Mutex` is not reentrant, so the call
-    /// blocked on a guard its own thread held — forever. The global DB mutex
-    /// stayed owned by a thread that could never release it, every other DB
-    /// command queued behind it, and once each runtime worker was parked no IPC
-    /// response was ever delivered (empty chats, dead artifact previews, and a
-    /// window that looks frozen while the main thread kept pumping).
-    ///
-    /// Runs the call on a worker thread and fails on a timeout instead of
-    /// hanging the suite on the old behavior.
-    #[test]
-    fn preview_scope_roots_does_not_relock_the_db_mutex() {
-        let app = tauri::test::mock_app();
-        let handle = app.handle().clone();
-        app.manage(crate::DbState(std::sync::Arc::new(parking_lot::Mutex::new(
-            crate::db::mem(),
-        ))));
-        let db = app.state::<crate::DbState>().0.clone();
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            // Exactly the shape every caller uses: guard held across the call.
-            let conn = db.lock();
-            let roots = preview_scope_roots(&conn, &handle);
-            let _ = tx.send(roots.len());
-        });
-        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(n) => println!("preview_scope_roots returned {n} roots without deadlocking"),
-            Err(_) => panic!("preview_scope_roots deadlocked on the DbState mutex"),
-        }
-    }
 }

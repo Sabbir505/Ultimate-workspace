@@ -20,7 +20,13 @@ use super::protocol::DesktopMessage;
 use super::relay_crypto;
 
 /// Type alias for the channel sender used to write DesktopMessages to a connection.
-pub type WsSender = mpsc::UnboundedSender<DesktopMessage>;
+/// BOUNDED (audit L-12): the per-connection channel used to be unbounded, so
+/// a half-open/stalled phone socket (pump stuck on the shared write lock)
+/// buffered every streamed token for as long as the stall lasted — memory
+/// growth proportional to traffic. Producers use `try_send` and DROP when
+/// full; a stalled connection loses live events (the transcript stays
+/// readable via read_session) instead of growing without bound.
+pub type WsSender = mpsc::Sender<DesktopMessage>;
 
 /// Type alias for the owner map that tracks which session owns which connection.
 pub type OwnerMap = Arc<Mutex<std::collections::HashMap<String, WsSender>>>;
@@ -120,7 +126,7 @@ pub async fn enable_e2e(write: &SharedWsWrite, key: [u8; 32]) {
 /// Encrypts when the connection has E2E enabled — forwarded session-chat
 /// events are user content and must not ride the wire in plaintext.
 pub async fn pump_to_ws_shared(
-    mut rx: mpsc::UnboundedReceiver<DesktopMessage>,
+    mut rx: mpsc::Receiver<DesktopMessage>,
     write: SharedWsWrite,
 ) -> Result<(), String> {
     while let Some(msg) = rx.recv().await {
@@ -132,8 +138,8 @@ pub async fn pump_to_ws_shared(
 /// Create a new (sender, receiver) pair for a single WebSocket connection.
 /// The caller spawns `pump_to_ws` with the receiver and stores the sender in
 /// the owner map so the relay can route session-scoped chat events to it.
-pub fn make_channel() -> (WsSender, mpsc::UnboundedReceiver<DesktopMessage>) {
-    mpsc::unbounded_channel()
+pub fn make_channel() -> (WsSender, mpsc::Receiver<DesktopMessage>) {
+    mpsc::channel(2048)
 }
 
 #[cfg(test)]

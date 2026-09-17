@@ -129,7 +129,7 @@ impl DirWatch {
         let dir_for_cb = dir.clone();
         let touched_for_cb = Arc::clone(&touched);
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            let mut guard = touched_for_cb.lock().unwrap();
+            let mut guard = touched_for_cb.lock().unwrap_or_else(|e| e.into_inner());
             match res {
                 Ok(event) => {
                     let Some(set) = guard.as_mut() else { return };
@@ -162,7 +162,7 @@ impl DirWatch {
             // No watcher (dir doesn't exist yet, backend init failed):
             // poisoned from the start → every turn full-walks, exactly the
             // pre-B6 behavior.
-            *touched.lock().unwrap() = None;
+            *touched.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
         Self {
             dir,
@@ -177,7 +177,7 @@ impl DirWatch {
     /// Watcher-healthy: stats only the touched paths. Otherwise: full walk.
     pub(super) fn changed(&mut self) -> Vec<String> {
         let touched = {
-            let mut guard = self.touched.lock().unwrap();
+            let mut guard = self.touched.lock().unwrap_or_else(|e| e.into_inner());
             let t = guard.take();
             // Rearm for the next turn when the watcher is still alive.
             *guard = if self._watcher.is_some() {

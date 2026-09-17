@@ -35,6 +35,18 @@ use crate::connectors::{Connector, connector_by_id, family_members, family_redir
 use crate::db;
 use crate::secrets;
 
+/// Bounded HTTP client for OAuth endpoints. `Client::new()` sets NO timeout —
+/// a wedged token/registration endpoint used to park `refresh_access_token`
+/// (and with it every connector tool call and the connect flow's "already in
+/// progress" marker) forever (audit H-2).
+fn oauth_http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// A pending OAuth flow. Used for state validation and
 /// code-verifier lookup during the callback. The system-browser
 /// approach records the flow before opening the browser so the
@@ -107,19 +119,79 @@ fn oauth_clients_cache_path(app: &AppHandle) -> std::path::PathBuf {
     crate::user_dirs::app_data_dir(app).join("oauth-clients.json")
 }
 
+/// Keychain-backed storage for the dynamic-client cache. The cache carries
+/// dynamically registered `client_secret` values and used to sit as plaintext
+/// `oauth-clients.json` on disk — contrary to the app's keychain discipline
+/// for pairing tokens / API keys / connector tokens (audit L-9). The legacy
+/// plaintext file is still READ (migration fallback) and deleted on the next
+/// successful save.
+const OAUTH_CLIENTS_NS: &str = "oauth";
+const OAUTH_CLIENTS_KEY: &str = "dynamic-clients";
+
+fn oauth_clients_keychain(
+    app: &AppHandle,
+) -> std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>> {
+    use tauri::Manager;
+    let db = app.state::<crate::DbState>();
+    std::sync::Arc::clone(&db.0)
+}
+
 fn load_cached_client(app: &AppHandle, connector_id: &str) -> Option<OAuthClient> {
+    // 1. Keychain (current store).
+    let conn = oauth_clients_keychain(app);
+    let keychain = {
+        let conn = conn.lock();
+        crate::secrets::generic_load(&conn, OAUTH_CLIENTS_NS, OAUTH_CLIENTS_KEY)
+            .and_then(|json| serde_json::from_str::<HashMap<String, OAuthClient>>(&json).ok())
+    };
+    if let Some(entry) = keychain.as_ref().and_then(|m| m.get(connector_id)) {
+        return Some(entry.clone());
+    }
+    // 2. Legacy plaintext file (pre-keychain caches).
     let bytes = std::fs::read(oauth_clients_cache_path(app)).ok()?;
     let map: HashMap<String, OAuthClient> = serde_json::from_slice(&bytes).ok()?;
     map.get(connector_id).cloned()
 }
 
 fn save_cached_client(app: &AppHandle, connector_id: &str, client: &OAuthClient) {
-    let path = oauth_clients_cache_path(app);
-    let mut map: HashMap<String, OAuthClient> = std::fs::read(&path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
+    let mut map: HashMap<String, OAuthClient> = HashMap::new();
+    // Seed from whichever store currently holds data (keychain first, then
+    // the legacy file) so nothing registered earlier is dropped.
+    {
+        let conn = oauth_clients_keychain(app);
+        let conn = conn.lock();
+        if let Some(json) = crate::secrets::generic_load(&conn, OAUTH_CLIENTS_NS, OAUTH_CLIENTS_KEY)
+        {
+            if let Ok(m) = serde_json::from_str::<HashMap<String, OAuthClient>>(&json) {
+                map = m;
+            }
+        }
+    }
+    if map.is_empty() {
+        let path = oauth_clients_cache_path(app);
+        if let Ok(bytes) = std::fs::read(&path) {
+            if let Ok(m) = serde_json::from_slice::<HashMap<String, OAuthClient>>(&bytes) {
+                map = m;
+            }
+        }
+    }
     map.insert(connector_id.to_string(), client.clone());
+    if let Ok(json) = serde_json::to_string(&map) {
+        let conn = oauth_clients_keychain(app);
+        let stored = {
+            let conn = conn.lock();
+            crate::secrets::generic_store(&conn, OAUTH_CLIENTS_NS, OAUTH_CLIENTS_KEY, &json)
+        };
+        if stored.is_ok() {
+            // Migration complete: the plaintext copy is now redundant (and
+            // was the whole problem).
+            let _ = std::fs::remove_file(oauth_clients_cache_path(app));
+            return;
+        }
+    }
+    // Keychain unavailable — fall back to the legacy file rather than losing
+    // the registration.
+    let path = oauth_clients_cache_path(app);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -150,7 +222,7 @@ pub async fn ensure_registered_client(
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
     });
-    let resp = reqwest::Client::new()
+    let resp = oauth_http()
         .post(url)
         .header("Content-Type", "application/json")
         .json(&body)
@@ -942,7 +1014,7 @@ async fn exchange_token(
     code_verifier: &str,
     redirect_uri: &str,
 ) -> Result<ExchangedToken, String> {
-    let http = reqwest::Client::new();
+    let http = oauth_http();
     let mut req = http.post(connector.token_url);
     // GitHub's OAuth App token endpoint returns `application/x-www-form-urlencoded`
     // unless the client explicitly asks for JSON (verified live: the first
@@ -1165,7 +1237,7 @@ async fn refresh_access_token_inner(
     }
     .ok_or_else(|| "no refresh token stored — reconnect required".to_string())?;
 
-    let http = reqwest::Client::new();
+    let http = oauth_http();
     let mut req = http.post(connector.token_url);
     // Same Accept header as the exchange: a vendor that honors it returns
     // JSON here too.

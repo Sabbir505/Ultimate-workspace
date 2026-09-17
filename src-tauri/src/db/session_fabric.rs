@@ -184,14 +184,83 @@ pub fn upsert_session_summary(
 }
 
 /// Batch lookup for the registry block: summaries for many sessions at once.
+/// One `IN` query (chunked for SQLite's variable limit) instead of a SELECT
+/// per peer — the registry rendered up to 50 sequential statements per build
+/// (audit L-3).
 pub fn summaries_for(conn: &Connection, sids: &[String]) -> DbResult<Vec<SessionSummary>> {
     let mut out = Vec::new();
-    for sid in sids {
-        if let Some(s) = get_session_summary(conn, sid)? {
-            out.push(s);
+    for chunk in sids.chunks(50) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT chat_session_id, summary, topics, model, updated_at
+               FROM session_summaries WHERE chat_session_id IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok(SessionSummary {
+                chat_session_id: r.get("chat_session_id")?,
+                summary: r.get("summary")?,
+                topics: r.get("topics")?,
+                model: r.get("model")?,
+                updated_at: r.get("updated_at")?,
+            })
+        })?;
+        for row in rows {
+            out.push(row?);
         }
     }
     Ok(out)
+}
+
+/// Unix timestamp of the session's newest message (0 = no messages yet). The
+/// workspace update's "since your last turn" filter compares peer activity
+/// against this — messages persist at turn END, so a peer whose
+/// `last_active_at` is newer genuinely moved after this session's last
+/// completed turn.
+pub fn last_message_created_at(conn: &Connection, sid: &str) -> DbResult<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(created_at), 0) FROM chat_messages WHERE chat_session_id = ?1",
+        params![sid],
+        |r| r.get(0),
+    )
+}
+
+/// Same-workspace sessions (same project — NULL matches NULL, so unbound
+/// chats form their own workspace) whose last activity is NEWER than
+/// `since`, most recent first. Self excluded by the query. This is the
+/// "moved while you were away" set behind the workspace update block.
+pub fn peers_active_since(
+    conn: &Connection,
+    self_sid: &str,
+    project_id: Option<&str>,
+    since: i64,
+    limit: u32,
+) -> DbResult<Vec<PeerSessionRow>> {
+    let limit = limit.clamp(1, 20) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT id, title, agent, model, project_id, last_active_at, starred, origin
+           FROM chat_sessions
+          WHERE id != ?1 AND last_active_at > ?2 AND project_id IS ?3
+          ORDER BY last_active_at DESC LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(params![self_sid, since, project_id, limit], |row| {
+        Ok(PeerSessionRow {
+            id: row.get("id")?,
+            title: row.get("title")?,
+            agent: row.get("agent")?,
+            model: row.get("model")?,
+            project_id: row.get("project_id")?,
+            last_active_at: row.get("last_active_at")?,
+            starred: row.get::<_, i64>("starred")? != 0,
+            origin: row.get("origin")?,
+        })
+    })?;
+    rows.collect()
 }
 
 // ── Registry / origin guards ──────────────────────────────────────────────

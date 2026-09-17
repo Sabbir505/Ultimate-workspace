@@ -36,6 +36,13 @@ pub(super) const MODEL_WINDOWS_TTL: std::time::Duration = std::time::Duration::f
 /// OpenRouter's public endpoint is fetched by the frontend directly (no
 /// key needed); OpenAI publishes no window data on any keyed API, so an
 /// empty map is returned and the registry fallback stands.
+/// OpenAI-compatible relays (commandcode's provider family, generic
+/// endpoints) commonly mirror OpenRouter's `context_length` field on their
+/// own `/models`, so the same probe runs against the configured base URL —
+/// a server that doesn't publish it just yields an empty map.
+/// The opencode HARNESS exposes its live model catalog on the running
+/// server (`GET /config/providers`, `models.<id>.limit.context`) — that
+/// needs the session's server URL, so callers pass `chat_session_id`.
 ///
 /// Results are cached in memory for 24h; a failed fetch returns the stale
 /// cache when present, else an empty map (callers treat that as "no dynamic
@@ -43,17 +50,32 @@ pub(super) const MODEL_WINDOWS_TTL: std::time::Duration = std::time::Duration::f
 #[tauri::command]
 pub async fn fetch_provider_model_windows(
     provider: String,
+    chat_session_id: Option<String>,
     db: State<'_, DbState>,
+    app: tauri::AppHandle,
 ) -> CmdResult<std::collections::HashMap<String, u32>> {
     let cache = MODEL_WINDOWS_CACHE
         .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
-    if let Some((at, table)) = cache.lock().get(&provider) {
+    // Cache key: the provider id, plus the session for harness arms (their
+    // catalog comes from THAT chat's live process, not a provider API).
+    let cache_key = match &chat_session_id {
+        Some(sid) => format!("{provider}:{sid}"),
+        None => provider.clone(),
+    };
+    if let Some((at, table)) = cache.lock().get(&cache_key) {
         if at.elapsed() < MODEL_WINDOWS_TTL {
             return Ok(table.clone());
         }
     }
 
-    let table: std::collections::HashMap<String, u32> = match provider.as_str() {
+    // Named endpoint ids ("openai_compatible-x7f2") — the protocol KIND is
+    // the part before the last '-'; bare ids have no suffix.
+    let kind = match provider.rsplit_once('-') {
+        Some((k, suffix)) if !suffix.is_empty() && is_provider_kind(k) => k.to_string(),
+        _ => provider.clone(),
+    };
+
+    let table: std::collections::HashMap<String, u32> = match kind.as_str() {
         "anthropic" => {
             let (api_key, base) = {
                 let conn = db.0.lock();
@@ -86,7 +108,7 @@ pub async fn fetch_provider_model_windows(
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
                 // Stale cache beats a live failure.
-                if let Some((_, table)) = cache.lock().get(&provider) {
+                if let Some((_, table)) = cache.lock().get(&cache_key) {
                     eprintln!(
                         "[context-windows] anthropic fetch failed ({status}); using stale cache"
                     );
@@ -124,13 +146,150 @@ pub async fn fetch_provider_model_windows(
         // OpenRouter: the frontend fetches the public endpoint directly (no
         // key). OpenAI: no window data on any keyed API. Both keep the
         // registry fallback.
+        "openai_compatible" => {
+            // OpenAI-compatible relays (the commandcode/provider family)
+            // commonly mirror OpenRouter's `context_length` on their own
+            // `/models`. Base URL from the provider's setting key (same one
+            // the send path reads); a server that publishes no windows just
+            // yields an empty map and the registry stands.
+            let (base, key) = {
+                let conn = db.0.lock();
+                let base = crate::db::get_setting(&conn, &format!("chat.{provider}.base_url"))
+                    .ok()
+                    .flatten()
+                    .filter(|b| !b.trim().is_empty());
+                let key = crate::secrets::get_chat_api_key(&conn, &provider);
+                (base, key)
+            };
+            let Some(base) = base else {
+                return Ok(std::collections::HashMap::new());
+            };
+            let client = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let mut req = client.get(format!("{}/models", base.trim_end_matches('/')));
+            if let Some(k) = key.filter(|k| !k.trim().is_empty()) {
+                req = req.bearer_auth(k.trim());
+            }
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(_) => return Ok(std::collections::HashMap::new()),
+            };
+            if !resp.status().is_success() {
+                return Ok(std::collections::HashMap::new());
+            }
+            let Ok(v) = resp.json::<serde_json::Value>().await else {
+                return Ok(std::collections::HashMap::new());
+            };
+            parse_openai_style_windows(&v)
+        }
+        // The opencode harness publishes its live model catalog on the
+        // running server — `GET /config/providers` →
+        // `{"providers":[{id, models:{"<id>":{limit:{context,…},…}}}]}`.
+        // Needs the chat's server URL, so this arm only fires when the
+        // caller passes the session id.
+        "opencode" => {
+            let Some(sid) = chat_session_id.as_deref().filter(|s| !s.is_empty()) else {
+                return Ok(std::collections::HashMap::new());
+            };
+            let Some(base) = app
+                .state::<crate::agent_sessions::AgentSessionState>()
+                .0
+                .opencode_server_url(sid)
+            else {
+                return Ok(std::collections::HashMap::new());
+            };
+            let client = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let Ok(resp) = client
+                .get(format!("{base}/config/providers"))
+                .send()
+                .await
+            else {
+                return Ok(std::collections::HashMap::new());
+            };
+            if !resp.status().is_success() {
+                return Ok(std::collections::HashMap::new());
+            }
+            let Ok(v) = resp.json::<serde_json::Value>().await else {
+                return Ok(std::collections::HashMap::new());
+            };
+            let mut table = std::collections::HashMap::new();
+            for p in v
+                .get("providers")
+                .and_then(|p| p.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let pid = p.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                let Some(models) = p.get("models").and_then(|m| m.as_object()) else {
+                    continue;
+                };
+                for (name, m) in models {
+                    let Some(w) = m.pointer("/limit/context").and_then(|w| w.as_u64()) else {
+                        continue;
+                    };
+                    if w == 0 {
+                        continue;
+                    }
+                    table.insert(name.to_ascii_lowercase(), w as u32);
+                    if !pid.is_empty() {
+                        table.insert(format!("{pid}/{name}").to_ascii_lowercase(), w as u32);
+                    }
+                }
+            }
+            table
+        }
         _ => std::collections::HashMap::new(),
     };
 
     cache
         .lock()
-        .insert(provider.clone(), (std::time::Instant::now(), table.clone()));
+        .insert(cache_key, (std::time::Instant::now(), table.clone()));
     Ok(table)
+}
+
+/// True for the provider protocol KINDS a named endpoint id can carry
+/// (`{kind}-{suffix}` — the suffix is generated, never part of a kind).
+fn is_provider_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "openai_compatible"
+            | "anthropic_compatible"
+            | "anthropic"
+            | "openrouter"
+            | "openai"
+            | "google"
+            | "local_gguf"
+    )
+}
+
+/// `data[]: {id, context_length}` rows → id → window (the OpenRouter /
+/// OpenAI-compatible models shape). Non-numeric or zero windows are skipped.
+fn parse_openai_style_windows(v: &serde_json::Value) -> std::collections::HashMap<String, u32> {
+    let mut table = std::collections::HashMap::new();
+    for m in v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(id) = m.get("id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        let Some(w) = m.get("context_length").and_then(|w| w.as_u64()) else {
+            continue;
+        };
+        if w > 0 {
+            table.insert(id.to_ascii_lowercase(), w as u32);
+        }
+    }
+    table
 }
 
 /// One entry of a provider's curated model list (`chat.<provider>.
@@ -144,6 +303,11 @@ pub struct SelectedModel {
     pub id: String,
     #[serde(default)]
     pub context_window: u64,
+    /// Free-text annotation shown beside the model in the picker — deals,
+    /// promos, pricing quirks ("99% off", "6x usage launch window"). Empty =
+    /// nothing shown.
+    #[serde(default)]
+    pub note: String,
 }
 
 pub(super) fn selected_models_key(provider: &str) -> String {
@@ -323,6 +487,39 @@ pub(crate) fn resolve_cloud_summarizer(
         return Some((provider_id, base, api_key, model));
     }
     None
+}
+
+/// Summarizer fallback for relay-only setups: the SESSION's own provider and
+/// model. `resolve_cloud_summarizer` only knows the big keyed APIs — an
+/// openai_compatible endpoint (the commandcode/opencode relay family) with
+/// no Anthropic/OpenAI/OpenRouter key previously meant summaries NEVER
+/// generated. Skips local_gguf: the sidecar serves the user's interactive
+/// local chat and its context window is small; summary work waits for a
+/// cloud provider.
+pub(crate) fn resolve_session_summarizer(
+    conn: &rusqlite::Connection,
+    sid: &str,
+) -> Option<(ChatProviderId, String, String, String)> {
+    let session = crate::db::get_chat_session(conn, sid).ok().flatten()?;
+    let provider = session.provider;
+    if provider.is_empty() || provider == "local_gguf" || provider == "auto" {
+        return None;
+    }
+    let provider_id = parse_provider_id(&provider)?;
+    if matches!(provider_id, ChatProviderId::LocalGguf) {
+        return None;
+    }
+    let api_key = crate::secrets::get_chat_api_key(conn, &provider)?;
+    let base = db::get_setting(conn, &format!("chat.{provider}.base_url"))
+        .ok()
+        .flatten()
+        .filter(|b| !b.trim().is_empty())
+        .unwrap_or_else(|| "https://api.openai.com".to_string());
+    let model = session.model.trim().to_string();
+    if model.is_empty() {
+        return None;
+    }
+    Some((provider_id, base, api_key, model))
 }
 
 /// Rough char-based token estimate (~4 chars/token, rounded up) for providers

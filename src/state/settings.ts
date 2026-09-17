@@ -90,6 +90,9 @@ const K_MONO_FONT = "fonts.mono";
 export interface ProviderModelEntry {
   id: string;
   contextWindow: number;
+  /** Free-text annotation rendered beside the model in the picker —
+   *  deals, promos, pricing quirks. Empty = nothing shown. */
+  note: string;
 }
 const selectedModelsKey = (provider: string) => `chat.${provider}.selected_models`;
 /** Index of providers that HAVE a curated list (stored lists are never
@@ -330,7 +333,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         try {
           const parsed = JSON.parse(raw) as ProviderModelEntry[];
           if (Array.isArray(parsed) && parsed.length > 0) {
-            providerModels[providers[i]] = parsed.filter((e) => e && typeof e.id === "string");
+            providerModels[providers[i]] = parsed
+              .filter((e) => e && typeof e.id === "string")
+              .map((e) => ({ ...e, note: typeof e.note === "string" ? e.note : "" }));
           }
         } catch { /* skip malformed list */ }
       }
@@ -599,6 +604,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       .map((e) => ({
         id: e.id.trim(),
         contextWindow: Math.max(0, Math.floor(e.contextWindow || 0)),
+        note: (e.note ?? "").trim().slice(0, 60),
       }));
     set((s) => ({
       providerModels: { ...s.providerModels, [provider]: cleaned },

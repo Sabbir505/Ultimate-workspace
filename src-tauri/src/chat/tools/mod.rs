@@ -792,7 +792,11 @@ const ENTER_PLAN_MODE_DESC: &str = "Switch this session into plan mode before \
     requirements, or hard-to-reverse actions (deletes, moves, migrations, \
     shell commands). In plan mode you research with read-only tools (file \
     reads, search, web) — mutating tools are blocked until the user approves a \
-    plan via present_plan. Do NOT use it for quick questions, single-file \
+    plan via present_plan. Only enter plan mode when the user explicitly asked \
+    to plan first or the work genuinely needs sign-off before anything is \
+    touched — NEVER on your own initiative for an ordinary request: it blocks \
+    mutations and pops an approval card the user didn't ask for. Do NOT use it \
+    for quick questions, single-file \
     tweaks, or pure research; and if you have ALREADY started making changes, \
     keep going and track progress with todo_write instead.";
 

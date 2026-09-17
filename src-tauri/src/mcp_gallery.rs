@@ -325,8 +325,14 @@ fn cmd_quote(token: &str) -> String {
     let mut out = String::with_capacity(token.len() + 2);
     out.push('"');
     for c in token.chars() {
+        // cmd.exe does NOT treat backslash as an escape — quotes merely
+        // toggle in/out of the quoted region, so `a"&calc&"` escaped as
+        // `a\"&calc&\"` still executed `&calc&` (audit M-10). Inside a
+        // quoted region the only way to emit a literal quote is DOUBLING it
+        // (and skipping the plain push, or the quote would land three times).
         if c == '"' {
-            out.push('\\');
+            out.push_str("\"\"");
+            continue;
         }
         out.push(c);
     }
@@ -867,8 +873,11 @@ mod tests {
         assert_eq!(cmd_quote("a^b"), "\"a^b\"");
         assert_eq!(cmd_quote("a<b>c"), "\"a<b>c\"");
         assert_eq!(cmd_quote("my dir"), "\"my dir\"");
-        // Embedded quotes are backslash-escaped inside the wrapping quotes.
-        assert_eq!(cmd_quote("say \"hi\""), "\"say \\\"hi\\\"\"");
+        // Embedded quotes are DOUBLED inside the wrapping quotes: cmd.exe has
+        // no backslash escape — a quote merely toggles quoting state, so the
+        // old `\"` form let `a"&calc&"` break out and execute `&calc&`
+        // (audit M-10). Doubling is the only in-quote representation.
+        assert_eq!(cmd_quote("say \"hi\""), "\"say \"\"hi\"\"\"");
     }
 
     /// Full live round-trip through the exact production path: spawn

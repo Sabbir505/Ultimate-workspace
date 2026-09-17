@@ -47,6 +47,9 @@ use super::relay_ws::OwnerMap;
 /// and a per-launch pairing token that the phone must present on the FIRST
 /// connection before any other message is honored. Subsequent reconnects from
 /// the same phone within the same process re-use the same token.
+/// Process-wide guard for the push listeners (audit M-9) — see start_relay.
+static PUSH_LISTENERS_REGISTERED: AtomicBool = AtomicBool::new(false);
+
 pub struct MobileRelayState {
     pub port: Mutex<Option<u16>>,
     pub abort: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -67,6 +70,16 @@ pub struct MobileRelayState {
     /// Powers broadcast pushes (automation-finished notices) that aren't
     /// scoped to a single mobile session.
     pub conns: Arc<Mutex<std::collections::HashMap<u64, super::relay_ws::WsSender>>>,
+    /// Abort handles for every spawned connection handler, so `stop_relay`
+    /// can tear the sockets down — draining senders alone left the handlers'
+    /// read loops alive, and pre-existing connections kept their PRE-ROTATION
+    /// E2E key and full command surface after a restart (audit M-13).
+    pub handler_aborts: Mutex<Vec<tokio::task::AbortHandle>>,
+    /// Caps concurrent connection handlers: the accept loop used to spawn a
+    /// task per TCP stream unconditionally, so any tailnet peer (or local
+    /// process) could accumulate handler+pump tasks in a tight loop (audit
+    /// L-16). Acquire-owned permits held by each handler task.
+    pub accept_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl MobileRelayState {
@@ -78,6 +91,8 @@ impl MobileRelayState {
             owner_map: OwnerMap::default(),
             active_connections: std::sync::atomic::AtomicUsize::new(0),
             conns: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            handler_aborts: Mutex::new(Vec::new()),
+            accept_permits: Arc::new(tokio::sync::Semaphore::new(64)),
         }
     }
 }
@@ -87,7 +102,9 @@ impl MobileRelayState {
 pub fn broadcast(relay_state: &MobileRelayState, msg: DesktopMessage) {
     let conns = relay_state.conns.lock();
     for tx in conns.values() {
-        let _ = tx.send(msg.clone());
+        // try_send: a stalled connection's buffer drops the message instead of
+        // buffering without bound (audit L-12). Best-effort by contract.
+        let _ = tx.try_send(msg.clone());
     }
 }
 
@@ -267,7 +284,10 @@ pub async fn start_relay(
     // reach the phone as OS notifications instead of being dropped. The
     // helpers no-op when no push token is registered or a phone IS connected
     // (the socket broadcast is the delivery path then).
-    {
+    // Push listeners register ONCE per process: start_relay runs on every
+    // relay (re)start, and unguarded re-registration duplicated every
+    // approval/done push N times after N restarts (audit M-9).
+    if !PUSH_LISTENERS_REGISTERED.swap(true, Ordering::SeqCst) {
         let push_app = app.clone();
         app.listen("chat:approval-request", move |event| {
             let Ok(v) = serde_json::from_str::<Value>(event.payload()) else {
@@ -287,8 +307,6 @@ pub async fn start_relay(
                 super::push::push_approval_for_mobile_session(&push_app, &chat_id, &summary);
             }
         });
-    }
-    {
         let push_app = app.clone();
         app.listen("chat:done", move |event| {
             let Ok(v) = serde_json::from_str::<Value>(event.payload()) else {
@@ -368,14 +386,24 @@ pub async fn start_relay(
                             let owner_map = relay_state.owner_map.clone();
                             let conn_registry = Arc::clone(&relay_state.conns);
                             let conns = Arc::clone(&relay_state);
-                            tokio::spawn(async move {
+                            // Bounded (audit L-16): the permit is held for the
+                            // handler's whole life; when 64 connections are
+                            // live, new streams wait here instead of piling up
+                            // handler+pump tasks.
+                            let permit = match conns.accept_permits.clone().acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => return, // semaphore closed: relay shutting down
+                            };
+                            let handler = tokio::spawn(async move {
                                 use std::sync::atomic::Ordering as AOrd;
+                                let _permit = permit;
                                 conns.active_connections.fetch_add(1, AOrd::Relaxed);
                                 if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map, conn_registry).await {
                                     eprintln!("[mobile-relay] connection error: {e}");
                                 }
                                 conns.active_connections.fetch_sub(1, AOrd::Relaxed);
                             });
+                            relay_state.handler_aborts.lock().push(handler.abort_handle());
                         }
                         Err(e) => {
                             eprintln!("[mobile-relay] accept error: {e}");
@@ -392,14 +420,24 @@ pub async fn start_relay(
                             let owner_map = relay_state.owner_map.clone();
                             let conn_registry = Arc::clone(&relay_state.conns);
                             let conns = Arc::clone(&relay_state);
-                            tokio::spawn(async move {
+                            // Bounded (audit L-16): the permit is held for the
+                            // handler's whole life; when 64 connections are
+                            // live, new streams wait here instead of piling up
+                            // handler+pump tasks.
+                            let permit = match conns.accept_permits.clone().acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => return, // semaphore closed: relay shutting down
+                            };
+                            let handler = tokio::spawn(async move {
                                 use std::sync::atomic::Ordering as AOrd;
+                                let _permit = permit;
                                 conns.active_connections.fetch_add(1, AOrd::Relaxed);
                                 if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map, conn_registry).await {
                                     eprintln!("[mobile-relay] connection error: {e}");
                                 }
                                 conns.active_connections.fetch_sub(1, AOrd::Relaxed);
                             });
+                            relay_state.handler_aborts.lock().push(handler.abort_handle());
                         }
                         None => {
                             // Tailnet task exited; keep serving loopback.
@@ -420,6 +458,19 @@ pub fn stop_relay(relay_state: &MobileRelayState) {
         let _ = tx.send(());
     }
     *relay_state.port.lock() = None;
+    // Tear live connections down: draining the senders stops the push pumps,
+    // and aborting the handlers kills their read loops. Without this a
+    // pre-existing WebSocket kept its PRE-ROTATION E2E key and full command
+    // surface across a restart — the token rotation was not fail-closed for
+    // live connections (audit M-13).
+    for h in relay_state.handler_aborts.lock().drain(..) {
+        h.abort();
+    }
+    relay_state.conns.lock().clear();
+    relay_state.owner_map.lock().clear();
+    relay_state
+        .active_connections
+        .store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 // ---------------------------------------------------------------------------
@@ -2194,26 +2245,51 @@ pub(crate) fn is_known_model_path(db: &Arc<Mutex<Connection>>, path: &str) -> bo
     if path.trim().is_empty() {
         return false;
     }
-    let mut known = crate::chat::local_models::scan_default_locations();
-    {
+    let known = known_models_cached(db);
+    known.iter().any(|f| f.path == path)
+}
+
+/// TTL cache for the known-model scan (audit L-13): `is_known_model_path`
+/// runs inside the async relay handler per frame and used to full-walk every
+/// configured model dir on EVERY call. Cache the combined scan for 60s,
+/// keyed by the folder list so a settings change invalidates immediately.
+fn known_models_cached(db: &Arc<Mutex<Connection>>) -> Vec<crate::chat::local_models::GgufFile> {
+    static CACHE: std::sync::OnceLock<
+        Mutex<Option<(std::time::Instant, String, Vec<crate::chat::local_models::GgufFile>)>>,
+    > = std::sync::OnceLock::new();
+    let folders_json = {
         let conn = db.lock();
-        if let Ok(Some(json)) = db::get_setting(&conn, "localModels.folders") {
-            if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
-                let seen: std::collections::HashSet<String> =
-                    known.iter().map(|f| f.id.clone()).collect();
-                for folder in list.into_iter().filter(|s| !s.trim().is_empty()) {
-                    for file in
-                        crate::chat::local_models::scan_folder(std::path::Path::new(&folder), "user")
-                    {
-                        if !seen.contains(&file.id) {
-                            known.push(file);
-                        }
-                    }
+        db::get_setting(&conn, "localModels.folders")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Some((at, key, files)) = cache.lock().as_ref() {
+        if *key == folders_json && at.elapsed() < std::time::Duration::from_secs(60) {
+            return files.clone();
+        }
+    }
+    let mut known = crate::chat::local_models::scan_default_locations();
+    if let Ok(list) = serde_json::from_str::<Vec<String>>(&folders_json) {
+        let seen: std::collections::HashSet<String> =
+            known.iter().map(|f| f.id.clone()).collect();
+        for folder in list.into_iter().filter(|s| !s.trim().is_empty()) {
+            for file in
+                crate::chat::local_models::scan_folder(std::path::Path::new(&folder), "user")
+            {
+                if !seen.contains(&file.id) {
+                    known.push(file);
                 }
             }
         }
     }
-    known.iter().any(|f| f.path == path)
+    *cache.lock() = Some((
+        std::time::Instant::now(),
+        folders_json,
+        known.clone(),
+    ));
+    known
 }
 
 /// Trigger on-demand warm-up for a local GGUF model from its file path.

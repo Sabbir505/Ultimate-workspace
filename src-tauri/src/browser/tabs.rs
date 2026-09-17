@@ -169,7 +169,12 @@ impl BrowserManager {
         let _ = self.app.emit("browser:confirm-request", payload);
         match tokio::time::timeout(Duration::from_secs(120), rx).await {
             Ok(Ok(answer)) => Some(answer),
-            _ => None,
+            _ => {
+                // Timed out: drop the parked sender or the map entry leaks
+                // for the life of the process (audit L-10).
+                self.gate_pending.lock().remove(&req_id);
+                None
+            }
         }
     }
 
@@ -247,7 +252,11 @@ impl BrowserManager {
                 "frontend could not {kind} tab (may be the last tab, an unknown tab, or the pane is gone)"
             )),
             Ok(Err(_)) => Err("tab request channel closed".to_string()),
-            Err(_) => Err("tab request timed out waiting for the frontend".to_string()),
+            Err(_) => {
+                // Timed out: drop the parked sender (audit L-10).
+                self.tab_pending.lock().remove(&req_id);
+                Err("tab request timed out waiting for the frontend".to_string())
+            }
         }
     }
 
@@ -367,6 +376,9 @@ impl BrowserManager {
                     return Err("pane_not_found".to_string());
                 }
                 Ok(Err(_)) | Err(_) => {
+                    // Timed out: drop the parked sender or the map entry
+                    // leaks for the life of the process (audit L-10).
+                    self.pane_resolve_pending.lock().remove(&req_id);
                     // Channel closed or timeout — fall through to global active.
                 }
             }
@@ -421,7 +433,11 @@ impl BrowserManager {
             }
             Ok(Ok(None)) => Err("open_pane_for_project: frontend returned null pane_id".to_string()),
             Ok(Err(_)) => Err("open_pane_for_project: channel closed".to_string()),
-            Err(_) => Err("open_pane_for_project: timed out waiting for pane creation".to_string()),
+            Err(_) => {
+                // Timed out: drop the parked sender (audit L-10).
+                self.pane_open_pending.lock().remove(&req_id);
+                Err("open_pane_for_project: timed out waiting for pane creation".to_string())
+            }
         }
     }
 

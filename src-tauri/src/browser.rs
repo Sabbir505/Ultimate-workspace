@@ -1220,9 +1220,15 @@ fn attach_core_listeners(
 /// `attach_web_message_bridge`), tauri-managed panes invoke the
 /// `browser_report_title` command.
 fn title_report_js(pane_id: &str, tab_id: &str) -> String {
+    // JSON-encode the ids: they come from the renderer-supplied pane label,
+    // and a `'` inside a raw single-quoted JS literal breaks out of the
+    // string — script injection into whatever page the pane is showing
+    // (audit M-12). Same treatment as DESC/SELECTOR in build_resolve_js.
+    let pane_js = serde_json::to_string(pane_id).unwrap_or_else(|_| "\"\"".into());
+    let tab_js = serde_json::to_string(tab_id).unwrap_or_else(|_| "\"\"".into());
     format!(
         r#"(function() {{
-    var args = {{ paneId: '{pane}', tabId: '{tab}', title: (document.title || '').slice(0, 300) }};
+    var args = {{ paneId: {pane_js}, tabId: {tab_js}, title: (document.title || '').slice(0, 300) }};
     try {{
         if (window.chrome && window.chrome.webview &&
             typeof window.chrome.webview.postMessage === 'function') {{
@@ -1236,8 +1242,6 @@ fn title_report_js(pane_id: &str, tab_id: &str) -> String {
             .catch(function() {{}});
     }} catch(e) {{}}
 }})();"#,
-        pane = pane_id,
-        tab = tab_id
     )
 }
 
@@ -1251,13 +1255,15 @@ fn title_report_js(pane_id: &str, tab_id: &str) -> String {
 /// slow-loading page's title lands within ~5 s even without a
 /// NavigationCompleted hook (the macOS/Linux paths have none).
 fn pushstate_injection_js(pane_id: &str, tab_id: &str) -> String {
+    let pane_js = serde_json::to_string(pane_id).unwrap_or_else(|_| "\"\"".into());
+    let tab_js = serde_json::to_string(tab_id).unwrap_or_else(|_| "\"\"".into());
     format!(
         r#"(function() {{
     {title_report}
     if (window.__relay_pushstate_patched) return;
     window.__relay_pushstate_patched = true;
     var emit = function() {{
-        var args = {{ paneId: '{pane}', tabId: '{tab}', url: location.href }};
+        var args = {{ paneId: {pane_js}, tabId: {tab_js}, url: location.href }};
         try {{
             if (window.chrome && window.chrome.webview &&
                 typeof window.chrome.webview.postMessage === 'function') {{
@@ -1287,8 +1293,6 @@ fn pushstate_injection_js(pane_id: &str, tab_id: &str) -> String {
     window.addEventListener('popstate', emit);
     window.addEventListener('hashchange', emit);
 }})();"#,
-        pane = pane_id,
-        tab = tab_id,
         title_report = title_report_js(pane_id, tab_id)
     )
 }

@@ -267,23 +267,29 @@ export function AgentModelPickerInner({
       const curated = useSettingsStore.getState().providerModels[p] ?? [];
       const toRows = (ids: string[]): { id: string; label: string }[] =>
         ids.map((id) => ({ id, label: id }));
+      // Curated entries carry their note (deals, promos) through to the row.
+      const curatedRows = () =>
+        curated.map((e) => ({
+          id: e.id,
+          label: e.id,
+          ...(e.note ? { note: e.note } : {}),
+        }));
       void listChatModels(p)
         .then((list) => {
           // Curated list wins when present (picker shows ONLY those, in
           // curated order); otherwise every model the fetch returned. The
           // per-model context windows ride along invisibly — the meter and
           // compaction trigger consume them, the labels stay clean.
-          const ids =
-            curated.length > 0
-              ? curated.map((e) => e.id)
-              : dedupeIds((list ?? []).map((m) => m.id));
-          settle({ status: "ready", rows: toRows(ids) });
+          settle({
+            status: "ready",
+            rows: curated.length > 0 ? curatedRows() : toRows(dedupeIds((list ?? []).map((m) => m.id))),
+          });
         })
         .catch((err: unknown) => {
           // Fetch failed (offline / no key yet) — a curated list still gives
           // the picker content; only without one do we surface the error.
           if (curated.length > 0) {
-            settle({ status: "ready", rows: toRows(curated.map((e) => e.id)) });
+            settle({ status: "ready", rows: curatedRows() });
             return;
           }
           settle({
@@ -570,6 +576,7 @@ export function AgentModelPickerInner({
     return fuzzyFilter(query, paneRows, (r) => r.label).map((h) => ({
       id: h.item.id,
       label: h.item.label,
+      note: h.item.note,
       matches: h.matches,
       score: h.score,
     }));
@@ -938,6 +945,15 @@ export function AgentModelPickerInner({
                           {query.trim().length > 0
                             ? highlight(r.label, { score: r.score, matches: r.matches })
                             : r.label}
+                          {/* User note (deals, promos) rides inline with the
+                              name so the row's space-between layout keeps the
+                              action group pinned right. */}
+                          {r.note && (
+                            <span className="model-note-badge" title={r.note}>
+                              {" "}
+                              [{r.note}]
+                            </span>
+                          )}
                         </span>
                         <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                           {isCurrent && <span className="model-effort-check">✓</span>}

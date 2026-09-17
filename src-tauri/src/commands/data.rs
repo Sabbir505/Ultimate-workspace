@@ -157,16 +157,32 @@ fn swap_chat_db_files(
 
     // 2. Copy ALL of the SQLite files (main + WAL + SHM). Under the lock the
     //    WAL is truncated-empty, but copy the sidecars anyway for parity with
-    //    any journal mode the connection was opened with.
+    //    any journal mode the connection was opened with. A failure MID-copy
+    //    used to leave a torn destination (main db present, sidecars missing)
+    //    that `swap_chat_db_files` then permanently refused with a misleading
+    //    error — delete whatever was written before returning (audit L-14).
     std::fs::create_dir_all(target_dir)
         .map_err(|e| format!("failed to create directory: {e}"))?;
-    for suffix in ["", "-wal", "-shm"] {
-        let src = std::path::PathBuf::from(format!("{}{}", current.display(), suffix));
-        if src.exists() {
-            let dst = std::path::PathBuf::from(format!("{}{}", target.display(), suffix));
-            std::fs::copy(&src, &dst)
-                .map_err(|e| format!("failed to copy {suffix}: {e}"))?;
+    let copy_result: Result<(), String> = (|| {
+        for suffix in ["", "-wal", "-shm"] {
+            let src = std::path::PathBuf::from(format!("{}{}", current.display(), suffix));
+            if src.exists() {
+                let dst = std::path::PathBuf::from(format!("{}{}", target.display(), suffix));
+                std::fs::copy(&src, &dst)
+                    .map_err(|e| format!("failed to copy {suffix}: {e}"))?;
+            }
         }
+        Ok(())
+    })();
+    if let Err(e) = copy_result {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(std::path::PathBuf::from(format!(
+                "{}{}",
+                target.display(),
+                suffix
+            )));
+        }
+        return Err(e);
     }
 
     // 3. Reopen the copy (runs migrations on it) and swap it into the

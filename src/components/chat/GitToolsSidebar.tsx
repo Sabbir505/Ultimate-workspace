@@ -27,6 +27,7 @@ import type { ChatTaskProgress, LoopState, PlanStep } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { BranchDropdown } from "./BranchDropdown";
 import { CommitModal } from "./CommitModal";
+import { useShallow } from "zustand/react/shallow";
 import { usePlanTracker } from "../../hooks/usePlanTracker";
 import { useOcclusion } from "../../hooks/useOcclusion";
 
@@ -210,7 +211,13 @@ export function GitToolsSidebar() {
     activeChatSessionId ? (s.meshChildren[activeChatSessionId] ?? EMPTY_CHILDREN) : EMPTY_CHILDREN,
   );
   const selectSession = useChatStore((s) => s.selectSession);
-  const streamingMap = useChatStore((s) => s.streaming);
+  // useShallow: `s.streaming` gets a fresh object identity per token flush —
+  // a raw subscription re-rendered the whole sidebar at token rate though it
+  // only derives streaming booleans for mesh children. Shallow-compare the
+  // id set; the map lookups below read from the store directly (audit M-18).
+  const streamingMap = useChatStore(
+    useShallow((s) => Object.keys(s.streaming)),
+  );
   // Running /goal or /loop for the focused chat — the sidebar goal card.
   const activeLoop = activeChatSessionId ? loopState[activeChatSessionId] : undefined;
   const stopLoop = useChatStore((s) => s.stopLoop);
@@ -443,17 +450,28 @@ export function GitToolsSidebar() {
 
   // Collapsed-chip status line: what the chat is doing RIGHT NOW, so the
   // collapsed rail isn't just a mute icon. Priority: the running /goal or
-  // /loop title, else the plan step currently in progress, else the changes
-  // summary (only when something actually changed).
+  // /loop title, else the current plan step — in progress first, then the
+  // next pending one (a queued task list should still surface) — else the
+  // changes summary (only when something actually changed). Goal/task/plan
+  // labels render as the clickable task pill (click expands the sidebar);
+  // the bare changes summary keeps the plain status line.
   const inProgressStep =
     Object.values(planSteps).find((s) => s.status === "in_progress") ?? null;
-  const collapsedStatus = activeLoop?.active
+  const nextPendingStep = inProgressStep
+    ? null
+    : (Object.values(planSteps).find((s) => s.status === "pending") ?? null);
+  const activeTaskLabel = activeLoop?.active
     ? activeLoop.goal
     : inProgressStep
       ? inProgressStep.label
-      : added + deleted > 0
-        ? `Changes +${added.toLocaleString()} −${deleted.toLocaleString()}`
+      : nextPendingStep
+        ? nextPendingStep.label
         : null;
+  const collapsedStatus = activeTaskLabel
+    ? activeTaskLabel
+    : added + deleted > 0
+      ? `Changes +${added.toLocaleString()} −${deleted.toLocaleString()}`
+      : null;
 
   // ---- Always-mounted shell so the collapse/expand can animate smoothly.
   // The shell slides between a compact icon chip and the full panel (260px).
@@ -468,14 +486,33 @@ export function GitToolsSidebar() {
         the 260px shell (clipped invisible by overflow:hidden). As a
         sibling it anchors to the real viewport again. */}
     <div
-      className={`git-sidebar${gitSidebarCollapsed ? " git-sidebar-collapsed" : ""}${gitSidebarCollapsed && collapsedStatus ? " git-sidebar-with-status" : ""}`}
+      className={`git-sidebar${gitSidebarCollapsed ? " git-sidebar-collapsed" : ""}${gitSidebarCollapsed && collapsedStatus ? " git-sidebar-with-status" : ""}${gitSidebarCollapsed && activeTaskLabel ? " git-sidebar-with-pill" : ""}`}
     >
       <div className="git-sidebar-inner">
         <div className="git-sidebar-header">
-          {/* Collapsed: the chip widens and shows what the chat is doing —
-              goal title / current plan step / changes summary. Full text on
-              hover via title (set on the div below). */}
-          {gitSidebarCollapsed && collapsedStatus && (
+          {/* Collapsed with a live task/goal/plan: the chip widens into a
+              clickable capsule — arrow + current label, full text on hover.
+              Clicking the pill expands the sidebar (the small icon button
+              still works too). */}
+          {gitSidebarCollapsed && activeTaskLabel && (
+            <button
+              className="git-sidebar-task-pill"
+              onClick={toggleGitSidebar}
+              title={`${activeTaskLabel} — click to expand git tools`}
+              aria-label={`Expand git tools — current task: ${activeTaskLabel}`}
+            >
+              <span className="git-sidebar-task-pill-text">
+                <svg className="git-sidebar-task-pill-arrow" width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M5 12h14" />
+                  <path d="m13 6 6 6-6 6" />
+                </svg>
+                <span className="git-sidebar-task-pill-label">{activeTaskLabel}</span>
+              </span>
+            </button>
+          )}
+          {/* Collapsed without a task: the plain status line (changes summary
+              etc.) — same as before, full text on hover via title. */}
+          {gitSidebarCollapsed && !activeTaskLabel && collapsedStatus && (
             <div className="git-sidebar-status" title={collapsedStatus}>
               {collapsedStatus}
             </div>
@@ -887,7 +924,7 @@ export function GitToolsSidebar() {
                 </SidebarMoreRow>
               )}
               {meshChildren.map((c) => {
-                const running = streamingMap[c.childId] !== undefined;
+                const running = streamingMap.includes(c.childId);
                 return (
                   <button
                     key={c.childId}

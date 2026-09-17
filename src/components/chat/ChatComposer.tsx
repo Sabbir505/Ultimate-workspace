@@ -527,13 +527,19 @@ export const ChatComposer = memo(function ChatComposer({
   const atQuery = atToken?.query ?? null;
   const atOpen = atToken !== null && atDismissed !== dismissKey(atToken) && !!chatSessionId;
 
+  // Identity of the session the attached rows belong to — a slow fetch for
+  // session A must never land after switching to B (the stale rows then bled
+  // into B's next send as connected-source markers; audit M-16).
+  const attachedRowsSessionRef = useRef<string | null>(null);
   const refreshAttached = useCallback(() => {
+    attachedRowsSessionRef.current = chatSessionId ?? null;
     if (!chatSessionId) {
       setAttachedRows([]);
       return;
     }
     void listSessionConnectors(chatSessionId)
       .then((rows) => {
+        if (attachedRowsSessionRef.current !== chatSessionId) return;
         setAttachedRows(rows ?? []);
       })
       .catch(() => {
@@ -1263,6 +1269,9 @@ export const ChatComposer = memo(function ChatComposer({
       usedTokens: usedTokens ?? null,
       model,
       provider,
+      // Harness sessions derive their live context window from the CLI's
+      // own model catalog — the meter needs the agent id to pick that path.
+      agent: agent ?? null,
       isLocal: provider === "local_gguf",
       localCtx,
       liveMaxTokens,
@@ -1272,7 +1281,7 @@ export const ChatComposer = memo(function ChatComposer({
       contextLimitOverride,
       pinnedWindow: pinnedWindow > 0 ? pinnedWindow : undefined,
     }),
-    [usedTokens, model, provider, localCtx, liveMaxTokens, effectiveSessionId, contextLimitOverride, pinnedWindow],
+    [usedTokens, model, provider, agent, localCtx, liveMaxTokens, effectiveSessionId, contextLimitOverride, pinnedWindow],
   );
   // The footer row only exists when something visible lives in it (research
   // chip, attach error, needs-model hint) — otherwise it's an empty strip
@@ -1656,7 +1665,10 @@ export const ChatComposer = memo(function ChatComposer({
       {slashOpen && slashFiltered.length > 0 && (
         <div className="composer-slash-menu" role="listbox" aria-label="Commands">
           {slashFiltered.map((item, i) => {
-            const key = item.kind === "template" ? item.trigger : item.slug;
+            // Kind-prefix the key: a skill slug can collide with a static
+            // command's slug (or a template trigger), and duplicate React
+            // keys made row reconciliation ambiguous (audit L-20).
+            const key = `${item.kind}:${item.kind === "template" ? item.trigger : item.slug}`;
             return (
               <button
                 key={key}

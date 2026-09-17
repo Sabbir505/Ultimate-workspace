@@ -255,6 +255,21 @@ impl AgentSessionManager {
         }
     }
 
+    /// The opencode persistent server's base URL for this chat, when one is
+    /// alive. The context meter's live window derivation reads the server's
+    /// model catalog (`GET /config/providers`) through it — the only place
+    /// opencode publishes per-model limits.
+    pub fn opencode_server_url(&self, chat_session_id: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .ok()?
+            .get(chat_session_id)?
+            .lock()
+            .ok()?
+            .oc_base_url
+            .clone()
+    }
+
     /// Register a surfaced question: the UI answers via
     /// `resolve_agent_question`, which routes by `route`. One pending
     /// question per chat.
@@ -708,8 +723,19 @@ impl AgentSessionManager {
                 let conn = db.0.lock();
                 crate::session_fabric::resumed_turn_hint(&conn, has_relay_tools, chat_session_id)
             };
-            match hint {
+            let effective = match hint {
                 Some(h) => format!("{effective}\n\n{h}"),
+                None => effective,
+            };
+            // Workspace update rides the same slot: same-project siblings
+            // that moved since THIS session's last turn — the automatic
+            // bridge for "pick up where the other chat left off".
+            let update = {
+                let conn = db.0.lock();
+                crate::session_fabric::workspace_update_block(&conn, chat_session_id)
+            };
+            match update {
+                Some(u) => format!("{effective}\n\n{u}"),
                 None => effective,
             }
         } else {
@@ -1208,30 +1234,43 @@ fn finish_turn(
             .as_deref()
             .and_then(|a| a.strip_prefix("harness:"))
             .unwrap_or("unknown");
-        crate::db::add_chat_message(
-            &conn,
-            crate::db::NewChatMessage {
-                input_tokens: input,
-                output_tokens: output,
-                cost_usd: cost,
-                cache_creation_input_tokens: cache_creation,
-                cache_read_input_tokens: cache_read,
-                provider: Some(provider),
-                model_key,
-                started_at: Some(started_at),
-                completed_at: Some(crate::db::now_ts()),
-                llm_time_ms: llm_ms,
-                ttft_ms: ttft,
-                tokens_per_second: tok_s,
-                ..crate::db::NewChatMessage::assistant(sid, full)
-            },
-        )
-        .ok()
-        .map(|m| m.id)
-    } else {
-        None
-    };
-    full.clear();
+        match crate::db::add_chat_message(
+                &conn,
+                crate::db::NewChatMessage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cost_usd: cost,
+                    cache_creation_input_tokens: cache_creation,
+                    cache_read_input_tokens: cache_read,
+                    provider: Some(provider),
+                    model_key,
+                    started_at: Some(started_at),
+                    completed_at: Some(crate::db::now_ts()),
+                    llm_time_ms: llm_ms,
+                    ttft_ms: ttft,
+                    tokens_per_second: tok_s,
+                    ..crate::db::NewChatMessage::assistant(sid, full)
+                },
+            ) {
+                Ok(m) => Some(m.id),
+                // Persist failure used to be swallowed: the reply was cleared
+                // from memory, usage still reported, and chat:done claimed
+                // success — the user's answer silently vanished (audit M-1).
+                // Surface it like the built-in path does; `full` stays intact
+                // so the caller's crash-flush paths still hold the text.
+                Err(e) => {
+                    crate::chat::stream_events::emit_error(
+                        app,
+                        sid,
+                        &format!("failed to persist the reply: {e}"),
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        full.clear();
 
     // Learn pricing from a provider-REPORTED cost (claude's
     // total_cost_usd, opencode's info.cost, an ACP agent's usage
@@ -1334,6 +1373,12 @@ fn finish_turn(
         let dir = spawn.dir.clone();
         crate::checkpoints::after_turn_detached(app, &db.0, sid, message_id, &dir);
     }
+
+    // Auto-distill the session abstract (throttled, background task) so
+    // Session Mesh peers can glance at what this chat covered — summaries
+    // used to only generate on unrelated lazy triggers, so most sessions
+    // never had one and every registry line read "no summary yet".
+    crate::session_fabric::maybe_spawn_summary(db, sid);
 }
 
 fn emit_token(app: Option<&AppHandle>, sid: &str, token: &str) {
@@ -3350,6 +3395,21 @@ mod tests {
         assert!(marker.contains("\"subId\""), "{marker}");
         assert!(tools.pending.is_empty());
         assert!(tools.by_tool_use.is_empty());
+    }
+
+    /// CommandCode appends an internal `<usage>` trailer to tool results —
+    /// forwarded verbatim it rendered as literal text at the end of a
+    /// subagent panel ("total_tokens: … tool_uses: … turns: …
+    /// duration_ms: …"). It is CLI metadata, not the agent's work.
+    #[test]
+    fn commandcode_usage_trailer_is_stripped_from_result_text() {
+        let raw = "Found vectorbt on PyPI.\n\n<usage>total_tokens: 109007 tool_uses: 8 \
+                   turns: 3 duration_ms: 67912</usage>";
+        assert_eq!(strip_usage_trailer(raw), "Found vectorbt on PyPI.");
+        // Unterminated trailer (truncated stream) drops the tail too.
+        assert_eq!(strip_usage_trailer("answer <usage>total_tokens: 1"), "answer");
+        // Trailer-free text passes through (trailing whitespace still trimmed).
+        assert_eq!(strip_usage_trailer("plain result\n"), "plain result");
     }
 
     /// EOF drain for adapters that queue subagents ONLY in the FIFO (kimi /

@@ -340,6 +340,13 @@ pub struct ChatSession {
     /// see `ensure_chat_session_worktree`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
+    /// Working-folder override picked in the composer ("+" → "Choose working
+    /// folder…"). `None` = the chat works in its bound project's tree, or the
+    /// artifacts fallback when unbound. Persisted so the picked folder
+    /// survives an app restart (set/cleared by `set_chat_session_cwd`); the
+    /// send paths resolve cwd = override → worktree → bound project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_override: Option<String>,
     /// Per-session permission posture (`read_only` | `manual` | `auto_edit` |
     /// `full_auto`). Legacy single-dimension mode — superseded by
     /// `sandbox_policy` + `approval_policy`. Retained for backward compat

@@ -481,6 +481,11 @@ export const createChatSession = (provider: string, model: string, projectId?: s
  *  that project's expandable sidebar row. */
 export const setChatSessionProject = (chatSessionId: string, projectId?: string | null) =>
   safeInvoke<void>("set_chat_session_project", { chatSessionId, projectId: projectId ?? null });
+/** Persist (or clear with null) the chat's working-folder override from the
+ *  composer's folder picker. The DB column is what makes the pick survive an
+ *  app restart — the in-memory cwdOverrides map alone evaporates. */
+export const setChatSessionCwd = (chatSessionId: string, cwd?: string | null) =>
+  safeInvoke<void>("set_chat_session_cwd", { chatSessionId, cwd: cwd ?? null });
 /** Worktree-per-session (roadmap P0 §3.1.1): make sure the chat has an
  *  isolated git worktree and returns its path (null when unbound or the
  *  project isn't a git repo). Idempotent and best-effort — callers must never

@@ -30,6 +30,9 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
         // NULL = work in the bound project's working tree; a path = the chat's
         // isolated git worktree (roadmap P0 §3.1.1, branch `relay/<id>`).
         worktree_path: row.get::<_, Option<String>>("worktree_path")?,
+        // Working-folder override from the composer's folder picker; NULL =
+        // resolve cwd from the bound project (or the artifacts fallback).
+        cwd_override: row.get::<_, Option<String>>("cwd_override")?,
         // Falls back to "manual" for rows written before the column existed
         // (the migration adds it nullable); unknown values also read as manual.
         permission_mode: row
@@ -195,6 +198,23 @@ pub fn set_chat_session_worktree(
     conn.execute(
         "UPDATE chat_sessions SET worktree_path = ?2 WHERE id = ?1",
         params![chat_session_id, worktree_path],
+    )?;
+    Ok(())
+}
+
+/// Persist (or clear with `None`) the chat's working-folder override — the
+/// composer's "Choose working folder…" pick. Persisted so the folder survives
+/// an app restart: the send paths resolve cwd = override → worktree → bound
+/// project, so without the column every post-restart send silently fell back
+/// to the artifacts dir.
+pub fn set_chat_session_cwd_override(
+    conn: &Connection,
+    chat_session_id: &str,
+    cwd_override: Option<&str>,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET cwd_override = ?2 WHERE id = ?1",
+        params![chat_session_id, cwd_override],
     )?;
     Ok(())
 }
@@ -1413,6 +1433,32 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(get_chat_session(&conn, &with_msgs.id).unwrap().is_some());
+    }
+
+    /// The composer's working-folder pick must round-trip: the persisted
+    /// cwd_override is what lets a chat re-enter the same folder after an app
+    /// restart instead of silently falling back to the artifacts dir.
+    #[test]
+    fn cwd_override_persists_and_clears() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        // Fresh sessions start unbound (resolve cwd from project / fallback).
+        assert!(cs.cwd_override.is_none());
+
+        // Picking a folder persists through both reads.
+        set_chat_session_cwd_override(&conn, &cs.id, Some("D:\\picked\\folder")).unwrap();
+        let reloaded = get_chat_session(&conn, &cs.id).unwrap().unwrap();
+        assert_eq!(reloaded.cwd_override.as_deref(), Some("D:\\picked\\folder"));
+        let listed = list_chat_sessions(&conn).unwrap();
+        assert_eq!(listed[0].cwd_override.as_deref(), Some("D:\\picked\\folder"));
+
+        // Clearing (the FolderNotch's remove action) persists too.
+        set_chat_session_cwd_override(&conn, &cs.id, None).unwrap();
+        assert!(get_chat_session(&conn, &cs.id)
+            .unwrap()
+            .unwrap()
+            .cwd_override
+            .is_none());
     }
 
     #[test]

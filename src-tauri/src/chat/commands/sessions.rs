@@ -251,6 +251,21 @@ pub async fn set_chat_session_project(
         .map_err(|e| e.to_string())
 }
 
+/// Persist (or clear with `None`) the chat's working-folder override from the
+/// composer's folder picker. The DB column is what makes the picked folder
+/// survive an app restart — the frontend's in-memory map alone evaporated, so
+/// every post-restart send silently fell back to the artifacts dir.
+#[tauri::command]
+pub fn set_chat_session_cwd(
+    chat_session_id: String,
+    cwd: Option<String>,
+    db: State<'_, DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::set_chat_session_cwd_override(&conn, &chat_session_id, cwd.as_deref())
+        .map_err(|e| e.to_string())
+}
+
 /// Delete every chat session that has no messages AND is not starred —
 /// the empty "Untitled" rows left behind when a brand-new chat was closed
 /// before the user typed anything. `keep` (when Some) protects a single

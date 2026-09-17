@@ -528,7 +528,7 @@ mod tests {
                created_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL,
                starred INTEGER NOT NULL DEFAULT 0, unread INTEGER NOT NULL DEFAULT 0,
                watch_mode TEXT, agent TEXT, project_id TEXT, permission_mode TEXT,
-               worktree_path TEXT, sandbox_policy TEXT, approval_policy TEXT,
+               worktree_path TEXT, cwd_override TEXT, sandbox_policy TEXT, approval_policy TEXT,
                auto_model INTEGER NOT NULL DEFAULT 0, effort_level TEXT, origin TEXT);",
         )
         .unwrap();

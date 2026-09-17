@@ -171,6 +171,12 @@ struct AgentChild {
     /// flag). A changed tier respawns on the next send — same contract as
     /// `spawned_mode`.
     spawned_effort: Option<String>,
+    /// claude_code: the working folder the persistent process was spawned
+    /// in (raw send cwd, before the artifacts-dir fallback). The CLI never
+    /// re-reads its startup dir, so after a folder change every turn would
+    /// silently keep working in the OLD folder — a changed value respawns
+    /// on the next send, same contract as `spawned_model`.
+    spawned_cwd: Option<String>,
     /// The CLI's own session id, captured from turn output and passed back
     /// to continue the conversation (kimi `--session`, opencode `-s`,
     /// claude `--resume` on respawn). Shared with the reader thread, which
@@ -481,6 +487,7 @@ impl AgentSessionManager {
                             spawned_model: None,
                             spawned_mode: None,
                             spawned_effort: None,
+                            spawned_cwd: None,
                             cli_session_id: Arc::new(Mutex::new(stored)),
                             turn_in_flight: Arc::new(AtomicBool::new(false)),
                             reader_alive: Arc::new(AtomicBool::new(false)),
@@ -537,6 +544,29 @@ impl AgentSessionManager {
             }
         }
         entry.model = model.to_string();
+
+        // Working-folder change mid-chat: the CLI harnesses index their own
+        // conversations under the spawn dir (claude/kimi store transcripts
+        // per project folder), so a session id captured under the PREVIOUS
+        // folder can't be resumed from the new one. Drop it up front (see
+        // drop_stale_cli_id_on_cwd_change) so THIS turn takes the
+        // context-primer path instead of resume-failing.
+        {
+            let send_ctx = entry.send_ctx.lock().unwrap_or_else(|e| e.into_inner());
+            if drop_stale_cli_id_on_cwd_change(
+                db,
+                harness,
+                chat_session_id,
+                &entry.cli_session_id,
+                send_ctx.as_ref(),
+                cwd,
+            ) {
+                eprintln!(
+                    "[context] working folder changed for session={chat_session_id}; \
+                     dropping CLI session id — this send replays the context primer"
+                );
+            }
+        }
 
         // Workspace snapshot for RELAY_ASK follow-up turns: the answer turn
         // must run where the asking turn ran (same cwd/project/connectors).
@@ -657,6 +687,9 @@ impl AgentSessionManager {
         } else {
             None
         };
+        // Resolved OUTSIDE the db lock below — spawn_dir takes its own lock
+        // and parking_lot is not reentrant.
+        let workspace_note = spawn_dir(cwd, &db.0).map(|d| harness_workspace_note(&d));
         let effective = {
             let conn = db.0.lock();
             let custom: Option<String> = crate::db::get_setting(&conn, "assistant.systemPrompt")
@@ -667,6 +700,13 @@ impl AgentSessionManager {
                 None => String::new(),
             };
             base.push_str(&persona);
+            // Names the CURRENT working folder on every turn — see
+            // harness_workspace_note. Without it the model infers "this
+            // folder" from the primer's replayed history, which after a
+            // mid-chat folder change still shows the PREVIOUS one.
+            if let Some(note) = &workspace_note {
+                base.push_str(note);
+            }
             // Session Mesh identity (SESSION_MESH_DESIGN_ARCHITECTURE.md §3):
             // the shared per-project bundle can't carry a per-chat id, so the
             // first turn states it — this is what lets a harness CLI address
@@ -1565,6 +1605,83 @@ mod tests {
         assert!(s.is_char_boundary(s.len()));
     }
 
+    /// Observed user flow (2026-09): chat with no working folder (the CLI
+    /// session id is created under the fallback dir), then pick a folder —
+    /// the next send resumed that id from the NEW dir, which the CLI can't
+    /// find ("no session found to resume"). The id must be dropped up front
+    /// so the turn takes the context-primer path instead of failing.
+    #[test]
+    fn cwd_change_drops_the_stored_cli_session_id() {
+        let conn = crate::db::mem();
+        let cs =
+            crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let db = DbState(Arc::new(parking_lot::Mutex::new(conn)));
+        let cell = Arc::new(Mutex::new(Some("cli-abc".to_string())));
+        {
+            let c = db.0.lock();
+            crate::db::set_setting(
+                &c,
+                &cli_session_key("claude_code", &cs.id),
+                "cli-abc",
+            )
+            .unwrap();
+        }
+        let prev = SendCtx {
+            cwd: Some("C:\\old\\folder".to_string()),
+            ..SendCtx::default()
+        };
+        assert!(drop_stale_cli_id_on_cwd_change(
+            &db,
+            "claude_code",
+            &cs.id,
+            &cell,
+            Some(&prev),
+            Some("D:\\new\\folder"),
+        ));
+        assert!(cell.lock().unwrap().is_none(), "in-memory id must go");
+        let c = db.0.lock();
+        assert_eq!(
+            crate::db::get_setting(&c, &cli_session_key("claude_code", &cs.id)).unwrap(),
+            None,
+            "persisted id must go"
+        );
+    }
+
+    /// The same folder (and the first send after an app restart, where no
+    /// previous-send snapshot exists in memory) must KEEP the stored id —
+    /// resume is exactly what carries the conversation across restarts.
+    #[test]
+    fn same_or_unknown_cwd_keeps_the_stored_cli_session_id() {
+        let conn = crate::db::mem();
+        let cs =
+            crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let db = DbState(Arc::new(parking_lot::Mutex::new(conn)));
+        let cell = Arc::new(Mutex::new(Some("cli-abc".to_string())));
+        let prev = SendCtx {
+            cwd: Some("D:\\new\\folder".to_string()),
+            ..SendCtx::default()
+        };
+        // Same folder as the previous send.
+        assert!(!drop_stale_cli_id_on_cwd_change(
+            &db,
+            "claude_code",
+            &cs.id,
+            &cell,
+            Some(&prev),
+            Some("D:\\new\\folder"),
+        ));
+        // First send after a restart: no snapshot of the previous send.
+        assert!(!drop_stale_cli_id_on_cwd_change(
+            &db,
+            "claude_code",
+            &cs.id,
+            &cell,
+            None,
+            Some("D:\\other\\folder"),
+        ));
+        assert_eq!(cell.lock().unwrap().as_deref(), Some("cli-abc"));
+    }
+
     /// Reader-state snapshot the handler tests assert against.
     struct UsageState {
         full: String,
@@ -2155,6 +2272,26 @@ mod tests {
                 "{h} carries instructions via CLI flags"
             );
         }
+    }
+
+    /// The workspace note must name the folder as "the" working directory and
+    /// explicitly point relative references at it: after a mid-chat folder
+    /// change the primer's replayed history still shows the PREVIOUS folder,
+    /// and the model answered "what do you know about this folder" from that
+    /// stale transcript instead of the directory it now runs in.
+    #[test]
+    fn workspace_note_names_the_current_directory() {
+        let note = harness_workspace_note(std::path::Path::new("D:\\picked\\folder"));
+        assert!(note.contains("D:\\picked\\folder"));
+        assert!(note.contains("working directory"));
+        assert!(
+            note.contains("this folder"),
+            "the note must redefine \"this folder\" for the model"
+        );
+        assert!(
+            note.contains("previous"),
+            "the note must warn that older turns may show another folder"
+        );
     }
 
     #[test]

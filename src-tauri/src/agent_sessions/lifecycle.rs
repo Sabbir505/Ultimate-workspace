@@ -214,3 +214,38 @@ pub(super) fn persist_cli_session_id(
         let _ = crate::db::set_setting(&conn, &cli_session_key(harness, sid), &id);
     }
 }
+
+/// Working-folder change between sends: the CLI harnesses index their own
+/// conversations under the spawn dir (claude/kimi store transcripts per
+/// project folder), so an id captured under the PREVIOUS folder can't be
+/// resumed from the new one — the spawn dies with "no session found to
+/// resume" and burns a turn before the readers' zero-activity recovery
+/// drops the id. Drop it up front (in-memory + persisted) so the turn takes
+/// the context-primer path instead: a fresh CLI session inside the new
+/// folder with the DB history replayed.
+///
+/// Compares only against a previous send in THIS process lifetime (`prev`
+/// is the last send's workspace snapshot): after an app restart the stored
+/// id was created under the same folder the send is about to use, so resume
+/// still works and must not be dropped. Returns whether it dropped.
+pub(super) fn drop_stale_cli_id_on_cwd_change(
+    db: &DbState,
+    harness: &str,
+    sid: &str,
+    cell: &Arc<Mutex<Option<String>>>,
+    prev: Option<&SendCtx>,
+    cwd: Option<&str>,
+) -> bool {
+    let Some(prev) = prev else {
+        return false;
+    };
+    if prev.cwd.as_deref() == cwd {
+        return false;
+    }
+    if let Ok(mut g) = cell.lock() {
+        *g = None;
+    }
+    let conn = db.0.lock();
+    let _ = crate::db::delete_setting(&conn, &cli_session_key(harness, sid));
+    true
+}

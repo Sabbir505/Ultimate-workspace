@@ -53,6 +53,24 @@ pub(super) fn harness_persona(harness_label: &str) -> String {
     )
 }
 
+/// The per-turn workspace note naming the session's working directory, pushed
+/// right after the persona in the send path's prefix stack. Harness CLIs don't
+/// all advertise their cwd to the model (and a mid-chat folder change hands
+/// context over via the primer, whose replayed history still shows the
+/// PREVIOUS folder — the model then answers "what about this folder" from the
+/// stale transcript), so the spawn dir is stated explicitly on EVERY turn.
+/// The respawn-on-folder-change contract (spawned_cwd on AgentChild) keeps the
+/// note accurate for the persistent processes; the per-turn harnesses spawn in
+/// the current dir anyway.
+pub(super) fn harness_workspace_note(dir: &std::path::Path) -> String {
+    format!(
+        "\n\n[Workspace] The working directory for this session is {}. Treat \
+         \"this folder\" / \"here\" / relative paths as that directory — earlier \
+         turns of a handed-off conversation may mention a previous one.",
+        dir.display()
+    )
+}
+
 /// One-shot prompt assembly (automations): `[persona, instructions, custom]`
 /// prefix joined with blank lines, then a `---` separator before the prompt —
 /// mirroring the chat-session prefix stack's ordering. All prefix parts are

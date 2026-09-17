@@ -6,6 +6,7 @@ import {
   createChatSession,
   getChatMessages,
   setChatSessionProject,
+  setChatSessionCwd,
   deleteAllChatSessions,
   deleteChatSession,
   listChatArtifacts,
@@ -53,16 +54,24 @@ import type { ChatStoreGet, ChatStoreSet } from "../types";
 
 export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
   return {
-    setCwdOverride: (chatSessionId: string, path: string | null) =>
+    setCwdOverride: (chatSessionId: string, path: string | null) => {
+      // Persist the pick: the DB column is what survives an app restart — the
+      // in-memory map alone evaporated, so every post-restart send silently
+      // fell back to the artifacts dir. Fire-and-forget like unbindProject.
+      void setChatSessionCwd(chatSessionId, path).catch(() => {});
       set((s) => {
         const next = { ...s.cwdOverrides };
         if (path) next[chatSessionId] = path;
         else delete next[chatSessionId];
         return { cwdOverrides: next };
-      }),
+      });
+    },
 
     unbindProject: (chatSessionId: string) => {
       void setChatSessionProject(chatSessionId, null).catch(() => {});
+      // The picker's folder override dies with the binding too (existing
+      // behavior) — persist the clear so a restart doesn't resurrect it.
+      void setChatSessionCwd(chatSessionId, null).catch(() => {});
       set((s) => {
         const sessionProjects = { ...s.sessionProjects };
         delete sessionProjects[chatSessionId];
@@ -100,10 +109,21 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       const sessions = await listChatSessions();
       const clean = withoutDeleted(sessions ?? []);
       // Seed the in-memory binding cache from the persisted project_id so the
-      // sidebar nesting + composer notch survive an app restart.
+      // sidebar nesting + composer notch survive an app restart. Same for the
+      // working-folder overrides — without the re-seed a restart dropped the
+      // picked folder and every later send ran in the artifacts dir.
       const seeded: Record<string, string> = {};
-      for (const s of clean) if (s.projectId) seeded[s.id] = s.projectId;
-      set({ loaded: true, sessions: clean, sessionProjects: seeded });
+      const seededCwd: Record<string, string> = {};
+      for (const s of clean) {
+        if (s.projectId) seeded[s.id] = s.projectId;
+        if (s.cwdOverride) seededCwd[s.id] = s.cwdOverride;
+      }
+      set({
+        loaded: true,
+        sessions: clean,
+        sessionProjects: seeded,
+        cwdOverrides: seededCwd,
+      });
     },
 
     selectSession: async (chatSessionId: string, opts?: { recordNav?: boolean }) => {

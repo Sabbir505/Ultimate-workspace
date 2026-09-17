@@ -1616,28 +1616,47 @@ pub async fn send_chat_message(
     // the project roots) AND named in the system prompt: without that line
     // the model had no idea which directory the chat was scoped to and
     // answered that it wasn't working in any directory.
-    if let Some(root) = extra_fs_root {
-        let root = root.trim().to_string();
-        if !root.is_empty() {
-            if !fs_roots.iter().any(|r| r == &root) {
-                fs_roots.push(root.clone());
-            }
-            let section = working_directory_section(&root);
-            // The suffix rides the rebuilt fail-over prompts too (without it
-            // a failed-over candidate would lose the working directory).
-            if let Some(inp) = auto_system_inputs.as_mut() {
-                inp.system_suffix.push_str(&section);
-            }
-            system = Some(system.unwrap_or_default() + &section);
-            // Remember the root for the prompt warmup: the selected project /
-            // custom folder live in frontend state the warmup can't see, and
-            // a missing section here invalidates the entire cached prefix
-            // (the section sits at the end of the system message, right
-            // before the tools region).
-            {
-                let conn = db.0.lock();
-                let _ = db::set_setting(&conn, "chat.local_gguf.last_working_dir", &root);
-            }
+    let picked_root = extra_fs_root
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty());
+    if let Some(root) = picked_root {
+        if !fs_roots.iter().any(|r| r == &root) {
+            fs_roots.push(root.clone());
+        }
+        let section = working_directory_section(&root);
+        // The suffix rides the rebuilt fail-over prompts too (without it
+        // a failed-over candidate would lose the working directory).
+        if let Some(inp) = auto_system_inputs.as_mut() {
+            inp.system_suffix.push_str(&section);
+        }
+        system = Some(system.unwrap_or_default() + &section);
+        // Remember the root for the prompt warmup: the selected project /
+        // custom folder live in frontend state the warmup can't see, and
+        // a missing section here invalidates the entire cached prefix
+        // (the section sits at the end of the system message, right
+        // before the tools region).
+        {
+            let conn = db.0.lock();
+            let _ = db::set_setting(&conn, "chat.local_gguf.last_working_dir", &root);
+        }
+    } else {
+        // Unbound chat (no picked folder, no bound project): the chat still
+        // operates SOMEWHERE — the artifacts fallback (configured
+        // storage.artifactsDir, else Documents/Relay), which is already in
+        // `fs_roots` above. Name it in the system prompt: left unstated, the
+        // model inferred "this folder" from whatever the transcript mentioned
+        // (parity with the harness path's per-turn workspace note).
+        // Information only — the fallback root is already granted, so this
+        // changes no permission decision.
+        let root = crate::chat::dispatch::artifacts_dir(&app).to_string_lossy().to_string();
+        let section = working_directory_section(&root);
+        if let Some(inp) = auto_system_inputs.as_mut() {
+            inp.system_suffix.push_str(&section);
+        }
+        system = Some(system.unwrap_or_default() + &section);
+        {
+            let conn = db.0.lock();
+            let _ = db::set_setting(&conn, "chat.local_gguf.last_working_dir", &root);
         }
     }
     chat_state.0.send(
@@ -1834,7 +1853,8 @@ pub(crate) async fn run_prompt_warmup(
     // and a single divergent char there invalidates the whole cached prefix
     // (this mismatch is why the first warmup attempt saved nothing: 7,139
     // warmup chars vs 7,819 real). The caller supplies the working dir its
-    // next send would resolve to; None matches a send without one.
+    // next send would resolve to; None means an unbound chat, whose send
+    // names the artifacts fallback (Documents/Relay / storage.artifactsDir).
     if let Some(root) = working_dir
         .map(|r| r.trim().to_string())
         .filter(|r| !r.is_empty())
@@ -1842,7 +1862,12 @@ pub(crate) async fn run_prompt_warmup(
         eprintln!("[prompt-warmup] matching working directory: {root:?}");
         system.push_str(&working_directory_section(&root));
     } else {
-        eprintln!("[prompt-warmup] no working directory — warmup covers the core+skills+manifest prefix only");
+        let root =
+            crate::chat::dispatch::artifacts_dir(app).to_string_lossy().to_string();
+        eprintln!(
+            "[prompt-warmup] no working dir picked — matching the artifacts fallback: {root:?}"
+        );
+        system.push_str(&working_directory_section(&root));
     }
     // Capability flags mirror chat/mod.rs send() exactly (see doc above).
     let pcaps = crate::chat::prompts::provider_capabilities(ChatProviderId::LocalGguf, model_id);
@@ -2146,5 +2171,25 @@ mod tests {
         // decoding at all.
         let b64_too_long = "A".repeat(MAX_ATTACHMENT_B64_LEN + 1);
         assert!(decode_attachment_capped(&b64_too_long).is_none());
+    }
+
+    /// The working-directory section must name the folder as THE current
+    /// working directory and scope relative paths and default tool targets to
+    /// it — this is the only place built-in (cloud + local) turns state where
+    /// the chat operates. Pinned because both the send path (picked folder OR
+    /// artifacts fallback) and the prompt warmup render it, and a divergent
+    /// warmup prefix silently voids the local model's prompt cache.
+    #[test]
+    fn working_directory_section_names_the_root_and_defaults() {
+        let s = working_directory_section("D:\\picked\\folder");
+        assert!(s.contains("D:\\picked\\folder"));
+        assert!(s.contains("## Working directory"));
+        assert!(
+            s.contains("RELATIVE paths"),
+            "the section must scope relative path resolution to the root"
+        );
+        // Reads stay machine-wide; only writes are root-limited.
+        assert!(s.contains("ANY"));
+        assert!(s.contains("Only WRITES"));
     }
 }

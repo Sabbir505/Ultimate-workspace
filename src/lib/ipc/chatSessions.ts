@@ -39,6 +39,11 @@ export interface ChatSession {
    *  isolated git worktree (sibling of the project, branch `relay/<id>`),
    *  which becomes its working dir for sends/spawns/diffs. */
   worktreePath?: string | null;
+  /** Working-folder override from the composer's "+" → "Choose working
+   *  folder…". null/undefined = resolve the working dir from the bound
+   *  project (or the artifacts fallback). Persisted in the DB and re-seeded
+   *  on load, so the picked folder survives an app restart. */
+  cwdOverride?: string | null;
   /** Legacy per-session permission posture — superseded by the dual
    *  sandbox/approval policies below. Retained for backward compat. */
   permissionMode?: string;

@@ -35,6 +35,13 @@ pub(super) fn send_claude_turn(
         || entry.spawned_model.as_deref() != Some(entry.model.as_str())
         || entry.spawned_mode.as_deref() != Some(current_mode.as_str())
         || entry.spawned_effort.as_deref() != Some(current_effort.as_str())
+        // A folder picked mid-chat must move the CLI too: the process never
+        // re-reads its startup dir, so without this it would keep working in
+        // the OLD folder forever. The stale CLI session id was already
+        // dropped by send() above (a transcript from the previous folder
+        // can't be resumed here), so the respawn starts fresh and the
+        // context primer replays the conversation.
+        || entry.spawned_cwd.as_deref() != cwd
     {
         if let Some(mut old) = entry.child.take() {
             kill_child_tree(&mut old);
@@ -74,6 +81,7 @@ pub(super) fn send_claude_turn(
         entry.spawned_mode = Some(spawned_mode);
         entry.spawned_effort = Some(spawned_effort);
         entry.spawned_model = Some(entry.model.clone());
+        entry.spawned_cwd = cwd.map(|c| c.to_string());
     }
 
     let line = json!({
@@ -189,7 +197,14 @@ pub(super) fn send_acp_turn(
     // is still Some — a handshake failure returns from read_acp_stream early
     // and used to leave the child cell occupied with no reader alive, so the
     // queued turn was never drained and every later send was rejected.
-    if entry.child.is_none() || !entry.reader_alive.load(Ordering::SeqCst) {
+    // A folder picked mid-chat also respawns: the agent process never
+    // re-reads its startup dir, so without this it would keep working in the
+    // OLD folder forever. send() already dropped the stale CLI session id on
+    // the folder change, so the fresh session rides the context primer.
+    if entry.child.is_none()
+        || !entry.reader_alive.load(Ordering::SeqCst)
+        || entry.spawned_cwd.as_deref() != cwd
+    {
         if let Some(mut old) = entry.child.take() {
             kill_child_tree(&mut old);
         }
@@ -300,6 +315,7 @@ pub(super) fn send_acp_turn(
             );
         });
         entry.child = Some(child);
+        entry.spawned_cwd = cwd.map(|c| c.to_string());
     }
 
     // Record the prompt for the reader's input-token estimate (Fix: ACP

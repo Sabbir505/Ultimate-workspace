@@ -46,7 +46,15 @@ pub(super) fn send_opencode_turn(
         .and_then(|cfg| current_config_stamp(&cfg));
     let stamp_changed = current_stamp.is_some()
         && *entry.oc_config_stamp.lock().unwrap_or_else(|e| e.into_inner()) != current_stamp;
+    // A folder picked mid-chat must move the server too: opencode.json (the
+    // stamp's input) doesn't embed the cwd, so without this a changed folder
+    // left the healthy server serving from its ORIGINAL startup dir forever —
+    // every turn kept reading/writing the previous folder. The stale CLI
+    // session id was already dropped by send() above, so the respawned
+    // server starts a fresh session and the context primer replays.
+    let cwd_changed = entry.spawned_cwd.as_deref() != cwd;
     let alive = !stamp_changed
+        && !cwd_changed
         && entry
             .oc_base_url
             .as_deref()
@@ -81,6 +89,7 @@ pub(super) fn send_opencode_turn(
             Ok((child, base_url)) => {
                 entry.child = Some(child);
                 entry.oc_base_url = Some(base_url);
+                entry.spawned_cwd = cwd.map(|c| c.to_string());
             }
             Err(e) => {
                 // Degraded mode: legacy one-shot `opencode run` per turn.

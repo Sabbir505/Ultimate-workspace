@@ -219,6 +219,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_session_policies(conn)?;
     migrate_chat_session_worktree(conn)?;
     migrate_chat_session_effort(conn)?;
+    migrate_chat_session_cwd_override(conn)?;
     migrate_artifacts_message_id(conn)?;
     migrate_chat_messages_superseded(conn)?;
     migrate_cost_v2(conn)?;
@@ -387,6 +388,21 @@ fn migrate_chat_session_policies(conn: &Connection) -> DbResult<()> {
 /// (PTY harness sessions) for the older sibling of this concept.
 fn migrate_chat_session_worktree(conn: &Connection) -> DbResult<()> {
     let sql = "ALTER TABLE chat_sessions ADD COLUMN worktree_path TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Add the `cwd_override` column to `chat_sessions` (the composer's "Choose
+/// working folder…" pick). Nullable: NULL = resolve the working dir from the
+/// bound project (or the artifacts fallback). Persisting it is what makes the
+/// picked folder survive an app restart — the in-memory map alone evaporated
+/// and every post-restart send silently lost the folder.
+fn migrate_chat_session_cwd_override(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN cwd_override TEXT";
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
@@ -771,6 +787,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
           permission_mode TEXT,
           worktree_path TEXT,
+          cwd_override TEXT,
           sandbox_policy TEXT,
           approval_policy TEXT,
           auto_model INTEGER NOT NULL DEFAULT 0,
@@ -1395,11 +1412,11 @@ pub use chat::{
     list_chat_messages_page, list_chat_session_connectors, list_chat_sessions,
     list_messages_superseded_by, mark_branch_superseded, mark_superseded,
     permission_label_from_policies, remove_chat_session_connector, search_chat_messages,
-    set_chat_session_auto, set_chat_session_connectors, set_chat_session_plan,
-    set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
-    set_chat_session_worktree, touch_chat_session, update_chat_message_content,
-    update_chat_session_agent, update_chat_session_effort, update_chat_session_model,
-    update_chat_session_permission_mode, update_chat_session_policies,
+    set_chat_session_auto, set_chat_session_connectors, set_chat_session_cwd_override,
+    set_chat_session_plan, set_chat_session_project, set_chat_session_starred,
+    set_chat_session_unread, set_chat_session_worktree, touch_chat_session,
+    update_chat_message_content, update_chat_session_agent, update_chat_session_effort,
+    update_chat_session_model, update_chat_session_permission_mode, update_chat_session_policies,
     update_chat_session_provider, update_chat_session_title, update_chat_session_watch_mode,
     NewChatMessage,
 };
@@ -1489,6 +1506,7 @@ pub(crate) fn mem() -> Connection {
     migrate_chat_session_project_id(&conn).unwrap();
     migrate_chat_session_permission_mode(&conn).unwrap();
     migrate_chat_session_worktree(&conn).unwrap();
+    migrate_chat_session_cwd_override(&conn).unwrap();
     migrate_artifacts_message_id(&conn).unwrap();
     migrate_chat_messages_superseded(&conn).unwrap();
     migrate_cost_v2(&conn).unwrap();

@@ -522,6 +522,57 @@
   pointer-events: none;
   user-select: none;
 }
+/* Collapsed WITH a live task/goal/plan: the status renders as a clickable
+   capsule — arrow + current label, full text on hover via title. Clicking
+   expands the sidebar (same toggle as the icon button). Slightly wider than
+   the plain-status chip so the label has room to breathe. */
+.git-sidebar.git-sidebar-collapsed.git-sidebar-with-pill {
+  width: 230px;
+}
+.git-sidebar-task-pill {
+  position: absolute;
+  left: 8px;
+  right: 34px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.2;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.14s var(--ease), color 0.14s var(--ease);
+}
+.git-sidebar-task-pill:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.git-sidebar-task-pill-arrow {
+  flex: none;
+}
+/* The text span is the single inline-flex child wrapping arrow + label, so
+   the capsule border always contains both — the arrow can never separate
+   from the pill regardless of inherited button/svg styles. */
+.git-sidebar-task-pill-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.git-sidebar-task-pill-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 @keyframes git-sidebar-slide {
   from { opacity: 0; transform: translateX(12px); }
   to { opacity: 1; transform: translateX(0); }

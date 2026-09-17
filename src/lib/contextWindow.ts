@@ -19,6 +19,7 @@
 // The "used" figure (passed in by the meter consumer) combines the
 // backend's live estimate with the input_tokens of the last assistant turn.
 import { providerKindOf } from "./providerKind";
+import { fetchProviderModelWindows } from "./ipc/localModels";
 
 /** Fallback context window (tokens) for model ids the registry doesn't
  *  recognize. Mirrors the backend's DEFAULT_CLOUD_WINDOW. */
@@ -262,21 +263,42 @@ function matchLiveWindow(
 
 /** Live refinement for cloud sessions: derive the window from the
  *  provider's own models API — OpenRouter's public endpoint (fetched
- *  directly) or Anthropic's keyed one (fetched via the backend, cached).
- *  Exact id match, falling back to the model's bare suffix. Returns null
- *  for providers without live data, in which case the registry (or its
- *  flat fallback) stands. The live figure is NOT capped here: it's the
- *  provider's own number. The user's context-limit override is applied on
- *  top by the caller (see `contextWindowFor`). */
+ *  directly), Anthropic's keyed one and the OpenAI-compatible relays'
+ *  `/models` (both fetched via the backend, cached), or the opencode
+ *  harness's own server catalog (needs the chat session id to find the
+ *  running server). Exact id match, falling back to the model's bare
+ *  suffix. Returns null for providers without live data, in which case the
+ *  registry (or its flat fallback) stands. The live figure is NOT capped
+ *  here: it's the provider's own number. The user's context-limit override
+ *  is applied on top by the caller (see `contextWindowFor`). */
 export async function contextWindowForModel(
   model: string | undefined | null,
   provider: string | undefined | null,
+  opts?: { agent?: string | null; chatSessionId?: string | null },
 ): Promise<number | null> {
   // Sessions may carry a named endpoint id ("openai_compatible-x7f2");
   // live-window support is per protocol kind.
   const p = providerKindOf((provider ?? "").toLowerCase());
   const m = (model ?? "").toLowerCase();
   if (!m) return null;
+  const agent = opts?.agent ?? "";
+  // Harness sessions: the CLI owns the model catalog. opencode publishes
+  // per-model limits on its running server; the other harnesses expose
+  // nothing, so the registry stands.
+  if (agent.startsWith("harness:opencode")) {
+    const windows = await fetchProviderModelWindows("opencode", opts?.chatSessionId);
+    if (!windows || Object.keys(windows).length === 0) {
+      debugContext("harness", `'${model}' → no opencode catalog (server down/empty), registry stands`);
+      return null;
+    }
+    const hit = matchLiveWindow(windows, m);
+    if (hit != null) {
+      debugContext("harness", `opencode '${model}' → live ${hit}`);
+      return hit;
+    }
+    debugContext("harness", `opencode '${model}' → not in catalog, registry stands`);
+    return null;
+  }
   if (p === "openrouter") {
     const windows = await openRouterContextWindows();
     if (!windows) {
@@ -303,6 +325,23 @@ export async function contextWindowForModel(
       return hit;
     }
     debugContext("anthropic", `'${model}' → no live entry, registry stands`);
+    return null;
+  }
+  if (p === "openai_compatible") {
+    // Generic OpenAI-compatible relays (incl. the commandcode family):
+    // probe their /models for `context_length` — the same field OpenRouter
+    // popularized. Servers that don't publish it return an empty map.
+    const windows = await fetchProviderModelWindows(provider ?? "");
+    if (!windows || Object.keys(windows).length === 0) {
+      debugContext("compatible", `'${model}' → no live windows published, registry stands`);
+      return null;
+    }
+    const hit = matchLiveWindow(windows, m);
+    if (hit != null) {
+      debugContext("compatible", `'${model}' → live ${hit}`);
+      return hit;
+    }
+    debugContext("compatible", `'${model}' → no live entry, registry stands`);
     return null;
   }
   return null;

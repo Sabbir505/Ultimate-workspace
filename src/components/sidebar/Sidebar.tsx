@@ -254,7 +254,7 @@ export function Sidebar() {
 
   const handleDeleteChat = useCallback(
     (id: string) => {
-      void deleteChat(id);
+      deleteChat(id).catch((e) => toastError("Couldn't delete the chat", e));
     },
     [deleteChat],
   );

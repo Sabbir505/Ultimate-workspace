@@ -490,6 +490,14 @@ pub async fn github_draft_pr_text(
     // Branch diff vs base: stat summary + bounded patch body. Three-dot
     // (merge-base) diff: what the PR will actually contain. Both are blocking
     // git subprocesses — run them off the async runtime worker.
+    // Argv guard (same standard as create_branch/checkout_branch): a `base`
+    // starting with `-` is parsed by git as an OPTION, not a ref — e.g.
+    // `--output=<path>` would write the diff to an arbitrary filesystem path
+    // (audit M-14).
+    let base = base.trim().to_string();
+    if base.starts_with('-') || base.is_empty() {
+        return Err("invalid base ref".into());
+    }
     let range = format!("{base}...HEAD");
     let (stat, patch) = tauri::async_runtime::spawn_blocking(move || {
         let stat = crate::git::run_git_env(&path, &["diff", "--stat", &range], &[])

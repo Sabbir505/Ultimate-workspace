@@ -48,6 +48,15 @@ export function QueuedMessageRow({
   const dragIndex = useRef(index);
   const dragPointerId = useRef<number | null>(null);
   const gripRef = useRef<HTMLSpanElement>(null);
+  // Removes the window drag listeners if the row unmounts mid-drag
+  // (auto-drain) before onUp ever runs (audit L-21).
+  const cleanupDrag = useRef<(() => void) | null>(null);
+  useEffect(
+    () => () => {
+      cleanupDrag.current?.();
+    },
+    [],
+  );
 
   const label =
     message.content ||
@@ -96,10 +105,18 @@ export function QueuedMessageRow({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
+      cleanupDrag.current = null;
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
+    // If the row unmounts mid-drag (auto-drain), remove the window listeners
+    // instead of letting onMove fire against a mutating queue (audit L-21).
+    cleanupDrag.current = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
   };
 
   return (

@@ -53,7 +53,7 @@ pub fn register_owner(owner: &OwnerMap, session_id: String, sender: super::relay
 pub fn register_connection(
     owner: &OwnerMap,
     session_id: String,
-) -> tokio::sync::mpsc::UnboundedReceiver<super::protocol::DesktopMessage> {
+) -> tokio::sync::mpsc::Receiver<super::protocol::DesktopMessage> {
     let (tx, rx) = super::relay_ws::make_channel();
     register_owner(owner, session_id, tx);
     rx
@@ -214,7 +214,7 @@ pub fn forward_session_chat_event(
     };
 
     sender
-        .send(desktop_msg)
+        .try_send(desktop_msg)
         .map_err(|e| format!("failed to send to owner: {e}"))?;
 
     Ok(())

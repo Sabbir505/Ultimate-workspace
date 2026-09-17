@@ -289,6 +289,12 @@ pub fn commandcode_bridge_current(
 /// callers use it to decide whether commandcode prompts may advertise the
 /// relay tools. The registration is user-visible via `cmd mcp list` and
 /// removable with `cmd mcp remove relay-tools -s local`.
+///
+/// WINDOWS-ONLY: the npm shim is a `.cmd` invoked through cmd.exe. On other
+/// hosts the spawn always failed, so the bridge silently never registered and
+/// `run()` burned two failed spawns per token/port change per project — gate
+/// the whole path and report "not registered" instead (audit L-15).
+#[cfg(windows)]
 pub fn ensure_commandcode_bridge(
     app: &tauri::AppHandle,
     cwd: &Path,
@@ -359,6 +365,17 @@ pub fn ensure_commandcode_bridge(
         return false;
     }
     true
+}
+
+/// Non-Windows stub: the npm shim is a `.cmd` invoked through cmd.exe, so the
+/// bridge can never register elsewhere (see the windows variant, audit L-15).
+#[cfg(not(windows))]
+pub fn ensure_commandcode_bridge(
+    _app: &tauri::AppHandle,
+    _cwd: &Path,
+    _project_slug: &str,
+) -> bool {
+    false
 }
 
 #[cfg(test)]

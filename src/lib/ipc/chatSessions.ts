@@ -409,6 +409,9 @@ export const listChatModels = (
 export interface SelectedModelEntry {
   id: string;
   contextWindow: number;
+  /** Free-text annotation shown beside the model in the picker — deals,
+   *  promos, pricing quirks ("99% off", "6x usage"). Empty/absent = none. */
+  note?: string;
 }
 
 export const setSelectedModels = (provider: string, models: SelectedModelEntry[]) =>

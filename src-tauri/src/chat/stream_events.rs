@@ -71,22 +71,27 @@ pub fn unregister(session_id: &str) {
 /// if the consumer dropped, and we silently drop in that case (the
 /// frontend will reconnect via re-subscribe).
 pub fn try_send(session_id: &str, payload: &ChatTokenPayload) -> bool {
-    let registry = REGISTRY.lock();
-    if let Some(ch) = registry.by_session.get(session_id) {
-        match ch.send(payload.clone()) {
-            Ok(()) => true,
-            Err(_) => {
-                // Consumer dropped mid-send. Clean up so future calls fall
-                // back to emit (the frontend has presumably re-mounted with
-                // a new channel via re-subscribe, but the registry entry
-                // is now stale).
-                drop(registry);
-                unregister(session_id);
-                false
-            }
+    // Clone the channel OUT from under the registry lock: this runs per token
+    // for every streaming session, and the send (payload clone + IPC write)
+    // under the global mutex serialized every other session's emits
+    // (audit M-7).
+    let ch = {
+        let registry = REGISTRY.lock();
+        registry.by_session.get(session_id).cloned()
+    };
+    let Some(ch) = ch else {
+        return false;
+    };
+    match ch.send(payload.clone()) {
+        Ok(()) => true,
+        Err(_) => {
+            // Consumer dropped mid-send. Clean up so future calls fall
+            // back to emit (the frontend has presumably re-mounted with
+            // a new channel via re-subscribe, but the registry entry
+            // is now stale).
+            unregister(session_id);
+            false
         }
-    } else {
-        false
     }
 }
 

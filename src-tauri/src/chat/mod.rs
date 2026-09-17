@@ -1218,17 +1218,33 @@ impl ChatManager {
                                 let report2 = report.clone();
                                 let orphan_numbers2 = orphan_numbers.clone();
                                 tauri::async_runtime::spawn(async move {
-                                    let verdicts = citation_verify::verify_via_provider(
-                                        &client2,
-                                        provider_id,
-                                        &base2,
-                                        &key2,
-                                        &model2,
-                                        &verify_claims,
+                                    // Bounded: this is a detached best-effort
+                                    // task on the shared (no-body-timeout)
+                                    // client — a wedged endpoint used to leak
+                                    // the task plus its AppHandle/DB clones for
+                                    // the process lifetime (audit M-4).
+                                    let verdicts = match tokio::time::timeout(
+                                        std::time::Duration::from_secs(120),
+                                        citation_verify::verify_via_provider(
+                                            &client2,
+                                            provider_id,
+                                            &base2,
+                                            &key2,
+                                            &model2,
+                                            &verify_claims,
+                                        ),
                                     )
-                                    .await;
-                                    let Ok(verdicts) = verdicts else {
-                                        return; // silent: verification is best-effort
+                                    .await
+                                    {
+                                        Ok(Ok(v)) => v,
+                                        Ok(Err(e)) => {
+                                            eprintln!("[citations] verify failed: {e}");
+                                            return;
+                                        }
+                                        Err(_) => {
+                                            eprintln!("[citations] verify timed out after 120s");
+                                            return;
+                                        }
                                     };
                                     let supported: Vec<u32> = verdicts
                                         .iter()
@@ -1367,6 +1383,14 @@ impl ChatManager {
                             }
                         });
                     }
+
+                    // Auto-distill the session abstract (throttled, background
+                    // task) so Session Mesh peers can glance at what this chat
+                    // covered without a manual read_session.
+                    crate::session_fabric::maybe_spawn_summary(
+                        &crate::DbState(std::sync::Arc::clone(&db)),
+                        &sid,
+                    );
                 }
                 Err(e) => {
                     // The stream failed (HTTP status, SSE stall, tool loop
@@ -1403,9 +1427,22 @@ impl ChatManager {
             crate::chat::turn_perf::unregister(&sid);
         });
 
-        self.streams
-            .lock()
-            .insert(chat_session_id.clone(), handle.abort_handle());
+        {
+            let mut streams = self.streams.lock();
+            let abort = handle.abort_handle();
+            // Insert only while the task is still alive: a fast failure let
+            // the task's own cleanup run BEFORE this insert, which used to
+            // register a dead handle — "turn in flight" forever, and a stale
+            // entry as the wrong cancel target when two sends overlap
+            // (audit M-2). The re-check closes the residual window where the
+            // task finished between the check and the insert.
+            if !handle.is_finished() {
+                streams.insert(chat_session_id.clone(), abort);
+            }
+            if handle.is_finished() {
+                streams.remove(&chat_session_id);
+            }
+        }
     }
 
     /// Whether `task_id` is still the registered stream for this session.

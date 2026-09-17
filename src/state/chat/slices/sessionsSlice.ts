@@ -25,6 +25,7 @@ import {
   updateChatSessionWatchMode,
   setChatSessionWorktree,
 } from "../../../lib/ipc";
+import { toastError } from "../../../lib/ipc";
 import type { ChatCheckpoint } from "../../../lib/ipc";
 import type { ApprovalPolicy, ChatArtifact, SandboxPolicy, WatchMode } from "../types";
 import { useAutomationsStore } from "../../automations";
@@ -269,10 +270,14 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
           const { loaded, automations } = useAutomationsStore.getState();
           // Store not loaded (IPC failure): can't rule out a run log — skip.
           if (loaded && !automations.some((a) => a.chatSessionId === outgoingId)) {
-            void get().deleteChat(outgoingId);
+            get()
+              .deleteChat(outgoingId)
+              .catch((e) => toastError("Couldn't clean up the empty chat", e));
           }
         } else {
-          void get().deleteChat(outgoingId);
+          get()
+            .deleteChat(outgoingId)
+            .catch((e) => toastError("Couldn't clean up the empty chat", e));
         }
       }
       // Opening a session that has messages stacked in its queue (queued while
@@ -506,6 +511,10 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         artifactProposals: {},
         stoppedPartial: {},
         citationReports: {},
+        // Audit L-17: delete-all missed these two keyed maps (single-delete
+        // clears them via clearSessionState).
+        composerDrafts: {},
+        supersededPartial: {},
       }));
       return count;
     },

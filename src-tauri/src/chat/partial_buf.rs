@@ -48,12 +48,32 @@ pub fn record(chat_session_id: &str, token: &str) {
 /// somewhere (final assistant row, persist command, or app-exit drain), so a
 /// later quit can never double-persist the same turn.
 pub fn take(chat_session_id: &str) -> Option<String> {
-    PARTIALS.lock().remove(chat_session_id)
+    PARTIALS.lock().remove(chat_session_id).map(close_dangling_tool)
 }
 
 /// Drain everything (app exit). Returns (session_id, partial_text) pairs.
 pub fn drain_all() -> Vec<(String, String)> {
-    PARTIALS.lock().drain().collect()
+    PARTIALS
+        .lock()
+        .drain()
+        .map(|(sid, text)| (sid, close_dangling_tool(text)))
+        .collect()
+}
+
+/// Close an unterminated `<tool>` block before the partial is persisted. The
+/// task fan-out opens every Task marker BEFORE the tools run (streaming.rs);
+/// a cancel/abort between that pre-pass and the closing emit used to leave a
+/// dangling marker in the persisted partial, which the segment parser renders
+/// as an eternally "working" step after reload (audit M-6).
+fn close_dangling_tool(mut text: String) -> String {
+    let opens = text.matches("<tool>").count();
+    let closes = text.matches("</tool>").count();
+    if opens > closes {
+        for _ in 0..(opens - closes) {
+            text.push_str("</tool>");
+        }
+    }
+    text
 }
 
 #[cfg(test)]

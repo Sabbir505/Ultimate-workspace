@@ -448,6 +448,10 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
   delete stoppedPartial[chatSessionId];
   const supersededPartial = { ...s.supersededPartial };
   delete supersededPartial[chatSessionId];
+  // Typed drafts die with the session too — they used to persist for the
+  // whole app run after delete (audit L-17).
+  const composerDrafts = { ...s.composerDrafts };
+  delete composerDrafts[chatSessionId];
   const citationReports = { ...s.citationReports };
   delete citationReports[chatSessionId];
   const meshMailBySession = { ...s.meshMailBySession };
@@ -498,6 +502,7 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
     lastTurnPerf,
     stoppedPartial,
     supersededPartial,
+    composerDrafts,
     citationReports,
     meshMail,
     meshMailBySession,

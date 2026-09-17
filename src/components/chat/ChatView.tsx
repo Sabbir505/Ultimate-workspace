@@ -19,9 +19,13 @@ import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
 import { QuestionCard } from "./QuestionCard";
 import { PlanProposalCard } from "./PlanProposalCard";
-import type { PermissionMode } from "../../state/chat";
+import type { PermissionMode, ChatTaskProgress } from "../../state/chat";
 import { HARNESS_PERMISSION_MODES, permissionModeToPolicies } from "../../state/chat";
 import type { ChatPerfPayload } from "../../lib/ipc";
+// Stable fallback for the tasks-map selector below: a fresh `{}` literal per
+// store notification defeats zustand's Object.is bail-out and re-renders the
+// whole ChatView on every keystroke/token flush (audit H-3).
+const EMPTY_TASKS: Record<string, ChatTaskProgress> = {};
 // TypingIndicator is tiny and eager — imported from its own module so the
 // entry chunk doesn't statically pull in MessageBubble (react-markdown).
 import { TypingIndicator } from "./TypingIndicator";
@@ -145,7 +149,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   const getArtifactProposals = useChatStore((s) => s.getArtifactProposals);
   const editArtifactProposal = useChatStore((s) => s.editArtifactProposal);
   const sessionTaskMap = useChatStore((s) =>
-    activeChatSessionId ? (s.tasks[activeChatSessionId] ?? {}) : null,
+    activeChatSessionId ? (s.tasks[activeChatSessionId] ?? EMPTY_TASKS) : null,
   );
   const sessionTasks = /*@__PURE__*/ useMemo(
     () => (sessionTaskMap ? Object.values(sessionTaskMap) : []),
@@ -1763,7 +1767,13 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       )}
       {fullAccessConfirmingFor && (
         <FullAutoConfirmModal
-          onConfirm={() => void confirmFullAccess(fullAccessConfirmingFor!)}
+          onConfirm={() =>
+            confirmFullAccess(fullAccessConfirmingFor!).catch((e) =>
+              // The store keeps the modal open for retry, but the user needs
+              // to SEE why the switch failed (audit L-19).
+              console.error("approval-mode switch failed:", e),
+            )
+          }
           onCancel={cancelFullAccessConfirm}
         />
       )}

@@ -1021,11 +1021,21 @@ pub async fn send_chat_message(
         // sites; only the interactive turn needs the block). Auto-model
         // fail-over rebuilds prompts from SystemPromptInputs and skips the
         // block for that one fallback attempt — awareness resumes next turn.
+        // The workspace update rides beside it: same-project siblings that
+        // moved SINCE this session's last turn, so picking up where another
+        // chat left off needs no manual message_session bridge.
         let built = built.map(|sys| {
-            match crate::session_fabric::registry_block(&conn, Some(&chat_session_id)) {
+            let mut sys = match crate::session_fabric::registry_block(&conn, Some(&chat_session_id))
+            {
                 Some(block) if !block.trim().is_empty() => format!("{sys}\n\n{block}"),
                 _ => sys,
+            };
+            if let Some(update) =
+                crate::session_fabric::workspace_update_block(&conn, &chat_session_id)
+            {
+                sys = format!("{sys}\n\n{update}");
             }
+            sys
         });
         // [prompt-audit] inputs captured before `custom`/`skills` are consumed.
         let audit = (

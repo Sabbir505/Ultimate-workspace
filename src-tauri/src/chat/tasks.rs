@@ -395,8 +395,23 @@ impl TaskManager {
         match tasks.get(task_id) {
             Some(entry) => {
                 if let Some(tx) = entry.cancel.lock().take() {
-                    let _ = tx.send(());
-                    format!("Cancelling task {task_id}…")
+                    if tx.send(()).is_ok() {
+                        format!("Cancelling task {task_id}…")
+                    } else {
+                        // The receiver is gone: the runner future died (panic
+                        // or drop) without reaching a terminal state. Mark it
+                        // failed NOW or the snapshot stays Running forever and
+                        // every later poll/cancel reports a phantom task
+                        // (audit M-5). The status poll picks the state up.
+                        {
+                            let mut snap = entry.snapshot.lock();
+                            snap.state = TaskState::Failed;
+                            snap.message = "task runner died before completion".to_string();
+                        }
+                        format!(
+                            "Task {task_id} had already died (its runner is gone) — marked failed."
+                        )
+                    }
                 } else {
                     let state = entry.snapshot.lock().state;
                     match state {
@@ -494,6 +509,31 @@ impl TaskManager {
 /// finally sees — this only bounds what we buffer while draining.
 const SHELL_DRAIN_CAP: usize = 4 * 1024 * 1024;
 
+/// Best-effort tree kill on Windows: `child.kill()` terminates only the
+/// direct cmd.exe — grandchildren that inherited the pipe handles keep the
+/// output drains open forever (audit H-1). Runs while the parent PID is
+/// still alive so /T reaches the whole tree; non-Windows and failures are
+/// no-ops (the foreground path's bounded joins cover stragglers).
+fn kill_process_tree(pid: Option<u32>) {
+    #[cfg(windows)]
+    {
+        let Some(pid) = pid else { return };
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+    }
+}
+
 /// Synchronous shell execution: runs the command to completion and returns
 /// its combined stdout+stderr as a string. Used by the built-in provider path
 /// so the tool result (and therefore the captured output) flows into the turn
@@ -541,7 +581,13 @@ pub fn run_shell_to_completion(
     // accumulate GBs of RAM before the 8KB tail cap below ever applied.
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
-    let out_thread = std::thread::spawn(move || {
+    // Tails come back through channels, not `join()`: the join is an
+    // UNBOUNDED wait, and a grandchild that inherited the pipe handles keeps
+    // the drain open after kill (audit H-1). The threads are detached on
+    // grace timeout — their BoundedTail is dropped with them.
+    let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
+    let (err_tx, err_rx) = std::sync::mpsc::channel::<String>();
+    let _out_thread = std::thread::spawn(move || {
         let mut tail = crate::util::BoundedTail::new(SHELL_DRAIN_CAP);
         if let Some(p) = stdout_pipe.as_mut() {
             use std::io::Read;
@@ -553,9 +599,9 @@ pub fn run_shell_to_completion(
                 }
             }
         }
-        tail.into_lossy()
+        let _ = out_tx.send(tail.into_lossy());
     });
-    let err_thread = std::thread::spawn(move || {
+    let _err_thread = std::thread::spawn(move || {
         let mut tail = crate::util::BoundedTail::new(SHELL_DRAIN_CAP);
         if let Some(p) = stderr_pipe.as_mut() {
             use std::io::Read;
@@ -567,9 +613,9 @@ pub fn run_shell_to_completion(
                 }
             }
         }
-        tail.into_lossy()
+        let _ = err_tx.send(tail.into_lossy());
     });
-    // Bounded wait: poll try_wait until the child exits or the ceiling hits.
+// Bounded wait: poll try_wait until the child exits or the ceiling hits.
     let deadline = std::time::Instant::now() + timeout;
     let mut timed_out = false;
     loop {
@@ -578,6 +624,10 @@ pub fn run_shell_to_completion(
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     timed_out = true;
+                    // Tree kill FIRST: `child.kill()` only terminates the
+                    // direct cmd.exe — grandchildren that inherited the pipe
+                    // write handles keep the drain reads below open forever.
+                    kill_process_tree(Some(child.id()));
                     let _ = child.kill();
                     let _ = child.wait();
                     break;
@@ -587,8 +637,18 @@ pub fn run_shell_to_completion(
             Err(e) => return format!("could not wait for shell: {e}"),
         }
     }
-    let mut out = out_thread.join().unwrap_or_default();
-    let err = err_thread.join().unwrap_or_default();
+    // Bounded join: grandchildren that inherited the pipe handles can keep
+    // the drain reads open even after the direct child is gone — an
+    // unconditional `join()` here wedged the turn forever (audit H-1). Wait
+    // a short grace for each tail, then proceed with whatever was captured;
+    // a straggler thread simply detaches and its tail is dropped.
+    const DRAIN_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+    let mut out = out_rx
+        .recv_timeout(DRAIN_JOIN_GRACE)
+        .unwrap_or_default();
+    let err = err_rx
+        .recv_timeout(DRAIN_JOIN_GRACE)
+        .unwrap_or_default();
     if !err.is_empty() {
         out.push('\n');
         out.push_str(&err);
@@ -1048,6 +1108,10 @@ async fn shell_task<R: tauri::Runtime>(
         tokio::select! {
             biased;
             _ = &mut cancel_rx => {
+                // Tree kill first — kill_on_drop/kill only reach the direct
+                // cmd.exe; grandchildren holding the pipe handles would keep
+                // the line readers open after cancellation (audit H-1).
+                kill_process_tree(child.id());
                 let _ = child.kill().await;
                 {
                     let mut snap = entry.snapshot.lock();
@@ -1059,6 +1123,7 @@ async fn shell_task<R: tauri::Runtime>(
                 return;
             }
             _ = &mut deadline_fut => {
+                kill_process_tree(child.id());
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 let secs = timeout.map(|t| t.as_secs()).unwrap_or(0);

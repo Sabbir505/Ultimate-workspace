@@ -119,9 +119,15 @@ pub fn browser_action_result(
     // injected wrapper always does). Pages loaded in a browser pane are
     // untrusted and req ids are sequential/guessable — the nonce is the
     // shared secret only the wrapper that launched the action knows.
+    // The nonce is MANDATORY: req ids are sequential/guessable and pages in
+    // a pane can reach this command via the injected JS's Tauri invoke
+    // fallback — the old `None` arm resolved unverified, so a hostile page
+    // could spoof any in-flight action's result (audit M-11). The injected
+    // wrapper always echoes the nonce (it rides the args object on both the
+    // postMessage and invoke transports).
     match nonce {
         Some(n) => browser.0.resolve_action_verified(req_id, &n, result),
-        None => browser.0.resolve_action(req_id, result),
+        None => return Err("missing action nonce".into()),
     }
     Ok(())
 }

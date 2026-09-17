@@ -47,6 +47,7 @@ import {
   Plug,
   Plus,
   Pencil,
+  Tag,
   Trash2,
 } from "lucide-react";
 
@@ -82,6 +83,11 @@ export function ApiKeysPanel() {
   const [addingRow, setAddingRow] = useState(false);
   const [addId, setAddId] = useState("");
   const [addWindow, setAddWindow] = useState("");
+  const [addNote, setAddNote] = useState("");
+  // Per-row note editing (deals / promos / pricing quirks shown beside the
+  // model in the picker) — same inline pattern as the window editor.
+  const [editingNote, setEditingNote] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [addingNew, setAddingNew] = useState(false);
   // User-assigned endpoint name — what the rail shows instead of the kind
@@ -176,7 +182,11 @@ export function ApiKeysPanel() {
   // offers".
   const persistCurated = (list: SelectedModelEntry[]) => {
     const cleaned = list
-      .map((e) => ({ id: e.id.trim(), contextWindow: Math.max(0, Math.floor(e.contextWindow || 0)) }))
+      .map((e) => ({
+        id: e.id.trim(),
+        contextWindow: Math.max(0, Math.floor(e.contextWindow || 0)),
+        note: (e.note ?? "").trim().slice(0, 60),
+      }))
       .filter((e) => e.id);
     // Route through the settings STORE action — it persists the key AND
     // updates the in-memory providerModels map (which the composer's model
@@ -604,6 +614,7 @@ export function ApiKeysPanel() {
                         const live = fetchedModels.find((m) => m.id === entry.id)?.contextWindow;
                         return formatWindowBadge(live) ? <span className="api-model-badge is-live">{formatWindowBadge(live)}</span> : null;
                       })()}
+                      {entry.note && <span className="api-model-badge is-note">{entry.note}</span>}
                     </span>
                     {editingWindow === entry.id ? (
                       <span className="api-model-row-edit">
@@ -638,9 +649,40 @@ export function ApiKeysPanel() {
                           setEditingWindow(entry.id);
                           setWindowDraft(entry.contextWindow ? String(entry.contextWindow) : "");
                         }}><Pencil size={13} /></button>
+                        <button type="button" className="api-icon-button" title="Edit note — deals, promos, pricing quirks (shown beside the model in the picker)" onClick={() => {
+                          setEditingNote(entry.id);
+                          setNoteDraft(entry.note ?? "");
+                        }}><Tag size={13} /></button>
                         <button type="button" className="api-icon-button" title="Remove from list" onClick={() => persistCurated(curatedModels.filter((m) => m.id !== entry.id))}>✕</button>
                       </span>
                     )}
+                    {editingNote === entry.id ? (
+                      <span className="api-model-row-edit">
+                        <input
+                          type="text"
+                          maxLength={60}
+                          autoFocus
+                          value={noteDraft}
+                          placeholder="e.g. 99% off · 6x usage"
+                          onChange={(e) => setNoteDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              persistCurated(curatedModels.map((m) =>
+                                m.id === entry.id ? { ...m, note: noteDraft } : m,
+                              ));
+                              setEditingNote(null);
+                            }
+                            if (e.key === "Escape") setEditingNote(null);
+                          }}
+                        />
+                        <button type="button" className="api-text-button" onClick={() => {
+                          persistCurated(curatedModels.map((m) =>
+                            m.id === entry.id ? { ...m, note: noteDraft } : m,
+                          ));
+                          setEditingNote(null);
+                        }}>Save</button>
+                      </span>
+                    ) : null}
                   </div>
                 ))}
                 {addingRow && (
@@ -671,16 +713,26 @@ export function ApiKeysPanel() {
                       placeholder="context (0 = auto)"
                       onChange={(e) => setAddWindow(e.target.value)}
                     />
+                    <input
+                      className="api-model-add-note"
+                      type="text"
+                      maxLength={60}
+                      value={addNote}
+                      placeholder="note (deal, promo…)"
+                      onChange={(e) => setAddNote(e.target.value)}
+                    />
                     <button type="button" className="api-text-button" disabled={!addId.trim()} onClick={() => {
                       persistCurated([...curatedModels, {
                         id: addId.trim(),
                         contextWindow: Math.max(0, Math.floor(Number(addWindow) || 0)),
+                        note: addNote.trim().slice(0, 60),
                       }]);
                       setAddId("");
                       setAddWindow("");
+                      setAddNote("");
                       setAddingRow(false);
                     }}>Add</button>
-                    <button type="button" className="api-text-button" onClick={() => { setAddingRow(false); setAddId(""); setAddWindow(""); }}>Cancel</button>
+                    <button type="button" className="api-text-button" onClick={() => { setAddingRow(false); setAddId(""); setAddWindow(""); setAddNote(""); }}>Cancel</button>
                   </div>
                 )}
               </div>

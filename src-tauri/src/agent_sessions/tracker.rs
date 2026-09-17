@@ -369,6 +369,14 @@ impl ToolTracker {
         // exact tool_use id or a task_notification, never through this queue.
         // Without the skip, a background agent's receipt-consumed slot would
         // eat the NEXT tool's result (the FIFO desync that garbled panes).
+        //
+        // NOTE (audit M-8, deliberately NOT finalized here): discarding the
+        // slot without finalizing looks like a leak, but finalizing here would
+        // regress the "Done ✓ but still working" fix — a background agent's
+        // launch receipt is swallowed above and its REAL completion can arrive
+        // minutes later by exact id / task_notification. The failure modes are
+        // covered instead by (a) reader-EOF `fail_pending` for a dead CLI and
+        // (b) `finish_background` for the notification path.
         while let Some(front) = self.pending.front() {
             match &front.sub_tool_use_id {
                 Some(t) if self.by_tool_use.contains_key(t) => {

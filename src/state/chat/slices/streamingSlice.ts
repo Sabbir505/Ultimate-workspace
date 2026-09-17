@@ -631,7 +631,10 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // finished one unread, so it surfaces in the sidebar. Best-effort: this
       // handler must ALWAYS reach the streaming-state cleanup below — an
       // awaited IPC rejection here would wedge the session in "working" state.
-      if (get().activeChatSessionId !== chatSessionId) {
+      // Pane-displayed sessions count as viewed too: in split view both panes
+      // are on screen, so marking the un-focused-but-visible one unread while
+      // the user watches it complete was wrong (audit L-25).
+      if (bufferTargetFor(get(), chatSessionId) == null) {
         void setChatSessionUnread(chatSessionId, true).catch(() => {});
       }
       // Capture the finished turn's final metrics for the composer's idle row

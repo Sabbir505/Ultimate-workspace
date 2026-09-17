@@ -365,7 +365,13 @@ fn print_via_webview(
             }
         }),
     )
-    .map_err(|e| format!("PrintToPdf failed: {e}"))?;
+    // Through `cleanup` like every other error path: a failed PrintToPdf
+    // used to leave the multi-MB relay-print-*.html in the user's temp dir
+    // (audit L-8).
+    .map_err(|e| {
+        let _ = std::fs::remove_file(&temp_html);
+        format!("PrintToPdf failed: {e}")
+    })?;
 
     if !std::path::Path::new(out_path).is_file() {
         return cleanup(Err("PrintToPdf completed but produced no file.".to_string()));

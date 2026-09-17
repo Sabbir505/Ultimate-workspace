@@ -165,7 +165,10 @@ pub async fn install_pinned_zip(
                 continue;
             }
             let name = entry.name().to_string();
-            if !(name.ends_with(".exe") || name.ends_with(".dll")) {
+            // Case-insensitive: an entry named e.g. FOO.DLL must not be
+            // silently skipped by a lowercase-only match.
+            let name_lower = name.to_lowercase();
+            if !(name_lower.ends_with(".exe") || name_lower.ends_with(".dll")) {
                 continue;
             }
             let base = name.rsplit(['/', '\\']).next().unwrap_or(&name).to_string();

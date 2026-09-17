@@ -126,6 +126,7 @@ pub async fn llama_install_cuda(
                 LLAMA_CUDA_INSTALL_ID,
                 &app,
             )?;
+            require_cuda_runtime_dlls(&install_dir, &app)?;
             crate::commands::build_updates::write_build_marker(&install_dir, LLAMA_CPP_TAG)?;
         }
 
@@ -158,6 +159,48 @@ pub async fn llama_install_cuda(
             version: Some(LLAMA_CPP_TAG.to_string()),
         })
     }
+}
+
+/// Confirm the extracted CUDA build can actually load its GPU backend: the
+/// archive must deliver the CUDA runtime DLLs (`cudart64_*`, `cublas64_*`,
+/// `cublasLt64_*`) beside `ggml-cuda.dll`. Newer upstream zips stopped
+/// bundling them — without these, `ggml-cuda.dll` silently fails to load and
+/// llama-server falls back to CPU: the install "succeeds", but GPU offload
+/// never happens (the exact regression this check turns into a loud error).
+fn require_cuda_runtime_dlls(install_dir: &PathBuf, app: &tauri::AppHandle) -> Result<(), String> {
+    let missing: Vec<&str> = ["cudart64_", "cublas64_", "cublaslt64_"]
+        .into_iter()
+        .filter(|prefix| {
+            !std::fs::read_dir(install_dir)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .any(|e| e.file_name().to_string_lossy().to_lowercase().starts_with(prefix))
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let msg = format!(
+        "the llama.cpp CUDA archive is missing its CUDA runtime DLLs ({}) — \
+         GPU offload would silently run on CPU. Copy the CUDA 12 runtime DLLs \
+         (cudart64_12.dll, cublas64_12.dll, cublasLt64_12.dll) into {} or pin an \
+         archive that bundles them.",
+        missing.join(", "),
+        install_dir.display(),
+    );
+    crate::commands::pinned_zip::emit_progress_for(
+        app,
+        LLAMA_CUDA_INSTALL_ID,
+        DownloadState::Error,
+        0,
+        None,
+        None,
+        Some(msg.clone()),
+    );
+    Err(msg)
 }
 
 type CmdResult<T> = Result<T, String>;

@@ -1541,7 +1541,19 @@ pub fn llama_server_build_probe(
     user_path: Option<&str>,
 ) -> Option<crate::commands::llama_build::ResolvedLlamaServer> {
     let resolved = resolve_llama_server_binary(user_path).ok()?;
+    // CUDA capability needs BOTH the backend DLL and the CUDA runtime DLLs it
+    // dlopens (cudart64_*, cublas*). A ggml-cuda.dll without its runtime
+    // silently falls back to CPU at spawn time — reporting CUDA here would
+    // make the build-updater row lie about what a load will actually do.
+    let has_runtime_dll = |prefix: &str| {
+        std::fs::read_dir(&resolved.dir).map_or(false, |entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().to_lowercase().starts_with(prefix))
+        })
+    };
     let is_cuda = cfg!(windows) && resolved.dir.join("ggml-cuda.dll").is_file()
+        && has_runtime_dll("cudart64_")
         || !cfg!(windows)
             && (resolved.dir.join("ggml-cuda.so").is_file()
                 || resolved.dir.join("libggml-cuda.so").is_file()

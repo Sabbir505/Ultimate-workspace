@@ -467,6 +467,10 @@ export function GitToolsSidebar() {
       : nextPendingStep
         ? nextPendingStep.label
         : null;
+  // The pill is the collapsed rail's progress indicator only when something is
+  // actually RUNNING (goal loop / in-progress plan step); a queued next step
+  // shows the same pill but static — no shine.
+  const taskRunning = !!activeLoop?.active || !!inProgressStep;
   const collapsedStatus = activeTaskLabel
     ? activeTaskLabel
     : added + deleted > 0
@@ -490,10 +494,11 @@ export function GitToolsSidebar() {
     >
       <div className="git-sidebar-inner">
         <div className="git-sidebar-header">
-          {/* Collapsed with a live task/goal/plan: the chip widens into a
-              clickable capsule — arrow + current label, full text on hover.
-              Clicking the pill expands the sidebar (the small icon button
-              still works too). */}
+          {/* Collapsed with a live task/goal/plan: the chip widens into ONE
+              clickable capsule — arrow + current label + the git-branch mark,
+              all inside a single background/radius (the branch glyph used to
+              be a separate header button floating beside the pill). Clicking
+              the capsule expands the sidebar. */}
           {gitSidebarCollapsed && activeTaskLabel && (
             <button
               className="git-sidebar-task-pill"
@@ -506,8 +511,15 @@ export function GitToolsSidebar() {
                   <path d="M5 12h14" />
                   <path d="m13 6 6 6-6 6" />
                 </svg>
-                <span className="git-sidebar-task-pill-label">{activeTaskLabel}</span>
+                <span className={`git-sidebar-task-pill-label${taskRunning ? " is-live" : ""}`}>{activeTaskLabel}</span>
               </span>
+              <svg className="git-sidebar-task-pill-git" width={13} height={13} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="4" cy="3" r="1.5" />
+                <circle cx="4" cy="13" r="1.5" />
+                <circle cx="12" cy="3" r="1.5" />
+                <path d="M4 4.5v7" />
+                <path d="M12 4.5c0 4-4 2-4 4.5" />
+              </svg>
             </button>
           )}
           {/* Collapsed without a task: the plain status line (changes summary
@@ -517,21 +529,27 @@ export function GitToolsSidebar() {
               {collapsedStatus}
             </div>
           )}
-          {/* Whole-sidebar collapse/expand. Same icon in both states. */}
-          <button
-            className="git-sidebar-collapse-btn"
-            onClick={toggleGitSidebar}
-            title={gitSidebarCollapsed ? "Expand git tools" : "Collapse git tools"}
-            aria-label={gitSidebarCollapsed ? "Expand git tools" : "Collapse git tools"}
-          >
-            <svg width={14} height={14} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="4" cy="3" r="1.5" />
-              <circle cx="4" cy="13" r="1.5" />
-              <circle cx="12" cy="3" r="1.5" />
-              <path d="M4 4.5v7" />
-              <path d="M12 4.5c0 4-4 2-4 4.5" />
-            </svg>
-          </button>
+          {/* Whole-sidebar collapse/expand. Same icon in both states. Not
+              rendered while the task pill is showing: the pill IS the control
+              then (its trailing git glyph keeps the rail's identity), and a
+              second floating branch icon beside the capsule read as a stray
+              detached element. */}
+          {!(gitSidebarCollapsed && activeTaskLabel) && (
+            <button
+              className="git-sidebar-collapse-btn"
+              onClick={toggleGitSidebar}
+              title={gitSidebarCollapsed ? "Expand git tools" : "Collapse git tools"}
+              aria-label={gitSidebarCollapsed ? "Expand git tools" : "Collapse git tools"}
+            >
+              <svg width={14} height={14} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="4" cy="3" r="1.5" />
+                <circle cx="4" cy="13" r="1.5" />
+                <circle cx="12" cy="3" r="1.5" />
+                <path d="M4 4.5v7" />
+                <path d="M12 4.5c0 4-4 2-4 4.5" />
+              </svg>
+            </button>
+          )}
           {/* Git-section disclosure toggle. */}
           <button
             className="git-sidebar-header-left"

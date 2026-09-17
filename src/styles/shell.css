@@ -532,7 +532,7 @@
 .git-sidebar-task-pill {
   position: absolute;
   left: 8px;
-  right: 34px;
+  right: 8px;
   top: 50%;
   transform: translateY(-50%);
   display: flex;
@@ -555,6 +555,14 @@
 }
 .git-sidebar-task-pill-arrow {
   flex: none;
+}
+/* The trailing git-branch mark INSIDE the capsule — the rail's identity rides
+   with the pill now that the separate header branch button is not rendered in
+   this state. flex:none so the truncating label never squeezes it out. */
+.git-sidebar-task-pill-git {
+  flex: none;
+  margin-left: auto;
+  opacity: 0.85;
 }
 /* The text span is the single inline-flex child wrapping arrow + label, so
    the capsule border always contains both — the arrow can never separate

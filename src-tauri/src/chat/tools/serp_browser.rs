@@ -8,13 +8,13 @@
 //! `browser_*` chat tools drive, so the trust layer (user pause/stop) applies
 //! unchanged.
 //!
-//! Lifecycle: when a browser pane is already open, the sweep runs in a
-//! THROWAWAY tab that is closed again afterwards (background research — if
-//! the user should SEE a page, the model calls `open_url`, which is the
-//! existing "show the user" contract). When no pane exists, one is opened and
-//! left on the SERP: the pane is frontend-owned, so tearing it down from the
-//! backend would strand the UI half-closed, and "the agent searched here" is
-//! honest information for the user anyway.
+//! Lifecycle: the sweep REUSES an existing SERP tab — the previous search's
+//! tab, in any live pane — by navigating it to the new query, so repeated
+//! searches no longer pile up one throwaway tab per turn (2026-09-18 report).
+//! When no SERP tab exists, one is created in the active browser pane, or a
+//! fresh pane (left open) when none exists; the tab then persists as the next
+//! sweep's reuse target. The user's own tabs are never closed, and `open_url`
+//! remains the "show the user a page" contract.
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -117,6 +117,55 @@ async fn load_and_extract(
     Ok(parse_extraction(&raw))
 }
 
+/// Host check for reuse candidates. Mirrors `search::is_serp_host` but kept
+/// local: the sweep already sits in the chat-tools layer, and inlining avoids
+/// re-shaping that helper's visibility for one call site.
+fn is_serp_tab_url(url: &str) -> bool {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    host == "duckduckgo.com"
+        || host.ends_with(".duckduckgo.com")
+        || host == "mojeek.com"
+        || host.ends_with(".mojeek.com")
+}
+
+/// Parse a `browser-{pane}-tab-{tab}` label back into its halves.
+fn split_browser_label(label: &str) -> Option<(String, String)> {
+    label
+        .strip_prefix("browser-")
+        .and_then(|rest| rest.split_once("-tab-"))
+        .map(|(p, t)| (p.to_string(), t.to_string()))
+}
+
+/// Find a reusable SERP tab: a LIVE tab whose remembered URL sits on a SERP
+/// host. The active pane's own search tab wins; otherwise the most recent
+/// sweep's tab anywhere (e.g. the dedicated search pane's) is reused so the
+/// app converges on exactly one search surface. Returns (pane_id, tab_id).
+fn find_reusable_serp_tab(
+    mgr: &BrowserManager,
+    pane_hint: Option<&str>,
+) -> Option<(String, String)> {
+    let mut any: Option<(String, String)> = None;
+    for (label, url) in mgr.live_tab_urls() {
+        if !is_serp_tab_url(&url) {
+            continue;
+        }
+        let Some((pid, tid)) = split_browser_label(&label) else {
+            continue;
+        };
+        if Some(pid.as_str()) == pane_hint {
+            return Some((pid, tid));
+        }
+        if any.is_none() {
+            any = Some((pid, tid));
+        }
+    }
+    any
+}
+
 /// Run `query` against the keyless SERPs inside the built-in browser pane.
 /// Tries DuckDuckGo's HTML endpoint first, Mojeek if the first page yields
 /// nothing. The entire sweep is bounded by a 40s timeout; every failure mode
@@ -136,39 +185,41 @@ pub(crate) async fn browser_serp_search(
             percent_encode_query(query)
         );
 
-        // Host the sweep: a throwaway tab in the open pane, or a fresh pane
-        // (left open — see the module doc) when none exists.
-        let (pane_id, tab_id, created_tab) = match mgr.active_pane_id() {
-            Some(pid) => {
-                let tid = mgr
-                    .new_tab_for_pane(&pid, &ddg_url)
-                    .await
-                    .map_err(|e| format!("browser SERP tab creation failed: {e}"))?;
-                (pid, tid, true)
-            }
-            None => {
-                let label = mgr
-                    .open_pane_for_project(SEARCH_PANE_PROJECT, &ddg_url)
-                    .await
-                    .map_err(|e| format!("browser SERP pane creation failed: {e}"))?;
-                // Label is `browser-{pane}-tab-{tab}` — split it back out.
-                let (pid, tid) = label
-                    .strip_prefix("browser-")
-                    .and_then(|rest| rest.split_once("-tab-"))
-                    .map(|(p, t)| (p.to_string(), t.to_string()))
-                    .ok_or_else(|| format!("unparsable browser label: {label}"))?;
-                (pid, tid, false)
-            }
-        };
+        // Reuse before spawn: the previous search's tab is navigated to the
+        // new query; a fresh tab (active pane) or a fresh pane is only spun
+        // up when no SERP tab is alive anywhere. The tab then persists as the
+        // next sweep's reuse target — one search surface, never a pile-up.
+        let (pane_id, tab_id, navigate_needed) =
+            match find_reusable_serp_tab(&mgr, mgr.active_pane_id().as_deref()) {
+                Some((pid, tid)) => (pid, tid, true),
+                None => match mgr.active_pane_id() {
+                    Some(pid) => {
+                        let tid = mgr
+                            .new_tab_for_pane(&pid, &ddg_url)
+                            .await
+                            .map_err(|e| format!("browser SERP tab creation failed: {e}"))?;
+                        (pid, tid, false)
+                    }
+                    None => {
+                        let label = mgr
+                            .open_pane_for_project(SEARCH_PANE_PROJECT, &ddg_url)
+                            .await
+                            .map_err(|e| format!("browser SERP pane creation failed: {e}"))?;
+                        let (pid, tid) = split_browser_label(&label)
+                            .ok_or_else(|| format!("unparsable browser label: {label}"))?;
+                        (pid, tid, false)
+                    }
+                },
+            };
         let label = crate::browser::browser_label(&pane_id, &tab_id);
         let _ = app.emit(
             "browser:activity",
             serde_json::json!({ "pane_id": pane_id }),
         );
 
-        // The fresh tab / fresh pane already points at the DDG SERP; an
-        // explicit navigate is only needed for the second engine.
-        let first = load_and_extract(&mgr, app, &pane_id, &tab_id, &label, &ddg_url, false).await;
+        // A fresh tab / fresh pane already points at the DDG SERP; a REUSED
+        // tab (and the second engine) needs an explicit navigate.
+        let first = load_and_extract(&mgr, app, &pane_id, &tab_id, &label, &ddg_url, navigate_needed).await;
         let hits = match first {
             Ok(h) if !h.is_empty() => h,
             first => {
@@ -180,20 +231,10 @@ pub(crate) async fn browser_serp_search(
                     .await
                 {
                     Ok(h) => h,
-                    Err(mojeek_err) => {
-                        if created_tab {
-                            let _ = mgr.close_tab_for_pane(&pane_id, &tab_id).await;
-                        }
-                        return Err(first.err().unwrap_or(mojeek_err));
-                    }
+                    Err(mojeek_err) => return Err(first.err().unwrap_or(mojeek_err)),
                 }
             }
         };
-
-        if created_tab {
-            // Best effort: the pane (and the user's own tabs) are untouched.
-            let _ = mgr.close_tab_for_pane(&pane_id, &tab_id).await;
-        }
 
         Ok(hits)
     };

@@ -2752,9 +2752,11 @@ button.chat-mermaid-open {
 /* Live tool rows (folded group + single step): no spinner, no ✓ — the title
    itself is the progress indicator. A bright band sweeps first word → last
    word on a loop until the turn's tools finish; the text sits at --text-dim
-   so the crossing band reads as a shine. */
+   so the crossing band reads as a shine. The collapsed git rail's task pill
+   carries the same treatment: it IS the last running call's label. */
 .chat-fold-title.is-live,
-.chat-step-label.is-live {
+.chat-step-label.is-live,
+.git-sidebar-task-pill-label.is-live {
   background-image: linear-gradient(
     90deg,
     var(--text-dim) 0%,
@@ -2780,7 +2782,8 @@ button.chat-mermaid-open {
 }
 @media (prefers-reduced-motion: reduce) {
   .chat-fold-title.is-live,
-  .chat-step-label.is-live {
+  .chat-step-label.is-live,
+  .git-sidebar-task-pill-label.is-live {
     animation: none;
   }
 }
@@ -4703,6 +4706,16 @@ button.chat-mermaid-open {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+/* The markdown root is this flex row's item. Flex items refuse to shrink
+   below their min-content width (min-width: auto), and a fenced code block's
+   longest pre line counts toward it — so once the pane narrows past that
+   line, the WHOLE markdown (prose included) overflowed the bubble to the
+   right while the bubble card kept the 80% cap. min-width: 0 drops the floor:
+   prose re-wraps at the bubble width and the code block scrolls internally
+   (its wrapper is overflow-x: auto) instead of pushing everything out. */
+.msg-user-line > .chat-markdown {
+  min-width: 0;
 }
 .msg-user-line p {
   margin: 0;

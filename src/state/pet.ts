@@ -715,6 +715,21 @@ export const usePetStore = create<PetStoreState>((set, get) => ({
         changed = true;
       }
     }
+    // Self-heal a stale home: the pet must live on a MOUNTED strip. Register
+    // events normally relocate it (pane closed, view switched), but a missed
+    // event (native-webview focus steal, cross-window persistence divergence,
+    // a strip that unmounted before its cleanup ran) leaves home pointing at
+    // a dead strip — the pet renders nowhere ("vanished pet"). Every tick
+    // re-checks, so the longest a stale home can hide the pet is one frame.
+    if (s0.homes.length > 0 && !s0.homes.includes(s0.home)) {
+      const candidates = s0.homes.filter((h) => h !== s0.home);
+      const to = candidates[Math.floor(Math.random() * candidates.length)] ?? s0.homes[0];
+      if (to) {
+        patch.home = to;
+        patch.teleport = null;
+        changed = true;
+      }
+    }
     if (changed) set(patch);
   },
 

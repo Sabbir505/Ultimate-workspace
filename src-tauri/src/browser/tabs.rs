@@ -83,6 +83,19 @@ impl BrowserManager {
         self.tab_urls.lock().insert(label.to_string(), url.to_string());
     }
 
+    /// `(label, remembered url)` for every tab whose webview is ALIVE. The
+    /// frontend owns the authoritative tab list, so the backend can only
+    /// enumerate what it has seen navigate; dead tabs drop out here because
+    /// their webview registration is gone. Backs the SERP sweep's tab reuse.
+    pub fn live_tab_urls(&self) -> Vec<(String, String)> {
+        let webviews = self.webviews.lock();
+        let urls = self.tab_urls.lock();
+        urls.iter()
+            .filter(|(label, _)| webviews.contains_key(*label))
+            .map(|(label, url)| (label.clone(), url.clone()))
+            .collect()
+    }
+
     pub fn tab_url(&self, label: &str) -> Option<String> {
         self.tab_urls.lock().get(label).cloned()
     }

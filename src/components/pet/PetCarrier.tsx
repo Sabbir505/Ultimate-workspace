@@ -24,6 +24,27 @@ export function PetCarrier() {
 
   useEffect(() => {
     if (!dragging) return;
+    // Lost-release recovery: the window pointerup/pointercancel listeners in
+    // PetStrip never fire when the release lands over a NATIVE webview (a
+    // browser pane swallows the event at the OS layer) or the window loses
+    // focus mid-carry. A drag stuck on hides the pet from every home (strips
+    // render nothing while `dragging`), which reads as "the pet vanished".
+    // Ending the carry lands it back in its current home — worst case a
+    // gentle plop, never a disappearance.
+    const release = () => usePetStore.getState().endDrag();
+    const onVisibility = () => {
+      if (document.hidden) release();
+    };
+    window.addEventListener("blur", release);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("blur", release);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [dragging]);
+
+  useEffect(() => {
+    if (!dragging) return;
     let raf = 0;
     const loop = () => {
       raf = requestAnimationFrame(loop);

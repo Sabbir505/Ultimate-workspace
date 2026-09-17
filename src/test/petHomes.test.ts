@@ -72,4 +72,15 @@ describe("pet homes", () => {
     expect(s.teleport).toBeNull();
     expect(s.nextTeleportAt).toBeGreaterThan(Date.now()); // rescheduled
   });
+
+  it("self-heals a stale home on the next tick (vanished-pet guard)", () => {
+    // A missed unmount event (native-webview focus steal, cross-window
+    // persistence divergence) can leave home pointing at a strip that no
+    // register/unmount pass will ever fix. The tick must relocate it.
+    usePetStore.setState({ home: "pane-9", homes: ["sidebar", "main"], teleport: null });
+    usePetStore.getState().tick(Date.now(), 0.016);
+    const s = usePetStore.getState();
+    expect(s.homes).toContain(s.home);
+    expect(s.teleport).toBeNull();
+  });
 });

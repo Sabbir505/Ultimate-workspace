@@ -145,6 +145,20 @@ export function ToolPanel() {
   const activeTabId = useUiStore((s) => s.activeTabId);
   const addTab = useUiStore((s) => s.addTab);
   const closeTab = useUiStore((s) => s.closeTab);
+  // Closing a BROWSER chip is a close-the-browser gesture, not a hide: the
+  // pane is chip-bound and a chipless pane would be re-adopted wholesale by
+  // openBrowserPane on the next open, resurrecting every old tab (2026-09-18
+  // report). Kill the bound pane (closePane disposes its webviews) so the
+  // next Browser tab opens fresh with one tab. Other chip kinds have no pane.
+  const closePanelTab = useCallback(
+    (inst: ToolPanelTabInstance) => {
+      if (inst.kind === "browser" && inst.paneId) {
+        usePanesStore.getState().closePane(inst.paneId);
+      }
+      closeTab(inst.instanceId);
+    },
+    [closeTab],
+  );
   const activateTab = useUiStore((s) => s.activateTab);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
   const collapsed = useUiStore((s) => s.toolPanelCollapsed);
@@ -449,7 +463,7 @@ export function ToolPanel() {
                     <span className="tool-panel-tabchip-label">{label}</span>
                     <button
                       className="ghost tool-panel-tabchip-close"
-                      onClick={(e) => { e.stopPropagation(); closeTab(inst.instanceId); }}
+                      onClick={(e) => { e.stopPropagation(); closePanelTab(inst); }}
                       title="Close tab"
                     >
                       ✕

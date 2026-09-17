@@ -720,6 +720,9 @@ pub fn build_system_prompt(
     research_mode: bool,
     plan_mode: bool,
     manifest: Option<&str>,
+    // Legacy hook, always None from live send paths: per-turn memory
+    // injection moved to the on-demand memory tools (§12.1) — retrieved text
+    // here changed every turn and invalidated the prompt prefix caches.
     memory_profile: Option<&str>,
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();

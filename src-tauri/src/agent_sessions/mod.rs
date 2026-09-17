@@ -712,30 +712,24 @@ impl AgentSessionManager {
         } else {
             effective
         };
-        // Session Mesh hint rides EVERY turn of RESUMED CLI sessions: the
-        // full registry block rides only the first turn's instructions, so a
-        // reopened chat had the mesh tools but nothing steering it to use
-        // them for "what did we do last session" — it answered from its own
-        // CLI's session data instead. Fresh sessions already carry the full
-        // context and skip the duplicate.
-        let effective = if !fresh_cli {
+        // Session Mesh is ON DEMAND: the mesh tools carry peer awareness
+        // (list_sessions / read_session / search_sessions / message_session
+        // / spawn_session), so nothing per-turn is injected — the old
+        // registry block's relative ages ("idle 3m") and the workspace
+        // update's "moved since last turn" peer tails changed every turn,
+        // invalidating the CLI's own prompt cache. What RIDES every turn is
+        // the STABLE identity hint (fixed session id + tool names, fresh and
+        // resumed alike): the relay-tools bridge needs the model to know its
+        // own caller_session_id, and no other per-session fact is volatile.
+        let effective = if has_relay_tools {
             let hint = {
                 let conn = db.0.lock();
                 crate::session_fabric::resumed_turn_hint(&conn, has_relay_tools, chat_session_id)
             };
-            let effective = match hint {
-                Some(h) => format!("{effective}\n\n{h}"),
-                None => effective,
-            };
-            // Workspace update rides the same slot: same-project siblings
-            // that moved since THIS session's last turn — the automatic
-            // bridge for "pick up where the other chat left off".
-            let update = {
-                let conn = db.0.lock();
-                crate::session_fabric::workspace_update_block(&conn, chat_session_id)
-            };
-            match update {
-                Some(u) => format!("{effective}\n\n{u}"),
+            match hint {
+                Some(h) => format!("{effective}
+
+{h}"),
                 None => effective,
             }
         } else {

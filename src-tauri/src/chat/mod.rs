@@ -85,7 +85,6 @@ pub struct SystemPromptInputs {
     pub custom: Option<String>,
     pub skills: Vec<(String, String)>,
     pub manifest: Option<String>,
-    pub memory_profile: Option<String>,
     pub plan_mode: bool,
     pub system_suffix: String,
 }
@@ -767,7 +766,7 @@ impl ChatManager {
                         research_mode,
                         inp.plan_mode,
                         inp.manifest.as_deref(),
-                        inp.memory_profile.as_deref(),
+                        None,
                     )
                     .unwrap_or_default();
                     s.push_str(&inp.system_suffix);
@@ -1673,6 +1672,13 @@ async fn run_turn_attempt(
     perf: &turn_perf::TurnPerf,
     ping: Option<&reconnect::PingTarget>,
 ) -> Result<(String, Option<ChatUsage>), String> {
+    // Local sidecars get a wider time-to-headers window — their serialized
+    // prefill (warmup + this turn queued behind it) delays headers well past
+    // the cloud-default 60s even on a healthy server.
+    let headers_timeout = reconnect::headers_timeout(matches!(
+        cand.provider_id,
+        ChatProviderId::LocalGguf
+    ));
     if tools_enabled && cand_is_openai {
         run_openai_tool_loop(
             client,
@@ -1688,6 +1694,7 @@ async fn run_turn_attempt(
             research_mode,
             cand_cache_marks,
             perf.clone(),
+            headers_timeout,
         )
         .await
     } else if tools_enabled && cand_is_anthropic {
@@ -1704,6 +1711,7 @@ async fn run_turn_attempt(
             app,
             research_mode,
             perf.clone(),
+            headers_timeout,
         )
         .await
     } else {
@@ -1717,6 +1725,7 @@ async fn run_turn_attempt(
             Some(app),
             perf,
             ping,
+            headers_timeout,
         )
         .await
     }
@@ -1740,6 +1749,9 @@ pub(crate) async fn run_chat_stream(
     // silent round is treated as a slow model rather than a lost connection
     // (chat/reconnect.rs). `None` keeps the old flat deadline.
     ping: Option<&reconnect::PingTarget>,
+    // Time-to-headers bound (reconnect::headers_timeout): widened for local
+    // sidecars, whose serialized prefill legitimately delays headers.
+    headers_timeout: std::time::Duration,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let request = provider
         .build_request(client, req, api_key, base_url)
@@ -1753,9 +1765,14 @@ pub(crate) async fn run_chat_stream(
     // B-10: bound time-to-headers — a blackholed connect otherwise hangs the
     // turn forever (OS TCP timeouts can be minutes). The B-9 watchdog below
     // covers the body.
-    let response = tokio::time::timeout(std::time::Duration::from_secs(60), request.send())
+    let response = tokio::time::timeout(headers_timeout, request.send())
         .await
-        .map_err(|_| "request timed out waiting for response headers (60s)".to_string())?
+        .map_err(|_| {
+            format!(
+                "request timed out waiting for response headers ({}s)",
+                headers_timeout.as_secs()
+            )
+        })?
         .map_err(|e| format!("request failed: {e}"))?;
 
     let status = response.status();
@@ -2726,6 +2743,7 @@ mod tests {
             std::time::Duration::from_secs(15),
             run_chat_stream(
                 &client, &provider, "sid-done", &req, "key", None, None, &perf, None,
+                std::time::Duration::from_secs(60),
             ),
         )
         .await

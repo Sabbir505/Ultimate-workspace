@@ -66,6 +66,26 @@ pub const IDLE_HARD_CAP: Duration = Duration::from_secs(90);
 /// told us what we needed to know.
 pub const PING_TIMEOUT: Duration = Duration::from_secs(4);
 
+/// Time-to-headers bound for one chat attempt, by provider kind.
+///
+/// Cloud endpoints answer headers in ~RTT, so 60s is generous. A local
+/// llama-server is a different beast: the sidecar serializes prompt prefill
+/// (unified KV cache), so a send issued while a warmup or the previous turn
+/// is mid-prefill waits for ITS prefill before headers move at all — the
+/// server is up and healthy, just busy, and on a CPU-only machine a long
+/// prefill comfortably exceeds 60s. That tripped the flat window and surfaced
+/// as "timed out waiting for response headers — gave up after 0 reconnect
+/// attempts"; retries can't fix a retry of a still-busy server, so local
+/// turns get a wider window instead and the stall watchdog still guards the
+/// body once headers arrive.
+pub fn headers_timeout(is_local: bool) -> Duration {
+    if is_local {
+        Duration::from_secs(300)
+    } else {
+        Duration::from_secs(60)
+    }
+}
+
 /// How long one attempt waits for the endpoint to answer a ping before it
 /// stops waiting and tries the request anyway.
 pub const PING_WAIT: Duration = Duration::from_secs(5);

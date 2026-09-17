@@ -1028,6 +1028,9 @@ async fn run_task_subagent(
     // Build the streaming request. OpenAI-style providers use /v1/chat/completions;
     // Anthropic uses /v1/messages with a different body shape.
     let is_anthropic = matches!(provider_str.as_str(), "anthropic" | "anthropic_compatible");
+    // Local sidecars serialize prompt prefill, so their headers legitimately
+    // wait on a busy server — widen the time-to-headers window for them.
+    let headers_timeout = crate::chat::reconnect::headers_timeout(provider_str == "local_gguf");
     // B-10: bounded connect; stream reads are guarded by the stall watchdog.
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(20))
@@ -1051,7 +1054,7 @@ async fn run_task_subagent(
             // back into the follow-up rounds' assistant messages.
             "thinking": {"type": "enabled", "budget_tokens": 2048},
         });
-        run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, sub_id, true).await
+        run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, sub_id, true, headers_timeout).await
     } else {
         // Audit: compatible/local endpoints REQUIRE a configured base URL —
         // the api.openai.com fallback used to send the user's key and the
@@ -1071,7 +1074,7 @@ async fn run_task_subagent(
                         {"role": "user", "content": prompt},
                     ],
                 });
-                run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, sub_id, false)
+                run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, sub_id, false, headers_timeout)
                     .await
             }
         }
@@ -1208,6 +1211,7 @@ async fn run_subagent_loop(
     sid: &str,
     sub_id: &str,
     is_anthropic: bool,
+    headers_timeout: std::time::Duration,
 ) -> Result<String, String> {
     use crate::types::SubagentTokenPayload;
     use futures_util::StreamExt;
@@ -1252,10 +1256,13 @@ async fn run_subagent_loop(
         }
         // B-10: bound time-to-headers (a hung subagent request used to hang
         // the whole parent turn).
-        let resp = tokio::time::timeout(std::time::Duration::from_secs(60), req.send())
+        let resp = tokio::time::timeout(headers_timeout, req.send())
             .await
             .map_err(|_| {
-                "subagent request timed out waiting for response headers (60s)".to_string()
+                format!(
+                    "subagent request timed out waiting for response headers ({}s)",
+                    headers_timeout.as_secs()
+                )
             })?
             .map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status();

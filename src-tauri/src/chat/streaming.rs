@@ -328,6 +328,7 @@ async fn openai_stream_round<R: tauri::Runtime>(
     sid: &str,
     full: &mut String,
     ping: &crate::chat::reconnect::PingTarget,
+    headers_timeout: std::time::Duration,
 ) -> Result<(Value, RoundUsage), String> {
     // (B-9 moved stream reads onto stream_next_with_watchdog, which brings
     // its own StreamExt — no local import needed.)
@@ -335,9 +336,10 @@ async fn openai_stream_round<R: tauri::Runtime>(
     // B-10: bound time-to-headers (send() resolves at the header) WITHOUT a
     // total request timeout — reqwest's `.timeout()` covers the whole body
     // read, which would kill long streams. The stall watchdog below guards
-    // the body.
+    // the body. Local sidecars get a wider window (reconnect::headers_timeout):
+    // their prefill serializes, so headers legitimately wait on a busy server.
     let resp = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        headers_timeout,
         client
             .post(url)
             .header("Authorization", format!("Bearer {api_key}"))
@@ -346,7 +348,12 @@ async fn openai_stream_round<R: tauri::Runtime>(
             .send(),
     )
     .await
-    .map_err(|_| "request timed out waiting for response headers (60s)".to_string())?
+    .map_err(|_| {
+        format!(
+            "request timed out waiting for response headers ({}s)",
+            headers_timeout.as_secs()
+        )
+    })?
     .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
@@ -669,6 +676,7 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
     sid: &str,
     full: &mut String,
     ping: &crate::chat::reconnect::PingTarget,
+    headers_timeout: std::time::Duration,
 ) -> Result<(Vec<Value>, RoundUsage), String> {
     // (B-9 moved stream reads onto stream_next_with_watchdog, which brings
     // its own StreamExt — no local import needed.)
@@ -676,7 +684,7 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
     // B-10: bound time-to-headers (see the OpenAI round for why there is no
     // total `.timeout()` on a streaming request).
     let resp = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        headers_timeout,
         client
             .post(url)
             .header("x-api-key", api_key)
@@ -686,7 +694,12 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
             .send(),
     )
     .await
-    .map_err(|_| "request timed out waiting for response headers (60s)".to_string())?
+    .map_err(|_| {
+        format!(
+            "request timed out waiting for response headers ({}s)",
+            headers_timeout.as_secs()
+        )
+    })?
     .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
@@ -1289,6 +1302,9 @@ pub(crate) async fn run_openai_tool_loop(
     // 400 on unknown fields, so nobody else gets them.
     cache_marks: bool,
     perf: crate::chat::turn_perf::TurnPerf,
+    // Time-to-headers bound for each round (reconnect::headers_timeout —
+    // widened for local sidecars whose prefill serializes).
+    headers_timeout: std::time::Duration,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/chat/completions");
     // Reachability probe for this round's endpoint — the stall watchdog pings
@@ -1399,10 +1415,10 @@ pub(crate) async fn run_openai_tool_loop(
         // round, or the already-streamed text would be duplicated.
         let full_len_before = full.len();
         let (message, round_usage) =
-            match openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping).await {
+            match openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping, headers_timeout).await {
                 Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
                     cache::strip_cache_control(&mut body);
-                    openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping).await?
+                    openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping, headers_timeout).await?
                 }
                 other => other?,
             };
@@ -1652,6 +1668,8 @@ pub(crate) async fn run_anthropic_tool_loop(
     app: &AppHandle,
     research_mode: bool,
     perf: crate::chat::turn_perf::TurnPerf,
+    // Time-to-headers bound for each round (reconnect::headers_timeout).
+    headers_timeout: std::time::Duration,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/messages");
     // Reachability probe for this round's endpoint — see the OpenAI loop.
@@ -1699,11 +1717,12 @@ pub(crate) async fn run_anthropic_tool_loop(
         // those words must not re-run the round and duplicate the text.
         let full_len_before = full.len();
         let (content, round_usage) =
-            match anthropic_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping).await {
+            match anthropic_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping, headers_timeout).await {
                 Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
                     cache::strip_cache_control(&mut body);
                     anthropic_stream_round::<tauri::Wry>(
                         client, &url, api_key, &body, app, sid, &mut full, &ping,
+                        headers_timeout,
                     )
                     .await?
                 }
@@ -1998,6 +2017,7 @@ async fn openai_round_accumulates_split_tool_call_deltas() {
 
     let (message, _) = openai_stream_round(
         &client, &url, "key", &body, &app, "sid-pin", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+        std::time::Duration::from_secs(60),
     )
     .await
     .expect("round succeeds");
@@ -2031,6 +2051,7 @@ async fn openai_round_captures_reported_cost_from_usage_chunk() {
 
     let (_, usage) = openai_stream_round(
         &client, &url, "key", &body, &app, "sid-cost", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+        std::time::Duration::from_secs(60),
     )
     .await
     .expect("round succeeds");
@@ -2060,6 +2081,7 @@ async fn openai_round_index_clamp_drops_hostile_far_indices() {
 
     let (message, _) = openai_stream_round(
         &client, &url, "key", &body, &app, "sid", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+        std::time::Duration::from_secs(60),
     )
     .await
     .expect("round succeeds");
@@ -2092,6 +2114,7 @@ async fn anthropic_round_accumulates_text_and_tool_input_json() {
 
     let (blocks, _) = anthropic_stream_round(
         &client, &url, "key", &body, &app, "sid-pin", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+        std::time::Duration::from_secs(60),
     )
     .await
     .expect("round succeeds");

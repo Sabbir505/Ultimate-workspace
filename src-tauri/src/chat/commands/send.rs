@@ -691,10 +691,36 @@ pub async fn send_chat_message(
         let local_state = app
             .try_state::<crate::chat::local_models::LocalModelState>()
             .map(|s| s.0.clone());
-        let sidecar_running = local_state
-            .as_ref()
-            .map(|l| l.status().is_some())
-            .unwrap_or(false);
+        // Registry "live" must mean PROCESS live: the entry survives anything
+        // that killed the llama-server behind it (app force-quit, external
+        // taskkill, reboot without the sidecar), and a stale entry reads as
+        // running so the respawn below never fires — every send then grinds
+        // through the reconnect ladder against a dead port before failing.
+        // A /health probe settles it: down == needs the respawn.
+        let sidecar_running = match local_state.as_ref().map(|l| l.status()) {
+            Some(Some(active)) => {
+                let probe = reqwest::Client::builder()
+                    .no_proxy()
+                    .connect_timeout(std::time::Duration::from_secs(2))
+                    .timeout(std::time::Duration::from_secs(3))
+                    .build()
+                    .ok();
+                match probe {
+                    Some(client) => matches!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(4),
+                            client.get(format!("{}/health", active.base_url)).send(),
+                        )
+                        .await,
+                        Ok(Ok(resp)) if resp.status().is_success()
+                    ),
+                    // Client construction failed — keep the old behavior
+                    // (trust the registry) rather than respawn-spamming.
+                    None => true,
+                }
+            }
+            _ => false,
+        };
         if !sidecar_running {
             crate::chat::stream_events::emit_status_reason(
                 Some(&app),
@@ -983,28 +1009,16 @@ pub async fn send_chat_message(
                 }
             }
         }
-        // Memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11, amended):
-        // ON DEMAND — the turn's query loads only matching records (plus a
-        // tiny standing identity core), budgeted at 800 tokens in render.rs.
-        // The full 2200-token document is the store, not injected wholesale;
-        // it rides along only as the fallback when nothing qualifies (see
-        // `memory::on_demand_injection`). Feature-off → None → the prompt
-        // part is omitted byte-neutral.
-        let project_id = db::get_chat_session(&conn, &chat_session_id)
-            .ok()
-            .flatten()
-            .and_then(|s| s.project_id);
-        let memory_profile = if crate::memory::memory_enabled(&conn) {
-            crate::memory::on_demand_injection(
-                &conn,
-                Some(&content),
-                project_id.as_deref(),
-                crate::db::now_ts(),
-                tools_on,
-            )
-        } else {
-            None
-        };
+        // Memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11 → §12.1): the
+        // per-turn prompt injection was REMOVED in favor of the on-demand
+        // memory tools (`memory_recall` / `memory_save` / `memory_forget`,
+        // gated by `ToolCaps.memory`). Retrieval-conditioned text sat near the
+        // TOP of the system prompt and changed every turn, so both the local
+        // KV prefix cache and cloud prompt caches lost the entire system +
+        // tools + history region on EVERY turn (~14.6k re-evaluated tokens ≈
+        // 140s TTFT on a local sidecar). The tools give the model the same
+        // facts when it wants them, at zero cache cost; dispatch backstops
+        // with a clear error when the feature is off.
         let built = crate::chat::build_system_prompt(
             provider_id.clone(),
             &model,
@@ -1014,29 +1028,19 @@ pub async fn send_chat_message(
             research_mode,
             session_plan_mode,
             manifest.as_deref(),
-            memory_profile.as_deref(),
+            None,
         );
-        // Session Mesh peer registry (SESSION_MESH_DESIGN_ARCHITECTURE.md
-        // §4.3) — appended AFTER build_system_prompt (which has 16 call
-        // sites; only the interactive turn needs the block). Auto-model
-        // fail-over rebuilds prompts from SystemPromptInputs and skips the
-        // block for that one fallback attempt — awareness resumes next turn.
-        // The workspace update rides beside it: same-project siblings that
-        // moved SINCE this session's last turn, so picking up where another
-        // chat left off needs no manual message_session bridge.
-        let built = built.map(|sys| {
-            let mut sys = match crate::session_fabric::registry_block(&conn, Some(&chat_session_id))
-            {
-                Some(block) if !block.trim().is_empty() => format!("{sys}\n\n{block}"),
-                _ => sys,
-            };
-            if let Some(update) =
-                crate::session_fabric::workspace_update_block(&conn, &chat_session_id)
-            {
-                sys = format!("{sys}\n\n{update}");
-            }
-            sys
-        });
+        // Session Mesh (SESSION_MESH_DESIGN_ARCHITECTURE.md §4.3) is ON
+        // DEMAND now: the registry block used to ride the system prompt
+        // EVERY turn, and its relative ages ("idle 3m") + peer reply tails
+        // changed between turns — invalidating the prompt prefix cache
+        // (system + tools + whole history re-evaluated per turn, ~140s TTFT
+        // on a local sidecar). The mesh tools (`list_sessions` /
+        // `read_session` / `search_sessions` / `message_session` /
+        // `spawn_session`, in the schema whenever the mesh is enabled) give
+        // the model the same awareness when it asks for it; the built-in
+        // loop resolves the caller server-side, so the model never needed
+        // the identity line the block used to carry.
         // [prompt-audit] inputs captured before `custom`/`skills` are consumed.
         let audit = (
             custom.as_deref().map(|c| c.trim().len()).unwrap_or(0),
@@ -1046,7 +1050,6 @@ pub async fn send_chat_message(
             inp.custom = custom.clone();
             inp.skills = skills.clone();
             inp.manifest = manifest.clone();
-            inp.memory_profile = memory_profile.clone();
             inp.plan_mode = session_plan_mode;
         }
         (built, audit)

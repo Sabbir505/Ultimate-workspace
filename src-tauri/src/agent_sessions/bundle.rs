@@ -110,18 +110,12 @@ pub(super) fn harness_context_section(
                 }
             }
         }
-        // Session Mesh peer registry (SESSION_MESH_DESIGN_ARCHITECTURE.md
-        // §4.3). The bundle is per-PROJECT (shared by every chat in it), so
-        // self_sid=None: no per-chat identity line here — `AgentSession
-        // Manager::send` adds it to the first turn's prompt instead.
-        // Tool-less harnesses skip it: no relay-tools MCP, no mesh tools.
-        if relay_tools {
-            if let Some(block) = crate::session_fabric::registry_block(&conn, None) {
-                if !block.trim().is_empty() {
-                    parts.push(block);
-                }
-            }
-        }
+        // Session Mesh is ON DEMAND: no registry block in the bundle — its
+        // relative ages ("idle 3m") changed between turns and invalidated
+        // the CLI's prompt cache. Peer awareness lives in the relay-tools
+        // mesh tools (list_sessions / read_session / …); the per-session
+        // identity line (caller_session_id) rides the stable turn hint from
+        // AgentSession Manager::send instead.
     }
     parts.join("\n\n")
 }

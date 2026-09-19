@@ -94,6 +94,7 @@ pub async fn check_build_updates(
         let llama_cuda_dir = crate::commands::llama_build::llama_cuda_dir(&app);
         let tts_dir = app_data.join(TTS_GPU_DIR);
         let tag = crate::commands::stt::WHISPER_RELEASE_TAG;
+        let sd_tag = crate::commands::image_gen::SD_RELEASE_TAG;
         vec![
             row(
                 "stt-whisper",
@@ -118,6 +119,30 @@ pub async fn check_build_updates(
                 tts_dir,
                 crate::commands::tts_gpu::gpu_build_installed(&app),
                 crate::commands::tts_gpu::GPU_BUNDLE_VERSION,
+                None,
+            ),
+            row(
+                "image-sd-cuda",
+                "Image engine (CUDA build)",
+                app_data.join(crate::commands::image_gen::SD_CUDA_DIR),
+                crate::commands::image_gen::cuda_build_installed(&app),
+                sd_tag,
+                None,
+            ),
+            row(
+                "image-sd-vulkan",
+                "Image engine (Vulkan build)",
+                app_data.join(crate::commands::image_gen::SD_VULKAN_DIR),
+                crate::commands::image_gen::vulkan_build_installed(&app),
+                sd_tag,
+                None,
+            ),
+            row(
+                "image-sd-cpu",
+                "Image engine (CPU build)",
+                app_data.join(crate::commands::image_gen::SD_CPU_DIR),
+                crate::commands::image_gen::cpu_build_installed(&app),
+                sd_tag,
                 None,
             ),
         ]

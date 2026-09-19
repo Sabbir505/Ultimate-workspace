@@ -7,6 +7,7 @@
 // unrelated controls.
 import { useEffect, useRef, useState } from "react";
 import {
+  imageGenInstall,
   llamaInstallCuda,
   onModelDownloadProgress,
   sttInstallCuda,
@@ -27,6 +28,9 @@ const INSTALLERS: Record<string, (force?: boolean) => Promise<unknown>> = {
   "stt-whisper-cuda": sttInstallCuda,
   "llama-cuda": llamaInstallCuda,
   "tts-gpu": ttsInstallGpu,
+  "image-sd-cuda": (force?: boolean) => imageGenInstall("cuda", force),
+  "image-sd-vulkan": (force?: boolean) => imageGenInstall("vulkan", force),
+  "image-sd-cpu": (force?: boolean) => imageGenInstall("cpu", force),
 };
 
 /** One-line description per build id (what it is, what it needs). */
@@ -38,6 +42,11 @@ const DESCRIPTIONS: Record<string, string> = {
     "CUDA build of llama-server for GPU offload on local models. Needs an NVIDIA GPU. ~242 MB.",
   "tts-gpu":
     "CUDA voice engine + cuDNN 9 runtime. Needs an NVIDIA GPU with the CUDA 13 runtime. ~876 MB.",
+  "image-sd-cuda":
+    "CUDA build of sd-server (stable-diffusion.cpp) + its CUDA 12 runtime. Needs an NVIDIA GPU. ~892 MB.",
+  "image-sd-vulkan":
+    "Vulkan build — runs image models on NVIDIA, AMD and Intel GPUs. ~32 MB.",
+  "image-sd-cpu": "CPU build — works everywhere, slow for image generation. ~17 MB.",
 };
 
 const INSTALL_SIZES: Record<string, string> = {
@@ -45,6 +54,9 @@ const INSTALL_SIZES: Record<string, string> = {
   "stt-whisper-cuda": "~640 MB",
   "llama-cuda": "~242 MB",
   "tts-gpu": "~876 MB",
+  "image-sd-cuda": "~892 MB",
+  "image-sd-vulkan": "~32 MB",
+  "image-sd-cpu": "~17 MB",
 };
 
 /** States that keep a row's progress bar (and disabled button) up. */

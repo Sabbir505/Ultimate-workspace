@@ -48,6 +48,11 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             GENERATE_DIAGRAM_DESC,
             generate_diagram_parameters(),
         ),
+        openai_fn(
+            GENERATE_IMAGE,
+            GENERATE_IMAGE_DESC,
+            generate_image_parameters(),
+        ),
         openai_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         openai_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
         openai_fn(GET_SKILL, GET_SKILL_DESC, get_skill_parameters()),
@@ -357,6 +362,11 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             GENERATE_DIAGRAM,
             GENERATE_DIAGRAM_DESC,
             generate_diagram_parameters(),
+        ),
+        anthropic_fn(
+            GENERATE_IMAGE,
+            GENERATE_IMAGE_DESC,
+            generate_image_parameters(),
         ),
         anthropic_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         anthropic_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
@@ -709,6 +719,35 @@ fn generate_diagram_parameters() -> Value {
             }
         },
         "required": ["filename", "html"],
+    })
+}
+
+fn generate_image_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "What to draw: subject, style/medium, lighting, \
+                    composition (e.g. \"a red fox curled on moss, dawn mist, \
+                    watercolor\")."
+            },
+            "width": {
+                "type": "integer",
+                "description": "Width in pixels (default 1024). Rounded to the 64px \
+                    grid, clamped 256-2048. On ~6GB GPUs use 512-768 for SDXL/full \
+                    checkpoints."
+            },
+            "height": {
+                "type": "integer",
+                "description": "Height in pixels. Same default, grid and clamp as width."
+            },
+            "filename": {
+                "type": "string",
+                "description": "Base file name (extension optional; .png is used)."
+            }
+        },
+        "required": ["prompt"]
     })
 }
 
@@ -1875,9 +1914,12 @@ mod tests {
         // subagents IN-session; the old texts steered models into separate-
         // chat spawns whose results never reached the parent) and
         // spawn_session documents the result auto-report.
+        // Bumped 43_000→44_500 for `generate_image`: local text-to-image via
+        // the sd-server sidecar (~1.6k chars) — a new user-facing capability
+        // (Settings → Local Models → Images), not description rot.
         assert!(
-            total < 43_000,
-            "default tool specs total {total} chars (budget 43_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            total < 44_500,
+            "default tool specs total {total} chars (budget 44_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
         let all_on_caps = ToolCaps {
             browser: true,
@@ -1890,10 +1932,11 @@ mod tests {
         println!("all-on specs JSON: {all_on} chars");
         // Same orchestration bump: 45_000→45_500 (the `model` params ride
         // the all-on surface too); 45_500→46_000 mirrors the default-budget
-        // disambiguation bump above.
+        // disambiguation bump above; 46_000→47_500 mirrors the
+        // generate_image bump above (the spec rides the all-on surface too).
         assert!(
-            all_on < 46_000,
-            "all-on tool specs total {all_on} chars (budget 46_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 47_500,
+            "all-on tool specs total {all_on} chars (budget 47_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 

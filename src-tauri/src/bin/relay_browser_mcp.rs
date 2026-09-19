@@ -226,6 +226,7 @@ const ROUND_TRIP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 async fn round_trip(
     ws: &mut WsConn,
     req: Value,
+    timeout: std::time::Duration,
 ) -> Result<Value, String> {
     let text = serde_json::to_string(&req).map_err(|e| format!("encode req: {e}"))?;
     ws.write
@@ -254,7 +255,7 @@ async fn round_trip(
         }
         None
     };
-    match tokio::time::timeout(ROUND_TRIP_TIMEOUT, wait).await {
+    match tokio::time::timeout(timeout, wait).await {
         Ok(Some(v)) => v,
         Ok(None) => {
             ws.closed = true;
@@ -320,11 +321,14 @@ async fn handle_line(
             "id": id,
             "result": null
         }),
-        "tools/list" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": { "tools": tool_schemas() }
-        }),
+        "tools/list" => {
+            let schemas = relay_schemas(url, ws).await;
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "tools": schemas }
+            })
+        }
         "tools/call" => {
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
             let result = handle_tool_call(params, url, project_id, ws).await;
@@ -341,6 +345,42 @@ async fn handle_line(
     })
 }
 
+/// Full tools/list payload: the hand-written BROWSER schemas plus the
+/// relay-tool schemas fetched from the app (derived from the live tool
+/// registry — `relay_schemas` op → `mcp_tools_bridge::relay_tool_schemas`).
+/// Falls back to the static relay copy when the app is unreachable or too
+/// old to answer; the two copies are kept in sync by the
+/// `static_relay_schemas_match_registry_names` test, and a NEW tool needs
+/// no edit here at all when the app is current.
+async fn relay_schemas(url: &str, ws: &mut Option<WsConn>) -> Vec<Value> {
+    let browser: Vec<Value> = tool_schemas()
+        .into_iter()
+        .filter(|t| !t["name"].as_str().map(tool_op).map(|r| r.is_ok()).unwrap_or(false))
+        .collect();
+    if ws.as_ref().map(|c| c.closed).unwrap_or(true) {
+        *ws = None;
+    }
+    if ws.is_none() {
+        match connect(url).await {
+            Ok(c) => *ws = Some(c),
+            Err(_) => return [browser, static_relay_schemas()].concat(),
+        }
+    }
+    let conn = ws.as_mut().unwrap();
+    match round_trip(conn, json!({ "op": "relay_schemas" }), ROUND_TRIP_TIMEOUT).await {
+        Ok(resp) => match resp.get("schemas").cloned().unwrap_or(Value::Null) {
+            Value::Array(items) if !items.is_empty() => {
+                [browser, items].concat()
+            }
+            _ => [browser, static_relay_schemas()].concat(),
+        },
+        Err(_) => {
+            ws.as_mut().unwrap().closed = true;
+            [browser, static_relay_schemas()].concat()
+        }
+    }
+}
+
 /// Map an MCP tool name to the WS op the app dispatches. Browser tools keep
 /// their bare op names; relay-tools live under a `relay_tools:<name>`
 /// prefix so the app-side dispatcher can route them to
@@ -355,6 +395,7 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
             Ok(tool.to_string())
         }
         "generate_document" | "generate_diagram" | "generate_file"
+        | "generate_image"
         | "plan_document" | "revise_document"
         | "get_skill" | "list_skills" | "list_artifacts" | "search_docs" | "get_capabilities"
         // Automation CRUD: parity with the built-in chat's automation tools —
@@ -406,7 +447,15 @@ async fn handle_tool_call(
         "args": args,
     });
 
-    let resp = round_trip(conn, req)
+    // Image generation legitimately runs for many minutes (model load +
+    // 20+ diffusion steps, queued serially server-side) — the 180s default
+    // that is right for browser ops kills every image call mid-flight.
+    let timeout = if op.starts_with("relay_tools:generate_image") {
+        std::time::Duration::from_secs(30 * 60)
+    } else {
+        ROUND_TRIP_TIMEOUT
+    };
+    let resp = round_trip(conn, req, timeout)
         .await
         .map_err(|e| ("browser_unavailable", e))?;
 
@@ -454,6 +503,12 @@ fn fallback_err() -> Value {
 /// WebSocket dispatch (`browser_mcp::op_*`); the optional `pane_id` lets the
 /// harness target a specific browser pane.
 fn tool_schemas() -> Vec<Value> {
+    [browser_schemas(), static_relay_schemas()].concat()
+}
+
+/// The in-app browser pane family — hand-written here (these ops are the
+/// sidecar's own; they do not exist in the chat tool registry).
+fn browser_schemas() -> Vec<Value> {
     vec![
         json!({
             "name": "navigate",
@@ -814,6 +869,15 @@ fn tool_schemas() -> Vec<Value> {
             },
             "annotations": { "readOnlyHint": true }
         }),
+    ]
+}
+
+/// FALLBACK relay-tool schemas, used only when the app can't be asked for
+/// the live-derived set (`relay_schemas` op). Kept in sync with the
+/// registry by the `static_relay_schemas_match_registry_names` test — a
+/// new tool needs NO edit here when the app is current.
+fn static_relay_schemas() -> Vec<Value> {
+    vec![
         json!({
             "name": "generate_document",
             "description": "Create a REAL, professionally formatted docx/pptx/xlsx/pdf file in the artifacts dir. Use this instead of hand-building office files with python. Args: format ('docx'|'pptx'|'xlsx'|'pdf'), filename, code (a complete runnable Python program that saves the built document to os.environ['RELAY_OUTPUT']).",
@@ -872,6 +936,20 @@ fn tool_schemas() -> Vec<Value> {
                     "html": { "type": "string" }
                 },
                 "required": ["filename", "html"]
+            }
+        }),
+        json!({
+            "name": "generate_image",
+            "description": "Generate a real image (PNG) with Relay's LOCAL diffusion model — no cloud. Args: prompt (subject/style/lighting/composition), width/height (default 1024, rounded to the 64px grid), filename. A fresh seed is drawn per call — re-call to vary. The PNG lands in the artifacts dir and is shown to the user.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string" },
+                    "width": { "type": "integer" },
+                    "height": { "type": "integer" },
+                    "filename": { "type": "string" }
+                },
+                "required": ["prompt"]
             }
         }),
         json!({
@@ -1086,7 +1164,7 @@ mod tests {
             .filter_map(|t| t["name"].as_str())
             .collect();
         for tool in ["navigate", "read_page", "generate_document", "generate_diagram",
-                     "generate_file", "plan_document", "revise_document",
+                     "generate_file", "generate_image", "plan_document", "revise_document",
                      "get_skill", "list_skills", "search_docs",
                      "get_capabilities",
                      "list_automations", "create_automation", "update_automation",

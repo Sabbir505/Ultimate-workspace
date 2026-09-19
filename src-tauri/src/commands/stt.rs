@@ -125,6 +125,8 @@ pub struct SttStatus {
     /// Absolute dir downloads target (`<models dir>/stt`).
     pub stt_dir: Option<String>,
     pub catalog: Vec<SttCatalogEntry>,
+    /// Manually-placed `*.bin` models found in the speech folder.
+    pub manual: Vec<SttManualModel>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,6 +141,44 @@ pub struct SttCatalogEntry {
     pub recommended: bool,
     pub installed: bool,
     pub is_default: bool,
+}
+
+/// A manually-placed whisper model — a `*.bin` file in the speech folder that
+/// isn't part of the catalog. Whisper-server takes any ggml bin path, so
+/// these run via `stt_set_default(filename)` like catalog models.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SttManualModel {
+    pub filename: String,
+    pub size_bytes: u64,
+    pub is_default: bool,
+}
+
+/// Non-catalog `*.bin` files in the STT folder (manual models).
+fn manual_models(dir: &Path, default_model: Option<&str>) -> Vec<SttManualModel> {
+    let catalog_names: Vec<String> = catalog().into_iter().map(|m| m.filename).collect();
+    let mut files: Vec<(String, u64)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !name.to_lowercase().ends_with(".bin") || catalog_names.contains(&name) {
+                return None;
+            }
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            Some((name, size))
+        })
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|(filename, size_bytes)| SttManualModel {
+            is_default: default_model.as_deref() == Some(filename.as_str()),
+            filename,
+            size_bytes,
+        })
+        .collect()
 }
 
 fn stt_dir(conn: &rusqlite::Connection) -> Option<PathBuf> {
@@ -263,6 +303,10 @@ pub async fn stt_status(db: State<'_, DbState>, stt: State<'_, SttState>) -> Cmd
             }
         })
         .collect();
+    let manual = dir
+        .as_ref()
+        .map(|d| manual_models(d, default_model.as_deref()))
+        .unwrap_or_default();
     Ok(SttStatus {
         running: running_guard.is_some(),
         port: running_guard.as_ref().map(|h| h.port),
@@ -274,6 +318,7 @@ pub async fn stt_status(db: State<'_, DbState>, stt: State<'_, SttState>) -> Cmd
         auto_start,
         stt_dir: dir.map(|d| d.to_string_lossy().into_owned()),
         catalog,
+        manual,
     })
 }
 
@@ -300,6 +345,14 @@ fn resolve_default_model_path(dir: &Path, default_model: Option<&str>) -> Option
         .map(|m| model_file(dir, &m.filename))
         .filter(|p| p.is_file())
         .collect();
+    // Manual models count too — a hand-dropped bin should serve when no
+    // catalog model is installed.
+    for m in manual_models(dir, None) {
+        let p = model_file(dir, &m.filename);
+        if p.is_file() {
+            others.push(p);
+        }
+    }
     others.sort();
     others.into_iter().next()
 }

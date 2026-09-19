@@ -12,6 +12,7 @@ pub mod chat_cmds;
 pub mod connectors_cmds;
 pub mod data;
 pub mod git_cmds;
+pub mod image_gen;
 pub mod improve_cmds;
 pub mod llama_build;
 pub mod local_model_market;

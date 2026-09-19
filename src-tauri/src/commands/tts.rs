@@ -169,6 +169,78 @@ pub struct TtsStatus {
     pub tts_dir: Option<String>,
     pub cache_bytes: u64,
     pub catalog: Vec<TtsCatalogEntry>,
+    /// Manually-placed model folders found in the TTS folder (a dir with an
+    /// onnx model that isn't a catalog bundle). Selectable by dir name via
+    /// `tts_set_model`.
+    pub manual: Vec<TtsManualModel>,
+}
+
+/// A manually-installed voice model directory.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TtsManualModel {
+    /// Directory name — also the `tts.model` id for `tts_set_model`.
+    pub id: String,
+    pub size_bytes: u64,
+    pub is_selected: bool,
+    /// The engine needs a tokens file; missing it means the folder is a
+    /// broken/incomplete drop and is shown as such instead of silently
+    /// failing at speak time.
+    pub usable: bool,
+}
+
+/// Scan the TTS folder for manually-placed model directories: any subdir
+/// holding an onnx model file that isn't a catalog bundle. `usable` reports
+/// whether `tokens.txt` (required by the engine) is present.
+fn manual_models(dir: &Path, selected: Option<&str>) -> Vec<TtsManualModel> {
+    let catalog_dirs: Vec<String> = catalog().into_iter().map(|m| m.dir_name).collect();
+    let mut found: Vec<(String, u64, bool)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if catalog_dirs.contains(&name) {
+                return None;
+            }
+            let path = e.path();
+            find_model_file(&path)?;
+            let usable = path.join("tokens.txt").is_file();
+            let size = dir_size(&path);
+            Some((name, size, usable))
+        })
+        .collect();
+    found.sort();
+    found
+        .into_iter()
+        .map(|(id, size_bytes, usable)| TtsManualModel {
+            is_selected: selected.as_deref() == Some(id.as_str()),
+            id,
+            size_bytes,
+            usable,
+        })
+        .collect()
+}
+
+/// Total size of a directory tree (best-effort; 0 when unreadable).
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                total += e.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    total
 }
 
 /// A synthesized chunk. `audio_base64` is a complete WAV file (header included)
@@ -597,6 +669,12 @@ fn resolve_model(dir: &Path, selected: Option<&str>) -> Option<(String, PathBuf)
             if find_model_file(&path).is_some() {
                 return Some((id.to_string(), path));
             }
+        }
+        // Manual model: the id is a directory name inside the TTS folder (as
+        // listed by `manual_models` in the status payload).
+        let manual_path = dir.join(id);
+        if find_model_file(&manual_path).is_some() {
+            return Some((id.to_string(), manual_path));
         }
     }
     for entry in catalog() {
@@ -1097,6 +1175,11 @@ async fn status_inner(
         })
         .collect();
 
+    let manual = dir
+        .as_ref()
+        .map(|d| manual_models(d, selected.as_deref()))
+        .unwrap_or_default();
+
     Ok(TtsStatus {
         model_id,
         model_dir: model_dir.map(|p| p.to_string_lossy().into_owned()),
@@ -1116,6 +1199,7 @@ async fn status_inner(
         tts_dir: dir.map(|d| d.to_string_lossy().into_owned()),
         cache_bytes: cache_bytes(app),
         catalog: catalog_entries,
+        manual,
     })
 }
 

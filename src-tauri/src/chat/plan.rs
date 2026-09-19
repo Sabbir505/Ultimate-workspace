@@ -349,6 +349,7 @@ pub(crate) fn is_mutating_tool(name: &str) -> bool {
             | "generate_file"
             | "generate_document"
             | "generate_diagram"
+            | "generate_image"
             | "browser_type"
             | "browser_click"
             | "attach_connector"

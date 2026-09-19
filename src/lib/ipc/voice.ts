@@ -55,6 +55,15 @@ export interface SttStatus {
   autoStart: boolean;
   sttDir: string | null;
   catalog: SttModelInfo[];
+  /** Manually-placed *.bin whisper models found in the speech folder. */
+  manual: SttManualModel[];
+}
+
+/** A hand-dropped whisper ggml/bin model — selectable via sttSetDefault. */
+export interface SttManualModel {
+  filename: string;
+  sizeBytes: number;
+  isDefault: boolean;
 }
 
 export const sttStatus = () => safeInvoke<SttStatus>("stt_status");
@@ -126,6 +135,18 @@ export interface TtsStatus {
   ttsDir: string | null;
   cacheBytes: number;
   catalog: TtsCatalogEntry[];
+  /** Manually-installed voice model folders found in the TTS folder. */
+  manual: TtsManualModel[];
+}
+
+/** A hand-placed sherpa voice model directory — selectable via ttsSetModel
+ *  with the directory name as the id. */
+export interface TtsManualModel {
+  id: string;
+  sizeBytes: number;
+  isSelected: boolean;
+  /** The engine also needs tokens.txt; false = incomplete drop. */
+  usable: boolean;
 }
 
 /** Readiness of the optional CUDA runtime, as the backend sees it. */

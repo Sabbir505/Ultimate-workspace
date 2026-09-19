@@ -32,6 +32,7 @@ import { ModelMarket, FitBadge } from "./ModelMarket";
 import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { SttPanel } from "./SttPanel";
 import { TtsPanel } from "./TtsPanel";
+import { ImageGenPanel } from "./ImageGenPanel";
 import { ServerBuildsCard } from "./ServerBuildsCard";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { GlassSelect } from "../common/GlassSelect";
@@ -59,8 +60,9 @@ export function LocalModelsPanel() {
   const overridesMapRef = useRef<Record<string, LlamaOverrides>>({});
   const overridesPersistTimer = useRef<number | null>(null);
   // Panel tabs: "models" = on-disk GGUF list, "market" = Hugging Face browser,
-  // "speech" = both directions of local speech (STT + TTS).
-  const [tab, setTab] = useState<"models" | "market" | "speech">("models");
+  // "speech" = both directions of local speech (STT + TTS), "images" = local
+  // image generation (sd-server sidecar + GGUF models).
+  const [tab, setTab] = useState<"models" | "market" | "speech" | "images">("models");
   // Speech splits into sub-tabs rather than stacking two panels: STT and TTS
   // are independent setups (one may be configured and the other not at all),
   // and scrolling past a fully configured one to reach the other made both
@@ -436,6 +438,12 @@ export function LocalModelsPanel() {
           STT &amp; TTS
         </button>
         <button
+          className={`tab${tab === "images" ? " active" : ""}`}
+          onClick={() => setTab("images")}
+        >
+          Images
+        </button>
+        <button
           className={`tab${tab === "market" ? " active" : ""}`}
           onClick={() => setTab("market")}
         >
@@ -763,6 +771,7 @@ export function LocalModelsPanel() {
           {speechTab === "stt" ? <SttPanel /> : <TtsPanel />}
         </>
       )}
+      {tab === "images" && <ImageGenPanel />}
       {tab === "market" && (
         <ModelMarket
           onDownloadComplete={handleDownloadComplete}

@@ -413,6 +413,43 @@ export function SttPanel() {
               })}
             </div>
           </div>
+          {/* Manual models — hand-dropped whisper .bin files in the speech
+              folder that aren't part of the catalog. whisper-server takes any
+              ggml bin path, so Set default is all they need. */}
+          {(stt.manual?.length ?? 0) > 0 && (
+            <div className="settings-note" style={{ marginTop: 4 }}>
+              <div style={{ fontWeight: 600, marginBottom: 8 }}>Other models in the speech folder</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {stt.manual.map((m) => (
+                  <div key={m.filename} className="ghost knowledge-suggestion" style={{ cursor: "default" }}>
+                    <span className="knowledge-suggestion-main">
+                      <span className="mono" style={{ fontSize: 12, fontWeight: 600 }}>
+                        {m.filename}
+                      </span>
+                      <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                        Manually placed — used as-is by whisper-server
+                      </span>
+                    </span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                      <span className="knowledge-suggestion-size mono">{formatBytes(m.sizeBytes)}</span>
+                      {m.isDefault ? (
+                        <span className="fit-badge fits">✓ Default</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="ghost"
+                          style={{ padding: "2px 10px" }}
+                          onClick={() => void handleSetDefault(m.filename)}
+                        >
+                          Set default
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </>
       )}
 

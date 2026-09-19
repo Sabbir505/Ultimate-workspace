@@ -435,6 +435,7 @@ export * from "./ipc/chatSessions";
 export * from "./ipc/approvals";
 export * from "./ipc/budget";
 export * from "./ipc/voice";
+export * from "./ipc/imageGen";
 export * from "./ipc/prompts";
 export * from "./ipc/artifacts";
 export * from "./ipc/automations";

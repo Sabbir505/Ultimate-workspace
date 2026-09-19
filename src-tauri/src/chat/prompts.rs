@@ -192,6 +192,9 @@ pub(crate) fn core_prompt_base() -> String {
      Files produced via plan_document/generate_document/generate_file/generate_diagram surface in the \
      artifact panel automatically — a short one-line acknowledgment afterward is enough. For PowerPoint \
      decks prefer plan_document (plan first — the app compiles the design system for you). \
+     Images are REAL, not a limitation: `generate_image` paints with the LOCAL image model and \
+     the PNG surfaces as an artifact — when the user asks to draw/generate/create a picture, \
+     illustration, or scene, call it; never claim image generation is impossible.\n\
      Files you write with write_file/edit_file do NOT open on screen; they are listed in \
      the Artifacts gallery only. When the user should SEE something you made — a finished \
      HTML page, a saved diagram, a document — open it explicitly with `open_file`; never \
@@ -292,6 +295,8 @@ pub(crate) fn core_prompt_base_local() -> String {
      Only use filesystem tools when the user means local content. For genuine local file \
      questions, search from the cwd proactively — never ask for a path.\n\n\
      ## Artifacts\n\
+     `generate_image` paints real images with the LOCAL image model — when the user asks for a \
+     picture/illustration, call it; never claim you can't generate images.\n\
      Files produced via `plan_document`/`generate_document`/`generate_file` surface in the artifact panel. For pptx prefer `plan_document` \
      automatically. Written files do NOT open on screen — call `open_file` only when the \
      user should see a finished result. \
@@ -819,8 +824,12 @@ mod tests {
         // that a persistent memory profile may appear below (behavioral fix —
         // models claimed ignorance of the user while the profile sat in the
         // same prompt). Not schema duplication; still catches real bloat.
+        // 9250 → 9600: the Artifacts section gained ~380 bytes announcing the
+        // generate_image capability ("never claim image generation is
+        // impossible") — without it models denied the ability even with the
+        // tool riding the request. Capability statement, not bloat.
         assert!(
-            frontier.len() < 9_250,
+            frontier.len() < 9_600,
             "frontier CORE prompt bloated: {} bytes",
             frontier.len()
         );
@@ -830,8 +839,11 @@ mod tests {
         // memory fixes — shipped capabilities grew the compact base). The
         // memory fixes do not touch the local prompt; re-baselined so the
         // guard catches re-bloat, not shipped features.
+        // 4750 → 4900: the Artifacts section gained ~170 bytes announcing the
+        // generate_image capability — same deny-the-capability fix as the
+        // frontier budget above.
         assert!(
-            local.len() < 4_750,
+            local.len() < 4_900,
             "local CORE prompt bloated: {} bytes",
             local.len()
         );
@@ -858,6 +870,11 @@ mod tests {
             // "I can't schedule things" to a feature the app ships.
             "## Automations",
             "`create_automation`",
+            // Image generation — its omission made models answer
+            // "I don't have image generation capabilities" even with the
+            // generate_image tool riding the request.
+            "`generate_image`",
+            "never claim image generation is impossible",
         ] {
             assert!(frontier.contains(anchor), "frontier lost anchor: {anchor}");
         }

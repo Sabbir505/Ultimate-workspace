@@ -6,6 +6,23 @@
 //! [`execute_tool`] dispatches a tool call (by name + JSON arguments) to its
 //! implementation. New capabilities are added by registering a spec here and a
 //! branch in `execute_tool`.
+//!
+//! ## ADDING A TOOL — the checklist the compiler enforces
+//!
+//! 1. `tools/mod.rs`: name const + `execute_tool` dispatch arm.
+//! 2. `tools/specs.rs`: spec in `openai_tool_specs` AND `anthropic_tool_specs`
+//!    (+ parameters fn; description const lives in this file).
+//! 3. Classification (the build FAILS until this is done):
+//!    `mcp_tools_bridge::every_registry_tool_is_bridged_or_excluded` — add the
+//!    tool to `ALLOWED_RELAY_TOOLS` (harness sessions get it automatically:
+//!    schemas are derived from the registry, and the sidecar fetches them via
+//!    the `relay_schemas` WS op) or to `BRIDGE_EXCLUDED_TOOLS` with a reason.
+//! 4. Prose surfaces (no compiler check — the test failure reminds you):
+//!    `prompts.rs` capability lines (frontier + local), `harness_bundle.rs`
+//!    instructions.
+//! 5. If it should mutate state in plan mode, add it to `plan.rs`'s
+//!    `is_mutating_tool`; if subagents may call it, add it to
+//!    `SUBAGENT_TOOL_ALLOW` (dispatch.rs).
 
 use std::path::Path;
 
@@ -34,6 +51,9 @@ mod generate;
 pub use generate::DIAGRAM_MARKER;
 pub use generate::LEGACY_DIAGRAM_MARKER;
 use generate::{generate_diagram, generate_document, generate_file};
+
+mod imagegen;
+use imagegen::generate_image_tool;
 
 mod fs;
 use fs::{
@@ -73,6 +93,10 @@ pub const GENERATE_DOCUMENT: &str = "generate_document";
 pub const PLAN_DOCUMENT: &str = "plan_document";
 pub const REVISE_DOCUMENT: &str = "revise_document";
 pub const GENERATE_DIAGRAM: &str = "generate_diagram";
+/// Local text-to-image through the sd-server sidecar (Settings → Local
+/// Models → Images installs the engine + models). Advertised always; a
+/// missing setup returns an actionable hint rather than hiding the tool.
+pub const GENERATE_IMAGE: &str = "generate_image";
 pub const FETCH_URL: &str = "fetch_url";
 pub const RUN_CODE: &str = "run_code";
 pub const OPEN_URL: &str = "open_url";
@@ -511,6 +535,14 @@ const GENERATE_DIAGRAM_DESC: &str = "Create a freeform STATIC vector illustratio
     via write_file (recharts/d3/lucide-react pre-installed in the preview \
     sandbox). The full routing + layout guide is returned with the tool result.";
 
+const GENERATE_IMAGE_DESC: &str = "Generate a new image from a text description \
+    with the LOCAL image model (offline) and save it as a PNG artifact shown to \
+    the user. Use for illustrations, concept art, scene visuals, icons, \
+    backgrounds. NOT for structured diagrams (mermaid / generate_diagram), \
+    charts (.tsx via write_file), or text-heavy graphics (typography comes out \
+    unreliable). Write descriptive prompts: subject, style, lighting, \
+    composition. Each call draws a fresh seed — call again to vary.";
+
 const FETCH_URL_DESC: &str = "Fetch a web page by URL and return its readable \
     text content (HTML stripped). You CAN open any public web URL with this — \
     never claim you can't open pages or browse. Use to read an article or page \
@@ -923,6 +955,12 @@ pub async fn execute_tool(
             crate::chat::docdesign::plan::revise_document(app, artifacts_dir, args).await
         }
         GENERATE_DIAGRAM => generate_diagram(artifacts_dir, args),
+        GENERATE_IMAGE => match app {
+            Some(app) => generate_image_tool(app, artifacts_dir, args).await,
+            None => ToolOutcome::text(
+                "Error: generate_image needs the app runtime, which is unavailable here.",
+            ),
+        },
         FETCH_URL => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
             match fetch_url(client, url).await {

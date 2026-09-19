@@ -13,6 +13,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useElementHeight } from "../../hooks/useElementHeight";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
 
+/** Visual-to-CSS pixel scale for rect measurements: getBoundingClientRect
+ *  values are VISUAL px (scaled by browser zoom — Ctrl+wheel, e.g. 90%), while
+ *  scrollTop, offsetHeight and style heights are CSS px. Writing a rect delta
+ *  into a style height at 90% zoom left the transcript wrapper 10% short and
+ *  the live edge permanently unscrollable (the image-gen card sat ~144px
+ *  behind the composer). Guarded against the degenerate 0-size frame. */
+function visualScale(el: HTMLElement): number {
+  const rect = el.getBoundingClientRect();
+  return rect.width > 0 && el.offsetWidth > 0 ? rect.width / el.offsetWidth : 1;
+}
+
 export function useTranscriptScroll({
   activeChatSessionId,
   hasMoreHistory,
@@ -21,6 +32,7 @@ export function useTranscriptScroll({
   streaming,
   approvalKey,
   questionKey,
+  followNonce,
 }: {
   activeChatSessionId: string | null;
   hasMoreHistory: boolean;
@@ -35,6 +47,10 @@ export function useTranscriptScroll({
    *  viewport, so the anchor-restore effect re-runs when they flip. */
   approvalKey: string | null;
   questionKey: string | null;
+  /** Bump to re-arm the follow/pin settle window for content that arrives
+   *  OUTSIDE the message stream (the local-image-generation card mounts as a
+   *  synthetic row without a message, so nothing else re-runs the pin). */
+  followNonce?: number;
 }) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -58,6 +74,9 @@ export function useTranscriptScroll({
   // scroll back down while they're reading history; flipped on again when
   // they scroll back to the bottom.
   const stickToBottomRef = useRef(true);
+  // Last-seen followNonce (see the pin effect): only a CHANGE re-arms the
+  // follow, so re-renders with the same nonce never grab the scroll.
+  const prevFollowNonceRef = useRef(followNonce);
   // Mirrors of the derived render items + the list virtualizer, so the
   // scroll-to-message helper (registered once, above their definitions) can
   // reach the current values without stale closures.
@@ -198,8 +217,12 @@ export function useTranscriptScroll({
     const last = rows[rows.length - 1];
     if (!last || itemsRef.current.length === 0) return maxScroll;
     if (Number(last.dataset.index) !== itemsRef.current.length - 1) return maxScroll;
+    // Rect measurements are VISUAL px: at browser zoom ≠ 100% (the card sat
+    // ~144px behind the composer at 90% zoom) they must be scaled back to
+    // CSS px before mixing with scrollTop / style heights.
+    const scale = visualScale(last);
     const elRect = el.getBoundingClientRect();
-    const rowBottom = last.getBoundingClientRect().bottom - elRect.top + el.scrollTop;
+    const rowBottom = (last.getBoundingClientRect().bottom - elRect.top) / scale + el.scrollTop;
     let tail = 0;
     const firstTail = last.parentElement?.nextElementSibling ?? null;
     if (firstTail) tail = 18; // .chat-messages flex gap before the tail stack
@@ -312,9 +335,13 @@ export function useTranscriptScroll({
     // MEASURED TAIL CLAMP: when the tail row IS mounted, its rendered bottom
     // is ground truth — clamp the wrapper to it, shrinking and growing alike
     // (rows are transform-positioned, so the rect delta IS the position).
+    // Rect deltas are VISUAL px: normalize by the zoom scale before writing
+    // them into the CSS height (a 90%-zoom window measured 10% short, so the
+    // live edge could never quite scroll clear of the composer).
     if (Number(last.dataset.index) === itemsRef.current.length - 1) {
+      const scale = visualScale(last);
       const measuredBottom =
-        last.getBoundingClientRect().bottom - inner.getBoundingClientRect().top;
+        (last.getBoundingClientRect().bottom - inner.getBoundingClientRect().top) / scale;
       if (measuredBottom > 0 && Math.abs(total - measuredBottom) > 1) {
         total = measuredBottom;
       }
@@ -334,7 +361,8 @@ export function useTranscriptScroll({
     // the cache settled), patch the cache with the real height so the next
     // layout pass stops under-allocating it.
     const overflow =
-      last.getBoundingClientRect().bottom - last.parentElement.getBoundingClientRect().bottom;
+      (last.getBoundingClientRect().bottom - last.parentElement.getBoundingClientRect().bottom) /
+      visualScale(last);
     if (overflow > 1) {
       const v = virt as unknown as {
         itemSizeCache?: Map<string, number>;
@@ -373,6 +401,13 @@ export function useTranscriptScroll({
   // dock height is a dep too, so a dock that grows (queue chip, approval
   // card, extra input line) re-pins the view instead of eating the gap.
   useEffect(() => {
+    // A bumped followNonce means new out-of-band content (the image-gen
+    // card): want the live edge again, even if the user had scrolled away —
+    // the card mounts below the fold and would otherwise sit unseen.
+    if (followNonce != null && followNonce !== prevFollowNonceRef.current) {
+      prevFollowNonceRef.current = followNonce;
+      stickToBottomRef.current = true;
+    }
     const patchTailAndPin = () => {
       const el = messagesContainerRef.current;
       if (!el || !stickToBottomRef.current) return;
@@ -422,7 +457,7 @@ export function useTranscriptScroll({
       cancelAnimationFrame(raf);
       pinToLiveEdgeRef.current = null;
     };
-  }, [messages, streaming, composerDockHeight, pinTargetFor]);
+  }, [messages, streaming, composerDockHeight, pinTargetFor, followNonce]);
 
   // Heal an already-stranded session on mount / fast-refresh reload: the
   // patch+pin above only fires on message/dock changes, but a chat saved in

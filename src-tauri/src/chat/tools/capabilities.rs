@@ -187,10 +187,10 @@ pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
             "available": browser_live,
             "how": "the relay-browser MCP server (tools prefixed mcp__relay-browser__)",
         },
-        "relay_tools": [
-            "generate_document", "generate_diagram", "generate_file",
-            "get_skill", "list_skills", "search_docs", "get_capabilities",
-        ],
+        // Derived from the bridge allowlist — one source of truth, so a new
+        // bridged tool reports itself without a manual edit here.
+        "relay_tools": crate::mcp_tools_bridge::ALLOWED_RELAY_TOOLS,
+
         "skills": skills,
         "terminal": terminal_lifecycle_json(),
     });

@@ -16,6 +16,8 @@ import { useProjectsStore } from "../../state/projects";
 import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
+import { ImageGenCard } from "./ImageGenCard";
+import { useImageGenStore, type ImageGenHistoryEntry } from "../../state/imageGenStore";
 import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
 import { QuestionCard } from "./QuestionCard";
 import { PlanProposalCard } from "./PlanProposalCard";
@@ -694,6 +696,9 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   const questionKey = activeChatSessionId
     ? pendingQuestions[activeChatSessionId]?.pendingId ?? null
     : null;
+  // Bumped when a local image generation starts — re-arms the scroll hook's
+  // follow/pin settle window for the synthetic image-gen row (see below).
+  const [genFollowNonce, setGenFollowNonce] = useState(0);
   // The transcript scroll engine (stick-to-bottom latch, measured live-edge
   // pinning over the virtualized list, history prepends, jump-to-latest
   // glide, dock wheel chaining) — carved to useTranscriptScroll.ts.
@@ -720,6 +725,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
     streaming,
     approvalKey,
     questionKey,
+    followNonce: genFollowNonce,
   });
 
   // Draft handed to the composer: bumping `nonce` re-prefills the textarea
@@ -834,6 +840,49 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   // Build the list of items to render: persisted messages, plus a live
   // streaming bubble for the active session if tokens are arriving.
   const activeStream = activeChatSessionId ? (streaming[activeChatSessionId] ?? "") : "";
+  const imageGenBusy = useImageGenStore((s) => s.busy);
+  const imageGenUpdate = useImageGenStore((s) => s.update);
+  const imageGenAnchorSessionId = useImageGenStore((s) => s.anchorSessionId);
+  const attachImageGenSession = useImageGenStore((s) => s.attachSession);
+  const imageGenHistory = useImageGenStore((s) => s.history);
+  // Claim ownership of an unclaimed generation for THIS pane's session: the
+  // first event ("starting" from the chat tool, "rendering" from the direct
+  // command) always fires while the assistant turn that invoked the tool is
+  // still streaming, so the streaming pane is the owner. In split view a
+  // pane only claims when ITS session is the one streaming — otherwise both
+  // panes would fight over every generation. Single view: the only pane.
+  useEffect(() => {
+    if (!imageGenUpdate || imageGenAnchorSessionId != null) return;
+    if (activeChatSessionId == null) return;
+    if (isPaneView && !(activeChatSessionId in streaming)) return;
+    attachImageGenSession(activeChatSessionId);
+  }, [imageGenUpdate, imageGenAnchorSessionId, activeChatSessionId, isPaneView, streaming, attachImageGenSession]);
+  // When a NEW generation starts, re-arm the transcript's follow/pin settle
+  // window so the "Creating image" card mounts on-screen above the composer
+  // dock. It arrives as a synthetic row without a message, so neither the
+  // new-message follow nor the streaming pin ever re-runs for it. The turn
+  // streaming ABOVE the card churns row heights for its first seconds (the
+  // virtualizer's estimates oscillate), so the re-arm repeats through that
+  // window — and once more on "done", when the card swaps to the image.
+  const prevGenPhaseRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!imageGenUpdate) return;
+    const phase = imageGenUpdate.phase;
+    const isNewGen =
+      (phase === "starting" || phase === "rendering") &&
+      (prevGenPhaseRef.current == null ||
+        prevGenPhaseRef.current === "done" ||
+        prevGenPhaseRef.current === "error");
+    prevGenPhaseRef.current = phase;
+    if (isNewGen) {
+      setGenFollowNonce((n) => n + 1);
+      const timers = [1500, 3000, 5000, 8000].map((ms) =>
+        window.setTimeout(() => setGenFollowNonce((n) => n + 1), ms),
+      );
+      return () => timers.forEach((t) => window.clearTimeout(t));
+    }
+    if (phase === "done") setGenFollowNonce((n) => n + 1);
+  }, [imageGenUpdate]);
   const activeIsStreaming =
     activeChatSessionId != null && activeChatSessionId in streaming;
   const isStreaming = activeIsStreaming && activeStream.length > 0;
@@ -908,6 +957,12 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   );
 
   const handleStop = useCallback(() => {
+    // A queued render is cancellable too (abandon — sd-server has no cancel;
+    // the current pass finishes silently and its file lands unused).
+    if (useImageGenStore.getState().busy) {
+      useImageGenStore.getState().cancel();
+      return;
+    }
     void cancelStream(activeChatSessionId ?? undefined);
   }, [cancelStream, activeChatSessionId]);
 
@@ -1083,6 +1138,10 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
     segmentStart?: boolean;
     livePerf?: ChatPerfPayload | null;
     proposalEntry?: ProposalEntry;
+    /** Synthetic local-image-generation row (progress/finished preview). */
+    imagegen?: boolean;
+    /** Static past render this row displays (restart persistence). */
+    genEntry?: ImageGenHistoryEntry;
     /** Pre-first-token "assistant is responding" row (TypingIndicator / statusNotice). */
     typing?: boolean;
     /** One-shot entrance animation flag (see enterKeysRef below). */
@@ -1351,6 +1410,83 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [structureSig, messages.length]);
 
+  // Local image generation: inject the generating/finished card as a row
+  // anchored by CONTENT — under the assistant turn whose text cites the
+  // generated file (the harness reply embeds the exact path), falling back
+  // to the list end while that turn streams. The card stays attached to ITS
+  // assistant message when newer turns arrive, and PAST renders of this
+  // session re-attach the same way after an app restart (store history).
+  const imageGenActive = imageGenUpdate != null;
+  const genHistory = imageGenHistory.filter((h) => {
+    if (h.sessionId !== activeChatSessionId) return false;
+    // The live card is already showing this render as a finished image —
+    // don't duplicate it as a static row too.
+    return !(
+      imageGenUpdate?.phase === "done" &&
+      imageGenUpdate.dataUri != null &&
+      imageGenUpdate.path === h.path
+    );
+  });
+  const genAnchorFor = (base: string) =>
+    base ? items.findIndex((it) => typeof it.content === "string" && it.content.includes(base)) : -1;
+  const genAlreadyInjected = items.some((it) => it.key === "__imagegen__");
+  const genFile = imageGenUpdate?.path?.split(/[\\/]/).pop();
+  if (imageGenActive) {
+    let genAnchorIdx = genFile ? genAnchorFor(genFile) : -1;
+    if (genAnchorIdx < 0) genAnchorIdx = items.length - 1;
+    if (!genAlreadyInjected) {
+      items.splice(Math.min(genAnchorIdx + 1, items.length), 0, {
+        key: "__imagegen__",
+        role: "assistant",
+        imagegen: true,
+      } as unknown as (typeof items)[number]);
+    } else {
+      // Follow the anchor if it moved (live bubble → persisted message swap).
+      const cur = items.findIndex((it) => it.key === "__imagegen__");
+      if (cur >= 0 && cur !== genAnchorIdx + 1) {
+        items.splice(cur, 1);
+        items.splice(Math.min(genAnchorIdx + 1, items.length), 0, {
+          key: "__imagegen__",
+          role: "assistant",
+          imagegen: true,
+        } as unknown as (typeof items)[number]);
+      }
+    }
+  } else {
+    // No live generation (sent, cancelled, or done-with-nothing-in-flight —
+    // done stays visible via `imageGenActive`, null clears): drop the row.
+    const cur = items.findIndex((it) => it.key === "__imagegen__");
+    if (cur >= 0) items.splice(cur, 1);
+  }
+  // Past renders (restart persistence): one static row per history entry of
+  // this session, anchored by the same content rule; unknown anchors append
+  // at the end so the image is never lost.
+  genHistory.forEach((h) => {
+    const key = `__imagegen_h__${h.path}`;
+    const base = h.path.split(/[\\/]/).pop() ?? h.path;
+    const anchorIdx = genAnchorFor(base);
+    const cur = items.findIndex((it) => it.key === key);
+    if (cur >= 0) {
+      if (anchorIdx >= 0 && cur !== anchorIdx + 1) {
+        items.splice(cur, 1);
+        items.splice(Math.min(anchorIdx + 1, items.length), 0, {
+          key,
+          role: "assistant",
+          imagegen: true,
+          genEntry: h,
+        } as unknown as (typeof items)[number]);
+      }
+    } else {
+      const insertAt = anchorIdx >= 0 ? anchorIdx + 1 : items.length;
+      items.splice(insertAt, 0, {
+        key,
+        role: "assistant",
+        imagegen: true,
+        genEntry: h,
+      } as unknown as (typeof items)[number]);
+    }
+  });
+
   const hasItems = items.length > 0;
   const currentLivePerf = activeChatSessionId
     ? livePerf[activeChatSessionId] ?? null
@@ -1465,7 +1601,12 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
                   }}
                 >
                   <Suspense fallback={null}>
-                    {item.proposalEntry ? (
+                    {item.imagegen ? (
+                      <ImageGenCard
+                        sessionScopesTo={activeChatSessionId}
+                        entry={item.genEntry}
+                      />
+                    ) : item.proposalEntry ? (
                       <ArtifactProposalCard
                         proposalId={item.proposalEntry.id}
                         proposal={item.proposalEntry.proposal}
@@ -1694,7 +1835,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         onClearQuotedSelections={clearQuotedSelections}
         onSend={handleSend}
         onStop={handleStop}
-        streaming={activeIsStreaming}
+        streaming={activeIsStreaming || imageGenBusy}
         disabled={false}
         model={
           activeChatSessionId

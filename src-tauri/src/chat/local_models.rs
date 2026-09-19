@@ -34,6 +34,29 @@ pub fn is_embedding_arch(arch: &str) -> bool {
     )
 }
 
+/// Whether a GGUF's architecture is a CHAT model llama-server can run. Used to
+/// keep image-generation files (the Images panel's territory) out of the chat
+/// model picker.
+///
+/// Two shapes are NOT chat:
+/// - Diffusion architectures (`flux`, `sdxl`, …) — stable-diffusion.cpp
+///   conversion output; llama-server cannot load them.
+/// - NO architecture at all — a bare tensor dump in ComfyUI-GGUF style (the
+///   format Z-Image / SDXL / SD1.5 quants ship in: the conversion writes only
+///   tensor data, no `general.architecture`). llama.cpp conversions ALWAYS
+///   stamp an architecture, so a headerless GGUF is never a runnable chat
+///   model.
+pub fn is_chat_gguf_arch(arch: Option<&str>) -> bool {
+    match arch {
+        None => false,
+        Some(a) => !matches!(
+            a,
+            "flux" | "z_image" | "sd1" | "sdxl" | "sd3" | "chroma" | "wan" | "ltx"
+                | "hunyuan" | "qwen_image" | "pixart" | "auraflow"
+        ),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GgufFile {
     pub id: String,
@@ -292,6 +315,15 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
     let mut model_files: Vec<(walkdir::DirEntry, GgufMeta)> = Vec::new();
     let mut mmproj_paths: std::collections::HashMap<String, PathBuf> =
         std::collections::HashMap::new();
+    // Directories that hold image-generation components (diffusion weights,
+    // text encoders, VAEs). NONE of their GGUFs are chat models — even when
+    // one carries a real LLM arch (a flux2 text encoder converted from
+    // Qwen3-4B parses as "qwen3" and would otherwise sneak into the picker
+    // and load into llama-server as a useless chat model). Marked from three
+    // signals: a sibling with a non-chat arch, a headerless GGUF (ComfyUI-
+    // style dump), or a component-named file.
+    let mut image_component_dirs: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for entry in walker {
         if !entry.file_type().is_file() {
@@ -306,22 +338,30 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
         }
         let path = entry.path();
         let meta = parse_gguf(path);
+        let dir_key = path
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
 
         // Detect vision-projector companion files (mmproj-*.gguf or mmproj.gguf).
         // These are CLIP vision encoders that llama-server loads via --mmproj.
         // We store them keyed by directory so models in the same dir can find
         // their companion.
         if name.starts_with("mmproj") || matches!(meta.architecture.as_deref(), Some("clip")) {
-            let dir_key = path
-                .parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
             mmproj_paths.insert(dir_key, path.to_path_buf());
             continue;
         }
 
         // Skip non-chat architectures that slipped through (mmproj caught above).
         if matches!(meta.architecture.as_deref(), Some("mmproj")) {
+            continue;
+        }
+
+        // The app-managed image-generation dir (diffusion + encoder/VAE
+        // GGUFs from the Images panel) is never chat territory, whatever the
+        // header says — its Qwen3 text encoder carries a real LLM arch but
+        // sits there as a component, not a chat model.
+        if path.components().any(|c| c.as_os_str() == "image-gen") {
             continue;
         }
 
@@ -333,8 +373,42 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
             continue;
         }
 
+        // Diffusion-model GGUFs (see is_chat_gguf_arch) belong to the Images
+        // panel — llama-server cannot run them, and the picker showing
+        // cyberrealistic/pony/t5xxl-style files was noise.
+        if !is_chat_gguf_arch(meta.architecture.as_deref()) {
+            // A real GGUF whose arch isn't a chat arch (diffusion archs, or a
+            // headerless ComfyUI-style dump) makes its whole directory an
+            // image-model directory — see image_component_dirs above.
+            if has_gguf_magic(path) {
+                image_component_dirs.insert(dir_key);
+            }
+            continue;
+        }
+
+        // Component-named files (text-encoder-*, t5xxl-*, vae-*) mark the
+        // directory too: split image models ship the text encoder beside the
+        // diffusion weights, and the name alone identifies it.
+        if ["text-encoder", "t5xxl", "t5-encoder", "vae"]
+            .iter()
+            .any(|pat| name.contains(*pat))
+        {
+            image_component_dirs.insert(dir_key);
+        }
+
         model_files.push((entry, meta));
     }
+
+    // Second-pass gate: everything inside an image-component directory is a
+    // component, whatever its own header says.
+    model_files.retain(|(entry, _)| {
+        let dir = entry
+            .path()
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        !image_component_dirs.contains(&dir)
+    });
 
     // Second pass: build GgufFile entries, attaching the mmproj companion when
     // one was found in the same directory.
@@ -1670,7 +1744,7 @@ fn auto_ngl(gguf_path: &str) -> i32 {
 /// failed). On non-Windows, returns None; on Windows the call is wrapped in
 /// `OnceLock` so we don't repeatedly LoadLibraryA on every model load.
 #[cfg(windows)]
-fn query_free_vram_bytes() -> Option<u64> {
+pub(crate) fn query_free_vram_bytes() -> Option<u64> {
     use std::os::raw::{c_int, c_uint};
     use std::ptr;
     use std::sync::OnceLock;
@@ -1804,7 +1878,7 @@ fn query_free_vram_bytes() -> Option<u64> {
 /// Non-Windows stub: NVML probe is Windows-only in this build. The stepwise
 /// fallback still works — the only loss is the smart first guess.
 #[cfg(not(windows))]
-fn query_free_vram_bytes() -> Option<u64> {
+pub(crate) fn query_free_vram_bytes() -> Option<u64> {
     None
 }
 
@@ -2008,13 +2082,51 @@ mod scanner_tests {
     use super::*;
     use std::io::Write;
 
-    /// Minimal GGUF header: magic + version + tensor_count + kv_count(0).
+    #[test]
+    fn chat_gguf_arch_separates_chat_from_image_files() {
+        // Chat conversions always stamp an architecture.
+        for arch in ["llama", "qwen3", "bailingmoe3", "nanbeige", "spark2_5", "gemma3"] {
+            assert!(is_chat_gguf_arch(Some(arch)), "{arch} should be chat");
+        }
+        // Diffusion conversions (stable-diffusion.cpp family names).
+        for arch in ["flux", "z_image", "sdxl", "sd3", "wan"] {
+            assert!(!is_chat_gguf_arch(Some(arch)), "{arch} is diffusion");
+        }
+        // ComfyUI-GGUF-style dumps (cyberrealistic/pony/t5xxl/z_image quants)
+        // carry no architecture at all.
+        assert!(!is_chat_gguf_arch(None), "headerless GGUF is never chat");
+    }
+
+    /// Minimal GGUF header with one `general.architecture = "llama"` KV —
+    /// the shape of a real chat-model conversion (llama.cpp always stamps
+    /// the architecture; a headerless GGUF reads as a ComfyUI-style
+    /// diffusion dump and is filtered out of the chat scan).
     fn tiny_gguf_bytes() -> Vec<u8> {
+        gguf_bytes_with_arch("llama")
+    }
+
+    /// GGUF header stamping the given `general.architecture` — the shape of
+    /// a real llama.cpp conversion.
+    fn gguf_bytes_with_arch(arch: &str) -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(b"GGUF"); // magic
         v.extend_from_slice(&3u32.to_le_bytes()); // version
         v.extend_from_slice(&0u64.to_le_bytes()); // tensor count
-        v.extend_from_slice(&0u64.to_le_bytes()); // metadata kv count
+        v.extend_from_slice(&1u64.to_le_bytes()); // metadata kv count
+        push_gguf_string(&mut v, "general.architecture");
+        v.extend_from_slice(&8u32.to_le_bytes()); // value type: string
+        push_gguf_string(&mut v, arch);
+        v
+    }
+
+    /// Headerless GGUF (magic, no KV at all) — the shape of a ComfyUI-style
+    /// diffusion/text-encoder dump.
+    fn headerless_gguf_bytes() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"GGUF");
+        v.extend_from_slice(&3u32.to_le_bytes());
+        v.extend_from_slice(&0u64.to_le_bytes());
+        v.extend_from_slice(&0u64.to_le_bytes());
         v
     }
 
@@ -2088,6 +2200,60 @@ mod scanner_tests {
         let found = scan_folder(dir.path(), "user");
         assert_eq!(found.len(), 1, "should detect .gguf by extension");
         assert_eq!(found[0].filename, "model.Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn scan_folder_excludes_image_model_component_folders() {
+        // The flux2-klein shape that leaked into the chat picker: a text
+        // encoder converted from a real LLM (chat arch!), a component-named
+        // encoder, and a headerless diffusion dump — all in one folder. NONE
+        // of them is a chat model, and the folder must vanish from the scan
+        // entirely, while an unrelated chat model elsewhere survives.
+        let root = tempfile::tempdir().unwrap();
+        let img_dir = root.path().join("flux2-klein");
+        fs::create_dir(&img_dir).unwrap();
+        for (name, bytes) in [
+            ("Qwen3-4B-Q4_K_M.gguf", gguf_bytes_with_arch("qwen3")),
+            ("text-encoder-uncensored-q8_0.gguf", gguf_bytes_with_arch("qwen3")),
+            ("flux2-klein-Q4_0.gguf", headerless_gguf_bytes()),
+        ] {
+            fs::File::create(img_dir.join(name))
+                .unwrap()
+                .write_all(&bytes)
+                .unwrap();
+        }
+        let chat_dir = root.path().join("chat");
+        fs::create_dir(&chat_dir).unwrap();
+        fs::File::create(chat_dir.join("Chat-7B-Q4_K_M.gguf"))
+            .unwrap()
+            .write_all(&gguf_bytes_with_arch("llama"))
+            .unwrap();
+
+        let found = scan_folder(root.path(), "user");
+        assert_eq!(
+            found.len(),
+            1,
+            "only the lone chat model survives; got {:?}",
+            found.iter().map(|f| &f.filename).collect::<Vec<_>>()
+        );
+        assert_eq!(found[0].filename, "Chat-7B-Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn scan_folder_drops_component_named_encoder_without_diffusion_sibling() {
+        // A folder holding ONLY a text-encoder-named GGUF (even with a chat
+        // arch) is an image-model component folder — no diffusion file
+        // needed to classify it.
+        let dir = tempfile::tempdir().unwrap();
+        fs::File::create(dir.path().join("text-encoder-uncensored-q8_0.gguf"))
+            .unwrap()
+            .write_all(&gguf_bytes_with_arch("qwen3"))
+            .unwrap();
+        let found = scan_folder(dir.path(), "user");
+        assert!(
+            found.is_empty(),
+            "component-named file must not reach the chat scan"
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::AppHandle;
 use tauri::Emitter;
 use tauri::Manager;
@@ -705,6 +705,12 @@ async fn dispatch_inner(
         "close_tab" => op_close_tab(req, browser, app).await,
         "zoom" => op_zoom(req, browser, app).await,
         "print_to_pdf" => op_print_to_pdf(req, browser, app).await,
+        // The relay sidecar asks for the CURRENT bridged-tool schemas (its
+        // tools/list) — derived from the live registry app-side, so new tools
+        // reach harness sessions without a sidecar-side hand copy.
+        "relay_schemas" => Ok(json!({
+            "schemas": crate::mcp_tools_bridge::relay_tool_schemas()
+        })),
         op if crate::mcp_tools_bridge::tool_from_op(op).is_some() => {
             let tool = crate::mcp_tools_bridge::tool_from_op(op).unwrap();
             let args = req.args.clone();

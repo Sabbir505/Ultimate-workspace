@@ -955,6 +955,33 @@ pub async fn start_model_download(
     expected_sha256: Option<String>,
     dest_dir: Option<String>,
 ) -> CmdResult<()> {
+    start_model_download_inner(
+        app,
+        DbState(std::sync::Arc::clone(&db.0)),
+        std::sync::Arc::clone(&registry),
+        id,
+        filename,
+        download_url,
+        expected_sha256,
+        dest_dir,
+    )
+    .await
+}
+
+/// Owned-state core of `start_model_download` so other commands (the image
+/// package installer) can queue downloads through the same engine without
+/// juggling Tauri State re-entry.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_model_download_inner(
+    app: AppHandle,
+    db: DbState,
+    registry: Arc<DownloadRegistry>,
+    id: String,
+    filename: String,
+    download_url: String,
+    expected_sha256: Option<String>,
+    dest_dir: Option<String>,
+) -> CmdResult<()> {
     let (cancel_tx, cancel_rx) = oneshot::channel();
     {
         let mut reg = registry.active.lock();

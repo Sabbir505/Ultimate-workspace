@@ -557,6 +557,56 @@ export function TtsPanel() {
               </div>
             );
           })}
+          {/* Manual models — voice-model folders dropped into the TTS folder
+              by hand. A dir with an onnx model selects via its folder name;
+              without tokens.txt the engine can't use it, so the row says so
+              instead of failing at speak time. */}
+          {(tts.manual?.length ?? 0) > 0 && (
+            <>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", marginTop: 10 }}>
+                Other folders in the TTS directory
+              </div>
+              {tts.manual.map((m) => (
+                <div key={m.id} className="ghost knowledge-suggestion" style={{ cursor: "default" }}>
+                  <span className="knowledge-suggestion-main">
+                    <span className="mono" style={{ fontSize: 12, fontWeight: 600 }}>
+                      {m.id}
+                      {m.isSelected && (
+                        <span className="fit-badge fits" style={{ marginLeft: 8 }}>
+                          In use
+                        </span>
+                      )}
+                    </span>
+                    <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                      {m.usable
+                        ? "Manually placed voice model"
+                        : "Missing tokens.txt — the engine can't load this folder"}
+                    </span>
+                  </span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                    <span className="knowledge-suggestion-size mono">{formatBytes(m.sizeBytes)}</span>
+                    {m.usable ? (
+                      m.isSelected ? (
+                        <span className="fit-badge fits">✓ Ready</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="ghost"
+                          style={{ padding: "2px 10px" }}
+                          disabled={busy}
+                          onClick={() => void handleInstall(m.id)}
+                        >
+                          Use this model
+                        </button>
+                      )
+                    ) : (
+                      <span style={{ fontSize: 11, color: "var(--warn, #d29922)" }}>incomplete</span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       </div>
     </div>

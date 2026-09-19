@@ -130,7 +130,13 @@ export function ArtifactCardThumb({ artifact }: { artifact: ArtifactRecord }) {
     );
   }
 
-  const { kind, text } = preview;
+  const { kind, text, dataUri } = preview;
+
+  // Generated images (and other picture artifacts): the thumbnail IS the
+  // image — cover-cropped like the text cards' snippet, not a full preview.
+  if (kind === "image" && dataUri) {
+    return <img className="doc-card-img" src={dataUri} alt="" aria-hidden="true" />;
+  }
 
   // Text-like artifact with readable content: faint formatted snippet.
   if (TEXT_KINDS.has(kind) && text != null) {
@@ -147,8 +153,8 @@ export function ArtifactCardThumb({ artifact }: { artifact: ArtifactRecord }) {
     );
   }
 
-  // image / pdf / html / diagram / office / binary, or text with no content:
-  // minimalist outline icon. No live iframe/img/pdf embed per the card design.
+  // pdf / html / diagram / office / binary, or text with no content:
+  // minimalist outline icon. No live iframe/pdf embed per the card design.
   return (
     <div className="doc-card-icon">
       <OutlineIcon kind={artifact.kind} />

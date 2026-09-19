@@ -177,6 +177,22 @@ pub fn run() {
             // sidecar (Settings → Knowledge manages it; the composer mic uses
             // it for transcription).
             app.manage(commands::stt::SttState::default());
+            // Local image generation: stable-diffusion.cpp's sd-server sidecar
+            // + the GGUF model catalog (Settings → Local Models → Images).
+            app.manage(commands::image_gen::ImageGenState::default());
+            // Orphan sweep: an sd-server child of a FORCE-killed previous
+            // instance (task manager / taskkill /F skips the graceful exit
+            // cleanup) holds VRAM and its port forever. At boot this instance
+            // has spawned no server yet, so any sd-server.exe alive right now
+            // is an orphan.
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt as _;
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/IM", "sd-server.exe", "/F"])
+                    .creation_flags(0x0800_0000)
+                    .output();
+            }
             // Text-to-speech: Kokoro-82M runs in-process (no sidecar to reap) —
             // the state holds the loaded ONNX session, dropped on model switch
             // and on app exit.
@@ -621,6 +637,20 @@ pub fn run() {
             commands::stt::stt_set_auto_start,
             commands::stt::stt_set_server_path,
             commands::stt::stt_set_device,
+            // Local image generation (stable-diffusion.cpp sd-server sidecar).
+            commands::image_gen::image_gen_status,
+            commands::image_gen::image_gen_start,
+            commands::image_gen::image_gen_stop,
+            commands::image_gen::image_gen_install,
+            commands::image_gen::image_gen_set_default,
+            commands::image_gen::image_gen_set_file_role,
+            commands::image_gen::image_gen_set_file_layout,
+            commands::image_gen::image_gen_select,
+            commands::image_gen::image_gen_use_family,
+            commands::image_gen::image_gen_family_plans,
+            commands::image_gen::image_gen_set_device,
+            commands::image_gen::image_gen_set_server_path,
+            commands::image_gen::image_generate,
             // Local text-to-speech (Kokoro-82M, in-process) — reads assistant
             // answers and text artifacts aloud.
             commands::tts::tts_status,
@@ -746,6 +776,21 @@ pub fn run() {
                     .is_err()
                     {
                         eprintln!("[stt] sidecar kill timed out at exit; exiting anyway");
+                    }
+                });
+            }
+            // Kill the sd-server image sidecar too — same orphaned-CUDA-context
+            // concern as the whisper sidecar (plus gigabytes of model memory).
+            if let Some(state) = handle.try_state::<commands::image_gen::ImageGenState>() {
+                tauri::async_runtime::block_on(async {
+                    if tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        commands::image_gen::stop_sidecar(&state),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        eprintln!("[image-gen] sidecar kill timed out at exit; exiting anyway");
                     }
                 });
             }

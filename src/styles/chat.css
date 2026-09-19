@@ -453,6 +453,14 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
+  /* The app pins the live edge itself (patchTailAndPin in
+     useTranscriptScroll) while the virtualizer rewrites row heights
+     constantly. Browser scroll anchoring "compensates" those rewrites by
+     scrolling UP behind the pin's back — the drift then reads as user
+     scroll-away, un-sticks the pin, and newly mounted content (the
+     image-gen card) lands stranded under the composer. Anchoring must not
+     touch this scroller. */
+  overflow-anchor: none;
   /* Reserve the scrollbar gutter so the column width never shifts when the
      scrollbar appears/disappears mid-stream — a width shift rescales every
      width:100% diagram and live iframe, which read as flashing
@@ -648,6 +656,36 @@ div[data-index]:has(.chat-session-row.menu-open) {
   margin-top: 4px;
   opacity: 0;
   transition: opacity 0.15s var(--ease);
+}
+/* Generated-image card: copy + download INSIDE the picture, revealed on
+   hover over it. The image carries no bar of its own — the assistant
+   message's hover bar stays on the text above. */
+.chat-img-wrap {
+  position: relative;
+  display: flex;
+}
+.chat-img-overlay-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease);
+}
+.chat-img-wrap:hover .chat-img-overlay-actions,
+.chat-img-overlay-actions:focus-within {
+  opacity: 1;
+}
+/* Dark pills so the icons read over any picture; same metrics as the
+   message-bar buttons (.chat-msg-action). */
+.chat-img-overlay-actions .chat-msg-action {
+  color: #fff;
+  background: rgba(8, 10, 16, 0.55);
+}
+.chat-img-overlay-actions .chat-msg-action:hover {
+  color: #fff;
+  background: rgba(8, 10, 16, 0.8);
 }
 /* End-of-turn timestamp in the bar's leading slot — same hover reveal, same
    muted register as the buttons, vertically centered with them. */

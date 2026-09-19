@@ -6,6 +6,23 @@ use super::*;
 /// Persistent-process path: spawn on first use (or on model change), then
 /// write the turn as a stream-json stdin line.
 
+/// Comparable identity of a connector snapshot: sorted `name:url` stamps.
+/// Bearer tokens are deliberately excluded — they are refreshed on every
+/// send, and comparing them would respawn the process every turn. The CLI
+/// reads its MCP config only at process start, so a changed SET (attach or
+/// detach — e.g. "check my inbox" attaching gmail via the keyword fast-path)
+/// must respawn for the tools to exist.
+pub(super) fn connector_stamp(
+    connectors: &[crate::connectors::HarnessMcpServer],
+) -> Vec<String> {
+    let mut stamps: Vec<String> = connectors
+        .iter()
+        .map(|c| format!("{}:{}", c.name, c.url))
+        .collect();
+    stamps.sort();
+    stamps
+}
+
 pub(super) fn send_claude_turn(
     app: &AppHandle,
     db: &DbState,
@@ -42,6 +59,11 @@ pub(super) fn send_claude_turn(
         // can't be resumed here), so the respawn starts fresh and the
         // context primer replays the conversation.
         || entry.spawned_cwd.as_deref() != cwd
+        // A connector attached (or detached) mid-chat must reach the CLI too:
+        // mcp.json is read only at spawn, so without this the model kept
+        // answering "I don't have the tools" after "check my inbox" attached
+        // gmail on a running session. `--resume` preserves the conversation.
+        || entry.spawned_connectors != connector_stamp(connectors)
     {
         if let Some(mut old) = entry.child.take() {
             kill_child_tree(&mut old);
@@ -82,6 +104,7 @@ pub(super) fn send_claude_turn(
         entry.spawned_effort = Some(spawned_effort);
         entry.spawned_model = Some(entry.model.clone());
         entry.spawned_cwd = cwd.map(|c| c.to_string());
+        entry.spawned_connectors = connector_stamp(connectors);
     }
 
     let line = json!({
@@ -187,6 +210,7 @@ pub(super) fn send_acp_turn(
     cwd: Option<&str>,
     project_id: Option<&str>,
     acp_id: &str,
+    connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Result<(), String> {
     let agent = {
         let conn = db.0.lock();
@@ -287,13 +311,18 @@ pub(super) fn send_acp_turn(
         let reader_alive2 = Arc::clone(&entry.reader_alive);
         let generation_cell2 = Arc::clone(&entry.proc_generation);
         // The ACP spec's session/new carries the client's MCP servers — the
-        // same relay bridge claude/kimi/opencode get via their config files.
-        // The agent spawns the stdio binary itself; the bridge reaches the
-        // app's WS with the current run's token.
-        let acp_mcp_servers = crate::browser_mcp_register::acp_mcp_servers(
+        // same relay bridge claude/kimi/opencode get via their config files,
+        // PLUS the attached hosted-MCP connectors (notion/github/kiwi) as
+        // spec-shaped http servers with freshly refreshed bearers. The agent
+        // spawns the stdio binary itself; the bridge reaches the app's WS
+        // with the current run's token.
+        let mut acp_mcp_servers = crate::browser_mcp_register::acp_mcp_servers(
             app,
             project_id.unwrap_or(super::bundle::NO_PROJECT_BUNDLE_SLUG),
         );
+        if let Some(arr) = acp_mcp_servers.as_array_mut() {
+            arr.extend(crate::browser_mcp_register::acp_connector_servers(connectors));
+        }
         std::thread::spawn(move || {
             let _alive = ReaderAliveGuard(reader_alive2);
             read_acp_stream(

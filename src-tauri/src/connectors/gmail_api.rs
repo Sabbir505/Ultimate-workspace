@@ -41,7 +41,9 @@ pub fn fallback_tool_defs() -> &'static [FallbackTool] {
              the official Gmail MCP tools are unavailable). Args: query (optional Gmail \
              search syntax, e.g. \"from:alice newer_than:7d is:unread\"; empty returns \
              the most recent messages), max_results (optional, 1-50, default 20). \
-             Returns recent messages with id, threadId, from, subject, date, snippet.",
+             Returns recent messages with sender/subject/date/snippet previews; each \
+             row carries `message_id`/`thread_id` (plus Gmail's native `id`/`threadId`) \
+             ready to pass to gmail_get_message / gmail_get_thread.",
             kind: ConnectorToolKind::Read,
         },
         FallbackTool {
@@ -77,9 +79,10 @@ pub fn fallback_tool_defs() -> &'static [FallbackTool] {
             name: "gmail_send_message",
             description: "Compose and SEND an email from the user's Gmail account (Gmail REST). \
              This tool works — call it whenever the user asks you to send an email (including to \
-             send a draft you already created; pass the same to/subject/body). A confirmation card \
-             is shown to the user and once they approve, the email is sent automatically — you do \
-             not need user permission in advance and must never tell the user to send it manually. \
+             send a draft you already created; pass the same to/subject/body). The email is sent \
+             as soon as the call executes — do not ask for permission first and never tell the \
+             user to send it manually. (In Relay's built-in chat a confirmation card is shown \
+             before the call runs; on the harness bridge it executes immediately.) \
              Args: to (array of addresses), subject, body (plain text; optional cc/bcc arrays). \
              Returns the sent message id and threadId.",
             kind: ConnectorToolKind::Write,
@@ -95,6 +98,66 @@ pub fn fallback_tool_defs() -> &'static [FallbackTool] {
             kind: ConnectorToolKind::Write,
         },
     ]
+}
+
+/// JSON Schema for one fallback tool's args, served over the relay-tools
+/// bridge. The bridge's generic fallback entries carry an EMPTY
+/// `properties` map (the description text is the only arg contract there),
+/// which made models guess parameter spellings — `threadId` from a search
+/// result against a `thread_id` arg — and burn retries on "parameter
+/// rejected". Gmail is the highest-traffic fallback surface, so it gets
+/// real schemas. Keep in sync with the `call_tool` validators.
+pub fn args_schema(name: &str) -> Option<serde_json::Value> {
+    let schema = |props: serde_json::Value, required: &[&str]| {
+        let mut s = serde_json::json!({ "type": "object", "properties": props });
+        if !required.is_empty() {
+            s["required"] = serde_json::json!(required);
+        }
+        s
+    };
+    match name {
+        "gmail_search_threads" => Some(schema(
+            serde_json::json!({
+                "query": { "type": "string", "description": "Gmail search syntax, e.g. \"from:alice newer_than:7d is:unread\". Omit or empty = the most recent messages." },
+                "max_results": { "type": "integer", "description": "1-50, default 20." },
+            }),
+            &[],
+        )),
+        "gmail_get_thread" => Some(schema(
+            serde_json::json!({
+                "thread_id": { "type": "string", "description": "Thread id — copy `thread_id` (or `threadId`) from a gmail_search_threads result." },
+                "format": { "type": "string", "enum": ["full", "minimal"], "description": "Default full." },
+            }),
+            &["thread_id"],
+        )),
+        "gmail_get_message" => Some(schema(
+            serde_json::json!({
+                "message_id": { "type": "string", "description": "Message id — copy `message_id` (or `id`) from a gmail_search_threads result." },
+                "format": { "type": "string", "enum": ["full", "minimal"], "description": "Default full." },
+            }),
+            &["message_id"],
+        )),
+        "gmail_list_labels" => Some(schema(serde_json::json!({}), &[])),
+        "gmail_create_draft" | "gmail_send_message" => Some(schema(
+            serde_json::json!({
+                "to": { "type": "array", "items": { "type": "string" }, "description": "Recipient email addresses." },
+                "subject": { "type": "string", "description": "Subject line." },
+                "body": { "type": "string", "description": "Plain-text body." },
+                "cc": { "type": "array", "items": { "type": "string" } },
+                "bcc": { "type": "array", "items": { "type": "string" } },
+            }),
+            &["to", "subject", "body"],
+        )),
+        "gmail_label_thread" => Some(schema(
+            serde_json::json!({
+                "thread_id": { "type": "string", "description": "Thread id from a gmail_search_threads result." },
+                "add": { "type": "array", "items": { "type": "string" }, "description": "Label ids to add, e.g. [\"UNREAD\"]." },
+                "remove": { "type": "array", "items": { "type": "string" }, "description": "Label ids to remove — [\"INBOX\"] archives, [\"UNREAD\"] marks read." },
+            }),
+            &["thread_id"],
+        )),
+        _ => None,
+    }
 }
 
 /// Run a fallback tool by name. Loads (and refreshes if expired) the gmail
@@ -118,13 +181,7 @@ pub async fn call_tool(
                 .and_then(|v| v.as_i64())
                 .unwrap_or(20)
                 .clamp(1, 50);
-            let mut params: Vec<(&str, String)> = vec![
-                ("maxResults", max.to_string()),
-                ("format", "metadata".to_string()),
-                ("metadataHeaders", "From".to_string()),
-                ("metadataHeaders", "Subject".to_string()),
-                ("metadataHeaders", "Date".to_string()),
-            ];
+            let mut params: Vec<(&str, String)> = vec![("maxResults", max.to_string())];
             if !q.is_empty() {
                 params.push(("q", q.to_string()));
             }
@@ -132,45 +189,84 @@ pub async fn call_tool(
             let body = resp.text().await.unwrap_or_default();
             let json: serde_json::Value = serde_json::from_str(&body)
                 .map_err(|e| format!("gmail search response not JSON: {e}"))?;
-            // Lighten the payload: keep id/threadId + metadata headers + snippet.
+            // `messages.list` returns ONLY ids — `format`/`metadataHeaders`
+            // apply to `messages.get`, not the list call — so each hit needs
+            // one metadata fetch to surface the from/subject/date/snippet the
+            // description promises. Without this the model got bare ids, then
+            // had to make detail calls it kept fumbling. Cap the fan-out so a
+            // 50-hit search can't stall the turn; a failed preview degrades
+            // to a bare id row (the search itself already succeeded).
+            let preview_cap = max.min(25);
             let mut kept = Vec::new();
             if let Some(list) = json.get("messages").and_then(|v| v.as_array()) {
-                for m in list.iter().take(max as usize) {
-                    let id = m.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                    let thread_id = m
-                        .get("threadId")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-                    let snippet = m.get("snippet").cloned().unwrap_or(serde_json::Value::Null);
-                    let mut hdrs = serde_json::Map::new();
-                    if let Some(payload) = m.get("payload").and_then(|p| p.get("headers")) {
-                        if let Some(headers) = payload.as_array() {
-                            for h in headers {
-                                if let (Some(n), Some(v)) = (
-                                    h.get("name").and_then(|x| x.as_str()),
-                                    h.get("value").and_then(|x| x.as_str()),
-                                ) {
-                                    hdrs.insert(n.to_string(), serde_json::Value::String(v.to_string()));
+                for (i, m) in list.iter().enumerate() {
+                    let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let thread_id = m.get("threadId").and_then(|v| v.as_str()).unwrap_or("");
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let mut row = serde_json::json!({
+                        "id": id,
+                        "threadId": thread_id,
+                        // Snake-case duplicates: the detail tools take
+                        // `message_id`/`thread_id`, and models copy keys from
+                        // this response verbatim — matching names removes the
+                        // casing guesswork behind the retry loops.
+                        "message_id": id,
+                        "thread_id": thread_id,
+                        "snippet": serde_json::Value::Null,
+                        "headers": {},
+                    });
+                    if i < preview_cap as usize {
+                        if let Ok(pr) = crate::util::checked_send_ctx(
+                            http .get(format!("{base}/messages/{}", urlencoding::encode(id)))
+                                 .bearer_auth(&token)
+                                 .query(&[
+                                     ("format", "metadata"),
+                                     ("metadataHeaders", "From"),
+                                     ("metadataHeaders", "Subject"),
+                                     ("metadataHeaders", "Date"),
+                                 ])
+                                 .timeout(std::time::Duration::from_secs(15)),
+                            500,
+                            "gmail search preview",
+                        )
+                        .await
+                        {
+                            let pbody = pr.text().await.unwrap_or_default();
+                            if let Ok(pj) = serde_json::from_str::<serde_json::Value>(&pbody) {
+                                row["snippet"] =
+                                    pj.get("snippet").cloned().unwrap_or(serde_json::Value::Null);
+                                let mut hdrs = serde_json::Map::new();
+                                if let Some(headers) =
+                                    pj.pointer("/payload/headers").and_then(|h| h.as_array())
+                                {
+                                    for h in headers {
+                                        if let (Some(n), Some(v)) = (
+                                            h.get("name").and_then(|x| x.as_str()),
+                                            h.get("value").and_then(|x| x.as_str()),
+                                        ) {
+                                            hdrs.insert(
+                                                n.to_string(),
+                                                serde_json::Value::String(v.to_string()),
+                                            );
+                                        }
+                                    }
                                 }
+                                row["headers"] = serde_json::Value::Object(hdrs);
                             }
                         }
                     }
-                    kept.push(serde_json::json!({
-                        "id": id,
-                        "threadId": thread_id,
-                        "snippet": snippet,
-                        "headers": hdrs,
-                    }));
+                    kept.push(row);
                 }
             }
             Ok(serde_json::to_string_pretty(&serde_json::Value::Array(kept))
                 .map_err(|e| e.to_string())?)
         }
         "gmail_get_thread" => {
-            let thread_id = args
-                .get("thread_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "gmail_get_thread: missing `thread_id` argument".to_string())?;
+            let thread_id = arg_str(args, &["thread_id", "threadId", "id"]).ok_or_else(|| {
+                missing_arg("gmail_get_thread", "thread_id", &["thread_id", "threadId", "id"], args)
+            })?;
             let fmt = args
                 .get("format")
                 .and_then(|v| v.as_str())
@@ -193,10 +289,9 @@ pub async fn call_tool(
             Ok(cap_response_text(body))
         }
         "gmail_get_message" => {
-            let message_id = args
-                .get("message_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "gmail_get_message: missing `message_id` argument".to_string())?;
+            let message_id = arg_str(args, &["message_id", "messageId", "id"]).ok_or_else(|| {
+                missing_arg("gmail_get_message", "message_id", &["message_id", "messageId", "id"], args)
+            })?;
             let fmt = args
                 .get("format")
                 .and_then(|v| v.as_str())
@@ -300,12 +395,50 @@ pub async fn call_tool(
     }
 }
 
+/// Resolve a string argument trying several key spellings in order. Models
+/// copy keys from previous tool results (Gmail's native `threadId`/`id`)
+/// while the declared args are snake_case — the aliases absorb that mismatch
+/// instead of making the model retry blind through casing variants.
+fn arg_str<'a>(args: &'a serde_json::Value, names: &[&str]) -> Option<&'a str> {
+    for n in names {
+        if let Some(v) = args.get(n).and_then(|v| v.as_str()) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+/// The error text for a missing argument: names every accepted spelling and
+/// echoes the keys the caller actually sent, so the model self-corrects in
+/// one step instead of guessing through retries.
+fn missing_arg(tool: &str, primary: &str, aliases: &[&str], args: &serde_json::Value) -> String {
+    let sent: Vec<String> = args
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    format!(
+        "{tool}: missing `{primary}` argument (accepted: {}; got: {})",
+        aliases
+            .iter()
+            .map(|a| format!("`{a}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        if sent.is_empty() {
+            "no arguments".to_string()
+        } else {
+            sent.join(", ")
+        },
+    )
+}
+
 /// Cap a fallback-read response before it enters model context: raw API
 /// bodies (threads, messages, Drive files) used to ride back unbounded and
 /// can be megabytes. Byte-truncates on a char boundary with an explicit
 /// marker so the model knows the text was cut.
-pub(crate) fn cap_response_text(body: String) -> String {
-    const MAX_BYTES: usize = 64 * 1024;
+pub(crate) fn cap_response_text(body: String) -> String {    const MAX_BYTES: usize = 64 * 1024;
     if body.len() <= MAX_BYTES {
         return body;
     }
@@ -473,6 +606,60 @@ mod tests {
         for (name, _) in fallback_tool_defs().iter().map(|d| (d.name, d)) {
             assert!(!vendor.contains(&name), "{name} collides with a vendor MCP tool");
         }
+    }
+
+    #[test]
+    fn arg_str_resolves_casing_aliases() {
+        // Models copy keys from search results (Gmail-native camelCase) while
+        // the declared args are snake_case — both must resolve.
+        let args = serde_json::json!({ "threadId": "abc" });
+        assert_eq!(arg_str(&args, &["thread_id", "threadId", "id"]), Some("abc"));
+        let args = serde_json::json!({ "id": "xyz" });
+        assert_eq!(arg_str(&args, &["thread_id", "threadId", "id"]), Some("xyz"));
+        let args = serde_json::json!({ "thread_id": "  spaced  " });
+        assert_eq!(arg_str(&args, &["thread_id", "threadId", "id"]), Some("spaced"));
+        // Empty-string aliases are skipped in favor of later spellings.
+        let args = serde_json::json!({ "thread_id": "", "id": "real" });
+        assert_eq!(arg_str(&args, &["thread_id", "threadId", "id"]), Some("real"));
+        // Non-string values don't resolve.
+        let args = serde_json::json!({ "id": 42 });
+        assert_eq!(arg_str(&args, &["thread_id", "threadId", "id"]), None);
+    }
+
+    #[test]
+    fn missing_arg_error_names_aliases_and_received_keys() {
+        let args = serde_json::json!({ "threadId": 5, "format": "full" });
+        let msg = missing_arg("gmail_get_thread", "thread_id", &["thread_id", "threadId", "id"], &args);
+        assert!(msg.contains("`thread_id`"), "{msg}");
+        assert!(msg.contains("`threadId`") && msg.contains("`id`"), "{msg}");
+        // The received keys are echoed (order is map-dependent) so the model
+        // can see exactly what it sent.
+        assert!(msg.contains("threadId") && msg.contains("format"), "{msg}");
+        // No args at all still reads sensibly.
+        let msg = missing_arg("gmail_get_message", "message_id", &["message_id", "id"], &serde_json::json!({}));
+        assert!(msg.contains("no arguments"), "{msg}");
+    }
+
+    #[test]
+    fn args_schema_covers_every_fallback_tool() {
+        // The bridge serves these schemas over MCP — a name without a schema
+        // silently degrades to the empty-properties guessing game again.
+        for def in fallback_tool_defs() {
+            let s = args_schema(def.name)
+                .unwrap_or_else(|| panic!("no args_schema for {}", def.name));
+            assert_eq!(s["type"], "object");
+            // Required lists must reference declared properties only.
+            if let Some(req) = s["required"].as_array() {
+                for r in req {
+                    assert!(
+                        s["properties"].get(r.as_str().unwrap()).is_some(),
+                        "{} requires undeclared property {r}",
+                        def.name
+                    );
+                }
+            }
+        }
+        assert!(args_schema("nonexistent_tool").is_none());
     }
 
     #[test]

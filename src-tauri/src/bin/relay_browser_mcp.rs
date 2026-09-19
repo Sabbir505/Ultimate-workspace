@@ -377,16 +377,30 @@ async fn relay_schemas(url: &str, ws: &mut Option<WsConn>) -> Vec<Value> {
     }
     let conn = ws.as_mut().unwrap();
     match round_trip(conn, json!({ "op": "relay_schemas" }), ROUND_TRIP_TIMEOUT).await {
-        Ok(resp) => match resp.get("schemas").cloned().unwrap_or(Value::Null) {
-            Value::Array(items) if !items.is_empty() => {
-                [browser, items].concat()
-            }
-            _ => [browser, static_relay_schemas()].concat(),
+        Ok(resp) => match extract_schemas(&resp) {
+            Some(items) => [browser, items].concat(),
+            None => [browser, static_relay_schemas()].concat(),
         },
         Err(_) => {
             ws.as_mut().unwrap().closed = true;
             [browser, static_relay_schemas()].concat()
         }
+    }
+}
+
+/// Pull the relay-tool schema list out of a `relay_schemas` round-trip
+/// response. The app wraps EVERY op reply in an envelope — `{"ok": value}` —
+/// so the live list actually arrives at `resp.ok.schemas`; a bare
+/// `{"schemas": ...}` is accepted too. This unwrap used to read
+/// `resp["schemas"]` directly, missed the envelope EVERY time, and silently
+/// fell back to the static copy — so harness sessions never saw the
+/// app-derived set (connector REST fallback reads included) no matter how
+/// current the app was, while `tools/call` against the same app worked fine.
+fn extract_schemas(resp: &Value) -> Option<Vec<Value>> {
+    let body = resp.get("ok").filter(|v| !v.is_null()).unwrap_or(resp);
+    match body.get("schemas") {
+        Some(Value::Array(items)) if !items.is_empty() => Some(items.clone()),
+        _ => None,
     }
 }
 
@@ -424,6 +438,21 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
     }
 }
 
+/// Routing for `tools/call`: static names take their mapped op; anything
+/// else forwards under the `relay_tools:` namespace. The dynamic remainder
+/// is the app-derived CONNECTOR REST fallback reads (`gmail_search_threads`,
+/// `youtube_search`, `gdrive_search_files`, …) whose names depend on which
+/// connectors are connected and only reach this binary via the live
+/// `relay_schemas` fetch — `tool_op` can never know them statically, and a
+/// hard-coded copy here silently broke every connector call with "unknown
+/// tool" (the app advertised the tools, this binary refused to forward
+/// them). The app-side allowlist (`mcp_tools_bridge::tool_from_op`) stays
+/// the real gate: it answers `unknown_op` for bogus names, so forwarding is
+/// safe — same trust model the app-side dispatcher already documents.
+fn route_tool_op(tool: &str) -> String {
+    tool_op(tool).unwrap_or_else(|_| format!("relay_tools:{tool}"))
+}
+
 /// Dispatch a `tools/call` to the app over the WebSocket. Returns the tool's
 /// text result or a structured (code, message) error.
 async fn handle_tool_call(
@@ -435,7 +464,7 @@ async fn handle_tool_call(
     let tool = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    let op = tool_op(tool).map_err(|_| ("unknown_op", format!("unknown tool: {tool}")))?;
+    let op = route_tool_op(tool);
 
     // Ensure we have a connection (lazy connect / reconnect on drop).
     if ws.as_ref().map(|c| c.closed).unwrap_or(true) {
@@ -1213,6 +1242,41 @@ mod tests {
             assert_eq!(tool_op(tool).unwrap(), tool, "expected bare op for {tool}");
         }
         assert!(tool_op("bogus").is_err()); // unknown tools error, not misroute
+    }
+
+    #[test]
+    fn relay_schemas_response_envelope_is_unwrapped() {
+        // The app wraps every op reply: {"ok": {"schemas": [...]}}. Reading
+        // resp["schemas"] directly missed it EVERY time and silently served
+        // the static copy — the live fetch (and every connector fallback
+        // read with it) never reached harness sessions.
+        let ok = json!({ "ok": { "schemas": [ { "name": "youtube_search" } ] } });
+        assert_eq!(
+            extract_schemas(&ok).unwrap(),
+            vec![json!({ "name": "youtube_search" })]
+        );
+        // A bare {"schemas": ...} body (older apps / test doubles) still works.
+        let bare = json!({ "schemas": [ { "name": "x" } ] });
+        assert_eq!(extract_schemas(&bare).unwrap(), vec![json!({ "name": "x" })]);
+        // Empty or malformed payloads fall back to the static copy.
+        assert!(extract_schemas(&json!({ "ok": { "schemas": [] } })).is_none());
+        assert!(extract_schemas(&json!({ "ok": null })).is_none());
+        assert!(extract_schemas(&json!({})).is_none());
+    }
+
+    #[test]
+    fn connector_fallback_tools_route_into_relay_tools() {
+        // The app-derived connector REST fallback reads (schemas arrive via
+        // the live `relay_schemas` fetch) are unknowable statically — they
+        // must FORWARD under the relay_tools namespace instead of dying with
+        // "unknown tool" locally. The app-side allowlist (`tool_from_op`) is
+        // the authority and answers unknown_op for bogus names.
+        for tool in ["youtube_search", "gmail_search_threads", "gdrive_search_files"] {
+            assert_eq!(route_tool_op(tool), format!("relay_tools:{tool}"));
+        }
+        // Static families keep their exact ops.
+        assert_eq!(route_tool_op("navigate"), "navigate");
+        assert_eq!(route_tool_op("generate_document"), "relay_tools:generate_document");
     }
 
     #[test]

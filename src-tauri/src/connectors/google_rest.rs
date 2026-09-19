@@ -40,6 +40,193 @@ pub fn fallback_tool_defs(connector_id: &str) -> Option<&'static [FallbackTool]>
     }
 }
 
+/// JSON Schema for one fallback tool's args, served over the relay-tools
+/// bridge (`mcp_tools_bridge::relay_tool_schemas`) — mirrors
+/// `gmail_api::args_schema`. With the generic empty `properties` map the
+/// description text was the only arg contract, and models guessed parameter
+/// spellings and burned retries on rejections. Keep in sync with the
+/// `call_tool` validators above.
+pub fn args_schema(name: &str) -> Option<serde_json::Value> {
+    let schema = |props: serde_json::Value, required: &[&str]| {
+        let mut s = serde_json::json!({ "type": "object", "properties": props });
+        if !required.is_empty() {
+            s["required"] = serde_json::json!(required);
+        }
+        s
+    };
+    match name {
+        // ---- Drive ----
+        "gdrive_search_files" => Some(schema(
+            serde_json::json!({
+                "query": { "type": "string", "description": "Drive search syntax, e.g. \"name contains 'Report'\" or \"mimeType='application/pdf'\". Omit or empty = recent files." },
+                "page_size": { "type": "integer", "description": "1-100, default 20." },
+            }),
+            &[],
+        )),
+        "gdrive_get_file_metadata" | "gdrive_read_file_content" => Some(schema(
+            serde_json::json!({
+                "file_id": { "type": "string", "description": "Drive file id — copy `id` from a gdrive_search_files result." },
+            }),
+            &["file_id"],
+        )),
+        "gdrive_create_file" => Some(schema(
+            serde_json::json!({
+                "name": { "type": "string", "description": "File name (with extension, e.g. notes.txt)." },
+                "content": { "type": "string", "description": "Text content to store." },
+                "mime_type": { "type": "string", "description": "Default text/plain." },
+                "parent_id": { "type": "string", "description": "Folder id; omit = My Drive root." },
+            }),
+            &["name"],
+        )),
+        // ---- Docs ----
+        "gdocs_read_doc" => Some(schema(
+            serde_json::json!({
+                "document_id": { "type": "string", "description": "Docs document id — copy `id` from a gdrive_search_files result." },
+            }),
+            &["document_id"],
+        )),
+        "gdocs_update_doc" => Some(schema(
+            serde_json::json!({
+                "document_id": { "type": "string", "description": "Docs document id." },
+                "text": { "type": "string", "description": "The new body content — REPLACES the document's entire text." },
+            }),
+            &["document_id", "text"],
+        )),
+        // ---- Sheets ----
+        "gsheets_get_spreadsheet" => Some(schema(
+            serde_json::json!({
+                "spreadsheet_id": { "type": "string", "description": "Spreadsheet id — copy `id` from a gdrive_search_files result." },
+            }),
+            &["spreadsheet_id"],
+        )),
+        "gsheets_get_values" => Some(schema(
+            serde_json::json!({
+                "spreadsheet_id": { "type": "string" },
+                "range": { "type": "string", "description": "A1 notation, e.g. \"Sheet1!A1:D20\" or just \"Sheet1\"." },
+                "major_dimension": { "type": "string", "enum": ["ROWS", "COLUMNS"], "description": "Default ROWS." },
+            }),
+            &["spreadsheet_id", "range"],
+        )),
+        "gsheets_update_values" | "gsheets_append_values" => Some(schema(
+            serde_json::json!({
+                "spreadsheet_id": { "type": "string" },
+                "range": { "type": "string", "description": "A1 notation, e.g. \"Sheet1!A1\". update REPLACES the range; append adds rows after it." },
+                "values": { "type": "array", "items": { "type": "array", "items": {} }, "description": "2D array of rows, e.g. [[\"name\",\"qty\"],[\"bolt\",12]]." },
+            }),
+            &["spreadsheet_id", "range", "values"],
+        )),
+        "gsheets_create_spreadsheet" => Some(schema(
+            serde_json::json!({
+                "title": { "type": "string" },
+            }),
+            &["title"],
+        )),
+        // ---- Slides ----
+        "gslides_read_presentation" => Some(schema(
+            serde_json::json!({
+                "presentation_id": { "type": "string", "description": "Presentation id — copy `id` from a gdrive_search_files result." },
+            }),
+            &["presentation_id"],
+        )),
+        "gslides_replace_all_text" => Some(schema(
+            serde_json::json!({
+                "presentation_id": { "type": "string" },
+                "find": { "type": "string", "description": "The exact text to replace." },
+                "replace": { "type": "string", "description": "The replacement text." },
+            }),
+            &["presentation_id", "find", "replace"],
+        )),
+        // ---- Calendar ----
+        "gcalendar_list_events" => Some(schema(
+            serde_json::json!({
+                "calendar_id": { "type": "string", "description": "Default \"primary\"." },
+                "time_min": { "type": "string", "description": "ISO-8601 lower bound, e.g. \"2026-09-19T00:00:00Z\"." },
+                "max_results": { "type": "integer", "description": "1-100, default 20." },
+            }),
+            &[],
+        )),
+        "gcalendar_get_event" | "gcalendar_delete_event" => Some(schema(
+            serde_json::json!({
+                "event_id": { "type": "string", "description": "Event id — copy `id` from a gcalendar_list_events result." },
+                "calendar_id": { "type": "string", "description": "Default \"primary\"." },
+            }),
+            &["event_id"],
+        )),
+        "gcalendar_list_calendars" => Some(schema(serde_json::json!({}), &[])),
+        "gcalendar_create_event" => Some(schema(
+            serde_json::json!({
+                "summary": { "type": "string", "description": "Event title." },
+                "start": { "type": "string", "description": "ISO-8601 dateTime, e.g. \"2026-09-20T14:00:00\" (or ...Z)." },
+                "end": { "type": "string", "description": "ISO-8601 dateTime." },
+                "description": { "type": "string" },
+                "attendees": { "type": "array", "items": { "type": "string" }, "description": "Email addresses." },
+                "calendar_id": { "type": "string", "description": "Default \"primary\"." },
+            }),
+            &["summary", "start", "end"],
+        )),
+        // ---- Chat ----
+        "gchat_list_spaces" => Some(schema(
+            serde_json::json!({
+                "page_size": { "type": "integer", "description": "1-100, default 20." },
+            }),
+            &[],
+        )),
+        "gchat_list_messages" => Some(schema(
+            serde_json::json!({
+                "space": { "type": "string", "description": "Space resource name — copy `name` from a gchat_list_spaces result, e.g. \"spaces/AAAA\"." },
+                "page_size": { "type": "integer", "description": "1-50, default 20." },
+            }),
+            &["space"],
+        )),
+        "gchat_send_message" => Some(schema(
+            serde_json::json!({
+                "space": { "type": "string", "description": "Space resource name, e.g. \"spaces/AAAA\"." },
+                "text": { "type": "string", "description": "Message text." },
+            }),
+            &["space", "text"],
+        )),
+        // ---- People ----
+        "gpeople_get_user_profile" => Some(schema(serde_json::json!({}), &[])),
+        "gpeople_search_contacts" | "gpeople_search_directory_people" => Some(schema(
+            serde_json::json!({
+                "query": { "type": "string", "description": "Name or email fragment to search." },
+                "page_size": { "type": "integer", "description": "1-30, default 10." },
+            }),
+            &["query"],
+        )),
+        // ---- YouTube ----
+        "youtube_search" => Some(schema(
+            serde_json::json!({
+                "query": { "type": "string" },
+                "item_type": { "type": "string", "enum": ["video", "channel", "playlist"], "description": "Default video." },
+                "max_results": { "type": "integer", "description": "1-50, default 10." },
+            }),
+            &["query"],
+        )),
+        "youtube_video_details" => Some(schema(
+            serde_json::json!({
+                "video_ids": { "type": "string", "description": "Comma-separated video ids, e.g. \"dQw4w9WgXcQ,abc123\" — copy `id` from a youtube_search result." },
+            }),
+            &["video_ids"],
+        )),
+        "youtube_my_channel" => Some(schema(serde_json::json!({}), &[])),
+        "youtube_list_my_playlists" => Some(schema(
+            serde_json::json!({
+                "max_results": { "type": "integer", "description": "1-50, default 25." },
+            }),
+            &[],
+        )),
+        "youtube_list_playlist_items" => Some(schema(
+            serde_json::json!({
+                "playlist_id": { "type": "string", "description": "Playlist id — copy `id` from a youtube_search or youtube_list_my_playlists result." },
+                "max_results": { "type": "integer", "description": "1-50, default 25." },
+            }),
+            &["playlist_id"],
+        )),
+        _ => None,
+    }
+}
+
 /// Drive (REST base `https://www.googleapis.com/drive/v3`).
 static GDRIVE_TOOLS: &[FallbackTool] = &[
     FallbackTool {
@@ -1169,6 +1356,32 @@ async fn people_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn args_schema_covers_every_fallback_tool() {
+        // The bridge serves these schemas over MCP — a name without a schema
+        // silently degrades to the empty-properties guessing game again.
+        for connector in [
+            "gdrive", "gdocs", "gsheets", "gslides", "gcalendar", "gchat", "gpeople", "youtube",
+        ] {
+            for def in fallback_tool_defs(connector).unwrap_or(&[]) {
+                let s = args_schema(def.name)
+                    .unwrap_or_else(|| panic!("no args_schema for {}", def.name));
+                assert_eq!(s["type"], "object");
+                // Required lists must reference declared properties only.
+                if let Some(req) = s["required"].as_array() {
+                    for r in req {
+                        assert!(
+                            s["properties"].get(r.as_str().unwrap()).is_some(),
+                            "{} requires undeclared property {r}",
+                            def.name
+                        );
+                    }
+                }
+            }
+        }
+        assert!(args_schema("nonexistent_tool").is_none());
+    }
 
     /// The vendor MCP tool names per product (from live `tools/list` responses
     /// of the official servers) — the `g*_` prefixes must keep the fallback

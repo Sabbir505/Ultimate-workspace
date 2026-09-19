@@ -126,7 +126,7 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
 pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
     use tauri::Manager;
     let db = app.state::<crate::DbState>();
-    let (connected_ids, account_displays, fallback_read_names) = {
+    let (connected_ids, account_displays, fallback_tool_names) = {
         let conn = db.0.lock();
         let rows = crate::db::list_connector_credential_rows(&conn).unwrap_or_default();
         let credentialed: Vec<String> =
@@ -136,7 +136,7 @@ pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
             rows.iter()
                 .filter_map(|r| r.account_display.clone())
                 .collect::<Vec<_>>(),
-            crate::connectors::connected_fallback_read_tools(&credentialed)
+            crate::connectors::connected_fallback_tools(&credentialed)
                 .into_iter()
                 .map(|(_, name, _)| name.to_string())
                 .collect::<Vec<_>>(),
@@ -181,16 +181,17 @@ pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
     your toolset: only connectors attached to your chat session are registered into \
     your MCP config (refreshed each turn), and a mention of one in the task text \
     (\"@gmail\", \"my inbox\", …) attaches it automatically. Independent of attach \
-    state, the read-style tools under connector_fallback_reads run app-side for \
-    connected connectors — call them directly. Never claim access you don't have \
-    (your own tool list is the truth), and never answer 'I can't access X' for a \
-    connected connector whose fallback read tools you DO have. Do not probe \
-    connectors with shell commands.",
+    state, the fallback tools under connector_fallback_tools run app-side for \
+    connected connectors — READS and WRITES alike (gmail_send_message sends \
+    immediately; there is no confirmation prompt on this bridge) — call them \
+    directly. Never claim access you don't have (your own tool list is the truth), \
+    and never answer 'I can't access X' for a connected connector whose fallback \
+    tools you DO have. Do not probe connectors with shell commands.",
         "connectors": {
             "connected": connected,
             "accounts": account_displays,
         },
-        "connector_fallback_reads": fallback_read_names,
+        "connector_fallback_tools": fallback_tool_names,
         "mcp_gallery": {
             "installed": mcp_gallery,
         },

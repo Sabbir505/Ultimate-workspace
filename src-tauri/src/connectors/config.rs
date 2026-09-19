@@ -562,7 +562,7 @@ pub const GITHUB: Connector = Connector {
     icon: "🐙",
     family: "github",
     description: "Access GitHub repositories, issues, pull requests, and code.",
-    keywords: &["github", "my pull request", "pull request on", "issue on github", "my repos", "github repo"],
+    keywords: &["github", "my pull request", "pull request on", "issue on github", "my repos", "github repo", "repo", "repository", "repositories"],
     authorize_url: "https://github.com/login/oauth/authorize",
     token_url: "https://github.com/login/oauth/access_token",
     client_id: env_or_empty!("GITHUB_CLIENT_ID"),

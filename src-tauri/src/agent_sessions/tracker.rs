@@ -746,6 +746,8 @@ pub(crate) fn tool_meta_generic(name: &str, input: &Value) -> Value {
     } else if is_shell {
         let cmd = s(&["command", "cmd"]);
         json!({ "kind": "code", "title": "Running shell command", "lang": "bash", "code": sanitize(cmd) })
+    } else if let Some((server, tool)) = name.strip_prefix("mcp__").and_then(|r| r.split_once("__")) {
+        mcp_tool_meta(server, tool, input)
     } else {
         match name {
             "Read" | "read" | "read_file" => {
@@ -773,5 +775,183 @@ pub(crate) fn tool_meta_generic(name: &str, input: &Value) -> Value {
             }),
             _ => json!({ "kind": "tool", "title": format!("Running tool {name}") }),
         }
+    }
+}
+
+/// Human card for an MCP tool call (`mcp__<server>__<tool>`). Connector ids
+/// map to display names, vendor quirks are de-prefixed (Notion names its
+/// tools `notion-get-tool-access`), high-traffic tools get hand-written
+/// verbs, and the most useful argument rides along as the detail line —
+/// `Running tool mcp__notion__notion-get-tool-access` becomes
+/// `Notion · checking tool access`.
+fn mcp_tool_meta(server: &str, tool: &str, input: &Value) -> Value {
+    let s = |keys: &[&str]| {
+        for k in keys {
+            if let Some(v) = input.get(*k).and_then(|v| v.as_str()) {
+                if !v.is_empty() {
+                    return v.to_string();
+                }
+            }
+        }
+        String::new()
+    };
+    let server_pretty = match server {
+        "relay-tools" => "Relay",
+        "relay-browser" => "Browser",
+        "gmail" => "Gmail",
+        "notion" => "Notion",
+        "github" => "GitHub",
+        "kiwi" => "Kiwi",
+        "gdrive" => "Drive",
+        "gdocs" => "Docs",
+        "gsheets" => "Sheets",
+        "gslides" => "Slides",
+        "gcalendar" => "Calendar",
+        "gchat" => "Chat",
+        "gpeople" => "Contacts",
+        "youtube" => "YouTube",
+        other => other,
+    };
+    // (title, detail) for the tools users hit constantly; the detail key list
+    // is per tool so the card shows WHAT it is acting on, not just the verb.
+    let known: Option<(&str, &str)> = match (server, tool) {
+        // relay-tools (Relay's own surface)
+        ("relay-tools", "generate_document") => Some(("Generating document", "filename")),
+        ("relay-tools", "plan_document") => Some(("Planning document", "filename")),
+        ("relay-tools", "revise_document") => Some(("Revising document", "path")),
+        ("relay-tools", "generate_diagram") => Some(("Drawing a diagram", "filename")),
+        ("relay-tools", "generate_image") => Some(("Generating an image", "prompt")),
+        ("relay-tools", "generate_file") => Some(("Writing an artifact file", "filename")),
+        ("relay-tools", "get_skill") => Some(("Loading a skill", "slug")),
+        ("relay-tools", "list_skills") => Some(("Listing skills", "")),
+        ("relay-tools", "list_artifacts") => Some(("Listing artifacts", "query")),
+        ("relay-tools", "search_docs") => Some(("Searching local docs", "query")),
+        ("relay-tools", "get_capabilities") => Some(("Checking capabilities", "")),
+        ("relay-tools", "list_automations") => Some(("Listing automations", "")),
+        ("relay-tools", "create_automation") => Some(("Creating an automation", "name")),
+        ("relay-tools", "update_automation") => Some(("Updating an automation", "name")),
+        ("relay-tools", "delete_automation") => Some(("Deleting an automation", "automation_id")),
+        ("relay-tools", "run_automation_now") => Some(("Running an automation", "automation_id")),
+        ("relay-tools", "list_sessions") => Some(("Listing chats", "")),
+        ("relay-tools", "read_session") => Some(("Reading a chat", "session_id")),
+        ("relay-tools", "search_sessions") => Some(("Searching chats", "query")),
+        ("relay-tools", "message_session") => Some(("Messaging a chat", "session_id")),
+        ("relay-tools", "spawn_session") => Some(("Spawning an agent", "task")),
+        // relay-browser
+        ("relay-browser", "navigate") => Some(("Opening a page", "url")),
+        ("relay-browser", "read_page") => Some(("Reading the page", "")),
+        ("relay-browser", "observe") => Some(("Scanning the page", "")),
+        ("relay-browser", "extract") => Some(("Extracting from the page", "prompt")),
+        ("relay-browser", "click") => Some(("Clicking", "selector_or_description")),
+        ("relay-browser", "type_text") => Some(("Typing", "text")),
+        ("relay-browser", "scroll") => Some(("Scrolling", "")),
+        ("relay-browser", "screenshot") => Some(("Taking a screenshot", "")),
+        ("relay-browser", "find") => Some(("Finding on the page", "query")),
+        ("relay-browser", "fill_form") => Some(("Filling a form", "")),
+        ("relay-browser", "evaluate") => Some(("Running page script", "expression")),
+        ("relay-browser", "press_key") => Some(("Pressing a key", "key")),
+        ("relay-browser", "print_to_pdf") => Some(("Saving page as PDF", "")),
+        ("relay-browser", "read_console") => Some(("Reading browser console", "")),
+        ("relay-browser", "read_network") => Some(("Reading network log", "")),
+        ("relay-browser", "list_tabs") => Some(("Listing browser tabs", "")),
+        ("relay-browser", "new_tab") => Some(("Opening a tab", "url")),
+        ("relay-browser", "switch_tab") => Some(("Switching tab", "")),
+        ("relay-browser", "close_tab") => Some(("Closing tab", "")),
+        // notion — its tools all carry a redundant `notion-` prefix; the
+        // generic de-prefixer handles the rest.
+        ("notion", "notion-get-tool-access") => Some(("Checking Notion access", "")),
+        // gmail
+        ("relay-tools", "gmail_search_threads") => Some(("Searching Gmail", "query")),
+        ("relay-tools", "gmail_get_thread") => Some(("Reading a Gmail thread", "thread_id")),
+        ("relay-tools", "gmail_get_message") => Some(("Reading a Gmail message", "message_id")),
+        ("relay-tools", "gmail_list_labels") => Some(("Listing Gmail labels", "")),
+        ("relay-tools", "gmail_send_message") => Some(("Sending an email", "subject")),
+        ("relay-tools", "gmail_create_draft") => Some(("Creating an email draft", "subject")),
+        ("relay-tools", "gmail_label_thread") => Some(("Updating Gmail labels", "thread_id")),
+        _ => None,
+    };
+    let (title, detail) = match known {
+        Some((title, key)) => (title.to_string(), s(&[key])),
+        None => {
+            // Generic: drop a redundant server prefix (notion-get-tool-access
+            // → get-tool-access), humanize separators, keep vendor casing.
+            let stripped = tool
+                .strip_prefix(&format!("{server}_"))
+                .or_else(|| tool.strip_prefix(&format!("{server}-")))
+                .unwrap_or(tool);
+            let mut human = stripped.replace(['-', '_'], " ").to_lowercase();
+            if let Some(first) = human.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            (format!("{server_pretty} · {human}"), String::new())
+        }
+    };
+    // Detail fallback: the first recognizable locator argument.
+    let detail = if detail.is_empty() {
+        s(&[
+            "query", "url", "q", "file_id", "thread_id", "message_id", "spreadsheet_id",
+            "document_id", "presentation_id", "event_id", "playlist_id", "space", "pattern",
+            "name", "subject", "summary", "slug", "task", "path", "filename", "id",
+        ])
+    } else {
+        detail
+    };
+    let mut card = json!({ "kind": "tool", "title": title });
+    if !detail.is_empty() {
+        // Keep cards readable — long ids/prompts truncate on a char boundary
+        // with an ellipsis.
+        let chars: Vec<char> = detail.chars().collect();
+        if chars.len() > 80 {
+            let short: String = chars[..80].iter().collect();
+            card["detail"] = json!(format!("{short}…"));
+        } else {
+            card["detail"] = json!(detail);
+        }
+    }
+    card
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_tool_cards_are_human_readable() {
+        // The screenshot case: Notion's hyphenated vendor tool name.
+        let card = tool_meta_generic("mcp__notion__notion-get-tool-access", &serde_json::json!({}));
+        assert_eq!(card["title"], "Checking Notion access");
+        // Other Notion tools de-prefix and humanize generically.
+        let card = tool_meta_generic("mcp__notion__notion-create-pages", &serde_json::json!({}));
+        assert_eq!(card["title"], "Notion · Create pages");
+        // High-traffic tools get hand-written verbs plus the useful argument.
+        let card = tool_meta_generic(
+            "mcp__relay-tools__gmail_search_threads",
+            &serde_json::json!({ "query": "from:alice is:unread" }),
+        );
+        assert_eq!(card["title"], "Searching Gmail");
+        assert_eq!(card["detail"], "from:alice is:unread");
+        // Writes read as actions too.
+        let card = tool_meta_generic(
+            "mcp__relay-tools__gmail_send_message",
+            &serde_json::json!({ "to": ["a@b.com"], "subject": "Hello there" }),
+        );
+        assert_eq!(card["title"], "Sending an email");
+        assert_eq!(card["detail"], "Hello there");
+        // Known detail keys win; unrecognized tools fall back to the locator
+        // scan, and unknown servers pass through prettified.
+        let card = tool_meta_generic(
+            "mcp__gcalendar__gcalendar_create_event",
+            &serde_json::json!({ "summary": "Dentist", "start": "2026-09-21T14:00:00" }),
+        );
+        assert_eq!(card["title"], "Calendar · Create event");
+        assert_eq!(card["detail"], "Dentist");
+        let card = tool_meta_generic("mcp__kiwi__search-flight", &serde_json::json!({}));
+        assert_eq!(card["title"], "Kiwi · Search flight");
+        // Long details truncate on a char boundary.
+        let card = tool_meta_generic(
+            "mcp__relay-tools__generate_image",
+            &serde_json::json!({ "prompt": "x".repeat(200) }),
+        );
+        assert_eq!(card["detail"].as_str().unwrap().chars().count(), 81); // 80 + ellipsis
     }
 }

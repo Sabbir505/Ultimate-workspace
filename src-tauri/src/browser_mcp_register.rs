@@ -214,6 +214,34 @@ pub fn acp_mcp_servers_for(
     ])
 }
 
+/// ACP `session/new` entries for the ATTACHED hosted-MCP connectors
+/// (notion, github, kiwi — the ones with no relay-tools fallback surface).
+/// Spec-shaped http servers: the agent calls the vendor endpoint itself with
+/// the freshly refreshed bearer. Pure; appended to [`acp_mcp_servers_for`]'s
+/// payload at the session/new call site.
+pub fn acp_connector_servers(connectors: &[crate::connectors::HarnessMcpServer]) -> Vec<Value> {
+    connectors
+        .iter()
+        .filter(|c| !c.url.is_empty())
+        .map(|c| {
+            let mut entry = json!({
+                "name": c.name,
+                "kind": "http",
+                "url": c.url,
+                "headers": [],
+            });
+            if let Some(tok) = &c.bearer_token {
+                if !tok.is_empty() {
+                    entry["headers"] = json!([
+                        { "name": "Authorization", "value": format!("Bearer {tok}") },
+                    ]);
+                }
+            }
+            entry
+        })
+        .collect()
+}
+
 /// The [`acp_mcp_servers_for`] payload for a live app: resolved binary +
 /// current WS port/token, or `[]` when the sidecar is absent.
 pub fn acp_mcp_servers(app: &tauri::AppHandle, project_id: &str) -> Value {
@@ -378,9 +406,113 @@ pub fn ensure_commandcode_bridge(
     false
 }
 
+/// The `mcp add-json` payload for one hosted-MCP connector, pure for tests.
+/// `None` for connectors without a hosted URL (fallback-only — their surface
+/// rides the relay-tools bridge instead).
+fn commandcode_connector_json(url: &str, bearer_token: Option<&str>) -> Option<Value> {
+    if url.is_empty() {
+        return None;
+    }
+    let mut v = json!({ "type": "http", "url": url });
+    if let Some(tok) = bearer_token.filter(|t| !t.is_empty()) {
+        v["headers"] = json!({ "Authorization": format!("Bearer {tok}") });
+    }
+    Some(v)
+}
+
+/// Register the ATTACHED hosted-MCP-only connectors (notion, github, kiwi —
+/// no relay-tools fallback surface, so without this a commandcode session
+/// has NO tools for them at all) into commandcode's own config as remote
+/// servers. Bearer tokens refresh every send, so — unlike the bridge
+/// registration with its marker — this re-registers EVERY commandcode turn
+/// (remove + add-json per connector). Returns how many registered.
+#[cfg(windows)]
+pub fn register_commandcode_connectors(
+    cwd: &Path,
+    connectors: &[crate::connectors::HarnessMcpServer],
+) -> usize {
+    let run = |args: &[&str]| -> bool {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").arg("commandcode").args(args).current_dir(cwd);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    };
+    let mut ok = 0usize;
+    for c in connectors {
+        let Some(server_json) = commandcode_connector_json(&c.url, c.bearer_token.as_deref())
+        else {
+            continue;
+        };
+        let _ = run(&["mcp", "remove", &c.name, "-s", "local"]);
+        if run(&["mcp", "add-json", &c.name, "-s", "local", &server_json.to_string()]) {
+            ok += 1;
+        } else {
+            eprintln!(
+                "[relay:mcp] commandcode connector registration failed for {} — its tools stay unavailable there",
+                c.name
+            );
+        }
+    }
+    ok
+}
+
+/// Non-Windows stub (same rationale as [`ensure_commandcode_bridge`]).
+#[cfg(not(windows))]
+pub fn register_commandcode_connectors(
+    _cwd: &Path,
+    _connectors: &[crate::connectors::HarnessMcpServer],
+) -> usize {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commandcode_connector_json_shapes_remote_entries() {
+        let v = commandcode_connector_json("https://mcp.notion.com/mcp", Some("tok123")).unwrap();
+        assert_eq!(v["type"], "http");
+        assert_eq!(v["url"], "https://mcp.notion.com/mcp");
+        assert_eq!(v["headers"]["Authorization"], "Bearer tok123");
+        // Public connectors (kiwi) carry no auth header at all.
+        let v = commandcode_connector_json("https://mcp.kiwi.com", None).unwrap();
+        assert!(v.get("headers").is_none());
+        // Empty-string tokens are treated like absent ones.
+        let v = commandcode_connector_json("https://mcp.kiwi.com", Some("")).unwrap();
+        assert!(v.get("headers").is_none());
+        // Fallback-only connectors (youtube — empty hosted URL) never register.
+        assert!(commandcode_connector_json("", Some("tok")).is_none());
+    }
+
+    #[test]
+    fn acp_connector_servers_shape_http_entries() {
+        let mk = |name: &str, url: &str, tok: Option<&str>| crate::connectors::HarnessMcpServer {
+            name: name.to_string(),
+            url: url.to_string(),
+            bearer_token: tok.map(str::to_string),
+        };
+        let out = acp_connector_servers(&[
+            mk("notion", "https://mcp.notion.com/mcp", Some("tok")),
+            mk("kiwi", "https://mcp.kiwi.com", None),
+            mk("youtube", "", Some("tok")), // fallback-only — skipped
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["name"], "notion");
+        assert_eq!(out[0]["kind"], "http");
+        assert_eq!(out[0]["headers"][0]["name"], "Authorization");
+        assert_eq!(out[0]["headers"][0]["value"], "Bearer tok");
+        // Public connector: no header entry.
+        assert_eq!(out[1]["name"], "kiwi");
+        assert_eq!(out[1]["headers"].as_array().unwrap().len(), 0);
+    }
 
     #[test]
     fn acp_mcp_servers_shape_both_servers_or_empty() {

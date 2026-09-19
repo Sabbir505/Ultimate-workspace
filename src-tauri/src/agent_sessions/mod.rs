@@ -177,6 +177,14 @@ struct AgentChild {
     /// silently keep working in the OLD folder — a changed value respawns
     /// on the next send, same contract as `spawned_model`.
     spawned_cwd: Option<String>,
+    /// claude_code: the connector snapshot the persistent process was
+    /// spawned with (sorted `name:url` stamps — tokens excluded, they are
+    /// refreshed per send and must not force a respawn). The CLI reads its
+    /// MCP config ONLY at process start, so a connector attached mid-chat
+    /// (keyword fast-path / @-picker) never reached a running process and
+    /// the model kept answering "I don't have the tools". A changed set
+    /// respawns on the next send (`--resume` keeps the conversation).
+    spawned_connectors: Vec<String>,
     /// The CLI's own session id, captured from turn output and passed back
     /// to continue the conversation (kimi `--session`, opencode `-s`,
     /// claude `--resume` on respawn). Shared with the reader thread, which
@@ -488,6 +496,7 @@ impl AgentSessionManager {
                             spawned_mode: None,
                             spawned_effort: None,
                             spawned_cwd: None,
+                            spawned_connectors: Vec::new(),
                             cli_session_id: Arc::new(Mutex::new(stored)),
                             turn_in_flight: Arc::new(AtomicBool::new(false)),
                             reader_alive: Arc::new(AtomicBool::new(false)),
@@ -651,11 +660,32 @@ impl AgentSessionManager {
             true
         } else if harness == "commandcode" {
             match spawn_dir(cwd, &db.0) {
-                Some(dir) => crate::browser_mcp_register::ensure_commandcode_bridge(
-                    app,
-                    &dir,
-                    project_id.unwrap_or(bundle::NO_PROJECT_BUNDLE_SLUG),
-                ),
+                Some(dir) => {
+                    let bridge = crate::browser_mcp_register::ensure_commandcode_bridge(
+                        app,
+                        &dir,
+                        project_id.unwrap_or(bundle::NO_PROJECT_BUNDLE_SLUG),
+                    );
+                    // Hosted-MCP-only connectors (notion, github, kiwi — no
+                    // relay-tools fallback surface) must ride commandcode's
+                    // OWN config as remote servers, re-registered every turn
+                    // so the refreshed bearer reaches the CLI.
+                    let hosted_only: Vec<crate::connectors::HarnessMcpServer> = connectors
+                        .iter()
+                        .filter(|c| {
+                            !c.url.is_empty()
+                                && c.name != "gmail"
+                                && crate::connectors::google_rest::fallback_tool_defs(&c.name)
+                                    .is_none()
+                        })
+                        .cloned()
+                        .collect();
+                    let _ = crate::browser_mcp_register::register_commandcode_connectors(
+                        &dir,
+                        &hosted_only,
+                    );
+                    bridge
+                }
                 None => false,
             }
         } else {
@@ -865,6 +895,7 @@ impl AgentSessionManager {
                 cwd,
                 project_id,
                 &s[4..],
+                connectors,
             ),
             other => Err(format!(
                 "harness '{other}' has no headless chat backend yet"
@@ -1538,6 +1569,30 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connector_stamp_ignores_tokens_and_order() {
+        let mk = |name: &str, url: &str| crate::connectors::HarnessMcpServer {
+            name: name.to_string(),
+            url: url.to_string(),
+            bearer_token: Some("tok".to_string()),
+        };
+        // Same set in a different order (and with refreshed tokens, which the
+        // stamp must never carry — they change every send) → same stamp.
+        let a = vec![mk("gmail", "https://g"), mk("notion", "https://n")];
+        let b = vec![mk("notion", "https://n"), mk("gmail", "https://g")];
+        assert_eq!(connector_stamp(&a), connector_stamp(&b));
+        // Membership change → different stamp (the respawn trigger).
+        assert_ne!(
+            connector_stamp(&a),
+            connector_stamp(&[mk("notion", "https://n")])
+        );
+        // URL change for the same name → different stamp.
+        assert_ne!(
+            connector_stamp(&a),
+            connector_stamp(&[mk("gmail", "https://other"), mk("notion", "https://n")])
+        );
+    }
 
     #[test]
     fn research_directive_is_appendix_shaped_and_carries_the_protocol() {

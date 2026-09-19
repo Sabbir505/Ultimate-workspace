@@ -51,22 +51,22 @@ pub const ALLOWED_RELAY_TOOLS: [&str; 21] = [
 /// Strip the `relay_tools:` prefix from a WS op; None for non-tool ops and
 /// for any tool outside the relay whitelist (those fall through to
 /// `unknown_op` in the dispatcher). Also accepts the connector REST fallback
-/// READ tools (`gmail_search_threads`, …) — write-kind fallbacks never route.
-/// MCP tool schemas for every bridged tool, DERIVED from the live tool
-/// registry — the relay sidecar fetches this over the WS (`relay_schemas` op)
-/// for its `tools/list`, so a new tool needs only: registry const + spec +
-/// dispatch arm + an entry in [`ALLOWED_RELAY_TOOLS`]. No hand-written schema
-/// copy in the sidecar to forget. An allowlist entry without a registry spec
-/// (typo, renamed tool) is skipped here and caught by the
-/// `bridge_allowlist_matches_registry` test.
+/// tools — reads AND writes alike (owner policy: the full connector surface
+/// bridges to harness sessions ungated). MCP tool schemas for every bridged
+/// tool, DERIVED from the live tool registry — the relay sidecar fetches
+/// this over the WS (`relay_schemas` op) for its `tools/list`, so a new tool
+/// needs only: registry const + spec + dispatch arm + an entry in
+/// [`ALLOWED_RELAY_TOOLS`]. No hand-written schema copy in the sidecar to
+/// forget. An allowlist entry without a registry spec (typo, renamed tool)
+/// is skipped here and caught by the `bridge_allowlist_matches_registry`
+/// test.
 ///
-/// Appended after the registry tools: the READ-kind REST fallbacks of every
-/// CONNECTED connector (`gmail_search_threads`, `gdrive_search_files`, …).
-/// These are the working Gmail/Workspace surface for harness CLIs while
-/// Google's hosted MCP servers deny every `tools/call` (Workspace MCP
-/// Developer Preview gate); writes are never bridged (no approval UI over
-/// MCP).
-pub fn relay_tool_schemas(app: &tauri::AppHandle) -> Vec<Value> {
+/// Appended after the registry tools: the REST fallbacks of every CONNECTED
+/// connector (`gmail_search_threads`, `gmail_send_message`,
+/// `gdrive_search_files`, …). These are the working Gmail/Workspace/YouTube
+/// surface for harness CLIs while Google's hosted MCP servers deny every
+/// `tools/call` (Workspace MCP Developer Preview gate).
+pub fn relay_tool_schemas<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Value> {
     // local_docs: `search_docs` is capability-gated in the registry but is
     // bridged unconditionally (it self-guards at runtime when the embedding
     // sidecar is down).
@@ -98,13 +98,21 @@ pub fn relay_tool_schemas(app: &tauri::AppHandle) -> Vec<Value> {
             .map(|r| r.connector_id)
             .collect()
     };
-    for (_, name, desc) in crate::connectors::connected_fallback_read_tools(&credentialed) {
+    for (connector_id, name, desc) in crate::connectors::connected_fallback_tools(&credentialed) {
+        // Every connector's fallback tools carry REAL args schemas — with
+        // the generic empty `properties` map, models guessed parameter
+        // spellings (`threadId` from a search result against a `thread_id`
+        // arg) and burned retries on rejections.
+        let input_schema = if connector_id == "gmail" {
+            crate::connectors::gmail_api::args_schema(name)
+        } else {
+            crate::connectors::google_rest::args_schema(name)
+        }
+        .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
         out.push(json!({
             "name": name,
             "description": desc,
-            // Same permissive-schema contract as the built-in chat's
-            // connector tools: the REST layer validates the args.
-            "inputSchema": { "type": "object", "properties": {} }
+            "inputSchema": input_schema,
         }));
     }
     out
@@ -113,7 +121,7 @@ pub fn relay_tool_schemas(app: &tauri::AppHandle) -> Vec<Value> {
 pub fn tool_from_op(op: &str) -> Option<String> {
     let rest = op.strip_prefix("relay_tools:")?;
     if ALLOWED_RELAY_TOOLS.contains(&rest)
-        || crate::connectors::fallback_read_tool_owner(rest).is_some()
+        || crate::connectors::fallback_tool_owner(rest).is_some()
     {
         Some(rest.to_string())
     } else {
@@ -180,15 +188,16 @@ pub async fn execute_relay_tool(
         let text = crate::session_fabric::execute_mesh_tool(app, None, tool_name, args).await;
         return Ok(json!({ "text": text, "artifact": Value::Null }));
     }
-    // Connector REST fallback reads (gmail_search_threads, gdrive_search_
-    // files, …): app-side tools executed by the connectors module, not
-    // registry tools, so the execute_tool fallback below can't route them.
-    // Read-kind only (`fallback_read_tool_owner` refuses writes) — reads
-    // auto-run in the built-in chat, so this ungated path matches the
-    // in-app posture; writes keep their approval gate in-app only.
-    if let Some(connector_id) = crate::connectors::fallback_read_tool_owner(tool_name) {
+    // Connector REST fallback tools (gmail_search_threads, gmail_send_
+    // message, gdrive_create_file, …): app-side tools executed by the
+    // connectors module, not registry tools, so the execute_tool fallback
+    // below can't route them. Owner policy: ALL fallback tools — writes
+    // included — execute here ungated (the user opted harness connector
+    // calls out of the approval-card flow); the built-in chat keeps its
+    // card gate for the same tools.
+    if let Some(connector_id) = crate::connectors::fallback_tool_owner(tool_name) {
         let text = match
-            crate::connectors::execute_fallback_read(app, connector_id, tool_name, args).await
+            crate::connectors::execute_fallback_tool(app, connector_id, tool_name, args).await
         {
             Ok(t) => t,
             Err(e) => format!("Error: {e}"),
@@ -447,6 +456,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn relay_schemas_append_connected_connector_reads() {
+        // The harness-facing tools/list is served from this function over the
+        // sidecar's `relay_schemas` op — this test pins the exact contract the
+        // running app must deliver: connected connectors' READ fallbacks are
+        // advertised (the only Gmail/Workspace/YouTube surface harnesses have
+        // while Google's hosted MCP servers deny tools/call), writes never
+        // are, and permission-ungated registry tools stay out.
+        let app = tauri::test::mock_app().handle().clone();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE connector_credentials (
+                 connector_id TEXT PRIMARY KEY,
+                 expires_at INTEGER,
+                 granted_scopes TEXT,
+                 account_display TEXT,
+                 connected_at INTEGER
+             )",
+        )
+        .unwrap();
+        // `connected_at` is a required column in the row mapper — production
+        // rows always carry it (github's NULL `expires_at` is the optional one).
+        conn.execute(
+            "INSERT INTO connector_credentials (connector_id, connected_at) VALUES ('gmail', 1), ('youtube', 2), ('gcalendar', 3)",
+            [],
+        )
+        .unwrap();
+        app.manage(crate::DbState(std::sync::Arc::new(parking_lot::Mutex::new(
+            conn,
+        ))));
+
+        let schemas = relay_tool_schemas(&app);
+        let names: Vec<String> = schemas
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect();
+        for read in ["gmail_search_threads", "youtube_search", "youtube_my_channel"] {
+            assert!(names.iter().any(|n| n == read), "missing fallback read {read}");
+        }
+        // Gmail entries carry REAL args schemas (the empty-properties guess
+        // game caused the "parameter rejected" retry loops) — the detail
+        // tools must declare their exact snake_case names as required.
+        let by_name = |n: &str| {
+            schemas
+                .iter()
+                .find(|t| t["name"] == n)
+                .unwrap_or_else(|| panic!("{n} not advertised"))
+        };
+        let get_thread = by_name("gmail_get_thread");
+        assert_eq!(get_thread["inputSchema"]["required"][0], "thread_id");
+        assert!(get_thread["inputSchema"]["properties"]["thread_id"].is_object());
+        let search = by_name("gmail_search_threads");
+        assert!(search["inputSchema"]["properties"]["query"].is_object());
+        // Writes ARE bridged now (owner policy: full connector surface,
+        // ungated) — gmail exposes its reads AND its writes.
+        let send = by_name("gmail_send_message");
+        assert_eq!(send["inputSchema"]["required"][0], "to");
+        assert!(by_name("gmail_create_draft")["inputSchema"]["properties"]["body"].is_object());
+        // Other connectors get schemas from google_rest::args_schema too.
+        let yt = by_name("youtube_search");
+        assert_eq!(yt["inputSchema"]["required"][0], "query");
+        let cal = by_name("gcalendar_create_event");
+        assert_eq!(cal["inputSchema"]["required"][0], "summary");
+        assert!(cal["inputSchema"]["properties"]["attendees"].is_object());
+        // Ungated registry tools stay out (same classification as the allowlist).
+        assert!(!names.iter().any(|n| n == "write_file"));
+    }
+
+    #[test]
     fn tool_name_extraction() {
         assert_eq!(tool_from_op("relay_tools:generate_document"), Some("generate_document".to_string()));
         assert_eq!(tool_from_op("relay_tools:search_docs"), Some("search_docs".to_string()));
@@ -474,10 +551,14 @@ mod tests {
         assert_eq!(tool_from_op("navigate"), None);
         assert_eq!(tool_from_op("relay_tools:"), None);
         // Mutating/dangerous chat tools must be rejected server-side even
-        // though they exist in chat::tools (no permission gate on this path).
+        // though they exist in chat::tools (no permission-mode gate on this
+        // path) — connector write fallbacks are the deliberate exception
+        // (owner policy: the full connector surface bridges ungated).
         assert_eq!(tool_from_op("relay_tools:delete_file"), None);
         assert_eq!(tool_from_op("relay_tools:write_file"), None);
         assert_eq!(tool_from_op("relay_tools:run_shell"), None);
+        assert_eq!(tool_from_op("relay_tools:gmail_send_message"), Some("gmail_send_message".to_string()));
+        assert_eq!(tool_from_op("relay_tools:gmail_create_draft"), Some("gmail_create_draft".to_string()));
     }
 
     #[test]

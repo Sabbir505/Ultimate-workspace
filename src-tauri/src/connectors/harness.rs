@@ -100,6 +100,19 @@ pub async fn harness_mcp_servers_for_message(
         let Some(cfg) = connector_by_id(&id) else {
             continue;
         };
+        // Fallback-only connectors (YouTube — Google ships no hosted MCP
+        // server for it) have no remote entry to register: an empty-URL
+        // `http`/`remote` entry is a dead server in mcp.json / opencode.json
+        // (and on OpenCode a malformed remote entry can fail the whole MCP
+        // config load, taking every other connector down with it). Their
+        // harness surface is the relay-tools bridge's REST fallback reads,
+        // which key off credentials, not off this list.
+        if cfg.effective_mcp_server_url().is_empty() {
+            eprintln!(
+                "[relay:connectors] {id} has no hosted MCP server — harness surface is the relay-tools fallback reads only"
+            );
+            continue;
+        }
         match crate::connectors::oauth::ensure_valid_access_token(app, &id).await {
             Ok(tok) => out.push(HarnessMcpServer {
                 name: id.clone(),

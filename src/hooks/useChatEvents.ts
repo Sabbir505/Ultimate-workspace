@@ -136,7 +136,18 @@ export function useChatEvents(): void {
         // completing is indistinguishable from an active one). Nothing fires
         // when the user is watching that session finish; the calm chime only
         // sounds when Relay itself is unfocused.
-        if (!isViewingSession(chatSessionId)) {
+        //
+        // Phantom-turn gate: a finished turn worth interrupting for reports
+        // output tokens AND belongs to a session in the sidebar. The
+        // cancel/teardown path (Stop, chat deletion, bulk clear) emits
+        // chat:done with null usage just to clear streaming state, and
+        // headless/deleted sessions never sit in the session list — both used
+        // to alert as "Untitled Session finished" with no turn behind them.
+        const knownSession = useChatStore
+          .getState()
+          .sessions.some((s) => s.id === chatSessionId);
+        const realTurn = knownSession && (payload.outputTokens ?? 0) > 0;
+        if (!isViewingSession(chatSessionId) && realTurn) {
           const appFocused = isAppFocused();
           relayNotify({
             kind: "completed",

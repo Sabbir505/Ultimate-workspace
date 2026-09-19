@@ -325,7 +325,10 @@ async fn resolve_or_open(
         });
     };
     if let Some((pane_id, _tab_id)) = parse_label(&label) {
-        let _ = app.emit("browser:activity", serde_json::json!({ "pane_id": pane_id }));
+        // camelCase key — the frontend's BrowserActivityPayload reads `paneId`;
+        // a snake_case key deserialized as undefined and every event fell
+        // back to the most-recently-used pane.
+        let _ = app.emit("browser:activity", serde_json::json!({ "paneId": pane_id }));
     }
     Ok(label)
 }
@@ -1727,7 +1730,7 @@ async fn resolve_pane_for_tab_op(
         })?;
     let (pane_id, _tab) = parse_label(&label)
         .ok_or_else(|| McpError { code: "invalid_args", message: format!("bad label: {label}") })?;
-    let _ = app.emit("browser:activity", serde_json::json!({ "pane_id": pane_id }));
+    let _ = app.emit("browser:activity", serde_json::json!({ "paneId": pane_id }));
     Ok(pane_id)
 }
 

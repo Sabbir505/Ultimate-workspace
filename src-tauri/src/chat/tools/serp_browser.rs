@@ -214,7 +214,7 @@ pub(crate) async fn browser_serp_search(
         let label = crate::browser::browser_label(&pane_id, &tab_id);
         let _ = app.emit(
             "browser:activity",
-            serde_json::json!({ "pane_id": pane_id }),
+            serde_json::json!({ "paneId": pane_id }),
         );
 
         // A fresh tab / fresh pane already points at the DDG SERP; a REUSED

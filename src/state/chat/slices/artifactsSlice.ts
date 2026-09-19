@@ -5,6 +5,7 @@ import {
   AUTO_OPEN_ARTIFACT_EXTS,
   MAX_ARTIFACTS_PER_SESSION,
   scheduleArtifactLibraryLoad,
+  selectContextSessionId,
 } from "../moduleState";
 import type { ArtifactProposal } from "../../../lib/ipc";
 import type { ChatArtifact } from "../types";
@@ -168,6 +169,14 @@ export function createArtifactsSlice(set: ChatStoreSet, get: ChatStoreGet) {
 
       // Images, pdf, csv, office docs render in ArtifactPreviewPane, with the
       // filename as the tab label.
+      //
+      // Cross-session gate: the tool panel is ONE shared surface, so auto-open
+      // only when the PRODUCING session is the one whose context the shared UI
+      // displays (focused split pane, else the active session). A screenshot
+      // from a background pane must not yank the panel while the user works in
+      // another session — the file is still tracked above, and it still shows
+      // on the producing bubble and in the Artifacts gallery.
+      if (selectContextSessionId(get()) !== chatSessionId) return;
       const ui = useUiStore.getState();
       ui.openArtifactTab({ path, filename });
       ui.setToolPanelCollapsed(false);

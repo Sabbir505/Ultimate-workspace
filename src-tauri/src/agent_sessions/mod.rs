@@ -1397,6 +1397,19 @@ fn finish_turn(
             let filename = rel.rsplit('/').next().unwrap_or(&rel).to_string();
             {
                 let conn = db.0.lock();
+                // Concurrent sessions share one artifacts dir: a file another
+                // session already claimed during THIS turn's window is theirs.
+                // Claiming it again would hang the other chat's screenshot/doc
+                // on this session's bubble and re-fire `chat:artifact` into the
+                // wrong chat (the browser-shot-in-the-other-pane bug).
+                match crate::db::artifact_claimed_by_other_since(&conn, &path, sid, started_at) {
+                    Ok(true) => continue,
+                    Err(e) => {
+                        eprintln!("[artifacts] ownership check failed, skipping {path}: {e}");
+                        continue;
+                    }
+                    Ok(false) => {}
+                }
                 crate::chat::stream_events::insert_and_emit_artifact(
                     app,
                     &conn,

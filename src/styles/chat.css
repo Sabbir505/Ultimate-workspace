@@ -453,6 +453,10 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
+  /* Clear the overlay title bar: the first row starts below the glass, and
+     scrolled rows glide UNDER it — the content-under-frost effect that makes
+     the bar read as glass instead of an opaque strip. */
+  padding-top: var(--toolbar-h, 37px);
   /* The app pins the live edge itself (patchTailAndPin in
      useTranscriptScroll) while the virtualizer rewrites row heights
      constantly. Browser scroll anchoring "compensates" those rewrites by
@@ -4351,7 +4355,8 @@ button.chat-mermaid-open {
    mounts on the very click that would have hit the button. */
 .chat-pane-float-close {
   position: absolute;
-  top: 6px;
+  /* Below the overlay title bar — the bar floats over the pane's top edge. */
+  top: calc(var(--toolbar-h, 37px) + 6px);
   left: 8px;
   z-index: 25;
   display: grid;

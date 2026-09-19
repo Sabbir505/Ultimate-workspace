@@ -10,6 +10,9 @@
   flex-direction: column;
   background: var(--surface);
   color: var(--text);
+  /* Clear the overlay title bar — the floating glass bar spans the full
+     .main width, so the header row starts below it. */
+  padding-top: var(--toolbar-h, 37px);
   /* Size container for the @container rules below: the tool side-panel shares
      a flex row with this view, so our real width shrinks when it opens even
      though the viewport doesn't move — viewport @media queries can't see that. */

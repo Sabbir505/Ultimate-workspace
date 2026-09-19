@@ -2337,12 +2337,19 @@ async fn run_browser_tool(
     }
     // Surface the Browser tab so the user can watch the agent work (same
     // auto-open contract as generated artifacts and the harness MCP path).
-    let _ = app.emit("browser:activity", serde_json::json!({ "pane_id": null }));
+    // The pane id matters: with it the frontend surfaces/binds THIS pane's
+    // chip; the old `null` made the frontend guess the most-recently-used
+    // pane, which in a multi-session layout lit up the wrong session's
+    // browser. (Key is camelCase — the frontend reads `paneId`.)
+    let browser = app.state::<crate::BrowserState>();
+    let mgr = browser.0.clone();
+    let _ = app.emit(
+        "browser:activity",
+        serde_json::json!({ "paneId": mgr.active_pane_id() }),
+    );
     // Any browser tool use marks the session browser-live (sticky), so the
     // interaction tools stay advertised for the rest of the session.
     app.state::<crate::ChatState>().0.mark_browser_live(sid);
-    let browser = app.state::<crate::BrowserState>();
-    let mgr = browser.0.clone();
 
     // Screenshot goes through the CDP execution layer (compositor-rendered,
     // no COM IStream roundtrip) — a blocking main-thread roundtrip, so

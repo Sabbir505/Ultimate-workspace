@@ -189,7 +189,10 @@
 /* Ambient color wash behind the glass. The window blur is uniform; this soft
    radial tint gives the translucent surfaces something to refract so the UI
    reads as "liquid" rather than a flat sheet. Purely decorative, sits under
-   every surface (z-index: 0 on .app, surfaces are â‰¥1). */
+   every surface (z-index: 0 on .app, surfaces are ≥1). The top-center band
+   exists for the title bar: the toolbar is the one glass surface whose
+   backdrop is otherwise flat --bg-tint (nothing scrolls under it), so without
+   a glow of its own its frost shows nothing and it reads as an opaque strip. */
 .app::before {
   content: "";
   position: absolute;
@@ -197,6 +200,7 @@
   pointer-events: none;
   background:
     radial-gradient(120% 80% at 12% -8%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 55%),
+    radial-gradient(95% 60% at 60% -16%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%),
     radial-gradient(110% 70% at 100% 0%, color-mix(in srgb, var(--state-diff) 9%, transparent), transparent 50%);
   z-index: 0;
 }
@@ -212,6 +216,10 @@
   min-width: 0;
   position: relative;
   z-index: 4;
+  /* Height of the overlay title bar (compact padding + 28px controls + border).
+     Content areas offset their top by this so controls clear the bar while the
+     transcript scrolls beneath it (see .toolbar's absolute positioning). */
+  --toolbar-h: 37px;
 }
 
 .toolbar {
@@ -221,22 +229,31 @@
   /* Compact title-bar height — the toolbar doubles as the window chrome. */
   padding: 4px 0 4px 14px;
   border-bottom: 1px solid var(--border);
-  /* Same liquid-glass body as the sidebar / composer card: translucent
-     gradient under a heavy frost, so the ambient wash behind the toolbar
-     reads as blurred tint instead of a flat opaque strip (the old opaque
-     --surface-glass fill blocked it entirely). */
+  /* The composer card's liquid-glass body, with a touch more body than the
+     card needs: the toolbar's backdrop is the flat top-edge wash (no content
+     scrolls beneath it), so the veil must carry more of the look itself. */
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--surface-glass) 45%, transparent),
-    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+    color-mix(in srgb, var(--surface-glass) 52%, transparent),
+    color-mix(in srgb, var(--surface-glass) 30%, transparent)
   );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
   /* Bottom sheen line — a brighter hairline under the toolbar reads as glass
-     catching light along its lower edge. */
-  box-shadow: var(--glass-rim), 0 1px 0 0 rgba(255, 255, 255, 0.06) inset;
-  position: relative;
-  z-index: 4;
+     catching light along its lower edge; glass-drop lifts it off the content
+     below like the composer card. */
+  box-shadow: var(--glass-rim), var(--glass-drop), 0 1px 0 0 rgba(255, 255, 255, 0.06) inset;
+  /* Overlay title bar: OUT of the layout flow, floating over the top of
+     .main so the transcript scrolls beneath the frost — the same trick that
+     makes the composer card read as real glass (content passing under it).
+     Every top-anchored surface offsets itself by --toolbar-h instead
+     (.chat-messages content, .tool-panel, .automations-view, the floating
+     pane-close ✕). */
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
 }
 /* Light theme: the same bump every other glass surface gets, so text keeps
    contrast on bright backdrops. */

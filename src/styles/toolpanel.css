@@ -16,6 +16,9 @@
   min-width: 0;
   background: var(--surface);
   border-left: 1px solid var(--border);
+  /* Clear the overlay title bar: the tab strip starts below the floating
+     glass bar instead of underneath it. */
+  padding-top: var(--toolbar-h, 37px);
   position: relative;
   /* Expand/collapse slides the width (same feel as the sidebar) — the panel
      stays mounted, content clipped by overflow while sliding. */

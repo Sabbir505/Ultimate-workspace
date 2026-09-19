@@ -99,6 +99,39 @@ pub fn list_artifacts_for_chat(
     rows.collect()
 }
 
+/// True when the newest artifact row for `path` already belongs to a
+/// DIFFERENT session and was claimed at or after `since_ts` (the caller's
+/// turn-start instant): another concurrent session surfaced this file inside
+/// the caller's turn window. Every harness turn diffs the ONE shared
+/// artifacts dir at turn end, so without this guard a session that finishes
+/// later steals the file — the other chat's screenshot/doc would re-appear
+/// as this session's bubble chip and re-fire `chat:artifact` into the wrong
+/// session. Files attributed at write time (browser shots, tool outcomes)
+/// are claimed the moment they are created, so the guard catches them in
+/// every end-of-turn ordering; only harness CLI writes with no write-time
+/// row resolve first-turn-to-end-wins. A row owned by the caller, by no one,
+/// or last claimed BEFORE the caller's turn started (a pre-existing file the
+/// caller just edited) returns false — the caller may bump it.
+pub fn artifact_claimed_by_other_since(
+    conn: &Connection,
+    path: &str,
+    chat_session_id: &str,
+    since_ts: i64,
+) -> DbResult<bool> {
+    let row: Option<(Option<String>, i64)> = conn
+        .query_row(
+            "SELECT chat_session_id, created_at FROM artifacts WHERE path = ?1 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(matches!(
+        row,
+        Some((Some(owner), created_at)) if owner != chat_session_id && created_at >= since_ts
+    ))
+}
+
 /// Artifacts attributed to one assistant message (timeline order).
 pub fn list_artifacts_for_message(
     conn: &Connection,
@@ -259,6 +292,34 @@ mod tests {
         let path = delete_artifact(&conn, &a.id).unwrap();
         assert_eq!(path.as_deref(), Some("/tmp/report.docx"));
         assert!(list_artifacts(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_turns_do_not_steal_each_others_artifacts() {
+        let conn = super::super::mem();
+        // Session A (running since t=100) writes a browser shot at t=150.
+        let a = insert_artifact(&conn, Some("sA"), "browser-shot-1.png", "C:/out/shot.png", "png")
+            .unwrap();
+        conn.execute(
+            "UPDATE artifacts SET created_at = 150 WHERE id = ?1",
+            params![a.id],
+        )
+        .unwrap();
+
+        // Session B, whose turn started at t=120 (A's write landed inside
+        // B's window), must NOT claim it at its turn end.
+        assert!(artifact_claimed_by_other_since(&conn, "C:/out/shot.png", "sB", 120).unwrap());
+        // A's own turn-end diff (started t=100) may re-bump its own file…
+        assert!(!artifact_claimed_by_other_since(&conn, "C:/out/shot.png", "sA", 100).unwrap());
+        // …and a session that STARTED after the last claim may edit the
+        // pre-existing file and take ownership (legit modification).
+        assert!(!artifact_claimed_by_other_since(&conn, "C:/out/shot.png", "sC", 200).unwrap());
+
+        // Unowned (user-deleted) rows and unknown paths never block.
+        conn.execute("UPDATE artifacts SET chat_session_id = NULL WHERE id = ?1", params![a.id])
+            .unwrap();
+        assert!(!artifact_claimed_by_other_since(&conn, "C:/out/shot.png", "sB", 120).unwrap());
+        assert!(!artifact_claimed_by_other_since(&conn, "C:/out/other.png", "sB", 120).unwrap());
     }
 
     #[test]

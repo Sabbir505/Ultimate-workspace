@@ -24,6 +24,10 @@ function seedStreaming() {
     pendingArtifacts: {},
     // onArtifact tracks regardless, but keep the session shape realistic.
     sessions: [],
+    // Default: s1 is the active (focused) session, so the auto-open paths
+    // under test still fire.
+    focusedChatSessionId: null,
+    activeChatSessionId: "s1",
   });
   useUiStore.setState({
     openTabs: [],
@@ -106,5 +110,41 @@ describe("onArtifact auto-open gate", () => {
     });
     expect(artifactTabs()).toHaveLength(0);
     expect(useChatStore.getState().artifacts.s1).toHaveLength(1);
+  });
+
+  it("does NOT auto-open a viewable artifact from a background session", () => {
+    // s2 runs in another pane; the user is working in s1 (active, no pin).
+    useChatStore.getState().onArtifact({
+      chatSessionId: "s2",
+      path: "C:/out/browser-shot-1789829194043.png",
+      filename: "browser-shot-1789829194043.png",
+    });
+    // Tracked for s2's gallery + bubble…
+    expect(useChatStore.getState().artifacts.s2).toHaveLength(1);
+    // …but the shared tool panel stays untouched.
+    expect(artifactTabs()).toHaveLength(0);
+    expect(useUiStore.getState().toolPanelCollapsed).toBe(true);
+  });
+
+  it("auto-open follows the focused split pane, not merely the active session", () => {
+    // Split view with the focus pinned to s2: s1's deliverable must not yank
+    // the shared panel even though s1 is the plain active session.
+    useChatStore.setState({ focusedChatSessionId: "s2", activeChatSessionId: "s1" });
+    useChatStore.getState().onArtifact({
+      chatSessionId: "s1",
+      path: "C:/out/report.pdf",
+      filename: "report.pdf",
+    });
+    expect(useChatStore.getState().artifacts.s1).toHaveLength(1);
+    expect(artifactTabs()).toHaveLength(0);
+
+    // The focused session's own deliverable still opens.
+    useChatStore.getState().onArtifact({
+      chatSessionId: "s2",
+      path: "C:/out/diagram.png",
+      filename: "diagram.png",
+    });
+    expect(artifactTabs().map((t) => t.artifactPath)).toEqual(["C:/out/diagram.png"]);
+    expect(useUiStore.getState().toolPanelCollapsed).toBe(false);
   });
 });

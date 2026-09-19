@@ -1,6 +1,7 @@
 target/
 node_modules/
 dist/
+dist-site/
 *.log
 .debug/
 # Local OAuth client secrets for connectors (e.g. Notion). These are baked

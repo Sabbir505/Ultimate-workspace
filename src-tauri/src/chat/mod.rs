@@ -2246,8 +2246,11 @@ mod tests {
         // the registry: totp_code (2FA), browser_observe, browser_extract,
         // plus the Task tool's background param — each reviewed for length
         // before landing.
+        // Re-baselined 2026-09-19 (55.5k → 58.0k) for the vault CRUD family
+        // (six specs, ~2.1k): the model's only structured write path into
+        // the user's markdown knowledge base.
         assert!(
-            total < 55_500,
+            total < 58_000,
             "fresh-turn baseline over fixed-cost budget: {total} chars"
         );
     }

@@ -13,7 +13,7 @@ function stopArtifactReadIfPlaying(path: string | undefined): void {
   if (tts.key === `artifact:${path}`) ttsPlayer.stop();
 }
 
-export type ActiveView = "chat" | "settings" | "skills" | "cost" | "automations";
+export type ActiveView = "chat" | "settings" | "skills" | "cost" | "automations" | "vault";
 
 /** Tabs in the right-side tool panel (mockups 01/03). */
 export type ToolPanelTab =

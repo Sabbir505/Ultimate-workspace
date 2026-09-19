@@ -450,3 +450,4 @@ export * from "./ipc/marketFiles";
 export * from "./ipc/github";
 export * from "./ipc/rag";
 export * from "./ipc/mcp";
+export * from "./ipc/vault";

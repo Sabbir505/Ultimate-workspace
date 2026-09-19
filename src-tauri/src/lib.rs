@@ -131,6 +131,7 @@ mod secrets;
 mod session_fabric;
 mod types;
 pub mod user_dirs;
+pub mod vault;
 mod util;
 
 use std::fs;
@@ -309,6 +310,10 @@ pub fn run() {
             // `useGitStatusPolling` / `DevDiffPanel` / `BranchDropdown`. See
             // src-tauri/src/git_watcher.rs for the design.
             app.manage(git_watcher::WatcherState::new());
+            // Vault (local markdown knowledge base): root + fs watcher. The
+            // index lives in the shared SQLite; the root re-binds lazily from
+            // the DB setting (vault::current_root) so no boot hook is needed.
+            app.manage(vault::VaultState::new());
             // MCP gallery: live stdio MCP server children (§3.2.14). Killed
             // on app exit via mcp_gallery::kill_all in the RunEvent handler.
             app.manage(mcp_gallery::McpGalleryState::default());
@@ -702,6 +707,25 @@ pub fn run() {
             docs_index::docs_attached_corpus_ids,
             docs_index::docs_start_index,
             docs_index::docs_cancel_index,
+            // Vault (local markdown knowledge base)
+            vault::vault_get_state,
+            vault::vault_bind,
+            vault::vault_unbind,
+            vault::vault_rescan,
+            vault::vault_tree,
+            vault::vault_read_note,
+            vault::vault_read_binary,
+            vault::vault_create_note,
+            vault::vault_write_note,
+            vault::vault_delete_note,
+            vault::vault_rename_note,
+            vault::vault_create_folder,
+            vault::vault_delete_folder,
+            vault::vault_search,
+            vault::vault_note_meta,
+            vault::vault_graph,
+            vault::vault_all_tags,
+            vault::vault_stats,
             chat::export::export_chat_zip,
             chat::export::export_project_zip,
             chat::export::import_chat_zip,

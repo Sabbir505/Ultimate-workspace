@@ -188,6 +188,10 @@ pub(crate) fn core_prompt_base() -> String {
      confirm an ambiguous schedule first. The `prompt` must be self-contained (runs have \
      no conversation memory) and fires on a 5-field local-time cron schedule; each run \
      logs to its own chat session.\n\n\
+     ## Vault (the user's notes)\n\
+     The user's vault (Vault view) = their markdown notes. CRUD: `vault_list/read/search/\n\
+     write/move/delete`. References to \"my notes\" → `vault_search` FIRST; offer `vault_write` to save\n\
+     durable results. Link notes with [[WikiLinks]]; `vault_move` rewrites inbound links.\n\\n\
      ## Artifacts & diagrams\n\
      Files produced via plan_document/generate_document/generate_file/generate_diagram surface in the \
      artifact panel automatically — a short one-line acknowledgment afterward is enough. For PowerPoint \
@@ -305,6 +309,8 @@ pub(crate) fn core_prompt_base_local() -> String {
      When the user asks WHERE an artifact lives, what was generated recently, or wants one \
      opened/shown, NEVER guess from memory — call `list_artifacts` for the live list with \
      kinds, dates and absolute paths, then `open_file` the one they mean.\n\n\
+     ## Vault\n\
+     The user's vault = their notes. `vault_search` \"my notes say X\" FIRST; `vault_write/read/move/delete` manage them.\n\\n\
      ## Automations\n\
      Scheduled headless runs (Automations view). `list_automations`, \
      `create_automation(name, prompt, schedule)`, `run_automation_now` manage \
@@ -831,8 +837,11 @@ mod tests {
         // generate_image capability ("never claim image generation is
         // impossible") — without it models denied the ability even with the
         // tool riding the request. Capability statement, not bloat.
+        // 9600 → 9800: the Vault section (~0.5k) — routing guide for the user's notes
+        // (search before claiming ignorance; move rewrites links). Capability
+        // statement, not bloat.
         assert!(
-            frontier.len() < 9_600,
+            frontier.len() < 9_800,
             "frontier CORE prompt bloated: {} bytes",
             frontier.len()
         );
@@ -845,8 +854,10 @@ mod tests {
         // 4750 → 4900: the Artifacts section gained ~170 bytes announcing the
         // generate_image capability — same deny-the-capability fix as the
         // frontier budget above.
+        // 4900 → 5050: the Vault section (~0.35k) — search-before-deny for the user's
+        // own notes, compressed for the local window.
         assert!(
-            local.len() < 4_900,
+            local.len() < 5_050,
             "local CORE prompt bloated: {} bytes",
             local.len()
         );

@@ -1125,6 +1125,11 @@ const SUBAGENT_TOOL_ALLOW: &[&str] = &[
     tools::READ_FILE,
     tools::SEARCH_FILES,
     tools::SEARCH_CONTENT,
+    // Vault read trio: subagents research the user's knowledge base like
+    // any other read-only source. (The write trio stays main-loop-only.)
+    tools::VAULT_LIST,
+    tools::VAULT_READ,
+    tools::VAULT_SEARCH,
     tools::FETCH_URL,
     tools::WEB_SEARCH,
     tools::ADD_SOURCE_NOTE,
@@ -1186,6 +1191,11 @@ Use one of the listed read-only tools instead."
     }
     if let Some(result) = run_ledger_tool(app, sid, name, args).await {
         return ToolOutcome::text(result);
+    }
+    // Vault read trio: dispatched here like the ledger tools (the write
+    // trio never passes the allowlist above).
+    if tools::is_vault_tool(name) {
+        return ToolOutcome::text(tools::execute_vault_tool(app, name, args).await);
     }
     if name == tools::WEB_SEARCH || name == tools::FETCH_URL {
         return ToolOutcome::text(
@@ -1758,6 +1768,43 @@ async fn run_gated_mesh_tool(
     crate::session_fabric::execute_mesh_tool(app, Some(sid), name, args).await
 }
 
+/// Approval-card wrapper for the vault write trio — mirrors
+/// run_gated_mesh_tool: the card is the only guard when the posture asks
+/// (read_only strips the schemas; auto postures never reach here).
+async fn run_gated_vault_tool(
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+) -> String {
+    let summary = vault_tool_summary(name, args);
+    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
+        return format!(
+            "The user denied the {name} action. Do not retry it unless the user explicitly asks."
+        );
+    }
+    tools::execute_vault_tool(app, name, args).await
+}
+
+/// One-line card summary for a gated vault call.
+fn vault_tool_summary(name: &str, args: &Value) -> String {
+    let path = args
+        .get("path")
+        .or_else(|| args.get("from"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    match name {
+        tools::VAULT_MOVE => format!(
+            "move a vault note ({} → {})",
+            path,
+            args.get("to").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
+        tools::VAULT_DELETE => format!("delete the vault note {path} (moves to .trash)"),
+        _ => format!("write the vault note {path}"),
+    }
+}
+
 /// One-line card summary for a gated mesh call.
 fn mesh_tool_summary(name: &str, args: &Value) -> String {
     let target = args
@@ -2074,6 +2121,29 @@ pub(crate) async fn run_tool(
             return run_gated_automation_tool(mgr, app, sid, name, args).await;
         }
         return tools::execute_automation_tool(app, name, args).await;
+    }
+
+    // Vault tools (vault_list/read/search + write/move/delete) — crate::vault
+    // via the AppHandle, like the automation and mesh families. The read trio
+    // auto-runs everywhere; the write trio follows the connector-write
+    // posture (auto under auto_edit/full_auto, approval card otherwise).
+    // Plan mode already refused the writes above via is_mutating_tool.
+    if tools::is_vault_tool(name) {
+        let decision = if !tools::is_vault_write_tool(name) {
+            permission::PermissionDecision::AutoRun
+        } else if !sandbox.allows_mutating_tools() {
+            permission::PermissionDecision::NeedsApproval
+        } else {
+            permission::check_connector_permission(
+                sandbox,
+                approval,
+                permission::ConnectorToolKind::Write,
+            )
+        };
+        if matches!(decision, permission::PermissionDecision::NeedsApproval) {
+            return run_gated_vault_tool(mgr, app, sid, name, args).await;
+        }
+        return tools::execute_vault_tool(app, name, args).await;
     }
 
     // Session Mesh tools (list/read/search sessions + message/spawn) —

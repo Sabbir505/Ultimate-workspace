@@ -114,6 +114,12 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             SEARCH_CONTENT_DESC,
             search_content_parameters(),
         ),
+        // Vault (the user's markdown knowledge base) — the read trio is
+        // read-only and always on; the write trio follows the mutating-tool
+        // gate below (see tools/mod.rs family block).
+        openai_fn(VAULT_LIST, VAULT_LIST_DESC, vault_list_parameters()),
+        openai_fn(VAULT_READ, VAULT_READ_DESC, vault_read_parameters()),
+        openai_fn(VAULT_SEARCH, VAULT_SEARCH_DESC, vault_search_parameters()),
         // Automations — list is read-only and always on; the CRUD/run tools
         // below follow the mutating-tool gating (see tools/mod.rs family
         // block). Without them the model denies an app capability it has.
@@ -184,6 +190,17 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
     }
     // Mutating filesystem tools — stripped from the schema under read_only.
     if sandbox.allows_mutating_tools() {
+        specs.push(openai_fn(
+            VAULT_WRITE,
+            VAULT_WRITE_DESC,
+            vault_write_parameters(),
+        ));
+        specs.push(openai_fn(VAULT_MOVE, VAULT_MOVE_DESC, vault_move_parameters()));
+        specs.push(openai_fn(
+            VAULT_DELETE,
+            VAULT_DELETE_DESC,
+            vault_delete_parameters(),
+        ));
         specs.push(openai_fn(
             WRITE_FILE,
             WRITE_FILE_DESC,
@@ -425,6 +442,9 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             SEARCH_CONTENT_DESC,
             search_content_parameters(),
         ),
+        anthropic_fn(VAULT_LIST, VAULT_LIST_DESC, vault_list_parameters()),
+        anthropic_fn(VAULT_READ, VAULT_READ_DESC, vault_read_parameters()),
+        anthropic_fn(VAULT_SEARCH, VAULT_SEARCH_DESC, vault_search_parameters()),
         // Automations — read-only list always on (mirror of the OpenAI block).
         anthropic_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
         // Session Mesh — mirror of the OpenAI block above.
@@ -483,6 +503,17 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         ));
     }
     if sandbox.allows_mutating_tools() {
+        specs.push(anthropic_fn(
+            VAULT_WRITE,
+            VAULT_WRITE_DESC,
+            vault_write_parameters(),
+        ));
+        specs.push(anthropic_fn(VAULT_MOVE, VAULT_MOVE_DESC, vault_move_parameters()));
+        specs.push(anthropic_fn(
+            VAULT_DELETE,
+            VAULT_DELETE_DESC,
+            vault_delete_parameters(),
+        ));
         specs.push(anthropic_fn(
             WRITE_FILE,
             WRITE_FILE_DESC,
@@ -794,6 +825,98 @@ fn get_source_ledger_parameters() -> Value {
 /// Parameter schema for the local-docs `search_docs` tool. `query` is the
 /// natural-language question; `top_k` (optional, capped server-side at 20)
 /// controls how many hits to return.
+
+// ---- Vault parameter schemas (shape-mirrors of the vault command args) ----
+
+fn vault_list_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "folder": {
+                "type": "string",
+                "description": "Optional vault-relative folder to scope the listing (e.g. \"Projects\"). Omit for the whole vault."
+            }
+        }
+    })
+}
+
+fn vault_read_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Vault-relative note path with extension, e.g. \"Projects/Ideas.md\"."
+            }
+        },
+        "required": ["path"]
+    })
+}
+
+fn vault_search_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search text. Operators: tag:work, path:Projects, file:2026, \"quoted phrase\", -exclude."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max hits (default 20, max 50)."
+            }
+        },
+        "required": ["query"]
+    })
+}
+
+fn vault_write_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Vault-relative note path ending in .md (folders are created as needed). Overwrites when the note exists."
+            },
+            "content": {
+                "type": "string",
+                "description": "The complete markdown content of the note (overwrite is wholesale). Optional YAML frontmatter first."
+            }
+        },
+        "required": ["path", "content"]
+    })
+}
+
+fn vault_move_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "from": {
+                "type": "string",
+                "description": "Current vault-relative .md path."
+            },
+            "to": {
+                "type": "string",
+                "description": "New vault-relative .md path. Inbound links are rewritten vault-wide."
+            }
+        },
+        "required": ["from", "to"]
+    })
+}
+
+fn vault_delete_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Vault-relative .md path of the note to delete (moves to .trash)."
+            }
+        },
+        "required": ["path"]
+    })
+}
+
 fn search_docs_parameters() -> Value {
     json!({
         "type": "object",
@@ -1919,8 +2042,12 @@ mod tests {
         // Bumped 43_000→44_500 for `generate_image`: local text-to-image via
         // the sd-server sidecar (~1.6k chars) — a new user-facing capability
         // (Settings → Local Models → Images), not description rot.
+        // Bumped 44_500→47_500 for the vault CRUD family (vault_list/read/
+        // search/write/move/delete, ~2.9k): the model's only structured write
+        // path into the user's markdown knowledge base — filesystem tools
+        // cannot carry the link-rewrite/index semantics.
         assert!(
-            total < 44_500,
+            total < 47_500,
             "default tool specs total {total} chars (budget 44_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
         let all_on_caps = ToolCaps {
@@ -1935,9 +2062,11 @@ mod tests {
         // Same orchestration bump: 45_000→45_500 (the `model` params ride
         // the all-on surface too); 45_500→46_000 mirrors the default-budget
         // disambiguation bump above; 46_000→47_500 mirrors the
-        // generate_image bump above (the spec rides the all-on surface too).
+        // generate_image bump above (the spec rides the all-on surface too);
+        // 47_500→50_500 mirrors the vault CRUD family bump above (all six
+        // vault specs ride the all-on surface).
         assert!(
-            all_on < 47_500,
+            all_on < 50_500,
             "all-on tool specs total {all_on} chars (budget 47_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }

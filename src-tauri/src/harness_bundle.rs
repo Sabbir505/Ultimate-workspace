@@ -210,6 +210,14 @@ pub fn build_instructions_md(
              answer questions — and fires only while the app is running; every \
              run is logged to its own chat session and the Automations view."
         ));
+        parts.push(format!("## Vault\n\
+             The user's bound vault (the Vault view) is a folder of markdown notes. The\n\
+             `relay-tools` MCP tools `vault_list`, `vault_read`, `vault_search`, `vault_write`,\n\
+             `vault_move`, `vault_delete` give you FULL CRUD on it. When the user references\n\
+             their notes (\"my notes\", something they wrote down), `vault_search` FIRST — never\n\
+             claim you can't see their notes. Link related notes with [[WikiLinks]]; metadata\n\
+             is YAML frontmatter (tags:, aliases:). `vault_move` rewrites every inbound link\n\
+             vault-wide — prefer it over delete+recreate.\n"));
         // Browser section stays behavioral only: the MCP `tools/list` response
         // already delivers each tool's name/params/description to the CLI, so
         // restating them here is duplicate tokens. What the schemas can't carry —

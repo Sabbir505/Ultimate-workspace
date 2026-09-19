@@ -338,6 +338,11 @@ pub(crate) fn is_mutating_tool(name: &str) -> bool {
     if crate::chat::tools::is_mesh_write_tool(name) {
         return true;
     }
+    // Vault writes: notes are user data — the read trio stays allowed during
+    // research, exactly like the mesh family above.
+    if crate::chat::tools::is_vault_write_tool(name) {
+        return true;
+    }
     matches!(
         name,
         "run_shell"

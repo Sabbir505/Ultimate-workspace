@@ -1366,7 +1366,11 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           PRIMARY KEY (chat_session_id, corpus_id)
         );
         ",
-    )
+    )?;
+    // Vault (local markdown knowledge base) — derived index over the bound
+    // folder's markdown files (see vault/index.rs). A deletable cache.
+    crate::vault::index::ensure_schema(conn)?;
+    Ok(())
 }
 
 // ---- re-exports (so all existing callers using `crate::db::<fn>` still compile) ----

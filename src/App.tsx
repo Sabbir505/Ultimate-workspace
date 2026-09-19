@@ -81,6 +81,10 @@ const SettingsView = lazy(() => import("./components/settings/SettingsView").the
 const SkillsLibrary = lazy(() => import("./components/skills-library/SkillsLibrary").then((m) => ({ default: m.SkillsLibrary })));
 const CostDashboard = lazy(() => import("./components/cost-dashboard/CostDashboard").then((m) => ({ default: m.CostDashboard })));
 const AutomationsView = lazy(() => import("./components/automations/AutomationsView").then((m) => ({ default: m.AutomationsView })));
+// Vault (markdown knowledge base) — same real-view-swap shape as
+// automations, lazily loaded (CodeMirror + the markdown pipeline stay out
+// of the entry chunk until the user opens the vault).
+const VaultView = lazy(() => import("./components/vault/VaultView").then((m) => ({ default: m.VaultView })));
 // Welcome wizard (PRD §9): lazy like the overlays — existing users never see
 // it, so its chunk shouldn't ride along with the entry bundle.
 const WelcomeWizard = lazy(() => import("./components/onboarding/WelcomeWizard").then((m) => ({ default: m.WelcomeWizard })));
@@ -450,7 +454,7 @@ export default function App() {
     view swap). Unmounting here blanked the whole app and killed the
     terminal/browser panes every time a footer icon was clicked; the panes
     hide themselves via browserOcclusion (activeView !== "chat") instead. */}
-{activeView !== "automations" ? (
+{activeView !== "automations" && activeView !== "vault" ? (
         <div className={`grid-wrap chat-grid-wrap${chatPaneTree ? " split-active" : ""}`}>
           {/* The split-chat pane tree (up to six full chat views, resizable
               gutters, drag-a-session-onto-an-edge). With no splits open the
@@ -475,7 +479,17 @@ export default function App() {
           </Suspense>
           <TtsPlayerBar />
         </div>
-      ) : null}
+      ) : (
+        <div className="grid-wrap chat-grid-wrap">
+          <Suspense fallback={null}>
+            <VaultView />
+          </Suspense>
+          <Suspense fallback={null}>
+            <ToolPanel />
+          </Suspense>
+          <TtsPlayerBar />
+        </div>
+      )}
       </div>
 
       {/* Overlays — mounted lazily so the heaviest view (Settings) only

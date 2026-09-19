@@ -24,7 +24,7 @@ use crate::chat::tools::{self, ToolCaps};
 /// no permission-mode gate, since this path intentionally runs the same
 /// ungated dispatcher the built-in chat uses (where the caller enforces the
 /// gate BEFORE reaching execute_tool).
-pub const ALLOWED_RELAY_TOOLS: [&str; 21] = [
+pub const ALLOWED_RELAY_TOOLS: [&str; 27] = [
     tools::GENERATE_DOCUMENT,
     tools::GENERATE_IMAGE,
     tools::PLAN_DOCUMENT,
@@ -46,6 +46,15 @@ pub const ALLOWED_RELAY_TOOLS: [&str; 21] = [
     tools::SEARCH_SESSIONS,
     tools::MESSAGE_SESSION,
     tools::SPAWN_SESSION,
+    // Vault CRUD — the harness's only write path into the bound vault
+    // (harness CLIs have their own generic file tools, but these carry the
+    // vault index + link-rewrite semantics they can't replicate).
+    tools::VAULT_LIST,
+    tools::VAULT_READ,
+    tools::VAULT_SEARCH,
+    tools::VAULT_WRITE,
+    tools::VAULT_MOVE,
+    tools::VAULT_DELETE,
 ];
 
 /// Strip the `relay_tools:` prefix from a WS op; None for non-tool ops and
@@ -186,6 +195,15 @@ pub async fn execute_relay_tool(
     // of which chat is calling.
     if tools::is_mesh_tool(tool_name) {
         let text = crate::session_fabric::execute_mesh_tool(app, None, tool_name, args).await;
+        return Ok(json!({ "text": text, "artifact": Value::Null }));
+    }
+    // Vault CRUD family: routed straight to the vault executor (same split
+    // the built-in chat uses in dispatch.rs). Ungated here BY POLICY, like
+    // the connector fallback tools — harness CLIs already hold unrestricted
+    // native file tools, so a vault-specific gate adds no security, only
+    // broken link semantics if they bypassed these tools.
+    if tools::is_vault_tool(tool_name) {
+        let text = tools::execute_vault_tool(app, tool_name, args).await;
         return Ok(json!({ "text": text, "artifact": Value::Null }));
     }
     // Connector REST fallback tools (gmail_search_threads, gmail_send_

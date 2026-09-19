@@ -110,6 +110,7 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
             // and open_url are always available.
             "browser_pane_tools": caps.browser,
             "memory": caps.memory,
+            "vault": "bound folder of markdown notes; vault_list/read/search + vault_write/move/delete (full CRUD)",
             "automations": true,
             "subagents": true,
             "skills": "listed under '## Available skills' in the system prompt; get_skill(slug) loads one",

@@ -29,6 +29,7 @@ import {
   Search,
   Settings,
   CalendarClock,
+  Vault,
   X,
   QrCode,
 } from "lucide-react";
@@ -380,6 +381,18 @@ export function Sidebar() {
             >
               <CalendarClock size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
               <span className="artifact-lib-title-label">Automations</span>
+            </button>
+            {/* Vault — the local markdown knowledge base (files on disk). */}
+            <button
+              type="button"
+              onClick={() => setActiveView("vault")}
+              className={`artifact-lib-title ${activeView === "vault" ? "is-active" : ""}`}
+              style={{ width: "100%" }}
+              title="Open vault"
+              aria-label="Open vault"
+            >
+              <Vault size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
+              <span className="artifact-lib-title-label">Vault</span>
             </button>
           </div>
         </div>

@@ -85,6 +85,12 @@ pub(crate) use automations::{
 mod capabilities;
 pub use capabilities::{app_capabilities_report, capabilities_report};
 
+/// Vault tools (vault_list/read/search/write/move/delete) — full CRUD on the
+/// bound vault. AppHandle-dependent like the automations family: dispatch.rs
+/// gates the write half, mcp_tools_bridge routes harness calls straight here.
+mod vault;
+pub(crate) use vault::{execute_vault_tool, is_vault_tool, is_vault_write_tool};
+
 /// Names of every tool the model may call. Kept in one place so the specs and
 /// the dispatcher can't drift apart.
 pub const WEB_SEARCH: &str = "web_search";
@@ -248,6 +254,35 @@ pub const MESSAGE_SESSION: &str = "message_session";
 /// Create a real (sidebar-visible, resumable) chat session with a task as
 /// its first turn, in any installed engine. Guarded: depth/concurrency caps.
 pub const SPAWN_SESSION: &str = "spawn_session";
+
+// ---- Vault (the local markdown knowledge base) ----
+//
+// Full CRUD on the vault folder the user bound in the Vault view
+// (crate::vault). Files on disk are the source of truth; the write half
+// goes through the same atomic-write + link-rewrite cores the UI uses, so
+// an agent-written note is indistinguishable from a hand-written one.
+// vault_list/read/search are read-only and auto-run everywhere; the write
+// trio follows the connector-write posture (see dispatch.rs).
+
+/// List vault notes (optionally under one folder) with titles + aliases.
+pub const VAULT_LIST: &str = "vault_list";
+/// Read one note's full markdown text.
+pub const VAULT_READ: &str = "vault_read";
+/// Full-text search over the vault (FTS + tag:/path:/file: operators).
+pub const VAULT_SEARCH: &str = "vault_search";
+/// Create or overwrite a note.
+pub const VAULT_WRITE: &str = "vault_write";
+/// Rename/move a note; every inbound link is rewritten vault-wide.
+pub const VAULT_MOVE: &str = "vault_move";
+/// Delete a note (moved to the vault's .trash, recoverable).
+pub const VAULT_DELETE: &str = "vault_delete";
+
+const VAULT_LIST_DESC: &str = "List the notes in the user's bound vault (optionally one folder). Read-only; vault_read for content, vault_search to find by text/tag.";
+const VAULT_READ_DESC: &str = "Read one vault note's full markdown text by vault-relative path (from vault_list/vault_search). Raw source: YAML frontmatter, [[wikilinks]], ^block-ids.";
+const VAULT_SEARCH_DESC: &str = "Full-text search over the user's OWN vault notes. Ranked hits with path + snippet. Operators: tag:work, path:Projects, file:2026, \"quoted phrase\", -exclude. An empty result means genuinely nothing.";
+const VAULT_WRITE_DESC: &str = "Create or overwrite one vault note: {path (vault-relative, ends in .md), content}. Overwrite is wholesale — vault_read first. Link notes with [[WikiLinks]]; metadata in YAML frontmatter (tags:, aliases:).";
+const VAULT_MOVE_DESC: &str = "Rename/move a vault note: {from, to}. EVERY inbound link is rewritten vault-wide — prefer this over delete+recreate when reorganizing.";
+const VAULT_DELETE_DESC: &str = "Delete a vault note by path (moves to the vault's .trash/, recoverable); inbound links become unresolved. Ask before deleting notes you didn't create this turn.";
 
 pub fn is_mesh_tool(name: &str) -> bool {
     matches!(
@@ -1434,6 +1469,38 @@ mod tests {
             SandboxPolicy::WorkspaceWrite
         )
         .contains(&RUN_CODE.to_string()));
+    }
+
+    #[test]
+    fn vault_tools_advertised_in_both_wire_formats_with_crud_gating() {
+        // Read trio: present in both formats under EVERY posture...
+        for spec_names in [
+            openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly),
+            anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::ReadOnly)
+                .iter()
+                .filter_map(|s| s["name"].as_str().map(String::from))
+                .collect::<Vec<_>>(),
+        ] {
+            for name in [VAULT_LIST, VAULT_READ, VAULT_SEARCH] {
+                assert!(spec_names.contains(&name.to_string()), "{name} missing");
+            }
+            // ...while the write trio is stripped under read_only.
+            for name in [VAULT_WRITE, VAULT_MOVE, VAULT_DELETE] {
+                assert!(
+                    !spec_names.contains(&name.to_string()),
+                    "{name} must be schema-stripped under read_only"
+                );
+            }
+        }
+        // Present under a mutating posture, in both formats.
+        let names = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
+        for name in [VAULT_WRITE, VAULT_MOVE, VAULT_DELETE] {
+            assert!(names.contains(&name.to_string()), "{name} missing");
+        }
+        let a = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
+        for name in [VAULT_WRITE, VAULT_MOVE, VAULT_DELETE] {
+            assert!(a.iter().any(|s| s["name"] == name), "{name} missing");
+        }
     }
 
     #[test]

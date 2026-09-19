@@ -41,6 +41,22 @@ pub async fn harness_mcp_servers(
     app: &AppHandle,
     chat_session_id: &str,
 ) -> Vec<HarnessMcpServer> {
+    harness_mcp_servers_for_message(app, chat_session_id, None).await
+}
+
+/// Same, but ALSO runs the built-in chat's keyword fast-path over this
+/// turn's text: a mention of "@gmail", "my inbox", … attaches the connector
+/// AND persists the `chat_session_connectors` row, so the CLI's config picks
+/// it up this turn and on every following one. Without this the harness send
+/// path had NO automatic attach at all — a connected connector stayed
+/// invisible to the model unless the user @-pinned it, while the CLI's
+/// capabilities report still advertised it as "connected" (the exact
+/// "Gmail shows as connected but I have no Gmail tool" failure).
+pub async fn harness_mcp_servers_for_message(
+    app: &AppHandle,
+    chat_session_id: &str,
+    user_message: Option<&str>,
+) -> Vec<HarnessMcpServer> {
     let db = app.state::<crate::DbState>();
     let mut ids: Vec<String> = {
         let conn = db.0.lock();
@@ -52,16 +68,32 @@ pub async fn harness_mcp_servers(
             .collect()
     };
     // Keep only genuinely usable ids (credentialed or public).
-    {
+    let usable: Vec<String> = {
         let conn = db.0.lock();
-        let usable: Vec<String> = crate::db::list_connector_credential_rows(&conn)
+        crate::db::list_connector_credential_rows(&conn)
             .unwrap_or_default()
             .into_iter()
             .map(|r| r.connector_id)
             .chain(CONNECTORS.iter().filter(|c| c.is_public()).map(|c| c.id.to_string()))
-            .collect();
-        ids.retain(|id| usable.iter().any(|u| u == id));
+            .collect()
+    };
+    // Keyword fast-path (same detection the built-in send path runs): the
+    // mention both attaches for THIS turn and persists for the session —
+    // the CLIs can't attach mid-turn themselves.
+    if let Some(msg) = user_message {
+        let trimmed = msg.trim();
+        if !trimmed.is_empty() {
+            let refs: Vec<&str> = usable.iter().map(|s| s.as_str()).collect();
+            for id in crate::chat::prompts::detect_connector_mentions(trimmed, &refs) {
+                if !ids.contains(&id) {
+                    ids.push(id.clone());
+                }
+                let conn = db.0.lock();
+                let _ = crate::db::add_chat_session_connector(&conn, chat_session_id, &id);
+            }
+        }
     }
+    ids.retain(|id| usable.iter().any(|u| u == id));
 
     let mut out = Vec::new();
     for id in ids {

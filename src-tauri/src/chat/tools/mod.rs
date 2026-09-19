@@ -761,7 +761,10 @@ const RUN_SHELL_DESC: &str = "Run a native shell command (cmd.exe / sh) with \
 const TASK_DESC: &str = "Spawn a focused IN-SESSION subagent that runs ONE task with its \
     own model turn and reports back — delegate self-contained sub-tasks \
     (explore a codebase, research a topic, draft a section) so the main turn \
-    stays lean. The subagent lives inside THIS conversation (a chip in the \
+    stays lean. Skip it for simple or quick work — a direct answer, a small \
+    tweak, a short lookup; do it yourself. Reserve subagents for genuinely \
+    self-contained, substantial sub-work. The \
+    subagent lives inside THIS conversation (a chip in the \
     chat, NOT a new sidebar session — that is spawn_session) and its final \
     text returns directly as this tool's result. Runs this session's \
     provider+model by default; pass `model` to override. Output streams \

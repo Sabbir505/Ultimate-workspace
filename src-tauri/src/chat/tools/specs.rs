@@ -1278,8 +1278,10 @@ const SPAWN_SESSION_DESC: &str = "Spawn a NEW, separate Relay chat session: a re
     chat or delegation that should outlive this conversation. When the spawned session \
     finishes the task, its result is automatically messaged back into this session. \
     mode=\"background\" (default) returns the new session's id immediately; mode=\"wait\" \
-    blocks (bounded) and returns its first-turn output. Pass `model` for a different \
-    model or CLI engine.";
+    blocks (bounded) and returns its first-turn output. Leave `agent`/`model` \
+    unset unless the task needs a specific engine/model — the configured \
+    default subagent model applies. A named model the target engine lacks is \
+    replaced by that engine's default (the spawn result says so).";
 
 fn list_sessions_parameters() -> Value {
     json!({
@@ -1392,7 +1394,7 @@ fn spawn_session_parameters() -> Value {
             },
             "model": {
                 "type": "string",
-                "description": "Model/engine for the child: bare id keeps your provider; \"provider::model\" switches provider (builtin); \"claude_code::sonnet\" runs another CLI harness. Omit for the configured default."
+                "description": "Model/engine for the child: bare id keeps your provider; \"provider::model\" switches provider (builtin); \"claude_code::sonnet\" runs another CLI harness. Omit for the configured default (preferred)."
             },
             "mode": {
                 "type": "string",

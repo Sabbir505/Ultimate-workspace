@@ -1911,9 +1911,19 @@ async fn run_attach_tool(
         }
         // E-9a: paired clear (see the MCP branch).
         stream_events::emit_status_clear(Some(app), sid);
-        // No DB row — same turn-scoping as the MCP branch above: discovery
-        // attaches must not pin chips into the composer.
-        format!("Attached {display} ({n} tools): {listing}")
+        // Persisted for the session: an explicit attach_connector call is an
+        // instruction to make the source available, so its tools ship on every
+        // following turn too. Turn-scoping here made turn N+1 silently lose
+        // what the model attached in turn N — the model then reported
+        // "Gmail shows as connected but this session exposes no Gmail tool",
+        // exactly what the manifest/capabilities had led it to expect. The
+        // composer chip appearing is the honest UI (removable like any other).
+        {
+            let db = app.state::<crate::DbState>();
+            let conn = db.0.lock();
+            let _ = crate::db::add_chat_session_connector(&conn, sid, &id);
+        }
+        format!("Attached {display} ({n} tools): {listing} — attached for the rest of this conversation.")
     }
 }
 

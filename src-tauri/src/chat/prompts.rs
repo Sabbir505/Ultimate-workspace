@@ -638,6 +638,9 @@ pub fn attach_manifest_segment(
         immediately; re-attach in a later turn when needed. Attach only what \
         the request needs — never attach everything just to check access. The \
         user can also pin one for the whole conversation with `@<id>`.\n\
+        Never answer that you can't access a source listed here — attaching is \
+        one cheap call, and the description next to an entry is what it CAN do, \
+        not proof you already have it loaded.\n\
         To check what is attached or available RIGHT NOW, call \
         `get_capabilities` — it is the instant, in-process authority on \
         connector/MCP availability. NEVER spawn a shell to check (`claude mcp \

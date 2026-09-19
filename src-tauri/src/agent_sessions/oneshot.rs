@@ -83,7 +83,33 @@ pub fn run_one_shot(
                 Some(chat_session_id),
             ) {
                 if harness_needs_prompt_instructions(harness) {
-                    if let Ok(ins) = std::fs::read_to_string(&b.claude_instructions) {
+                    // Tool-carrying harnesses read the full instructions; the
+                    // rest get the stripped variant that advertises nothing
+                    // their CLI can't call — same contract as the interactive
+                    // send path. One-shot runs never register the commandcode
+                    // bridge themselves, so commandcode counts as carrying
+                    // relay-tools only when a current registration exists
+                    // (marker read only — no CLI spawn here).
+                    let has_relay_tools =
+                        crate::session_fabric::harness_has_relay_tools(harness)
+                            || (harness == "commandcode" && {
+                                let slug = project_id
+                                    .clone()
+                                    .unwrap_or_else(|| super::bundle::NO_PROJECT_BUNDLE_SLUG.to_string());
+                                cwd.is_some_and(|c| {
+                                    crate::browser_mcp_register::commandcode_bridge_current(
+                                        app,
+                                        std::path::Path::new(c),
+                                        &slug,
+                                    )
+                                })
+                            });
+                    let ins_path = if has_relay_tools {
+                        &b.claude_instructions
+                    } else {
+                        &b.prompt_only_instructions
+                    };
+                    if let Ok(ins) = std::fs::read_to_string(ins_path) {
                         if !ins.trim().is_empty() {
                             instructions = Some(ins);
                         }

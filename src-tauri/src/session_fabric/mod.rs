@@ -47,6 +47,11 @@ const QUESTION_TIMEOUT_MAX: u64 = 120;
 const WATCHER_CEILING_SECS: u64 = 15 * 60;
 const PUMP_CEILING_SECS: u64 = 30 * 60;
 const POLL_MS: u64 = 400;
+/// Ceiling for AUTOMATED follow-up pushes (late answers, spawn reports).
+/// `mesh_message_session` guards its own mails, but `push_follow_up_answer`
+/// and the spawn reporter insert directly — without their own ceiling a
+/// bounce chain incremented depth unboundedly (observed: forwarded-depth 13).
+const MAX_FOLLOWUP_DEPTH: i64 = 3;
 
 // ── Settings ──────────────────────────────────────────────────────────────
 
@@ -958,12 +963,19 @@ async fn deliver_mail(app: &AppHandle, mail: store::MailRow) -> Result<(), Strin
 
     run_turn(app, &target, &envelope).await?;
 
-    // Watcher: wait for the turn to end, then capture the answer. Spawned
-    // from a NON-async helper: an inline spawn here would make deliver_mail's
+    // Watcher: QUESTIONS ONLY. A notify has no expected reply — arming a
+    // watcher on its turn used to capture the recipient's acknowledgment
+    // ("Noted."/"Received.") and mail it back to the sender as "Answer to
+    // your earlier question", whose delivery re-armed another watcher on
+    // the other side: a mechanical Noted/Received ping-pong between parent
+    // and spawned sessions with no model-intent behind it. Spawned from a
+    // NON-async helper: an inline spawn here would make deliver_mail's
     // future type recursive (watch_answer's late-answer path awaits
     // deliver_mail again via push_follow_up_answer) and Send-checking would
     // never terminate.
-    spawn_answer_watcher(app.clone(), mail, watermark);
+    if mail.mode == "question" {
+        spawn_answer_watcher(app.clone(), mail, watermark);
+    }
     Ok(())
 }
 
@@ -1068,8 +1080,23 @@ async fn watch_answer(app: AppHandle, mail: store::MailRow, watermark: i64) {
 
 /// Late answer delivery (design §5.2): when the asker's tool call is gone,
 /// the answer rides a notify mail back into the asker's session as a turn.
+/// This is an AUTOMATED insert — it bypasses `mesh_message_session`'s
+/// guards, so the depth ceiling, the hourly mail budget, and the bare-ack
+/// filter are re-checked here.
 async fn push_follow_up_answer(app: &AppHandle, mail: &store::MailRow, answer: &str) {
+    if mail.depth + 1 > MAX_FOLLOWUP_DEPTH || is_bare_ack(answer) {
+        return;
+    }
     let db = app.state::<DbState>();
+    let over_budget = {
+        let conn = db.0.lock();
+        store::count_mail_from_since(&conn, &mail.to_session, crate::db::now_ts() - 3600)
+            .map(|n| n >= MAX_MAIL_PER_HOUR)
+            .unwrap_or(false)
+    };
+    if over_budget {
+        return;
+    }
     let fwd = {
         let conn = db.0.lock();
         store::insert_mail(
@@ -1091,6 +1118,60 @@ async fn push_follow_up_answer(app: &AppHandle, mail: &store::MailRow, answer: &
         }
         Err(_) => {} // audit row lost — the answer still sits in the original mail
     }
+}
+
+/// Drop `<think>…</think>` blocks so acknowledgment detection judges the
+/// visible reply (harness transcripts store thinking inline).
+fn strip_think(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("</think>") {
+            Some(end) => rest = &rest[start + end + "</think>".len()..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// True when a captured reply is a bare acknowledgment — "Noted.",
+/// "Received.", "<think>…</think>Acknowledged." — rather than content.
+/// Pushing these back as "answers" was the fuel of the parent/child
+/// Noted-Received ping-pong: every ack generated a new mail that invited
+/// the next ack. Deliberately narrow (short, question-free, unmistakable
+/// ack markers); a false negative costs nothing now that notify mails
+/// never arm watchers, while a false positive would swallow a real
+/// late answer.
+fn is_bare_ack(text: &str) -> bool {
+    let visible = strip_think(text);
+    let t = visible.trim();
+    if t.is_empty() || t.contains('?') || t.chars().count() > 240 {
+        return t.is_empty();
+    }
+    let lower = t.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "noted",
+        "received",
+        "acknowledg",
+        "understood",
+        "no action needed",
+        "no action required",
+        "no reply is expected",
+        "no reply expected",
+        "thanks for the update",
+        "thanks for letting me know",
+    ];
+    if MARKERS.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+    let plain: String = lower.chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect();
+    const EXACT: &[&str] = &[
+        "ok", "okay", "k", "yes", "yep", "yeah", "sure", "done", "got it", "will do", "copy",
+        "copy that", "roger", "ack",
+    ];
+    EXACT.iter().any(|w| plain.trim() == *w)
 }
 
 /// Watch one freshly spawned child's first (task) turn and notify-mail its
@@ -1154,6 +1235,18 @@ fn spawn_spawn_result_reporter(app: AppHandle, parent: String, child_id: String)
             }
         };
         drop(db);
+        // Automated insert — honor the same hourly mail budget the manual
+        // path enforces, so a spawn-storm can't out-fly the caps.
+        let over_budget = {
+            let db = app.state::<DbState>();
+            let conn = db.0.lock();
+            store::count_mail_from_since(&conn, &child_id, crate::db::now_ts() - 3600)
+                .map(|n| n >= MAX_MAIL_PER_HOUR)
+                .unwrap_or(false)
+        };
+        if over_budget {
+            return;
+        }
         let mail = {
             let db = app.state::<DbState>();
             let conn = db.0.lock();
@@ -1407,6 +1500,30 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             model_pick_for_child,
         )
     };
+    // Pre-flight: does the target engine actually HAVE this model? An
+    // uninformed `model` guess used to create the child and only fail at
+    // first turn (or silently ride the CLI's own default). Best-effort
+    // against the CLI's config-derived catalog: an empty/unprovable catalog
+    // passes the model through; a known miss falls back to the engine's
+    // configured default and the spawn result says so.
+    let (model, model_substituted) = if harness_child {
+        validate_harness_child_model(&agent, &model).await
+    } else {
+        (model, None)
+    };
+    let substitution_note = model_substituted
+        .map(|fallback| {
+            let what = if fallback.is_empty() {
+                "that engine's configured default model".to_string()
+            } else {
+                format!("\"{fallback}\" (that engine's configured default)")
+            };
+            format!(
+                "Note: the requested model was not found on engine \"{agent}\" — the \
+                 session runs on {what} instead.\n\n"
+            )
+        })
+        .unwrap_or_default();
 
     let child = {
         let conn = db.0.lock();
@@ -1466,10 +1583,10 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
         // and the parent never learns the outcome.
         spawn_spawn_result_reporter(app.clone(), parent.clone(), child.id.clone());
         return format!(
-            "Spawned session \"{}\" (id {}, engine {}, model {}). It received the task \
-             as its first turn and is running — the user can watch it in the sidebar. \
-             When it finishes the task, its result is automatically messaged back into \
-             this session. You can also message it with \
+            "{substitution_note}Spawned session \"{}\" (id {}, engine {}, model {}). It \
+             received the task as its first turn and is running — the user can watch it \
+             in the sidebar. When it finishes the task, its result is automatically \
+             messaged back into this session. You can also message it with \
              message_session(session_id=\"{}\") or read its output with \
              read_session(session_id=\"{}\", mode=\"recent_turns\").",
             child.title.clone().unwrap_or_default(),
@@ -1497,7 +1614,7 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
     };
     match result {
         Some(r) => format!(
-            "Spawned session \"{}\" (id {}) finished its first turn:\n{}",
+            "{substitution_note}Spawned session \"{}\" (id {}) finished its first turn:\n{}",
             child.title.clone().unwrap_or_default(),
             child.id,
             crate::util::truncate_chars(&r, 6_000)
@@ -1517,6 +1634,45 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             )
         }
     }
+}
+
+/// Pre-flight a harness child's model against the engine's own model catalog
+/// (config-derived; may probe the CLI — hence spawn_blocking). Returns the
+/// model to run plus `Some(fallback)` when a substitution happened.
+/// Deliberately best-effort: an empty catalog (unreadable config, raced
+/// probe) passes the model through unchanged rather than blocking the spawn,
+/// and opencode bare ids are qualified to `provider/model` first since that
+/// CLI rejects bare ids at the send path.
+async fn validate_harness_child_model(agent: &str, model: &str) -> (String, Option<String>) {
+    let Some(harness) = agent.strip_prefix("harness:") else {
+        return (model.to_string(), None);
+    };
+    if model.trim().is_empty() || model == "auto" {
+        return (model.to_string(), None);
+    }
+    let model = if harness == "opencode" {
+        crate::harness_config::resolve_opencode_model(model)
+    } else {
+        model.to_string()
+    };
+    let id = harness.to_string();
+    let cfg = tauri::async_runtime::spawn_blocking(move || {
+        crate::harness_config::harness_model_config(&id)
+    })
+    .await
+    .unwrap_or_default();
+    if cfg.models.is_empty() {
+        return (model, None);
+    }
+    if cfg.models.iter().any(|m| m.id.eq_ignore_ascii_case(&model)) {
+        return (model, None);
+    }
+    let fallback = cfg.default_model.clone().unwrap_or_default();
+    eprintln!(
+        "[mesh-spawn] model {model:?} not found in {harness}'s catalog — using its \
+         configured default instead"
+    );
+    (fallback.clone(), Some(fallback))
 }
 
 fn spawn_envelope(db: &DbState, parent: &str, child: &str, task: &str) -> String {
@@ -1600,7 +1756,12 @@ fn session_busy(app: &AppHandle, sid: &str) -> bool {
 async fn run_turn(app: &AppHandle, target: &SessionRowLite, content: &str) -> Result<(), String> {
     match target_kind(&target.agent) {
         TargetKind::Harness(harness) => {
-            let connectors = crate::connectors::harness_mcp_servers(app, &target.id).await;
+            // The turn's text (spawn task / mail envelope) runs the keyword
+            // fast-path — a task that mentions "@gmail"/"my inbox" attaches
+            // the connector to the harness child, same as a user send.
+            let connectors =
+                crate::connectors::harness_mcp_servers_for_message(app, &target.id, Some(content))
+                    .await;
             let db = app.state::<DbState>();
             let cwd = {
                 let conn = db.0.lock();
@@ -1703,7 +1864,8 @@ fn mail_envelope(conn: &Connection, mail: &store::MailRow) -> String {
         "Your final message this turn is delivered back to the asking session as the \
          answer — answer the question directly and completely."
     } else {
-        "This is a notice; no reply is expected unless it changes your current work."
+        "This is an automated notice — do NOT reply to it. Replies to a notice are \
+         not delivered anywhere; only act on it if it changes your current work."
     };
     format!(
         "[Relay inter-session mail — NOT typed by the user]\n\
@@ -1863,7 +2025,26 @@ mod tests {
         assert!(env.contains("What did we decide about X?"));
         let notify = store::insert_mail(&conn, "asker", "target", "notify", "FYI", 0).unwrap();
         let env2 = mail_envelope(&conn, &notify);
-        assert!(env2.contains("no reply is expected"));
+        assert!(env2.contains("do NOT reply"));
+        assert!(env2.contains("not delivered anywhere"));
+    }
+
+    #[test]
+    fn bare_ack_filter_catches_loop_fuel_and_spares_answers() {
+        // The exact loop texts observed in the mail panel.
+        assert!(is_bare_ack("Noted."));
+        assert!(is_bare_ack("Received."));
+        assert!(is_bare_ack(
+            "<think>The parent session keeps sending \"Noted\" acks — a back-and-forth \
+             confirmation loop. I should acknowledge minimally.</think>Received."
+        ));
+        assert!(is_bare_ack("<think>no action needed</think>Acknowledged."));
+        assert!(is_bare_ack("   "));
+        assert!(is_bare_ack("ok"));
+        // Substantive replies must still push.
+        assert!(!is_bare_ack("Done — the Gmail check found 3 unread; details in the artifact."));
+        assert!(!is_bare_ack("Noted. One question: should I retry with a different model?"));
+        assert!(!is_bare_ack("I could not check the inbox — the IMAP login failed with auth error."));
     }
 
     #[test]

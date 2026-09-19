@@ -50,7 +50,8 @@ pub const ALLOWED_RELAY_TOOLS: [&str; 21] = [
 
 /// Strip the `relay_tools:` prefix from a WS op; None for non-tool ops and
 /// for any tool outside the relay whitelist (those fall through to
-/// `unknown_op` in the dispatcher).
+/// `unknown_op` in the dispatcher). Also accepts the connector REST fallback
+/// READ tools (`gmail_search_threads`, …) — write-kind fallbacks never route.
 /// MCP tool schemas for every bridged tool, DERIVED from the live tool
 /// registry — the relay sidecar fetches this over the WS (`relay_schemas` op)
 /// for its `tools/list`, so a new tool needs only: registry const + spec +
@@ -58,7 +59,14 @@ pub const ALLOWED_RELAY_TOOLS: [&str; 21] = [
 /// copy in the sidecar to forget. An allowlist entry without a registry spec
 /// (typo, renamed tool) is skipped here and caught by the
 /// `bridge_allowlist_matches_registry` test.
-pub fn relay_tool_schemas() -> Vec<Value> {
+///
+/// Appended after the registry tools: the READ-kind REST fallbacks of every
+/// CONNECTED connector (`gmail_search_threads`, `gdrive_search_files`, …).
+/// These are the working Gmail/Workspace surface for harness CLIs while
+/// Google's hosted MCP servers deny every `tools/call` (Workspace MCP
+/// Developer Preview gate); writes are never bridged (no approval UI over
+/// MCP).
+pub fn relay_tool_schemas(app: &tauri::AppHandle) -> Vec<Value> {
     // local_docs: `search_docs` is capability-gated in the registry but is
     // bridged unconditionally (it self-guards at runtime when the embedding
     // sidecar is down).
@@ -67,7 +75,7 @@ pub fn relay_tool_schemas() -> Vec<Value> {
         ..ToolCaps::default()
     };
     let all = tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite);
-    ALLOWED_RELAY_TOOLS
+    let mut out: Vec<Value> = ALLOWED_RELAY_TOOLS
         .iter()
         .filter_map(|name| {
             all.iter()
@@ -80,12 +88,37 @@ pub fn relay_tool_schemas() -> Vec<Value> {
                     })
                 })
         })
-        .collect()
+        .collect();
+    let credentialed: Vec<String> = {
+        let db = app.state::<crate::DbState>();
+        let conn = db.0.lock();
+        crate::db::list_connector_credential_rows(&conn)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.connector_id)
+            .collect()
+    };
+    for (_, name, desc) in crate::connectors::connected_fallback_read_tools(&credentialed) {
+        out.push(json!({
+            "name": name,
+            "description": desc,
+            // Same permissive-schema contract as the built-in chat's
+            // connector tools: the REST layer validates the args.
+            "inputSchema": { "type": "object", "properties": {} }
+        }));
+    }
+    out
 }
 
 pub fn tool_from_op(op: &str) -> Option<String> {
     let rest = op.strip_prefix("relay_tools:")?;
-    if ALLOWED_RELAY_TOOLS.contains(&rest) { Some(rest.to_string()) } else { None }
+    if ALLOWED_RELAY_TOOLS.contains(&rest)
+        || crate::connectors::fallback_read_tool_owner(rest).is_some()
+    {
+        Some(rest.to_string())
+    } else {
+        None
+    }
 }
 
 pub fn outcome_text(o: &tools::ToolOutcome) -> &str {
@@ -145,6 +178,21 @@ pub async fn execute_relay_tool(
     // of which chat is calling.
     if tools::is_mesh_tool(tool_name) {
         let text = crate::session_fabric::execute_mesh_tool(app, None, tool_name, args).await;
+        return Ok(json!({ "text": text, "artifact": Value::Null }));
+    }
+    // Connector REST fallback reads (gmail_search_threads, gdrive_search_
+    // files, …): app-side tools executed by the connectors module, not
+    // registry tools, so the execute_tool fallback below can't route them.
+    // Read-kind only (`fallback_read_tool_owner` refuses writes) — reads
+    // auto-run in the built-in chat, so this ungated path matches the
+    // in-app posture; writes keep their approval gate in-app only.
+    if let Some(connector_id) = crate::connectors::fallback_read_tool_owner(tool_name) {
+        let text = match
+            crate::connectors::execute_fallback_read(app, connector_id, tool_name, args).await
+        {
+            Ok(t) => t,
+            Err(e) => format!("Error: {e}"),
+        };
         return Ok(json!({ "text": text, "artifact": Value::Null }));
     }
     // Same client construction the built-in chat uses (chat/mod.rs).

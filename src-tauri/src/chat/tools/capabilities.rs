@@ -91,7 +91,7 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
         "connectors": {
             "attached": attached,
             "attachable": attachable,
-            "attach_how": "attach_connector(id) loads a listed connector's tools into this turn",
+            "attach_how": "attach_connector(id) loads a listed connector's tools into this turn. Listed = connected, NOT loaded: if a request touches one, attach FIRST — never answer that you can't access a connector listed here.",
         },
         "mcp_servers": {
             "attached": mcp_attached,
@@ -126,15 +126,19 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
 pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
     use tauri::Manager;
     let db = app.state::<crate::DbState>();
-    let (connected_ids, account_displays) = {
+    let (connected_ids, account_displays, fallback_read_names) = {
         let conn = db.0.lock();
         let rows = crate::db::list_connector_credential_rows(&conn).unwrap_or_default();
+        let credentialed: Vec<String> =
+            rows.iter().map(|r| r.connector_id.clone()).collect();
         (
-            rows.iter()
-                .map(|r| r.connector_id.clone())
-                .collect::<Vec<_>>(),
+            credentialed.clone(),
             rows.iter()
                 .filter_map(|r| r.account_display.clone())
+                .collect::<Vec<_>>(),
+            crate::connectors::connected_fallback_read_tools(&credentialed)
+                .into_iter()
+                .map(|(_, name, _)| name.to_string())
                 .collect::<Vec<_>>(),
         )
     };
@@ -173,13 +177,20 @@ pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
     let report = json!({
         "note": NOTE,
         "harness_context": "You are a CLI harness running inside Relay (the desktop app). \
-    This report describes the APP's connections — what Relay registered into your \
-    MCP config at spawn. Connected connectors appear as MCP servers in your own \
-    config; do not probe them with shell commands.",
+    A CONNECTED connector below is authorized app-wide but is NOT automatically in \
+    your toolset: only connectors attached to your chat session are registered into \
+    your MCP config (refreshed each turn), and a mention of one in the task text \
+    (\"@gmail\", \"my inbox\", …) attaches it automatically. Independent of attach \
+    state, the read-style tools under connector_fallback_reads run app-side for \
+    connected connectors — call them directly. Never claim access you don't have \
+    (your own tool list is the truth), and never answer 'I can't access X' for a \
+    connected connector whose fallback read tools you DO have. Do not probe \
+    connectors with shell commands.",
         "connectors": {
             "connected": connected,
             "accounts": account_displays,
         },
+        "connector_fallback_reads": fallback_read_names,
         "mcp_gallery": {
             "installed": mcp_gallery,
         },

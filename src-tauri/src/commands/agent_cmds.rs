@@ -51,9 +51,12 @@ pub async fn send_agent_chat_message(
 ) -> Result<(), String> {
     // Snapshot the session's attached connectors (refreshing OAuth tokens)
     // BEFORE the sync spawn path — the CLIs only read static MCP config at
-    // startup, so this is the one place fresh tokens can reach them.
+    // startup, so this is the one place fresh tokens can reach them. This
+    // turn's text runs the same keyword fast-path as the built-in chat:
+    // "my inbox"/"@gmail" attaches (and persists) the connector here too.
     let connectors =
-        crate::connectors::harness_mcp_servers(&app, &chat_session_id).await;
+        crate::connectors::harness_mcp_servers_for_message(&app, &chat_session_id, Some(&content))
+            .await;
     let (content, attach_prompt) = match &attachments {
         Some(list) if !list.is_empty() => {
             // Same display markers/extraction the built-in path persists

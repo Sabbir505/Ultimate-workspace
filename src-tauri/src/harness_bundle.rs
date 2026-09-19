@@ -149,12 +149,15 @@ pub fn build_instructions_md(
              config file instead of the live session. For sub-work inside THIS \
              conversation, use your OWN Task/Agent tool — it runs an in-session \
              subagent whose result returns to you directly. The relay-tools \
-             `spawn_session` tool (optionally `model`, \
-             e.g. \"opencode::mimo-v2.5-free\") is for a DIFFERENT kind of \
+             `spawn_session` tool is for a DIFFERENT kind of \
              delegation: a dedicated, sidebar-visible chat in another engine \
              the user can watch and resume — use it when the user asks for a \
              separate chat/session or the work should run in a different \
-             engine. When a spawned session finishes its task, its result is \
+             engine. Leave its `agent`/`model` unset unless the task genuinely \
+             needs a specific engine or model — the app's configured default \
+             subagent model applies then; a model the target engine doesn't \
+             have is replaced by that engine's default. When a spawned session \
+             finishes its task, its result is \
              automatically messaged back into this session. Never launch a \
              coding-agent CLI in your shell instead: an externally launched \
              agent opens a stray terminal window and is invisible to Relay: \

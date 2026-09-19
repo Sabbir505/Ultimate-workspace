@@ -707,9 +707,11 @@ async fn dispatch_inner(
         "print_to_pdf" => op_print_to_pdf(req, browser, app).await,
         // The relay sidecar asks for the CURRENT bridged-tool schemas (its
         // tools/list) — derived from the live registry app-side, so new tools
-        // reach harness sessions without a sidecar-side hand copy.
+        // reach harness sessions without a sidecar-side hand copy. Takes the
+        // app handle: connected connectors' REST fallback reads append to the
+        // registry-derived set.
         "relay_schemas" => Ok(json!({
-            "schemas": crate::mcp_tools_bridge::relay_tool_schemas()
+            "schemas": crate::mcp_tools_bridge::relay_tool_schemas(app)
         })),
         op if crate::mcp_tools_bridge::tool_from_op(op).is_some() => {
             let tool = crate::mcp_tools_bridge::tool_from_op(op).unwrap();

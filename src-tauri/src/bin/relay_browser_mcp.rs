@@ -1144,7 +1144,7 @@ fn static_relay_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "spawn_session",
-            "description": "Spawn a NEW Relay chat session to delegate work: create a real, sidebar-visible session (any installed engine — it may differ from yours) whose first turn is `task`. Pass `model` to run it on a different model than yours (cheap models for mechanical sub-work) or on another CLI engine (\"claude_code::sonnet\"). mode=\"background\" (default) returns the new session's id immediately; mode=\"wait\" blocks (bounded) and returns its first-turn output. The user can watch and take over the spawned session at any time. Prefer this over doing a big parallel task inside this conversation.",
+            "description": "Spawn a NEW Relay chat session to delegate work: create a real, sidebar-visible session (any installed engine — it may differ from yours) whose first turn is `task`. This is a SEPARATE conversation — for in-session subagent asks use your engine's own Task tool. mode=\"background\" (default) returns the new session's id immediately; mode=\"wait\" blocks (bounded) and returns its first-turn output. The user can watch and take over the spawned session at any time. Leave `agent` and `model` unset unless the task genuinely needs a specific engine/model — the app's configured default subagent model applies then; a model the target engine doesn't have is replaced by that engine's default.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

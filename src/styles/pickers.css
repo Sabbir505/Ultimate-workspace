@@ -1,6 +1,8 @@
 .model-effort-chevron {
   color: var(--text-dim);
   font-size: 10px;
+  /* The chip label is the shrinking part — the caret never squashes. */
+  flex-shrink: 0;
 }
 .model-effort-search {
   padding: 4px 4px 6px;
@@ -179,6 +181,10 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  /* Shrinkable flex item: with min-width auto the chip's nowrap label held
+     the control bar open and shoved the mic/send buttons out of the composer
+     card on narrow panes. The label below already ellipsizes. */
+  min-width: 0;
   /* Match the project-folder notch beside it: same height and text color. */
   padding: 2px 10px;
   font-size: 12px;

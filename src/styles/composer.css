@@ -748,6 +748,13 @@
   background: rgba(0, 0, 0, 0.05);
   border-color: rgba(0, 0, 0, 0.08);
 }
+/* The agent chip's pill wrapper is the flex item the control bar sizes:
+   with min-width auto its nowrap label held the bar open and pushed the
+   mic/send buttons out of the composer card (narrow panes). min-width: 0
+   lets it compress; the label inside ellipsizes (see .agent-chip-label). */
+.composer-control-bar .composer-control-agent {
+  min-width: 0;
+}
 .composer-control-bar .composer-notch-agent:hover,
 .composer-control-bar .composer-notch-folder:hover,
 .composer-control-bar .composer-notch-github:hover,
@@ -1427,14 +1434,16 @@
 }
 
 /* --- GFM markdown: tables, task lists, strikethrough ---
-   Tables render as a rounded card that FILLS the available width:
-   `display: table; width: 100%` stretches the columns (display:block used to
-   leave dead space right of the last column); `border-collapse: separate`
-   lets border-radius clip the corners, so the corner cells carry matching
-   inner radii (their backgrounds would poke out otherwise). The wrapper owns
-   the vertical margin AND the horizontal scroll (wide tables scroll instead
-   of crushing), and hosts the hover Copy/CSV toolbar (MarkdownTable in chat
-   bubbles AND artifact previews). */
+   Tables render as a rounded card at their NATURAL column widths:
+   `width: max-content` gives every column its one-line width (forcing
+   `width: 100%` crushed columns until headers broke mid-word — "Durati
+   on"), and `min-width: 100%` still stretches narrow tables to fill the
+   card (no dead space right of the last column). When the natural width
+   exceeds the card, .chat-table-wrap scrolls instead of squeezing.
+   `border-collapse: separate` lets border-radius clip the corners, so the
+   corner cells carry matching inner radii (their backgrounds would poke
+   out otherwise). The wrapper also hosts the hover Copy/CSV toolbar
+   (MarkdownTable in chat bubbles AND artifact previews). */
 .chat-table-wrap {
   position: relative;
   overflow-x: auto;
@@ -1445,7 +1454,8 @@
   border-spacing: 0;
   margin: 0;
   font-size: calc(12.5px * var(--chat-zoom, 1));
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   display: table;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -1463,6 +1473,19 @@
   padding: 5px 10px;
   /* start (not left): RTL cells align to their reading side. */
   text-align: start;
+}
+/* Headers never wrap — a squeezed header ("Booki ng") reads broken; the
+   table scrolls horizontally instead. */
+.chat-markdown th,
+.artifact-preview-table th {
+  white-space: nowrap;
+}
+/* Body cells wrap only past a generous cap, so a long paragraph cell can't
+   stretch the table (and its scrollbar) across the whole pane — short cells
+   like prices/routes stay on one line. */
+.chat-markdown td,
+.artifact-preview-table td {
+  max-width: 48ch;
 }
 /* Drop the inner rules that touch the table's rounded edge, and round the
    corner cells so header/zebra fills stay inside the card's radius. */
@@ -1597,6 +1620,18 @@
      box-shadow reads as a faint rounded border around the flat chip. */
   box-shadow: none;
   padding: 4px 8px;
+}
+/* Same narrow-pane contract as the agent chip: the label compresses to an
+   ellipsis instead of wrapping or shoving the mic/send buttons out of the
+   card; the chevron never squashes. */
+.permission-mode-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.permission-mode-chevron {
+  flex-shrink: 0;
 }
 /* Flat in every state — transparent background/border on hover too; only the
    popup keeps its surface. */

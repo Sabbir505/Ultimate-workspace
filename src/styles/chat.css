@@ -4282,7 +4282,12 @@ button.chat-mermaid-open {
 .chat-pane-split.pane-resizing .chat-pane { pointer-events: none; }
 
 .chat-pane-cell {
-  min-width: 0;
+  /* Width floor (matches MIN_SPLIT_HALF_W in ChatPaneGrid): below this the
+     composer control bar can't fit and the mic/send buttons overflow the
+     card. A narrower window pushes the panes' combined overflow right
+     instead of crushing them — the tool panel (painted after the grid)
+     covers the spill. */
+  min-width: 320px;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -4292,7 +4297,9 @@ button.chat-mermaid-open {
 .chat-pane {
   position: relative;
   flex: 1 1 auto;
-  min-width: 0;
+  /* Same floor as .chat-pane-cell — this element is the grid's direct flex
+     child in the unsplit view, where no cell sits above it. */
+  min-width: 320px;
   min-height: 0;
   display: flex;
   flex-direction: column;

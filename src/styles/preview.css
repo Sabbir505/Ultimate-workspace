@@ -11,7 +11,12 @@
 }
 .chat-view-wrap .chat-view {
   flex: 1;
-  min-width: 0;
+  /* Floor matching .artifact-preview-pane's min-width: without it, opening
+     the artifact preview in a narrow pane lets the artifact's own 320px
+     minimum crush the chat half (composer included) to zero. When both
+     minimums exceed the wrap, the artifact pane spills right — the tool
+     panel paints over it, so the chat side always stays intact. */
+  min-width: 320px;
 }
 .artifact-preview-pane {
   position: relative;

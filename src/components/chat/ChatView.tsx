@@ -845,12 +845,22 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   const imageGenAnchorSessionId = useImageGenStore((s) => s.anchorSessionId);
   const attachImageGenSession = useImageGenStore((s) => s.attachSession);
   const imageGenHistory = useImageGenStore((s) => s.history);
-  // Claim ownership of an unclaimed generation for THIS pane's session: the
-  // first event ("starting" from the chat tool, "rendering" from the direct
-  // command) always fires while the assistant turn that invoked the tool is
-  // still streaming, so the streaming pane is the owner. In split view a
-  // pane only claims when ITS session is the one streaming — otherwise both
-  // panes would fight over every generation. Single view: the only pane.
+  const imageGenGenId = useImageGenStore((s) => s.genId);
+  const imageGenSuppressed = useImageGenStore((s) => s.suppressed);
+  // Only the pane that OWNS the generation behaves as if it were busy
+  // (composer lock, Stop button): in split view pane B's minutes-long render
+  // must not turn pane A's send into a Stop for pane A's own chat.
+  const imageGenBusyHere =
+    imageGenBusy &&
+    (imageGenAnchorSessionId == null || imageGenAnchorSessionId === activeChatSessionId);
+  // Claim ownership of an (ownerless) generation for THIS pane's session:
+  // the first event ("starting" from the chat tool, "rendering" from the
+  // direct command) always fires while the assistant turn that invoked the
+  // tool is still streaming, so the streaming pane is the owner. In split
+  // view a pane only claims when ITS session is the one streaming —
+  // otherwise both panes would fight over every generation. Single view: the
+  // only pane. Owner-tagged events (chat tool path) set the anchor in the
+  // store directly and never reach this effect.
   useEffect(() => {
     if (!imageGenUpdate || imageGenAnchorSessionId != null) return;
     if (activeChatSessionId == null) return;
@@ -864,9 +874,26 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   // streaming ABOVE the card churns row heights for its first seconds (the
   // virtualizer's estimates oscillate), so the re-arm repeats through that
   // window — and once more on "done", when the card swaps to the image.
+  // The timers live in a REF, not the effect's cleanup: the cleanup runs on
+  // the next progress event (milliseconds later on a warm server) and would
+  // otherwise kill the whole schedule before a single timer fired.
   const prevGenPhaseRef = useRef<string | null>(null);
+  const genFollowTimersRef = useRef<number[]>([]);
+  useEffect(
+    () => () => {
+      genFollowTimersRef.current.forEach((t) => window.clearTimeout(t));
+    },
+    [],
+  );
   useEffect(() => {
     if (!imageGenUpdate) return;
+    // Foreign generations (another pane/session) don't get to yank THIS
+    // pane's scroll position.
+    if (
+      imageGenAnchorSessionId != null &&
+      imageGenAnchorSessionId !== activeChatSessionId
+    )
+      return;
     const phase = imageGenUpdate.phase;
     const isNewGen =
       (phase === "starting" || phase === "rendering") &&
@@ -876,13 +903,13 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
     prevGenPhaseRef.current = phase;
     if (isNewGen) {
       setGenFollowNonce((n) => n + 1);
-      const timers = [1500, 3000, 5000, 8000].map((ms) =>
+      genFollowTimersRef.current.forEach((t) => window.clearTimeout(t));
+      genFollowTimersRef.current = [1500, 3000, 5000, 8000].map((ms) =>
         window.setTimeout(() => setGenFollowNonce((n) => n + 1), ms),
       );
-      return () => timers.forEach((t) => window.clearTimeout(t));
     }
     if (phase === "done") setGenFollowNonce((n) => n + 1);
-  }, [imageGenUpdate]);
+  }, [imageGenUpdate, imageGenAnchorSessionId, activeChatSessionId]);
   const activeIsStreaming =
     activeChatSessionId != null && activeChatSessionId in streaming;
   const isStreaming = activeIsStreaming && activeStream.length > 0;
@@ -958,9 +985,15 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
 
   const handleStop = useCallback(() => {
     // A queued render is cancellable too (abandon — sd-server has no cancel;
-    // the current pass finishes silently and its file lands unused).
-    if (useImageGenStore.getState().busy) {
-      useImageGenStore.getState().cancel();
+    // the current pass finishes silently and its file lands unused). Only a
+    // render THIS pane owns counts — a foreign pane's render must not swallow
+    // this pane's stream-stop.
+    const s = useImageGenStore.getState();
+    const busyHere =
+      s.busy &&
+      (s.anchorSessionId == null || s.anchorSessionId === activeChatSessionId);
+    if (busyHere) {
+      s.cancel();
       return;
     }
     void cancelStream(activeChatSessionId ?? undefined);
@@ -1416,7 +1449,16 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   // to the list end while that turn streams. The card stays attached to ITS
   // assistant message when newer turns arrive, and PAST renders of this
   // session re-attach the same way after an app restart (store history).
-  const imageGenActive = imageGenUpdate != null;
+  // Live-card visibility: hidden while a user-cancelled render's stale event
+  // state lingers (suppressed && !busy — cancel keeps `update` so the store
+  // can keep swallowing the abandoned render's late events), and only in the
+  // pane that OWNS the generation. Without the ownership gate every mounted
+  // view grew a phantom row (and `hasItems` went true in brand-new empty
+  // chats, hiding the welcome screen).
+  const imageGenOwnedHere =
+    imageGenAnchorSessionId == null || imageGenAnchorSessionId === activeChatSessionId;
+  const imageGenActive =
+    imageGenUpdate != null && !(imageGenSuppressed && !imageGenBusy) && imageGenOwnedHere;
   const genHistory = imageGenHistory.filter((h) => {
     if (h.sessionId !== activeChatSessionId) return false;
     // The live card is already showing this render as a finished image —
@@ -1427,26 +1469,58 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       imageGenUpdate.path === h.path
     );
   });
-  const genAnchorFor = (base: string) =>
-    base ? items.findIndex((it) => typeof it.content === "string" && it.content.includes(base)) : -1;
-  const genAlreadyInjected = items.some((it) => it.key === "__imagegen__");
+  const genRowKey = `__imagegen__${imageGenGenId}`;
+  const isLiveGenRow = (key: unknown) =>
+    typeof key === "string" &&
+    key.startsWith("__imagegen__") &&
+    !key.startsWith("__imagegen_h__");
+  // Drop live rows from PREVIOUS generations (the key bumps per generation so
+  // the card remounts and its elapsed timer restarts).
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (isLiveGenRow(items[i].key) && items[i].key !== genRowKey) items.splice(i, 1);
+  }
+  // One pass over the timeline resolves EVERY generation basename at once —
+  // per-entry findIndex scans were O(items × history) on every render pass
+  // (every token flush, every step event).
+  const genAnchorIndex = new Map<string, number>();
+  {
+    const bases: string[] = [];
+    const liveBase = imageGenUpdate?.path?.split(/[\\/]/).pop();
+    if (imageGenActive && liveBase) bases.push(liveBase);
+    genHistory.forEach((h) => {
+      const b = h.path.split(/[\\/]/).pop() ?? h.path;
+      if (b) bases.push(b);
+    });
+    if (bases.length > 0) {
+      for (let i = 0; i < items.length; i++) {
+        const c = items[i].content;
+        if (typeof c !== "string") continue;
+        for (const base of bases) {
+          if (!genAnchorIndex.has(base) && c.includes(base)) genAnchorIndex.set(base, i);
+        }
+        if (genAnchorIndex.size === bases.length) break;
+      }
+    }
+  }
+  const genAnchorFor = (base: string) => (base ? genAnchorIndex.get(base) ?? -1 : -1);
+  const genAlreadyInjected = items.some((it) => it.key === genRowKey);
   const genFile = imageGenUpdate?.path?.split(/[\\/]/).pop();
   if (imageGenActive) {
     let genAnchorIdx = genFile ? genAnchorFor(genFile) : -1;
     if (genAnchorIdx < 0) genAnchorIdx = items.length - 1;
     if (!genAlreadyInjected) {
       items.splice(Math.min(genAnchorIdx + 1, items.length), 0, {
-        key: "__imagegen__",
+        key: genRowKey,
         role: "assistant",
         imagegen: true,
       } as unknown as (typeof items)[number]);
     } else {
       // Follow the anchor if it moved (live bubble → persisted message swap).
-      const cur = items.findIndex((it) => it.key === "__imagegen__");
+      const cur = items.findIndex((it) => it.key === genRowKey);
       if (cur >= 0 && cur !== genAnchorIdx + 1) {
         items.splice(cur, 1);
         items.splice(Math.min(genAnchorIdx + 1, items.length), 0, {
-          key: "__imagegen__",
+          key: genRowKey,
           role: "assistant",
           imagegen: true,
         } as unknown as (typeof items)[number]);
@@ -1455,7 +1529,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   } else {
     // No live generation (sent, cancelled, or done-with-nothing-in-flight —
     // done stays visible via `imageGenActive`, null clears): drop the row.
-    const cur = items.findIndex((it) => it.key === "__imagegen__");
+    const cur = items.findIndex((it) => isLiveGenRow(it.key));
     if (cur >= 0) items.splice(cur, 1);
   }
   // Past renders (restart persistence): one static row per history entry of
@@ -1835,7 +1909,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         onClearQuotedSelections={clearQuotedSelections}
         onSend={handleSend}
         onStop={handleStop}
-        streaming={activeIsStreaming || imageGenBusy}
+        streaming={activeIsStreaming || imageGenBusyHere}
         disabled={false}
         model={
           activeChatSessionId

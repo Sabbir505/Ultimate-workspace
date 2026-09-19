@@ -156,9 +156,13 @@ export const imageGenerate = (prompt: string, width?: number, height?: number) =
 
 /** Live generation-lifecycle push (chat composer-area card): fires on lazy
  *  start, render progress (step counts parsed from the server log), the
- *  finished image, and failures. Backend: image_gen.rs emit_update. */
+ *  finished image, and failures. Backend: image_gen.rs emit_update.
+ *  `owner` — the chat session id the render belongs to, set only on the
+ *  chat-tool path; ownerless events are attributed to whichever pane claims
+ *  them first. */
 export interface ImageGenUpdate {
   phase: "starting" | "rendering" | "done" | "error";
+  owner?: string;
   step?: number;
   total?: number;
   width?: number;

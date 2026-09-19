@@ -86,6 +86,9 @@ vi.mock("../lib/ipc", () => ({
   llamaInstallCuda: vi.fn().mockResolvedValue(undefined),
   ttsInstallGpu: vi.fn().mockResolvedValue(undefined),
   onModelDownloadProgress: vi.fn().mockResolvedValue(() => {}),
+  // imageGenStore subscribes to this at module scope; without it the
+  // store import fails to evaluate under this mock.
+  onImageGenUpdate: vi.fn().mockResolvedValue(() => {}),
 }));
 
 vi.mock("../state/ui", () => ({

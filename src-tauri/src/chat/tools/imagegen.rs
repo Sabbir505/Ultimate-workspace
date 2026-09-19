@@ -15,6 +15,7 @@ pub(super) async fn generate_image_tool(
     app: &tauri::AppHandle,
     artifacts_dir: &Path,
     args: &Value,
+    owner: Option<&str>,
 ) -> ToolOutcome {
     let prompt = args
         .get("prompt")
@@ -42,6 +43,7 @@ pub(super) async fn generate_image_tool(
         height,
         Some(artifacts_dir),
         None,
+        owner,
     )
     .await
     {

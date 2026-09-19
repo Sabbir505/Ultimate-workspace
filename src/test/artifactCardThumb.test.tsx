@@ -102,19 +102,19 @@ describe("ArtifactCardThumb (document-card layout)", () => {
     });
   });
 
-  it("shows the outline icon for non-text artifacts (image)", async () => {
-    // The preview is fetched, but since its kind is "image" (not a text kind),
-    // the card renders the outline icon — no <img>/<iframe>/<embed>.
+  it("shows the image itself as the thumbnail for image artifacts", async () => {
+    // The preview is fetched, and since its kind is "image" the card renders
+    // the picture itself (cover-cropped) — no icon, no iframe/embed.
     mockedRead.mockResolvedValue(
       preview({ kind: "image", ext: "png", dataUri: "data:image/png;base64,AAAA" }),
     );
     const { container } = render(<ArtifactCardThumb artifact={record("png")} />);
     await waitFor(() => {
-      const icon = container.querySelector(".doc-card-icon");
-      expect(icon).not.toBeNull();
-      expect(icon?.querySelector("svg")).not.toBeNull();
+      const img = container.querySelector("img.doc-card-img");
+      expect(img).not.toBeNull();
+      expect(img?.getAttribute("src")).toBe("data:image/png;base64,AAAA");
     });
-    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector(".doc-card-icon")).toBeNull();
     expect(container.querySelector("iframe")).toBeNull();
     expect(container.querySelector("embed")).toBeNull();
     expect(mockedRead).toHaveBeenCalled();

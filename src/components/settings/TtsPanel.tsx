@@ -16,6 +16,7 @@ import {
   ttsSetAutoRead,
   ttsSetDevice,
   ttsSetKeepLoaded,
+  ttsSetModel,
   ttsSetSpeed,
   ttsSetVoice,
   ttsStatus,
@@ -151,6 +152,23 @@ export function TtsPanel() {
       void ttsPreload().catch(() => {});
     } catch (err) {
       toastError("Could not install the voice model", err);
+    } finally {
+      setBusy(false);
+      refresh();
+    }
+  };
+
+  // Manual (hand-placed) model dirs are NOT catalog entries — ttsInstallModel
+  // rejects every non-catalog id with "unknown voice model", which made this
+  // button fail unconditionally. Selecting a manual model goes through
+  // tts_set_model, which resolves any detected dir.
+  const handleSelectManual = async (id: string) => {
+    setBusy(true);
+    try {
+      await ttsSetModel(id);
+      void ttsPreload().catch(() => {});
+    } catch (err) {
+      toastError("Could not switch the voice model", err);
     } finally {
       setBusy(false);
       refresh();
@@ -594,7 +612,7 @@ export function TtsPanel() {
                           className="ghost"
                           style={{ padding: "2px 10px" }}
                           disabled={busy}
-                          onClick={() => void handleInstall(m.id)}
+                          onClick={() => void handleSelectManual(m.id)}
                         >
                           Use this model
                         </button>

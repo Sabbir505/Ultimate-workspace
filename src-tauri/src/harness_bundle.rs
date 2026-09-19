@@ -136,7 +136,10 @@ pub fn build_instructions_md(
              validates it, compiles it against the design system, and runs design \
              QA. Fix any QA warnings by re-calling with a revised plan, or make \
              copy tweaks with `revise_document` (targeted patches, no full \
-             regeneration). Images are REAL: `generate_image` paints with Relay's LOCAL \n             diffusion model (no cloud) — when the user asks to draw/generate a picture, \n             illustration or scene, call it; never claim image generation is impossible. Fall \n             back to `generate_document` for xlsx or when the \
+             regeneration). Images are REAL: `generate_image` paints with Relay's LOCAL \
+             diffusion model (no cloud) — when the user asks to draw/generate a picture, \
+             illustration or scene, call it; never claim image generation is impossible. Fall \
+             back to `generate_document` for xlsx or when the \
              planner is unavailable. Use `get_skill` to load the detailed guidance \
              for a skill before producing it. To check which connectors / MCP \
              servers / skills are \

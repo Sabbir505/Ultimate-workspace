@@ -345,7 +345,7 @@ async fn run_gated_fs_tool(
     }
 
     // Approved — execute the tool now and return its real result.
-    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app)).await;
+    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app), Some(sid)).await;
     if let Some(a) = outcome.artifact {
         {
             let db = app.state::<crate::DbState>();
@@ -1192,7 +1192,7 @@ Use one of the listed read-only tools instead."
             run_cached_web_tool(client, artifacts_dir, caps, app, sid, name, args).await,
         );
     }
-    tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app)).await
+    tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app), Some(sid)).await
 }
 
 /// Stream a subagent completion WITH tools. Runs up to `SUBAGENT_MAX_ROUNDS`
@@ -2246,7 +2246,7 @@ pub(crate) async fn run_tool(
         }
     }
 
-    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app)).await;
+    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app), Some(sid)).await;
     if let Some(a) = outcome.artifact {
         // Persist to the Artifacts sidebar (30-day retention) before notifying
         // the UI. A DB failure must not block the chat, so errors are ignored.
@@ -2604,7 +2604,7 @@ async fn run_cached_web_tool(
         }
         _ => {
             // Guarded by the matches! at the call site; delegate as a fallback.
-            tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app))
+            tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app), Some(sid))
                 .await
                 .text
         }

@@ -182,16 +182,33 @@ pub fn run() {
             app.manage(commands::image_gen::ImageGenState::default());
             // Orphan sweep: an sd-server child of a FORCE-killed previous
             // instance (task manager / taskkill /F skips the graceful exit
-            // cleanup) holds VRAM and its port forever. At boot this instance
-            // has spawned no server yet, so any sd-server.exe alive right now
-            // is an orphan.
+            // cleanup) holds VRAM and its port forever. Scope the kill to OUR
+            // sidecar via the PID file written at spawn — a name-wide
+            // `taskkill /IM` would also murder an sd-server the user started
+            // themselves or another app instance's live render.
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt as _;
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/IM", "sd-server.exe", "/F"])
-                    .creation_flags(0x0800_0000)
-                    .output();
+                let pid_file = user_dirs::app_data_dir(app.handle()).join("sd-server.pid");
+                if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                    let pid = pid.trim();
+                    if !pid.is_empty()
+                        // PID reuse guard: only kill when that exact PID is
+                        // still an sd-server.exe (tasklist CSV line 2).
+                        && std::process::Command::new("tasklist")
+                            .args(["/FI", &format!("PID eq {pid}")])
+                            .creation_flags(0x0800_0000)
+                            .output()
+                            .map(|o| String::from_utf8_lossy(&o.stdout).contains("sd-server.exe"))
+                            .unwrap_or(false)
+                    {
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/PID", pid, "/F"])
+                            .creation_flags(0x0800_0000)
+                            .output();
+                    }
+                    let _ = std::fs::remove_file(&pid_file);
+                }
             }
             // Text-to-speech: Kokoro-82M runs in-process (no sidecar to reap) —
             // the state holds the loaded ONNX session, dropped on model switch

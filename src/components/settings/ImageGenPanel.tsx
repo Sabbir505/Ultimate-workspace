@@ -5,7 +5,7 @@
 // <models dir>/image-gen/, and the "try it" box exercises the whole pipeline
 // without leaving settings. Backend contract:
 // src-tauri/src/commands/image_gen.rs.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   cancelModelDownload,
   type FamilyPlan,
@@ -123,7 +123,22 @@ export function ImageGenPanel() {
   };
   useEffect(refresh, []);
 
-  // Live download bars (same stream the Model Market and Speech use).
+  // Live download bars (same stream the Model Market and Speech use). The
+  // success/error TOASTS are filtered to image-related ids: this stream also
+  // carries llama/STT/TTS/engine downloads, and toasting "Image model
+  // installed" for those from the Images tab is noise (TtsPanel filters the
+  // same way).
+  const imageDownloadIdsRef = useRef<Set<string>>(
+    new Set(["image-sd-cuda", "image-sd-vulkan", "image-sd-cpu"]),
+  );
+  useEffect(() => {
+    imageDownloadIdsRef.current = new Set([
+      ...(status?.catalog ?? []).map((c) => c.id),
+      "image-sd-cuda",
+      "image-sd-vulkan",
+      "image-sd-cpu",
+    ]);
+  }, [status]);
   useEffect(() => {
     let stale = false;
     let unlisten: (() => void) | null = null;
@@ -133,6 +148,7 @@ export function ImageGenPanel() {
         ...prev,
         [p.id]: { state: p.state, downloaded: p.downloadedBytes, total: p.totalBytes ?? null },
       }));
+      if (!imageDownloadIdsRef.current.has(p.id)) return;
       if (p.state === "done") {
         toastSuccess("Image model installed");
         refresh();
@@ -259,6 +275,12 @@ export function ImageGenPanel() {
     } catch (err) {
       toastError("Image generation failed", err);
     } finally {
+      // Drop the pre-claim unconditionally: a completed generation consumed
+      // it at its first event (pendingOwner is null by now), and a failure
+      // that fired BEFORE any event must not leave the sentinel armed —
+      // otherwise the NEXT CHAT generation's preview gets swallowed into a
+      // session id no pane can claim.
+      useImageGenStore.getState().disarm();
       setBusy(false);
       refresh();
     }
@@ -354,13 +376,28 @@ export function ImageGenPanel() {
     (pickedEntry(p)?.action === "download" ? 1 : 0) +
     p.deps.filter((d) => d.action === "download").length;
 
-  const handleUseFamily = async (p: FamilyPlan) => {
+  // In-flight "Install & use" calls per family — a ref, not state: a
+  // double-click lands inside the same React batch, so state-based guards
+  // miss it. The backend registry dedupes downloads, but the second call
+  // would still re-plan and toast a spurious "Could not activate" error.
+  const usingFamiliesRef = useRef<Set<string>>(new Set());
+
+  const handleUseFamily = async (p: FamilyPlan, variantOverride?: string) => {
+    if (usingFamiliesRef.current.has(p.family)) return;
+    usingFamiliesRef.current.add(p.family);
+    // Take the variant EXPLICITLY when the caller just set one: setVariantPick
+    // is async, so reading `variantPick` here synchronously saw the PREVIOUS
+    // pick — the GPU-tier buttons installed one quant behind the one they
+    // display (first click fetched the default Q4_0 while showing Q6_K).
+    const variant = variantOverride ?? pickedVariant(p);
     try {
-      const plan = await imageGenUseFamily(p.family, pickedVariant(p));
+      const plan = await imageGenUseFamily(p.family, variant);
       const reused = plan.deps.filter((e) => e.action === "use" && e.reused).length;
       const downloaded =
         plan.deps.filter((e) => e.action === "download").length +
-        (pickedEntry(plan)?.action === "download" ? 1 : 0);
+        ((plan.variants.find((v) => v.id === variant) ?? plan.variants[0])?.action ===
+        "download"
+          ? 1 : 0);
       const bits = [
         reused > 0 ? `${reused} existing cop${reused > 1 ? "ies" : "y"} reused` : null,
         downloaded > 0
@@ -371,6 +408,7 @@ export function ImageGenPanel() {
     } catch (err) {
       toastError("Could not activate the package", err);
     } finally {
+      usingFamiliesRef.current.delete(p.family);
       void imageGenFamilyPlans().then(setPlans).catch(() => {});
       refresh();
     }
@@ -535,7 +573,9 @@ export function ImageGenPanel() {
                       onClick={() => {
                         if (!plan) return;
                         if (t.variant) setVariantPick((prev) => ({ ...prev, [plan.family]: t.variant! }));
-                        void handleUseFamily(plan);
+                        // Pass the pick EXPLICITLY — the state update above
+                        // hasn't landed yet (see handleUseFamily).
+                        void handleUseFamily(plan, t.variant);
                       }}
                     >
                       <span style={{ fontWeight: 600 }}>{t.range}</span>
@@ -619,7 +659,7 @@ export function ImageGenPanel() {
                       )}
                       {isDisk && p.layout === "split" && p.deps.some((d) => d.action === "download") && (
                         <div style={{ fontSize: 10, color: "var(--warn, #d29922)", marginTop: 4 }}>
-                          missing encoder/VAE — pick one in the groups below
+                          missing encoder/VAE — Install &amp; use will download them
                         </div>
                       )}
 

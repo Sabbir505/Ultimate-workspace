@@ -162,17 +162,19 @@ function GenImageDone({
 }
 
 // Preview hydration cache: static entries re-read their PNG once per path
-// per app run (the timeline rebuilds `items` on every render pass).
-const previewCache = new Map<string, Promise<string | null>>();
-// RESOLVED data URIs, kept synchronously beside the promise cache. The
-// message list is virtualized: rows unmount/remount on every streaming
-// flush and scroll — the exact remount-flash the mermaid render cache
-// fixed (MermaidDiagram.tsx). Seeding state from this map in the useState
-// initializer makes a remount paint the image on the FIRST render instead
-// of flashing the "Loading image…" placeholder for the async window.
-// Bounded like the other render caches.
+// per app run (the timeline rebuilds `items` on every render pass). Bounded:
+// each resolved promise retains its full base64 data URI, so an unbounded
+// map would pin every render ever displayed for the whole app run.
 const PREVIEW_SYNC_MAX = 24;
+const previewCache = new Map<string, Promise<string | "error" | null>>();
 const previewSync = new Map<string, string>();
+function cachePutBounded<K, V>(map: Map<K, V>, key: K, value: V, max: number) {
+  if (map.size >= max) {
+    const oldest = map.keys().next().value;
+    if (oldest != null) map.delete(oldest);
+  }
+  map.set(key, value);
+}
 
 export function ImageGenCard({
   sessionScopesTo,
@@ -218,23 +220,29 @@ export function ImageGenCard({
     setStaticDone(false);
     let hit = previewCache.get(entryPath);
     if (!hit) {
+      // A rejected promise ("error") is NOT the same as a null resolution:
+      // null means the backend says the file is gone; a rejection can be a
+      // transient IPC/lock hiccup, and pruning history on those would
+      // silently destroy the restart-persistence entry for a healthy file.
       hit = readArtifactPreview(entryPath)
         .then((p) => p?.dataUri ?? null)
-        .catch(() => null);
-      previewCache.set(entryPath, hit);
+        .catch(() => "error");
+      cachePutBounded(previewCache, entryPath, hit, PREVIEW_SYNC_MAX);
     }
     void hit.then((uri) => {
-      if (uri) {
-        if (previewSync.size >= PREVIEW_SYNC_MAX) {
-          const oldest = previewSync.keys().next().value;
-          if (oldest != null) previewSync.delete(oldest);
-        }
-        previewSync.set(entryPath, uri);
+      if (typeof uri === "string" && uri) {
+        cachePutBounded(previewSync, entryPath, uri, PREVIEW_SYNC_MAX);
         setStaticUri(uri);
         setStaticDone(true);
       } else {
-        useImageGenStore.getState().pruneHistory(entryPath);
-        setStaticDone(true);
+        if (uri === null) {
+          // Definitively gone (backend read the dir, file missing) — keep
+          // the row silent for the rest of the run; the entry rotates out
+          // with the 12-item history cap.
+          setStaticDone(true);
+        }
+        // "error" → transient: leave staticDone false so a remount retries
+        // (the promise is cached per run, so no hot loop).
       }
     });
   }, [entryPath]);
@@ -246,12 +254,11 @@ export function ImageGenCard({
   }, [active]);
   const elapsed = Math.max(0, Math.round((now - startedAt) / 1000));
 
-  // Session scoping: a NEW chat (different session id) never shows another
-  // session's image.
-  if (anchorSessionId != null && sessionScopesTo != null && anchorSessionId !== sessionScopesTo) {
-    return null;
-  }
-
+  // Static entries are ALREADY session-scoped: ChatView only injects history
+  // rows whose entry matches this pane's session. Scope-check only the LIVE
+  // card (a NEW chat must never show another session's in-flight render) —
+  // checking static rows too hid a chat's own past renders whenever a DIFFERENT
+  // session's done-update was still resident in the app-wide store.
   if (entry) {
     if (staticUri) {
       return (

@@ -160,7 +160,7 @@ pub async fn execute_relay_tool(
     let client = reqwest::Client::new();
     let artifacts_dir = crate::chat::dispatch::artifacts_dir(app);
     let caps = ToolCaps::default();
-    let outcome = tools::execute_tool(&client, &artifacts_dir, &caps, tool_name, args, Some(app)).await;
+    let outcome = tools::execute_tool(&client, &artifacts_dir, &caps, tool_name, args, Some(app), None).await;
     Ok(json!({
         "text": outcome_text(&outcome),
         "artifact": outcome_artifact_json(&outcome)
@@ -203,11 +203,14 @@ fn generate_image_background(app: &tauri::AppHandle, args: &Value) -> Value {
     // app-data generated dir is never checkpointed.
     let save_dir = crate::user_dirs::app_data_dir(app).join("generated-images");
     let _ = std::fs::create_dir_all(&save_dir);
-    let started_secs = std::time::SystemTime::now()
+    // Millisecond naming: two renders started in the same wall-clock second
+    // (different prompts — the dedupe keys on prompt) must not silently
+    // overwrite each other's PNG.
+    let started_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis())
         .unwrap_or(0);
-    let filename = format!("image-{started_secs}.png");
+    let filename = format!("image-{started_ms}.png");
     let out_path = save_dir.join(&filename);
     let out_path_display = out_path.display().to_string();
     let out_path_display_clone = out_path_display.clone();
@@ -219,11 +222,11 @@ fn generate_image_background(app: &tauri::AppHandle, args: &Value) -> Value {
     static INFLIGHT: std::sync::LazyLock<
         std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>,
     > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let dedupe_key = format!("{}|{}x{}", prompt.trim().to_lowercase(), width, height);
     {
         let mut map = INFLIGHT.lock().unwrap();
-        let key = format!("{}|{}x{}", prompt.trim().to_lowercase(), width, height);
         map.retain(|_, (t, _)| t.elapsed() < std::time::Duration::from_secs(600));
-        if let Some((_, existing)) = map.get(&key) {
+        if let Some((_, existing)) = map.get(&dedupe_key) {
             return json!({
                 "text": format!(
                     "A render for this exact prompt is ALREADY in progress — its PNG will be saved to \"{}\" when done. Do NOT call generate_image again; the user sees live progress in the UI.",
@@ -232,18 +235,14 @@ fn generate_image_background(app: &tauri::AppHandle, args: &Value) -> Value {
                 "artifact": Value::Null
             });
         }
-        map.insert(key, (std::time::Instant::now(), out_path_display.clone()));
+        map.insert(dedupe_key.clone(), (std::time::Instant::now(), out_path_display.clone()));
     }
 
     let app = app.clone();
-    crate::commands::image_gen::emit_update(
-        &app,
-        "starting",
-        json!({ "width": width, "height": height, "path": out_path_display }),
-    );
     tauri::async_runtime::spawn(async move {
-        // out_path makes the ONE done event (emitted inside generate_via_app)
-        // carry the final file path — no rename afterward, no second event.
+        // out_path makes the ONE done event (emitted inside generate_via_app,
+        // after the gate is held) carry the final file path — no rename
+        // afterward, no second event.
         let result = crate::commands::image_gen::generate_via_app(
             &app,
             &prompt,
@@ -251,8 +250,17 @@ fn generate_image_background(app: &tauri::AppHandle, args: &Value) -> Value {
             height,
             Some(&save_dir),
             Some(&out_path),
+            None,
         )
         .await;
+        // Release the dedupe slot as soon as THIS render settles — the 600s
+        // sweep is only a fallback for a wedged process; without removal a
+        // finished (or failed) render blocked same-prompt retries for the
+        // whole window while pointing at a path that already exists (or will
+        // never appear).
+        if let Ok(mut map) = INFLIGHT.lock() {
+            map.remove(&dedupe_key);
+        }
         match result {
             Ok(img) => {
                 // Register in the Artifacts gallery (global listing — harness
@@ -282,7 +290,11 @@ fn generate_image_background(app: &tauri::AppHandle, args: &Value) -> Value {
 
     json!({
         "text": format!(
-            "Image generation STARTED in the background (local diffusion, {}x{}{}). The PNG will              be saved to \"{}\" — typically 1-5 minutes on a GPU, up to 20 on CPU. Relay's UI              shows live progress to the user, so do NOT poll with shell/sleep tools and do NOT              call generate_image again for the same prompt. When the user asks about it, reference              the exact path above (confirm it exists first).{}",
+            "Image generation STARTED in the background (local diffusion, {}x{}{}). The PNG will \
+             be saved to \"{}\" — typically 1-5 minutes on a GPU, up to 20 on CPU. Relay's UI \
+             shows live progress to the user, so do NOT poll with shell/sleep tools and do NOT \
+             call generate_image again for the same prompt. When the user asks about it, \
+             reference the exact path above (confirm it exists first).{}",
             width,
             height,
             if clamped { format!(" — requested size clamped: this GPU cannot handle larger renders") } else { String::new() },

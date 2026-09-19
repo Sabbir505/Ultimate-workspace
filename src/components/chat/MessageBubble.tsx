@@ -56,10 +56,6 @@ interface Props {
   message: ChatMessage;
   /** True for the in-progress streaming bubble — hides the action bar. */
   live?: boolean;
-  /** Hides the hover action bar entirely: used when the message's image is
-   *  rendered by the attached image-generation card, whose own hover bar
-   *  carries the merged actions (time/copy/repeat/delete/save). */
-  hideActions?: boolean;
   /** When provided (user messages), shows an "Edit" action that opens an inline
    *  editor; calling it submits the edited content (edit-to-fork). */
   onEdit?: (newContent: string) => void;
@@ -114,7 +110,6 @@ function MessageBubbleInner({
   onEdit,
   onRepeat,
   onDelete,
-  hideActions,
   superseded,
   segmentStart,
   artifacts,
@@ -509,7 +504,7 @@ function MessageBubbleInner({
       {/* Hover action bar; the end-of-turn timestamp rides inside it so it
           appears beside the buttons with the same hover reveal. Absent on the
           live streaming bubble — the stamp shows once the turn ends. */}
-      {!live && !hideActions && (
+      {!live && (
         <MessageActions
           content={plainText || message.content}
           onEdit={isUser ? openEditor : undefined}

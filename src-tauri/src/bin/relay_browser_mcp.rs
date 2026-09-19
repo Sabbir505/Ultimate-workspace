@@ -353,9 +353,18 @@ async fn handle_line(
 /// `static_relay_schemas_match_registry_names` test, and a NEW tool needs
 /// no edit here at all when the app is current.
 async fn relay_schemas(url: &str, ws: &mut Option<WsConn>) -> Vec<Value> {
+    // Keep ONLY the hand-written browser schemas: strip the static RELAY
+    // copies (their live versions come from the app). tool_op recognizes the
+    // browser names as bare ops and relay names under the "relay_tools:"
+    // prefix — filtering on "has a known op" would strip BOTH families and
+    // return an empty browser list, vanishing navigate/click/screenshot from
+    // every harness tools/list.
     let browser: Vec<Value> = tool_schemas()
         .into_iter()
-        .filter(|t| !t["name"].as_str().map(tool_op).map(|r| r.is_ok()).unwrap_or(false))
+        .filter(|t| match t["name"].as_str().map(tool_op) {
+            Some(Ok(op)) => !op.starts_with("relay_tools:"),
+            _ => false,
+        })
         .collect();
     if ws.as_ref().map(|c| c.closed).unwrap_or(true) {
         *ws = None;
@@ -940,7 +949,7 @@ fn static_relay_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "generate_image",
-            "description": "Generate a real image (PNG) with Relay's LOCAL diffusion model — no cloud. Args: prompt (subject/style/lighting/composition), width/height (default 1024, rounded to the 64px grid), filename. A fresh seed is drawn per call — re-call to vary. The PNG lands in the artifacts dir and is shown to the user.",
+            "description": "Generate a real image (PNG) with Relay's LOCAL diffusion model — no cloud. Args: prompt (subject/style/lighting/composition), width/height (OPTIONAL, rounded to the 64px grid, clamped 256-2048; omitted = the model's native render size — omit unless the user asks for specific dimensions), filename. A fresh seed is drawn per call — re-call to vary. The PNG lands in the artifacts dir and is shown to the user.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -927,6 +927,12 @@ async fn run_blocking_tool(args: &Value, f: fn(&Value) -> ToolOutcome) -> ToolOu
 /// pass `None`, and the tools that need an app window (the HTML→PDF print
 /// engine, the JavaScript document runner) report a Python-fallback hint when
 /// it's absent.
+///
+/// `owner` is the chat session id the call belongs to (None elsewhere). Only
+/// the image tool uses it today: it tags the generation's UI events so the
+/// finished preview anchors to the RIGHT session even when the user has
+/// switched chats (or left the app) by the time the render's first event
+/// fires — renders can queue for minutes behind the GENERATE_GATE.
 pub async fn execute_tool(
     client: &reqwest::Client,
     artifacts_dir: &Path,
@@ -934,6 +940,7 @@ pub async fn execute_tool(
     name: &str,
     args: &Value,
     app: Option<&tauri::AppHandle>,
+    owner: Option<&str>,
 ) -> ToolOutcome {
     match name {
         WEB_SEARCH => {
@@ -956,7 +963,7 @@ pub async fn execute_tool(
         }
         GENERATE_DIAGRAM => generate_diagram(artifacts_dir, args),
         GENERATE_IMAGE => match app {
-            Some(app) => generate_image_tool(app, artifacts_dir, args).await,
+            Some(app) => generate_image_tool(app, artifacts_dir, args, owner).await,
             None => ToolOutcome::text(
                 "Error: generate_image needs the app runtime, which is unavailable here.",
             ),
@@ -1318,6 +1325,7 @@ mod tests {
             GENERATE_DIAGRAM,
             &json!({ "filename": "diag_test", "html": html }),
             None,
+            None,
         ));
         assert!(out.artifact.is_some(), "should surface an artifact");
         let art = out.artifact.unwrap();
@@ -1346,6 +1354,7 @@ mod tests {
             &ToolCaps::default(),
             GENERATE_DIAGRAM,
             &json!({ "filename": "x", "html": "" }),
+            None,
             None,
         ));
         assert!(out.artifact.is_none());
@@ -1550,6 +1559,7 @@ mod tests {
             OPEN_FILE,
             &json!({ "path": "traffic.mmd" }),
             None,
+            None,
         ));
         assert!(out.text.contains("ABSOLUTE"));
         // Absolute but non-existent → not-found error, no launch attempt.
@@ -1560,6 +1570,7 @@ mod tests {
             &ToolCaps::default(),
             OPEN_FILE,
             &json!({ "path": gone.to_string_lossy() }),
+            None,
             None,
         ));
         assert!(out.text.contains("no file exists"));
@@ -1580,6 +1591,7 @@ mod tests {
             OPEN_FILE,
             &json!({ "path": file.to_string_lossy() }),
             None,
+            None,
         ));
         // A .mmd is previewed natively — it must NOT hit the OS handler (the
         // OS just pops an "open with" picker over apps that can't render it).
@@ -1599,6 +1611,7 @@ mod tests {
             &ToolCaps::default(),
             OPEN_URL,
             &json!({ "url": "ftp://example.com" }),
+            None,
             None,
         ));
         assert!(out.browse_url.is_none());
@@ -1626,6 +1639,7 @@ mod tests {
             RUN_CODE,
             &json!({ "language": "python", "code": "print(1)" }),
             None,
+            None,
         ));
         assert!(out.text.contains("code execution is disabled"));
     }
@@ -1641,6 +1655,7 @@ mod tests {
             &ToolCaps::default(),
             WEB_SEARCH,
             &json!({ "query": "rust programming language" }),
+            None,
             None,
         ));
         println!("{}", out.text);
@@ -1659,6 +1674,7 @@ mod tests {
             "does_not_exist",
             &json!({}),
             None,
+            None,
         ));
         assert!(out.text.contains("unknown tool"));
     }
@@ -1673,6 +1689,7 @@ mod tests {
             &ToolCaps::default(),
             LIST_SKILLS,
             &json!({}),
+            None,
             None,
         ));
         // The built-in docx skill always exists (even when shadowed by an

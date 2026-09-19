@@ -14,10 +14,11 @@
 //!    for diffusion files, a layout (full self-contained checkpoint vs split
 //!    model that needs the encoder + VAE files).
 //! 3. **sd-server sidecar** — stable-diffusion.cpp's HTTP server (the image
-//!    counterpart of llama-server). Resolved like the whisper binary (managed
-//!    build → user path → env → PATH), spawned against one diffusion model on
-//!    a free port, health-polled, exposed as start/stop/status. Generation is
-//!    an OpenAI-style `POST /v1/images/generations` returning base64 PNG.
+//!    counterpart of llama-server). Resolved like the whisper binary
+//!    (explicit override → managed build → PATH), spawned against one
+//!    diffusion model on a free port, health-polled, exposed as
+//!    start/stop/status. Generation is an OpenAI-style
+//!    `POST /v1/images/generations` returning base64 PNG.
 //! 4. **Settings** — `imageGen.defaultModel` (models-root-relative diffusion
 //!    path), `imageGen.defaultLayout`, the per-file overrides `imageGen.roles`
 //!    / `imageGen.layouts`, `imageGen.device` (`"auto" | "vulkan" | "cpu"`),
@@ -357,8 +358,11 @@ pub struct ImageGenState(pub Mutex<Option<ImageGenHandle>>);
 
 /// Push a generation-lifecycle update to the frontend (the chat composer-area
 /// card: progress + finished preview). Safe no-op before setup.
-/// Payload: { phase: "starting"|"rendering"|"saving"|"done"|"error",
-///            step?, total?, width?, height?, path?, dataUri?, error? }
+/// Payload: { phase: "starting"|"rendering"|"done"|"error",
+///            owner?, step?, total?, width?, height?, path?, dataUri?, error? }
+/// `owner` (set by the chat tool path) is the chat session id the render
+/// belongs to — the frontend anchors the preview card to that session
+/// directly instead of guessing from whichever pane sees the event first.
 pub fn emit_update(app: &tauri::AppHandle, phase: &str, extra: Value) {
     use tauri::Emitter;
     let mut payload = serde_json::json!({ "phase": phase });
@@ -538,7 +542,7 @@ const FULL_CHECKPOINT_TENSOR_PREFIXES: [&str; 3] =
 /// style files carry no metadata at all, so tensor names are the only
 /// reliable signal. Returns `None` when the file can't be parsed as GGUF.
 fn sniff_full_checkpoint(path: &Path) -> Option<bool> {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{Read, Seek};
 
     fn read_u32(f: &mut std::fs::File) -> Option<u32> {
         let mut b = [0u8; 4];
@@ -562,8 +566,25 @@ fn sniff_full_checkpoint(path: &Path) -> Option<bool> {
     fn skip_string_array(f: &mut std::fs::File, count: u64) -> Option<()> {
         for _ in 0..count.min(1_000_000) {
             let n = read_u64(f)?;
-            f.seek(SeekFrom::Current(n as i64)).ok()?;
+            skip_ahead(f, n)?;
         }
+        Some(())
+    }
+
+    /// Seek forward `bytes`, bounds-checked against the file length instead
+    /// of a raw u64→i64 cast: a corrupt/crafted count ≥ 2^63 wraps negative
+    /// and seeks BACKWARD, desyncing the walk into a wrong full-vs-split
+    /// verdict. Sanity cap: a GGUF claiming > 1TB of payload is garbage.
+    fn skip_ahead(f: &mut std::fs::File, bytes: u64) -> Option<()> {
+        if bytes > (1u64 << 40) {
+            return None;
+        }
+        let cur = f.stream_position().ok()?;
+        let len = f.metadata().ok()?.len();
+        if cur.saturating_add(bytes) > len {
+            return None;
+        }
+        f.seek(std::io::SeekFrom::Current(bytes as i64)).ok()?;
         Some(())
     }
 
@@ -592,19 +613,19 @@ fn sniff_full_checkpoint(path: &Path) -> Option<bool> {
                 match elem_type {
                     8 => skip_string_array(&mut f, count)?,
                     7 => {
-                        f.seek(SeekFrom::Current(count.saturating_mul(4) as i64)).ok()?;
+                        skip_ahead(&mut f, count.saturating_mul(4))?;
                     }
                     10 | 12 => {
-                        f.seek(SeekFrom::Current(count.saturating_mul(8) as i64)).ok()?;
+                        skip_ahead(&mut f, count.saturating_mul(8))?;
                     }
                     6 => {
-                        f.seek(SeekFrom::Current(count.saturating_mul(4) as i64)).ok()?;
+                        skip_ahead(&mut f, count.saturating_mul(4))?;
                     }
                     4 | 5 => {
-                        f.seek(SeekFrom::Current(count.saturating_mul(2) as i64)).ok()?;
+                        skip_ahead(&mut f, count.saturating_mul(2))?;
                     }
                     2 | 3 | 1 => {
-                        f.seek(SeekFrom::Current(count as i64)).ok()?;
+                        skip_ahead(&mut f, count)?;
                     }
                     _ => return None,
                 }
@@ -617,7 +638,7 @@ fn sniff_full_checkpoint(path: &Path) -> Option<bool> {
                     10 | 11 | 12 => 8,
                     _ => return None,
                 };
-                f.seek(SeekFrom::Current(size as i64)).ok()?;
+                skip_ahead(&mut f, size as u64)?;
             }
         }
     }
@@ -634,7 +655,7 @@ fn sniff_full_checkpoint(path: &Path) -> Option<bool> {
         if n_dims > 8 {
             return None;
         }
-        f.seek(SeekFrom::Current(n_dims as i64 * 8)).ok()?; // dims
+        skip_ahead(&mut f, n_dims as u64 * 8)?; // dims
         read_u32(&mut f)?; // ggml tensor type
         read_u64(&mut f)?; // offset
         let lower = name.to_ascii_lowercase();
@@ -800,7 +821,27 @@ fn resolve_binary(
     conn: &rusqlite::Connection,
     device: &str,
 ) -> Option<(PathBuf, &'static str)> {
+    // EXPLICIT overrides first: the settings path field (and the SD_SERVER
+    // env) are the user's own choice — they must beat a managed build, or
+    // the "binary path override" silently does nothing while one exists.
+    // The managed build in turn beats a random sd-server.exe found on PATH.
     let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
+    if let Some(p) = get_setting(conn, SERVER_PATH_KEY).filter(|s| !s.trim().is_empty()) {
+        let path = PathBuf::from(p.trim());
+        if path.is_file() {
+            candidates.push((path, "custom"));
+        } else if path.is_dir() {
+            candidates.push((path.join(SD_SERVER_EXE), "custom"));
+        }
+    }
+    if let Ok(env_path) = std::env::var("SD_SERVER") {
+        let path = PathBuf::from(env_path);
+        if path.is_file() {
+            candidates.push((path, "custom"));
+        } else if path.is_dir() {
+            candidates.push((path.join(SD_SERVER_EXE), "custom"));
+        }
+    }
     match device {
         "cuda" => {
             if let Some(p) = dir_has_server(managed_dir(app, SD_CUDA_DIR)) {
@@ -825,22 +866,6 @@ fn resolve_binary(
             if let Some(p) = dir_has_server(managed_dir(app, SD_VULKAN_DIR)) {
                 candidates.push((p, "vulkan"));
             }
-        }
-    }
-    if let Some(p) = get_setting(conn, SERVER_PATH_KEY).filter(|s| !s.trim().is_empty()) {
-        let path = PathBuf::from(p.trim());
-        if path.is_file() {
-            candidates.push((path, "custom"));
-        } else if path.is_dir() {
-            candidates.push((path.join(SD_SERVER_EXE), "custom"));
-        }
-    }
-    if let Ok(env_path) = std::env::var("SD_SERVER") {
-        let path = PathBuf::from(env_path);
-        if path.is_file() {
-            candidates.push((path, "custom"));
-        } else if path.is_dir() {
-            candidates.push((path.join(SD_SERVER_EXE), "custom"));
         }
     }
     if let Some(paths) = std::env::var_os("PATH") {
@@ -991,7 +1016,18 @@ pub async fn image_gen_status(
             get_setting(&conn, VAE_PATH_KEY),
         )
     };
-    let running_guard = image.0.lock();
+    // Snapshot the handle WITHOUT holding the lock across the directory
+    // walks below — on a large/network models folder they take seconds, and
+    // holding it here blocked every other image-gen command (including
+    // stop_sidecar) for that whole time.
+    let (running, running_port, running_diffusion) = {
+        let guard = image.0.lock();
+        (
+            guard.is_some(),
+            guard.as_ref().map(|h| h.port),
+            guard.as_ref().map(|h| h.diffusion_path.clone()),
+        )
+    };
     let binary = resolve_binary(&app, &db.0.lock(), &device).map(|(p, _)| p);
     let detected = root
         .as_ref()
@@ -1037,9 +1073,9 @@ pub async fn image_gen_status(
     let vae_path = resolved("vae", &vae_sel);
     let dependencies_ready = encoder_path.is_some() && vae_path.is_some();
     Ok(ImageGenStatus {
-        running: running_guard.is_some(),
-        port: running_guard.as_ref().map(|h| h.port),
-        diffusion_path: running_guard.as_ref().map(|h| h.diffusion_path.clone()),
+        running,
+        port: running_port,
+        diffusion_path: running_diffusion,
         binary_path: binary.map(|p| p.to_string_lossy().into_owned()),
         device,
         cuda_available: cuda_build_installed(&app),
@@ -1220,57 +1256,22 @@ pub async fn start_sidecar_core(
         .spawn()
         .map_err(|e| format!("failed to start sd-server: {e}"))?;
 
-    // Server stderr → a log file. This is the ONLY place "is the GPU backend
-    // active / why is generation slow" is actually answerable: ggml prints
-    // its device init there ("ggml_cuda_init: found N CUDA devices") and a
-    // silent CPU fallback would otherwise be invisible. Truncated per start.
+    // Server stdout+stderr → a log file. This is the ONLY place "is the GPU
+    // backend active / why is generation slow" is actually answerable: ggml
+    // prints its device init to stderr, but at the pinned engine the INFO log
+    // AND the \r step progress go to STDOUT (examples/common/log.cpp routes
+    // everything but ERROR to stdout, and pretty_progress printf's there) —
+    // reading only stderr left the live step counter dead and an undrained
+    // stdout pipe wedged the server after ~64KB. Truncated per start.
+    let log_dir = crate::user_dirs::app_data_dir(app).join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("image-gen-server.log");
     if let Some(stderr) = child.stderr.take() {
-        let log_dir = crate::user_dirs::app_data_dir(app).join("logs");
-        let _ = std::fs::create_dir_all(&log_dir);
-        let log_path = log_dir.join("image-gen-server.log");
-        if let Ok(mut log_file) = std::fs::File::create(&log_path) {
-            use std::io::Write as _;
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut stderr = stderr;
-                let mut buf = vec![0u8; 4096];
-                // sd.cpp writes step progress with CR line endings — a
-                // line-oriented reader never yields them (the log stayed at
-                // the backend-init lines forever). Split on BOTH separators
-                // and feed live step counts to the UI.
-                const SEPARATORS: [u8; 2] = [b'\r', b'\n'];
-                let mut pending: Vec<u8> = Vec::new();
-                loop {
-                    match stderr.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            pending.extend_from_slice(&buf[..n]);
-                            while let Some(pos) =
-                                pending.iter().position(|b| SEPARATORS.contains(b))
-                            {
-                                let line_bytes: Vec<u8> = pending.drain(..=pos).collect();
-                                let line = String::from_utf8_lossy(&line_bytes[..pos])
-                                    .trim()
-                                    .to_string();
-                                if line.is_empty() {
-                                    continue;
-                                }
-                                let _ = writeln!(log_file, "{line}");
-                                let _ = log_file.flush();
-                                if let Some((step, total)) = parse_step_progress(&line) {
-                                    emit_update(
-                                        &app,
-                                        "rendering",
-                                        serde_json::json!({ "step": step, "total": total }),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }
+        spawn_sidecar_readers(app, child.stdout.take(), Some(stderr), &log_path);
+    } else {
+        // stderr itself failed to attach — still drain stdout so the child's
+        // printf can never wedge on a full pipe.
+        spawn_sidecar_readers(app, child.stdout.take(), None, &log_path);
     }
 
     // Health-poll: model load streams several GB off disk, so allow ~2min
@@ -1314,6 +1315,16 @@ pub async fn start_sidecar_core(
             .unwrap_or_else(|| diffusion.path.to_string_lossy().into_owned()),
         child,
     });
+    // Record our sidecar's PID so the next boot's orphan sweep can kill
+    // exactly THIS process (if it outlived a force-killed app) instead of
+    // every sd-server.exe on the machine.
+    {
+        let pid_path = crate::user_dirs::app_data_dir(app).join("sd-server.pid");
+        let pid = image.0.lock().as_ref().and_then(|h| h.child.id());
+        if let Some(pid) = pid {
+            let _ = std::fs::write(&pid_path, pid.to_string());
+        }
+    }
     eprintln!(
         "[image-gen] sd-server up on port {port} ({} {:?}, backend {backend})",
         diffusion.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -1325,22 +1336,109 @@ pub async fn start_sidecar_core(
     // CPU setups skip it: there is no JIT cliff and the compute would
     // compete with real use.
     if warm && backend != "cpu" {
+        // Suppress the warmup's step lines: they'd surface in the chat UI as
+        // a phantom "Creating image" card that never resolves (the warmup
+        // discards its result, so no done/error ever follows). Still logged.
+        WARMING.store(true, std::sync::atomic::Ordering::Relaxed);
         let warm_app = app.clone();
         tauri::async_runtime::spawn(async move {
             let db = warm_app.state::<DbState>();
             let image = warm_app.state::<ImageGenState>();
             // Direct post_generation — NOT generate_once: that re-enters
-            // ensure/start (async cycle) and this render must not emit
-            // progress events anyway. The lock guard is dropped before the
-            // await (parking_lot guards are !Send).
+            // ensure/start (async cycle). The lock guard is dropped before
+            // the await (parking_lot guards are !Send).
             let port = image.0.lock().as_ref().map(|h| h.port);
             if let Some(port) = port {
                 let _ = post_generation(port, "warmup", Some(320), Some(320), None, None).await;
             }
+            WARMING.store(false, std::sync::atomic::Ordering::Relaxed);
             eprintln!("[image-gen] sidecar warmup complete");
         });
     }
     Ok(port)
+}
+
+/// Set while the startup warmup render runs — see the warmup block in
+/// [`start_sidecar_core`].
+static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Pump one sidecar output pipe: every line (CR or LF separated — sd.cpp
+/// redraws step progress with `\r` on the SAME line) lands in the server log,
+/// and `step/total` pairs feed the live UI counter. BOTH pipes are pumped:
+/// at the pinned engine stdout carries the INFO log AND the step progress
+/// while stderr carries backend init + errors — and an undrained pipe blocks
+/// the child's printf once its ~64KB buffer fills, wedging the server
+/// mid-render after a few dozen images.
+async fn pump_sidecar_pipe(
+    app: tauri::AppHandle,
+    mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    mut log_file: Option<std::fs::File>,
+) {
+    use std::io::Write as _;
+    use tokio::io::AsyncReadExt;
+    let mut buf = vec![0u8; 4096];
+    const SEPARATORS: [u8; 2] = [b'\r', b'\n'];
+    // A binary/separator-less dump must not grow this buffer without bound.
+    const PENDING_CAP: usize = 1024 * 1024;
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if pending.len() >= PENDING_CAP {
+                    pending.clear();
+                }
+                pending.extend_from_slice(&buf[..n]);
+                while let Some(pos) = pending.iter().position(|b| SEPARATORS.contains(b)) {
+                    let line_bytes: Vec<u8> = pending.drain(..=pos).collect();
+                    let line = String::from_utf8_lossy(&line_bytes[..pos])
+                        .trim()
+                        .to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Some(f) = log_file.as_mut() {
+                        let _ = writeln!(f, "{line}");
+                        let _ = f.flush();
+                    }
+                    // The warmup render's step lines must not surface as a
+                    // phantom generation (see the warmup block).
+                    if WARMING.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
+                    if let Some((step, total)) = parse_step_progress(&line) {
+                        emit_update(
+                            &app,
+                            "rendering",
+                            serde_json::json!({ "step": step, "total": total }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn spawn_sidecar_readers(
+    app: &tauri::AppHandle,
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
+    log_path: &Path,
+) {
+    let _ = std::fs::remove_file(log_path);
+    let open_log = || {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(log_path)
+            .ok()
+    };
+    if let Some(out) = stdout {
+        tauri::async_runtime::spawn(pump_sidecar_pipe(app.clone(), Box::new(out), open_log()));
+    }
+    if let Some(err) = stderr {
+        tauri::async_runtime::spawn(pump_sidecar_pipe(app.clone(), Box::new(err), open_log()));
+    }
 }
 
 /// True when the tracked server process died without the state being
@@ -1419,6 +1517,9 @@ pub async fn generate_once(
         return Err("the image server is not running".into());
     };
     if !silent {
+        // "starting" is the generation-boundary event for the frontend store;
+        // it fires only after the gate is held (see generate_via_app).
+        emit_update(app, "starting", serde_json::json!({ "width": clamp_size(width), "height": clamp_size(height) }));
         emit_update(app, "rendering", serde_json::json!({ "width": clamp_size(width), "height": clamp_size(height) }));
     }
     match post_generation(port, prompt, Some(width), Some(height), save_dir, None).await {
@@ -1447,7 +1548,14 @@ pub async fn generate_once(
 fn short_body(text: &str) -> String {
     let t = text.trim().replace('\n', " ");
     if t.len() > 200 {
-        format!("{}…", &t[..200])
+        // Slice on a CHAR boundary: a raw byte offset panics when byte 200
+        // lands inside a multi-byte char (e.g. a non-ASCII error body), and
+        // with `panic = "abort"` that takes the whole app down.
+        let mut end = 200;
+        while !t.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &t[..end])
     } else if t.is_empty() {
         "(no body)".into()
     } else {
@@ -1455,10 +1563,11 @@ fn short_body(text: &str) -> String {
     }
 }
 
-fn chrono_secs() -> u64 {
+/// Millis since the epoch — same-second renders must not share a filename.
+fn chrono_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis())
         .unwrap_or(0)
 }
 
@@ -1485,8 +1594,15 @@ fn parse_step_progress(line: &str) -> Option<(u32, u32)> {
                         i += 1;
                     }
                     if i >= bytes.len() || !bytes[i].is_ascii_digit() {
-                        let step: u32 = line[start..slash].parse().ok()?;
-                        let total: u32 = line[t_start..i].parse().ok()?;
+                        // Skip THIS candidate on an unparseable pair, not the
+                        // whole line: a garbage number ahead of the real
+                        // step/total pair must not drop the real progress.
+                        let (Ok(step), Ok(total)) = (
+                            line[start..slash].parse::<u32>(),
+                            line[t_start..i].parse::<u32>(),
+                        ) else {
+                            continue;
+                        };
                         if total > 0 && step <= total {
                             result = Some((step, total));
                         }
@@ -1579,6 +1695,7 @@ pub async fn generate_via_app(
     height: u32,
     save_dir: Option<&Path>,
     out_path: Option<&Path>,
+    owner: Option<&str>,
 ) -> CmdResult<GeneratedImage> {
     let _gate = GENERATE_GATE.lock().await;
     if prompt.trim().is_empty() {
@@ -1605,6 +1722,18 @@ pub async fn generate_via_app(
     } else {
         (width, height)
     };
+    // First event of the generation, emitted only AFTER the gate is held (a
+    // pre-gate "starting" would reset the frontend's session anchor while
+    // another render is still in flight) and tagged with the owning session
+    // so the preview card lands in the right chat no matter when the user
+    // switches views.
+    let mut starting = serde_json::json!({
+        "width": clamp_size(width), "height": clamp_size(height),
+    });
+    if let Some(o) = owner {
+        starting["owner"] = serde_json::Value::String(o.to_string());
+    }
+    emit_update(app, "starting", starting);
     emit_update(app, "rendering", serde_json::json!({ "width": clamp_size(width), "height": clamp_size(height) }));
     let result = post_generation(port, prompt, Some(width), Some(height), save_dir, out_path).await;
     match &result {
@@ -1698,7 +1827,10 @@ async fn post_generation(
             None => {
                 std::fs::create_dir_all(dir)
                     .map_err(|e| format!("could not create image dir: {e}"))?;
-                dir.join(format!("image-{}.png", chrono_secs()))
+                // Millisecond naming: two renders in the same wall-clock
+                // second must not silently overwrite each other (the chat
+                // history keys entries by path).
+                dir.join(format!("image-{}.png", chrono_millis()))
             }
         };
         std::fs::write(&file, &bytes).map_err(|e| format!("could not write image: {e}"))?;
@@ -1721,11 +1853,9 @@ pub async fn image_gen_start(
     db: State<'_, DbState>,
     image: State<'_, ImageGenState>,
 ) -> CmdResult<ImageGenStatus> {
-    let already_running = image.0.lock().is_some();
-    if !already_running {
-        // Explicit panel start: pre-warm so the first real image is fast.
-        start_sidecar_core(&app, &db, &image, true).await?;
-    }
+    // Self-heal like the generate paths: a dead handle (crashed child) must
+    // not report running:true forever — clear it and start fresh.
+    ensure_server_alive(&app, &db, &image, true).await?;
     image_gen_status(app, db, image).await
 }
 
@@ -1733,6 +1863,23 @@ pub async fn image_gen_start(
 pub async fn image_gen_stop(image: State<'_, ImageGenState>) -> CmdResult<()> {
     stop_sidecar(&image).await;
     Ok(())
+}
+
+/// A stored/delivered model path must be a relative path inside the models
+/// folder — no absolute paths, no `..` traversal (the value reaches the
+/// sidecar's command line; a compromised webview must not be able to point
+/// it at arbitrary files on disk).
+fn safe_model_rel(rel: &str) -> bool {
+    let p = Path::new(rel);
+    !p.is_absolute()
+        && p.components().all(|c| {
+            !matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+            )
+        })
 }
 
 /// Set the default diffusion model. `path` is models-root-relative with
@@ -1747,6 +1894,9 @@ pub async fn image_gen_set_default(
     path: String,
     layout: Option<String>,
 ) -> CmdResult<()> {
+    if !safe_model_rel(&path) {
+        return Err("model path must be relative to the models folder".into());
+    }
     {
         let conn = db.0.lock();
         db::set_setting(&conn, DEFAULT_MODEL_KEY, &path).map_err(|e| e.to_string())?;
@@ -1846,10 +1996,12 @@ pub async fn image_gen_select(
             .filter(|s| !s.is_empty())
             .map(str::to_string);
         // Validate up front: a selection pointing at nothing would only
-        // surface as a failed generation much later.
+        // surface as a failed generation much later, and `Path::join` with
+        // an absolute path (or `..` segments) would escape the models root
+        // entirely — reject both before the file check.
         if let Some(rel) = &value {
             let exists = crate::commands::local_model_market::resolve_models_dir(&conn)
-                .map(|root| root.join(rel).is_file())
+                .map(|root| safe_model_rel(rel) && root.join(rel).is_file())
                 .unwrap_or(false);
             if !exists {
                 return Err(format!("no model file exists at \"{rel}\""));
@@ -2079,9 +2231,9 @@ fn disk_family_plans(
                 ]
                 .iter()
                 .filter_map(|(role, sel)| {
-                    resolve_dependency(root, role, *sel).map(|p| {
+                    if let Some(p) = resolve_dependency(root, role, *sel) {
                         let rel = rel_path(&p, root);
-                        FamilyEntryPlan {
+                        return Some(FamilyEntryPlan {
                             id: format!("disk-dep:{role}"),
                             label: if *role == "text-encoder" {
                                 "Text encoder (current selection)".into()
@@ -2094,7 +2246,27 @@ fn disk_family_plans(
                             reused: !p.starts_with(&root.join(IMAGE_SUBDIR)),
                             size_bytes: 0,
                             selected: false,
-                        }
+                        });
+                    }
+                    // Missing entirely: surface it as a downloadable dep —
+                    // the catalog's recommended component — so the card
+                    // warns up front AND "Install & use" repairs it, instead
+                    // of generation failing later with "the text encoder
+                    // for a SPLIT-layout model is missing".
+                    let info = catalog()
+                        .into_iter()
+                        .filter(|m| m.role == *role)
+                        .find(|m| m.recommended)
+                        .or_else(|| catalog().into_iter().find(|m| m.role == *role))?;
+                    Some(FamilyEntryPlan {
+                        id: info.id.clone(),
+                        label: format!("{} (missing — will download)", info.label),
+                        role: (*role).into(),
+                        action: "download".into(),
+                        path: None,
+                        reused: false,
+                        size_bytes: info.size_bytes,
+                        selected: false,
                     })
                 })
                 .collect()
@@ -2204,7 +2376,9 @@ pub async fn image_gen_use_family(
     // managed through the groups below).
     if let Some(rel) = family.strip_prefix("disk:") {
         let full = root.join(rel);
-        if !full.is_file() {
+        // The rel reaches the sidecar's command line — require a relative
+        // path inside the models folder (no absolute paths, no `..`).
+        if !safe_model_rel(rel) || !full.is_file() {
             return Err(format!("no model file exists at \"{rel}\""));
         }
         let roles = {
@@ -2239,6 +2413,32 @@ pub async fn image_gen_use_family(
         .into_iter()
         .next()
         .ok_or_else(|| format!("disk model \"{rel}\" vanished mid-plan"))?;
+        // Repair missing deps: the plan names the catalog components to
+        // download (the card's ↓N badge and "will download" note promise
+        // exactly this). Already-active downloads are skipped quietly.
+        for dep in plan.deps.iter().filter(|d| d.action == "download") {
+            let Some(info) = catalog().into_iter().find(|m| m.id == dep.id) else {
+                continue;
+            };
+            if registry.active.lock().contains_key(&info.id) {
+                continue;
+            }
+            let dir = image_dir
+                .as_ref()
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.join(IMAGE_SUBDIR).to_string_lossy().into_owned());
+            crate::commands::local_model_market::start_model_download_inner(
+                app.clone(),
+                DbState(std::sync::Arc::clone(&db.0)),
+                std::sync::Arc::clone(&registry),
+                info.id.clone(),
+                info.filename.clone(),
+                info.download_url.clone(),
+                None,
+                Some(dir),
+            )
+            .await?;
+        }
         return Ok(plan);
     }
     let plan = plan_family_use(
@@ -2296,6 +2496,13 @@ pub async fn image_gen_use_family(
                     .into_iter()
                     .find(|m| m.id == entry.id)
                     .ok_or("catalog entry vanished mid-plan")?;
+                // Already downloading (double-click, or the plan raced the
+                // previous click): the first pass flipped the default and
+                // started this exact download — skip quietly instead of
+                // erroring the whole command AFTER mutating the default.
+                if registry.active.lock().contains_key(&info.id) {
+                    continue;
+                }
                 let managed_rel = format!("{IMAGE_SUBDIR}/{}", info.filename);
                 {
                     let conn = db.0.lock();
@@ -2326,6 +2533,10 @@ pub async fn image_gen_use_family(
                     .into_iter()
                     .find(|m| m.id == entry.id)
                     .ok_or("catalog entry vanished mid-plan")?;
+                // Already in flight (double-click): the first click owns it.
+                if registry.active.lock().contains_key(&info.id) {
+                    continue;
+                }
                 let dir = image_dir
                     .as_ref()
                     .map(|d| d.to_string_lossy().into_owned())
@@ -2404,6 +2615,33 @@ pub fn image_gen_set_server_path(
     db::set_setting(&conn, SERVER_PATH_KEY, &trimmed).map_err(|e| e.to_string())
 }
 
+/// The cudart bundle DLL prefixes a CUDA install must contain.
+const CUDART_DLL_PREFIXES: [&str; 3] = ["cudart64_", "cublas64_", "cublaslt64_"];
+
+fn cudart_dlls_present(dir: &Path) -> bool {
+    missing_cudart_prefixes(dir).is_empty()
+}
+
+fn missing_cudart_prefixes(dir: &Path) -> Vec<&'static str> {
+    CUDART_DLL_PREFIXES
+        .into_iter()
+        .filter(|prefix| {
+            !std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .any(|e| {
+                            e.file_name()
+                                .to_string_lossy()
+                                .to_lowercase()
+                                .starts_with(prefix)
+                        })
+                })
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 /// One-click install/update of a pinned stable-diffusion.cpp build.
 /// `device`: `"cuda"` (the CUDA 12 build + its cudart bundle, ~892MB total),
 /// `"vulkan"` (~32MB, AMD/Intel), or `"cpu"` (~17MB). Progress arrives on the
@@ -2436,7 +2674,15 @@ pub async fn image_gen_install(
         };
         let install_dir = managed_dir(&app, dir_name);
         let exe_path = install_dir.join(SD_SERVER_EXE);
-        if force || !exe_path.is_file() {
+        // "Already installed" must mean the FULL set: for CUDA the runtime
+        // DLLs from the separate cudart bundle too. An install that died
+        // mid-cudart otherwise short-circuits here forever (exe exists →
+        // skip → Done), leaving every generation dead with "sd-server
+        // exited immediately" and no repair short of the buried force flag.
+        if force
+            || !exe_path.is_file()
+            || (device != "vulkan" && device != "cpu" && !cudart_dlls_present(&install_dir))
+        {
             // A running server holds its image (and DLLs) open — stop it
             // before the files underneath it are replaced.
             if force {
@@ -2462,23 +2708,7 @@ pub async fn image_gen_install(
                     id,
                 )
                 .await?;
-                let missing: Vec<&str> = ["cudart64_", "cublas64_", "cublaslt64_"]
-                    .into_iter()
-                    .filter(|prefix| {
-                        !std::fs::read_dir(&install_dir)
-                            .map(|entries| {
-                                entries
-                                    .filter_map(|e| e.ok())
-                                    .any(|e| {
-                                        e.file_name()
-                                            .to_string_lossy()
-                                            .to_lowercase()
-                                            .starts_with(prefix)
-                                    })
-                            })
-                            .unwrap_or(false)
-                    })
-                    .collect();
+                let missing: Vec<&str> = missing_cudart_prefixes(&install_dir);
                 if !missing.is_empty() {
                     let msg = format!(
                         "the CUDA runtime bundle is missing {} — the image engine would \
@@ -2508,9 +2738,9 @@ pub async fn image_gen_install(
 }
 
 /// The Tauri command behind the settings panel's "try it" box: one generation
-/// against the RUNNING sidecar, returned as a data URI (nothing saved to
-/// disk). Chat generation lazy-starts; this demands an explicit start so the
-/// panel's Start button stays meaningful.
+/// (lazy-starting the sidecar when it isn't running, like the chat path —
+/// the explicit Start button is the way to pay the JIT warmup up front).
+/// Returns a data URI; nothing is saved to disk.
 #[tauri::command]
 pub async fn image_generate(
     app: tauri::AppHandle,

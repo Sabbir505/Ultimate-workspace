@@ -734,9 +734,9 @@ fn generate_image_parameters() -> Value {
             },
             "width": {
                 "type": "integer",
-                "description": "Width in pixels (default 1024). Rounded to the 64px \
-                    grid, clamped 256-2048. On ~6GB GPUs use 512-768 for SDXL/full \
-                    checkpoints."
+                "description": "Width in pixels (OPTIONAL — default: the model's native \
+                    render size). Rounded to the 64px grid, clamped 256-2048. On ~6GB GPUs \
+                    use 512-768 for SDXL/full checkpoints."
             },
             "height": {
                 "type": "integer",

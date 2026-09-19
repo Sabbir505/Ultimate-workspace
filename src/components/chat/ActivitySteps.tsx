@@ -4,7 +4,7 @@
 //! process-step components that consume it; MessageBubble imports the
 //! pieces it renders.
 import { Fragment, createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Pencil } from "lucide-react";
+import { Brain as BrainIcon, Pencil } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -476,6 +476,15 @@ export function ThinkingBlock({ thinking, done }: { thinking: string; done: bool
     setOpen((o) => !o);
   };
 
+  // Collapsed-row peek: while the block is folded the reasoning rides the
+  // row itself — the TAIL while streaming (so the row visibly streams as
+  // tokens land), the HEAD once done (the thought's opening reads as its
+  // summary). Hidden while expanded: the full body sits right below.
+  const flat = useMemo(() => thinking.replace(/\s+/g, " ").trim(), [thinking]);
+  const peek = open || !flat ? "" : done
+    ? flat.length > 140 ? `${flat.slice(0, 140)}…` : flat
+    : flat.length > 140 ? `…${flat.slice(-140)}` : flat;
+
   return (
     <div className={`chat-thinking${done ? "" : " live"}`}>
       <button
@@ -483,8 +492,10 @@ export function ThinkingBlock({ thinking, done }: { thinking: string; done: bool
         onClick={toggle}
         title={open ? "Hide thinking" : "Show thinking"}
       >
-        <span className={`chat-thinking-icon${open ? " open" : ""}`}>›</span>
-        {done ? "Thinking" : "Thinking…"}
+        <BrainIcon size={13} strokeWidth={1.8} aria-hidden="true" />
+        <span className="chat-thinking-label">{done ? "Thinking" : "Thinking…"}</span>
+        {peek && <span className="chat-thinking-peek">· {peek}</span>}
+        <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
       </button>
       <SmoothReveal open={open}>
         <div className="chat-thinking-body">

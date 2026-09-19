@@ -939,26 +939,27 @@ div[data-index]:has(.chat-session-row.menu-open) {
   mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
 }
 
-/* â”€â”€ Codex-style thinking / reasoning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-   Quiet, secondary text that visually recedes behind the actual response.
-   Collapsed by default; a small "Thinking" label toggles it. No colorful
-   card â€” just muted gray italic text with a subtle left border. */
+/* -- Codex-style thinking / reasoning --------------------------------------
+   One quiet row: brain glyph, "Thinking" label, then - while the block is
+   folded - the reasoning itself riding the row as dim single-line peek text
+   (tail while streaming so the row visibly streams, head once done). Click
+   unfolds the full body below; the peek yields its space to it. */
 .chat-thinking {
   margin: 4px 0 8px;
 }
 .chat-thinking-toggle {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
   background: transparent;
   border: none;
   padding: 2px 0;
-  font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--text-dim);
+  font-size: 12.5px;
+  color: var(--text);
   cursor: pointer;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  text-align: left;
 }
 .chat-thinking-toggle:hover {
   color: var(--text);
@@ -967,18 +968,53 @@ div[data-index]:has(.chat-session-row.menu-open) {
   background: transparent;
   border: none;
 }
-.chat-thinking.live .chat-thinking-toggle {
-  animation: thinking-pulse 1.4s ease-in-out infinite;
+.chat-thinking-toggle svg {
+  flex: none;
+  color: var(--text-dim);
 }
-@keyframes thinking-pulse {
-  0%, 100% { opacity: 0.45; }
-  50% { opacity: 0.85; }
+.chat-thinking-label {
+  flex: none;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text);
 }
-.chat-thinking-icon {
-  font-size: 10px;
-  opacity: 0.6;
+/* While streaming the label carries the same title shine as live tool-call
+   rows (see .chat-step-label.is-live below) — the pulse was too quiet. */
+.chat-thinking.live .chat-thinking-label {
+  background-image: linear-gradient(
+    90deg,
+    var(--text-dim) 0%,
+    var(--text-dim) 44%,
+    var(--text) 50%,
+    var(--text-dim) 56%,
+    var(--text-dim) 100%
+  );
+  background-size: 300% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: chat-title-shine 1.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-thinking.live .chat-thinking-label {
+    animation: none;
+  }
+}
+.chat-thinking-peek {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.chat-thinking-peek:hover {
+  color: var(--text-dim);
 }
 .chat-thinking-chevron {
+  flex: none;
   display: inline-block;
   transition: transform 0.15s var(--ease);
   font-size: 10px;
@@ -4451,6 +4487,17 @@ button.chat-mermaid-open {
   .chat-pane .chat-composer {
     padding: 8px 12px 24px;
   }
+  /* The composer compacts to a 12px side floor here; the docked notch cards
+     must follow or they misalign with the composer card they're fused to
+     (2px step out on both edges — visible on the question card's borders). */
+  .chat-pane .chat-composer-dock .plan-preview,
+  .chat-pane .composer-approval-wrap {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .chat-pane .citation-report-strip {
+    margin: 0 12px 8px;
+  }
 }
 /* Under ~400px: further squeeze — tighter bubbles column, smaller jump pill
    offsets handled by the dock measurement, hide the citation strip's detail
@@ -4467,17 +4514,30 @@ button.chat-mermaid-open {
    timestamps, the per-message action rows) slid under the ticks. Once the
    rail is mounted, lift the left edge clear of it; wider panes already get
    ≥30px from the centered-column formula, so the max() no-ops there. The
-   popout window has no chat-pane container (and no hide threshold), so it
-   needs its own unguarded rules. */
+   docked notch cards (question, approval, citation strip) share the
+   composer's left edge by design — leave any of them at the 14px floor and
+   the card juts out to the LEFT of the composer card it's fused to (most
+   visible on the question card). The popout window has no chat-pane
+   container (and no hide threshold), so it needs its own unguarded rules. */
 @container chat-pane (min-width: 561px) {
   .chat-pane:has(.turn-rail) .chat-messages,
-  .chat-pane:has(.turn-rail) .chat-composer {
+  .chat-pane:has(.turn-rail) .chat-composer,
+  .chat-pane:has(.turn-rail) .chat-composer-dock .plan-preview,
+  .chat-pane:has(.turn-rail) .composer-approval-wrap {
     padding-left: max(30px, calc((100% - 780px) / 2));
+  }
+  .chat-pane:has(.turn-rail) .citation-report-strip {
+    margin-left: max(30px, calc((100% - 780px) / 2));
   }
 }
 .popout-chat-root:has(.turn-rail) .chat-messages,
-.popout-chat-root:has(.turn-rail) .chat-composer {
+.popout-chat-root:has(.turn-rail) .chat-composer,
+.popout-chat-root:has(.turn-rail) .chat-composer-dock .plan-preview,
+.popout-chat-root:has(.turn-rail) .composer-approval-wrap {
   padding-left: max(30px, calc((100% - 780px) / 2));
+}
+.popout-chat-root:has(.turn-rail) .citation-report-strip {
+  margin-left: max(30px, calc((100% - 780px) / 2));
 }
 
 /* ---------- Citation-integrity strip (research turns) ---------- */

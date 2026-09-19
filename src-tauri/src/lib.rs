@@ -5,6 +5,95 @@
 //! and — critically — child-process cleanup on app exit (PRD §8: no orphaned
 //! agent processes after the app closes).
 
+// CLIPPY ADOPTION (2026-09-19): `cargo clippy --workspace --all-targets
+// -- -D warnings` is a CI gate (.github/workflows/ci.yml). Clippy had never
+// been run on this codebase, so the 766 pre-existing instances (79 lint kinds,
+// counts captured on 2026-09-19, rustc 1.97.1) are allowed at the crate root
+// instead of being mass-fixed into unrelated diffs. House rules for this list:
+//   * DELETE an entry once its debt is fixed — never grow it.
+//   * New lint kinds (not listed here) fail CI immediately.
+//   * `unknown_lints` guards against lint renames across toolchain updates.
+#![allow(unknown_lints)]
+#![allow(dead_code)] // 91
+#![allow(clippy::needless_borrow)] // 84
+#![allow(clippy::too_many_arguments)] // 68
+#![allow(clippy::doc_lazy_continuation)] // 42
+#![allow(clippy::redundant_closure)] // 32
+#![allow(clippy::type_complexity)] // 30
+#![allow(clippy::unnecessary_map_or)] // 30
+#![allow(clippy::useless_format)] // 23
+#![allow(clippy::empty_line_after_doc_comments)] // 20
+#![allow(clippy::redundant_field_names)] // 16
+#![allow(unused_imports)] // 16
+#![allow(unused_variables)] // 14
+#![allow(clippy::clone_on_copy)] // 14
+#![allow(clippy::needless_option_as_deref)] // 13
+#![allow(clippy::manual_pattern_char_comparison)] // 12
+#![allow(clippy::cloned_ref_to_slice_refs)] // 12
+#![allow(unused_assignments)] // 10
+#![allow(clippy::unnecessary_lazy_evaluations)] // 10
+#![allow(clippy::derivable_impls)] // 10
+#![allow(clippy::manual_contains)] // 9
+#![allow(clippy::map_identity)] // 8
+#![allow(clippy::manual_div_ceil)] // 8
+#![allow(clippy::question_mark)] // 8
+#![allow(clippy::needless_borrows_for_generic_args)] // 7
+#![allow(clippy::let_underscore_future)] // 7
+#![allow(clippy::collapsible_match)] // 6
+#![allow(clippy::let_unit_value)] // 6
+#![allow(clippy::ptr_arg)] // 6
+#![allow(clippy::manual_repeat_n)] // 6
+#![allow(clippy::collapsible_if)] // 6
+#![allow(clippy::blocks_in_conditions)] // 6
+#![allow(clippy::for_kv_map)] // 6
+#![allow(clippy::needless_question_mark)] // 6
+#![allow(clippy::unnecessary_sort_by)] // 6
+#![allow(clippy::drop_non_drop)] // 6
+#![allow(clippy::manual_range_patterns)] // 6
+#![allow(clippy::items_after_test_module)] // 5
+#![allow(clippy::needless_as_bytes)] // 4
+#![allow(clippy::unnecessary_filter_map)] // 4
+#![allow(clippy::to_string_in_format_args)] // 4
+#![allow(clippy::io_other_error)] // 4
+#![allow(clippy::unnecessary_cast)] // 4
+#![allow(clippy::option_map_unit_fn)] // 4
+#![allow(clippy::manual_clamp)] // 4
+#![allow(clippy::single_match)] // 4
+#![allow(clippy::redundant_guards)] // 4
+#![allow(non_snake_case)] // 4
+#![allow(clippy::if_same_then_else)] // 3
+#![allow(clippy::field_reassign_with_default)] // 3
+#![allow(unused_labels)] // 2
+#![allow(clippy::needless_return)] // 2
+#![allow(clippy::unnecessary_to_owned)] // 2
+#![allow(clippy::needless_range_loop)] // 2
+#![allow(clippy::new_without_default)] // 2
+#![allow(clippy::unnecessary_unwrap)] // 2
+#![allow(clippy::len_zero)] // 2
+#![allow(clippy::op_ref)] // 2
+#![allow(clippy::collapsible_str_replace)] // 2
+#![allow(clippy::let_and_return)] // 2
+#![allow(clippy::useless_borrows_in_formatting)] // 2
+#![allow(clippy::single_char_add_str)] // 2
+#![allow(clippy::bind_instead_of_map)] // 2
+#![allow(clippy::explicit_auto_deref)] // 2
+#![allow(clippy::match_like_matches_macro)] // 2
+#![allow(clippy::manual_map)] // 2
+#![allow(clippy::iter_cloned_collect)] // 2
+#![allow(clippy::byte_char_slices)] // 2
+#![allow(clippy::double_ended_iterator_last)] // 2
+#![allow(clippy::needless_lifetimes)] // 2
+#![allow(clippy::vec_init_then_push)] // 2
+#![allow(clippy::filter_next)] // 2
+#![allow(clippy::inherent_to_string)] // 2
+#![allow(clippy::obfuscated_if_else)] // 2
+#![allow(clippy::bool_comparison)] // 2
+#![allow(unused_mut)] // 1
+#![allow(clippy::bool_assert_comparison)] // 1
+#![allow(clippy::useless_conversion)] // 1
+#![allow(clippy::err_expect)] // 1
+#![allow(clippy::manual_is_multiple_of)] // 1
+
 mod browser;
 mod browser_js;
 mod browser_mcp;

@@ -1,0 +1,119 @@
+# CI — Windows-only quality gates on every push to master and every PR.
+#
+# Four checks (matching the local dev loop in README.md):
+#   1. npx tsc --noEmit        — TypeScript typecheck
+#   2. npm test                — vitest suite (src/test/)
+#   3. cargo clippy -D warnings — Rust lints, warnings are errors
+#   4. cargo test --lib        — Rust unit tests
+#
+# The release workflow (build.yml) is tag-triggered and separate; make these
+# checks required in branch protection to keep regressions out of releases.
+#
+# Note on resource placeholders: tauri-build's build script validates every
+# `bundle.resources` glob and `bundle.externalBin` path on ANY cargo
+# invocation and fails when a glob matches nothing. A fresh checkout has
+# neither the sidecars nor the bundled Python/LibreOffice trees, so we stage
+# 0-byte placeholders before building. `cargo test --lib` never runs the app,
+# and the bundled-Python e2e test (chat/python_runtime.rs) explicitly skips
+# when the staged interpreter is a placeholder instead of a real binary.
+#
+# Note on clippy debt: clippy was first adopted on 2026-09-19 with 766
+# pre-existing instances across 79 lint kinds. Rather than mass-fix, those
+# kinds are allowed at the crate root (src-tauri/src/lib.rs, dated block with
+# per-lint counts — shrink it as debt is fixed; never grow it). New lint
+# kinds still fail CI.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (tsc + vitest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit
+
+      - name: Vitest suite
+        run: npm test
+
+  rust-clippy:
+    name: Rust (clippy -D warnings)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Build-script requirements for a fresh checkout — see file header.
+      - name: Stage sidecar + resource placeholders
+        working-directory: src-tauri
+        run: |
+          New-Item -ItemType Directory -Force "binaries" | Out-Null
+          New-Item -ItemType File -Force "binaries/relay-browser-mcp-x86_64-pc-windows-msvc.exe" | Out-Null
+          New-Item -ItemType File -Force "binaries/relay-automation-x86_64-pc-windows-msvc.exe" | Out-Null
+          New-Item -ItemType Directory -Force "resources/python", "resources/libreoffice" | Out-Null
+          New-Item -ItemType File -Force "resources/python/CI_PLACEHOLDER" | Out-Null
+          New-Item -ItemType File -Force "resources/libreoffice/CI_PLACEHOLDER" | Out-Null
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-test:
+    name: Rust (cargo test --lib)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Stage sidecar + resource placeholders
+        working-directory: src-tauri
+        run: |
+          New-Item -ItemType Directory -Force "binaries" | Out-Null
+          New-Item -ItemType File -Force "binaries/relay-browser-mcp-x86_64-pc-windows-msvc.exe" | Out-Null
+          New-Item -ItemType File -Force "binaries/relay-automation-x86_64-pc-windows-msvc.exe" | Out-Null
+          New-Item -ItemType Directory -Force "resources/python", "resources/libreoffice" | Out-Null
+          New-Item -ItemType File -Force "resources/python/CI_PLACEHOLDER" | Out-Null
+          New-Item -ItemType File -Force "resources/libreoffice/CI_PLACEHOLDER" | Out-Null
+
+      - name: cargo test --lib
+        working-directory: src-tauri
+        run: cargo test --lib

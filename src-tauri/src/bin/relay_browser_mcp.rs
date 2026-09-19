@@ -294,11 +294,7 @@ async fn handle_line(
     // This single gate covers `notifications/initialized` AND any unknown
     // notification method, which previously got an id:null error response.
     let id = msg.get("id").cloned();
-    let is_notification = match msg.get("id") {
-        None => true,
-        Some(Value::Null) => true,
-        _ => false,
-    };
+    let is_notification = matches!(msg.get("id"), None | Some(Value::Null));
     if is_notification {
         return None;
     }

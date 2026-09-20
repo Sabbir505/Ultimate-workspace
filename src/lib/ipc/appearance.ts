@@ -37,3 +37,23 @@ export const SIDEBAR_ART_PRESETS: { id: string; label: string }[] = [
 ];
 
 export const sidebarArtPresetUrl = (id: string) => `/sideart/${id}.jpg`;
+
+// --- App wallpaper — the same slot machinery pointed at the whole window ---
+// (same backend flow, own settings keys + file stem; see appearance_cmds.rs)
+
+/** Import a picked wallpaper: the BACKEND opens the native file dialog,
+ *  validates, copies into the app data dir, and remembers it. Returns the
+ *  stored path; cancelling the dialog errors. */
+export const importAppWallpaper = () =>
+  safeInvoke<string>("import_app_wallpaper");
+/** Select a bundled stock image by id (replaces any custom upload). */
+export const setAppWallpaperPreset = (id: string) =>
+  safeInvoke<void>("set_app_wallpaper_preset", { id });
+/** The wallpaper as a `data:` URL; null when unset. */
+export const readAppWallpaperData = () =>
+  safeInvoke<string | null>("read_app_wallpaper_data");
+/** Remove the wallpaper entirely; the app falls back to the flat palette. */
+export const clearAppWallpaper = () => safeInvoke<void>("clear_app_wallpaper");
+
+/** The same bundled stock images double as wallpaper presets. */
+export const WALLPAPER_PRESETS = SIDEBAR_ART_PRESETS;

@@ -126,8 +126,10 @@ export function ThemeGalleryPanel() {
 
   return (
     <div className="settings-form">
-      <div className="panel-head">
-        <h3>Custom themes</h3>
+      {/* Same section header anatomy as the other Appearance groups (theme
+          mode, wallpaper, sidebar art) so the whole tab reads as one list. */}
+      <div className="settings-section-title">
+        Custom themes
         <span className="panel-count">{customThemes.length} theme{customThemes.length !== 1 ? "s" : ""}</span>
       </div>
 

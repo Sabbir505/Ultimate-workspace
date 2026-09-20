@@ -40,6 +40,12 @@ vi.mock("../lib/ipc", () => ({
   getSidebarArtPath: vi.fn().mockResolvedValue(null),
   SIDEBAR_ART_PRESETS: [],
   sidebarArtPresetUrl: (id: string) => `/sideart/${id}.png`,
+  // App wallpaper (rendered inside SettingsView's Appearance panel; inert here).
+  importAppWallpaper: vi.fn().mockResolvedValue(null),
+  readAppWallpaperData: vi.fn().mockResolvedValue(null),
+  clearAppWallpaper: vi.fn().mockResolvedValue(undefined),
+  setAppWallpaperPreset: vi.fn().mockResolvedValue(undefined),
+  WALLPAPER_PRESETS: [],
   listChatSessions: vi.fn().mockResolvedValue([]),
   getChatMessages: vi.fn().mockResolvedValue([]),
   createChatSession: vi.fn(),

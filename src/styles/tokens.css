@@ -71,6 +71,15 @@
                       border-color 0.18s var(--ease),
                       color 0.18s var(--ease),
                       box-shadow 0.18s var(--ease);
+
+  /* App wallpaper (shell.css ::after layer; set by useWallpaper). The image
+     URL and scrim alpha are inline styles on <html>; the scrim COLOR is a
+     theme concern, so it lives here: dark scrim on dark, white veil on
+     light. --app-wallpaper defaults to none — the layer only exists while
+     html[data-wallpaper] is set. */
+  --app-wallpaper: none;
+  --wallpaper-scrim-rgb: 8, 10, 14;
+  --wallpaper-scrim-a: 0.5;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -239,6 +248,10 @@
 :root[data-theme="light"] {
   /* === Cursor Light â€” Core UI Colors ============================== */
   --bg-tint: #ffffff;
+  /* White veil instead of the dark scrim, so a wallpaper keeps the light
+     theme airy (alpha still follows the user's dim slider). */
+  --wallpaper-scrim-rgb: 255, 255, 255;
+  --wallpaper-scrim-a: 0.6;
   --surface: #ffffff;
   --surface-2: #f3f3f3;
   --surface-solid: #fafafa;

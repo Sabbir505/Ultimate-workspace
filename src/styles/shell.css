@@ -209,6 +209,45 @@
   z-index: 1;
 }
 
+/* ---------- App wallpaper (Settings → Appearance → App wallpaper) ---------- */
+/* The image paints on ::after, a sibling of the ambient wash above (both
+   z-index 0, under every surface): blurred into an ambient backdrop so text
+   over it stays readable, with a scrim in the theme's own bg tone blended
+   over it. The layer only exists while html[data-wallpaper] is set — zero
+   cost with no wallpaper. inset is negative so the blur never samples past
+   the element edge, which would show transparent fringes. */
+:root[data-wallpaper] .app {
+  /* The shell's own flat canvas steps aside; the big content canvases below
+     go translucent so the wallpaper reads through the UI. */
+  background: transparent;
+}
+:root[data-wallpaper] .app::after {
+  content: "";
+  position: absolute;
+  inset: -48px;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(
+      rgba(var(--wallpaper-scrim-rgb), var(--wallpaper-scrim-a)),
+      rgba(var(--wallpaper-scrim-rgb), var(--wallpaper-scrim-a))
+    ),
+    var(--app-wallpaper, none);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: blur(28px) saturate(115%);
+}
+/* The full-window canvases that used to be opaque: tinted glass over the
+   wallpaper. Terminal/editor panes deliberately stay solid (see panes.css)
+   — readability beats ambience there. */
+:root[data-wallpaper] .chat-view,
+:root[data-wallpaper] .automations-view,
+:root[data-wallpaper] .vault-view,
+:root[data-wallpaper] .popout-chat-root {
+  background: color-mix(in srgb, var(--bg-tint) 76%, transparent);
+}
+
 .main {
   flex: 1;
   display: flex;

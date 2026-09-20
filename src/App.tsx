@@ -62,6 +62,7 @@ import { usePetEvents } from "./hooks/usePetEvents";
 import { PetTicker } from "./components/pet/PetTicker";
 import { PetCarrier } from "./components/pet/PetCarrier";
 import { useTheme } from "./hooks/useTheme";
+import { useWallpaper } from "./hooks/useWallpaper";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
 import { checkAndNotifyHarnessUpdates } from "./lib/harnessUpdates";
 import { checkAndNotifyBuildUpdates } from "./lib/buildUpdates";
@@ -215,6 +216,7 @@ export default function App() {
   }, []);
 
   useTheme();
+  useWallpaper();
   useKeybindings();
   usePtyEvents();
   useChatEvents();

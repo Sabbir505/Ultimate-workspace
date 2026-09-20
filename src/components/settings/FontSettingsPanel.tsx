@@ -40,9 +40,8 @@ export function FontSettingsPanel() {
 
   return (
     <div className="settings-form">
-      <div className="panel-head">
-        <h3>Fonts</h3>
-      </div>
+      {/* Same section header anatomy as the other Appearance groups. */}
+      <div className="settings-section-title">Fonts</div>
       {group(
         "Interface font",
         "Used across the app chrome and chat.",

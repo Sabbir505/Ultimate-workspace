@@ -12,6 +12,8 @@ import { defaultHarness, newSessionFlow, openSession } from "../../lib/sessionLa
 import { useChatStore } from "../../state/chat";
 import { openOnboarding } from "../../state/onboarding";
 import { useProjectsStore } from "../../state/projects";
+import { useVaultStore } from "../../state/vault";
+import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import type { SessionRecord } from "../../types";
 
@@ -28,6 +30,8 @@ export function CommandPalette() {
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
   const projects = useProjectsStore((s) => s.projects);
   const sessions = useProjectsStore((s) => s.sessions);
+  const activeView = useUiStore((s) => s.activeView);
+  const keybindings = useSettingsStore((s) => s.keybindings);
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
   const [chatHits, setChatHits] = useState<ChatSearchResult[]>([]);
@@ -98,6 +102,71 @@ export function CommandPalette() {
           store.setExpanded(project.id, true);
         },
       })),
+      // Vault commands — only meaningful on the vault surface; hidden
+      // elsewhere so the palette never offers dead actions.
+      ...(activeView === "vault"
+        ? ([
+            ["action:vault-new-note", "New note", "vaultNewNote"],
+            ["action:vault-mode", "Toggle edit / preview mode", "vaultModeToggle"],
+            ["action:vault-switcher", "Quick switcher", "vaultQuickSwitcher"],
+            ["action:vault-search", "Search notes", "vaultSearch"],
+            ["action:vault-graph", "Toggle graph view", "vaultGraph"],
+            ["action:vault-daily", "Open today's daily note", "vaultDailyNote"],
+            ["action:vault-template", "Insert template…", "vaultInsertTemplate"],
+            ["action:vault-copy-note", "Copy note as markdown", "vaultCopyNote"],
+          ] as const).map(([id, label, action]) => ({
+            id,
+            section: "Actions" as const,
+            label,
+            // Not every action has a binding (copy-as-markdown is
+            // palette-only) — absent hint, the palette just shows none.
+            hint: (keybindings as Partial<Record<string, string>>)[action],
+            run: () => {
+              const handlers: Record<string, () => void> = {
+                vaultNewNote: () => {
+                  const v = useVaultStore.getState();
+                  if (v.root) void v.createNote("Untitled.md");
+                },
+                vaultModeToggle: () => {
+                  const v = useVaultStore.getState();
+                  v.setMode(v.mode === "edit" ? "preview" : "edit");
+                },
+                vaultQuickSwitcher: () => useVaultStore.getState().setSwitcherOpen(true),
+                vaultSearch: () => {
+                  const v = useVaultStore.getState();
+                  v.setRail("search");
+                  (document.querySelector(".vault-rail-search-box input") as HTMLInputElement | null)?.focus();
+                },
+                vaultGraph: () => {
+                  const v = useVaultStore.getState();
+                  v.setGraphOpen(!v.graphOpen);
+                },
+                vaultDailyNote: () => void useVaultStore.getState().openDailyNote(),
+                vaultInsertTemplate: () => {
+                  const v = useVaultStore.getState();
+                  if (!v.root) return;
+                  if (!v.activePath) {
+                    useUiStore.getState().pushToast("info", "Open a note first");
+                    return;
+                  }
+                  v.setTemplatePickerOpen(true);
+                },
+                vaultCopyNote: async () => {
+                  const v = useVaultStore.getState();
+                  if (!v.activePath) return;
+                  try {
+                    await navigator.clipboard.writeText(v.content);
+                    useUiStore.getState().pushToast("info", "Note copied as markdown");
+                  } catch {
+                    useUiStore.getState().pushToast("error", "Clipboard unavailable");
+                  }
+                },
+              };
+              close();
+              handlers[action]();
+            },
+          }))
+        : []),
       {
         id: "action:new-session",
         section: "Actions",

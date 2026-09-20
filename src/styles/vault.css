@@ -17,18 +17,21 @@
      .main width; without this the header (new note / change vault /
      unbind) is rendered UNDERNEATH it and looks missing entirely. */
   padding-top: var(--toolbar-h, 37px);
-  /* Below this the three-column layout genuinely breaks (rails crush the
-     center) — hold the floor and let the container clip instead; the tool
-     side-panel overlaps rather than squeezing the vault to mush.
-     The floor YIELDS below 760 when the tool panel needs the room (a hard
-     floor here pinned the panel's left edge and pushed its content off the
-     window's right edge once the panel hit its 900px cap): max() keeps a
-     360px usable minimum, and 100% - 910px is exactly the space the panel's
-     900px cap + the 10px grid gap leave. */
-  min-width: min(760px, max(360px, calc(100% - 910px)));
+  /* Hard floors: below these the three-column layout genuinely breaks, so
+     the vault DEMANDS this much and the tool panel yields instead (it is
+     flex-shrink:1 with a 240px min — toolpanel.css). 760 = rails at their
+     250 mins + a readable pane; the demand is capped at the container minus
+     what an open tool panel can legitimately keep (240 + 10px gap) so the
+     two never fight. With a note open in split mode the floor rises to
+     cover the pane px floors (editor 220 + preview 260) + the rails:
+     below it the divider clamps and CSS floors degrade into the clip. */
+  min-width: min(760px, calc(100% - 250px));
   background: var(--background-primary, var(--bg));
   color: var(--text-normal, var(--text));
   overflow: hidden;
+}
+.vault-view:has(.vault-note-panes.split) {
+  min-width: min(1000px, calc(100% - 250px));
 }
 
 /* The global `button` rule (tokens.css) paints a border + glass rim
@@ -158,12 +161,12 @@
 }
 .vault-left-rail {
   /* Width comes from the store (persisted, user-resizable) and is
-     authoritative — shrink must stay 0 or flexbox re-negotiates the rendered
-     width every frame once a drag is past the clamp, and the rail visibly
-     slides on its own. When the view is squeezed below the rails' widths the
-     center (min-width: 0) gives way and .vault-view clips — the same
-     contract as the 760px floor above. */
-  flex-shrink: 0;
+     authoritative in normal layouts — flex-shrink only engages when the
+     VIEW is squeezed below the rails' widths (tool panel open on a narrow
+     window), and then the rail yields toward its inline min-width instead
+     of letting the center crush or the rail clip off-view. The store clamp
+     bounds the width itself, so a drag never re-enters shrink territory. */
+  flex-shrink: 1;
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -224,9 +227,8 @@
   user-select: none;
 }
 .vault-right-rail {
-  /* Authoritative width (see .vault-left-rail) — flex-shrink here is what
-     let the rail slide toward the screen edge once a drag passed max. */
-  flex-shrink: 0;
+  /* Yields toward its min under squeeze — see .vault-left-rail. */
+  flex-shrink: 1;
   border-left: 1px solid var(--border);
   overflow-y: auto;
   min-height: 0;
@@ -242,6 +244,14 @@
   flex-direction: column;
   min-height: 0;
   position: relative;
+}
+/* A note in split mode holds the panes' px floors (editor 220 + preview
+   260 + divider ≈ 486): the center demands them BEFORE the rails give the
+   rest of their width up (the rails shrink to their mins first — see
+   .vault-left-rail, and .vault-view's floor reserves 500 + this). In
+   preview/edit modes the lone pane is flex:1 and needs no floor. */
+.vault-center:has(.vault-note-panes.split) {
+  min-width: 490px;
 }
 .vault-center-placeholder {
   flex: 1;
@@ -536,28 +546,34 @@
   display: flex;
   min-height: 0;
   min-width: 0;
+  /* The asset pane and the note panes carry hard px floors (below); when
+     the user drags a divider past them the flexbox would overflow this box
+     into the right rail — clip here so a too-far drag cramps the panes
+     instead of breaking the three-column layout. */
+  overflow: hidden;
 }
 .vault-asset-pane {
   /* Default: fill the center when the asset is alone. When a note sits
-     beside it, VaultView pins this to `0 0 <pct>%` inline. */
+     beside it, VaultView pins this to `0 1 <pct>%` inline — the 1 lets the
+     asset YIELD under squeeze (down to a sliver): the note side is the
+     active editing surface and wins the center's floors; the asset is the
+     reference pane the user can re-widen or close. */
   flex: 1 1 auto;
-  min-width: 200px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-}
-/* The pdf toolbar is a single row of fixed-size controls (~371px natural):
-   hold a floor under the pane so it can never wrap or clip. */
-.vault-asset-pane:has(.pdf-viewer) {
-  min-width: 380px;
 }
 .vault-note-split {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  min-width: 0;
+  /* NO min-width: 0 here — the automatic flex minimum is exactly what
+     protects the note under squeeze: it derives from the panes' own
+     min-widths (editor 220 + preview 260 in split mode), so the note side
+     keeps its floors while the asset pane yields (see .vault-asset-pane). */
 }
 .vault-note-head {
   display: flex;
@@ -628,8 +644,18 @@
   display: flex;
   flex-direction: column;
 }
-.vault-note-panes.split .vault-editor-pane {
-  border-right: none; /* the resize divider replaces the border */
+/* Resize floors (the px counterpart of the rails' VAULT_*_RAIL.min; values
+   mirror VAULT_EDITOR_MIN_PX / VAULT_PREVIEW_MIN_PX in state/vault.ts, whose
+   divider clamps keep the split pct from ever violating them): in split mode
+   a divider drag must be able to cramp a pane, never crush it to zero —
+   past the floor the container clips (.vault-center-split). Single-pane
+   modes are unaffected (the lone pane is flex:1 above the floor except in
+   pathologically narrow windows, where clipping wins). */
+.vault-note-panes .vault-editor-pane {
+  min-width: 220px;
+}
+.vault-note-panes .vault-preview-pane {
+  min-width: 260px;
 }
 .vault-editor-pane .vault-editor {
   flex: 1;
@@ -669,8 +695,20 @@
   line-height: 1.6;
   padding: 10px 4px 40vh 10px;
 }
+/* Fold gutter (heading/list folding) — slim and quiet, chevrons only. */
 .vault-editor .cm-gutters {
-  display: none;
+  display: block;
+  background: transparent;
+  border: none;
+  color: var(--text-dim, #888);
+  font-size: 11px;
+}
+.vault-editor .cm-foldGutter span {
+  color: var(--text-dim, #888);
+  cursor: pointer;
+}
+.vault-editor .cm-foldGutter span:hover {
+  color: var(--accent, #5b8def);
 }
 .vault-editor .cm-activeLine {
   background: color-mix(in srgb, var(--surface-3) 45%, transparent);
@@ -679,6 +717,22 @@
   color: var(--accent, #5b8def);
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, var(--accent, #5b8def) 40%, transparent);
+  cursor: pointer;
+}
+/* External markdown links + bare URLs. The descendant selector matters:
+   the markdown() syntax highlighter paints the same characters from an
+   INNER span, and its dim blue on dark is what made links unreadable. */
+.cm-editor .cm-vault-mdlink,
+.cm-editor .cm-vault-mdlink *,
+.cm-editor .cm-vault-url,
+.cm-editor .cm-vault-url * {
+  color: var(--accent, #5b8def);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--accent, #5b8def) 55%, transparent);
+}
+.cm-editor .cm-vault-mdlink,
+.cm-editor .cm-vault-mdlink * {
   cursor: pointer;
 }
 .cm-vault-mark,
@@ -728,7 +782,7 @@
 }
 .vault-preview {
   max-width: 760px;
-  margin: 0 auto;
+  margin: 0;
   font-size: 14px;
   line-height: 1.65;
 }
@@ -1426,4 +1480,213 @@
   margin: 0;
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* ---- live preview (the merged edit+read surface) ----
+   The editor IS the reading view now: CodeMirror renders markdown
+   document-style via decorations (see livePreviewDeco in VaultEditor). */
+.vault-editor .cm-content {
+  font-family: var(--font-ui, inherit);
+  font-size: 14px;
+  line-height: 1.65;
+  padding-bottom: 40vh;
+}
+.vault-editor .cm-line {
+  padding: 0 4px;
+}
+/* Headings sized like the reading view; the class lands on the whole line. */
+.vault-editor .cm-line.cm-vault-heading {
+  font-weight: 700;
+  line-height: 1.3;
+  /* PADDING, not margin: CodeMirror's height model measures line boxes and
+     cannot see margins — heading margins silently shifted every line below,
+     so clicks landed on the wrong line ("point somewhere, cursor lands
+     somewhere else"). Padding is part of the measured box. */
+  padding: 0.55em 4px 0.2em;
+  color: var(--text);
+}
+.vault-editor .cm-line.cm-vault-h1 { font-size: 1.65em; }
+.vault-editor .cm-line.cm-vault-h2 { font-size: 1.35em; }
+.vault-editor .cm-line.cm-vault-h3 { font-size: 1.15em; }
+.vault-editor .cm-line.cm-vault-h4,
+.vault-editor .cm-line.cm-vault-h5,
+.vault-editor .cm-line.cm-vault-h6 { font-size: 1.05em; }
+/* Quote lines get the reading view's left rule; body text stays normal. */
+.vault-editor .cm-line.cm-vault-quote-line {
+  border-left: 3px solid var(--border);
+  padding-left: 10px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+/* Inline token flavors (delimiters are replaced away by the decorations). */
+.vault-editor .cm-vault-strong { font-weight: 700; }
+.vault-editor .cm-vault-em { font-style: italic; }
+.vault-editor .cm-vault-strike { text-decoration: line-through; }
+.vault-editor .cm-vault-code-inline {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.88em;
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* ---- [[ completion dropdown — vault-toned, readable ---- */
+.vault-editor .cm-tooltip.cm-tooltip-autocomplete {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  font-family: var(--font-ui, inherit);
+}
+.vault-editor .cm-tooltip-autocomplete > ul {
+  font-family: var(--font-ui, inherit);
+  font-size: 12.5px;
+  max-height: 260px;
+}
+.vault-editor .cm-tooltip-autocomplete > ul > li {
+  padding: 5px 10px;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.vault-editor .cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--accent-soft, var(--surface-3));
+  color: var(--accent, var(--text));
+}
+.vault-editor .cm-completionLabel {
+  font-weight: 550;
+}
+.vault-editor .cm-completionDetail {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-style: normal;
+}
+/* H2/H3 toolbar glyphs (text spans — no icons exist for partial headings). */
+.vault-toolbar-h2,
+.vault-toolbar-h3 {
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+.vault-toolbar-h3 { font-size: 9px; }
+
+/* ---- tables (GFM) — real tables in the preview ---- */
+.vault-preview table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  font-size: 0.95em;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.vault-preview th,
+.vault-preview td {
+  border: 1px solid color-mix(in srgb, var(--border, #444) 80%, transparent);
+  padding: 6px 10px;
+  text-align: left;
+}
+.vault-preview thead th {
+  background: color-mix(in srgb, var(--surface-3, #2a2a2a) 70%, transparent);
+  font-weight: 600;
+}
+.vault-preview tbody tr:nth-child(2n) {
+  background: color-mix(in srgb, var(--surface-2, #222) 45%, transparent);
+}
+
+/* ==== tier upgrades: tasks, math, search panel ==== */
+
+/* Rendered task checkbox (click toggles the file's [ ] / [x]). */
+.vault-editor .cm-vault-task-box {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid var(--text-dim, #888);
+  border-radius: 3.5px;
+  vertical-align: -2px;
+  margin: 0 6px 0 1px;
+  cursor: pointer;
+  background: transparent;
+  transition: background 0.12s var(--ease, ease), border-color 0.12s var(--ease, ease);
+}
+.vault-editor .cm-vault-task-box:hover {
+  border-color: var(--accent, #5b8def);
+}
+.vault-editor .cm-vault-task-box.checked {
+  background: var(--accent, #5b8def);
+  border-color: var(--accent, #5b8def);
+  position: relative;
+}
+.vault-editor .cm-vault-task-box.checked::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0.5px;
+  width: 4px;
+  height: 7px;
+  border: solid #fff;
+  border-width: 0 1.6px 1.6px 0;
+  transform: rotate(42deg);
+}
+
+/* Rendered math (katex) — inline stays inline; $$ blocks center + scroll. */
+.vault-editor .cm-vault-math-render {
+  color: var(--text, #ddd);
+  white-space: normal;
+}
+.vault-editor .cm-vault-math-render.block {
+  display: block;
+  text-align: center;
+  overflow-x: auto;
+  padding: 4px 0;
+}
+.vault-editor .cm-line.cm-vault-math-block {
+  background: color-mix(in srgb, var(--surface-3, #2a2a2a) 30%, transparent);
+}
+
+/* In-note search panel (Ctrl+F) — match the app's surfaces. */
+.vault-editor .cm-panel.cm-search {
+  background: var(--surface-2, #222);
+  border: 1px solid var(--border, #333);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-family: var(--font-ui, sans-serif);
+  font-size: 12px;
+  color: var(--text, #ddd);
+}
+.vault-editor .cm-panel.cm-search input,
+.vault-editor .cm-panel.cm-search button {
+  background: var(--surface-3, #2a2a2a);
+  color: var(--text, #ddd);
+  border: 1px solid var(--border, #333);
+  border-radius: 5px;
+  padding: 3px 7px;
+  font-size: 12px;
+}
+.vault-editor .cm-panel.cm-search button:hover {
+  border-color: var(--accent, #5b8def);
+}
+.vault-editor .cm-panel.cm-search label {
+  color: var(--text-dim, #888);
+  font-size: 11.5px;
+}
+.vault-editor .cm-panel.cm-search input[name="close"],
+.vault-editor .cm-panel.cm-search button[name="close"] {
+  border: none;
+  background: transparent;
+  color: var(--text-dim, #888);
+}
+.vault-editor .cm-searchMatch {
+  background: color-mix(in srgb, #ffd54d 32%, transparent);
+  border-radius: 2px;
+}
+.vault-editor .cm-searchMatch-selected {
+  background: color-mix(in srgb, #ff9d3d 45%, transparent);
+  outline: 1px solid #ff9d3d;
+}
+.vault-editor .cm-selectionMatch {
+  background: color-mix(in srgb, var(--accent, #5b8def) 18%, transparent);
 }

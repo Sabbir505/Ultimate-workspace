@@ -1,0 +1,175 @@
+/* Vault extras — styles appended by the vault hover-preview and search
+   highlight features. Kept separate from vault.css so parallel feature work
+   never touches the same file twice. Import order is irrelevant here. */
+
+/* ==== link hover preview (VaultLinkHover) ==== */
+
+.vault-hover-card {
+  position: fixed;
+  z-index: 90;
+  width: 380px;
+  max-height: 300px;
+  overflow: hidden auto;
+  background: var(--bg, var(--surface-1, #1e1e1e));
+  color: var(--text, var(--text-normal, #ddd));
+  border: 1px solid var(--border, #333);
+  border-radius: 10px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.4);
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  /* Interactive: the card is a reading surface — the cursor must be able to
+     reach it (scroll it) without it vanishing. VaultLinkHover's grace-gap
+     close + the card's own mouseenter pin make that safe; pointer-events:
+     none here was the old "card can't be hovered" behavior that made it
+     impossible to scroll. */
+  pointer-events: auto;
+}
+.vault-hover-card .vault-hover-path {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border, #333);
+  font-size: 10.5px;
+  color: var(--text-dim, #888);
+  font-family: var(--font-mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==== search hit highlight (vault search) ==== */
+
+.vault-search-hit-hl {
+  background: color-mix(in srgb, #ffd54d 38%, transparent);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* ==== media embeds (VaultPreview audio/video) ==== */
+
+.vault-embed-audio,
+.vault-embed-video {
+  display: block;
+  width: 100%;
+  margin: 10px 0;
+  border-radius: 6px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.15));
+}
+/* Cap landscape clips so one embed can't dominate the reading column. */
+.vault-embed-video {
+  max-height: 420px;
+  object-fit: contain;
+}
+
+/* ==== hover card body states (VaultLinkHover) ==== */
+
+/* The resolving "…" and the unresolved-target message. */
+.vault-hover-card .vault-hover-missing {
+  color: var(--text-dim, #888);
+  font-style: italic;
+}
+
+/* ==== local graph (rail) ==== */
+
+/* Sits in a rail section, not the full overlay: a fixed-height flex column
+   so .vault-graph (flex:1) fills it. The --vault-graph-* tokens are declared
+   on :root, so the canvas picks them up here with no re-declaration. */
+.vault-local-graph {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* ==== interactive task checkboxes (VaultPreview) ==== */
+
+.vault-preview input[type="checkbox"] {
+  accent-color: var(--accent, #6e706f);
+  cursor: pointer;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+/* Hover cards and embeds don't wire a toggle handler, so their checkboxes
+   stay disabled — don't advertise them as clickable. */
+.vault-preview input[type="checkbox"]:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* ==== Obsidian callouts (VaultPreview blockquote override) ==== */
+
+.vault-callout {
+  border-left: 3px solid var(--callout-color, #4c8dff);
+  background: color-mix(in srgb, var(--callout-color, #4c8dff) 9%, transparent);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 12px 0;
+}
+.vault-callout p {
+  margin: 6px 0;
+}
+.vault-callout-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--callout-color, #4c8dff);
+  font-weight: 600;
+  line-height: 1.45;
+}
+.vault-callout-title .vault-callout-icon {
+  flex: none;
+}
+.vault-callout-body > :first-child {
+  margin-top: 0;
+}
+.vault-callout-body > :last-child {
+  margin-bottom: 0;
+}
+/* One --callout-color per canonical kind (aliases share the canonical's
+   class, unknown types fall through to note). Mid-saturation hues that stay
+   readable against both data-theme="dark" and data-theme="light". */
+.vault-callout-note { --callout-color: #4c8dff; }
+.vault-callout-abstract { --callout-color: #1fb8a6; }
+.vault-callout-info { --callout-color: #21a7d0; }
+.vault-callout-todo { --callout-color: #3f9ceb; }
+.vault-callout-tip { --callout-color: #d9a514; }
+.vault-callout-success { --callout-color: #3fb950; }
+.vault-callout-question { --callout-color: #c78a1d; }
+.vault-callout-warning { --callout-color: #e0a12f; }
+.vault-callout-failure { --callout-color: #e5534b; }
+.vault-callout-danger { --callout-color: #f85149; }
+.vault-callout-bug { --callout-color: #e0559f; }
+.vault-callout-example { --callout-color: #986ee2; }
+.vault-callout-quote { --callout-color: #8a919c; }
+
+/* ==== frontmatter properties card (VaultPreviewContent) ==== */
+
+.vault-properties {
+  border: 1px solid var(--border, #333);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text, #ddd) 4%, transparent);
+  padding: 8px 14px;
+  margin: 0 0 16px;
+  font-size: 12.5px;
+}
+.vault-property {
+  display: flex;
+  gap: 18px;
+  padding: 3px 0;
+}
+.vault-property + .vault-property {
+  border-top: 1px solid color-mix(in srgb, var(--border, #333) 55%, transparent);
+}
+.vault-property-key {
+  flex: none;
+  min-width: 90px;
+  color: var(--text-dim, #888);
+}
+.vault-property-value {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}

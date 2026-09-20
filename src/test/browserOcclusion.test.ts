@@ -21,6 +21,15 @@ describe("browserOccluded", () => {
     }
   });
 
+  it("is visible in every view that hosts the tool panel", () => {
+    // chat, vault and automations all mount the ToolPanel — the old
+    // `activeView !== "chat"` rule kept the vault's browser permanently
+    // hidden (black pane while the page loaded fine).
+    for (const activeView of ["chat", "vault", "automations"] as const) {
+      expect(browserOccluded({ ...clear, activeView })).toBe(false);
+    }
+  });
+
   it("is occluded by the command palette, peek panel, and modals", () => {
     expect(browserOccluded({ ...clear, paletteOpen: true })).toBe(true);
     expect(browserOccluded({ ...clear, peekOpen: true })).toBe(true);

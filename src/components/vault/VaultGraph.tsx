@@ -206,11 +206,15 @@ export function VaultGraph({
   edges,
   activePath,
   onOpenNode,
+  compact = false,
 }: {
   nodes: VaultGraphNode[];
   edges: VaultGraphEdge[];
   activePath: string | null;
   onOpenNode: (path: string) => void;
+  /** Rail-sized variant (local graph): identical engine and interactions,
+   *  minus the legend/model chrome that only fits the full overlay. */
+  compact?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -768,7 +772,10 @@ export function VaultGraph({
           </div>
         </div>
       ) : null}
-      {/* Legend / model — top right; swatch recolors, click text toggles. */}
+      {/* Legend / model — top right; swatch recolors, click text toggles.
+          Compact (rail) graphs drop it: with a handful of nodes the kinds
+          are obvious and the panel would fill the rail. */}
+      {!compact && (
       <div className="vault-graph-model">
         <div className="vault-graph-model-title">Graph model</div>
         {KIND_ORDER.map((kind) => (
@@ -794,9 +801,12 @@ export function VaultGraph({
           Fit view · {zoomLabel}%
         </button>
       </div>
-      <div className="vault-graph-legend">
-        <span>Click: open · Drag node: arrange · Drag space: pan · Wheel: zoom</span>
-      </div>
+      )}
+      {!compact && (
+        <div className="vault-graph-legend">
+          <span>Click: open · Drag node: arrange · Drag space: pan · Wheel: zoom</span>
+        </div>
+      )}
     </div>
   );
 }

@@ -23,22 +23,24 @@ import {
   List,
   ListOrdered,
   Loader2,
-  PanelLeftClose,
-  PanelLeftOpen,
-  PanelRightClose,
-  PanelRightOpen,
+  Minus,
   Quote,
   RefreshCw,
   Search,
   Strikethrough,
   FolderInput,
   Eye,
-  Columns2,
   PencilLine,
   Redo2,
+  SquareCode,
+  Star,
+  ListTodo,
+  Table,
   Undo2,
+  FileText,
   X,
 } from "lucide-react";
+import { PanelIcon } from "../common/PanelIcon";
 import { open as pickFolder, open as pickFile } from "@tauri-apps/plugin-dialog";
 import type { EditorView } from "@codemirror/view";
 import { redo, undo } from "@codemirror/commands";
@@ -46,10 +48,22 @@ import {
   listenVaultChanged,
   listenVaultScanned,
   toastError,
+  vaultReadNote,
   type VaultTreeNode,
 } from "../../lib/ipc";
-import { useVaultStore, type VaultMode, type VaultRail, VAULT_LEFT_RAIL, VAULT_RIGHT_RAIL } from "../../state/vault";
+import { splitFrontmatter } from "../../lib/vaultFrontmatter";
+import {
+  useVaultStore,
+  clampAssetSplitPct,
+  VAULT_ASSET_MIN_PX,
+  VAULT_PDF_MIN_PX,
+  type VaultMode,
+  type VaultRail,
+  VAULT_LEFT_RAIL,
+  VAULT_RIGHT_RAIL,
+} from "../../state/vault";
 import { VaultFileTree } from "./VaultFileTree";
+import { VaultLinkHoverHost } from "./VaultLinkHover";
 import { VaultNoteRail, VaultSearchPanel, VaultTagsPanel, VaultQuickSwitcher } from "./VaultQuickSwitcher";
 import { VaultPreview } from "./VaultPreview";
 import { VaultAssetView } from "./VaultAssetView";
@@ -115,14 +129,29 @@ function EditorToolbar({
         <Redo2 size={13} />
       </button>
       <span className="vault-editor-toolbar-sep" />
-      <button title="Heading" onClick={() => onAction({ type: "linePrefix", prefix: "# " })}>
+      <button title="Heading 1" onClick={() => onAction({ type: "linePrefix", prefix: "# " })}>
         <Heading1 size={13} />
       </button>
+      <button title="Heading 2" onClick={() => onAction({ type: "linePrefix", prefix: "## " })}>
+        <span className="vault-toolbar-h2">H2</span>
+      </button>
+      <button title="Heading 3" onClick={() => onAction({ type: "linePrefix", prefix: "### " })}>
+        <span className="vault-toolbar-h3">H3</span>
+      </button>
+      <span className="vault-editor-toolbar-sep" />
       {wrapBtn(<Bold size={13} />, "Bold (**…**)", "**")}
       {wrapBtn(<Italic size={13} />, "Italic (*…*)", "*")}
       {wrapBtn(<Strikethrough size={13} />, "Strikethrough (~~…~~)", "~~")}
       {wrapBtn(<Highlighter size={13} />, "Highlight (==…==)", "==")}
       {wrapBtn(<Code size={13} />, "Inline code", "`")}
+      <button
+        title="Code block"
+        onClick={() =>
+          onAction({ type: "insert", text: "```\n\n```" })
+        }
+      >
+        <SquareCode size={13} />
+      </button>
       <span className="vault-editor-toolbar-sep" />
       <button title="Quote" onClick={() => onAction({ type: "linePrefix", prefix: "> " })}>
         <Quote size={13} />
@@ -132,6 +161,24 @@ function EditorToolbar({
       </button>
       <button title="Numbered list" onClick={() => onAction({ type: "linePrefix", prefix: "1. " })}>
         <ListOrdered size={13} />
+      </button>
+      <button title="Task (- [ ])" onClick={() => onAction({ type: "linePrefix", prefix: "- [ ] " })}>
+        <ListTodo size={13} />
+      </button>
+      <span className="vault-editor-toolbar-sep" />
+      <button
+        title="Table (3 × 3)"
+        onClick={() =>
+          onAction({
+            type: "insert",
+            text: "| Column A | Column B | Column C |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |",
+          })
+        }
+      >
+        <Table size={13} />
+      </button>
+      <button title="Divider (---)" onClick={() => onAction({ type: "insert", text: "\n---\n" })}>
+        <Minus size={13} />
       </button>
       <span className="vault-editor-toolbar-sep" />
       {wrapBtn(<Link2 size={13} />, "Wikilink ([[…]])", "[[", "]]", "wikilink")}
@@ -227,9 +274,8 @@ function ModeSwitch() {
   const mode = useVaultStore((s) => s.mode);
   const setMode = useVaultStore((s) => s.setMode);
   const modes: { key: VaultMode; icon: typeof Eye; label: string }[] = [
-    { key: "edit", icon: PencilLine, label: "Editor" },
-    { key: "split", icon: Columns2, label: "Split" },
-    { key: "preview", icon: Eye, label: "Preview" },
+    { key: "edit", icon: PencilLine, label: "Edit mode (Ctrl+E)" },
+    { key: "preview", icon: Eye, label: "Preview mode (Ctrl+E)" },
   ];
   return (
     <div className="vault-mode-switch" role="tablist">
@@ -245,6 +291,116 @@ function ModeSwitch() {
           <m.icon size={13} />
         </button>
       ))}
+    </div>
+  );
+}
+
+/** Pinned + Recent shortcuts above the files tree — re-open a note without
+ *  hunting through the tree. Rows reuse the outline-row scale; pinned rows
+ *  carry a small unpin (✕). Both lists live in the store (persisted). */
+function VaultPinnedRecent() {
+  const pinnedPaths = useVaultStore((s) => s.pinnedPaths);
+  const recentPaths = useVaultStore((s) => s.recentPaths);
+  const activePath = useVaultStore((s) => s.activePath);
+  const openNote = useVaultStore((s) => s.openNote);
+  const pinNote = useVaultStore((s) => s.pinNote);
+  // The active note needs no "recent" shortcut — it is already open.
+  const recent = recentPaths.filter((p) => p !== activePath).slice(0, 6);
+  if (pinnedPaths.length === 0 && recent.length === 0) return null;
+  return (
+    <div className="vault-rail-pinned">
+      {pinnedPaths.length > 0 && (
+        <div className="vault-rail-pin-section">
+          <div className="vault-rail-pin-label">Pinned</div>
+          {pinnedPaths.map((p) => (
+            <div key={p} className="vault-rail-pin-row">
+              <button className="vault-rail-pin-open" title={p} onClick={() => void openNote(p)}>
+                {stemOf(p)}
+              </button>
+              <button className="vault-rail-pin-unpin" title="Unpin note" onClick={() => pinNote(p)}>
+                <X size={10} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {recent.length > 0 && (
+        <div className="vault-rail-pin-section">
+          <div className="vault-rail-pin-label">Recent</div>
+          {recent.map((p) => (
+            <button key={p} className="vault-rail-pin-open" title={p} onClick={() => void openNote(p)}>
+              {stemOf(p)}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The "insert template" modal: every *.md note under Templates/ becomes a
+ *  one-click insert at the editor cursor (via the vault:insert-text event).
+ *  Reading goes through the normal vault IPC; frontmatter is stripped so a
+ *  template's properties never land in the note body. Esc / backdrop close. */
+function VaultTemplatePicker() {
+  const open = useVaultStore((s) => s.templatePickerOpen);
+  const setOpen = useVaultStore((s) => s.setTemplatePickerOpen);
+  const tree = useVaultStore((s) => s.tree);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, setOpen]);
+
+  // Flatten the tree the same way the quick switcher does, keeping only
+  // markdown notes under a Templates/ folder (case-insensitive).
+  const templates = useMemo(() => {
+    if (!open) return [];
+    const out: { path: string; name: string }[] = [];
+    const walk = (nodes: VaultTreeNode[]) => {
+      for (const n of nodes) {
+        if (n.kind === "folder") walk(n.children);
+        else if (n.kind === "note" && n.path.toLowerCase().startsWith("templates/") && /\.md$/i.test(n.path)) {
+          out.push({ path: n.path, name: stemOf(n.path) });
+        }
+      }
+    };
+    walk(tree);
+    return out;
+  }, [open, tree]);
+
+  if (!open) return null;
+
+  const pick = async (path: string) => {
+    try {
+      const content = await vaultReadNote(path);
+      const body = splitFrontmatter(content).body.replace(/^\n+/, "");
+      window.dispatchEvent(new CustomEvent("vault:insert-text", { detail: body }));
+    } catch (e) {
+      toastError("Could not read template", e);
+    }
+    setOpen(false);
+  };
+
+  return (
+    <div className="vault-template-picker-overlay" onClick={() => setOpen(false)}>
+      <div className="vault-template-picker" onClick={(e) => e.stopPropagation()}>
+        <div className="vault-template-picker-head">Insert template</div>
+        {templates.length === 0 ? (
+          <div className="vault-template-picker-empty">Put templates in a Templates/ folder</div>
+        ) : (
+          templates.map((t) => (
+            <button key={t.path} className="vault-template-picker-row" title={t.path} onClick={() => void pick(t.path)}>
+              <FileText size={13} />
+              <span className="vault-template-picker-name">{t.name}</span>
+            </button>
+          ))
+        )}
+      </div>
     </div>
   );
 }
@@ -266,9 +422,7 @@ export function VaultView() {
   const toggleRightRail = useVaultStore((s) => s.toggleRightRail);
   const activePath = useVaultStore((s) => s.activePath);
   const assetPath = useVaultStore((s) => s.assetPath);
-  const noteSplitPct = useVaultStore((s) => s.noteSplitPct);
   const assetSplitPct = useVaultStore((s) => s.assetSplitPct);
-  const setNoteSplitPct = useVaultStore((s) => s.setNoteSplitPct);
   const setAssetSplitPct = useVaultStore((s) => s.setAssetSplitPct);
   const content = useVaultStore((s) => s.content);
   const savedContent = useVaultStore((s) => s.savedContent);
@@ -276,9 +430,29 @@ export function VaultView() {
   const mode = useVaultStore((s) => s.mode);
   const setContent = useVaultStore((s) => s.setContent);
   const scheduleSave = useVaultStore((s) => s.scheduleSave);
+  // Preview checkboxes toggle the task in the note source (1-based line
+  // reported by the markdown renderer) and save like any edit.
+  const onToggleTaskLine = useCallback(
+    (line: number) => {
+      const lines = content.split("\n");
+      const target = lines[line - 1];
+      if (target == null || !/^[\s>\-\d*+]*\[([ xX])\]/.test(target)) return;
+      lines[line - 1] = target.replace(/\[([ xX])\]/, (_full, ch: string) => `[${ch === " " ? "x" : " "}]`);
+      setContent(lines.join("\n"));
+      scheduleSave();
+    },
+    [content, setContent, scheduleSave],
+  );
   const saveNow = useVaultStore((s) => s.saveNow);
   const openNote = useVaultStore((s) => s.openNote);
   const closeNote = useVaultStore((s) => s.closeNote);
+  const closeNoteTab = useVaultStore((s) => s.closeNoteTab);
+  const openNotes = useVaultStore((s) => s.openNotes);
+  const pinnedPaths = useVaultStore((s) => s.pinnedPaths);
+  const pinNote = useVaultStore((s) => s.pinNote);
+  const recentPaths = useVaultStore((s) => s.recentPaths);
+  const templatePickerOpen = useVaultStore((s) => s.templatePickerOpen);
+  const setTemplatePickerOpen = useVaultStore((s) => s.setTemplatePickerOpen);
   const createNote = useVaultStore((s) => s.createNote);
   const createFolder = useVaultStore((s) => s.createFolder);
   const rescan = useVaultStore((s) => s.rescan);
@@ -290,6 +464,7 @@ export function VaultView() {
   const onScanned = useVaultStore((s) => s.onScanned);
   const init = useVaultStore((s) => s.init);
   const dirty = content !== savedContent && activePath != null;
+  const isPinned = activePath != null && pinnedPaths.includes(activePath);
   const initialized = useRef(false);
   const [resizing, setResizing] = useState(false);
 
@@ -377,9 +552,9 @@ export function VaultView() {
     const w = centerRef.current?.getBoundingClientRect().width ?? 1;
     return (dx / Math.max(1, w)) * 100;
   }, []);
-
   // The live CodeMirror view — the toolbar dispatches edits through it.
   const editorViewRef = useRef<EditorView | null>(null);
+
   /** Read a Blob as base64 (no data: prefix). */
   const blobToBase64 = (blob: Blob) =>
     new Promise<string>((resolve, reject) => {
@@ -433,6 +608,22 @@ export function VaultView() {
       toastError("Could not insert image", e);
     }
   }, [activePath]);
+
+  // Template inserts: the picker dispatches "vault:insert-text" with the
+  // template text; drop it at the editor cursor through the live view —
+  // the same dispatch shape as the toolbar's insert action (insert at the
+  // selection head, cursor after the insert, refocus). No editor mounted
+  // (preview mode, no note) → skip silently.
+  useEffect(() => {
+    const onInsertText = (e: Event) => {
+      const text = (e as CustomEvent<string>).detail;
+      const view = editorViewRef.current;
+      if (!view || typeof text !== "string" || text === "") return;
+      applyEdit(view, { type: "insert", text });
+    };
+    window.addEventListener("vault:insert-text", onInsertText);
+    return () => window.removeEventListener("vault:insert-text", onInsertText);
+  }, []);
 
   if (!root) {
     return (
@@ -509,7 +700,7 @@ export function VaultView() {
         >
           {leftRailCollapsed ? (
             <button className="vault-rail-expand" title="Show the files panel" onClick={toggleLeftRail}>
-              <PanelLeftOpen size={14} />
+              <PanelIcon side="left" size={14} />
             </button>
           ) : (
             <div className="vault-rail-inner">
@@ -524,10 +715,15 @@ export function VaultView() {
                   <Hash size={12} /> Tags
                 </button>
                 <button className="vault-rail-collapse" title="Hide the files panel" onClick={toggleLeftRail}>
-                  <PanelLeftClose size={13} />
+                  <PanelIcon side="left" size={13} />
                 </button>
               </div>
-              {rail === "files" && <VaultFileTree tree={tree} />}
+              {rail === "files" && (
+                <>
+                  <VaultPinnedRecent />
+                  <VaultFileTree tree={tree} />
+                </>
+              )}
               {rail === "search" && <VaultSearchPanel />}
               {rail === "tags" && <VaultTagsPanel />}
             </div>
@@ -565,38 +761,84 @@ export function VaultView() {
               {assetPath != null && (
                 <div
                   className="vault-asset-pane"
-                  style={activePath != null ? { flex: `0 0 ${assetSplitPct}%` } : undefined}
+                  style={activePath != null ? { flex: `0 1 ${assetSplitPct}%` } : undefined}
                 >
                   <VaultAssetView path={assetPath} />
                 </div>
               )}
               {assetPath != null && activePath != null && (
                 <ResizeHandle
-                  onDrag={(dx) => setAssetSplitPct((p) => p + dxToPct(dx))}
+                  onDrag={(dx) => {
+                    const w = centerRef.current?.getBoundingClientRect().width ?? 0;
+                    const assetMin = assetPath.toLowerCase().endsWith(".pdf") ? VAULT_PDF_MIN_PX : VAULT_ASSET_MIN_PX;
+                    setAssetSplitPct(clampAssetSplitPct(dxToPct(dx) + assetSplitPct, w, assetMin));
+                  }}
                   onDragState={setResizing}
                 />
               )}
               {activePath != null && (
-            <div className={`vault-note-split mode-${mode}`}>
+              <div className={`vault-note-split mode-${mode}`}>
               <div className="vault-note-head">
                 <span className="vault-note-path" title={activePath}>{activePath}</span>
                 {dirty ? <span className="vault-dirty-dot" title="Unsaved changes (autosave on)" /> : null}
                 <ModeSwitch />
+                <button
+                  className={`vault-rail-toggle vault-note-pin${isPinned ? " pinned" : ""}`}
+                  title={isPinned ? "Unpin note" : "Pin note"}
+                  onClick={() => activePath != null && pinNote(activePath)}
+                >
+                  <Star size={14} fill={isPinned ? "currentColor" : "none"} />
+                </button>
                 <button className="vault-rail-toggle" title="Toggle note rail" onClick={toggleRightRail}>
-                  {rightRailOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+                  <PanelIcon side="right" size={14} />
                 </button>
                 <button className="vault-rail-toggle" title="Close note" onClick={closeNote}>
                   <X size={14} />
                 </button>
               </div>
-              {/* key={mode}: each switch remounts the panes so the fade-in
-                  below plays (the app's standard --ease motion). */}
+              {/* Open-note tab strip: click activates, ✕ (or middle-click)
+                  closes just that tab. The store owns ordering and the
+                  active-tab neighbor handoff. */}
+              {openNotes.length > 0 && (
+                <div className="vault-note-tabs" role="tablist" aria-label="Open notes">
+                  {openNotes.map((p) => (
+                    <div
+                      key={p}
+                      role="tab"
+                      aria-selected={p === activePath}
+                      className={`vault-note-tab${p === activePath ? " active" : ""}`}
+                      title={p}
+                      onClick={() => void openNote(p)}
+                      onMouseDown={(e) => {
+                        if (e.button === 1) {
+                          e.preventDefault();
+                          closeNoteTab(p);
+                        }
+                      }}
+                    >
+                      <span className="vault-note-tab-name">{stemOf(p)}</span>
+                      <button
+                        className="vault-note-tab-close"
+                        title="Close tab"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeNoteTab(p);
+                        }}
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* key={mode}: each switch remounts the surface so the fade-in
+                  below plays (the app's standard --ease motion). EDIT is the
+                  live-preview editor (markdown source stays editable while
+                  decorations render it document-style); PREVIEW is the pure
+                  rendered view. */}
               <div className={`vault-note-panes ${mode}`} key={mode}>
-                {mode !== "preview" && (
-                  <div
-                    className="vault-editor-pane"
-                    style={mode === "split" ? { flex: `0 0 ${noteSplitPct}%`, minWidth: 180 } : undefined}
-                  >
+                {mode === "edit" ? (
+                  <div className="vault-editor-pane">
                     <EditorToolbar
                       onAction={(a) => {
                         const v = editorViewRef.current;
@@ -628,20 +870,13 @@ export function VaultView() {
                       </Suspense>
                     )}
                   </div>
-                )}
-                {mode === "split" && (
-                  <ResizeHandle
-                    onDrag={(dx) => setNoteSplitPct((p) => p + dxToPct(dx))}
-                    onDragState={setResizing}
-                  />
-                )}
-                {mode !== "edit" && (
+                ) : (
                   <div className="vault-preview-pane">
-                    <VaultPreview content={content} notePath={activePath} />
+                    <VaultPreview content={content} notePath={activePath} onToggleTaskLine={onToggleTaskLine} />
                   </div>
                 )}
               </div>
-            </div>
+              </div>
               )}
             </div>
           )}
@@ -668,6 +903,12 @@ export function VaultView() {
       </div>
 
       <VaultQuickSwitcher />
+      <VaultTemplatePicker />
+      {/* The hover page-preview card is a position:fixed singleton driven by
+          module state (openVaultLinkHover from the editor + preview links) —
+          it mounts here, ABOVE any mode-conditional surface, so hovers work
+          in both edit and preview modes. */}
+      <VaultLinkHoverHost />
     </div>
   );
 }

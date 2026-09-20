@@ -1,0 +1,205 @@
+/* Vault note tabs (open-note tab strip), the pin toggle, the Pinned/Recent
+   sections in the files rail, and the "insert template" picker. Palette and
+   radii mirror vault.css (.vault-mode-switch / .vault-rail-tabs / rows) via
+   the shared tokens, so both themes work unchanged. */
+
+/* ---- note tab strip (under the note head, above the panes) ---- */
+.vault-note-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 4px 8px 0;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.vault-note-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 5px 5px 9px;
+  border: none;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+  min-width: 0;
+  max-width: 170px;
+  white-space: nowrap;
+  user-select: none;
+}
+.vault-note-tab:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.vault-note-tab.active {
+  background: var(--surface-3);
+  color: var(--text);
+  font-weight: 600;
+}
+.vault-note-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.vault-note-tab-close {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 1px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.vault-note-tab-close:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+/* ---- pin (star) toggle in the note head ---- */
+/* Base chrome comes from .vault-rail-toggle; only the pinned state is new. */
+.vault-rail-toggle.vault-note-pin.pinned {
+  color: var(--accent, var(--text));
+}
+.vault-rail-toggle.vault-note-pin.pinned:hover {
+  background: var(--accent-soft, var(--surface-3));
+}
+
+/* ---- pinned + recent sections (files rail, above the tree) ---- */
+.vault-rail-pinned {
+  flex-shrink: 0;
+  max-height: 38%;
+  overflow-y: auto;
+  padding: 6px 4px 8px;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: thin;
+}
+.vault-rail-pin-section + .vault-rail-pin-section {
+  margin-top: 8px;
+}
+.vault-rail-pin-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 2px 6px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vault-rail-pin-row {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  width: 100%;
+  min-width: 0;
+  border-radius: 5px;
+}
+.vault-rail-pin-row:hover {
+  background: var(--surface-3);
+}
+.vault-rail-pin-open:hover {
+  background: var(--surface-3);
+}
+.vault-rail-pin-open {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 3px 6px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vault-rail-pin-unpin {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 2px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.vault-rail-pin-unpin:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+/* ---- template picker modal (modeled on the quick switcher) ---- */
+.vault-template-picker-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 18vh;
+  z-index: 80;
+}
+.vault-template-picker {
+  width: 420px;
+  max-width: 90vw;
+  max-height: 55vh;
+  overflow-y: auto;
+  background: var(--surface-1, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  padding: 6px;
+}
+.vault-template-picker-head {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 6px 9px 6px;
+}
+.vault-template-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 7px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-family: inherit;
+  text-align: left;
+}
+.vault-template-picker-row:hover {
+  background: var(--accent-soft, var(--surface-3));
+}
+.vault-template-picker-row svg {
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+.vault-template-picker-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vault-template-picker-empty {
+  padding: 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+}

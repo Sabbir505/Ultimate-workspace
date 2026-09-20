@@ -50,6 +50,9 @@ export interface VaultNoteMeta {
   headings: [number, string, number][];
   aliases: string[];
   word_count: number;
+  /** Filesystem timestamps (unix ms) when the OS provides them. */
+  created_ms?: number;
+  modified_ms?: number;
 }
 
 export interface VaultGraphNode {

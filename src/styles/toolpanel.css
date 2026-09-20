@@ -9,11 +9,15 @@
    running); the panel itself also stays mounted while collapsed. */
 .tool-panel {
   width: 532px;
-  flex-shrink: 0;
+  /* The panel YIELDS before the view beside it: when the vault holds its
+     split-layout floor, flexbox shrinks the RENDERED panel (down to the
+     240px min) instead of letting the vault's panes/rails crush. The store
+     width is unchanged — dragging the splitter wider just re-reveals it. */
+  flex-shrink: 1;
+  min-width: 240px;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  min-width: 0;
   background: var(--surface);
   border-left: 1px solid var(--border);
   /* Clear the overlay title bar: the tab strip starts below the floating
@@ -27,6 +31,9 @@
 }
 .tool-panel.collapsed {
   width: 0;
+  /* The collapsed panel must collapse to nothing — the open-state min
+     (240px) must not hold it open. */
+  min-width: 0;
   opacity: 0;
   border-left-color: transparent;
   pointer-events: none;

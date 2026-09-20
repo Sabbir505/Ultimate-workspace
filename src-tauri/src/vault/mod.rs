@@ -1089,10 +1089,20 @@ pub async fn vault_search(app: AppHandle, query: String, limit: Option<usize>) -
 #[tauri::command]
 pub async fn vault_note_meta(app: AppHandle, path: String) -> Result<index::NoteMeta, String> {
     vault_blocking(app, move |app| {
-        current_root(app)?;
+        let root = current_root(app)?;
         let db = app.state::<DbState>().inner().0.clone();
         let conn = db.lock();
-        index::note_meta(&conn, &normalize_rel(&path)).map_err(|e| e.to_string())
+        let rel = normalize_rel(&path);
+        let mut meta = index::note_meta(&conn, &rel).map_err(|e| e.to_string())?;
+        // Best-effort filesystem timestamps (unix epoch ms). `created()` is
+        // Windows-only in practice; on error/unsupported both stay None.
+        if let Ok(md) = std::fs::metadata(root.join(&rel)) {
+            let to_unix_ms =
+                |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis() as u64);
+            meta.modified_ms = md.modified().ok().and_then(to_unix_ms);
+            meta.created_ms = md.created().ok().and_then(to_unix_ms);
+        }
+        Ok(meta)
     })
     .await
 }

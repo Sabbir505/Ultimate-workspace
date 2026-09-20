@@ -8,12 +8,18 @@
 // the browser pane:
 //  - the pane is collapsed (its own collapsed flag — not just the global UI),
 //  - the pane's column/row slot is not currently visible (tool panel tab),
-//  - the active view is not `chat` (the only view that shows browser panes),
+//  - the active view is an overlay (settings / skills / cost — the only
+//    views that cover the tool panel without hosting it),
 //  - or a full-screen overlay (palette / peek / modal) is covering it.
 //
 // IMPORTANT: a pane's OWN `collapsed` state must participate in the check.
 // Previously only global overlays were considered, so a collapsed browser
 // pane kept painting its native webview on top of whatever replaced it.
+//
+// NOTE: chat, vault and automations all mount the ToolPanel, so the pane is
+// legitimately visible in all three. The old `activeView !== "chat"` rule
+// predates the vault/automations tool panels and kept their webviews
+// permanently hidden — black pane, page loads fine (2026-09-20 report).
 
 import type { ActiveView } from "../state/ui";
 
@@ -31,6 +37,11 @@ export interface OcclusionInputs {
   htmlOverlayOpen?: boolean;
 }
 
+/** Views that cover the browser without hosting a tool panel of their own. */
+function viewOccludesBrowser(view: ActiveView): boolean {
+  return view === "settings" || view === "skills" || view === "cost";
+}
+
 export function browserOccluded({
   paletteOpen,
   peekOpen,
@@ -43,7 +54,7 @@ export function browserOccluded({
   return (
     collapsed ||
     !paneVisible ||
-    activeView !== "chat" ||
+    viewOccludesBrowser(activeView) ||
     paletteOpen ||
     peekOpen ||
     modalOpen ||

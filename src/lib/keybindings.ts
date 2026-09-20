@@ -17,7 +17,15 @@ export type KeybindingAction =
   | "toggleBroadcast"
   | "openSettings"
   | "spotlightNext"
-  | "spotlightPrev";
+  | "spotlightPrev"
+  // Vault surface (only fire while activeView === "vault").
+  | "vaultModeToggle"
+  | "vaultQuickSwitcher"
+  | "vaultNewNote"
+  | "vaultSearch"
+  | "vaultGraph"
+  | "vaultDailyNote"
+  | "vaultInsertTemplate";
 
 export type KeybindingMap = Record<KeybindingAction, string>;
 
@@ -36,6 +44,16 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
   openSettings: "Mod+,",
   spotlightNext: "Mod+Shift+]",
   spotlightPrev: "Mod+Shift+[",
+  // Obsidian-flavoured vault defaults. Mod+P is the quick switcher (the
+  // browser's print dialog doesn't exist inside Tauri); Mod+E toggles the
+  // live/reading note surface like Obsidian's edit/preview toggle.
+  vaultModeToggle: "Mod+E",
+  vaultQuickSwitcher: "Mod+P",
+  vaultNewNote: "Mod+Shift+N",
+  vaultSearch: "Mod+Shift+F",
+  vaultGraph: "Mod+G",
+  vaultDailyNote: "Mod+Shift+D",
+  vaultInsertTemplate: "Mod+T",
 };
 
 export interface ParsedAccelerator {

@@ -354,7 +354,10 @@ function NotificationsPanel() {
 }
 
 export function SettingsView() {
-  const setActiveView = useUiStore((s) => s.setActiveView);
+  // Overlay dismissal returns to the view underneath (vault stays vault);
+  // only deliberate navigations (e.g. "Run login" needing the terminal) go
+  // to chat explicitly.
+  const closeOverlay = useUiStore((s) => s.closeOverlay);
   const harnesses = useProjectsStore((s) => s.harnesses);
   const harnessUpdates = useProjectsStore((s) => s.harnessUpdates);
   const projects = useProjectsStore((s) => s.projects);
@@ -449,7 +452,7 @@ export function SettingsView() {
   }, [category, updateCheckAttempted, harnessUpdates, refreshHarnessUpdates]);
 
   return (
-    <div className="view-overlay modal-centered" onPointerDown={(e) => e.target === e.currentTarget && setActiveView("chat")}>
+    <div className="view-overlay modal-centered" onPointerDown={(e) => e.target === e.currentTarget && closeOverlay()}>
       <div className="view-panel settings-modal">
         <div className="view-header">
           <div>
@@ -458,7 +461,7 @@ export function SettingsView() {
               {NAV_SECTIONS.flatMap((s) => s.items).find((c) => c.key === category)?.sub}
             </span>
           </div>
-          <button className="ghost" onClick={() => setActiveView("chat")}>
+          <button className="ghost" onClick={closeOverlay}>
             ✕
           </button>
         </div>
@@ -602,7 +605,9 @@ export function SettingsView() {
                                       onClick={() => {
                                         const cwd = projects[0]?.path ?? ".";
                                         void runLoginFlow(h.id, cwd, `${h.displayName} login`);
-                                        setActiveView("chat");
+                                        // Deliberate navigation: the login runs in a
+                                        // terminal, which lives in the chat view.
+                                        useUiStore.getState().setActiveView("chat");
                                       }}
                                     >
                                       Run login

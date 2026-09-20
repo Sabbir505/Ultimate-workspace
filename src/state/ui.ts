@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import { ttsPlayer } from "../lib/tts";
 import { useTtsStore } from "./tts";
+import { isOverlayView } from "../lib/viewKinds";
 
 /** Stop the read-aloud of a tool-panel artifact, if that is what is playing.
  *  The player is global, so a pane the user closed would otherwise keep
@@ -102,6 +103,12 @@ export interface ViewNavEntry {
 
 export interface UiState {
   activeView: ActiveView;
+  /** The real (non-overlay) view the main grid is rendering. Overlay views
+   *  (settings/skills/cost) float ABOVE it without swapping it out, so
+   *  closing Settings returns to whatever was actually underneath — opening
+   *  settings from the vault must not land you on the chat. Written by
+   *  setActiveView/navBack/navForward whenever the target is a real view. */
+  baseView: ActiveView;
   /** Browser-style back/forward history over visited views AND visited
    *  chats (see ViewNavEntry). `viewIndex` points into `viewHistory`;
    *  back/forward move it instead of pushing. Written by setActiveView /
@@ -186,6 +193,10 @@ export interface UiState {
   updateModelDownload: (p: ModelDownloadProgress) => void;
 
   setActiveView: (view: ActiveView) => void;
+  /** Dismiss the open overlay view (settings/skills/cost) and restore the
+   *  view underneath (baseView) — the overlay ✕/backdrop all funnel here.
+   *  No-op when no overlay is open. */
+  closeOverlay: () => void;
   /** Record a chat switch in the nav timeline (called by the chat store when
    *  the active session changes). A chat pick always lands in the chat view;
    *  a chat-less chat-view top entry (boot auto-start, fresh view push) is
@@ -319,6 +330,7 @@ const TOAST_TTL_MS: Record<ToastKind, number> = { error: 9000, info: 5000, succe
 
 export const useUiStore = create<UiState>((set, get) => ({
   activeView: "chat",
+  baseView: "chat",
   viewHistory: [{ view: "chat", chatSessionId: null }],
   viewIndex: 0,
   pendingArtifactFormData: null,
@@ -400,6 +412,9 @@ export const useUiStore = create<UiState>((set, get) => ({
       // guard turned the follow-up setActiveView("chat") into a silent
       // no-op — the click switched chats but never left the view.
       if (s.activeView === activeView) return {};
+      // Overlays don't change what's underneath; real views become the new
+      // base (see baseView).
+      const baseView = isOverlayView(activeView) ? s.baseView : activeView;
       // A new navigation truncates the forward branch (browser semantics),
       // and the log is capped so endless switching can't grow it forever.
       const top = s.viewHistory[s.viewIndex];
@@ -411,15 +426,23 @@ export const useUiStore = create<UiState>((set, get) => ({
           ...s.viewHistory.slice(0, s.viewIndex),
           { view: activeView, chatSessionId: null } satisfies ViewNavEntry,
         ];
-        return { activeView, viewHistory: history, viewIndex: history.length - 1 };
+        return { activeView, baseView, viewHistory: history, viewIndex: history.length - 1 };
       }
       let history = [
         ...s.viewHistory.slice(0, s.viewIndex + 1),
         { view: activeView, chatSessionId: null } satisfies ViewNavEntry,
       ];
       if (history.length > 50) history = history.slice(history.length - 50);
-      return { activeView, viewHistory: history, viewIndex: history.length - 1 };
+      return { activeView, baseView, viewHistory: history, viewIndex: history.length - 1 };
     }),
+
+  closeOverlay: () => {
+    const s = get();
+    if (!isOverlayView(s.activeView)) return;
+    // Route through setActiveView so the history entry records the restore
+    // the same way every other navigation does.
+    if (s.baseView !== s.activeView) s.setActiveView(s.baseView);
+  },
 
   recordChatNav: (chatSessionId) =>
     set((s) => {
@@ -480,7 +503,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     if (s.viewIndex <= 0) return null;
     const viewIndex = s.viewIndex - 1;
     const entry = s.viewHistory[viewIndex];
-    set({ activeView: entry.view, viewIndex });
+    set({ activeView: entry.view, baseView: isOverlayView(entry.view) ? s.baseView : entry.view, viewIndex });
     return entry;
   },
   navForward: () => {
@@ -488,7 +511,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     if (s.viewIndex >= s.viewHistory.length - 1) return null;
     const viewIndex = s.viewIndex + 1;
     const entry = s.viewHistory[viewIndex];
-    set({ activeView: entry.view, viewIndex });
+    set({ activeView: entry.view, baseView: isOverlayView(entry.view) ? s.baseView : entry.view, viewIndex });
     return entry;
   },
   setPendingArtifactFormData: (pendingArtifactFormData) => set({ pendingArtifactFormData }),

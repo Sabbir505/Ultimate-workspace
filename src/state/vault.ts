@@ -33,23 +33,37 @@ import {
 } from "../lib/ipc";
 import { useUiStore } from "./ui";
 
-export type VaultMode = "edit" | "split" | "preview";
+export type VaultMode = "edit" | "preview";
 export type VaultRail = "files" | "search" | "tags";
 
 /** Debounce window for autosave after an edit keystroke. */
 export const VAULT_SAVE_DEBOUNCE_MS = 600;
 
 /** Rail layout bounds (px). The drag handles clamp to these; the rails also
- *  flex-shrink below their width when the tool panel squeezes the view. */
-export const VAULT_LEFT_RAIL = { default: 224, min: 210, max: 400 };
-export const VAULT_RIGHT_RAIL = { default: 272, min: 200, max: 440 };
+ *  flex-shrink toward their min when the view is squeezed (tool panel open
+ *  on a narrow window) — the min is what always holds. Files tree and
+ *  outline share the same bounds. */
+export const VAULT_LEFT_RAIL = { default: 250, min: 250, max: 400 };
+export const VAULT_RIGHT_RAIL = { default: 272, min: 250, max: 400 };
+
+/** Note-split pane floors (px) — mirrored in vault.css
+ *  (.vault-editor-pane / .vault-preview-pane min-width). The dividers clamp
+ *  live against them so a drag stops at the floor instead of entering the
+ *  container's clip zone. */
+export const VAULT_EDITOR_MIN_PX = 220;
+export const VAULT_PREVIEW_MIN_PX = 260;
+/** Asset pane floor (vault.css .vault-asset-pane / :has(.pdf-viewer)). */
+export const VAULT_ASSET_MIN_PX = 200;
+export const VAULT_PDF_MIN_PX = 380;
 
 interface VaultLayout {
   leftWidth: number;
   rightWidth: number;
   leftCollapsed: boolean;
-  noteSplitPct: number;
   assetSplitPct: number;
+  openNotes: string[];
+  pinnedPaths: string[];
+  recentPaths: string[];
 }
 
 const LAYOUT_KEY = "relay.vault.layout";
@@ -61,7 +75,7 @@ function clampPct(v: unknown, fallback: number): number {
 
 /** Survives restarts; guarded because tests (and odd embeds) may lack storage. */
 function loadLayout() {
-  const fallback = { leftRailWidth: VAULT_LEFT_RAIL.default, rightRailWidth: VAULT_RIGHT_RAIL.default, leftRailCollapsed: false, noteSplitPct: 50, assetSplitPct: 58 };
+  const fallback = { leftRailWidth: VAULT_LEFT_RAIL.default, rightRailWidth: VAULT_RIGHT_RAIL.default, leftRailCollapsed: false, assetSplitPct: 58, openNotes: [] as string[], pinnedPaths: [] as string[], recentPaths: [] as string[] };
   try {
     const raw = localStorage.getItem(LAYOUT_KEY);
     if (!raw) return fallback;
@@ -70,7 +84,6 @@ function loadLayout() {
       leftRailWidth: clampWidth(p.leftWidth, VAULT_LEFT_RAIL),
       rightRailWidth: clampWidth(p.rightWidth, VAULT_RIGHT_RAIL),
       leftRailCollapsed: p.leftCollapsed === true,
-      noteSplitPct: clampPct(p.noteSplitPct, 50),
       assetSplitPct: clampPct(p.assetSplitPct, 58),
     };
   } catch {
@@ -81,6 +94,29 @@ function loadLayout() {
 function clampWidth(v: unknown, b: { min: number; max: number; default: number }): number {
   const n = typeof v === "number" && Number.isFinite(v) ? Math.round(v) : b.default;
   return Math.min(b.max, Math.max(b.min, n));
+}
+
+/** Height of the note head (path row + mode switch) above the note panes —
+ *  part of the note side's minimum in the asset|note split. Measured ~37px;
+ *  rounded up for zoom/font variation. */
+const VAULT_NOTE_HEAD_PX = 40;
+/** Width of a resize divider between panes. */
+const VAULT_HANDLE_PX = 6;
+
+/** Clamp the asset|note split percentage (asset share) against the persisted
+ *  20–80 bounds AND the live px floors: the note side keeps its head + the
+ *  live pane floor (the wider of editor/reading) + its divider; the asset
+ *  side its own (380 for a pdf, 200 otherwise — mirrors the old CSS floors
+ *  that the divider drag must respect before the asset yields). */
+export function clampAssetSplitPct(pct: number, centerWidthPx: number, assetMinPx: number): number {
+  const v = clampPct(pct, 58);
+  const noteMinPx = VAULT_NOTE_HEAD_PX + Math.max(VAULT_EDITOR_MIN_PX, VAULT_PREVIEW_MIN_PX) + VAULT_HANDLE_PX;
+  if (centerWidthPx > assetMinPx + noteMinPx + 12) {
+    const lo = (assetMinPx / centerWidthPx) * 100;
+    const hi = 100 - (noteMinPx / centerWidthPx) * 100;
+    return Math.min(hi, Math.max(lo, v));
+  }
+  return v;
 }
 
 function saveLayout(l: VaultLayout) {
@@ -101,9 +137,7 @@ interface VaultStore {
   /** The open non-note asset (pdf/image/…), independent of the note so both
    *  can sit side by side — take notes while reading a pdf. */
   assetPath: string | null;
-  /** Editor|preview split (percent to the editor) and asset|note split —
-   *  both user-resizable and persisted. */
-  noteSplitPct: number;
+  /** Asset|note split (percent to the asset) — user-resizable, persisted. */
   assetSplitPct: number;
   content: string;
   savedContent: string;
@@ -114,6 +148,15 @@ interface VaultStore {
   rightRailWidth: number;
   leftRailCollapsed: boolean;
   rightRailOpen: boolean;
+  /** Open note tabs, in strip order (persisted). activePath is always in
+   *  here while a note is open. */
+  openNotes: string[];
+  /** Pinned notes — float to the top of the files rail and the switcher. */
+  pinnedPaths: string[];
+  /** Recently opened notes, most recent first (persisted, capped). */
+  recentPaths: string[];
+  /** "Insert template" picker modal. */
+  templatePickerOpen: boolean;
   meta: VaultNoteMeta | null;
   loadingNote: boolean;
   searchQuery: string;
@@ -146,7 +189,6 @@ interface VaultStore {
    *  two moves against the same stale base (React batches pointermove). */
   setLeftRailWidth: (w: number | ((cur: number) => number)) => void;
   setRightRailWidth: (w: number | ((cur: number) => number)) => void;
-  setNoteSplitPct: (p: number | ((cur: number) => number)) => void;
   setAssetSplitPct: (p: number | ((cur: number) => number)) => void;
   toggleLeftRail: () => void;
   toggleRightRail: () => void;
@@ -164,6 +206,13 @@ interface VaultStore {
   loadGraph: () => Promise<void>;
   setGraphOpen: (open: boolean) => void;
   setSwitcherOpen: (open: boolean) => void;
+  /** Close one tab; when it is the active note the neighbor activates. */
+  closeNoteTab: (path: string) => void;
+  /** Toggle a note's pin (star). */
+  pinNote: (path: string) => void;
+  /** Open (creating from Templates/Daily.md if missing) today's daily note. */
+  openDailyNote: () => Promise<void>;
+  setTemplatePickerOpen: (open: boolean) => void;
   /** Restore a previously-recorded vault state (Back/Forward navigation).
    *  Reloads the snapshot note's content without recording a new step. */
   restoreSnapshot: (snap: {
@@ -259,8 +308,10 @@ export const useVaultStore = create<VaultStore>((set, get) => {
         leftWidth: s.leftRailWidth,
         rightWidth: s.rightRailWidth,
         leftCollapsed: s.leftRailCollapsed,
-        noteSplitPct: s.noteSplitPct,
         assetSplitPct: s.assetSplitPct,
+        openNotes: s.openNotes,
+        pinnedPaths: s.pinnedPaths,
+        recentPaths: s.recentPaths,
       });
     }, 250);
   };
@@ -275,8 +326,12 @@ export const useVaultStore = create<VaultStore>((set, get) => {
   assetPath: null,
   content: "",
   savedContent: "",
-  mode: "preview",
+  mode: "edit",
   rail: "files",
+  openNotes: [],
+  pinnedPaths: [],
+  recentPaths: [],
+  templatePickerOpen: false,
   ...loadLayout(),
   rightRailOpen: true,
   meta: null,
@@ -353,13 +408,26 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     const resolved = await resolveNotePath(path);
     if (gen !== openGeneration) return; // a newer open superseded this one
     if (!resolved) {
+      // Unresolved link → CREATE the note, Obsidian-style. Nested targets
+      // ("Folder/Note") create their parent folders backend-side; the note
+      // opens immediately in the editor. This is what makes
+      // `[[new idea]]` + click a flow.
       set({ loadingNote: false });
-      vaultToast("info", `No note named "${path}" in the vault.`, "Create it or check the spelling.");
+      await get().createNote(path);
       return;
     }
     // Opening anything closes the graph overlay — otherwise the note opens
     // "behind" the graph and nothing visibly changes.
-    set({ activePath: resolved, graphOpen: false });
+    const s0 = get();
+    set({
+      activePath: resolved,
+      graphOpen: false,
+      // Tab strip: an opened note gets a tab (appended, no dupes). Recents
+      // dedupe to the front, capped — both persisted via the layout blob.
+      openNotes: s0.openNotes.includes(resolved) ? s0.openNotes : [...s0.openNotes, resolved],
+      recentPaths: [resolved, ...s0.recentPaths.filter((p) => p !== resolved)].slice(0, 12),
+    });
+    persistLayout();
     recordVaultNav(get());
     const content = await vaultReadNote(resolved).catch(() => null);
     if (gen !== openGeneration) return;
@@ -425,13 +493,87 @@ export const useVaultStore = create<VaultStore>((set, get) => {
   },
 
   closeNote: () => {
+    const s = get();
+    if (!s.activePath) return;
+    get().closeNoteTab(s.activePath);
+  },
+
+  closeNoteTab: (path) => {
+    const s = get();
+    const idx = s.openNotes.indexOf(path);
+    const next = s.openNotes.filter((p) => p !== path);
+    if (path !== s.activePath) {
+      set({ openNotes: next });
+      persistLayout();
+      return;
+    }
+    // Active tab closing: flush pending edits for it first, then activate
+    // the neighbor (previous tab preferred, like editors do). No tabs left
+    // → fully clear the note surface.
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
+      void get().saveNow();
     }
-    set({ activePath: null, content: "", savedContent: "", meta: null });
+    const neighbor = next[Math.max(0, idx - 1)] ?? null;
+    set({ openNotes: next, activePath: neighbor });
+    if (!neighbor) {
+      set({ content: "", savedContent: "", meta: null });
+    } else {
+      // Load the neighbor without pushing another history step.
+      const gen = ++openGeneration;
+      set({ loadingNote: true });
+      void vaultReadNote(neighbor)
+        .then((content) => {
+          if (gen !== openGeneration) return;
+          set({ content: content ?? "", savedContent: content ?? "", loadingNote: false });
+          return vaultNoteMeta(neighbor).then((m) => {
+            if (gen === openGeneration) set({ meta: m });
+          });
+        })
+        .catch(() => {
+          if (gen === openGeneration) set({ loadingNote: false });
+        });
+    }
+    persistLayout();
     recordVaultNav(get());
   },
+
+  pinNote: (path) => {
+    const s = get();
+    const pinned = s.pinnedPaths.includes(path)
+      ? s.pinnedPaths.filter((p) => p !== path)
+      : [path, ...s.pinnedPaths];
+    set({ pinnedPaths: pinned });
+    persistLayout();
+  },
+
+  openDailyNote: async () => {
+    const d = new Date();
+    const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const dailyPath = `Daily/${iso}.md`;
+    const existing = await resolveNotePath(dailyPath);
+    if (!existing) {
+      // Seed from Templates/Daily.md when present; {{date}}/{{title}}/{{time}}
+      // get the same substitution Obsidian's core templates apply.
+      let template: string | null = null;
+      const tplPath = await resolveNotePath("Templates/Daily").catch(() => null);
+      if (tplPath) template = await vaultReadNote(tplPath).catch(() => null);
+      const body = (template ?? "")
+        .replace(/\{\{date\}\}/g, iso)
+        .replace(/\{\{title\}\}/g, iso)
+        .replace(/\{\{time\}\}/g, d.toTimeString().slice(0, 5));
+      try {
+        await vaultCreateNote(dailyPath, body);
+      } catch {
+        // Exists on disk but not indexed yet — opening below still works.
+      }
+      await get().loadTree();
+    }
+    await get().openNote(dailyPath);
+  },
+
+  setTemplatePickerOpen: (open) => set({ templatePickerOpen: open }),
 
   setMode: (mode) => set({ mode }),
   setRail: (rail) => {
@@ -445,10 +587,6 @@ export const useVaultStore = create<VaultStore>((set, get) => {
   },
   setRightRailWidth: (w) => {
     set((s) => ({ rightRailWidth: clampWidth(resolve(w, s.rightRailWidth), VAULT_RIGHT_RAIL) }));
-    persistLayout();
-  },
-  setNoteSplitPct: (p) => {
-    set((s) => ({ noteSplitPct: clampPct(resolve(p, s.noteSplitPct), s.noteSplitPct) }));
     persistLayout();
   },
   setAssetSplitPct: (p) => {
@@ -567,7 +705,10 @@ export const useVaultStore = create<VaultStore>((set, get) => {
       return;
     }
     set({ searchLoading: true });
-    const hits = await vaultSearch(q, 40).catch(() => []);
+    // `?? []`: a nullish response must never reach the panel as null — the
+    // render would crash on hits.map (observed on the IPC stub; a backend
+    // regression would crash it for real).
+    const hits = (await vaultSearch(q, 40).catch(() => [])) ?? [];
     set({ searchHits: hits, searchLoading: false });
   },
 
@@ -644,7 +785,14 @@ export const useVaultStore = create<VaultStore>((set, get) => {
       if (!snap.activePath) {
         set({ activePath: null, content: "", savedContent: "", meta: null });
       } else {
-        set({ activePath: snap.activePath, loadingNote: true });
+        const s0 = get();
+        set({
+          activePath: snap.activePath,
+          loadingNote: true,
+          openNotes: s0.openNotes.includes(snap.activePath!) ? s0.openNotes : [...s0.openNotes, snap.activePath!],
+          recentPaths: [snap.activePath!, ...s0.recentPaths.filter((p) => p !== snap.activePath)].slice(0, 12),
+        });
+        persistLayout();
         const content = await vaultReadNote(snap.activePath).catch(() => null);
         // The snapshot may have been superseded mid-load — only land the
         // text if the restore is still the latest navigation.

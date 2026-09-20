@@ -1,11 +1,14 @@
 // Vault quick switcher (Ctrl/Cmd+P inside the Vault view) + the search and
-// tags rails + the note's right rail (backlinks / outline). All read from
-// the store; opening a result is the same openNote path a tree click uses.
+// tags rails + the note's right rail (local graph / outline / backlinks).
+// All read from the store; opening a result is the same openNote path a
+// tree click uses.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, FileText, Hash, Link2, ListTree, Search } from "lucide-react";
+import { ChevronDown, ChevronRight, FileText, Hash, Link2, ListTree, Network, Search } from "lucide-react";
+import { VaultLocalGraph } from "./VaultLocalGraph";
 import { useVaultStore } from "../../state/vault";
 import { basenameOf, snippetToPlain, stemOf } from "../../lib/vaultLinks";
+import { relativeTime } from "../../lib/relativeTime";
 import type { VaultSearchHit } from "../../lib/ipc";
 
 /** Lightweight subsequence scorer for the switcher (same feel as the
@@ -30,11 +33,50 @@ export function fuzzyScore(query: string, text: string): number {
   return qi === q.length ? score : 0;
 }
 
+/** Pull the plain terms the backend actually matched on, so hits can
+ *  highlight them: exclusions (-word) and field filters (tag:, path:) match
+ *  outside the note text, a "quoted phrase" must mark up as ONE unit rather
+ *  than its words, and 1-char tokens would paint half the snippet. */
+export function searchTerms(query: string): string[] {
+  const terms: string[] = [];
+  for (const m of query.matchAll(/"([^"]*)"|(\S+)/g)) {
+    if (m[1] !== undefined) {
+      const phrase = m[1].trim();
+      if (phrase) terms.push(phrase);
+      continue;
+    }
+    const token = m[2] ?? "";
+    if (token.startsWith("-") || /^(tag|path):/i.test(token)) continue;
+    if (token.length > 1) terms.push(token);
+  }
+  return terms;
+}
+
+/** Wrap each case-insensitive occurrence of any term in <mark>. One pass
+ *  with a single alternation regex — rather than a replace per term — so
+ *  overlapping matches share one mark instead of nesting: split() with a
+ *  capture group yields [text, match, text, match, …]. */
+export function highlightTerms(text: string, terms: string[]): ReactNode {
+  const live = terms.filter((t) => t.length > 0);
+  if (live.length === 0) return text;
+  const escaped = live.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return text.split(new RegExp(`(${escaped.join("|")})`, "gi")).map((part, i) =>
+    i % 2 === 1 ? (
+      <mark key={i} className="vault-search-hit-hl">
+        {part}
+      </mark>
+    ) : (
+      part
+    ),
+  );
+}
+
 export function VaultQuickSwitcher() {
   const open = useVaultStore((s) => s.switcherOpen);
   const setOpen = useVaultStore((s) => s.setSwitcherOpen);
   const tree = useVaultStore((s) => s.tree);
   const openNote = useVaultStore((s) => s.openNote);
+  const pinnedPaths = useVaultStore((s) => s.pinnedPaths);
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -52,13 +94,20 @@ export function VaultQuickSwitcher() {
   }, [tree]);
 
   const results = useMemo(() => {
+    const pinned = new Set(pinnedPaths);
+    // Flat +100 for pinned notes: equal fuzzy scores rank pinned first.
     const scored = notes
-      .map((n) => ({ ...n, score: Math.max(fuzzyScore(query, n.name), fuzzyScore(query, n.path) * 0.8) }))
+      .map((n) => ({
+        ...n,
+        score:
+          Math.max(fuzzyScore(query, n.name), fuzzyScore(query, n.path) * 0.8) +
+          (pinned.has(n.path) ? 100 : 0),
+      }))
       .filter((n) => n.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, 12);
     return scored;
-  }, [notes, query]);
+  }, [notes, query, pinnedPaths]);
 
   useEffect(() => {
     if (open) {
@@ -131,12 +180,16 @@ export function VaultSearchPanel() {
   const loading = useVaultStore((s) => s.searchLoading);
   const openNote = useVaultStore((s) => s.openNote);
 
+  // Derived once per query, not per hit; the slice runs on the PLAIN text
+  // (as today) so a match falling past char 140 just stays unhighlighted.
+  const terms = useMemo(() => searchTerms(query), [query]);
+
   const renderHit = (hit: VaultSearchHit) => (
     <button key={hit.path} className="vault-search-hit" onClick={() => void openNote(hit.path)}>
       <FileText size={13} />
-      <span className="vault-search-hit-title">{hit.title ?? hit.basename}</span>
+      <span className="vault-search-hit-title">{highlightTerms(hit.title ?? hit.basename, terms)}</span>
       <span className="vault-search-hit-path">{hit.path}</span>
-      <span className="vault-search-hit-snippet">{snippetToPlain(hit.snippet).slice(0, 140)}</span>
+      <span className="vault-search-hit-snippet">{highlightTerms(snippetToPlain(hit.snippet).slice(0, 140), terms)}</span>
     </button>
   );
 
@@ -240,6 +293,9 @@ export function VaultNoteRail() {
   const aliases = meta.aliases;
   return (
     <div className="vault-note-rail">
+      <RailSection title="Local graph" icon={<Network size={12} />}>
+        <VaultLocalGraph activePath={activePath} meta={meta} onOpen={(p: string) => void openNote(p)} />
+      </RailSection>
       <RailSection title="Outline" icon={<ListTree size={12} />}>
         {headings.length === 0 ? (
           <div className="vault-rail-hint">No headings.</div>
@@ -306,6 +362,9 @@ export function VaultNoteRail() {
       <RailSection title="Stats">
         <div className="vault-rail-hint">
           {meta.word_count} words{content !== savedContent ? " · unsaved edits" : ""}
+          {typeof meta.modified_ms === "number"
+            ? ` · Modified ${relativeTime(Math.floor(meta.modified_ms / 1000))}`
+            : ""}
         </div>
       </RailSection>
     </div>

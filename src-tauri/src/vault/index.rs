@@ -835,6 +835,9 @@ pub struct NoteMeta {
     pub headings: Vec<(i64, String, i64)>, // level, text, line
     pub aliases: Vec<String>,
     pub word_count: i64,
+    /// Filesystem timestamps (unix epoch ms), None when the OS doesn't provide them.
+    pub created_ms: Option<u64>,
+    pub modified_ms: Option<u64>,
 }
 
 pub fn note_meta(conn: &Connection, path: &str) -> DbResult<NoteMeta> {
@@ -960,6 +963,8 @@ pub fn note_meta(conn: &Connection, path: &str) -> DbResult<NoteMeta> {
         headings,
         aliases,
         word_count: wc,
+        created_ms: None,
+        modified_ms: None,
     })
 }
 

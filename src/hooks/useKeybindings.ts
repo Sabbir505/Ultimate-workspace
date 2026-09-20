@@ -5,6 +5,7 @@ import { matchesAccelerator, type KeybindingAction } from "../lib/keybindings";
 import { defaultHarness, newSessionFlow } from "../lib/sessionLauncher";
 import { activeTerminalPair, cycleTerminalPair, usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
+import { useVaultStore } from "../state/vault";
 import { DEFAULT_APP_ZOOM, useSettingsStore } from "../state/settings";
 import { useUiStore } from "../state/ui";
 
@@ -95,6 +96,67 @@ export function useKeybindings(): void {
             const pair = activeTerminalPair(panes, spotlightOverride);
             const prev = cycleTerminalPair(panes, pair, -1);
             if (prev[0]) setSpotlight(prev[0]);
+          },
+        ],
+        // Vault shortcuts are gated on the vault being the active view — the
+        // same accelerators are meaningless (or already bound) elsewhere.
+        [
+          "vaultModeToggle",
+          () => {
+            if (useUiStore.getState().activeView !== "vault") return;
+            const { mode, setMode } = useVaultStore.getState();
+            setMode(mode === "edit" ? "preview" : "edit");
+          },
+        ],
+        [
+          "vaultQuickSwitcher",
+          () => {
+            if (useUiStore.getState().activeView !== "vault") return;
+            useVaultStore.getState().setSwitcherOpen(true);
+          },
+        ],
+        [
+          "vaultDailyNote",
+          () => {
+            if (useUiStore.getState().activeView !== "vault") return;
+            void useVaultStore.getState().openDailyNote();
+          },
+        ],
+        [
+          "vaultInsertTemplate",
+          () => {
+            if (useUiStore.getState().activeView !== "vault") return;
+            if (!useVaultStore.getState().root) return;
+            if (!useVaultStore.getState().activePath) {
+              useUiStore.getState().pushToast("info", "Open a note first");
+              return;
+            }
+            useVaultStore.getState().setTemplatePickerOpen(true);
+          },
+        ],
+        [
+          "vaultNewNote",
+          () => {
+            if (useUiStore.getState().activeView !== "vault") return;
+            const vault = useVaultStore.getState();
+            if (vault.root) void vault.createNote("Untitled.md");
+          },
+        ],
+        [
+          "vaultSearch",
+          () => {
+            if (useUiStore.getState().activeView !== "vault") return;
+            const vault = useVaultStore.getState();
+            vault.setRail("search");
+            (document.querySelector(".vault-rail-search-box input") as HTMLInputElement | null)?.focus();
+          },
+        ],
+        [
+          "vaultGraph",
+          () => {
+            if (useUiStore.getState().activeView !== "vault") return;
+            const vault = useVaultStore.getState();
+            vault.setGraphOpen(!vault.graphOpen);
           },
         ],
       ];

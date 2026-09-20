@@ -46,6 +46,7 @@ const NOTE = { path: "Notes/Idea.md" };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   useVaultStore.setState({
     root: "C:/vault",
     tree: [],
@@ -57,6 +58,12 @@ beforeEach(() => {
     searchQuery: "",
     searchHits: [],
     saveGeneration: 0,
+    // Tab/pin/recent state persists (via the layout blob) — reset it too so
+    // earlier tests' opens can't bleed into later assertions.
+    openNotes: [],
+    pinnedPaths: [],
+    recentPaths: [],
+    templatePickerOpen: false,
   });
   useUiStore.setState({ toasts: [] });
   vaultTreeMock.mockResolvedValue([]);
@@ -170,8 +177,11 @@ describe("vault store — asset (non-note) opens", () => {
     useVaultStore.getState().closeAsset();
     expect(useVaultStore.getState().assetPath).toBeNull();
     expect(useVaultStore.getState().activePath).toBe("A.md");
+    // closeNote closes the ACTIVE TAB: the last tab clears the surface and
+    // leaves no stray tab behind.
     useVaultStore.getState().closeNote();
     expect(useVaultStore.getState().activePath).toBeNull();
+    expect(useVaultStore.getState().openNotes).toEqual([]);
   });
 
   it("renameNote refuses non-note paths instead of renaming to .pdf.md", async () => {
@@ -253,12 +263,19 @@ describe("vault store — wikilink resolution", () => {
     expect(useVaultStore.getState().content).toBe("daily body");
   });
 
-  it("fails loudly when a target matches no note (no phantom empty editor)", async () => {
+  it("creates + opens the note when a link target matches nothing (click-to-create)", async () => {
+    // The search finds nothing for "Missing" — openNote CREATES Missing.md
+    // (Obsidian's unresolved-link behavior) and opens it. The extensioned
+    // re-open bypasses resolution (resolveNotePath short-circuits .md), so
+    // the flow terminates even with the search still returning nothing.
     vaultSearchMock.mockResolvedValue([]);
+    vaultCreateNoteMock.mockResolvedValue("Missing.md");
+    vaultTreeMock.mockResolvedValue([]);
+    vaultReadNoteMock.mockResolvedValue("");
     await useVaultStore.getState().openNote("Missing");
-    expect(vaultReadNoteMock).not.toHaveBeenCalled();
-    expect(useVaultStore.getState().activePath).toBeNull();
-    expect(useUiStore.getState().toasts.some((t) => t.message.includes("Missing"))).toBe(true);
+    expect(vaultCreateNoteMock).toHaveBeenCalledWith("Missing.md", "");
+    expect(useVaultStore.getState().activePath).toBe("Missing.md");
+    expect(useVaultStore.getState().mode).toBe("edit");
   });
 
   it("a slow read for note A cannot clobber a fast open of note B", async () => {
@@ -383,12 +400,16 @@ describe("vault store — mutations", () => {
     expect(useVaultStore.getState().activePath).toBe("Old.md");
   });
 
-  it("deleteNote closes the active note", async () => {
+  it("deleteNote closes the deleted note's tab (neighbor activates)", async () => {
     vaultReadNoteMock.mockResolvedValue("x");
+    await useVaultStore.getState().openNote("Old.md");
     await useVaultStore.getState().openNote("Doomed.md");
     await useVaultStore.getState().deleteNote("Doomed.md");
     expect(vaultDeleteNoteMock).toHaveBeenCalledWith("Doomed.md");
-    expect(useVaultStore.getState().activePath).toBeNull();
+    // Tab-aware close: the previous tab activates, the deleted path leaves
+    // the strip entirely.
+    expect(useVaultStore.getState().activePath).toBe("Old.md");
+    expect(useVaultStore.getState().openNotes).toEqual(["Old.md"]);
   });
 });
 

@@ -20,6 +20,25 @@ interface StubArtifactRecord {
 const HOUR = 3_600_000;
 const now = Date.now();
 
+/** Tiny note corpus for vault harnesses: two linked notes so wikilink
+ *  resolution, hover previews and the local graph have something real. */
+const STUB_VAULT_NOTES = [
+  {
+    path: "Notes/Night.md",
+    basename: "Night.md",
+    title: "Night",
+    snippet: "…Night is a short study note. It links back to Linear Regression…",
+    body: "# Night\n\nA short study note.\n\nSee [[Linear Regression]] for the base lesson.\n\n==Highlight== and `code` render inline.\n",
+  },
+  {
+    path: "Notes/Linear Regression.md",
+    basename: "Linear Regression.md",
+    title: "Linear Regression Basics",
+    snippet: "…Linear Regression is a supervised learning algorithm…",
+    body: "# Linear Regression\n\nLinear Regression is a supervised learning algorithm.\n\nPart of [[Night]].\n",
+  },
+];
+
 const stubArtifacts: StubArtifactRecord[] = [
   { id: "a1", chatSessionId: "s1", chatMessageId: 12, filename: "memory-system.md", path: "C:/artifacts/memory-system.md", kind: "md", createdAt: now - 2 * HOUR, expiresAt: now + 30 * 24 * HOUR },
   { id: "a2", chatSessionId: "s1", chatMessageId: 14, filename: "traffic-graph.svg", path: "C:/artifacts/traffic-graph.svg", kind: "svg", createdAt: now - 5 * HOUR, expiresAt: now + 30 * 24 * HOUR },
@@ -207,6 +226,27 @@ export function installTauriStub(): void {
         case "plugin:event|listen":
         case "plugin:event|unlisten":
           return Promise.resolve(0);
+        // Vault search/read so link-hover previews and the search rail have
+        // real-shaped data in harnesses (a bare null used to crash callers
+        // into their "no hits" path even after the ?? [] guards).
+        case "vault_search": {
+          const q = String((args as { query?: string })?.query ?? "");
+          const m = /file:"([^"]+)"/.exec(q);
+          const target = (m?.[1] ?? "").toLowerCase();
+          const hit = STUB_VAULT_NOTES.find(
+            (n) => n.path.toLowerCase() === `${target}.md` || n.path.toLowerCase().endsWith(`/${target}.md`) || n.basename.toLowerCase() === target,
+          );
+          return Promise.resolve(
+            hit
+              ? [{ path: hit.path, title: hit.title, basename: hit.basename, snippet: hit.snippet }]
+              : [],
+          );
+        }
+        case "vault_read_note": {
+          const p = String((args as { path?: string })?.path ?? "");
+          const hit = STUB_VAULT_NOTES.find((n) => n.path.toLowerCase() === p.toLowerCase());
+          return Promise.resolve(hit ? hit.body : null);
+        }
         default:
           console.debug(`[tauriStub] invoke("${cmd}") → null`);
           return Promise.resolve(null);

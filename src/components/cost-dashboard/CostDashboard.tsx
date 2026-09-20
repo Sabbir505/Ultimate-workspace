@@ -10,19 +10,19 @@ import { CostQualityPanel } from "./CostQualityPanel";
 import { BudgetPanel } from "./BudgetPanel";
 
 export function CostDashboard() {
-  const setActiveView = useUiStore(s => s.setActiveView);
+  const closeOverlay = useUiStore(s => s.closeOverlay);
   const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
   const { rollups, loading, error, refresh } = useCostRollups(rangeDays);
 
   return (
     <div className="view-overlay modal-centered"
-         onPointerDown={(e) => e.target === e.currentTarget && setActiveView("chat")}>
+         onPointerDown={(e) => e.target === e.currentTarget && closeOverlay()}>
       <div className="view-panel">
         <div className="view-header">
           <h2>Usage</h2>
           <div className="view-header-right">
             <RangeToggle value={rangeDays} onChange={setRangeDays} />
-            <button className="ghost" onClick={() => setActiveView("chat")}>✕</button>
+            <button className="ghost" onClick={closeOverlay}>✕</button>
           </div>
         </div>
         <div className="view-body">

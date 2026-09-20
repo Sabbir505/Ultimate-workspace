@@ -27,7 +27,7 @@ import type { InstalledSkill, Skill } from "../../types";
 type Tab = "skills" | "loops" | "templates";
 
 export function SkillsLibrary() {
-  const setActiveView = useUiStore((s) => s.setActiveView);
+  const closeOverlay = useUiStore((s) => s.closeOverlay);
   const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
   const [tab, setTab] = useState<Tab>("skills");
 
@@ -49,11 +49,11 @@ export function SkillsLibrary() {
   }, [pendingArtifactFormData]);
 
   return (
-    <div className="view-overlay modal-centered" onPointerDown={(e) => e.target === e.currentTarget && setActiveView("chat")}>
+    <div className="view-overlay modal-centered" onPointerDown={(e) => e.target === e.currentTarget && closeOverlay()}>
       <div className="view-panel">
         <div className="view-header">
           <h2>Skills &amp; Loops Library</h2>
-          <button className="ghost" onClick={() => setActiveView("chat")}>
+          <button className="ghost" onClick={closeOverlay}>
             ✕
           </button>
         </div>

@@ -13,6 +13,7 @@ describe("view nav history", () => {
   beforeEach(() => {
     useUiStore.setState({
       activeView: "chat",
+      baseView: "chat",
       viewHistory: [entry("chat")],
       viewIndex: 0,
     });
@@ -113,5 +114,52 @@ describe("view nav history", () => {
       entry("chat", "a"),
     ]);
     expect(useUiStore.getState().viewIndex).toBe(2);
+  });
+});
+
+// Overlays (settings/skills/cost) float above the real view; closing one
+// must restore what was actually underneath — opening settings from the
+// vault used to dump the user on the chat (2026-09-20 report).
+describe("overlay open/close (baseView)", () => {
+  beforeEach(() => {
+    useUiStore.setState({
+      activeView: "chat",
+      baseView: "chat",
+      viewHistory: [{ view: "chat", chatSessionId: null }],
+      viewIndex: 0,
+    });
+  });
+
+  it("closing settings from the vault returns to the vault, not chat", () => {
+    const { setActiveView, closeOverlay } = useUiStore.getState();
+    setActiveView("vault");
+    expect(useUiStore.getState().baseView).toBe("vault");
+    setActiveView("settings");
+    expect(useUiStore.getState().baseView).toBe("vault");
+    closeOverlay();
+    expect(useUiStore.getState().activeView).toBe("vault");
+  });
+
+  it("opening an overlay does not change the base view", () => {
+    const { setActiveView } = useUiStore.getState();
+    setActiveView("automations");
+    setActiveView("skills");
+    setActiveView("cost");
+    expect(useUiStore.getState().baseView).toBe("automations");
+  });
+
+  it("navigating to a real view moves the base view", () => {
+    const { setActiveView } = useUiStore.getState();
+    setActiveView("vault");
+    setActiveView("settings");
+    setActiveView("chat");
+    // Settings → chat is a REAL navigation (e.g. "Run login"): base follows.
+    expect(useUiStore.getState().baseView).toBe("chat");
+  });
+
+  it("closeOverlay is a no-op when no overlay is open", () => {
+    useUiStore.getState().setActiveView("vault");
+    useUiStore.getState().closeOverlay();
+    expect(useUiStore.getState().activeView).toBe("vault");
   });
 });

@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { usePanesStore, type PaneDescriptor } from "../state/panes";
 import { useSettingsStore } from "../state/settings";
 import { useKeybindings } from "../hooks/useKeybindings";
+import { DEFAULT_KEYBINDINGS } from "../lib/keybindings";
 import { render, cleanup } from "@testing-library/react";
 
 function Harness() {
@@ -27,13 +28,7 @@ function terminalDesc(sessionId: string): PaneDescriptor {
   };
 }
 
-const DEFAULTS = {
-  openPalette: "Mod+K", focusPane1: "Mod+1", focusPane2: "Mod+2",
-  focusPane3: "Mod+3", focusPane4: "Mod+4", focusPane5: "Mod+5",
-  focusPane6: "Mod+6", cyclePane: "Mod+`", newSession: "Mod+N",
-  closePane: "Mod+W", toggleBroadcast: "Mod+Shift+B", openSettings: "Mod+,",
-  spotlightNext: "Mod+Shift+]", spotlightPrev: "Mod+Shift+[",
-};
+const DEFAULTS: Record<string, string> = { ...DEFAULT_KEYBINDINGS };
 
 function fireKey(target: HTMLElement, key: string, mods: { ctrl?: boolean; shift?: boolean } = {}) {
   const e = new KeyboardEvent("keydown", {
@@ -54,7 +49,7 @@ describe("focus-pane shortcuts fire even when xterm stopPropagation's the keydow
   let ta: HTMLTextAreaElement;
 
   beforeEach(() => {
-    useSettingsStore.setState({ keybindings: { ...DEFAULTS } });
+    useSettingsStore.setState({ keybindings: { ...DEFAULT_KEYBINDINGS } });
     usePanesStore.setState({ panes: [], focusedPaneId: null });
     ta = document.createElement("textarea");
     ta.className = "xterm-helper-textarea";

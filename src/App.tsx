@@ -14,6 +14,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ArrowLeft, ArrowRight, MessageCirclePlus } from "lucide-react";
 import { Modal } from "./components/common/Modal";
+import { PanelIcon } from "./components/common/PanelIcon";
 import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
 import { WorktreeNudgeBanner } from "./components/onboarding/WorktreeNudgeBanner";
@@ -94,6 +95,7 @@ import { mainPaneLeaf } from "./state/chat/paneTree";
 
 export default function App() {
   const activeView = useUiStore((s) => s.activeView);
+  const baseView = useUiStore((s) => s.baseView);
   const setActiveView = useUiStore((s) => s.setActiveView);
   // First-run welcome wizard: visibility is decided by initOnboarding() in
   // the bootstrap effect below (after projects load), and replays re-open it
@@ -391,10 +393,7 @@ export default function App() {
             title="Toggle side panel"
             aria-label="Toggle side panel"
           >
-            <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <rect x="3" y="4" width="18" height="16" rx="2" />
-              <line x1="15" y1="4" x2="15" y2="20" />
-            </svg>
+            <PanelIcon side="right" size={16} />
           </button>
           {/* Window controls — the title bar's right edge, mirroring native
               Minimize / Maximize / Close order. */}
@@ -449,18 +448,35 @@ export default function App() {
           </Suspense>
         )}
 
-{/* Settings/Skills/Cost are OVERLAYS mounted on top of the chat — the chat
-    grid must stay MOUNTED for those views (only "automations" is a real
-    view swap). Unmounting here blanked the whole app and killed the
-    terminal/browser panes every time a footer icon was clicked; the panes
-    hide themselves via browserOcclusion (activeView !== "chat") instead. */}
-{activeView !== "automations" && activeView !== "vault" ? (
-        <div className={`grid-wrap chat-grid-wrap${chatPaneTree ? " split-active" : ""}`}>
-          {/* The split-chat pane tree (up to six full chat views, resizable
-              gutters, drag-a-session-onto-an-edge). With no splits open the
-              same renderer draws the single main pane — identical drop
-              targets, so the FIRST drag can create the first split. */}
-          <ChatPaneGrid node={chatPaneTree ?? mainPaneLeaf()} />
+{/* Settings/Skills/Cost are OVERLAYS mounted on top of the grid — the view
+    underneath stays MOUNTED (only automations/vault are real view swaps of
+    the grid's content). Unmounting here blanked the whole app and killed
+    the terminal/browser panes every time a footer icon was clicked; the
+    panes hide themselves via browserOcclusion (overlay views occlude)
+    instead. The grid follows baseView, so opening Settings from the vault
+    overlays the vault instead of swapping it for the chat — and closing it
+    restores where the user actually was.
+
+    The ToolPanel + TtsPlayerBar are rendered ONCE below the view switch:
+    every view hosts the same panel, and a per-branch instance would unmount
+    on every chat↔vault↔automations switch — killing browser webviews (full
+    page reload on the way back) and churning terminal ptys. */}
+        <div className={`grid-wrap chat-grid-wrap${baseView === "chat" && chatPaneTree ? " split-active" : ""}`}>
+          {baseView !== "automations" && baseView !== "vault" ? (
+            /* The split-chat pane tree (up to six full chat views, resizable
+                gutters, drag-a-session-onto-an-edge). With no splits open the
+                same renderer draws the single main pane — identical drop
+                targets, so the FIRST drag can create the first split. */
+            <ChatPaneGrid node={chatPaneTree ?? mainPaneLeaf()} />
+          ) : baseView === "automations" ? (
+            <Suspense fallback={null}>
+              <AutomationsView />
+            </Suspense>
+          ) : (
+            <Suspense fallback={null}>
+              <VaultView />
+            </Suspense>
+          )}
           <Suspense fallback={null}>
             <ToolPanel />
           </Suspense>
@@ -469,27 +485,6 @@ export default function App() {
               keep its controls here. */}
           <TtsPlayerBar />
         </div>
-      ) : activeView === "automations" ? (
-        <div className="grid-wrap chat-grid-wrap">
-          <Suspense fallback={null}>
-            <AutomationsView />
-          </Suspense>
-          <Suspense fallback={null}>
-            <ToolPanel />
-          </Suspense>
-          <TtsPlayerBar />
-        </div>
-      ) : (
-        <div className="grid-wrap chat-grid-wrap">
-          <Suspense fallback={null}>
-            <VaultView />
-          </Suspense>
-          <Suspense fallback={null}>
-            <ToolPanel />
-          </Suspense>
-          <TtsPlayerBar />
-        </div>
-      )}
       </div>
 
       {/* Overlays — mounted lazily so the heaviest view (Settings) only

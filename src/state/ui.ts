@@ -80,14 +80,24 @@ export interface PendingReplace {
   lruPaneId: string;
 }
 
+/** The slice of vault state Back/Forward restores for a vault entry. Kept
+ *  structural (no import of the vault store) to avoid a store cycle. */
+export interface VaultNavSnapshot {
+  graphOpen: boolean;
+  assetPath: string | null;
+  activePath: string | null;
+}
+
 /** One browser-history entry: the visited view plus the chat session that
  *  was open when the entry was recorded. Chat switches ARE navigation —
  *  back/forward must return to the chat the user was reading, not just the
  *  view. `chatSessionId` is null for non-chat views (and the pre-boot
- *  placeholder before any session exists). */
+ *  placeholder before any session exists). Vault entries additionally carry
+ *  a `vault` snapshot (graph open? which note/asset?). */
 export interface ViewNavEntry {
   view: ActiveView;
   chatSessionId: string | null;
+  vault?: VaultNavSnapshot;
 }
 
 export interface UiState {
@@ -182,6 +192,10 @@ export interface UiState {
    *  replaced in place so the auto-created session doesn't add a dead Back
    *  step. */
   recordChatNav: (chatSessionId: string) => void;
+  /** Record a vault-view state change in the nav timeline (called by the
+   *  vault store when its note/asset/graph trio changes). Mirrors
+   *  recordChatNav: same-snapshot no-op, fresh-push replace, else push. */
+  recordVaultNav: (vault: VaultNavSnapshot) => void;
   /** Step one entry back through the visited views/chats. Returns the entry
    *  landed on (null = already at the start) so callers can restore the
    *  entry's chat session. */
@@ -426,6 +440,36 @@ export const useUiStore = create<UiState>((set, get) => ({
         return { viewHistory: history, viewIndex: history.length - 1 };
       }
       // Chat picked from a non-chat view (palette, artifacts, …): push.
+      let history = [...s.viewHistory.slice(0, s.viewIndex + 1), entry];
+      if (history.length > 50) history = history.slice(history.length - 50);
+      return { viewHistory: history, viewIndex: history.length - 1 };
+    }),
+
+  recordVaultNav: (vault) =>
+    set((s) => {
+      const top = s.viewHistory[s.viewIndex];
+      const entry: ViewNavEntry = { view: "vault", chatSessionId: null, vault };
+      if (top?.view === "vault") {
+        const topV = top.vault;
+        const same =
+          topV &&
+          topV.graphOpen === vault.graphOpen &&
+          topV.assetPath === vault.assetPath &&
+          topV.activePath === vault.activePath;
+        if (same) return {};
+        let history: ViewNavEntry[];
+        if (!topV) {
+          // Replace in place: a fresh vault-view push (setActiveView) has no
+          // snapshot yet — it becomes this first real vault state.
+          history = [...s.viewHistory.slice(0, s.viewIndex), entry];
+        } else {
+          history = [...s.viewHistory.slice(0, s.viewIndex + 1), entry];
+        }
+        if (history.length > 50) history = history.slice(history.length - 50);
+        return { viewHistory: history, viewIndex: history.length - 1 };
+      }
+      // Vault state changed while a non-vault view was on top (transient —
+      // the vault store only mutates while mounted, but stay safe): push.
       let history = [...s.viewHistory.slice(0, s.viewIndex + 1), entry];
       if (history.length > 50) history = history.slice(history.length - 50);
       return { viewHistory: history, viewIndex: history.length - 1 };

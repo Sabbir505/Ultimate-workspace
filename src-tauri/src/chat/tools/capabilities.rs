@@ -110,7 +110,13 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
             // and open_url are always available.
             "browser_pane_tools": caps.browser,
             "memory": caps.memory,
-            "vault": "bound folder of markdown notes; vault_list/read/search + vault_write/move/delete (full CRUD)",
+            // Match the schema: the write trio is stripped under a read-only
+            // posture, so the report must not claim full CRUD there.
+            "vault": if caps.allows_mutating {
+                "bound folder of markdown notes; vault_list/read/search + vault_write/move/delete (full CRUD)"
+            } else {
+                "bound folder of markdown notes; vault_list/read/search only (write tools are stripped in this read-only posture)"
+            },
             "automations": true,
             "subagents": true,
             "skills": "listed under '## Available skills' in the system prompt; get_skill(slug) loads one",

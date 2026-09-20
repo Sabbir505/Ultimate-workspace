@@ -14,6 +14,9 @@ export interface VaultTreeNode {
   children: VaultTreeNode[];
 }
 
+/** [newPath, filesRewritten] */
+export type VaultRenameResult = [string, number];
+
 export interface VaultStats {
   notes: number;
   files: number;
@@ -91,6 +94,17 @@ export const vaultWriteNote = (path: string, content: string) =>
   safeInvoke<string>("vault_write_note", { path, content });
 export const vaultDeleteNote = (path: string) =>
   safeInvoke<string>("vault_delete_note", { path });
+/** Move a NON-note file (asset) to a new vault-relative path (drag & drop). */
+export const vaultMoveFile = (from: string, to: string) =>
+  safeInvoke<string>("vault_move_file", { from, to });
+/** Copy an external file INTO the vault (insert-image). Returns the final
+ *  vault-relative path (suffixed on collision, never clobbers). */
+export const vaultImportFile = (src: string, dest: string) =>
+  safeInvoke<string>("vault_import_file", { src, dest });
+/** Write raw bytes (base64) into a vault file — clipboard image paste.
+ *  Returns the final vault-relative path (suffixed on collision). */
+export const vaultWriteBinary = (path: string, base64Data: string) =>
+  safeInvoke<string>("vault_write_binary", { path, base64Data });
 /** [newPath, filesRewritten] */
 export const vaultRenameNote = (from: string, to: string) =>
   safeInvoke<[string, number]>("vault_rename_note", { from, to });

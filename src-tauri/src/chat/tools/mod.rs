@@ -430,6 +430,11 @@ pub struct ToolCaps {
     /// mid-round caps refresh in streaming.rs picks the flag up). When false
     /// only `open_url` + `browser_read` are advertised.
     pub browser: bool,
+    /// Whether this turn's sandbox posture allows mutating tools — set from
+    /// `SandboxPolicy::allows_mutating_tools()` at the same place the schema
+    /// strips the write tools, so `get_capabilities` (which reports from this
+    /// struct) can never claim vault/fs writes in a read-only posture.
+    pub allows_mutating: bool,
 }
 
 impl Default for ToolCaps {
@@ -451,6 +456,7 @@ impl Default for ToolCaps {
             local_model: false,
             memory: true,
             browser: false,
+            allows_mutating: true,
         }
     }
 }

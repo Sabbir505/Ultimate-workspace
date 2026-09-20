@@ -192,26 +192,41 @@ pub fn parse_note(content: &str) -> ParsedNote {
 }
 
 /// Split leading `---` frontmatter. Returns (body, Some((raw_yaml, parsed)))
-/// when a well-formed fence is present.
+/// when a well-formed fence is present. Walks the content with a byte cursor
+/// instead of `lines()` arithmetic: `lines()` strips `\r`, so counting
+/// `line.len() + 1` per line drifts one byte short per CRLF line — the body
+/// offset lands inside the closing fence, shifting every indexed line number
+/// (and, if the drift cuts a multibyte char, silently emptying the body).
 pub fn split_frontmatter(content: &str) -> (&str, Option<(String, Frontmatter)>) {
-    let mut lines = content.lines();
-    if !lines.next().map(|l| l.trim_end() == "---").unwrap_or(false) {
-        return (content, None);
-    }
+    let bytes = content.as_bytes();
+    let mut pos = 0usize;
     let mut yaml = String::new();
-    let mut offset = 4; // "---\n"
-    for line in content.lines().skip(1) {
-        offset += line.len() + 1;
-        if line.trim_end() == "---" {
-            let body_offset = offset;
+    let mut first = true;
+    while pos < content.len() {
+        let nl = content[pos..].find('\n').map(|i| pos + i);
+        let line_end = nl.unwrap_or(content.len());
+        let mut text_end = line_end;
+        if text_end > pos && bytes[text_end - 1] == b'\r' {
+            text_end -= 1; // CRLF: the \r belongs to the ending, not the line
+        }
+        let line = &content[pos..text_end];
+        if first {
+            first = false;
+            if line.trim_end() != "---" {
+                return (content, None);
+            }
+        } else if line.trim_end() == "---" {
+            let body_offset = nl.map_or(content.len(), |i| i + 1);
             let fm = parse_frontmatter(&yaml);
             return (
-                content.get(body_offset..).unwrap_or(""),
+                &content[body_offset..],
                 Some((yaml.trim_end().to_string(), fm)),
             );
+        } else {
+            yaml.push_str(line);
+            yaml.push('\n');
         }
-        yaml.push_str(line);
-        yaml.push('\n');
+        pos = nl.map_or(content.len(), |i| i + 1);
     }
     // Unterminated fence: not frontmatter.
     (content, None)
@@ -667,7 +682,9 @@ pub fn shortest_linktext(dest: &str, files: &[FileMeta]) -> String {
 
 /// Rewrite every link in `content` that resolves (against `files`) to
 /// `old_path`, replacing only the target text with `new_linktext` — display
-/// text and subpaths survive. Returns (new_content, rewrite_count).
+/// text and subpaths survive, and each line keeps its original line ending
+/// (LF stays LF, CRLF stays CRLF — renaming a note must not flip the line
+/// endings of every file that links to it). Returns (new_content, rewrite_count).
 pub fn rewrite_inbound_links(
     content: &str,
     old_path: &str,
@@ -677,11 +694,20 @@ pub fn rewrite_inbound_links(
     let old_norm = normalize_linkpath(old_path);
     let mut out = String::with_capacity(content.len() + 16);
     let mut rewrites = 0usize;
-    for (idx, line) in content.lines().enumerate() {
+    let bytes = content.as_bytes();
+    let mut pos = 0usize;
+    while pos < content.len() {
+        let nl = content[pos..].find('\n').map(|i| pos + i);
+        let line_end = nl.unwrap_or(content.len());
+        // Split a CRLF's \r off so parsing sees the same text `lines()` did;
+        // the ending itself is re-emitted verbatim below.
+        let had_cr = line_end > pos && bytes[line_end - 1] == b'\r';
+        let text_end = if had_cr { line_end - 1 } else { line_end };
+        let line = &content[pos..text_end];
         // Spans are byte offsets into the masked line, which is
         // byte-length-identical to `line` (both masks preserve width).
         let code_masked = mask_inline_code(line);
-        let links = scan_links(&code_masked, idx);
+        let links = scan_links(&code_masked, 0);
         let hits: Vec<&SpanLink> = links
             .iter()
             .filter(|l| {
@@ -720,8 +746,12 @@ pub fn rewrite_inbound_links(
                     out.push_str(&format!("[{display}]({encoded}{ext}{subpath})"));
                 } else {
                     let bang = if l.is_embed { "!" } else { "" };
+                    // Obsidian order: target, then #subpath, then |alias —
+                    // the subpath targets the destination, so it must stay
+                    // BEFORE the pipe (an alias with the subpath appended is
+                    // display text, and the heading target is lost).
                     match &l.display {
-                        Some(d) => out.push_str(&format!("{bang}[[{new_linktext}|{d}{subpath}]]")),
+                        Some(d) => out.push_str(&format!("{bang}[[{new_linktext}{subpath}|{d}]]")),
                         None => out.push_str(&format!("{bang}[[{new_linktext}{subpath}]]")),
                     }
                 }
@@ -730,11 +760,17 @@ pub fn rewrite_inbound_links(
             }
             out.push_str(&line[last..]);
         }
-        out.push('\n');
-    }
-    // lines() drops the final newline state — restore it exactly.
-    if !content.ends_with('\n') && out.ends_with('\n') {
-        out.truncate(out.len() - 1);
+        match nl {
+            Some(i) => {
+                if had_cr {
+                    out.push_str("\r\n");
+                } else {
+                    out.push('\n');
+                }
+                pos = i + 1;
+            }
+            None => pos = content.len(),
+        }
     }
     (out, rewrites)
 }
@@ -861,6 +897,41 @@ mod tests {
         assert!(n.links.is_empty());
     }
 
+    #[test]
+    fn crlf_frontmatter_splits_at_the_exact_body_offset() {
+        // Byte-cursor accounting: one \r per line must not shift the body.
+        let content = "---\r\naliases: [X]\r\n---\r\n# Title\r\nbody [[Link]]";
+        let (body, fm) = split_frontmatter(content);
+        assert_eq!(body, "# Title\r\nbody [[Link]]");
+        assert!(fm.is_some());
+        let n = parse_note(content);
+        assert_eq!(n.title.as_deref(), Some("Title"));
+        assert_eq!(n.links.len(), 1);
+        assert_eq!(n.links[0].line, 1, "body-relative line, not shifted by CRLF");
+        assert_eq!(n.headings.len(), 1);
+        assert_eq!(n.headings[0].line, 0);
+    }
+
+    #[test]
+    fn crlf_frontmatter_with_multibyte_yaml_keeps_body() {
+        // The old offset math could land mid-UTF-8 char and silently
+        // produce an empty body; the byte cursor cannot.
+        let content = "---\r\n别名: 值一\r\n别名二: 值二\r\n别名三: 值三\r\n---\r\n# 好";
+        let n = parse_note(content);
+        assert_eq!(n.headings.len(), 1);
+        assert_eq!(n.headings[0].text, "好");
+    }
+
+    #[test]
+    fn frontmatter_empty_body_and_no_trailing_newline() {
+        let (body, fm) = split_frontmatter("---\nk: v\n---");
+        assert_eq!(body, "");
+        assert!(fm.is_some());
+        let (body2, fm2) = split_frontmatter("---\r\nk: v\r\n---\r\n");
+        assert_eq!(body2, "");
+        assert!(fm2.is_some());
+    }
+
     fn files() -> Vec<FileMeta> {
         vec![
             FileMeta { path: "Note.md".into(), basename: "Note".into(), folder: "".into(), aliases: vec!["The Alias".into()], is_note: true },
@@ -921,6 +992,43 @@ mod tests {
         assert!(out.contains("[[New Name#Head]]"));
         assert!(out.contains("![[New Name]]"));
         assert!(out.contains("[md](New%20Name.md#x)"));
+    }
+
+    #[test]
+    fn rewrite_keeps_subpath_before_alias_in_wikilinks() {
+        // `[[Old#Head|alias]]`: the subpath targets the destination and must
+        // stay before the pipe — `[[New|alias#Head]]` demotes it to display
+        // text and the heading link is lost.
+        let content = "[[Old#Head|see here]] and [[Old#^abc|ref]]";
+        let files = vec![FileMeta {
+            path: "Old.md".into(),
+            basename: "Old".into(),
+            folder: "".into(),
+            aliases: vec![],
+            is_note: true,
+        }];
+        let (out, n) = rewrite_inbound_links(content, "Old.md", "New", &files);
+        assert_eq!(n, 2);
+        assert!(out.contains("[[New#Head|see here]]"), "out: {out}");
+        assert!(out.contains("[[New#^abc|ref]]"), "out: {out}");
+    }
+
+    #[test]
+    fn rewrite_preserves_crlf_line_endings() {
+        let content = "top\r\nlink [[Old]] here\r\nlast no newline";
+        let files = vec![FileMeta {
+            path: "Old.md".into(),
+            basename: "Old".into(),
+            folder: "".into(),
+            aliases: vec![],
+            is_note: true,
+        }];
+        let (out, n) = rewrite_inbound_links(content, "Old.md", "New", &files);
+        assert_eq!(n, 1);
+        assert_eq!(out, "top\r\nlink [[New]] here\r\nlast no newline");
+        // And an LF file stays LF.
+        let (out2, _) = rewrite_inbound_links("a\n[[Old]]\n", "Old.md", "New", &files);
+        assert_eq!(out2, "a\n[[New]]\n");
     }
 
     #[test]

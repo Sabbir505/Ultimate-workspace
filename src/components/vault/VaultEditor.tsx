@@ -27,6 +27,12 @@ export interface VaultEditorProps {
   /** Note basenames + aliases for `[[` completion. */
   completionItems: { label: string; detail: string }[];
   onOpenLink: (target: string, subpath: string | null) => void;
+  /** Hands the live EditorView to the parent — the toolbar's edit actions
+   *  (bold/italic/image insert/…) dispatch through it. */
+  onViewReady?: (view: EditorView | null) => void;
+  /** An image arrived via clipboard paste or file drag-drop — the parent
+   *  imports it into the vault and inserts the embed. */
+  onImagePaste?: (file: File) => void;
 }
 
 // Module-level bridge so the completion source reads the CURRENT note list
@@ -72,6 +78,7 @@ const wikilinkDeco = ViewPlugin.fromClass(
     buildDeco(view: EditorView): DecorationSet {
       const widgets: Array<{ from: number; to: number; deco: Decoration }> = [];
       const re = /\[\[([^\]|\n]+)(?:\|([^\]\n]*))?\]\]/g;
+      const markRe = /==([^=\n]+)==/g;
       for (const range of view.visibleRanges) {
         for (let pos = range.from; pos <= range.to; ) {
           const line = view.state.doc.lineAt(pos);
@@ -86,6 +93,15 @@ const wikilinkDeco = ViewPlugin.fromClass(
                 class: "cm-vault-wikilink",
                 attributes: { title: m[1].trim() },
               }),
+            });
+          }
+          let mk: RegExpExecArray | null;
+          while ((mk = markRe.exec(line.text))) {
+            const start = line.from + mk.index;
+            widgets.push({
+              from: start,
+              to: start + mk[0].length,
+              deco: Decoration.mark({ class: "cm-vault-mark" }),
             });
           }
           pos = line.to + 1;
@@ -177,6 +193,30 @@ export function VaultEditor(props: VaultEditorProps) {
           ]),
           keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
           EditorView.lineWrapping,
+          // Clipboard paste / file drop of IMAGES → the parent's importer
+          // (writes the bytes into vault assets, inserts the embed). Text
+          // paste/drop falls through to CodeMirror untouched.
+          EditorView.domEventHandlers({
+            paste: (event) => {
+              const items = Array.from(event.clipboardData?.items ?? []);
+              const img = items.find((i) => i.kind === "file" && i.type.startsWith("image/"));
+              if (!img) return false;
+              const file = img.getAsFile();
+              if (!file) return false;
+              event.preventDefault();
+              propsRef.current.onImagePaste?.(file);
+              return true;
+            },
+            drop: (event) => {
+              const files = Array.from(event.dataTransfer?.files ?? []).filter((f) =>
+                f.type.startsWith("image/"),
+              );
+              if (files.length === 0) return false;
+              event.preventDefault();
+              for (const file of files) propsRef.current.onImagePaste?.(file);
+              return true;
+            },
+          }),
           themeComp.of(EditorView.theme({})),
           languageComp.of([]),
           wikilinkDeco,
@@ -190,9 +230,11 @@ export function VaultEditor(props: VaultEditorProps) {
       }),
     });
     viewRef.current = view;
+    propsRef.current.onViewReady?.(view);
     return () => {
       view.destroy();
       viewRef.current = null;
+      propsRef.current.onViewReady?.(null);
     };
     // The editor is created ONCE per mount; value changes flow through
     // the sync effect below (externally loaded notes / watcher reloads).

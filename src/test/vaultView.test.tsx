@@ -53,6 +53,7 @@ beforeEach(() => {
     stats: null,
     tree: [],
     activePath: null,
+    assetPath: null,
     content: "",
     savedContent: "",
     meta: null,
@@ -99,11 +100,49 @@ describe("VaultView", () => {
 describe("VaultFileTree", () => {
   it("renders folders collapsed and expands on click", () => {
     render(<VaultFileTree tree={TREE as never} />);
-    // Collapsed: the child note is not in the DOM yet.
-    expect(screen.queryByText("2026-09-19.md")).toBeNull();
+    // Collapsed: the child is mounted (for the height animation) but its
+    // container is shut (grid-rows 0fr).
+    const container = () => document.querySelector(".vault-tree-children")!;
+    expect(container()).toBeTruthy();
+    expect(container().classList.contains("open")).toBe(false);
     fireEvent.click(screen.getByText("Journal"));
+    expect(container().classList.contains("open")).toBe(true);
     expect(screen.getByText("2026-09-19.md")).toBeTruthy();
     expect(screen.getByText("Home.md")).toBeTruthy();
+  });
+
+  it("lets nested folders expand and collapse INDEPENDENTLY", () => {
+    // Regression: the recursive Row used to thread the parent's expanded
+    // boolean down, so nested folders were force-expanded and their
+    // chevrons did nothing.
+    const NESTED = [
+      {
+        name: "A",
+        path: "A",
+        kind: "folder",
+        children: [
+          {
+            name: "B",
+            path: "A/B",
+            kind: "folder",
+            children: [{ name: "deep.md", path: "A/B/deep.md", kind: "note", children: [] }],
+          },
+        ],
+      },
+    ];
+    render(<VaultFileTree tree={NESTED as never} />);
+    fireEvent.click(screen.getByText("A"));
+    expect(screen.getByText("B")).toBeTruthy();
+    // A's container is open; B's (nested inside) stays shut…
+    const containers = document.querySelectorAll(".vault-tree-children");
+    expect(containers.length).toBe(2);
+    expect(containers[0].classList.contains("open")).toBe(true);
+    expect(containers[1].classList.contains("open")).toBe(false);
+    fireEvent.click(screen.getByText("B"));
+    expect(containers[1].classList.contains("open")).toBe(true);
+    // …and collapses again on the second click.
+    fireEvent.click(screen.getByText("B"));
+    expect(containers[1].classList.contains("open")).toBe(false);
   });
 
   it("opens a note through the store", async () => {
@@ -112,6 +151,70 @@ describe("VaultFileTree", () => {
     render(<VaultFileTree tree={TREE as never} />);
     fireEvent.click(screen.getByText("Home.md"));
     expect(openNote).toHaveBeenCalledWith("Home.md");
+  });
+
+  it("routes a non-note asset to openFile, not openNote", () => {
+    const openNote = vi.fn().mockResolvedValue(undefined);
+    const openFile = vi.fn().mockResolvedValue(undefined);
+    useVaultStore.setState({ openNote: openNote as never, openFile: openFile as never });
+    const WITH_ASSET = [
+      ...TREE,
+      { name: "Inference Engineering.pdf", path: "Inference Engineering.pdf", kind: "file", children: [] },
+    ];
+    render(<VaultFileTree tree={WITH_ASSET as never} />);
+    fireEvent.click(screen.getByText("Inference Engineering.pdf"));
+    expect(openFile).toHaveBeenCalledWith("Inference Engineering.pdf");
+    expect(openNote).not.toHaveBeenCalled();
+  });
+
+  it("hides rename for assets but still offers delete", () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const deleteNote = vi.fn().mockResolvedValue(undefined);
+    useVaultStore.setState({ deleteNote: deleteNote as never });
+    const WITH_ASSET = [{ name: "report.pdf", path: "report.pdf", kind: "file", children: [] }];
+    render(<VaultFileTree tree={WITH_ASSET as never} />);
+    const row = screen.getByText("report.pdf").closest(".vault-tree-row") as HTMLElement;
+    // Rename would push the file through the .md-only path ("report.pdf.md").
+    expect(row.querySelector("[title='Rename']")).toBeNull();
+    fireEvent.click(row.querySelector("[title='Delete file (to .trash)']") as HTMLElement);
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(deleteNote).toHaveBeenCalledWith("report.pdf");
+    confirmSpy.mockRestore();
+  });
+
+  it("renders the asset view (not the editor) when a file is active", () => {
+    useVaultStore.setState({
+      root: "C:/myvault",
+      stats: { notes: 3, files: 4, links: 5, unresolved: 1 },
+      tree: TREE as never,
+      assetPath: "report.docx",
+      activePath: null,
+    });
+    render(<VaultView />);
+    expect(document.querySelector(".vault-asset-card")).toBeTruthy();
+    expect(screen.getByText("Open in system app")).toBeTruthy();
+    expect(document.querySelector(".vault-editor")).toBeNull();
+    // The backlinks rail is note-only.
+    expect(screen.queryByText(/Backlinks/)).toBeNull();
+  });
+
+  it("shows the asset and the note side by side when both are open", () => {
+    useVaultStore.setState({
+      root: "C:/myvault",
+      stats: { notes: 3, files: 4, links: 5, unresolved: 1 },
+      tree: TREE as never,
+      assetPath: "Inference Engineering.pdf",
+      activePath: "Home.md",
+      content: "# home",
+      savedContent: "# home",
+    });
+    render(<VaultView />);
+    expect(document.querySelector(".vault-asset-pane")).toBeTruthy();
+    expect(document.querySelector(".vault-note-split")).toBeTruthy();
+    // Closing the asset keeps the note (and vice versa is covered in the store tests).
+    fireEvent.click(screen.getAllByTitle("Close")[0]);
+    expect(useVaultStore.getState().assetPath).toBeNull();
+    expect(useVaultStore.getState().activePath).toBe("Home.md");
   });
 
   it("delete asks for confirmation and calls the store", () => {

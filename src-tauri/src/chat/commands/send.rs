@@ -1906,6 +1906,8 @@ pub(crate) async fn run_prompt_warmup(
             .map(|sid| app.state::<crate::ChatState>().0.browser_session_live(sid))
             .unwrap_or(false)
             || app.state::<crate::BrowserState>().0.has_active_page(),
+        // Mirror the send's posture (the specs below use the same sandbox).
+        allows_mutating: sandbox.allows_mutating_tools(),
     };
     let mut body = serde_json::json!({
         "model": model_id,

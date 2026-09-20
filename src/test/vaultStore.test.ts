@@ -26,6 +26,7 @@ vi.mock("../lib/ipc", () => ({
   vaultCreateNote: (...a: unknown[]) => vaultCreateNoteMock(...a),
   vaultWriteNote: (...a: unknown[]) => vaultWriteNoteMock(...a),
   vaultDeleteNote: (...a: unknown[]) => vaultDeleteNoteMock(...a),
+  vaultMoveFile: vi.fn().mockResolvedValue("moved"),
   vaultRenameNote: (...a: unknown[]) => vaultRenameNoteMock(...a),
   vaultCreateFolder: vi.fn().mockResolvedValue(undefined),
   vaultDeleteFolder: vi.fn().mockResolvedValue(undefined),
@@ -39,6 +40,7 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 import { useVaultStore, VAULT_SAVE_DEBOUNCE_MS } from "../state/vault";
+import { useUiStore } from "../state/ui";
 
 const NOTE = { path: "Notes/Idea.md" };
 
@@ -48,6 +50,7 @@ beforeEach(() => {
     root: "C:/vault",
     tree: [],
     activePath: null,
+    assetPath: null,
     content: "",
     savedContent: "",
     meta: null,
@@ -55,6 +58,7 @@ beforeEach(() => {
     searchHits: [],
     saveGeneration: 0,
   });
+  useUiStore.setState({ toasts: [] });
   vaultTreeMock.mockResolvedValue([]);
   vaultStatsMock.mockResolvedValue({ notes: 1, files: 1, links: 1, unresolved: 0 });
   vaultNoteMetaMock.mockResolvedValue({
@@ -135,6 +139,50 @@ describe("vault store — open/save lifecycle", () => {
   });
 });
 
+describe("vault store — asset (non-note) opens", () => {
+  it("openFile shows the asset WITHOUT touching the note reader", () => {
+    useVaultStore.getState().openFile("Attachments/Inference Engineering.pdf");
+    expect(useVaultStore.getState().assetPath).toBe("Attachments/Inference Engineering.pdf");
+    expect(vaultReadNoteMock).not.toHaveBeenCalled();
+  });
+
+  it("openNote keeps the asset open — the two sit side by side", async () => {
+    vaultReadNoteMock.mockResolvedValue("body");
+    useVaultStore.getState().openFile("a.pdf");
+    await useVaultStore.getState().openNote("B.md");
+    expect(useVaultStore.getState().assetPath).toBe("a.pdf");
+    expect(useVaultStore.getState().activePath).toBe("B.md");
+    expect(useVaultStore.getState().content).toBe("body");
+  });
+
+  it("openFile does NOT disturb the open note's editor buffer", async () => {
+    vaultReadNoteMock.mockResolvedValue("note body");
+    await useVaultStore.getState().openNote("A.md");
+    useVaultStore.getState().openFile("a.pdf");
+    expect(useVaultStore.getState().activePath).toBe("A.md");
+    expect(useVaultStore.getState().content).toBe("note body");
+  });
+
+  it("closeAsset clears only the asset; closeNote clears only the note", async () => {
+    vaultReadNoteMock.mockResolvedValue("note body");
+    await useVaultStore.getState().openNote("A.md");
+    useVaultStore.getState().openFile("a.pdf");
+    useVaultStore.getState().closeAsset();
+    expect(useVaultStore.getState().assetPath).toBeNull();
+    expect(useVaultStore.getState().activePath).toBe("A.md");
+    useVaultStore.getState().closeNote();
+    expect(useVaultStore.getState().activePath).toBeNull();
+  });
+
+  it("renameNote refuses non-note paths instead of renaming to .pdf.md", async () => {
+    await useVaultStore.getState().renameNote("Inference Engineering.pdf", "Renamed.pdf");
+    expect(vaultRenameNoteMock).not.toHaveBeenCalled();
+    expect(
+      useUiStore.getState().toasts.some((t) => t.message.includes("Only notes")),
+    ).toBe(true);
+  });
+});
+
 describe("vault store — watcher events", () => {
   it("reloads a CLEAN buffer that changed on disk", async () => {
     vaultReadNoteMock.mockResolvedValue("disk v1");
@@ -158,6 +206,28 @@ describe("vault store — watcher events", () => {
     expect(useVaultStore.getState().content).toBe("my local edits");
   });
 
+  it("does NOT toast when the event is our own autosave echoing back", async () => {
+    // The watcher fires for the app's own writes: disk still equals the
+    // last SAVED text, so the dirty buffer is purely newer local typing.
+    vaultReadNoteMock.mockResolvedValue("saved text");
+    await useVaultStore.getState().openNote(NOTE.path);
+    useVaultStore.getState().setContent("saved text and more typing");
+    useVaultStore.getState().onVaultChanged([NOTE.path]);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(useUiStore.getState().toasts.filter((t) => t.message.includes("changed on disk"))).toHaveLength(0);
+  });
+
+  it("DOES toast when a dirty buffer's note genuinely changed on disk", async () => {
+    vaultReadNoteMock.mockResolvedValue("saved text");
+    await useVaultStore.getState().openNote(NOTE.path);
+    useVaultStore.getState().setContent("my local edits");
+    vaultReadNoteMock.mockResolvedValue("externally rewritten");
+    useVaultStore.getState().onVaultChanged([NOTE.path]);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(useUiStore.getState().toasts.filter((t) => t.message.includes("changed on disk"))).toHaveLength(1);
+    expect(useVaultStore.getState().content).toBe("my local edits");
+  });
+
   it("refreshes the tree on any change", async () => {
     vaultTreeMock.mockResolvedValue([
       { name: "Home.md", path: "Home.md", kind: "note", children: [] },
@@ -166,6 +236,105 @@ describe("vault store — watcher events", () => {
     await vi.waitFor(() => {
       expect(useVaultStore.getState().tree).toHaveLength(1);
     });
+  });
+});
+
+describe("vault store — wikilink resolution", () => {
+  it("resolves an extensionless target through the index before reading", async () => {
+    vaultSearchMock.mockResolvedValue([
+      { path: "Daily 2026.md", title: null, basename: "Daily 2026.md", snippet: "" },
+      { path: "Daily.md", title: null, basename: "Daily.md", snippet: "" },
+    ]);
+    vaultReadNoteMock.mockResolvedValue("daily body");
+    await useVaultStore.getState().openNote("Daily");
+    // Exact stem beats the alphabetically-first substring hit.
+    expect(vaultReadNoteMock).toHaveBeenCalledWith("Daily.md");
+    expect(useVaultStore.getState().activePath).toBe("Daily.md");
+    expect(useVaultStore.getState().content).toBe("daily body");
+  });
+
+  it("fails loudly when a target matches no note (no phantom empty editor)", async () => {
+    vaultSearchMock.mockResolvedValue([]);
+    await useVaultStore.getState().openNote("Missing");
+    expect(vaultReadNoteMock).not.toHaveBeenCalled();
+    expect(useVaultStore.getState().activePath).toBeNull();
+    expect(useUiStore.getState().toasts.some((t) => t.message.includes("Missing"))).toBe(true);
+  });
+
+  it("a slow read for note A cannot clobber a fast open of note B", async () => {
+    let releaseA: (v: string) => void = () => {};
+    vaultReadNoteMock.mockImplementation((p: unknown) =>
+      p === "A.md"
+        ? new Promise<string>((res) => {
+            releaseA = res;
+          })
+        : Promise.resolve("B body"),
+    );
+    const pA = useVaultStore.getState().openNote("A.md");
+    const pB = useVaultStore.getState().openNote("B.md");
+    await pB;
+    releaseA("stale A body");
+    await pA;
+    const s = useVaultStore.getState();
+    expect(s.activePath).toBe("B.md");
+    expect(s.content).toBe("B body");
+    expect(s.savedContent).toBe("B body");
+  });
+});
+
+describe("vault store — drag & drop moves", () => {
+  it("moves a NOTE via renameNote (links are rewritten), keeping .md", async () => {
+    vaultRenameNoteMock.mockResolvedValue(["Journal/2026-09-19.md", 2]);
+    await useVaultStore.getState().moveEntry("2026-09-19.md", "Journal");
+    expect(vaultRenameNoteMock).toHaveBeenCalledWith("2026-09-19.md", "Journal/2026-09-19.md");
+  });
+
+  it("moves an ASSET via vault_move_file, never the .md rename path", async () => {
+    const { vaultMoveFile } = await import("../lib/ipc");
+    const moveMock = vaultMoveFile as Mock;
+    moveMock.mockResolvedValue("Journal/report.pdf");
+    await useVaultStore.getState().moveEntry("report.pdf", "Journal");
+    expect(moveMock).toHaveBeenCalledWith("report.pdf", "Journal/report.pdf");
+    expect(vaultRenameNoteMock).not.toHaveBeenCalled();
+  });
+
+  it("no-ops when dropped on the folder it already lives in", async () => {
+    await useVaultStore.getState().moveEntry("Journal/note.md", "Journal");
+    expect(vaultRenameNoteMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("vault store — back/forward navigation", () => {
+  it("openNote records a vault snapshot in the shell nav timeline", async () => {
+    vaultReadNoteMock.mockResolvedValue("body");
+    const before = useUiStore.getState().viewHistory.length;
+    await useVaultStore.getState().openNote("A.md");
+    const history = useUiStore.getState().viewHistory;
+    expect(history.length).toBe(before + 1);
+    const top = history[history.length - 1];
+    expect(top.view).toBe("vault");
+    expect(top.vault?.activePath).toBe("A.md");
+  });
+
+  it("restoreSnapshot swaps back to the old note WITHOUT a new nav step", async () => {
+    // Reads in order: open A, open B, then restore → A again.
+    vaultReadNoteMock.mockReset();
+    vaultReadNoteMock
+      .mockResolvedValueOnce("A body")
+      .mockResolvedValueOnce("B body")
+      .mockResolvedValue("A body");
+    await useVaultStore.getState().openNote("A.md");
+    await useVaultStore.getState().openNote("B.md");
+    const before = useUiStore.getState().viewHistory.length;
+    await useVaultStore.getState().restoreSnapshot({
+      graphOpen: false,
+      assetPath: null,
+      activePath: "A.md",
+    });
+    expect(useVaultStore.getState().activePath).toBe("A.md");
+    expect(useVaultStore.getState().content).toBe("A body");
+    expect(useUiStore.getState().viewHistory.length).toBe(before);
+    vaultReadNoteMock.mockResolvedValue("body");
   });
 });
 
@@ -185,6 +354,33 @@ describe("vault store — mutations", () => {
     await useVaultStore.getState().renameNote("Old.md", "New.md");
     expect(vaultRenameNoteMock).toHaveBeenCalledWith("Old.md", "New.md");
     expect(useVaultStore.getState().activePath).toBe("New.md");
+  });
+
+  it("renameNote flushes a pending edit to the OLD path BEFORE the rename", async () => {
+    // Firing the pending autosave after the move would recreate the old
+    // file with the fresh edits — two divergent copies, silently.
+    vi.useFakeTimers();
+    vaultReadNoteMock.mockResolvedValue("old body");
+    await useVaultStore.getState().openNote("Old.md");
+    useVaultStore.getState().setContent("fresh edits");
+    useVaultStore.getState().scheduleSave();
+    vaultRenameNoteMock.mockResolvedValue(["New.md", 0]);
+    vaultReadNoteMock.mockResolvedValue("fresh edits");
+    await useVaultStore.getState().renameNote("Old.md", "New.md");
+    expect(vaultWriteNoteMock).toHaveBeenCalledWith("Old.md", "fresh edits");
+    const writeOrder = (vaultWriteNoteMock as Mock).mock.invocationCallOrder[0];
+    const renameOrder = (vaultRenameNoteMock as Mock).mock.invocationCallOrder[0];
+    expect(writeOrder).toBeLessThan(renameOrder);
+    expect(useVaultStore.getState().activePath).toBe("New.md");
+  });
+
+  it("renameNote surfaces failures instead of failing silently", async () => {
+    vaultReadNoteMock.mockResolvedValue("x");
+    await useVaultStore.getState().openNote("Old.md");
+    vaultRenameNoteMock.mockRejectedValue("disk error");
+    await useVaultStore.getState().renameNote("Old.md", "New.md");
+    expect(useUiStore.getState().toasts.some((t) => t.kind === "error")).toBe(true);
+    expect(useVaultStore.getState().activePath).toBe("Old.md");
   });
 
   it("deleteNote closes the active note", async () => {

@@ -170,15 +170,35 @@ export function folderOf(path: string): string {
   const idx = path.lastIndexOf("/");
   return idx === -1 ? "" : path.slice(0, idx);
 }
+/** Collapse `.`/`..` segments lexically (the backend's safe_join rejects any
+ *  literal `..`, so `![[../assets/img.png]]` — valid Obsidian — must arrive
+ *  at the IPC boundary already normalized). Returns null when the path
+ *  escapes the vault root. */
+function collapseRelPath(p: string): string | null {
+  const out: string[] = [];
+  for (const seg of p.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (out.length === 0) return null;
+      out.pop();
+      continue;
+    }
+    out.push(seg);
+  }
+  return out.join("/");
+}
+
 /** Resolve an image/asset target for the preview: './x' and bare 'x' are
- *  relative to the note's folder; folder-qualified spellings are
- *  vault-relative (the preview only handles same-folder + vault paths). */
-export function resolveAssetPath(notePath: string, target: string): string {
+ *  relative to the note's folder, `../`-spelled relatives collapse
+ *  lexically, folder-qualified spellings are vault-relative. */
+export function resolveAssetPath(notePath: string, target: string): string | null {
   const clean = target.replace(/^\.\//, "");
-  const isVaultRelative = target.includes("/") && !target.startsWith("./") && !target.startsWith(".");
+  const startsDotDot = target.startsWith("../");
+  const isVaultRelative = target.includes("/") && !target.startsWith("./") && !startsDotDot;
   if (isVaultRelative) {
     return clean.startsWith("/") ? clean.slice(1) : clean;
   }
   const folder = folderOf(notePath);
-  return folder ? `${folder}/${clean}` : clean;
+  const joined = folder ? `${folder}/${clean}` : clean;
+  return collapseRelPath(joined);
 }

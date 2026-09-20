@@ -6,7 +6,7 @@
 // recursive previews, depth-capped).
 
 import { memo, useEffect, useMemo, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import remarkMath from "remark-math";
@@ -20,12 +20,37 @@ import {
   splitEmbeds,
   wikilinksToMarkdown,
   basenameOf,
+  stemOf,
+  VAULT_HREF,
 } from "../../lib/vaultLinks";
 
 /** Max recursion for note-in-note embeds (Obsidian warns past 8; 3 is sane). */
 const MAX_EMBED_DEPTH = 3;
 
+/** Bounded LRU-ish cache (insertion-ordered Map, oldest evicted). */
+const IMAGE_CACHE_MAX = 120;
 const imageCache = new Map<string, Promise<string>>();
+
+/** Shared by the note preview (embeds) and the asset view (standalone
+ *  image files) — one cache, one IPC cost per image per session. */
+export function cachedVaultImage(path: string): Promise<string> {
+  const hit = imageCache.get(path);
+  if (hit) return hit;
+  const p = import("../../lib/ipc")
+    .then((m) => m.vaultReadBinary(path))
+    .then(([mime, b64]) => `data:${mime};base64,${b64}`);
+  // Failed loads are evicted so a file added to disk later can render on
+  // the next render pass (a permanently negative cache survives restarts).
+  p.catch(() => {
+    if (imageCache.get(path) === p) imageCache.delete(path);
+  });
+  if (imageCache.size >= IMAGE_CACHE_MAX) {
+    const oldest = imageCache.keys().next().value;
+    if (oldest !== undefined) imageCache.delete(oldest);
+  }
+  imageCache.set(path, p);
+  return p;
+}
 
 function useVaultImage(path: string | null): string | null {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
@@ -35,12 +60,7 @@ function useVaultImage(path: string | null): string | null {
       return;
     }
     let alive = true;
-    let p = imageCache.get(path);
-    if (!p) {
-      p = import("../../lib/ipc").then((m) => m.vaultReadBinary(path)).then(([mime, b64]) => `data:${mime};base64,${b64}`);
-      imageCache.set(path, p);
-    }
-    void p.then((url) => {
+    void cachedVaultImage(path).then((url) => {
       if (alive) setDataUrl(url);
     }).catch(() => {
       if (alive) setDataUrl(null);
@@ -53,29 +73,46 @@ function useVaultImage(path: string | null): string | null {
 }
 
 /** A vault file rendered inside a note (image embeds + md images). */
-const VaultImage = memo(function VaultImage({ path, className }: { path: string; className?: string }) {
+const VaultImage = memo(function VaultImage({ path, className }: { path: string | null; className?: string }) {
   const dataUrl = useVaultImage(path);
-  if (!dataUrl) {
-    return <span className="vault-embed-missing">⟨{path}⟩</span>;
+  if (!path || !dataUrl) {
+    return <span className="vault-embed-missing">⟨{path ?? "invalid asset path"}⟩</span>;
   }
   return <img className={className ?? "vault-embed-img"} src={dataUrl} alt={basenameOf(path)} />;
 });
 
 /** A note rendered inside a note (![[Note]] transclusion). Resolution goes
- *  through the backend index (file: search), so aliases resolve too. */
+ *  through the backend index (file: search): basenames carry the extension
+ *  while embed targets are conventionally extensionless, so rank by exact
+ *  basename → exact STEM, shortest path first — never blindly hits[0]
+ *  (`![[Daily]]` with `Daily.md` + `Daily 2026.md` present must not pick
+ *  the alphabetically-first wrong note). */
 const NoteEmbed = memo(function NoteEmbed({ target, depth }: { target: string; depth: number }) {
   const [content, setContent] = useState<string | null>(null);
+  const [resolved, setResolved] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     void (async () => {
       const { vaultSearch, vaultReadNote } = await import("../../lib/ipc");
-      const hits = await vaultSearch(`file:"${target}"`, 5).catch(() => []);
-      const hit = hits.find((h) => h.basename === target) ?? hits[0];
+      const lc = target.toLowerCase();
+      const base = lc.split("/").pop() ?? lc;
+      const hits = await vaultSearch(`file:"${target}"`, 10).catch(() => []);
+      const ranked = hits
+        .filter((h) => {
+          const hb = h.basename.toLowerCase();
+          const dot = hb.lastIndexOf(".");
+          const stem = dot > 0 ? hb.slice(0, dot) : hb;
+          return hb === base || stem === base;
+        })
+        .sort((a, b) => a.path.length - b.path.length || a.path.localeCompare(b.path));
+      const hit = ranked[0] ?? null;
       if (!alive) return;
       if (!hit) {
+        setResolved(null);
         setContent(null);
         return;
       }
+      setResolved(hit.path);
       const text = await vaultReadNote(hit.path).catch(() => null);
       if (alive) setContent(text);
     })();
@@ -91,22 +128,58 @@ const NoteEmbed = memo(function NoteEmbed({ target, depth }: { target: string; d
   }
   return (
     <div className="vault-embed-note">
-      <VaultPreviewContent content={content} notePath={target} depth={depth + 1} />
+      <VaultPreviewContent content={content} notePath={resolved ?? target} depth={depth + 1} />
     </div>
   );
 });
+
+/** Obsidian-style `==highlight==` — a tiny mdast transformer (no extra
+ *  dependency): splits text nodes containing ==…== and maps them to <mark>
+ *  elements. Code nodes are skipped so inline code keeps its literal ==. */
+function remarkVaultHighlight() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const walk = (node: any) => {
+    if (!node || node.type === "code" || node.type === "inlineCode") return;
+    if (!Array.isArray(node.children)) return;
+    const next: any[] = [];
+    for (const child of node.children) {
+      if (child.type === "text" && /==[^=\n]+==/.test(child.value)) {
+        const parts = String(child.value ?? "").split(/==([^=\n]+)==/);
+        parts.forEach((part: string, i: number) => {
+          if (i % 2 === 1) {
+            next.push({
+              type: "emphasis",
+              data: { hName: "mark", hProperties: { className: ["vault-mark"] } },
+              children: [{ type: "text", value: part }],
+            });
+          } else if (part) {
+            next.push({ type: "text", value: part });
+          }
+        });
+      } else {
+        walk(child);
+        next.push(child);
+      }
+    }
+    node.children = next;
+  };
+  return (tree: unknown) => walk(tree);
+}
 
 const Md = memo(function Md({ text, notePath }: { text: string; notePath: string }) {
   const openNote = useVaultStore((s) => s.openNote);
   const transformed = useMemo(() => wikilinksToMarkdown(text), [text]);
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+      remarkPlugins={[remarkVaultHighlight, remarkGfm, remarkBreaks, remarkMath]}
       rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
       urlTransform={(url) => {
-        // vault:// links and data: images pass through; relative asset paths
-        // resolve against the note's folder for the img component.
-        return url;
+        // vault:// links and data: images are produced by THIS pipeline;
+        // everything else defers to the library's default sanitizer (the
+        // previous identity transform disabled URL sanitizing entirely and
+        // was only safe while the a/img overrides were the sole URL sinks).
+        if (url.startsWith(VAULT_HREF) || url.startsWith("data:image/")) return url;
+        return defaultUrlTransform(url);
       }}
       components={{
         a: ({ href, children }) => {
@@ -148,6 +221,51 @@ const Md = memo(function Md({ text, notePath }: { text: string; notePath: string
                   {children}
                 </a>
               );
+            }
+            if (href.startsWith("#")) {
+              // Same-note anchors (GFM footnotes `#fn`/`#fnref`, manual
+              // heading anchors): route through the scroll handler.
+              return (
+                <a
+                  className="vault-link"
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    window.dispatchEvent(
+                      new CustomEvent("vault:scroll-text", { detail: { text: href.slice(1) } }),
+                    );
+                  }}
+                >
+                  {children}
+                </a>
+              );
+            }
+            // A plain relative link to another vault note ([x](Note.md)) —
+            // was rendered href-less (dead). Percent-decode, strip the
+            // extension and let openNote resolve it like a wikilink.
+            if (!/^[a-z][a-z0-9+.-]*:/i.test(href)) {
+              let decoded = href;
+              try {
+                decoded = decodeURIComponent(href);
+              } catch {
+                // keep raw form on malformed encoding
+              }
+              const [rawTarget, subpath] = decoded.split("#", 2);
+              const target = rawTarget.replace(/\.md$/i, "");
+              if (target) {
+                return (
+                  <a
+                    className="vault-link"
+                    href="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void openNote(target, subpath ? `#${subpath}` : null);
+                    }}
+                  >
+                    {children}
+                  </a>
+                );
+              }
             }
           }
           return <a className="vault-link">{children}</a>;
@@ -215,8 +333,9 @@ export function VaultPreviewContent({
           // A note embed — resolve and transclude.
           return <NoteEmbed key={i} target={seg.target} depth={depth} />;
         }
-        // Other assets (pdf, audio, …) render as an openable link chip for
-        // now — NOT "unresolved", the file may well exist.
+        // Other assets (pdf, audio, …) open in the asset view — NOT the
+        // note path (that toasted "no note named …" for every pdf), and
+        // NOT "unresolved": the file may well exist.
         return (
           <a
             key={i}
@@ -224,7 +343,8 @@ export function VaultPreviewContent({
             href="#"
             onClick={(e) => {
               e.preventDefault();
-              void useVaultStore.getState().openNote(seg.target);
+              const resolvedPath = resolveAssetPath(notePath, seg.target);
+              if (resolvedPath) void useVaultStore.getState().openFile(resolvedPath);
             }}
           >
             ⟨attachment: {seg.target}⟩

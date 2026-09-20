@@ -114,6 +114,18 @@ describe("path helpers", () => {
     expect(resolveAssetPath("Journal/day.md", "./pic.png")).toBe("Journal/pic.png");
     expect(resolveAssetPath("day.md", "Assets/pic.png")).toBe("Assets/pic.png");
   });
+
+  it("collapses ../ relatives (safe_join rejects literal ..)", () => {
+    expect(resolveAssetPath("Journal/2026/day.md", "../assets/pic.png")).toBe(
+      "Journal/assets/pic.png",
+    );
+    expect(resolveAssetPath("Journal/2026/day.md", "./../x.png")).toBe("Journal/x.png");
+  });
+
+  it("returns null for paths that escape the vault root", () => {
+    expect(resolveAssetPath("day.md", "../pic.png")).toBeNull();
+    expect(resolveAssetPath("a/b/day.md", "../../../evil.png")).toBeNull();
+  });
 });
 
 describe("snippetToPlain", () => {

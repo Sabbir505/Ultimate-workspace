@@ -4,13 +4,45 @@
    read by the canvas renderer via getComputedStyle). */
 
 .vault-view {
+  /* Same mount as .automations-view (a plain child of .grid-wrap's flex
+     row) — without flex:1 the whole view shrank to its content (~460px)
+     and the binder card hugged one edge instead of filling the window. */
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  /* Clear the overlay title bar — the floating glass bar spans the full
+     .main width; without this the header (new note / change vault /
+     unbind) is rendered UNDERNEATH it and looks missing entirely. */
+  padding-top: var(--toolbar-h, 37px);
+  /* Below this the three-column layout genuinely breaks (rails crush the
+     center) — hold the floor and let the container clip instead; the tool
+     side-panel overlaps rather than squeezing the vault to mush. */
+  min-width: 760px;
   background: var(--background-primary, var(--bg));
   color: var(--text-normal, var(--text));
   overflow: hidden;
+}
+
+/* The global `button` rule (tokens.css) paints a border + glass rim
+   (box-shadow) on every control. Vault's list rows, tabs and icon buttons
+   are flat affordances — they reset border themselves but inherited the
+   rim, which read as a border around every file/folder row. */
+.vault-tree-main,
+.vault-tree-actions button,
+.vault-rail-tabs button,
+.vault-header-actions button,
+.vault-rail-toggle,
+.vault-rail-collapse,
+.vault-mode-switch button,
+.vault-search-hit,
+.vault-tag-row,
+.vault-outline-row,
+.vault-backlink-row,
+.vault-switcher-row {
+  box-shadow: none;
 }
 
 /* ---- binder (no vault bound) ---- */
@@ -31,6 +63,15 @@
   border: 1px dashed var(--border);
   border-radius: 12px;
   background: var(--surface-2);
+}
+.vault-binder-card > svg {
+  color: var(--text-dim);
+}
+.vault-binder-card .primary {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .vault-binder-card h3 {
   margin: 0;
@@ -108,21 +149,81 @@
   flex: 1;
   display: flex;
   min-height: 0;
+  min-width: 0;
 }
 .vault-left-rail {
-  width: 264px;
-  flex-shrink: 0;
+  /* Width comes from the store (persisted, user-resizable); flex-shrink
+     lets the rail give ground when the tool side-panel squeezes the view
+     instead of crushing the center to a sliver. */
+  flex-shrink: 1;
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
+  transition: width 0.26s var(--ease);
+}
+.vault-body.resizing .vault-left-rail {
+  transition: none;
+}
+.vault-left-rail.collapsed {
+  border-right: 1px solid var(--border);
+  align-items: center;
+}
+.vault-rail-inner {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  width: 100%;
+}
+.vault-left-rail.collapsed .vault-rail-inner {
+  display: none;
+}
+.vault-rail-expand {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  margin-top: 6px;
+  display: inline-flex;
+  align-items: center;
+}
+.vault-rail-expand:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.vault-rail-collapse {
+  margin-left: auto;
+}
+/* The col-resize dividers between the three sections. */
+.vault-resize-handle {
+  width: 6px;
+  margin: 0 -3px;
+  cursor: col-resize;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 5;
+}
+.vault-resize-handle:hover,
+.vault-body.resizing .vault-resize-handle {
+  background: color-mix(in srgb, var(--accent, #5b8def) 35%, transparent);
+}
+.vault-body.resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 .vault-right-rail {
-  width: 272px;
-  flex-shrink: 0;
+  flex-shrink: 1;
   border-left: 1px solid var(--border);
   overflow-y: auto;
   min-height: 0;
+  transition: width 0.26s var(--ease);
+}
+.vault-body.resizing .vault-right-rail {
+  transition: none;
 }
 .vault-center {
   flex: 1;
@@ -146,10 +247,14 @@
 /* ---- rail tabs ---- */
 .vault-rail-tabs {
   display: flex;
+  align-items: center;
   gap: 2px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  /* Narrow rail: tabs compress (ellipsis) so the collapse button stays
+     reachable instead of being pushed out of the row. */
+  min-width: 0;
 }
 .vault-rail-tabs button {
   border: none;
@@ -162,6 +267,13 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.vault-rail-collapse {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 .vault-rail-tabs button.active {
   background: var(--surface-3);
@@ -174,6 +286,25 @@
   flex: 1;
   overflow-y: auto;
   padding: 4px 4px 12px;
+  min-height: 0;
+}
+.vault-tree-row.drop-target {
+  background: color-mix(in srgb, var(--accent, #5b8def) 22%, transparent);
+  outline: 1px dashed color-mix(in srgb, var(--accent, #5b8def) 60%, transparent);
+  outline-offset: -1px;
+}
+/* Smooth folder collapse/expand — the grid-rows trick motion.css uses
+   (0fr→1fr animates height without measuring). Children stay mounted. */
+.vault-tree-children {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.24s var(--ease);
+}
+.vault-tree-children.open {
+  grid-template-rows: 1fr;
+}
+.vault-tree-children-inner {
+  overflow: hidden;
   min-height: 0;
 }
 .vault-tree-empty,
@@ -390,11 +521,33 @@
 }
 
 /* ---- note area ---- */
+.vault-center-split {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+.vault-asset-pane {
+  /* Default: fill the center when the asset is alone. When a note sits
+     beside it, VaultView pins this to `0 0 <pct>%` inline. */
+  flex: 1 1 auto;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+/* The pdf toolbar is a single row of fixed-size controls (~371px natural):
+   hold a floor under the pane so it can never wrap or clip. */
+.vault-asset-pane:has(.pdf-viewer) {
+  min-width: 380px;
+}
 .vault-note-split {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
 }
 .vault-note-head {
   display: flex;
@@ -445,6 +598,19 @@
   display: flex;
   min-height: 0;
 }
+/* Editor/preview panes fade in on every edit/split/preview switch (the
+   key={mode} remount plays this) — same feel as the tool-panel slide. */
+.vault-note-panes > * {
+  animation: vault-pane-fade 0.2s var(--ease);
+}
+@keyframes vault-pane-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
 .vault-note-panes .vault-editor-pane,
 .vault-note-panes .vault-preview-pane {
   flex: 1;
@@ -453,12 +619,36 @@
   flex-direction: column;
 }
 .vault-note-panes.split .vault-editor-pane {
-  border-right: 1px solid var(--border);
+  border-right: none; /* the resize divider replaces the border */
 }
 .vault-editor-pane .vault-editor {
   flex: 1;
   overflow-y: auto;
   font-size: 13.5px;
+}
+/* The app shell sets user-select:none on <body>; notes are TEXT — enable
+   selection/copy again in the editor, the reading view and over the pdf. */
+.vault-editor-pane,
+.vault-preview-pane,
+.vault-asset-body {
+  user-select: text;
+  -webkit-user-select: text;
+}
+.vault-editor .cm-content {
+  color: var(--text);
+  caret-color: var(--text);
+}
+.vault-editor .cm-cursor,
+.vault-editor .cm-dropCursor {
+  border-left-color: var(--text);
+}
+.vault-editor .cm-selectionBackground,
+.vault-editor.cm-focused .cm-selectionBackground {
+  background: color-mix(in srgb, var(--accent, #5b8def) 32%, transparent) !important;
+}
+.vault-editor .cm-line ::selection,
+.vault-editor .cm-line::selection {
+  background: color-mix(in srgb, var(--accent, #5b8def) 32%, transparent);
 }
 .vault-editor .cm-editor {
   height: 100%;
@@ -480,6 +670,45 @@
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, var(--accent, #5b8def) 40%, transparent);
   cursor: pointer;
+}
+.cm-vault-mark,
+.vault-preview mark.vault-mark {
+  background: color-mix(in srgb, #ffd54d 38%, transparent);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* ---- editing toolbar (above the editor, top center of the note) ---- */
+.vault-editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.vault-editor-toolbar button {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 4px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  box-shadow: none;
+}
+.vault-editor-toolbar button:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.vault-editor-toolbar-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border);
+  margin: 0 4px;
 }
 
 /* ---- preview (reading mode) ---- */
@@ -574,6 +803,32 @@
   align-items: center;
   gap: 5px;
 }
+/* Section header doubles as its collapse/expand control. */
+.vault-rail-section-toggle {
+  all: unset;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.vault-rail-section-toggle:hover {
+  color: var(--text);
+}
+/* Folding body — same grid-rows trick as the file tree. */
+.vault-rail-section-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.24s var(--ease);
+}
+.vault-rail-section-body.open {
+  grid-template-rows: 1fr;
+}
+.vault-rail-section-body > .vault-rail-section-inner {
+  overflow: hidden;
+  min-height: 0;
+}
 .vault-outline-row,
 .vault-backlink-row {
   display: flex;
@@ -622,6 +877,7 @@
   position: relative;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 .vault-graph-canvas {
   width: 100%;
@@ -727,11 +983,156 @@
   --vault-graph-node: #8a94a6;
   --vault-graph-active: #5b8def;
   --vault-graph-label: #9aa3b2;
+  --vault-graph-attachment: #d9a44a;
+  --vault-graph-missing: #c96f5e;
 }
 :root[data-theme="dark"] {
   --vault-graph-node: #a8b3c7;
   --vault-graph-active: #7ba7ff;
   --vault-graph-label: #b8c0cf;
+  --vault-graph-attachment: #e0b05e;
+  --vault-graph-missing: #d97e6a;
+}
+
+/* Hover detail card for a node. */
+.vault-graph-card {
+  position: absolute;
+  z-index: 6;
+  max-width: 220px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1, var(--bg));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vault-graph-card-title {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vault-graph-card-kind {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.vault-graph-card-meta {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+/* The graph "model" (legend) — top right; click a kind to hide/show it. */
+.vault-graph-model {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-1, var(--bg)) 88%, transparent);
+  backdrop-filter: blur(8px);
+  min-width: 148px;
+}
+.vault-graph-model-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  padding: 0 4px 4px;
+}
+.vault-graph-model-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 11.5px;
+  padding: 3px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+  text-align: left;
+  box-shadow: none;
+}
+.vault-graph-model-row:hover {
+  background: var(--surface-3);
+}
+.vault-graph-model-row.off {
+  opacity: 0.42;
+  text-decoration: line-through;
+}
+/* Kind color swatch — click opens the OS color picker (hidden input). */
+.vault-graph-swatch {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1.4px solid;
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+}
+.vault-graph-swatch input[type="color"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  border: none;
+  padding: 0;
+}
+.vault-graph-model-toggle {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-shadow: none;
+}
+.vault-graph-model-row.fit {
+  color: var(--text-dim);
+  margin-top: 3px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 0 0;
+  padding-top: 6px;
+}
+.vault-graph-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.vault-graph-dot.dot-note {
+  background: var(--vault-graph-node);
+}
+.vault-graph-dot.dot-attachment {
+  background: var(--vault-graph-attachment);
+}
+.vault-graph-dot.dot-unresolved {
+  background: transparent;
+  border: 1.4px solid var(--vault-graph-missing);
+}
+.vault-graph-count {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 10.5px;
 }
 
 /* Non-note asset embeds (pdf/audio/…) — an openable chip, visually
@@ -743,4 +1144,276 @@
   padding: 3px 9px;
   font-size: 12px;
   margin: 4px 0;
+}
+
+/* ---- asset view (a kind:"file" row opened in the center) ---- */
+.vault-asset-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.vault-asset-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  overflow: auto;
+}
+.vault-asset-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+}
+.vault-asset-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+/* ---- pdf viewer (selectable text + highlighter) ---- */
+.vault-asset-body:has(.pdf-viewer) {
+  padding: 0;
+  align-items: stretch;
+  justify-content: stretch;
+}
+.pdf-viewer {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+.pdf-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  background: var(--surface-2);
+}
+.pdf-tool-btn {  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 5px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  box-shadow: none;
+}
+.pdf-tool-btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.pdf-tool-btn.active {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.pdf-tool-group {
+  position: relative;
+  display: inline-flex;
+}
+/* Hover popover with the highlighter colors. */
+.pdf-color-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1, var(--bg));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  z-index: 8;
+  animation: pdf-pop-in 0.14s var(--ease);
+}
+@keyframes pdf-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.pdf-color-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.pdf-color-dot.active {
+  border-color: var(--text);
+  box-shadow: 0 0 0 1px var(--surface-1, #101014);
+}
+.pdf-toolbar-pages {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding-right: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pdf-toolbar-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border);
+  margin: 0 4px;
+}
+.pdf-zoom-label {
+  font-size: 11px;
+  min-width: 42px;
+  justify-content: center;
+}
+.pdf-page-input {
+  width: 46px;
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--text);
+  text-align: center;
+}
+.pdf-page-input::-webkit-inner-spin-button {
+  opacity: 1;
+}
+.pdf-page-total {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.pdf-pages {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 0 40vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+/* Loading state owns the whole box so it centers regardless of the
+   scroll container's padding/alignment. */
+.pdf-pages .vault-center-placeholder {
+  position: absolute;
+  inset: 0;
+  flex: none;
+}
+.pdf-page {
+  position: relative;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  background: #fff;
+  border-radius: 2px;
+}
+.pdf-canvas-slot {
+  display: block;
+  line-height: 0;
+}
+.pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  line-height: 1;
+  text-align: initial;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.pdf-text-layer span {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  transform-origin: 0 0;
+  transform: scaleX(var(--scale-x, 1));
+  cursor: text;
+}
+.pdf-text-layer ::selection {
+  background: color-mix(in srgb, var(--accent, #5b8def) 40%, transparent);
+}
+.pdf-text-layer .endOfContent {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  display: block;
+}
+.pdf-highlight {
+  position: absolute;
+  inset: 0;
+  mix-blend-mode: multiply;
+}
+.pdf-highlight span {
+  position: absolute;
+  border-radius: 2px;
+  opacity: 0.45;
+}
+.pdf-highlight.erasable {
+  cursor: pointer;
+}
+.pdf-highlight.erasable:hover span {
+  opacity: 0.7;
+  outline: 1px dashed rgba(200, 60, 60, 0.8);
+}
+.vault-asset-audio,
+.vault-asset-video {
+  max-width: min(640px, 100%);
+}
+.vault-asset-video {
+  max-height: 100%;
+  border-radius: 8px;
+}
+.vault-asset-card {
+  max-width: 380px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+.vault-asset-card h3 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vault-asset-card .primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.vault-asset-ext {
+  margin: 0;
+  font-size: 12px;
+}
+.vault-asset-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-dim);
 }

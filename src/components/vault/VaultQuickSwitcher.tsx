@@ -2,8 +2,8 @@
 // tags rails + the note's right rail (backlinks / outline). All read from
 // the store; opening a result is the same openNote path a tree click uses.
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { FileText, Hash, Link2, ListTree, Search } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ChevronDown, ChevronRight, FileText, Hash, Link2, ListTree, Search } from "lucide-react";
 import { useVaultStore } from "../../state/vault";
 import { basenameOf, snippetToPlain, stemOf } from "../../lib/vaultLinks";
 import type { VaultSearchHit } from "../../lib/ipc";
@@ -195,6 +195,37 @@ export function VaultTagsPanel() {
   );
 }
 
+/** A note-rail section (Outline / Backlinks / …) with its OWN collapse
+ *  chevron — content folds with the standard grid-rows animation. */
+function RailSection({
+  title,
+  icon,
+  count,
+  children,
+}: {
+  title: string;
+  icon?: ReactNode;
+  count?: number;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <section className="vault-rail-section">
+      <h4>
+        <button className="vault-rail-section-toggle" aria-expanded={open} title={open ? "Collapse" : "Expand"} onClick={() => setOpen((o) => !o)}>
+          {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          {icon}
+          {title}
+          {count != null ? ` (${count})` : ""}
+        </button>
+      </h4>
+      <div className={`vault-rail-section-body${open ? " open" : ""}`}>
+        <div className="vault-rail-section-inner">{children}</div>
+      </div>
+    </section>
+  );
+}
+
 export function VaultNoteRail() {
   const meta = useVaultStore((s) => s.meta);
   const activePath = useVaultStore((s) => s.activePath);
@@ -209,8 +240,7 @@ export function VaultNoteRail() {
   const aliases = meta.aliases;
   return (
     <div className="vault-note-rail">
-      <section className="vault-rail-section">
-        <h4><ListTree size={12} /> Outline</h4>
+      <RailSection title="Outline" icon={<ListTree size={12} />}>
         {headings.length === 0 ? (
           <div className="vault-rail-hint">No headings.</div>
         ) : (
@@ -230,9 +260,8 @@ export function VaultNoteRail() {
             ))}
           </div>
         )}
-      </section>
-      <section className="vault-rail-section">
-        <h4><Link2 size={12} /> Backlinks ({meta.backlinks.length})</h4>
+      </RailSection>
+      <RailSection title="Backlinks" icon={<Link2 size={12} />} count={meta.backlinks.length}>
         {meta.backlinks.length === 0 ? (
           <div className="vault-rail-hint">No notes link here yet.</div>
         ) : (
@@ -243,20 +272,18 @@ export function VaultNoteRail() {
             </button>
           ))
         )}
-      </section>
+      </RailSection>
       {meta.unresolved_mentions.length > 0 ? (
-        <section className="vault-rail-section">
-          <h4>Unresolved links ({meta.unresolved_mentions.length})</h4>
+        <RailSection title="Unresolved links" count={meta.unresolved_mentions.length}>
           {meta.unresolved_mentions.slice(0, 10).map((m, i) => (
             <div key={i} className="vault-backlink-row static">
               <span className="vault-backlink-src">{m.raw}</span>
               <span className="vault-backlink-hint">create with +</span>
             </div>
           ))}
-        </section>
+        </RailSection>
       ) : null}
-      <section className="vault-rail-section">
-        <h4>Outgoing ({outgoing.length})</h4>
+      <RailSection title="Outgoing" count={outgoing.length}>
         {outgoing.length === 0 ? (
           <div className="vault-rail-hint">No outgoing links.</div>
         ) : (
@@ -270,19 +297,17 @@ export function VaultNoteRail() {
             </button>
           ))
         )}
-      </section>
+      </RailSection>
       {aliases.length > 0 ? (
-        <section className="vault-rail-section">
-          <h4>Aliases</h4>
+        <RailSection title="Aliases">
           <div className="vault-rail-hint">{aliases.join(", ")}</div>
-        </section>
+        </RailSection>
       ) : null}
-      <section className="vault-rail-section">
-        <h4>Stats</h4>
+      <RailSection title="Stats">
         <div className="vault-rail-hint">
           {meta.word_count} words{content !== savedContent ? " · unsaved edits" : ""}
         </div>
-      </section>
+      </RailSection>
     </div>
   );
 }

@@ -4,8 +4,18 @@
 // The tree is disk-driven (vault_tree), so external file managers stay in
 // sync through the watcher.
 
-import { memo, useCallback, useState } from "react";
-import { ChevronDown, ChevronRight, FileText, File as FileIcon, Folder, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
+import { memo, useCallback, useState, type DragEvent } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  File as FileIcon,
+  Folder,
+  FolderOpen,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import type { VaultTreeNode } from "../../lib/ipc";
 import { useVaultStore } from "../../state/vault";
 
@@ -43,7 +53,7 @@ function NewEntryInput({
 const Row = memo(function Row({
   node,
   depth,
-  expanded,
+  expandedSet,
   toggle,
   selected,
   onOpen,
@@ -51,10 +61,14 @@ const Row = memo(function Row({
   onDelete,
   onNewNote,
   onNewFolder,
+  dnd,
 }: {
   node: VaultTreeNode;
   depth: number;
-  expanded: boolean;
+  /** The live expanded-set: each Row reads ITS OWN path — threading the
+   *  parent's boolean down the recursion made every nested folder inherit
+   *  its ancestor's state (nested folders could never be collapsed). */
+  expandedSet: Set<string>;
   toggle: (path: string) => void;
   selected: boolean;
   onOpen: (path: string) => void;
@@ -62,20 +76,44 @@ const Row = memo(function Row({
   onDelete: (node: VaultTreeNode) => void;
   onNewNote: (folder: string) => void;
   onNewFolder: (folder: string) => void;
+  dnd: {
+    /** A file drag is in flight (folders highlight as drop targets). */
+    active: boolean;
+    /** The folder path (or "" for root) currently hovered, if any. */
+    dropDir: string | null;
+    onDragStartFile: (node: VaultTreeNode, e: DragEvent) => void;
+    onDragEnd: () => void;
+    onDragOverFolder: (node: VaultTreeNode, e: DragEvent) => void;
+    onDragLeaveFolder: (node: VaultTreeNode) => void;
+    onDropFolder: (node: VaultTreeNode, e: DragEvent) => void;
+  };
 }) {
   const isFolder = node.kind === "folder";
+  const isNote = node.kind === "note";
+  const expanded = expandedSet.has(node.path);
+  const isDropTarget = dnd.active && isFolder && dnd.dropDir === node.path;
   return (
     <>
       <div
-        className={`vault-tree-row${selected ? " selected" : ""}`}
+        className={`vault-tree-row${selected ? " selected" : ""}${isDropTarget ? " drop-target" : ""}`}
         style={{ paddingLeft: 6 + depth * 14 }}
         role="treeitem"
         aria-expanded={isFolder ? expanded : undefined}
+        draggable={!isFolder}
+        onDragStart={(e) => {
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", node.path);
+          dnd.onDragStartFile(node, e);
+        }}
+        onDragEnd={dnd.onDragEnd}
+        onDragOver={isFolder ? (e) => dnd.onDragOverFolder(node, e) : undefined}
+        onDragLeave={isFolder ? () => dnd.onDragLeaveFolder(node) : undefined}
+        onDrop={isFolder ? (e) => dnd.onDropFolder(node, e) : undefined}
       >
         <button
           className="vault-tree-main"
           onClick={() => (isFolder ? toggle(node.path) : onOpen(node.path))}
-          onDoubleClick={() => !isFolder && onRename(node)}
+          onDoubleClick={() => isNote && onRename(node)}
           title={node.path}
         >
           {isFolder ? (
@@ -86,7 +124,7 @@ const Row = memo(function Row({
           ) : (
             <>
               <span className="vault-tree-spacer" />
-              {node.kind === "note" ? <FileText size={14} /> : <FileIcon size={14} />}
+              {isNote ? <FileText size={14} /> : <FileIcon size={14} />}
             </>
           )}
           <span className="vault-tree-name">{node.name}</span>
@@ -102,31 +140,41 @@ const Row = memo(function Row({
               </button>
             </>
           ) : null}
-          <button title="Rename" onClick={() => onRename(node)}>
-            <Pencil size={12} />
-          </button>
-          <button title={isFolder ? "Delete folder (to .trash)" : "Delete note (to .trash)"} onClick={() => onDelete(node)}>
+          {isNote ? (
+            // Notes only: vault_rename_note rewrites vault-wide links and
+            // requires a .md target, so offering it on assets renamed them
+            // to "file.pdf.md" with every embed now dangling.
+            <button title="Rename" onClick={() => onRename(node)}>
+              <Pencil size={12} />
+            </button>
+          ) : null}
+          <button title={isFolder ? "Delete folder (to .trash)" : isNote ? "Delete note (to .trash)" : "Delete file (to .trash)"} onClick={() => onDelete(node)}>
             <Trash2 size={12} />
           </button>
         </span>
       </div>
-      {isFolder && expanded && (
-        <div>
-          {node.children.map((child) => (
-            <Row
-              key={child.path}
-              node={child}
-              depth={depth + 1}
-              expanded={expanded}
-              toggle={toggle}
-              selected={selected}
-              onOpen={onOpen}
-              onRename={onRename}
-              onDelete={onDelete}
-              onNewNote={onNewNote}
-              onNewFolder={onNewFolder}
-            />
-          ))}
+      {isFolder && (
+        /* Always mounted — the grid-rows transition (motion.css's trick)
+           animates collapse/expand smoothly instead of popping. */
+        <div className={`vault-tree-children${expanded ? " open" : ""}`}>
+          <div className="vault-tree-children-inner">
+            {node.children.map((child) => (
+              <Row
+                key={child.path}
+                node={child}
+                depth={depth + 1}
+                expandedSet={expandedSet}
+                toggle={toggle}
+                selected={selected}
+                onOpen={onOpen}
+                onRename={onRename}
+                onDelete={onDelete}
+                onNewNote={onNewNote}
+                onNewFolder={onNewFolder}
+                dnd={dnd}
+              />
+            ))}
+          </div>
         </div>
       )}
     </>
@@ -139,11 +187,50 @@ export function VaultFileTree({ tree }: { tree: VaultTreeNode[] }) {
   const [newIn, setNewIn] = useState<{ folder: string; kind: "note" | "folder" } | null>(null);
   const activePath = useVaultStore((s) => s.activePath);
   const openNote = useVaultStore((s) => s.openNote);
+  const openFile = useVaultStore((s) => s.openFile);
   const createNote = useVaultStore((s) => s.createNote);
   const createFolder = useVaultStore((s) => s.createFolder);
   const renameNote = useVaultStore((s) => s.renameNote);
   const deleteNote = useVaultStore((s) => s.deleteNote);
   const deleteFolder = useVaultStore((s) => s.deleteFolder);
+  const moveEntry = useVaultStore((s) => s.moveEntry);
+
+  // Drag & drop: only single files (notes + assets) move; folders stay put.
+  const [dragPath, setDragPath] = useState<string | null>(null);
+  const [dropDir, setDropDir] = useState<string | null>(null);
+
+  const finishDrop = useCallback(
+    (dir: string) => {
+      if (dragPath) void moveEntry(dragPath, dir);
+      setDragPath(null);
+      setDropDir(null);
+    },
+    [dragPath, moveEntry],
+  );
+
+  const dnd = {
+    active: dragPath != null,
+    dropDir,
+    onDragStartFile: (node: VaultTreeNode) => setDragPath(node.path),
+    onDragEnd: () => {
+      setDragPath(null);
+      setDropDir(null);
+    },
+    onDragOverFolder: (node: VaultTreeNode, e: DragEvent) => {
+      if (dragPath == null) return;
+      e.preventDefault();
+      e.stopPropagation(); // the tree root must not steal the drop
+      setDropDir(node.path);
+    },
+    onDragLeaveFolder: (node: VaultTreeNode) => {
+      setDropDir((cur) => (cur === node.path ? null : cur));
+    },
+    onDropFolder: (node: VaultTreeNode, e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      finishDrop(node.path);
+    },
+  };
 
   const toggle = useCallback((path: string) => {
     setExpanded((prev) => {
@@ -164,6 +251,11 @@ export function VaultFileTree({ tree }: { tree: VaultTreeNode[] }) {
         if (window.confirm(`Delete "${node.name}"?\n(it moves to the vault's .trash)`)) {
           void deleteNote(node.path);
         }
+      } else {
+        // Non-note asset — the backend trash move takes any file.
+        if (window.confirm(`Delete file "${node.name}"?\n(it moves to the vault's .trash)`)) {
+          void deleteNote(node.path);
+        }
       }
     },
     [deleteFolder, deleteNote],
@@ -174,19 +266,42 @@ export function VaultFileTree({ tree }: { tree: VaultTreeNode[] }) {
       key={node.path}
       node={node}
       depth={0}
-      expanded={expanded.has(node.path)}
+      expandedSet={expanded}
       toggle={toggle}
       selected={node.path === activePath}
-      onOpen={(p) => void openNote(p)}
+      onOpen={(p) => {
+        // Non-note assets go to the asset view — openNote would search the
+        // NOTE index, miss, and toast "No note named …" for a file that is
+        // right there in the tree.
+        if (node.kind === "file") void openFile(p);
+        else void openNote(p);
+      }}
       onRename={(n) => setRenaming(n.path)}
       onDelete={confirmDelete}
       onNewNote={(f) => setNewIn({ folder: f, kind: "note" })}
       onNewFolder={(f) => setNewIn({ folder: f, kind: "folder" })}
+      dnd={dnd}
     />
-  )).map((row) => row);
+  ));
 
   return (
-    <div className="vault-tree" role="tree">
+    <div
+      className="vault-tree"
+      role="tree"
+      onDragOver={(e) => {
+        // Dropping on the empty area moves to the vault root.
+        if (dragPath != null) {
+          e.preventDefault();
+          setDropDir("");
+        }
+      }}
+      onDrop={(e) => {
+        if (dragPath != null) {
+          e.preventDefault();
+          finishDrop("");
+        }
+      }}
+    >
       {rows.length === 0 ? (
         <div className="vault-tree-empty">Empty vault — create your first note below.</div>
       ) : (

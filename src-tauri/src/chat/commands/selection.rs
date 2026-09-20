@@ -435,6 +435,8 @@ pub(super) fn builtin_tool_specs_json(provider_id: &ChatProviderId, model: &str,
         // Mirror the fresh-turn gates: memory on, browser interaction tools off.
         memory: true,
         browser: false,
+        // Preview paths always pair with the WorkspaceWrite sandbox below.
+        allows_mutating: true,
         fs_rules: Vec::new(),
     };
     serde_json::to_string(&crate::chat::tools::openai_tool_specs(
@@ -754,6 +756,8 @@ pub async fn count_context_tokens(
                             // Mirror the fresh-turn gates: memory on, browser interaction tools off.
                             memory: true,
                             browser: false,
+                            // Preview paths always pair with WorkspaceWrite.
+                            allows_mutating: true,
                             fs_rules: Vec::new(),
                         },
                         crate::chat::permission::SandboxPolicy::WorkspaceWrite,
@@ -1042,6 +1046,8 @@ pub async fn count_context_breakdown(
                 // Mirror the fresh-turn gates: memory on, browser interaction tools off.
                 memory: true,
                 browser: false,
+                // Preview paths always pair with WorkspaceWrite.
+                allows_mutating: true,
                 fs_rules: Vec::new(),
             };
             let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(
@@ -1161,6 +1167,8 @@ pub async fn count_context_breakdown(
         // Mirror the fresh-turn gates: memory on, browser interaction tools off.
         memory: true,
         browser: false,
+        // Preview paths always pair with the WorkspaceWrite sandbox below.
+        allows_mutating: true,
         fs_rules: Vec::new(),
     };
     let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(

@@ -548,6 +548,9 @@ impl ChatManager {
                 // browsing manually before asking the model to act).
                 browser: self.browser_session_live(&sid)
                     || app.state::<crate::BrowserState>().0.has_active_page(),
+                // Same posture signal the schema build uses to strip the
+                // write tools — get_capabilities reads it.
+                allows_mutating: sandbox.allows_mutating_tools(),
             }
         };
         // Fresh late-attach slot for this turn (replaces any stale one).

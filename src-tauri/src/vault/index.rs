@@ -83,6 +83,16 @@ pub fn ensure_schema(conn: &Connection) -> DbResult<()> {
         );
         "#,
     )?;
+    // Duplicate tag rows (same tag twice on one line, duplicated frontmatter
+    // entries) are harmless to readers but would violate a unique constraint
+    // — dedupe pre-existing rows first, then enforce uniqueness so
+    // INSERT OR IGNORE in the indexer actually has something to ignore on.
+    conn.execute_batch(
+        "DELETE FROM vault_tags WHERE rowid NOT IN
+           (SELECT MIN(rowid) FROM vault_tags GROUP BY tag, path, line, source);
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_tags_unique
+           ON vault_tags(tag, path, line, source);",
+    )?;
     Ok(())
 }
 
@@ -124,50 +134,90 @@ pub fn list_files(conn: &Connection) -> DbResult<Vec<FileMeta>> {
     Ok(out)
 }
 
-/// (Re)index one note. Reads the file FIRST (no DB lock held across IO),
-/// then upserts everything in one transaction. Missing file = removal.
-pub fn reindex_file(conn: &Connection, root: &Path, rel: &str) -> DbResult<bool> {
+/// Everything read out of a note file before the (single-transaction) index
+/// write. `parsed_ok` is false for binary/undecodable files, which stay
+/// resolvable as unparsed rows.
+struct NoteInput {
+    parsed: ParsedNote,
+    aliases: Vec<String>,
+    fm_tags: Vec<String>,
+    size: usize,
+    /// Full text for the FTS row (empty for binary/undecodable files).
+    body: String,
+    meta: std::fs::Metadata,
+    parsed_ok: bool,
+}
+
+/// Read + parse one note for indexing. `None` = the file is gone (the
+/// caller drops its index rows). Read/decode problems degrade to an
+/// unparsed row; this never fails. No DB access — safe to call without the
+/// lock held (IO phase of the lock discipline).
+fn read_for_index(root: &Path, rel: &str) -> Option<NoteInput> {
     let abs = root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
     let meta = match std::fs::metadata(&abs) {
         Ok(m) if m.is_file() => m,
-        _ => {
-            remove_from_index(conn, rel)?;
-            return Ok(false);
-        }
+        _ => return None,
     };
-    let content = match std::fs::read_to_string(&abs) {
-        Ok(c) => c,
-        Err(_) => {
-            // Binary/undecodable: keep the file resolvable, unparsed.
-            upsert_file_row(conn, rel, "", None, None, 0, &meta)?;
-            return Ok(true);
+    Some(match std::fs::read_to_string(&abs) {
+        Ok(content) => {
+            let parsed = parse::parse_note(&content);
+            NoteInput {
+                aliases: parsed
+                    .frontmatter
+                    .as_ref()
+                    .map(|f| f.get_list("aliases"))
+                    .unwrap_or_default(),
+                fm_tags: parsed
+                    .frontmatter
+                    .as_ref()
+                    .map(|f| f.get_list("tags"))
+                    .unwrap_or_default(),
+                size: content.len(),
+                body: content,
+                meta,
+                parsed_ok: true,
+                parsed,
+            }
         }
-    };
-    let parsed: ParsedNote = parse::parse_note(&content);
-    let aliases = parsed
-        .frontmatter
-        .as_ref()
-        .map(|f| f.get_list("aliases"))
-        .unwrap_or_default();
-    let fm_tags = parsed
-        .frontmatter
-        .as_ref()
-        .map(|f| f.get_list("tags"))
-        .unwrap_or_default();
+        Err(_) => NoteInput {
+            parsed: ParsedNote::default(),
+            aliases: Vec::new(),
+            fm_tags: Vec::new(),
+            size: 0,
+            body: String::new(),
+            meta,
+            parsed_ok: false,
+        },
+    })
+}
 
+/// Write one note's rows in a single transaction. When `resolve` is false
+/// (full-scan phase 1) links are stored unresolved — the whole-set pass at
+/// the end of the scan resolves them against the COMPLETE file list, which
+/// avoids an O(files) resolver snapshot per file and never mis-resolves an
+/// ambiguous basename to whichever same-named file was indexed first.
+fn index_note(
+    conn: &Connection,
+    rel: &str,
+    input: &NoteInput,
+    resolve: bool,
+) -> DbResult<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| -> DbResult<()> {
-        upsert_file_row_parsed(conn, rel, &parsed, &aliases, &content.len(), &meta)?;
-        // One resolver snapshot per reindex (not per link) — O(files), not
-        // O(links × files). The just-upserted row is included, so self-links
-        // and newly renamed files resolve consistently.
-        let files = list_files(conn)?;
+        if input.parsed_ok {
+            upsert_file_row_parsed(conn, rel, &input.parsed, &input.aliases, &input.size, &input.meta)?;
+        } else {
+            upsert_file_row(conn, rel, "", None, None, 0, &input.meta)?;
+        }
+        let files = if resolve { Some(list_files(conn)?) } else { None };
         conn.execute(
             "DELETE FROM vault_links WHERE src = ?1",
             rusqlite::params![rel],
         )?;
-        for l in &parsed.links {
-            let dest = parse::resolve_link(l.linkpath(), &files);
+        for l in &input.parsed.links {
+            let dest = files
+                .as_deref()
+                .and_then(|f| parse::resolve_link(l.linkpath(), f));
             conn.execute(
                 "INSERT OR IGNORE INTO vault_links (src, dest, raw, is_embed, kind, line)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -182,13 +232,13 @@ pub fn reindex_file(conn: &Connection, root: &Path, rel: &str) -> DbResult<bool>
             )?;
         }
         conn.execute("DELETE FROM vault_tags WHERE path = ?1", rusqlite::params![rel])?;
-        for t in &parsed.tags {
+        for t in &input.parsed.tags {
             conn.execute(
                 "INSERT OR IGNORE INTO vault_tags (tag, path, line, source) VALUES (?1, ?2, ?3, 'inline')",
                 rusqlite::params![t.tag, rel, t.line as i64],
             )?;
         }
-        for t in &fm_tags {
+        for t in &input.fm_tags {
             conn.execute(
                 "INSERT OR IGNORE INTO vault_tags (tag, path, line, source) VALUES (?1, ?2, -1, 'frontmatter')",
                 rusqlite::params![t, rel],
@@ -198,7 +248,7 @@ pub fn reindex_file(conn: &Connection, root: &Path, rel: &str) -> DbResult<bool>
             "DELETE FROM vault_headings WHERE path = ?1",
             rusqlite::params![rel],
         )?;
-        for h in &parsed.headings {
+        for h in &input.parsed.headings {
             conn.execute(
                 "INSERT INTO vault_headings (path, level, text, line) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![rel, h.level as i64, h.text, h.line as i64],
@@ -208,7 +258,7 @@ pub fn reindex_file(conn: &Connection, root: &Path, rel: &str) -> DbResult<bool>
             "DELETE FROM vault_blocks WHERE path = ?1",
             rusqlite::params![rel],
         )?;
-        for b in &parsed.blocks {
+        for b in &input.parsed.blocks {
             conn.execute(
                 "INSERT OR IGNORE INTO vault_blocks (path, block_id, line) VALUES (?1, ?2, ?3)",
                 rusqlite::params![rel, b.id, b.line as i64],
@@ -221,7 +271,7 @@ pub fn reindex_file(conn: &Connection, root: &Path, rel: &str) -> DbResult<bool>
         let name = rel.rsplit('/').next().unwrap_or(rel);
         conn.execute(
             "INSERT INTO vault_fts (path, name, body) VALUES (?1, ?2, ?3)",
-            rusqlite::params![rel, name, content],
+            rusqlite::params![rel, name, input.body],
         )?;
         Ok(())
     })();
@@ -232,23 +282,64 @@ pub fn reindex_file(conn: &Connection, root: &Path, rel: &str) -> DbResult<bool>
             return Err(e);
         }
     }
-    // Forward references: links OTHER files wrote to this note before it
-    // existed (or while it was renamed) stay dest=NULL until this file is
-    // (re)indexed — resolve the pending ones now. Obsidian resolves
-    // asynchronously; this is the same contract, synchronous and bounded.
-    let names = pending_names_for(conn, rel);
-    refresh_unresolved_for(conn, &names)?;
+    Ok(())
+}
+
+/// (Re)index one note. Reads the file FIRST (no DB lock held across IO),
+/// then upserts everything in one transaction. Missing file = removal.
+/// The `&Connection` variant for callers that already hold the guard
+/// (tests, single-connection contexts).
+pub fn reindex_file(conn: &Connection, root: &Path, rel: &str) -> DbResult<bool> {
+    match read_for_index(root, rel) {
+        None => {
+            remove_from_index(conn, rel)?;
+            Ok(false)
+        }
+        Some(input) => {
+            index_note(conn, rel, &input, true)?;
+            let names = pending_names_for(conn, rel);
+            refresh_unresolved_for(conn, &names)?;
+            Ok(true)
+        }
+    }
+}
+
+/// Lock-disciplined variant over the shared connection mutex: file IO with
+/// the lock released, each SQL phase under its own lock. This is what the
+/// commands, the watcher and the chat tools use.
+pub fn reindex_file_locked(db: &parking_lot::Mutex<Connection>, root: &Path, rel: &str) -> DbResult<bool> {
+    let Some(input) = read_for_index(root, rel) else {
+        let conn = db.lock();
+        remove_from_index(&conn, rel)?;
+        return Ok(false);
+    };
+    {
+        let conn = db.lock();
+        index_note(&conn, rel, &input, true)?;
+    }
+    let conn = db.lock();
+    let names = pending_names_for(&conn, rel);
+    refresh_unresolved_for(&conn, &names)?;
     Ok(true)
 }
 
-/// The raw spellings a pending link can use to reach  (stemmed path,
-/// basename, aliases) — all lowercased for matching.
+/// The raw spellings a pending link can use to reach this file (stemmed
+/// path, basename, dotted spelling, aliases) — all lowercased for matching.
 fn pending_names_for(conn: &Connection, rel: &str) -> Vec<String> {
     let (base, _folder) = split_rel(rel);
     let mut names = vec![base.to_lowercase()];
-    let stem = rel.trim_end_matches(".md").to_lowercase();
+    let lower = rel.to_lowercase();
+    let stem = lower.strip_suffix(".md").unwrap_or(&lower).to_string();
     if !names.contains(&stem) {
-        names.push(stem);
+        names.push(stem.clone());
+    }
+    // Wikilinks may spell the target WITH its extension (`[[Note.md]]`),
+    // stored raw as the dotted form — neither the stem nor the basename
+    // matches that, so add it explicitly or those pending links stay
+    // unresolved until a full rescan.
+    let dotted = format!("{stem}.md");
+    if !names.contains(&dotted) {
+        names.push(dotted);
     }
     if let Ok(aliases_json) = conn.query_row(
         "SELECT aliases FROM vault_files WHERE path = ?1",
@@ -267,8 +358,21 @@ fn pending_names_for(conn: &Connection, rel: &str) -> Vec<String> {
     names
 }
 
-/// Re-resolve dest=NULL links whose raw target matches one of 
-/// (exact, or ending in  for folder-qualified spellings).
+/// Escape SQL LIKE wildcards so an alias like `100%_done` matches literally
+/// instead of as a pattern.
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '\\' || c == '%' || c == '_' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Re-resolve dest=NULL links whose raw target matches one of `names`
+/// (exact, or ending in `/<name>` for folder-qualified spellings).
 pub fn refresh_unresolved_for(conn: &Connection, names: &[String]) -> DbResult<usize> {
     let files = list_files(conn)?;
     let mut resolved = 0;
@@ -277,10 +381,12 @@ pub fn refresh_unresolved_for(conn: &Connection, names: &[String]) -> DbResult<u
             continue;
         }
         let mut stmt = conn.prepare(
-            "SELECT rowid, raw FROM vault_links WHERE dest IS NULL AND (lower(raw) = ?1 OR lower(raw) LIKE '%/' || ?1)",
+            "SELECT rowid, raw FROM vault_links WHERE dest IS NULL AND (lower(raw) = ?1 OR lower(raw) LIKE '%/' || ?2 ESCAPE '\\')",
         )?;
         let rows: Vec<(i64, String)> = stmt
-            .query_map(rusqlite::params![name], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map(rusqlite::params![name, like_escape(name)], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
             .filter_map(|r| r.ok())
             .collect();
         drop(stmt);
@@ -374,11 +480,22 @@ fn upsert_file_row_parsed(
 }
 
 pub fn remove_from_index(conn: &Connection, rel: &str) -> DbResult<()> {
+    // Resolve the ACTUAL stored spelling first: paths arrive from callers
+    // that may case them differently (Windows paths are case-insensitive —
+    // e.g. a case-only rename must drop the old-cased row, not orphan it).
+    // Exact match wins when two case-variant files coexist (Linux).
+    let actual: String = conn
+        .query_row(
+            "SELECT path FROM vault_files WHERE lower(path) = lower(?1) ORDER BY (path = ?1) DESC LIMIT 1",
+            rusqlite::params![rel],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| rel.to_string());
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let r = (|| -> DbResult<()> {
         // Inbound links to a deleted note become unresolved (graph keeps the
         // hollow node), exactly like Obsidian.
-        conn.execute("UPDATE vault_links SET dest = NULL WHERE dest = ?1", rusqlite::params![rel])?;
+        conn.execute("UPDATE vault_links SET dest = NULL WHERE dest = ?1", rusqlite::params![actual])?;
         for sql in [
             "DELETE FROM vault_links WHERE src = ?1",
             "DELETE FROM vault_tags WHERE path = ?1",
@@ -387,7 +504,7 @@ pub fn remove_from_index(conn: &Connection, rel: &str) -> DbResult<()> {
             "DELETE FROM vault_fts WHERE path = ?1",
             "DELETE FROM vault_files WHERE path = ?1",
         ] {
-            conn.execute(sql, rusqlite::params![rel])?;
+            conn.execute(sql, rusqlite::params![actual])?;
         }
         Ok(())
     })();
@@ -402,18 +519,32 @@ pub fn remove_from_index(conn: &Connection, rel: &str) -> DbResult<()> {
 }
 
 /// Full rescan: clear + walk + reindex every .md. Returns (notes, elapsed_ms).
-pub fn full_scan(conn: &Connection, root: &Path) -> DbResult<(usize, u128)> {
+/// Takes the connection MUTEX (not a held guard): file IO runs unlocked and
+/// each write phase takes the lock, so a long scan never freezes other DB
+/// users (chat persistence etc.) for its whole duration.
+pub fn full_scan(db: &parking_lot::Mutex<Connection>, root: &Path) -> DbResult<(usize, u128)> {
     let started = std::time::Instant::now();
+    super::sweep_stale_tmp(root);
     let files = collect_note_paths(root);
-    reset_index(conn)?;
+    {
+        let conn = db.lock();
+        reset_index(&conn)?;
+    }
+    // Two phases: write every file's rows with links UNresolved (no per-file
+    // resolver snapshot — O(files) once instead of O(files²) over the scan;
+    // a name ambiguous in the full vault must not resolve to whichever
+    // same-basename file happened to be indexed first), then one whole-set
+    // resolution pass now that every file is in the index.
     let mut n = 0;
     for rel in &files {
-        reindex_file(conn, root, rel)?;
-        n += 1;
+        if let Some(input) = read_for_index(root, rel) {
+            let conn = db.lock();
+            index_note(&conn, rel, &input, false)?;
+            n += 1;
+        }
     }
-    // One global pass now that the whole file set is indexed: forward
-    // references between notes scanned earlier in the walk resolve here.
-    refresh_all_unresolved(conn)?;
+    let conn = db.lock();
+    refresh_all_unresolved(&conn)?;
     Ok((n, started.elapsed().as_millis()))
 }
 
@@ -559,7 +690,11 @@ pub fn parse_search_query(q: &str) -> SearchParams {
 
 pub fn search(conn: &Connection, query: &str, limit: usize) -> DbResult<Vec<SearchHit>> {
     let params = parse_search_query(query);
-    // FTS MATCH string: quoted terms AND'd (space-separated), NOT for exclusions.
+    // FTS MATCH string: positive terms only, quoted and AND'd. Exclusions
+    // are applied afterwards as a set difference — with no positive terms a
+    // lone `-word` must still return everything else, and there is no
+    // match-all expression in FTS5 syntax to hang `NOT` off (a bare `*` is
+    // a syntax error), so `NOT` in the MATCH string can't express it.
     let mut match_q = String::new();
     for t in &params.terms {
         if !match_q.is_empty() {
@@ -567,17 +702,25 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> DbResult<Vec<Sear
         }
         match_q.push_str(&format!("\"{}\"", t.replace('"', "\"\"")));
     }
-    for t in &params.not {
-        if match_q.is_empty() {
-            // A lone exclusion filters nothing without positive terms —
-            // match all rows (FTS5 empty query is invalid; use *).
-            match_q.push('*');
+    // Paths of files whose body matches any excluded term (empty when none).
+    let mut excluded: Vec<String> = Vec::new();
+    if !params.not.is_empty() {
+        for t in &params.not {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT path FROM vault_fts WHERE vault_fts MATCH ?1",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![format!("\"{}\"", t.replace('"', "\"\""))],
+                |r| r.get::<_, String>(0),
+            )?;
+            for r in rows {
+                excluded.push(r?);
+            }
         }
-        match_q.push_str(&format!(" NOT \"{}\"", t.replace('"', "\"\"")));
     }
 
     let mut hits: Vec<(String, Option<String>, String, String, String)> = Vec::new(); // path,title,base,folder,snippet
-    if match_q.is_empty() || match_q == "*" {
+    if match_q.is_empty() {
         let mut stmt = conn.prepare(
             "SELECT f.path, f.title, f.basename, f.folder, '' FROM vault_files f ORDER BY f.basename",
         )?;
@@ -629,7 +772,10 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> DbResult<Vec<Sear
 
     // Operator filters (post-FTS; the tables answer them exactly).
     let tag_rows: Vec<String> = if let Some(tag) = &params.tag {
-        let mut stmt = conn.prepare("SELECT DISTINCT path FROM vault_tags WHERE tag = ?1")?;
+        // NOCASE: tags are stored as typed (`#Life` keeps its case) but
+        // Obsidian tag matching is case-insensitive.
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT path FROM vault_tags WHERE tag = ?1 COLLATE NOCASE")?;
         let rows = stmt.query_map(rusqlite::params![tag], |r| r.get::<_, String>(0))?;
         rows.filter_map(|r| r.ok()).collect()
     } else {
@@ -637,6 +783,9 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> DbResult<Vec<Sear
     };
     let mut out = Vec::new();
     for (path, title, base, folder, snippet) in hits {
+        if !excluded.is_empty() && excluded.iter().any(|p| p == &path) {
+            continue;
+        }
         if let Some(tag) = &params.tag {
             if !tag_rows.iter().any(|p| p == &path) {
                 continue;
@@ -1065,7 +1214,8 @@ mod tests {
 
     #[test]
     fn full_scan_and_rebuild() {
-        let conn = mem();
+        let conn = parking_lot::Mutex::new(Connection::open_in_memory().unwrap());
+        ensure_schema(&conn.lock()).unwrap();
         let dir = std::env::temp_dir().join(format!("vault-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".obsidian")).unwrap();
@@ -1080,6 +1230,7 @@ mod tests {
         let (n, _) = full_scan(&conn, &root).unwrap();
         assert_eq!(n, 2, "dot dirs skipped");
         let links: i64 = conn
+            .lock()
             .query_row("SELECT COUNT(*) FROM vault_links WHERE dest IS NOT NULL", [], |r| r.get(0))
             .unwrap();
         assert_eq!(links, 2);
@@ -1094,6 +1245,101 @@ mod tests {
         assert_eq!(p.path.as_deref(), Some("my folder"));
         assert_eq!(p.file.as_deref(), Some("2026"));
         assert_eq!(p.not, vec!["skipme"]);
+    }
+
+    #[test]
+    fn lone_exclusion_search_lists_everything_else() {
+        let conn = mem();
+        let dir = std::env::temp_dir().join(format!("vault-excl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = write_vault(
+            &dir,
+            &[("A.md", "welcome here"), ("B.md", "other words"), ("C.md", "more words")],
+        );
+        for rel in ["A.md", "B.md", "C.md"] {
+            reindex_file(&conn, &root, rel).unwrap();
+        }
+        // A bare `*` is invalid FTS5 — a lone `-term` must still work.
+        let hits = search(&conn, "-welcome", 10).unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["B.md", "C.md"]);
+        // Mixed query keeps the AND NOT semantics.
+        let hits = search(&conn, "words -other", 10).unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["C.md"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tag_search_is_case_insensitive() {
+        let conn = mem();
+        let dir = std::env::temp_dir().join(format!("vault-tagcase-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = write_vault(&dir, &[("A.md", "#Life and #life twice #life")]);
+        reindex_file(&conn, &root, "A.md").unwrap();
+        for q in ["tag:life", "tag:Life", "tag:LIFE"] {
+            let hits = search(&conn, q, 10).unwrap();
+            assert_eq!(hits.len(), 1, "query {q}");
+        }
+        // The duplicate `#life` on one line collapses via the unique index
+        // (INSERT OR IGNORE); the differently-cased `#Life` is kept.
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vault_tags WHERE path='A.md'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wikilink_spelled_with_extension_resolves_without_rescan() {
+        let conn = mem();
+        let dir = std::env::temp_dir().join(format!("vault-dotted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = write_vault(&dir, &[("A.md", "see [[Projects/B.md]]")]);
+        reindex_file(&conn, &root, "A.md").unwrap();
+        let unresolved: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vault_links WHERE dest IS NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(unresolved, 1);
+        // B appears later; its (re)index must resolve A's dotted spelling.
+        std::fs::create_dir_all(dir.join("Projects")).unwrap();
+        std::fs::write(dir.join("Projects").join("B.md"), "# B").unwrap();
+        reindex_file(&conn, &root, "Projects/B.md").unwrap();
+        let unresolved: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vault_links WHERE dest IS NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(unresolved, 0, "dotted raw resolves via pending-name refresh");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn full_scan_resolves_ambiguous_basenames_against_the_full_set() {
+        let conn = parking_lot::Mutex::new(Connection::open_in_memory().unwrap());
+        ensure_schema(&conn.lock()).unwrap();
+        let dir = std::env::temp_dir().join(format!("vault-ambig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = write_vault(
+            &dir,
+            &[
+                ("Deep/Note.md", "deep note"),
+                ("Zet.md", "links to [[Note]]"),
+                ("Note.md", "root note"),
+            ],
+        );
+        let (n, _) = full_scan(&conn, &root).unwrap();
+        assert_eq!(n, 3);
+        // Walk order indexes Deep/Note.md before Note.md — resolution happens
+        // against the complete set, so the shortest path wins.
+        let dest: Option<String> = conn
+            .lock()
+            .query_row(
+                "SELECT dest FROM vault_links WHERE src='Zet.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dest.as_deref(), Some("Note.md"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

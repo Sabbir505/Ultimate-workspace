@@ -47,28 +47,44 @@ fn arg_str(args: &Value, key: &str) -> String {
 
 /// Execute one vault tool call. Returns plain text for the model.
 pub async fn execute_vault_tool(app: &tauri::AppHandle, name: &str, args: &Value) -> String {
+    // Every branch below does file IO and/or SQLite work: run on the
+    // blocking pool, same discipline as the vault_* Tauri commands (the
+    // cores scope the DB mutex to their SQL phases internally).
+    let app = app.clone();
+    let name = name.to_string();
+    let args = args.clone();
+    match tauri::async_runtime::spawn_blocking(move || execute_vault_tool_sync(&app, &name, &args))
+        .await
+    {
+        Ok(text) => text,
+        Err(e) => format!("Error: task join error: {e}"),
+    }
+}
+
+/// The synchronous body — runs on a blocking thread.
+fn execute_vault_tool_sync(app: &tauri::AppHandle, name: &str, args: &Value) -> String {
     let root = match vault::current_root(app) {
         Ok(r) => r,
         Err(e) => return format!("Error: {e}"),
     };
+    let db = app.state::<crate::DbState>().inner().0.clone();
     match name {
-        super::VAULT_LIST => vault_list(app, &root, args),
-        super::VAULT_READ => vault_read(app, &root, args),
-        super::VAULT_SEARCH => vault_search(app, args),
-        super::VAULT_WRITE => vault_write(app, &root, args).await,
-        super::VAULT_MOVE => vault_move(app, &root, args).await,
-        super::VAULT_DELETE => vault_delete(app, &root, args),
+        super::VAULT_LIST => vault_list(&db, args),
+        super::VAULT_READ => vault_read(&db, &root, args),
+        super::VAULT_SEARCH => vault_search(&db, args),
+        super::VAULT_WRITE => vault_write(&db, &root, args),
+        super::VAULT_MOVE => vault_move(&db, &root, args),
+        super::VAULT_DELETE => vault_delete(&db, &root, args),
         other => format!("Error: unknown vault tool \"{other}\"."),
     }
 }
 
-fn vault_list(app: &tauri::AppHandle, _root: &std::path::Path, args: &Value) -> String {
+fn vault_list(db: &parking_lot::Mutex<rusqlite::Connection>, args: &Value) -> String {
     let folder_filter = arg_str(args, "folder")
         .trim_matches('/')
         .to_lowercase();
-    let db = app.state::<crate::DbState>();
     let rows: Vec<(String, Option<String>, String, String)> = {
-        let conn = db.0.lock();
+        let conn = db.lock();
         let mut stmt = match conn.prepare(
             "SELECT path, title, basename, aliases FROM vault_files WHERE ext = 'md' ORDER BY path",
         ) {
@@ -126,17 +142,12 @@ fn vault_list(app: &tauri::AppHandle, _root: &std::path::Path, args: &Value) -> 
     out
 }
 
-fn vault_read(app: &tauri::AppHandle, root: &std::path::Path, args: &Value) -> String {
+fn vault_read(db: &parking_lot::Mutex<rusqlite::Connection>, root: &std::path::Path, args: &Value) -> String {
     let path = arg_str(args, "path");
     if path.is_empty() {
         return "Error: vault_read requires a \"path\" (vault-relative, e.g. \"Notes/Idea.md\").".into();
     }
-    let db = app.state::<crate::DbState>();
-    let content = {
-        let conn = db.0.lock();
-        vault::read_note_core(&conn, root, &path)
-    };
-    match content {
+    match vault::read_note_core(db, root, &path) {
         Ok(text) => {
             if text.len() > VAULT_READ_MAX {
                 let mut cut = VAULT_READ_MAX;
@@ -152,15 +163,14 @@ fn vault_read(app: &tauri::AppHandle, root: &std::path::Path, args: &Value) -> S
     }
 }
 
-fn vault_search(app: &tauri::AppHandle, args: &Value) -> String {
+fn vault_search(db: &parking_lot::Mutex<rusqlite::Connection>, args: &Value) -> String {
     let query = arg_str(args, "query");
     if query.is_empty() {
         return "Error: vault_search requires a \"query\".".into();
     }
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).clamp(1, 50) as usize;
-    let db = app.state::<crate::DbState>();
     let hits = {
-        let conn = db.0.lock();
+        let conn = db.lock();
         vault::index::search(&conn, &query, limit)
     };
     match hits {
@@ -182,31 +192,33 @@ fn vault_search(app: &tauri::AppHandle, args: &Value) -> String {
     }
 }
 
-async fn vault_write(app: &tauri::AppHandle, root: &std::path::Path, args: &Value) -> String {
+fn vault_write(db: &parking_lot::Mutex<rusqlite::Connection>, root: &std::path::Path, args: &Value) -> String {
     let path = arg_str(args, "path");
-    let content = args
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    // The spec marks `content` required, but nothing validates the model's
+    // JSON before this point: a missing or NON-STRING content must fail
+    // loudly instead of defaulting to "" and blanking an existing note with
+    // a success message (an overwrite keeps no recoverable copy — deletes
+    // go to .trash, overwrites don't).
+    let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
+        return "Error: vault_write requires \"content\" as a string — the complete markdown \
+                of the note. Omitting it would blank the note."
+            .into();
+    };
     if path.is_empty() {
         return "Error: vault_write requires \"path\" (vault-relative, must end in .md) and \"content\".".into();
     }
     if !path.to_ascii_lowercase().ends_with(".md") {
         return format!("Error: vault_write paths must end in .md (got \"{path}\").");
     }
-    let db = app.state::<crate::DbState>();
     // create-or-overwrite, decided by existence (the model says intent via
     // which tool shape it needs; both land here for identical indexing).
     let exists = vault::safe_join(root, &path)
         .map(|p| p.is_file())
         .unwrap_or(false);
-    let result = {
-        let conn = db.0.lock();
-        if exists {
-            vault::write_note_core(&conn, root, &path, content)
-        } else {
-            vault::create_note_core(&conn, root, &path, content)
-        }
+    let result = if exists {
+        vault::write_note_core(db, root, &path, content)
+    } else {
+        vault::create_note_core(db, root, &path, content)
     };
     match result {
         Ok(rel) => {
@@ -221,43 +233,39 @@ async fn vault_write(app: &tauri::AppHandle, root: &std::path::Path, args: &Valu
     }
 }
 
-async fn vault_move(app: &tauri::AppHandle, root: &std::path::Path, args: &Value) -> String {
+fn vault_move(db: &parking_lot::Mutex<rusqlite::Connection>, root: &std::path::Path, args: &Value) -> String {
     let from = arg_str(args, "from");
     let to = arg_str(args, "to");
     if from.is_empty() || to.is_empty() {
         return "Error: vault_move requires \"from\" and \"to\" (vault-relative .md paths).".into();
     }
-    let db = app.state::<crate::DbState>();
-    let db_arc = db.inner().0.clone();
-    let root_owned = root.to_path_buf();
-    // The rename rewrites whole files — off the async runtime.
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let mut conn = db_arc.lock();
-        vault::rename_note_core(&mut conn, &root_owned, &from, &to)
-    })
-    .await
-    .map_err(|e| format!("task join error: {e}"));
-    match result {
-        Ok(Ok((new_path, rewrites))) => format!(
+    // The spec says notes; enforce it on BOTH sides (rename_note_core only
+    // checks `to` — a binary `from` would otherwise rename onto a .md path
+    // and index as a garbage note row).
+    if !from.to_ascii_lowercase().ends_with(".md") {
+        return format!("Error: vault_move \"from\" must end in .md (got \"{from}\").");
+    }
+    match vault::rename_note_core(db, root, &from, &to) {
+        Ok((new_path, rewrites)) => format!(
             "Renamed to \"{new_path}\". {rewrites} note(s) had inbound links rewritten to \
              point at the new location."
         ),
-        Ok(Err(e)) => format!("Error: {e}"),
         Err(e) => format!("Error: {e}"),
     }
 }
 
-fn vault_delete(app: &tauri::AppHandle, root: &std::path::Path, args: &Value) -> String {
+fn vault_delete(db: &parking_lot::Mutex<rusqlite::Connection>, root: &std::path::Path, args: &Value) -> String {
     let path = arg_str(args, "path");
     if path.is_empty() {
         return "Error: vault_delete requires a \"path\".".into();
     }
-    let db = app.state::<crate::DbState>();
-    let result = {
-        let conn = db.0.lock();
-        vault::delete_note_core(&conn, root, &path)
-    };
-    match result {
+    if !path.to_ascii_lowercase().ends_with(".md") {
+        return format!(
+            "Error: vault_delete paths must be .md notes (got \"{path}\"); the trash flow is \
+             for notes only."
+        );
+    }
+    match vault::delete_note_core(db, root, &path) {
         Ok(trash_path) => format!(
             "Deleted \"{path}\" (moved to vault .trash: {trash_path}). Inbound links to it \
              are now unresolved."

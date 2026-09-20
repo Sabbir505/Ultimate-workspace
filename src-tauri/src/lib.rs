@@ -118,6 +118,7 @@ mod git_watcher;
 mod harness_adapters;
 mod harness_bundle;
 mod harness_config;
+mod hooks;
 mod improve_engine;
 mod installed_skills;
 pub mod memory;
@@ -195,6 +196,57 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // User hooks — lifecycle observers (Settings → Hooks). Fired from
+            // the global turn-finalization events so EVERY engine (built-in
+            // loop, harness headless, ACP, mobile-dispatched turns) gets
+            // turn_complete without touching each emit site. Detached and
+            // pre-trusted by design — see hooks::lifecycle_detached.
+            {
+                use tauri::Listener;
+                let handle = app.handle().clone();
+                app.listen("chat:done", move |event| {
+                    let sid = serde_json::from_str::<serde_json::Value>(event.payload())
+                        .ok()
+                        .and_then(|v| {
+                            v.get("chatSessionId")
+                                .and_then(|s| s.as_str())
+                                .map(str::to_string)
+                        });
+                    if let Some(sid) = sid {
+                        crate::hooks::lifecycle_detached(
+                            &handle,
+                            crate::hooks::HookEvent::TurnComplete,
+                            &sid,
+                            "done",
+                            "",
+                        );
+                    }
+                });
+                let handle = app.handle().clone();
+                app.listen("chat:error", move |event| {
+                    let parsed = serde_json::from_str::<serde_json::Value>(event.payload()).ok();
+                    if let Some(v) = parsed {
+                        let sid = v
+                            .get("chatSessionId")
+                            .and_then(|s| s.as_str())
+                            .map(str::to_string);
+                        let msg = v
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some(sid) = sid {
+                            crate::hooks::lifecycle_detached(
+                                &handle,
+                                crate::hooks::HookEvent::TurnComplete,
+                                &sid,
+                                "error",
+                                &msg,
+                            );
+                        }
+                    }
+                });
+            }
             // Chat DB location: `storage.dbDir` (Settings → Data) when set,
             // else the default `<app data dir>/relay.db`. The setting is
             // read by peeking at the default DB, which always exists.
@@ -497,6 +549,9 @@ pub fn run() {
             github::github_pr_checks,
             github::github_draft_pr_text,
             github::github_local_branches,
+            // user hooks (Settings → Hooks; config rides get/set_setting)
+            commands::hooks_cmds::hooks_test,
+            commands::hooks_cmds::hooks_import_claude,
             commands::git_cmds::get_git_status,
             commands::git_cmds::get_changed_files,
             commands::git_cmds::create_worktree,

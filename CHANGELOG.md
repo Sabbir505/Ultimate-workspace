@@ -11,6 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **User hooks — pre/post tool-call scripts** (Settings → Hooks): a hook is a user command that runs around
+  every agent tool call in the built-in chat (main loop, spawned subagent Tasks, Session Mesh children), the
+  subagent loop, and the `relay-tools` MCP bridge. `pre_tool_use` hooks can deny a call (exit 2 or JSON
+  `decision:"deny"`, refusal text feeds back to the model), request approval (`decision:"ask"` routes into the
+  same approval card the permission system uses; degrades to deny on subagent/bridge paths), or rewrite
+  arguments (`updatedInput`); `post_tool_use` hooks annotate results (`additionalContext`) or observe detached
+  (`async: true`). Claude-Code-style I/O contract (JSON on stdin, exit 0/2/other, JSON decisions) so existing
+  hook scripts port directly; commands spawn exec-form (never a shell) with `${tool_input.*}` substitution;
+  the first run of each distinct command raises the native exec-gate dialog, remembered per hash; per-hook
+  `onError: closed` lets guardrail hooks fail closed. Config lives under the `hooks` setting, edited in
+  Settings → Hooks with a per-hook Test button (`hooks_test`). Matchers support exact lists and regexes;
+  `turn_complete` (from the global chat:done/chat:error events, every engine) and `session_start` (first
+  message) lifecycle hooks fire detached as observers; Claude Code sessions gate `can_use_tool` requests
+  through pre-hooks (deny answers the CLI, rewritten input rides the allow response, ask degrades to
+  proceed under full_auto's no-cards contract); all six harness panes fire detached post-tool observations;
+  and `hooks_import_claude` imports command-type hooks from `~/.claude/settings.json`. See
+  `docs/research/HOOKS_SYSTEM_RESEARCH.md`.
+
 ## [0.5.0] — 2026-09-17
 
 **A feature release covering 345 commits since 0.4.2** — relief from single-chat, single-session amnesia. Relay now runs up to six chats side by side in one window, agents can see and message each other's sessions, a persistent memory survives across chats, artifacts improve themselves from their own run telemetry, and a companion pet keeps the workspace company. Alongside: an in-process local read-aloud, a rebuilt browser agent core, a notification center, auto model routing, a first-run wizard, and the architecture debt paid down (the event seam, DB lock scopes, and the 4k-line chat store all carved up).

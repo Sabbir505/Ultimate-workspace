@@ -1174,6 +1174,7 @@ pub(super) fn emit_opencode_tool(
             let err = state.get("error").and_then(|e| e.as_str());
             tools.tool_use_with_output(name, value, out, err)
         } else {
+            crate::hooks::harness_observation(app, sid, name, &value);
             tools.tool_use(name, vec![value])
         };
         {

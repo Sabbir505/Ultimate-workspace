@@ -150,8 +150,69 @@ pub fn outcome_artifact_json(o: &tools::ToolOutcome) -> Value {
     }
 }
 
-/// Execute one relay-tools call and return the text result + artifact info.
+/// Execute one relay-tools call, wrapped with the user-hook pass (origin
+/// `relay_tools`). There is no session identity on this path (`sid` is `None`
+/// in the hook payload) and no approval card is reachable — a hook's `ask`
+/// degrades to a refusal, since an unattended harness turn can't answer one
+/// either.
 pub async fn execute_relay_tool(
+    app: &tauri::AppHandle,
+    tool_name: &str,
+    args: &Value,
+) -> Result<Value, McpError> {
+    if crate::hooks::is_exempt(tool_name) {
+        return execute_relay_tool_inner(app, tool_name, args).await;
+    }
+    let mut hook_args = args.clone();
+    match crate::hooks::run_pre_tool(app, None, tool_name, &mut hook_args, "relay_tools", "harness")
+        .await
+    {
+        crate::hooks::PreVerdict::Deny { reason } => {
+            return Ok(json!({
+                "text": format!(
+                    "Error: `{tool_name}` was blocked by a user hook — {reason} The user's hook \
+                     scripts are authoritative here; adjust the approach instead of retrying."
+                ),
+                "artifact": Value::Null
+            }));
+        }
+        crate::hooks::PreVerdict::Ask { reason } => {
+            return Ok(json!({
+                "text": format!(
+                    "Error: `{tool_name}` needs manual approval per a user hook ({reason}), which \
+                     is not available on this path. The main chat can run it interactively."
+                ),
+                "artifact": Value::Null
+            }));
+        }
+        crate::hooks::PreVerdict::Proceed { .. } => {}
+    }
+
+    let result = execute_relay_tool_inner(app, tool_name, &hook_args).await?;
+    // Post-hook annotations ride on the text field; the artifact (if any) is
+    // untouched so file attribution keeps working.
+    let annotated = match result.get("text").and_then(Value::as_str) {
+        Some(text) => {
+            let text = crate::hooks::run_post_tool(
+                app,
+                None,
+                tool_name,
+                &hook_args,
+                text.to_string(),
+                "relay_tools",
+                "harness",
+            )
+            .await;
+            json!({ "text": text, "artifact": result.get("artifact").cloned().unwrap_or(Value::Null) })
+        }
+        None => result,
+    };
+    Ok(annotated)
+}
+
+/// Execute one relay-tools call and return the text result + artifact info.
+/// Wrapped by [`execute_relay_tool`], which owns the user-hook pass.
+async fn execute_relay_tool_inner(
     app: &tauri::AppHandle,
     tool_name: &str,
     args: &Value,

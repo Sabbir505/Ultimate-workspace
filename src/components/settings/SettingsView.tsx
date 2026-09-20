@@ -25,6 +25,7 @@ import { SubagentModelPanel } from "./SubagentModelPanel";
 import { ImprovementsPanel } from "./ImprovementsPanel";
 import { SttPanel } from "./SttPanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
+import { HooksPanel } from "./HooksPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
 import { FontSettingsPanel } from "./FontSettingsPanel";
 import { SidebarArtPanel } from "./SidebarArtPanel";
@@ -104,6 +105,7 @@ import {
   Library,
   Brain,
   Shield,
+  Webhook,
   ShieldOff,
   Smartphone,
   Bell,
@@ -126,6 +128,7 @@ type Category =
   | "memory"
   | "mcpgallery"
   | "permissions"
+  | "hooks"
   | "data"
   | "git"
   | "remote";
@@ -145,6 +148,7 @@ const CATEGORY_KEYS: Category[] = [
   "memory",
   "mcpgallery",
   "permissions",
+  "hooks",
   "data",
   "git",
   "remote",
@@ -173,6 +177,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "knowledge": return <Library {...props} />;
     case "memory": return <Brain {...props} />;
     case "permissions": return <Shield {...props} />;
+    case "hooks": return <Webhook {...props} />;
     case "data": return <Database {...props} />;
     case "git": return <GitBranch {...props} />;
     case "remote": return <Smartphone {...props} />;
@@ -220,6 +225,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
     items: [
       { key: "git", label: "Version control", sub: "Commits · worktrees · checkpoints" },
       { key: "permissions", label: "Approval rules", sub: "Always-allow tool+glob" },
+      { key: "hooks", label: "Hooks", sub: "Pre/post tool scripts" },
     ],
   },
   {
@@ -659,6 +665,8 @@ export function SettingsView() {
               {category === "mcpgallery" && <McpGalleryPanel />}
 
               {category === "permissions" && <PermissionRulesPanel />}
+
+              {category === "hooks" && <HooksPanel />}
 
               {category === "data" && <DataPanel />}
 

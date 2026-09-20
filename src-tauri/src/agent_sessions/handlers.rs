@@ -169,6 +169,9 @@ pub(super) fn handle_kimi_event(
                                 &args,
                             );
                         } else {
+                            let hook_input =
+                                values.first().cloned().unwrap_or(serde_json::json!({}));
+                            crate::hooks::harness_observation(app, sid, &name, &hook_input);
                             let marker = tools.tool_use(&name, values);
                             full.push_str(&marker);
                             emit_token(app, sid, &marker);
@@ -584,6 +587,7 @@ pub(super) fn handle_pi_event(
                 // pi reports the tool's output separately (tool_execution_end),
                 // so the start marker queues a pending slot for tool_result to
                 // match — the plain tool_use, NOT the self-contained variant.
+                crate::hooks::harness_observation(app, sid, name, &inp);
                 let marker = tools.tool_use(name, vec![value]);
                 full.push_str(&marker);
                 emit_token(app, sid, &marker);
@@ -762,6 +766,7 @@ pub(super) fn handle_commandcode_event(
                             // through them rendered the chat chip but never
                             // emitted chat:subagent-spawn — the Agents pane
                             // stayed empty and the entry never finalized.
+                            crate::hooks::harness_observation(app, sid, name, &value);
                             let marker = if is_subagent_tool_name(name) {
                                 let role = inp
                                     .get("subagent_type")

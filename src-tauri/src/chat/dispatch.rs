@@ -1167,14 +1167,57 @@ fn subagent_tool_specs(is_anthropic: bool) -> Vec<Value> {
         .collect()
 }
 
-/// Execute one subagent tool call. The DB-backed source-ledger tools are
-/// intercepted first — the subagent loop bypasses `run_tool`, where the main
-/// loop dispatches them, so without this the model could never record
-/// sources. Then the read-only allowlist is enforced AT EXECUTION: the specs
-/// only advertise it, but `execute_tool` dispatches by name and the subagent
-/// loop has no permission layer — a hallucinated/injected write_file must not
-/// run unchecked. Everything else goes to the shared `execute_tool`.
+/// Execute one subagent tool call, wrapped with the user-hook pass (origin
+/// `subagent`). Subagents can't pause for an approval card of their own — a
+/// hook's `ask` degrades to a refusal pointing at the main chat, mirroring how
+/// the subagent loop has no other interactive surface.
 async fn subagent_run_tool(
+    app: &AppHandle,
+    sid: &str,
+    client: &reqwest::Client,
+    artifacts_dir: &std::path::Path,
+    caps: &tools::ToolCaps,
+    name: &str,
+    args: &Value,
+) -> ToolOutcome {
+    if crate::hooks::is_exempt(name) {
+        return subagent_run_tool_inner(app, sid, client, artifacts_dir, caps, name, args).await;
+    }
+    let mut hook_args = args.clone();
+    match crate::hooks::run_pre_tool(app, Some(sid), name, &mut hook_args, "subagent", "read_only")
+        .await
+    {
+        crate::hooks::PreVerdict::Deny { reason } => {
+            return ToolOutcome::text(format!(
+                "Error: `{name}` was blocked by a user hook — {reason}"
+            ));
+        }
+        crate::hooks::PreVerdict::Ask { .. } => {
+            return ToolOutcome::text(format!(
+                "Error: `{name}` needs manual approval per a user hook, and subagents cannot ask. \
+                 Run it from the main chat instead."
+            ));
+        }
+        crate::hooks::PreVerdict::Proceed { .. } => {}
+    }
+    let outcome = subagent_run_tool_inner(app, sid, client, artifacts_dir, caps, name, &hook_args).await;
+    let text = crate::hooks::run_post_tool(
+        app,
+        Some(sid),
+        name,
+        &hook_args,
+        outcome.text,
+        "subagent",
+        "read_only",
+    )
+    .await;
+    ToolOutcome { text, ..outcome }
+}
+
+/// The subagent dispatcher proper — allowlist enforcement at execution, then
+/// the ledger/vault/web intercepts and the shared `execute_tool`. Wrapped by
+/// [`subagent_run_tool`], which owns the user-hook pass.
+async fn subagent_run_tool_inner(
     app: &AppHandle,
     sid: &str,
     client: &reqwest::Client,
@@ -2023,7 +2066,79 @@ pub(crate) fn spawn_run_tool(
     })
 }
 
+/// Public tool entry for the built-in chat loop: user hooks wrap the whole
+/// family ladder below. Plan tools are exempt (they ARE a consent surface);
+/// every other call — reads and writes, main loop and spawned subagent Tasks
+/// alike — passes through here, so one pre/post pair covers the engine.
+/// `pre_tool_use` may deny (refusal text), ask (the same approval oneshot the
+/// gated families use), or rewrite the args; `post_tool_use` annotates the
+/// result text. See `src/hooks.rs` and docs/research/HOOKS_SYSTEM_RESEARCH.md.
 pub(crate) async fn run_tool(
+    client: &reqwest::Client,
+    artifacts_dir: &std::path::Path,
+    caps: &tools::ToolCaps,
+    sandbox: permission::SandboxPolicy,
+    approval: permission::ApprovalPolicy,
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+) -> String {
+    if crate::chat::plan::is_plan_tool(name) || crate::hooks::is_exempt(name) {
+        return run_tool_inner(client, artifacts_dir, caps, sandbox, approval, mgr, app, sid, name, args)
+            .await;
+    }
+    let mut hook_args = args.clone();
+    let mut pre_note: Option<String> = None;
+    match crate::hooks::run_pre_tool(app, Some(sid), name, &mut hook_args, "chat", approval.as_db())
+        .await
+    {
+        crate::hooks::PreVerdict::Deny { reason } => {
+            return format!(
+                "Error: `{name}` was blocked by a user hook — {reason} The user's hook scripts are \
+                 authoritative here; adjust the approach instead of retrying the same call."
+            );
+        }
+        crate::hooks::PreVerdict::Ask { reason } => {
+            let summary = format!("User hook asks for approval — {name}: {reason}");
+            if !run_approval_gate(mgr, app, sid, name, &hook_args, summary).await {
+                return format!(
+                    "The user denied the {name} action (asked by a user hook). Do not retry it \
+                     unless the user explicitly asks."
+                );
+            }
+        }
+        crate::hooks::PreVerdict::Proceed { note } => pre_note = note,
+    }
+
+    let result =
+        run_tool_inner(client, artifacts_dir, caps, sandbox, approval, mgr, app, sid, name, &hook_args)
+            .await;
+    let annotated = crate::hooks::run_post_tool(
+        app,
+        Some(sid),
+        name,
+        &hook_args,
+        result,
+        "chat",
+        approval.as_db(),
+    )
+    .await;
+    match pre_note {
+        Some(note) => format!(
+            "{annotated}\n\n[user hook] {}",
+            crate::util::truncate_chars(note.trim(), 2_000)
+        ),
+        None => annotated,
+    }
+}
+
+/// The family ladder proper — plan gate, browser, ledger, web, automations,
+/// vault, memory/mesh, connector/MCP, system, filesystem, then the shared
+/// `execute_tool` fallback. Wrapped by [`run_tool`], which owns the user-hook
+/// pass.
+async fn run_tool_inner(
     client: &reqwest::Client,
     artifacts_dir: &std::path::Path,
     caps: &tools::ToolCaps,

@@ -338,6 +338,51 @@ pub(super) fn handle_can_use_tool(
             .map(|cs| cs.approval_policy == "full_access")
             .unwrap_or(false)
     };
+
+    // User hooks gate harness tool calls before the posture decision (origin
+    // `harness`). A deny answers the CLI immediately; an ask forces the card
+    // in card-capable postures; proceed/allow falls through unchanged.
+    // Blocking the reader thread is the established contract here — the CLI
+    // is waiting on our control response anyway — and the hook's own timeout
+    // bounds the wait. A rewritten input (`updatedInput`) rides the eventual
+    // allow response.
+    let mut hook_input = input.clone();
+    let hook_ask = if let Some(app) = app {
+        let mode = if full_auto { "full_access" } else { "on_request" };
+        match tauri::async_runtime::block_on(crate::hooks::run_harness_pre_gate(
+            app,
+            sid,
+            &tool,
+            &mut hook_input,
+            mode,
+        )) {
+            crate::hooks::HarnessGateVerdict::Deny { reason } => {
+                let _ = reason; // the CLI's deny response carries its own message
+                let response = can_use_tool_response(&request_id, false, &input);
+                if let Ok(mut guard) = shared_stdin.lock() {
+                    if let Some(stdin) = guard.as_mut() {
+                        let _ = stdin
+                            .write_all(response.to_string().as_bytes())
+                            .and_then(|_| stdin.write_all(b"
+"))
+                            .and_then(|_| stdin.flush());
+                    }
+                }
+                return;
+            }
+            crate::hooks::HarnessGateVerdict::Ask => true,
+            crate::hooks::HarnessGateVerdict::Proceed => false,
+        }
+    } else {
+        false
+    };
+    // A hook's rewritten input becomes the CLI's updatedInput on allow.
+    let input = hook_input;
+    // `hook_ask` needs no branch here: in card-capable postures the flow
+    // below already shows the card for BOTH ask and proceed, and in
+    // full_auto the no-cards contract degrades an ask to proceed (deny
+    // hooks — the actual guardrail — already answered above).
+    let _ = hook_ask;
     if full_auto {
         let line = can_use_tool_response(&request_id, true, &input).to_string();
         if let Ok(mut guard) = shared_stdin.lock() {
@@ -786,6 +831,11 @@ pub(super) fn read_claude_stream(
                                 full.push_str(&marker);
                                 emit_token(app, sid, &marker);
                             } else {
+                                // Post-hook observation of the CLI's own tool
+                                // call (fire-and-forget; never delays the reader).
+                                let hook_input =
+                                    values.first().cloned().unwrap_or(serde_json::json!({}));
+                                crate::hooks::harness_observation(app, sid, &name, &hook_input);
                                 let marker = tools.tool_use(&name, values);
                                 full.push_str(&marker);
                                 emit_token(app, sid, &marker);

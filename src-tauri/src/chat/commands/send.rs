@@ -668,9 +668,27 @@ pub async fn send_chat_message(
     // 2. Persist the user message.
     {
         let conn = db.0.lock();
+        // session_start hooks fire on a session's FIRST message only.
+        let first_turn = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE chat_session_id = ?1",
+                rusqlite::params![chat_session_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n == 0)
+            .unwrap_or(false);
         db::add_user_chat_message(&conn, &chat_session_id, &content)
             .map_err(|e| e.to_string())?;
         db::touch_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())?;
+        if first_turn {
+            crate::hooks::lifecycle_detached(
+                &app,
+                crate::hooks::HookEvent::SessionStart,
+                &chat_session_id,
+                "start",
+                &content,
+            );
+        }
     }
 
     // 3. Resolve provider id.

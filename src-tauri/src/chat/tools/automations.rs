@@ -261,6 +261,22 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
             a
         }
     };
+    // model/cwd merge the same way: absent → keep the stored value. They
+    // used to be hardcoded to None here, which the DB layer writes as "",
+    // silently WIPING the stored model/working-directory on every agent
+    // update ("only passed fields change" was a lie for these two). An
+    // EXPLICIT "" resets to the harness default / clears, per the schema —
+    // so presence, not emptiness, is what decides.
+    let model = match args.get("model") {
+        Some(Value::String(m)) => Some(m.clone()),
+        _ if existing.model.is_empty() => None,
+        _ => Some(existing.model.clone()),
+    };
+    let cwd = match args.get("cwd") {
+        Some(Value::String(c)) => Some(c.clone()),
+        _ if existing.cwd.is_empty() => None,
+        _ => Some(existing.cwd.clone()),
+    };
     if let Err(e) = validate_automation_input(&name, &prompt, &schedule, &agent) {
         // Same validation as create, with the tool name corrected.
         return e.replace("create_automation", "update_automation");
@@ -272,8 +288,8 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
             name: name.clone(),
             prompt: prompt.clone(),
             harness: agent.clone(),
-            model: None,
-            cwd: None,
+            model,
+            cwd,
             schedule: schedule.clone(),
             enabled: None,
             // Update preserves the row's original origin (the column is not

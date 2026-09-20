@@ -239,6 +239,25 @@ export function ConnectorsPanel() {
               <div className="conn-family-foot">
                 {allConnected ? (
                   <span className="conn-all-done">✓ Connected</span>
+                ) : connectedCount > 0 ? (
+                  /* Partial family: the account IS connected — leading with
+                     "Connect all" here read as if the earlier consent had
+                     done nothing (Google's consent screen lets individual
+                     scopes/members go ungranted). Show the score and offer
+                     to connect only the rest. */
+                  <>
+                    <span className="conn-all-done partial">
+                      ✓ {connectedCount}/{f.members.length} connected
+                    </span>
+                    <button
+                      type="button"
+                      className="primary conn-connect-btn"
+                      disabled={isConnecting}
+                      onClick={connect}
+                    >
+                      {isConnecting ? "Authorizing…" : single ? "Connect" : "Connect rest"}
+                    </button>
+                  </>
                 ) : (
                   <button
                     type="button"
@@ -272,7 +291,7 @@ export function ConnectorsPanel() {
         >
           <p className="estimate-note">
             {openFam.members.length > 1
-              ? "One OAuth consent covers every product below — use the card's Connect all, or manage each connection here."
+              ? "One OAuth consent covers every product below — use the card's Connect all / Connect rest, or connect each product here."
               : "Manage this connection."}
           </p>
           <div className="conn-modal-list">
@@ -281,7 +300,6 @@ export function ConnectorsPanel() {
               const statusLabel = st.connected && st.expired ? "Token expired" : "Not connected";
               const isConnecting = connecting === c.id;
               const isBusy = busy === c.id;
-              const canConnect = openFam.members.length === 1;
               return (
                 <div className="conn-sub-row" key={c.id}>
                   <div className="conn-sub-icon">
@@ -311,7 +329,12 @@ export function ConnectorsPanel() {
                       >
                         {isBusy ? "Disconnecting…" : "Disconnect"}
                       </button>
-                    ) : canConnect ? (
+                    ) : (
+                      /* The modal is the per-member manager: any
+                         disconnected member can be connected on its own
+                         (its scopes only) — this used to be limited to
+                         single-member families, leaving multi-member
+                         families with no granular path. */
                       <button
                         className="primary"
                         disabled={isConnecting}
@@ -319,7 +342,7 @@ export function ConnectorsPanel() {
                       >
                         {isConnecting ? "Authorizing…" : "Connect"}
                       </button>
-                    ) : null}
+                    )}
                   </div>
                 </div>
               );

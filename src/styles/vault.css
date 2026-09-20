@@ -19,8 +19,13 @@
   padding-top: var(--toolbar-h, 37px);
   /* Below this the three-column layout genuinely breaks (rails crush the
      center) — hold the floor and let the container clip instead; the tool
-     side-panel overlaps rather than squeezing the vault to mush. */
-  min-width: 760px;
+     side-panel overlaps rather than squeezing the vault to mush.
+     The floor YIELDS below 760 when the tool panel needs the room (a hard
+     floor here pinned the panel's left edge and pushed its content off the
+     window's right edge once the panel hit its 900px cap): max() keeps a
+     360px usable minimum, and 100% - 910px is exactly the space the panel's
+     900px cap + the 10px grid gap leave. */
+  min-width: min(760px, max(360px, calc(100% - 910px)));
   background: var(--background-primary, var(--bg));
   color: var(--text-normal, var(--text));
   overflow: hidden;
@@ -152,10 +157,13 @@
   min-width: 0;
 }
 .vault-left-rail {
-  /* Width comes from the store (persisted, user-resizable); flex-shrink
-     lets the rail give ground when the tool side-panel squeezes the view
-     instead of crushing the center to a sliver. */
-  flex-shrink: 1;
+  /* Width comes from the store (persisted, user-resizable) and is
+     authoritative — shrink must stay 0 or flexbox re-negotiates the rendered
+     width every frame once a drag is past the clamp, and the rail visibly
+     slides on its own. When the view is squeezed below the rails' widths the
+     center (min-width: 0) gives way and .vault-view clips — the same
+     contract as the 760px floor above. */
+  flex-shrink: 0;
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -216,7 +224,9 @@
   user-select: none;
 }
 .vault-right-rail {
-  flex-shrink: 1;
+  /* Authoritative width (see .vault-left-rail) — flex-shrink here is what
+     let the rail slide toward the screen edge once a drag passed max. */
+  flex-shrink: 0;
   border-left: 1px solid var(--border);
   overflow-y: auto;
   min-height: 0;

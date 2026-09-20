@@ -276,7 +276,26 @@ pub fn update_skill(
     db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
-    db::update_skill(&conn, &id, &name, &slash_command, &content).map_err(|e| e.to_string())
+    // Old twin slug, captured before the row changes (renames must not
+    // leave the previous command's copy installed).
+    let old_slug = db::list_skills(&conn, None)
+        .ok()
+        .and_then(|rows| rows.into_iter().find(|r| r.id == id))
+        .map(|r| r.slash_command.trim_start_matches('/').to_string())
+        .unwrap_or_default();
+    db::update_skill(&conn, &id, &name, &slash_command, &content).map_err(|e| e.to_string())?;
+    // A DB skill row also has an INSTALLED harness twin (its slash-command
+    // copy, created alongside it) — updating the row alone left the twin
+    // serving the stale body/slug. Mirror the write; best-effort, the twin
+    // may not exist (row created without an install).
+    let slug = slash_command.trim_start_matches('/').to_string();
+    if !slug.is_empty() {
+        let _ = crate::installed_skills::save_installed(&slug, "skill", &content);
+    }
+    if !old_slug.is_empty() && old_slug != slug {
+        let _ = crate::installed_skills::delete_installed(&old_slug, "skill");
+    }
+    Ok(())
 }
 
 #[tauri::command(async)]

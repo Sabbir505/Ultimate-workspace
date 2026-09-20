@@ -455,8 +455,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
   overflow-y: auto;
   /* Clear the overlay title bar: the first row starts below the glass, and
      scrolled rows glide UNDER it — the content-under-frost effect that makes
-     the bar read as glass instead of an opaque strip. */
-  padding-top: var(--toolbar-h, 37px);
+     the bar read as glass instead of an opaque strip. (Enforced by the
+     padding shorthand at the bottom of this rule, which folds in
+     --toolbar-h; a standalone padding-top here would be overridden by it.) */
   /* The app pins the live edge itself (patchTailAndPin in
      useTranscriptScroll) while the virtualizer rewrites row heights
      constantly. Browser scroll anchoring "compensates" those rewrites by
@@ -476,7 +477,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
      scroll container is NOT counted in its scrollHeight (measured
      2026-08-27: scrollH ran ~220px short of content+padding), so a padding
      reservation silently never scrolled clear of the composer. */
-  padding: 20px max(16px, calc((100% - 780px) / 2)) 0;
+  /* Top padding must include the overlay title bar height — this shorthand
+     is the last padding declaration in the rule, so it owns the top edge. */
+  padding: calc(var(--toolbar-h, 37px) + 20px) max(16px, calc((100% - 780px) / 2)) 0;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -4487,7 +4490,9 @@ button.chat-mermaid-open {
   .chat-pane .composer-metrics-chips { display: none; }
   .chat-pane .chat-messages {
     gap: 12px;
-    padding: 12px 12px 0;
+    /* Keep the title-bar clearance even in narrow panes — the glass bar
+       overlays this container too. */
+    padding: calc(var(--toolbar-h, 37px) + 12px) 12px 0;
   }
   .chat-pane .chat-composer {
     padding: 8px 12px 24px;

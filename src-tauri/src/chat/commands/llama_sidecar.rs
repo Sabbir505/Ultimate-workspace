@@ -364,12 +364,14 @@ pub(super) fn detect_llama_server_path_blocking() -> Option<String> {
                 return Some(alt.to_string());
             }
         }
-        // Check if llama-server is on PATH (Windows)
-        let output = std::process::Command::new(bin_name)
-            .arg("--version")
+        // Check if llama-server is on PATH (Windows). Console binary — a GUI
+        // process spawning it bare would flash a console window per probe.
+        let mut probe = std::process::Command::new(bin_name);
+        probe.arg("--version")
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output();
+            .stderr(std::process::Stdio::piped());
+        crate::util::no_console_window(&mut probe);
+        let output = probe.output();
         if let Ok(out) = output {
             if out.status.success() {
                 return Some(bin_name.to_string());

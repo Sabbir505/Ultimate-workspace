@@ -501,7 +501,11 @@ export function VaultView() {
       <div className={`vault-body${resizing ? " resizing" : ""}`}>
         <aside
           className={`vault-left-rail${leftRailCollapsed ? " collapsed" : ""}`}
-          style={{ width: leftRailCollapsed ? 28 : leftRailWidth, minWidth: leftRailCollapsed ? 28 : VAULT_LEFT_RAIL.min }}
+          style={{
+            width: leftRailCollapsed ? 28 : leftRailWidth,
+            minWidth: leftRailCollapsed ? 28 : VAULT_LEFT_RAIL.min,
+            maxWidth: leftRailCollapsed ? 28 : VAULT_LEFT_RAIL.max,
+          }}
         >
           {leftRailCollapsed ? (
             <button className="vault-rail-expand" title="Show the files panel" onClick={toggleLeftRail}>
@@ -531,7 +535,7 @@ export function VaultView() {
         </aside>
         {!leftRailCollapsed && (
           <ResizeHandle
-            onDrag={(dx) => setLeftRailWidth(leftRailWidth + dx)}
+            onDrag={(dx) => setLeftRailWidth((w) => w + dx)}
             onDragState={setResizing}
           />
         )}
@@ -568,7 +572,7 @@ export function VaultView() {
               )}
               {assetPath != null && activePath != null && (
                 <ResizeHandle
-                  onDrag={(dx) => setAssetSplitPct(assetSplitPct + dxToPct(dx))}
+                  onDrag={(dx) => setAssetSplitPct((p) => p + dxToPct(dx))}
                   onDragState={setResizing}
                 />
               )}
@@ -627,7 +631,7 @@ export function VaultView() {
                 )}
                 {mode === "split" && (
                   <ResizeHandle
-                    onDrag={(dx) => setNoteSplitPct(noteSplitPct + dxToPct(dx))}
+                    onDrag={(dx) => setNoteSplitPct((p) => p + dxToPct(dx))}
                     onDragState={setResizing}
                   />
                 )}
@@ -646,10 +650,17 @@ export function VaultView() {
         {rightRailOpen && !graphOpen && activePath != null && (
           <>
             <ResizeHandle
-              onDrag={(dx) => setRightRailWidth(rightRailWidth - dx)}
+              onDrag={(dx) => setRightRailWidth((w) => w - dx)}
               onDragState={setResizing}
             />
-            <aside className="vault-right-rail" style={{ width: rightRailWidth, minWidth: VAULT_RIGHT_RAIL.min }}>
+            {/* maxWidth mirrors the store clamp on the RENDERED box: with the
+                width authoritative (flex-shrink: 0) this guarantees the rail
+                can never render past its bound and drift toward the screen
+                edge while a drag keeps going past the max. */}
+            <aside
+              className="vault-right-rail"
+              style={{ width: rightRailWidth, minWidth: VAULT_RIGHT_RAIL.min, maxWidth: VAULT_RIGHT_RAIL.max }}
+            >
               <VaultNoteRail />
             </aside>
           </>

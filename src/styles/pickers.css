@@ -827,37 +827,6 @@
   background: #4ade80;
   box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.18);
 }
-.api-provider-delete {
-  position: absolute;
-  right: -28px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease, color 120ms ease, background 120ms ease, border-color 120ms ease;
-}
-.api-provider-item:hover .api-provider-delete {
-  opacity: 1;
-}
-.api-provider-delete:hover {
-  color: #e5484d;
-  background: rgba(229, 72, 77, 0.08);
-  border-color: rgba(229, 72, 77, 0.4);
-}
-.api-provider-delete:focus-visible {
-  opacity: 1;
-  outline: none;
-  box-shadow: 0 0 0 2px #e5484d;
-}
 .api-provider-add {
   margin-top: 8px;
   display: inline-flex;
@@ -1305,13 +1274,6 @@
     width: 20px;
     height: 20px;
     font-size: 9px;
-  }
-  .api-provider-delete {
-    position: static;
-    transform: none;
-    margin-left: 4px;
-    opacity: 1;
-    flex-shrink: 0;
   }
   .api-provider-add {
     margin-top: 0;

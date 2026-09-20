@@ -142,10 +142,12 @@ interface VaultStore {
   closeNote: () => void;
   setMode: (mode: VaultMode) => void;
   setRail: (rail: VaultRail) => void;
-  setLeftRailWidth: (w: number) => void;
-  setRightRailWidth: (w: number) => void;
-  setNoteSplitPct: (p: number) => void;
-  setAssetSplitPct: (p: number) => void;
+  /** Width/split setters accept an updater form so drag handlers never apply
+   *  two moves against the same stale base (React batches pointermove). */
+  setLeftRailWidth: (w: number | ((cur: number) => number)) => void;
+  setRightRailWidth: (w: number | ((cur: number) => number)) => void;
+  setNoteSplitPct: (p: number | ((cur: number) => number)) => void;
+  setAssetSplitPct: (p: number | ((cur: number) => number)) => void;
   toggleLeftRail: () => void;
   toggleRightRail: () => void;
   /** Drag & drop: move a file (note or asset) into a folder ("" = root).
@@ -245,16 +247,26 @@ function vaultToast(kind: "error" | "info", title: string, detail?: string) {
 
 export const useVaultStore = create<VaultStore>((set, get) => {
   /** Snapshot the resizable layout to localStorage (guarded inside). */
+  let layoutPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const persistLayout = () => {
-    const s = get();
-    saveLayout({
-      leftWidth: s.leftRailWidth,
-      rightWidth: s.rightRailWidth,
-      leftCollapsed: s.leftRailCollapsed,
-      noteSplitPct: s.noteSplitPct,
-      assetSplitPct: s.assetSplitPct,
-    });
+    // Drag handlers call this on every pointermove — debounce so a drag
+    // writes storage once at the end instead of on every tick.
+    if (layoutPersistTimer) clearTimeout(layoutPersistTimer);
+    layoutPersistTimer = setTimeout(() => {
+      layoutPersistTimer = null;
+      const s = get();
+      saveLayout({
+        leftWidth: s.leftRailWidth,
+        rightWidth: s.rightRailWidth,
+        leftCollapsed: s.leftRailCollapsed,
+        noteSplitPct: s.noteSplitPct,
+        assetSplitPct: s.assetSplitPct,
+      });
+    }, 250);
   };
+  /** Resolve a setter argument (value or updater) against current state. */
+  const resolve = <T,>(v: T | ((cur: T) => T), cur: T): T =>
+    typeof v === "function" ? (v as (c: T) => T)(cur) : v;
   return ({
   root: null,
   stats: null,
@@ -428,19 +440,19 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     if (rail === "search") void get().runSearch();
   },
   setLeftRailWidth: (w) => {
-    set({ leftRailWidth: clampWidth(w, VAULT_LEFT_RAIL) });
+    set((s) => ({ leftRailWidth: clampWidth(resolve(w, s.leftRailWidth), VAULT_LEFT_RAIL) }));
     persistLayout();
   },
   setRightRailWidth: (w) => {
-    set({ rightRailWidth: clampWidth(w, VAULT_RIGHT_RAIL) });
+    set((s) => ({ rightRailWidth: clampWidth(resolve(w, s.rightRailWidth), VAULT_RIGHT_RAIL) }));
     persistLayout();
   },
   setNoteSplitPct: (p) => {
-    set({ noteSplitPct: clampPct(p, 50) });
+    set((s) => ({ noteSplitPct: clampPct(resolve(p, s.noteSplitPct), s.noteSplitPct) }));
     persistLayout();
   },
   setAssetSplitPct: (p) => {
-    set({ assetSplitPct: clampPct(p, 58) });
+    set((s) => ({ assetSplitPct: clampPct(resolve(p, s.assetSplitPct), s.assetSplitPct) }));
     persistLayout();
   },
   toggleLeftRail: () => {

@@ -177,6 +177,27 @@ export function ToolPanel() {
   // Ref to the chips scroll container — needed for the wheel handler.
   const chipsRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  // Live ceiling for the RENDERED width. The stored width clamps at 900, but
+  // the view beside the panel can't always give way to it (the vault view
+  // holds a 760px floor that only yields gradually) — without this cap the
+  // panel's box extended past the window and its right-anchored content
+  // (URL bar, tab close buttons) slid off the screen edge while the stored
+  // width sat clamped. Capping the rendered width makes the drag handle
+  // physically STOP at the space the sibling view can spare.
+  // 370 = 360px sibling floor (.vault-view's yield minimum; chat panes
+  // shrink freely) + the 10px .grid-wrap column gap; 24 = .grid-wrap's
+  // left/right padding.
+  const [maxAvail, setMaxAvail] = useState<number | null>(null);
+  useEffect(() => {
+    const update = () => {
+      const parent = panelRef.current?.parentElement;
+      if (!parent) return;
+      setMaxAvail(Math.max(280, parent.clientWidth - 24 - 370));
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
   // True only when the chips strip actually overflows. The fade mask and its
   // trailing pad live behind this class — applied unconditionally they held
   // the "+" a 16px gap away from the last chip even when everything fit.
@@ -396,7 +417,7 @@ export function ToolPanel() {
       <div
         className={`tool-panel${collapsed ? " collapsed" : ""}${resizing ? " resizing" : ""}`}
         ref={panelRef}
-        style={collapsed ? { width: 0 } : { width }}
+        style={collapsed ? { width: 0 } : { width: maxAvail != null ? Math.min(width, maxAvail) : width }}
         aria-label="Tool panel"
       >
         <div

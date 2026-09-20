@@ -64,6 +64,17 @@ function ArrowDownIcon() {
   );
 }
 
+// Module-level cache of harness model discovery, keyed by harness id. The
+// chat grid UNMOUNTS when the user switches to automations/vault and
+// remounts on return (and on every chat switch that changes the agent), and
+// the discovery is a live CLI probe (`<cli> --list-models`) that can take
+// seconds — without this, every return parked the agent chip on a spinner
+// for data we already had. Fresh entries (< TTL) are served synchronously
+// with no fetch at all; stale entries render immediately and revalidate in
+// the background, also without a spinner.
+const HARNESS_CFG_TTL_MS = 30_000;
+const harnessCfgCache = new Map<string, { at: number; cfg: HarnessModelConfig }>();
+
 /** Format a backend error message for display. Strips raw JSON blobs,
  *  extracts the human-readable message, and keeps it to one line. */
 function formatChatError(raw: string): string {
@@ -178,8 +189,9 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   const [harnessLoading, setHarnessLoading] = useState(false);
 
   // Discover the CLI's configured models/endpoint whenever the agent changes.
-  // The agent chip shows a spinner while this runs (live CLI queries like
-  // `opencode models` can take a second or two).
+  // The agent chip shows a spinner ONLY when we have no cached discovery for
+  // this harness (first ever selection); otherwise last-known config renders
+  // immediately and a stale entry revalidates in the background.
   useEffect(() => {
     if (!harnessAgent) {
       setHarnessCfg(null);
@@ -187,14 +199,21 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
       return;
     }
     let cancelled = false;
-    setHarnessLoading(true);
+    const cached = harnessCfgCache.get(harnessAgent);
+    if (cached) setHarnessCfg(cached.cfg);
+    else setHarnessCfg(null);
+    if (cached && Date.now() - cached.at < HARNESS_CFG_TTL_MS) return;
+    setHarnessLoading(!cached);
     void listHarnessModels(harnessAgent)
       .then((cfg) => {
+        // A null discovery (probe failure) is not cached — the next mount
+        // should re-probe rather than pin the failure for the TTL.
+        if (cfg) harnessCfgCache.set(harnessAgent, { at: Date.now(), cfg });
         if (!cancelled) setHarnessCfg(cfg);
       })
       .catch(() => {
-        /* harness discovery is best-effort — the static catalog still lists */
-        if (!cancelled) setHarnessCfg(null);
+        /* harness discovery is best-effort — keep whatever is on screen
+           (the static catalog still lists; don't poison the cache) */
       })
       .finally(() => {
         if (!cancelled) setHarnessLoading(false);

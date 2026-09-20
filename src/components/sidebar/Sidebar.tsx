@@ -29,10 +29,10 @@ import {
   Search,
   Settings,
   CalendarClock,
-  Vault,
   X,
   QrCode,
 } from "lucide-react";
+import { VaultIcon } from "../../lib/icons";
 import { useProjectsStore } from "../../state/projects";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
@@ -391,7 +391,7 @@ export function Sidebar() {
               title="Open vault"
               aria-label="Open vault"
             >
-              <Vault size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
+              <VaultIcon size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
               <span className="artifact-lib-title-label">Vault</span>
             </button>
           </div>

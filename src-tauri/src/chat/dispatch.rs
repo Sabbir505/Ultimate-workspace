@@ -3201,10 +3201,10 @@ async fn run_totp_tool(app: &AppHandle, sid: &str, args: &Value) -> String {
             // `bw get totp <item>` prints the current code. The user's own
             // environment (BW_SESSION) unlocks the vault; without a session
             // bw fails with its own message, surfaced verbatim.
-            match tokio::process::Command::new("bw")
-                .args(["get", "totp", key])
-                .output()
-                .await
+            let mut cmd = tokio::process::Command::new("bw");
+            cmd.args(["get", "totp", key]);
+            crate::util::no_console_window_tokio(&mut cmd);
+            match cmd.output().await
             {
                 Ok(out) if out.status.success() => {
                     let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -3232,7 +3232,10 @@ async fn run_totp_tool(app: &AppHandle, sid: &str, args: &Value) -> String {
             if !key.starts_with("op://") {
                 return "Error: for source '1password', 'key' must be a full op:// secret reference (e.g. op://Private/GitHub/one-time-code).".to_string();
             }
-            match tokio::process::Command::new("op").args(["read", key]).output().await {
+            let mut cmd = tokio::process::Command::new("op");
+            cmd.args(["read", key]);
+            crate::util::no_console_window_tokio(&mut cmd);
+            match cmd.output().await {
                 Ok(out) if out.status.success() => {
                     let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if code.is_empty() {

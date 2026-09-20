@@ -143,14 +143,14 @@ fn git_config_proxy() -> Option<String> {
     PROXY_CACHE
         .get_or_init(|| {
             for key in ["https.proxy", "http.proxy"] {
-                let out = std::process::Command::new("git")
-                    .args(["config", "--global", "--get", key])
-                .output()
-                .ok()?;
-            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !v.is_empty() {
-                return Some(v);
-            }
+                let mut cmd = std::process::Command::new("git");
+                cmd.args(["config", "--global", "--get", key]);
+                crate::util::no_console_window(&mut cmd);
+                let out = cmd.output().ok()?;
+                let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !v.is_empty() {
+                    return Some(v);
+                }
             }
             None
         })

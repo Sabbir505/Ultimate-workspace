@@ -409,6 +409,13 @@
   font-weight: 600;
   color: var(--accent, #c15f3c);
 }
+/* Partial family state ("✓ 3/8 connected") + Connect rest button share the
+   foot row — the chip sits left, the action stays pinned right. */
+.conn-family-foot .conn-all-done.partial {
+  margin-right: auto;
+  color: var(--text-dim);
+  font-weight: 500;
+}
 
 .conn-note {
   font-size: 12px;
@@ -1142,6 +1149,12 @@
   border-radius: 10px;
   background: var(--surface);
   transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+/* Stacked toggle cards (DND + notification sound, GitPanel, ...) need a gap:
+   as block children of .settings-section they'd otherwise fuse border to
+   border. Scoped to siblings so a lone row is untouched. */
+.settings-section .settings-toggle-row + .settings-toggle-row {
+  margin-top: 8px;
 }
 .settings-toggle-row:hover {
   border-color: var(--border-strong);

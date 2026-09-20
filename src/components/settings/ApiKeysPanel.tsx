@@ -421,36 +421,11 @@ export function ApiKeysPanel() {
                     <span className="api-provider-item-label">{label}</span>
                     <span className={`api-provider-status${inst.hasKey ? " connected" : ""}`} aria-label={inst.hasKey ? "Connected" : "Not connected"} />
                   </button>
-                  <button
-                    type="button"
-                    className="api-provider-delete"
-                    aria-label={`Remove ${label}`}
-                    title={`Remove ${label}`}
-                    onClick={() => {
-                      void clearApiKeyFn(inst.id).then(async () => {
-                        if (inst.id === provider) {
-                          setApiKey("");
-                          setBaseUrl("");
-                          setModel("");
-                          setFetchedModels([]);
-                          setFetchError(null);
-                          setAddingNew(true);
-                          formDirtyRef.current = false;
-                          setDisplayName(kindMeta?.label ?? inst.kind);
-                          const nextId = makeInstanceIdForKind(inst.kind, [inst.id]);
-                          setProvider(nextId);
-                          await loadConfigFn(nextId);
-                        }
-                        await refreshSavedProviders();
-                      }).catch((e) => {
-                        // A rejected delete used to vanish silently — same
-                        // toast the key-clear path uses.
-                        toastError("Couldn't clear the API key", String(e));
-                      });
-                    }}
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  {/* No per-row delete: removal lives in the detail pane's
+                      delete button, which shows exactly what is being
+                      removed. The old hover trash here sat outside the row
+                      box (right: -28px) where the rail clipped it — it
+                      rendered but could not be clicked. */}
                 </div>
               );
             })}

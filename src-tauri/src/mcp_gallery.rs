@@ -406,6 +406,10 @@ pub async fn connect_server(def: &McpServerDef) -> Result<std::sync::Arc<Gallery
         cmd = wrapped;
     }
 
+    // Gallery servers are console binaries (often behind a `cmd.exe /C`
+    // shim); without CREATE_NO_WINDOW each connect flashes a console window.
+    crate::util::no_console_window_tokio(&mut cmd);
+
     // Default stdio per rmcp builder: stdin/stdout piped, stderr inherited —
     // server logs land in our console, invaluable for first-run debugging.
     let (transport, _stderr) = TokioChildProcess::builder(cmd)

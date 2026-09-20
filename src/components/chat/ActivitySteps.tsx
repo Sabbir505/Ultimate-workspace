@@ -461,7 +461,45 @@ export function CompactedContextMarker({
 
 /** Reasoning disclosure — shared with the subagent pane (Agents panel), which
  *  streams the subagent's <think> blocks with the same visual language. */
-export function ThinkingBlock({ thinking, done }: { thinking: string; done: boolean }) {
+
+// Wall-clock timing per think block so a finished one can headline its
+// duration ("Thought for 6s") even after the row remounts — scroll
+// virtualization and view switches (automations/vault unmount ChatView)
+// both remount transcript rows. Keyed by session + the thought's opening
+// words: the prefix is stable while the text streams in (only appends) and
+// after it's done. Pruned FIFO, finished entries first.
+const THINK_TIMING_CAP = 240;
+const thinkTimings = new Map<string, { startedAt: number; endedAt: number | null }>();
+
+function thinkTimingKey(sessionId: string, thinking: string): string {
+  const head = thinking.replace(/\s+/g, " ").trim().slice(0, 96);
+  return `${sessionId}:${head.length}:${head}`;
+}
+
+function pruneThinkTimings() {
+  if (thinkTimings.size <= THINK_TIMING_CAP) return;
+  for (const k of thinkTimings.keys()) {
+    if (thinkTimings.size <= THINK_TIMING_CAP) break;
+    // Only evict finished blocks — an active stream's start time is live.
+    if (thinkTimings.get(k)?.endedAt != null) thinkTimings.delete(k);
+  }
+}
+
+function thinkDurationSec(e: { startedAt: number; endedAt: number | null }): number {
+  return Math.max(1, Math.round(((e.endedAt ?? Date.now()) - e.startedAt) / 1000));
+}
+
+export function ThinkingBlock({
+  thinking,
+  done,
+  sessionId,
+}: {
+  thinking: string;
+  done: boolean;
+  /** Scopes the duration cache so identical openings in different chats
+   *  don't share a timer. */
+  sessionId?: string | null;
+}) {
   // Expanded while streaming (live), collapsed once the turn finishes.
   const [open, setOpen] = useState(!done);
   // Auto-collapse when the turn completes — but only if the user hasn't
@@ -471,18 +509,42 @@ export function ThinkingBlock({ thinking, done }: { thinking: string; done: bool
     if (done && !userToggled) setOpen(false);
   }, [done, userToggled]);
 
+  const timingKey = useMemo(
+    () => thinkTimingKey(sessionId ?? "", thinking),
+    [sessionId, thinking],
+  );
+  // Measured duration, null = unknown (mounted already-done from reloaded
+  // history, so no window was observed).
+  const [thoughtSecs, setThoughtSecs] = useState<number | null>(() => {
+    const e = thinkTimings.get(timingKey);
+    return e?.endedAt != null ? thinkDurationSec(e) : null;
+  });
+  useEffect(() => {
+    if (!done) {
+      if (!thinkTimings.has(timingKey)) {
+        thinkTimings.set(timingKey, { startedAt: Date.now(), endedAt: null });
+        pruneThinkTimings();
+      }
+      return;
+    }
+    const e = thinkTimings.get(timingKey);
+    if (!e) return;
+    if (e.endedAt == null) e.endedAt = Date.now();
+    setThoughtSecs(thinkDurationSec(e));
+  }, [done, timingKey]);
+
   const toggle = () => {
     setUserToggled(true);
     setOpen((o) => !o);
   };
 
-  // Collapsed-row peek: while the block is folded the reasoning rides the
-  // row itself — the TAIL while streaming (so the row visibly streams as
-  // tokens land), the HEAD once done (the thought's opening reads as its
-  // summary). Hidden while expanded: the full body sits right below.
+  // Collapsed-row peek: while streaming the reasoning rides the row — the
+  // TAIL, so the row visibly streams as tokens land. Once done the row
+  // settles to the compact "Thought for Xs" headline (the full text stays
+  // one click away), instead of a 140-char blob of raw reasoning.
   const flat = useMemo(() => thinking.replace(/\s+/g, " ").trim(), [thinking]);
-  const peek = open || !flat ? "" : done
-    ? flat.length > 140 ? `${flat.slice(0, 140)}…` : flat
+  const peek = open || done || !flat
+    ? ""
     : flat.length > 140 ? `…${flat.slice(-140)}` : flat;
 
   return (
@@ -493,7 +555,13 @@ export function ThinkingBlock({ thinking, done }: { thinking: string; done: bool
         title={open ? "Hide thinking" : "Show thinking"}
       >
         <BrainIcon size={13} strokeWidth={1.8} aria-hidden="true" />
-        <span className="chat-thinking-label">{done ? "Thinking" : "Thinking…"}</span>
+        <span className="chat-thinking-label">
+          {done
+            ? thoughtSecs != null
+              ? `Thought for ${formatDuration(thoughtSecs)}`
+              : "Thought"
+            : "Thinking…"}
+        </span>
         {peek && <span className="chat-thinking-peek">· {peek}</span>}
         <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
       </button>
@@ -1037,7 +1105,7 @@ export function renderProcessBlock(
       return <EditFileRow key={`editrow:${b.step.data?.path ?? i}`} step={b.step} />;
     case "think":
       return b.text.length > 0 ? (
-        <ThinkingBlock key={`think:${i}`} thinking={b.text} done={b.done} />
+        <ThinkingBlock key={`think:${i}`} thinking={b.text} done={b.done} sessionId={chatSessionId} />
       ) : null;
     case "text":
       return b.text.trim().length > 0 ? (

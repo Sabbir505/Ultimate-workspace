@@ -262,6 +262,40 @@ pub fn path_starts_with_ci(path: &std::path::Path, prefix: &std::path::Path) -> 
     }
 }
 
+/// Mark a `std::process::Command` CREATE_NO_WINDOW on Windows.
+///
+/// A GUI-subsystem process spawning a console binary otherwise flashes a
+/// visible console window per spawn — and redirecting stdio does NOT
+/// suppress it, only this flag does. Several modules carry private copies
+/// of this helper (agent_sessions, git.rs, harness_adapters, …); new
+/// std-flavored spawn sites should call this one instead of growing
+/// another.
+pub fn no_console_window(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// [`no_console_window`] for the tokio command flavor.
+pub fn no_console_window_tokio(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

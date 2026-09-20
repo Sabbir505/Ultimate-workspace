@@ -3,7 +3,23 @@
 // (diff-style change summary + eval verdict), runs sweeps, and applies or
 // rejects validated candidates. Also hosts the per-artifact autonomy tier and
 // the global kill switch (§9.3).
+//
+// Layout notes: the data/behavior contract is identical to the original list
+// implementation — every testid, status label, and action is preserved; the
+// redesign is the presentation: an engine card with the kill switch as a real
+// toggle, proposal cards with status accenting, and artifact rows that expand
+// into a version timeline.
 import { useCallback, useEffect, useState } from "react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  FlaskConical,
+  HistoryIcon,
+  RefreshCw,
+  ShieldCheck,
+  Sparkles,
+} from "lucide-react";
 import {
   applyImprovementProposal,
   checkImprovementCanaries,
@@ -32,6 +48,13 @@ const STATUS_LABEL: Record<string, string> = {
   applied: "Applied",
   rejected: "Rejected",
   stale: "Stale",
+};
+
+const KIND_LABEL: Record<string, string> = {
+  skill: "Skill",
+  loop: "Loop",
+  prompt_template: "Template",
+  automation: "Automation",
 };
 
 export function ImprovementsPanel() {
@@ -161,51 +184,110 @@ export function ImprovementsPanel() {
   const open = proposals.filter((p) => !["applied", "rejected", "stale"].includes(p.status));
 
   return (
-    <div className="settings-panel">
-      <h3>Self-improving artifacts</h3>
-      <p className="settings-desc">
-        Skills, loops, prompt templates, and automations get versioned, learn
-        from failed and corrected runs, and propose improvements that must pass
-        a regression eval before being applied.
-      </p>
-      <div className="settings-row">
-        <label htmlFor="improve-enabled">Improvement engine</label>
-        <button
-          id="improve-enabled"
-          role="switch"
-          aria-checked={enabled}
-          data-testid="improve-kill-switch"
-          className="ghost"
-          onClick={() => void toggleEnabled()}
-        >
-          {enabled ? "On" : "Off (kill switch)"}
-        </button>
-      </div>
-      <div className="settings-row">
-        <button
-          className="ghost"
-          data-testid="run-sweep"
-          onClick={() => void runSweep()}
-          disabled={!enabled || busy === "sweep"}
-        >
-          {busy === "sweep" ? "Sweeping…" : "Run improvement sweep"}
-        </button>
+    <div className="settings-panel improve-root">
+      <div className="improve-hero">
+        <span className="improve-hero-icon" aria-hidden="true">
+          <Sparkles size={18} strokeWidth={1.8} />
+        </span>
+        <div className="improve-hero-copy">
+          <h3>Self-improving artifacts</h3>
+          <p className="settings-desc">
+            Skills, loops, prompt templates, and automations get versioned,
+            learn from failed and corrected runs, and propose improvements that
+            must pass a regression eval before being applied.
+          </p>
+        </div>
       </div>
 
-      <h4>Proposals</h4>
-      {open.length === 0 && <p className="settings-desc">No open proposals.</p>}
+      {/* Engine card — kill switch + sweep in one surface, with live counts. */}
+      <section className="improve-engine" aria-label="Improvement engine">
+        <div className="improve-engine-main">
+          <div className="improve-engine-copy">
+            <span className="improve-engine-title">Improvement engine</span>
+            <span className="improve-engine-hint">
+              {enabled
+                ? "Proposals are drafted from run outcomes and gated behind evals."
+                : "Paused — nothing is drafted, evaluated, or applied."}
+            </span>
+          </div>
+          <button
+            id="improve-enabled"
+            role="switch"
+            aria-checked={enabled}
+            aria-label="Improvement engine"
+            data-testid="improve-kill-switch"
+            className={`improve-switch${enabled ? " on" : ""}`}
+            onClick={() => void toggleEnabled()}
+          >
+            <span className="improve-switch-track" aria-hidden="true" />
+            <span className="improve-switch-label">{enabled ? "On" : "Off (kill switch)"}</span>
+          </button>
+        </div>
+        <div className="improve-engine-foot">
+          <button
+            className="primary improve-sweep-btn"
+            data-testid="run-sweep"
+            onClick={() => void runSweep()}
+            disabled={!enabled || busy === "sweep"}
+          >
+            <RefreshCw size={13} strokeWidth={2} className={busy === "sweep" ? "spin" : ""} />
+            {busy === "sweep" ? "Sweeping…" : "Run improvement sweep"}
+          </button>
+          <span className="improve-engine-hint">
+            Scans recent runs for correctable mistakes and drafts proposals.
+          </span>
+        </div>
+        <div className="improve-stats">
+          <span className="improve-stat">
+            <strong>{artifacts.length}</strong> tracked artifact{artifacts.length === 1 ? "" : "s"}
+          </span>
+          <span className="improve-stat-sep" aria-hidden="true" />
+          <span className="improve-stat">
+            <strong>{open.length}</strong> open proposal{open.length === 1 ? "" : "s"}
+          </span>
+        </div>
+      </section>
+
+      <div className="improve-section-head">
+        <h4>Proposals</h4>
+        {open.length > 0 && <span className="improve-count-chip">{open.length}</span>}
+      </div>
+      {open.length === 0 && (
+        <div className="improve-empty">
+          <FlaskConical size={16} strokeWidth={1.6} aria-hidden="true" />
+          <span>No open proposals.</span>
+        </div>
+      )}
       {open.map((p) => (
-        <div key={p.id} className="improve-proposal" data-testid="improve-proposal">
+        <div key={p.id} className={`improve-proposal improve-proposal-${p.status}`} data-testid="improve-proposal">
           <div className="improve-proposal-head">
-            <strong>{nameOf(p.artifactId)}</strong>
+            <strong className="improve-proposal-name">{nameOf(p.artifactId)}</strong>
+            <span className="improve-versions">v{p.baseVersion} → v{p.candidateVersion}</span>
             <span className={`improve-status improve-status-${p.status}`}>
               {STATUS_LABEL[p.status] ?? p.status}
             </span>
-            <span className="improve-versions">v{p.baseVersion} → v{p.candidateVersion}</span>
           </div>
           <div className="improve-summary">{p.changeSummary}</div>
-          {p.expectedEffect && <div className="improve-meta">Expected: {p.expectedEffect}</div>}
-          {p.riskNotes && <div className="improve-meta">Risk: {p.riskNotes}</div>}
+          {(p.expectedEffect || p.riskNotes) && (
+            <div className="improve-meta-rows">
+              {p.expectedEffect && (
+                <div className="improve-meta-row">
+                  <span className="improve-meta-label">
+                    <ShieldCheck size={12} strokeWidth={2} aria-hidden="true" /> Expected
+                  </span>
+                  <span className="improve-meta-value">{p.expectedEffect}</span>
+                </div>
+              )}
+              {p.riskNotes && (
+                <div className="improve-meta-row">
+                  <span className="improve-meta-label is-risk">
+                    <AlertTriangle size={12} strokeWidth={2} aria-hidden="true" /> Risk
+                  </span>
+                  <span className="improve-meta-value">{p.riskNotes}</span>
+                </div>
+              )}
+            </div>
+          )}
           <div className="improve-actions">
             {(p.status === "open" || p.status === "failed_eval") && (
               <button
@@ -218,7 +300,7 @@ export function ImprovementsPanel() {
             )}
             {p.status === "passed" && (
               <button
-                className="ghost"
+                className="primary"
                 data-testid="apply-proposal"
                 onClick={() => void apply(p.id)}
                 disabled={busy === p.id}
@@ -238,50 +320,72 @@ export function ImprovementsPanel() {
         </div>
       ))}
 
-      <h4>Artifacts &amp; version history</h4>
+      <div className="improve-section-head">
+        <h4>Artifacts &amp; version history</h4>
+        {artifacts.length > 0 && <span className="improve-count-chip">{artifacts.length}</span>}
+      </div>
       {artifacts.length === 0 && (
-        <p className="settings-desc">
-          No tracked artifacts yet — they are registered automatically as skills,
-          loops, and templates are used.
-        </p>
-      )}
-      {artifacts.map((a) => (
-        <div key={a.id} className="improve-artifact">
-          <button className="ghost" data-testid="artifact-row" onClick={() => void toggleHistory(a.id)}>
-            {expanded === a.id ? "▾" : "▸"} {a.name} ({a.kind})
-          </button>
-          {expanded === a.id && (
-            <div className="improve-versions-list">
-              <div className="improve-version-row">
-                <span className="improve-meta">Autonomy</span>
-                <select
-                  data-testid={`tier-${a.id}`}
-                  value={tiers[a.id] ?? "manual"}
-                  onChange={(e) => void changeTier(a.id, e.target.value as "manual" | "auto" | "canary")}
-                >
-                  <option value="manual">Manual — I apply proposals</option>
-                  <option value="auto">Auto — promote after passing eval (1/24h)</option>
-                  <option value="canary">Canary — shadow window, auto-rollback</option>
-                </select>
-              </div>
-              {(versions[a.id] ?? []).map((v) => (
-                <div key={v.id} className="improve-version-row">
-                  <span>v{v.version}</span>
-                  <span className="improve-meta">{v.origin}</span>
-                  <button
-                    className="ghost"
-                    onClick={() => void rollback(a.id, v.version)}
-                    disabled={busy === `${a.id}:${v.version}`}
-                    title="Roll back to this version"
-                  >
-                    Set active
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+        <div className="improve-empty">
+          <HistoryIcon size={16} strokeWidth={1.6} aria-hidden="true" />
+          <span>
+            No tracked artifacts yet — they are registered automatically as
+            skills, loops, and templates are used.
+          </span>
         </div>
-      ))}
+      )}
+      <div className="improve-artifact-list">
+        {artifacts.map((a) => {
+          const isOpen = expanded === a.id;
+          return (
+            <div key={a.id} className={`improve-artifact${isOpen ? " open" : ""}`}>
+              <button
+                className="improve-artifact-row"
+                data-testid="artifact-row"
+                aria-expanded={isOpen}
+                onClick={() => void toggleHistory(a.id)}
+              >
+                <span className="improve-artifact-chevron" aria-hidden="true">
+                  {isOpen ? <ChevronDown size={14} strokeWidth={2} /> : <ChevronRight size={14} strokeWidth={2} />}
+                </span>
+                <span className="improve-artifact-name">{a.name}</span>
+                <span className="improve-kind-chip">{KIND_LABEL[a.kind] ?? a.kind}</span>
+              </button>
+              {isOpen && (
+                <div className="improve-versions-list">
+                  <div className="improve-autonomy-row">
+                    <span className="improve-meta-label">Autonomy</span>
+                    <select
+                      data-testid={`tier-${a.id}`}
+                      value={tiers[a.id] ?? "manual"}
+                      onChange={(e) => void changeTier(a.id, e.target.value as "manual" | "auto" | "canary")}
+                    >
+                      <option value="manual">Manual — I apply proposals</option>
+                      <option value="auto">Auto — promote after passing eval (1/24h)</option>
+                      <option value="canary">Canary — shadow window, auto-rollback</option>
+                    </select>
+                  </div>
+                  <div className="improve-timeline">
+                    {(versions[a.id] ?? []).map((v) => (
+                      <div key={v.id} className="improve-version-row">
+                        <span className="improve-version-chip">v{v.version}</span>
+                        <span className="improve-meta-value">{v.origin}</span>
+                        <button
+                          className="ghost improve-rollback-btn"
+                          onClick={() => void rollback(a.id, v.version)}
+                          disabled={busy === `${a.id}:${v.version}`}
+                          title="Roll back to this version"
+                        >
+                          Set active
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

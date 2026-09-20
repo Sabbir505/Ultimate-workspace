@@ -464,6 +464,35 @@ fn normalize_hf_model(m: HfModel) -> Vec<CatalogEntry> {
     entries
 }
 
+/// Keep every entry of the first `max_repos` DISTINCT repos, preserving the
+/// input order (HF rank). All GGUF siblings of an admitted repo are kept —
+/// the market UI groups by repo and prefers a quant per card — bounded by a
+/// 16-entries-per-repo hard cap so a many-variant repo can't balloon the
+/// payload. Entries past the bound are dropped. Entries of one repo are
+/// contiguous (each HF model fans out via `normalize_hf_model` in one run),
+/// which is what makes the prefix-keep sound.
+fn truncate_catalog_by_repo(entries: &mut Vec<CatalogEntry>, max_repos: usize) {
+    const MAX_ENTRIES_PER_REPO: usize = 16;
+    let mut kept: Vec<CatalogEntry> = Vec::with_capacity(entries.len());
+    let mut admitted_repos = 0usize;
+    let mut idx = 0usize;
+    while idx < entries.len() {
+        if admitted_repos >= max_repos {
+            break;
+        }
+        let repo = entries[idx].repo_id.clone();
+        let run_len = entries[idx..]
+            .iter()
+            .take_while(|e| e.repo_id == repo)
+            .count();
+        admitted_repos += 1;
+        let take = run_len.min(MAX_ENTRIES_PER_REPO);
+        kept.extend_from_slice(&entries[idx..idx + take]);
+        idx += run_len;
+    }
+    *entries = kept;
+}
+
 /// Estimate GGUF file size from model parameters and quantization.
 /// Bit-per-weight values are approximate industry standards.
 fn estimate_gguf_size(params_label: Option<&str>, quant: Option<&str>) -> u64 {
@@ -644,7 +673,14 @@ pub async fn fetch_model_catalog(
     for m in models {
         entries.extend(normalize_hf_model(m));
     }
-    entries.truncate(limit as usize);
+    // HF's `limit` counts REPOS; each repo fans out into one entry per GGUF
+    // sibling (typically 8-10 quants). Truncating the flat entry list at
+    // `limit` therefore kept only ~6-8 repos no matter the number — the "the
+    // market shows six cards" bug. Truncate on DISTINCT repos instead: every
+    // file of the first `limit` repos is kept (the UI groups by repo and
+    // picks one quant per card), with a hard per-repo entry cap so a
+    // pathological repo can't balloon the payload.
+    truncate_catalog_by_repo(&mut entries, limit as usize);
 
     let result = FetchCatalogResult {
         entries,
@@ -1733,6 +1769,76 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+
+    // ---- repo-aware catalog truncation (the "only ~6 market cards" bug) ----
+
+    fn entry(repo: &str, file: &str) -> CatalogEntry {
+        CatalogEntry {
+            id: format!("{repo}::{file}"),
+            display_name: file.to_string(),
+            author: repo.split('/').next().unwrap_or("").to_string(),
+            repo_id: repo.to_string(),
+            filename: file.to_string(),
+            downloads: 0,
+            likes: 0,
+            last_modified: None,
+            size_bytes: 1,
+            description: None,
+            tags: vec![],
+            sha256: None,
+            download_url: format!("https://huggingface.co/{repo}/resolve/main/{file}"),
+            vision: false,
+            params_label: None,
+            quantization: None,
+            license: None,
+            gated: false,
+        }
+    }
+
+    #[test]
+    fn truncate_catalog_by_repo_keeps_whole_repos() {
+        // Two repos × 9 quant files, interleaved like HF returns them. The
+        // old flat `entries.truncate(limit)` kept only ~6 FILES (~1 repo);
+        // the repo-aware cut must keep every file of the first N repos.
+        let mut entries = Vec::new();
+        for repo in ["a/one", "b/two"] {
+            for q in 0..9 {
+                entries.push(entry(repo, &format!("m.q{q}.gguf")));
+            }
+        }
+        truncate_catalog_by_repo(&mut entries, 2);
+        assert_eq!(entries.len(), 18, "all files of admitted repos survive");
+        let repos: std::collections::HashSet<&str> =
+            entries.iter().map(|e| e.repo_id.as_str()).collect();
+        assert_eq!(repos.len(), 2);
+    }
+
+    #[test]
+    fn truncate_catalog_by_repo_stops_at_repo_bound() {
+        let mut entries: Vec<CatalogEntry> = (0..5)
+            .map(|i| entry(&format!("r{i}/m"), "m.Q4_K_M.gguf"))
+            .collect();
+        truncate_catalog_by_repo(&mut entries, 3);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.last().unwrap().repo_id, "r2/m", "input order kept");
+    }
+
+    #[test]
+    fn truncate_catalog_by_repo_caps_entries_per_repo() {
+        // A pathological repo with 30 GGUFs must not balloon the payload.
+        let mut entries: Vec<CatalogEntry> = (0..30)
+            .map(|i| entry("big/repo", &format!("m.f{i}.gguf")))
+            .collect();
+        truncate_catalog_by_repo(&mut entries, 60);
+        assert_eq!(entries.len(), 16, "hard per-repo entry cap");
+    }
+
+    #[test]
+    fn truncate_catalog_by_repo_handles_empty() {
+        let mut entries: Vec<CatalogEntry> = Vec::new();
+        truncate_catalog_by_repo(&mut entries, 5);
+        assert!(entries.is_empty());
+    }
 
     // ---- E7: urlencoding_lite ----
 

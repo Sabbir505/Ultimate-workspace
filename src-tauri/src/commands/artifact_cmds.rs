@@ -400,12 +400,25 @@ pub async fn update_artifact_cmd(
             AdaptedArtifact::Automation(input) => input.prompt.clone(),
         };
 
-        // Update based on type
+        // Update based on type. The trailing Option carries the deferred
+        // installed-skill disk write: (new slug, kind, content, stale slug to
+        // drop after a rename).
         let skill_fs_write = match artifact_type.as_str() {
             "skill" | "loop" => {
-                // Find the skill to update
-                let skills = list_skills(&conn, None).map_err(|e| e.to_string())?;
-                if let Some(_skill) = skills.iter().find(|s| s.id == artifact_id) {
+                // Two id spaces reach this arm: artifact-flow skills/loops
+                // are FILESYSTEM-installed and carry their slug as the
+                // artifact id, while DB-backed rows carry a DB id. Update
+                // whichever exists — a miss in BOTH must error (the old code
+                // silently returned success:true while writing nothing).
+                let db_hit = list_skills(&conn, None)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|s| s.id == artifact_id);
+                let disk_hit = crate::installed_skills::read_installed(&artifact_id, artifact_type.as_str()).is_some();
+                if !db_hit && !disk_hit {
+                    return Err(format!("Artifact {} not found", artifact_id));
+                }
+                if db_hit {
                     update_skill(
                         &conn,
                         &artifact_id,
@@ -413,18 +426,83 @@ pub async fn update_artifact_cmd(
                         &format!("/{}", new_spec.slug()),
                         &new_content,
                     ).map_err(|e| e.to_string())?;
-
-                    // Defer the installed-skill disk write until after the
-                    // lock is released (see above).
-                    Some((new_spec.slug(), artifact_type.clone(), new_content.clone()))
+                }
+                let new_slug = new_spec.slug();
+                let stale_slug = if new_slug != artifact_id && disk_hit {
+                    // The spec renamed the artifact: the old slug's
+                    // directory would linger as a duplicate — drop it after
+                    // the save lands.
+                    Some(artifact_id.clone())
                 } else {
                     None
-                }
+                };
+                // Defer the installed-skill disk write until after the lock
+                // is released (see above). Upsert under the CURRENT slug.
+                Some((new_slug, artifact_type.clone(), new_content.clone(), stale_slug))
+            }
+            "prompt_template" => {
+                // Templates live in TWO places: the DB skill row and the
+                // installed harness twin (its slash-command copy). Update
+                // both or the twin keeps serving the stale body. This arm
+                // used to reject the type outright ("Unsupported artifact
+                // type") even though create supports it.
+                let old_command = {
+                    let skills = list_skills(&conn, None).map_err(|e| e.to_string())?;
+                    let row = skills.iter().find(|s| s.id == artifact_id)
+                        .ok_or_else(|| format!("Artifact {} not found", artifact_id))?;
+                    row.slash_command.clone()
+                };
+                update_skill(
+                    &conn,
+                    &artifact_id,
+                    &new_spec.name(),
+                    &format!("/{}", new_spec.slug()),
+                    &new_content,
+                ).map_err(|e| e.to_string())?;
+                let new_slug = new_spec.slug();
+                let old_slug = old_command.trim_start_matches('/').to_string();
+                let stale_slug = if !old_slug.is_empty()
+                    && old_slug != new_slug
+                    && crate::installed_skills::read_installed(&old_slug, "skill").is_some()
+                {
+                    Some(old_slug)
+                } else {
+                    None
+                };
+                // The twin is always installed under kind "skill" (see
+                // create_artifact_cmd).
+                Some((new_slug, "skill".to_string(), new_content.clone(), stale_slug))
             }
             "automation" => {
                 match adapted {
-                    AdaptedArtifact::Automation(input) => {
-                        update_automation(&conn, &artifact_id, &input)
+                    AdaptedArtifact::Automation(adapted_input) => {
+                        // Merge onto the stored row. The adapter defaults
+                        // absent spec fields (harness → claude_code, cron →
+                        // "0 9 * * *", model/cwd → None → ""), and feeding
+                        // those defaults straight into update_automation
+                        // RESET the stored harness/schedule/model/cwd on
+                        // every artifact edit. Only fields the new spec
+                        // actually carries may change.
+                        let existing = get_automation(&conn, &artifact_id)
+                            .map_err(|e| e.to_string())?
+                            .ok_or_else(|| format!("Artifact {} not found", artifact_id))?;
+                        let spec = match &new_spec {
+                            ArtifactSpec::Automation(a) => a,
+                            _ => return Err("Adapter mismatch for automation".to_string()),
+                        };
+                        let merged = crate::db::AutomationInput {
+                            name: adapted_input.name,
+                            prompt: adapted_input.prompt,
+                            harness: spec.harness.clone().unwrap_or(existing.harness),
+                            model: spec.model.clone().or({
+                                if existing.model.is_empty() { None } else { Some(existing.model) }
+                            }),
+                            cwd: if existing.cwd.is_empty() { None } else { Some(existing.cwd) },
+                            schedule: spec.trigger.schedule.clone().unwrap_or(existing.schedule),
+                            enabled: None,
+                            origin: None,
+                        };
+                        update_automation(&conn, &artifact_id, &merged)
                             .map_err(|e| e.to_string())?;
                     }
                     _ => return Err("Adapter mismatch for automation".to_string()),
@@ -437,8 +515,11 @@ pub async fn update_artifact_cmd(
     };
 
     // Also update the installed skill on disk — outside the DB lock.
-    if let Some((slug, kind, content)) = skill_fs_write {
-        save_installed_skill(slug, kind, content).map_err(|e| e.to_string())?;
+    if let Some((slug, kind, content, stale_slug)) = skill_fs_write {
+        save_installed_skill(slug.clone(), kind.clone(), content).map_err(|e| e.to_string())?;
+        if let Some(old) = stale_slug {
+            let _ = crate::installed_skills::delete_installed(&old, &kind);
+        }
     }
 
     // Compute diff

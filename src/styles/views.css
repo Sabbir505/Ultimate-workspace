@@ -997,45 +997,374 @@
   color: var(--text-dim);
 }
 
-/* --- Self-improving artifacts panel (SELF_IMPROVING_ARTIFACTS.md) --- */
-.improve-proposal {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 6px);
-  padding: 10px 12px;
-  margin: 8px 0;
+/* --- Self-improving artifacts panel (SELF_IMPROVING_ARTIFACTS.md) ---
+   Redesigned control surface: hero + engine card (kill switch + sweep),
+   status-accented proposal cards, artifact rows expanding into a version
+   timeline. Data/behavior contract (testids, labels) is unchanged. */
+.improve-root {
   display: flex;
   flex-direction: column;
+  gap: 4px;
+}
+.improve-hero {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.improve-hero-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: var(--accent, #c15f3c);
+  background: color-mix(in srgb, var(--accent, #c15f3c) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #c15f3c) 25%, transparent);
+}
+.improve-hero-copy h3 {
+  margin: 0;
+}
+.improve-hero-copy .settings-desc {
+  margin: 2px 0 0;
+}
+
+/* Engine card */
+.improve-engine {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 14px;
+  margin: 8px 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.improve-engine-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.improve-engine-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.improve-engine-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.improve-engine-hint {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+/* Kill switch as a real toggle: pill track + knob + state label. */
+.improve-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 4px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2, transparent);
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease), color 0.15s var(--ease);
+}
+.improve-switch-track {
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--border);
+  position: relative;
+  transition: background 0.15s var(--ease);
+  flex-shrink: 0;
+}
+.improve-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--surface, #fff);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s var(--ease);
+}
+.improve-switch.on {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent, #c15f3c) 40%, var(--border));
+}
+.improve-switch.on .improve-switch-track {
+  background: var(--accent, #c15f3c);
+}
+.improve-switch.on .improve-switch-track::after {
+  transform: translateX(12px);
+}
+.improve-engine-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.improve-sweep-btn {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
+  white-space: nowrap;
+}
+.improve-sweep-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.improve-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.improve-stat strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.improve-stat-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--border);
+}
+
+/* Section headings with count chips */
+.improve-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+.improve-section-head h4 {
+  margin: 0;
+}
+.improve-count-chip {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 7px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.improve-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+/* Proposal cards — status accent lives on the left edge */
+.improve-proposal {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 11px 13px;
+  margin: 0 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  overflow: hidden;
+}
+.improve-proposal::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--border);
+}
+.improve-proposal-open::before,
+.improve-proposal-evaluating::before {
+  background: var(--accent, #c15f3c);
+}
+.improve-proposal-passed::before {
+  background: #3fb950;
+}
+.improve-proposal-failed_eval::before {
+  background: var(--danger, #f85149);
 }
 .improve-proposal-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: 12.5px;
+}
+.improve-proposal-name {
+  font-weight: 600;
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .improve-status {
   font-size: 11px;
-  padding: 1px 6px;
+  padding: 1px 8px;
   border-radius: 999px;
   border: 1px solid var(--border);
   color: var(--text-dim);
+  margin-left: auto;
+  flex-shrink: 0;
 }
 .improve-status-passed { color: #3fb950; border-color: #3fb950; }
 .improve-status-failed_eval { color: var(--danger, #f85149); border-color: var(--danger, #f85149); }
-.improve-versions { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-dim); }
-.improve-summary { font-size: 12px; color: var(--text); }
-.improve-meta { font-size: 11px; color: var(--text-dim); }
-.improve-actions { display: flex; gap: 6px; }
-.improve-artifact { margin: 4px 0; }
-.improve-versions-list {
-  margin: 4px 0 8px 16px;
+.improve-versions {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+.improve-summary { font-size: 12.5px; color: var(--text); }
+.improve-meta-rows {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 7px;
+}
+.improve-meta-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+}
+.improve-meta-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  width: 84px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+.improve-meta-label.is-risk { color: var(--danger, #f85149); }
+.improve-meta-value { color: var(--text); min-width: 0; }
+.improve-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  padding-top: 2px;
+}
+
+/* Artifact rows + version timeline */
+.improve-artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.improve-artifact {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.improve-artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--text);
+  text-align: left;
+  transition: background 0.12s var(--ease);
+}
+.improve-artifact-row:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+}
+.improve-artifact-chevron {
+  display: inline-flex;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.improve-artifact-name {
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.improve-kind-chip {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 7px;
+}
+.improve-versions-list {
+  border-top: 1px solid var(--border);
+  padding: 10px 12px 12px 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.improve-autonomy-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.improve-autonomy-row select {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2, transparent);
+  color: var(--text);
+}
+.improve-timeline {
+  display: flex;
+  flex-direction: column;
 }
 .improve-version-row {
   display: flex;
   align-items: center;
   gap: 10px;
   font-size: 12px;
+  padding: 5px 0;
+}
+.improve-version-row + .improve-version-row {
+  border-top: 1px solid var(--border);
+}
+.improve-version-chip {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 6px;
+  flex-shrink: 0;
+}
+.improve-rollback-btn {
+  margin-left: auto;
+  font-size: 11.5px;
+  padding: 3px 10px;
 }

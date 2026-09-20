@@ -1592,6 +1592,14 @@ fn update_automation_parameters() -> Value {
                 "description": "New agent engine (optional) — one of \
                     create_automation's agent values.",
             },
+            "model": {
+                "type": "string",
+                "description": "Model override; omit = keep, empty = default.",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Working directory; omit = keep, empty = none.",
+            },
             "enabled": {
                 "type": "boolean",
                 "description": "Turn on/off (optional).",
@@ -2046,9 +2054,13 @@ mod tests {
         // search/write/move/delete, ~2.9k): the model's only structured write
         // path into the user's markdown knowledge base — filesystem tools
         // cannot carry the link-rewrite/index semantics.
+        // Bumped 47_500→48_000 for update_automation model/cwd parameters
+        // (~0.2k): correctness fix — the tool used to silently WIPE the
+        // stored model/working-directory on every update, so they must be
+        // expressible (and preserved) via the schema.
         assert!(
-            total < 47_500,
-            "default tool specs total {total} chars (budget 44_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            total < 48_000,
+            "default tool specs total {total} chars (budget 48_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
         let all_on_caps = ToolCaps {
             browser: true,

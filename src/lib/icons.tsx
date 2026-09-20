@@ -74,3 +74,42 @@ export function NextIcon() {
     </svg>
   );
 }
+
+/**
+ * Vault — a bank safe: rounded body, combination dial, hub.
+ *
+ * Hand-rolled because lucide's `Vault` crams a dial plus four corner spokes
+ * into the same grid, which turns to noise at sidebar size (14px); this
+ * reads as a safe at any size. Accepts lucide-style props so it drops in
+ * wherever a lucide icon was.
+ */
+export function VaultIcon({
+  size = 24,
+  strokeWidth = 2,
+  className,
+}: {
+  size?: number;
+  strokeWidth?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      {/* Safe body */}
+      <rect x="3.5" y="3.5" width="17" height="17" rx="2.5" />
+      {/* Combination dial + hub */}
+      <circle cx="12" cy="12" r="4.25" />
+      <circle cx="12" cy="12" r="0.9" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}

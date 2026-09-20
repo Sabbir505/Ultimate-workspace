@@ -24,7 +24,7 @@ use crate::chat::tools::{self, ToolCaps};
 /// no permission-mode gate, since this path intentionally runs the same
 /// ungated dispatcher the built-in chat uses (where the caller enforces the
 /// gate BEFORE reaching execute_tool).
-pub const ALLOWED_RELAY_TOOLS: [&str; 27] = [
+pub const ALLOWED_RELAY_TOOLS: [&str; 28] = [
     tools::GENERATE_DOCUMENT,
     tools::GENERATE_IMAGE,
     tools::PLAN_DOCUMENT,
@@ -37,6 +37,7 @@ pub const ALLOWED_RELAY_TOOLS: [&str; 27] = [
     tools::GET_CAPABILITIES,
     tools::LIST_ARTIFACTS,
     tools::LIST_AUTOMATIONS,
+    tools::GET_AUTOMATION,
     tools::CREATE_AUTOMATION,
     tools::UPDATE_AUTOMATION,
     tools::DELETE_AUTOMATION,
@@ -553,6 +554,7 @@ mod tests {
         assert_eq!(tool_from_op("relay_tools:revise_document"), Some("revise_document".to_string()));
         // Automation CRUD is offered to harness sessions (built-in-chat parity).
         assert_eq!(tool_from_op("relay_tools:list_automations"), Some("list_automations".to_string()));
+        assert_eq!(tool_from_op("relay_tools:get_automation"), Some("get_automation".to_string()));
         assert_eq!(tool_from_op("relay_tools:create_automation"), Some("create_automation".to_string()));
         assert_eq!(tool_from_op("relay_tools:update_automation"), Some("update_automation".to_string()));
         assert_eq!(tool_from_op("relay_tools:delete_automation"), Some("delete_automation".to_string()));

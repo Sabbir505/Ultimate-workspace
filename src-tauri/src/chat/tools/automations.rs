@@ -13,7 +13,8 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
 use super::{
-    CREATE_AUTOMATION, DELETE_AUTOMATION, LIST_AUTOMATIONS, RUN_AUTOMATION_NOW, UPDATE_AUTOMATION,
+    CREATE_AUTOMATION, DELETE_AUTOMATION, GET_AUTOMATION, LIST_AUTOMATIONS, RUN_AUTOMATION_NOW,
+    UPDATE_AUTOMATION,
 };
 
 /// Dispatch an automation-family tool call. Permission gating (read-only vs
@@ -22,6 +23,7 @@ use super::{
 pub(crate) async fn execute_automation_tool(app: &AppHandle, name: &str, args: &Value) -> String {
     match name {
         LIST_AUTOMATIONS => list_automations(app),
+        GET_AUTOMATION => get_automation(app, args),
         CREATE_AUTOMATION => create_automation(app, args),
         UPDATE_AUTOMATION => update_automation(app, args),
         DELETE_AUTOMATION => delete_automation(app, args),
@@ -36,6 +38,7 @@ pub(crate) fn is_automation_tool(name: &str) -> bool {
     matches!(
         name,
         LIST_AUTOMATIONS
+            | GET_AUTOMATION
             | CREATE_AUTOMATION
             | UPDATE_AUTOMATION
             | DELETE_AUTOMATION
@@ -107,7 +110,8 @@ fn list_automations(app: &AppHandle) -> String {
                 ));
             }
             out.push_str(
-                "Update with update_automation, delete with delete_automation, \
+                "Prompts are truncated here — read one in full with get_automation. \
+                 Update with update_automation, delete with delete_automation, \
                  fire now with run_automation_now.",
             );
             out
@@ -125,6 +129,80 @@ fn one_line(s: &str) -> String {
         let cut: String = flat.chars().take(157).collect();
         format!("{cut}...")
     }
+}
+
+/// Read one automation in FULL — the complete prompt included. This is the
+/// read half of an "edit my automation" turn: update_automation overwrites
+/// whole fields, so appending a step means seeing the stored text verbatim
+/// first (the list's 160-char one-liner cannot be reconstructed from, and
+/// guessing at it silently drops content).
+fn get_automation(app: &AppHandle, args: &Value) -> String {
+    let id = arg_str(args, "automation_id");
+    if id.is_empty() {
+        return "Error: get_automation requires \"automation_id\" (from \
+             list_automations)."
+            .to_string();
+    }
+    let a = {
+        let db = app.state::<crate::DbState>();
+        let conn = db.0.lock();
+        crate::db::get_automation(&conn, &id)
+    };
+    match a {
+        Ok(Some(a)) => format_automation_detail(&a),
+        Ok(None) => format!("Error: no automation with id \"{id}\"."),
+        Err(e) => format!("Error: get_automation failed: {e}"),
+    }
+}
+
+/// The full get_automation report for one stored row. The prompt must come
+/// back VERBATIM — update_automation replaces whole fields, so the caller
+/// copies this text through with only its intended edits applied.
+fn format_automation_detail(a: &crate::db::Automation) -> String {
+    let next = if a.enabled {
+        format_next_fire(&a.schedule)
+            .map(|t| format!("; next run {t}"))
+            .unwrap_or_else(|| "; schedule error — will not fire".to_string())
+    } else {
+        "; disabled".to_string()
+    };
+    let status = a.last_status.as_deref().unwrap_or("never run");
+    let origin = match a.origin.as_str() {
+        "agent" => "agent-authored (chat approval card)",
+        "user" => "user-authored (Automations view)",
+        other => other,
+    };
+    format!(
+        "# {}\n\
+         - id: `{}`\n\
+         - agent: `{}`{}\n\
+         - cwd: {}\n\
+         - cron: `{}`{}\n\
+         - enabled: {}; last run: {status}\n\
+         - origin: {origin}\n\
+         \n\
+         ## Prompt (verbatim — pass it back unchanged through update_automation's \
+         `prompt` field, with your edits applied)\n\
+         \n\
+         {}",
+        a.name,
+        a.id,
+        a.harness,
+        if a.model.is_empty() {
+            String::new()
+        } else {
+            format!(" (model: `{}`)", a.model)
+        },
+        if a.cwd.is_empty() {
+            "(none — harness default)".to_string()
+        } else {
+            format!("`{}`", a.cwd)
+        },
+        a.schedule,
+        next,
+        if a.enabled { "yes" } else { "no" },
+        a.prompt,
+    )
 }
 
 fn validate_automation_input(
@@ -423,5 +501,40 @@ mod tests {
         let out = one_line(&long);
         assert_eq!(out.chars().count(), 160);
         assert!(out.ends_with("..."));
+    }
+
+    /// get_automation is the edit-turn read path: it must return the stored
+    /// prompt VERBATIM (the whole point — list truncates to one_line) plus
+    /// the id echo the update call needs. The handler's id plumbing (missing
+    /// id / unknown id → the shared guidance errors) is thin; the formatting
+    /// carries the contract, so the test pins that.
+    #[test]
+    fn automation_detail_formats_full_prompt_verbatim() {
+        let long_prompt = "Line one of the schedule.\nLine two has \"quotes\" and \
+                           backslashes D:\\artifect — beyond the 160-char list cut.\n"
+            .repeat(4);
+        let a = crate::db::Automation {
+            id: "48ea3ef6-0000-0000-0000-000000000000".into(),
+            name: "Daily ML Lesson 9AM".into(),
+            prompt: long_prompt.clone(),
+            harness: "opencode".into(),
+            model: String::new(),
+            cwd: String::new(),
+            schedule: "0 9 * * *".into(),
+            enabled: false,
+            last_run_at: None,
+            last_status: None,
+            chat_session_id: None,
+            created_at: 0,
+            origin: "user".into(),
+        };
+        let out = format_automation_detail(&a);
+        assert!(out.contains(&long_prompt), "prompt must be verbatim");
+        assert!(out.contains(a.id.as_str()));
+        assert!(out.contains("`opencode`"));
+        assert!(out.contains("0 9 * * *"));
+        assert!(out.contains("disabled"));
+        // The one_line cut would drop the tail — this report must not.
+        assert!(!out.contains(&one_line(&long_prompt)));
     }
 }

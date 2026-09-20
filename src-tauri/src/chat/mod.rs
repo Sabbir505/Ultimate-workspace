@@ -2252,8 +2252,11 @@ mod tests {
         // Re-baselined 2026-09-19 (55.5k → 58.0k) for the vault CRUD family
         // (six specs, ~2.1k): the model's only structured write path into
         // the user's markdown knowledge base.
+        // +0.5k for `get_automation`: the full-prompt read path —
+        // list_automations truncates to a one-liner, and update_automation
+        // overwrites whole fields, so an edit turn needs the verbatim text.
         assert!(
-            total < 58_000,
+            total < 58_500,
             "fresh-turn baseline over fixed-cost budget: {total} chars"
         );
     }

@@ -828,6 +828,7 @@ fn mcp_tool_meta(server: &str, tool: &str, input: &Value) -> Value {
         ("relay-tools", "search_docs") => Some(("Searching local docs", "query")),
         ("relay-tools", "get_capabilities") => Some(("Checking capabilities", "")),
         ("relay-tools", "list_automations") => Some(("Listing automations", "")),
+        ("relay-tools", "get_automation") => Some(("Reading an automation", "automation_id")),
         ("relay-tools", "create_automation") => Some(("Creating an automation", "name")),
         ("relay-tools", "update_automation") => Some(("Updating an automation", "name")),
         ("relay-tools", "delete_automation") => Some(("Deleting an automation", "automation_id")),

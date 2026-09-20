@@ -2084,17 +2084,18 @@ pub(crate) async fn run_tool(
         return run_cached_web_tool(client, artifacts_dir, caps, app, sid, name, args).await;
     }
 
-    // Automation tools (list/create/update/delete/run-now) — DB + scheduler
-    // via the AppHandle, like the ledger tools above. The list is read-only
-    // and auto-runs. Runs execute unattended at full permission by design
-    // (an unattended turn can never answer a prompt), so the human gate lives
-    // at CONTENT-WRITING time: create/update are approval-carded in EVERY
-    // posture including full_auto — an automation must never exist that the
-    // user didn't explicitly click yes on. delete keeps the stricter
-    // delete_file posture; run_now launches an already-approved automation.
-    // Plan mode has already refused the mutating ones above via is_mutating_tool.
+    // Automation tools (get/list/create/update/delete/run-now) — DB +
+    // scheduler via the AppHandle, like the ledger tools above. The reads
+    // (list, full get) are read-only and auto-run. Runs execute unattended at
+    // full permission by design (an unattended turn can never answer a
+    // prompt), so the human gate lives at CONTENT-WRITING time: create/update
+    // are approval-carded in EVERY posture including full_auto — an
+    // automation must never exist that the user didn't explicitly click yes
+    // on. delete keeps the stricter delete_file posture; run_now launches an
+    // already-approved automation. Plan mode has already refused the mutating
+    // ones above via is_mutating_tool.
     if tools::is_automation_tool(name) {
-        let decision = if name == tools::LIST_AUTOMATIONS {
+        let decision = if name == tools::LIST_AUTOMATIONS || name == tools::GET_AUTOMATION {
             permission::PermissionDecision::AutoRun
         } else if name == tools::CREATE_AUTOMATION || name == tools::UPDATE_AUTOMATION {
             // Runs are full_auto by design (product decision 2026-09-13), so

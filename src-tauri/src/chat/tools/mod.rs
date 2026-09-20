@@ -215,11 +215,17 @@ pub const CHECK_SUFFICIENCY: &str = "check_sufficiency";
 // capability: without these tools the model answers "I can't schedule things"
 // even though Relay schedules headless runs on every supported agent. They
 // dispatch in dispatch.rs (AppHandle → DbState), like the ledger tools.
-// `list_automations` is read-only; the rest change persisted state and are
-// schema-stripped under the read_only sandbox like the mutating FS tools.
+// `list_automations`/`get_automation` are read-only; the rest change
+// persisted state and are schema-stripped under the read_only sandbox like
+// the mutating FS tools.
 
 /// List every stored automation (id, name, schedule, enabled, next fire).
+/// The prompt appears truncated here — `get_automation` carries the full text.
 pub const LIST_AUTOMATIONS: &str = "list_automations";
+/// Read one automation in full, including its complete prompt — the read
+/// path an "edit my automation" turn needs before update_automation (the
+/// list output alone cannot reconstruct it).
+pub const GET_AUTOMATION: &str = "get_automation";
 /// Create an automation: a prompt + 5-field cron schedule + agent engine.
 pub const CREATE_AUTOMATION: &str = "create_automation";
 /// Edit an existing automation's fields (partial update by id).
@@ -1567,10 +1573,11 @@ mod tests {
             .contains(&OPEN_FILE.to_string()));
     }
 
-    /// The Automations feature must be model-visible: `list_automations`
-    /// (read-only) in every wire format and mode, the CRUD/run tools only
-    /// where mutating tools ship. Both wire formats must agree — a missing
-    /// entry on one provider is the "model claims it can't automate" bug class.
+    /// The Automations feature must be model-visible: `list_automations` and
+    /// `get_automation` (read-only) in every wire format and mode, the
+    /// CRUD/run tools only where mutating tools ship. Both wire formats must
+    /// agree — a missing entry on one provider is the "model claims it can't
+    /// automate" bug class.
     #[test]
     fn automation_tools_exposed_and_gated_consistently() {
         let anthropic_ro: Vec<String> =
@@ -1578,15 +1585,17 @@ mod tests {
                 .iter()
                 .map(|s| s["name"].as_str().unwrap().to_string())
                 .collect();
-        assert!(
-            anthropic_ro.contains(&LIST_AUTOMATIONS.to_string()),
-            "read-only list_automations missing from the anthropic schema"
-        );
-        assert!(
-            openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly)
-                .contains(&LIST_AUTOMATIONS.to_string()),
-            "read-only list_automations missing from the openai schema"
-        );
+        for name in [LIST_AUTOMATIONS, GET_AUTOMATION] {
+            assert!(
+                anthropic_ro.contains(&name.to_string()),
+                "read-only {name} missing from the anthropic schema under read_only"
+            );
+            assert!(
+                openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly)
+                    .contains(&name.to_string()),
+                "read-only {name} missing from the openai schema"
+            );
+        }
         let openai = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         let anthropic: Vec<String> =
             anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
@@ -1595,6 +1604,7 @@ mod tests {
                 .collect();
         for name in [
             LIST_AUTOMATIONS,
+            GET_AUTOMATION,
             CREATE_AUTOMATION,
             UPDATE_AUTOMATION,
             DELETE_AUTOMATION,

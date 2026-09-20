@@ -420,7 +420,7 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         // Automation CRUD: parity with the built-in chat's automation tools —
         // without these a harness session answers "I can't schedule things"
         // to the same requests the built-in chat handles.
-        | "list_automations" | "create_automation" | "update_automation"
+        | "list_automations" | "get_automation" | "create_automation" | "update_automation"
         | "delete_automation" | "run_automation_now"
         // Session Mesh (SESSION_MESH_DESIGN_ARCHITECTURE.md): sibling-session
         // awareness + messaging + spawning. Without these a harness session
@@ -1051,8 +1051,20 @@ fn static_relay_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "list_automations",
-            "description": "List the user's Relay automations — scheduled headless agent runs (id, name, agent, cron schedule, enabled, next fire, last run status). Call before updating or deleting one, to get its id.",
+            "description": "List the user's Relay automations — scheduled headless agent runs (id, name, agent, cron schedule, enabled, next fire, last run status). Prompts appear truncated here; call get_automation for the full text. Call before updating or deleting one, to get its id.",
             "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "get_automation",
+            "description": "Read one Relay automation in full by id (from list_automations): the COMPLETE prompt plus agent, model, cwd, schedule, enabled, status. update_automation overwrites whole fields — read this verbatim text before editing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "automation_id": { "type": "string", "description": "The automation id from list_automations." }
+                },
+                "required": ["automation_id"]
+            },
             "annotations": { "readOnlyHint": true }
         }),
         json!({

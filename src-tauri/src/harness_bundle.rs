@@ -198,8 +198,10 @@ pub fn build_instructions_md(
             "## Automations\n\
              Relay schedules headless agent runs — cron \"automations\", managed in the \
              app's Automations view and via the `relay-tools` MCP tools \
-             `list_automations`, `create_automation`, `update_automation`, \
-             `delete_automation`, `run_automation_now`. When the user asks to \
+             `list_automations`, `get_automation`, `create_automation`, `update_automation`, \
+             `delete_automation`, `run_automation_now`. `list_automations` truncates \
+             prompts — read one in full with `get_automation` before editing it. When the \
+             user asks to \
              schedule/repeat/automate a task, create one — never claim scheduling \
              is impossible; confirm an ambiguous schedule first. `schedule` is a \
              5-field local-time cron (\"0 9 * * 1-5\" = 09:00 weekdays); `agent` \

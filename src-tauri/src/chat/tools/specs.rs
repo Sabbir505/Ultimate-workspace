@@ -120,10 +120,16 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         openai_fn(VAULT_LIST, VAULT_LIST_DESC, vault_list_parameters()),
         openai_fn(VAULT_READ, VAULT_READ_DESC, vault_read_parameters()),
         openai_fn(VAULT_SEARCH, VAULT_SEARCH_DESC, vault_search_parameters()),
-        // Automations — list is read-only and always on; the CRUD/run tools
-        // below follow the mutating-tool gating (see tools/mod.rs family
-        // block). Without them the model denies an app capability it has.
+        // Automations — list/get are read-only and always on; the CRUD/run
+        // tools below follow the mutating-tool gating (see tools/mod.rs
+        // family block). Without them the model denies an app capability it
+        // has.
         openai_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
+        openai_fn(
+            GET_AUTOMATION,
+            GET_AUTOMATION_DESC,
+            automation_id_parameters(),
+        ),
         // Session Mesh — sibling-session awareness + consultation. The read
         // trio is read-only; message/spawn are gated at dispatch (see
         // dispatch.rs + plan.rs is_mutating_tool).
@@ -445,8 +451,14 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         anthropic_fn(VAULT_LIST, VAULT_LIST_DESC, vault_list_parameters()),
         anthropic_fn(VAULT_READ, VAULT_READ_DESC, vault_read_parameters()),
         anthropic_fn(VAULT_SEARCH, VAULT_SEARCH_DESC, vault_search_parameters()),
-        // Automations — read-only list always on (mirror of the OpenAI block).
+        // Automations — read-only list/get always on (mirror of the OpenAI
+        // block).
         anthropic_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
+        anthropic_fn(
+            GET_AUTOMATION,
+            GET_AUTOMATION_DESC,
+            automation_id_parameters(),
+        ),
         // Session Mesh — mirror of the OpenAI block above.
         anthropic_fn(LIST_SESSIONS, LIST_SESSIONS_DESC, list_sessions_parameters()),
         anthropic_fn(READ_SESSION, READ_SESSION_DESC, read_session_parameters()),
@@ -1360,7 +1372,13 @@ fn task_id_parameters() -> Value {
 
 const LIST_AUTOMATIONS_DESC: &str = "List the user's scheduled automations (cron \
     headless agent runs): id, name, agent, schedule, next fire, last status. \
-    Call before update/delete/run to get ids.";
+    Prompts appear truncated — call get_automation for the full text. Call \
+    before update/delete/run to get ids.";
+
+const GET_AUTOMATION_DESC: &str = "Read one automation in full by id (from \
+    list_automations): the COMPLETE prompt plus agent, model, cwd, schedule, \
+    enabled, status. update_automation overwrites whole fields — read this \
+    verbatim text before editing.";
 
 const CREATE_AUTOMATION_DESC: &str = "Create a scheduled automation: `prompt` runs \
     unattended on a 5-field local-time cron `schedule` via the chosen agent. \
@@ -2058,6 +2076,8 @@ mod tests {
         // (~0.2k): correctness fix — the tool used to silently WIPE the
         // stored model/working-directory on every update, so they must be
         // expressible (and preserved) via the schema.
+        // 48_000 stays: get_automation (~0.5k) fit inside the existing
+        // headroom after trimming its description to schema-carrying essentials.
         assert!(
             total < 48_000,
             "default tool specs total {total} chars (budget 48_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
@@ -2077,9 +2097,12 @@ mod tests {
         // generate_image bump above (the spec rides the all-on surface too);
         // 47_500→50_500 mirrors the vault CRUD family bump above (all six
         // vault specs ride the all-on surface).
+        // Bumped 50_500→51_000 for `get_automation` (~0.5k): the full-prompt
+        // read path (list_automations truncates to a one-liner) — an edit
+        // turn must start from verbatim text, not a reconstruction.
         assert!(
-            all_on < 50_500,
-            "all-on tool specs total {all_on} chars (budget 47_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 51_000,
+            "all-on tool specs total {all_on} chars (budget 51_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 

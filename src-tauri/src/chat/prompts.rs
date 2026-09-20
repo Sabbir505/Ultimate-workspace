@@ -182,8 +182,8 @@ pub(crate) fn core_prompt_base() -> String {
      servers run as a background task, then open http://localhost:PORT.\n\n\
      ## Automations\n\
      Relay schedules headless agent runs — cron \"automations\", managed in the app's \
-     Automations view and in-chat via `list_automations`, `create_automation`, \
-     `update_automation`, `delete_automation`, `run_automation_now`. When the user asks to \
+     Automations view and in-chat via `list_automations`, `get_automation`, \
+     `create_automation`, `update_automation`, `delete_automation`, `run_automation_now`. When the user asks to \
      schedule/repeat/automate a task, create one — never claim scheduling is impossible; \
      confirm an ambiguous schedule first. The `prompt` must be self-contained (runs have \
      no conversation memory) and fires on a 5-field local-time cron schedule; each run \
@@ -840,8 +840,12 @@ mod tests {
         // 9600 → 9800: the Vault section (~0.5k) — routing guide for the user's notes
         // (search before claiming ignorance; move rewrites links). Capability
         // statement, not bloat.
+        // 9800 → 9850: `get_automation` joins the Automations enumeration —
+        // the read path that returns an automation's FULL prompt (list
+        // truncates to a one-liner), so an edit turn can update without
+        // reconstruction. One tool name; guidance rides the tool schemas.
         assert!(
-            frontier.len() < 9_800,
+            frontier.len() < 9_850,
             "frontier CORE prompt bloated: {} bytes",
             frontier.len()
         );

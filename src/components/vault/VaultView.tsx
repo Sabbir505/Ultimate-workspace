@@ -455,6 +455,7 @@ export function VaultView() {
   const setTemplatePickerOpen = useVaultStore((s) => s.setTemplatePickerOpen);
   const createNote = useVaultStore((s) => s.createNote);
   const createFolder = useVaultStore((s) => s.createFolder);
+  const reorderNoteTab = useVaultStore((s) => s.reorderNoteTab);
   const rescan = useVaultStore((s) => s.rescan);
   const graphOpen = useVaultStore((s) => s.graphOpen);
   const setGraphOpen = useVaultStore((s) => s.setGraphOpen);
@@ -482,6 +483,103 @@ export function VaultView() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Note-tab strip: wheel-scroll + drag-to-reorder, the same pattern as the
+  // tool panel's chip strip (native non-passive wheel for the vertical-wheel
+  // → horizontal scroll translation; pointer events + hit-testing for the
+  // reorder because WebView2's HTML5 drag-and-drop is unreliable).
+  const tabsRef = useRef<HTMLDivElement | null>(null);
+  const [tabsScrollable, setTabsScrollable] = useState(false);
+  useEffect(() => {
+    const el = tabsRef.current;
+    if (!el) return;
+    const update = () => setTabsScrollable(el.scrollWidth > el.clientWidth + 1);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    window.addEventListener("resize", update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, [openNotes, activePath]);
+
+  useEffect(() => {
+    const el = tabsRef.current;
+    if (!el) return;
+    const onTabsWheel = (e: WheelEvent) => {
+      // Horizontal input goes straight through; map the vertical wheel.
+      const dx = e.deltaX !== 0 ? e.deltaX : e.deltaY;
+      if (dx === 0) return;
+      el.scrollLeft += dx;
+      // Swallow the event only while the strip can actually scroll — at the
+      // edges (or with everything visible) the page behind keeps it.
+      if (el.scrollLeft > 0 || el.scrollLeft + el.clientWidth < el.scrollWidth) {
+        e.preventDefault();
+      }
+    };
+    el.addEventListener("wheel", onTabsWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onTabsWheel);
+  }, [openNotes.length, activePath]);
+
+  // Keep the active tab inside the visible strip: opening a note from a
+  // link, the switcher or the tree reveals its tab instead of leaving it
+  // scrolled out of sight. Only el.scrollLeft is touched — no ancestor
+  // scroll chaining (scrollIntoView would nudge the whole page).
+  useEffect(() => {
+    const el = tabsRef.current;
+    if (!el) return;
+    const tab = el.querySelector<HTMLElement>(".vault-note-tab.active");
+    if (!tab) return;
+    if (tab.offsetLeft < el.scrollLeft) {
+      el.scrollLeft = tab.offsetLeft;
+    } else if (tab.offsetLeft + tab.offsetWidth > el.scrollLeft + el.clientWidth) {
+      el.scrollLeft = tab.offsetLeft + tab.offsetWidth - el.clientWidth;
+    }
+  }, [activePath, openNotes.length]);
+
+  const tabDragIndexRef = useRef<number | null>(null);
+  const tabDragOverRef = useRef<number | null>(null);
+  const [tabDragIndex, setTabDragIndex] = useState<number | null>(null);
+  const [tabDragOverIndex, setTabDragOverIndex] = useState<number | null>(null);
+
+  const onTabMouseDown = useCallback(
+    (index: number, e: React.MouseEvent) => {
+      // Don't start a drag from the close button.
+      if ((e.target as HTMLElement).closest(".vault-note-tab-close")) return;
+      e.preventDefault();
+      tabDragIndexRef.current = index;
+      setTabDragIndex(index);
+      setTabDragOverIndex(index);
+      const handleMove = (ev: MouseEvent) => {
+        const el = document.elementFromPoint(ev.clientX, ev.clientY);
+        const tab = el?.closest(".vault-note-tab") as HTMLElement | null;
+        if (!tab) return;
+        const newIndex = Number(tab.dataset.index);
+        if (!Number.isNaN(newIndex) && newIndex !== tabDragOverRef.current) {
+          tabDragOverRef.current = newIndex;
+          setTabDragOverIndex(newIndex);
+        }
+      };
+      const handleUp = () => {
+        const from = tabDragIndexRef.current;
+        const to = tabDragOverRef.current;
+        if (from !== null && to !== null && from !== to) {
+          const path = openNotes[from];
+          if (path) reorderNoteTab(path, to);
+        }
+        tabDragIndexRef.current = null;
+        tabDragOverRef.current = null;
+        setTabDragIndex(null);
+        setTabDragOverIndex(null);
+        window.removeEventListener("mousemove", handleMove);
+        window.removeEventListener("mouseup", handleUp);
+      };
+      window.addEventListener("mousemove", handleMove);
+      window.addEventListener("mouseup", handleUp);
+    },
+    [openNotes, reorderNoteTab],
+  );
 
   // Ctrl/Cmd+P quick switcher while the view is up; Mod+S flushes a save.
   useEffect(() => {
@@ -797,23 +895,32 @@ export function VaultView() {
                 </button>
               </div>
               {/* Open-note tab strip: click activates, ✕ (or middle-click)
-                  closes just that tab. The store owns ordering and the
-                  active-tab neighbor handoff. */}
+                  closes just that tab; the wheel scrolls an overflowing
+                  strip and dragging a tab reorders it. The store owns
+                  ordering and the active-tab neighbor handoff. */}
               {openNotes.length > 0 && (
-                <div className="vault-note-tabs" role="tablist" aria-label="Open notes">
-                  {openNotes.map((p) => (
+                <div
+                  className={`vault-note-tabs${tabsScrollable ? " scrollable" : ""}`}
+                  role="tablist"
+                  aria-label="Open notes"
+                  ref={tabsRef}
+                >
+                  {openNotes.map((p, index) => (
                     <div
                       key={p}
                       role="tab"
                       aria-selected={p === activePath}
-                      className={`vault-note-tab${p === activePath ? " active" : ""}`}
+                      className={`vault-note-tab${p === activePath ? " active" : ""}${index === tabDragIndex ? " dragging" : ""}${index === tabDragOverIndex && tabDragIndex !== index ? " drag-over" : ""}`}
                       title={p}
+                      data-index={index}
                       onClick={() => void openNote(p)}
                       onMouseDown={(e) => {
                         if (e.button === 1) {
                           e.preventDefault();
                           closeNoteTab(p);
+                          return;
                         }
+                        onTabMouseDown(index, e);
                       }}
                     >
                       <span className="vault-note-tab-name">{stemOf(p)}</span>

@@ -321,6 +321,41 @@ describe("vault store — drag & drop moves", () => {
   });
 });
 
+describe("vault store — note modes and tab order", () => {
+  it("opens a never-toggled note in preview mode", async () => {
+    vaultReadNoteMock.mockResolvedValue("body");
+    await useVaultStore.getState().openNote("Fresh.md");
+    expect(useVaultStore.getState().mode).toBe("preview");
+  });
+
+  it("re-opens a note in the mode the user last chose for it", async () => {
+    vaultReadNoteMock.mockResolvedValue("body");
+    await useVaultStore.getState().openNote("A.md");
+    useVaultStore.getState().setMode("edit");
+    await useVaultStore.getState().openNote("B.md");
+    expect(useVaultStore.getState().mode).toBe("preview");
+    await useVaultStore.getState().openNote("A.md");
+    expect(useVaultStore.getState().mode).toBe("edit");
+  });
+
+  it("createNote still lands in the editor (recorded per-note)", async () => {
+    vaultSearchMock.mockResolvedValue([]);
+    vaultCreateNoteMock.mockResolvedValue("New.md");
+    vaultReadNoteMock.mockResolvedValue("");
+    await useVaultStore.getState().createNote("New.md");
+    expect(useVaultStore.getState().mode).toBe("edit");
+  });
+
+  it("reorderNoteTab moves a tab and clamps the index", () => {
+    useVaultStore.setState({ openNotes: ["A.md", "B.md", "C.md"] });
+    useVaultStore.getState().reorderNoteTab("C.md", 0);
+    expect(useVaultStore.getState().openNotes).toEqual(["C.md", "A.md", "B.md"]);
+    // Out-of-range target clamps instead of throwing / dropping the tab.
+    useVaultStore.getState().reorderNoteTab("A.md", 99);
+    expect(useVaultStore.getState().openNotes).toEqual(["C.md", "B.md", "A.md"]);
+  });
+});
+
 describe("vault store — back/forward navigation", () => {
   it("openNote records a vault snapshot in the shell nav timeline", async () => {
     vaultReadNoteMock.mockResolvedValue("body");

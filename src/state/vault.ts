@@ -142,6 +142,9 @@ interface VaultStore {
   content: string;
   savedContent: string;
   mode: VaultMode;
+  /** Last-chosen mode per note path — notes the user never toggled open as
+   *  "preview" (the default). In-memory only: a fresh session previews. */
+  noteModes: Record<string, VaultMode>;
   rail: VaultRail;
   /** Left/right rail widths (px) and the collapsed left rail — persisted. */
   leftRailWidth: number;
@@ -208,6 +211,8 @@ interface VaultStore {
   setSwitcherOpen: (open: boolean) => void;
   /** Close one tab; when it is the active note the neighbor activates. */
   closeNoteTab: (path: string) => void;
+  /** Move an open-note tab to a new strip index (drag-to-reorder). */
+  reorderNoteTab: (path: string, toIndex: number) => void;
   /** Toggle a note's pin (star). */
   pinNote: (path: string) => void;
   /** Open (creating from Templates/Daily.md if missing) today's daily note. */
@@ -326,7 +331,8 @@ export const useVaultStore = create<VaultStore>((set, get) => {
   assetPath: null,
   content: "",
   savedContent: "",
-  mode: "edit",
+  mode: "preview",
+  noteModes: {},
   rail: "files",
   openNotes: [],
   pinnedPaths: [],
@@ -422,6 +428,9 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     set({
       activePath: resolved,
       graphOpen: false,
+      // Notes open in preview by default; a note the user last toggled to
+      // edit keeps that choice (per-note, session-scoped).
+      mode: s0.noteModes[resolved] ?? "preview",
       // Tab strip: an opened note gets a tab (appended, no dupes). Recents
       // dedupe to the front, capped — both persisted via the layout blob.
       openNotes: s0.openNotes.includes(resolved) ? s0.openNotes : [...s0.openNotes, resolved],
@@ -516,7 +525,7 @@ export const useVaultStore = create<VaultStore>((set, get) => {
       void get().saveNow();
     }
     const neighbor = next[Math.max(0, idx - 1)] ?? null;
-    set({ openNotes: next, activePath: neighbor });
+    set({ openNotes: next, activePath: neighbor, mode: s.noteModes[neighbor] ?? "preview" });
     if (!neighbor) {
       set({ content: "", savedContent: "", meta: null });
     } else {
@@ -537,6 +546,17 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     }
     persistLayout();
     recordVaultNav(get());
+  },
+
+  reorderNoteTab: (path, toIndex) => {
+    const s = get();
+    const from = s.openNotes.indexOf(path);
+    if (from === -1) return;
+    const next = [...s.openNotes];
+    const [moved] = next.splice(from, 1);
+    next.splice(Math.max(0, Math.min(next.length, toIndex)), 0, moved);
+    set({ openNotes: next });
+    persistLayout();
   },
 
   pinNote: (path) => {
@@ -575,7 +595,13 @@ export const useVaultStore = create<VaultStore>((set, get) => {
 
   setTemplatePickerOpen: (open) => set({ templatePickerOpen: open }),
 
-  setMode: (mode) => set({ mode }),
+  setMode: (mode) =>
+    set((s) => ({
+      mode,
+      // Remember the choice for THIS note so re-opening it (tab hop, link
+      // click, back/forward) lands in the mode the user last used.
+      noteModes: s.activePath ? { ...s.noteModes, [s.activePath]: mode } : s.noteModes,
+    })),
   setRail: (rail) => {
     set({ rail });
     if (rail === "tags") void get().loadTags();
@@ -629,7 +655,9 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     await get().loadTree();
     await get().refreshStats();
     await get().openNote(withExt);
-    set({ mode: "edit" });
+    // A brand-new note goes straight into the editor (recorded per-note so
+    // leaving and returning keeps it there).
+    get().setMode("edit");
   },
 
   renameNote: async (from, to) => {
@@ -789,6 +817,7 @@ export const useVaultStore = create<VaultStore>((set, get) => {
         set({
           activePath: snap.activePath,
           loadingNote: true,
+          mode: s0.noteModes[snap.activePath] ?? "preview",
           openNotes: s0.openNotes.includes(snap.activePath!) ? s0.openNotes : [...s0.openNotes, snap.activePath!],
           recentPaths: [snap.activePath!, ...s0.recentPaths.filter((p) => p !== snap.activePath)].slice(0, 12),
         });

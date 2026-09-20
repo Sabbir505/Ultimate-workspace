@@ -5,6 +5,13 @@
 
 /* ---- note tab strip (under the note head, above the panes) ---- */
 .vault-note-tabs {
+  position: relative; /* offsetParent for the active-tab reveal math */
+  /* Zero out the strip's intrinsic width: without it the row's full content
+     width propagates up as .vault-note-split's automatic flex minimum (that
+     element deliberately has no min-width: 0), the note side inflates past
+     the visible center pane, and the strip never overflows internally —
+     the wheel had nothing to scroll (clip happened at an ancestor). */
+  contain: inline-size;
   display: flex;
   align-items: stretch;
   gap: 2px;
@@ -13,9 +20,29 @@
   flex-shrink: 0;
   min-width: 0;
   overflow-x: auto;
-  scrollbar-width: thin;
+  overflow-y: hidden;
+  /* The wheel scrolls the strip (VaultView binds a native listener); the
+     scrollbar itself stays hidden like the tool panel's chip strip. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.vault-note-tabs::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+/* Fade + trailing pad only when the strip actually overflows — the pad keeps
+   the fade over empty space instead of dimming the last tab's close button. */
+.vault-note-tabs.scrollable {
+  padding-right: 16px;
+  mask-image: linear-gradient(to right, black calc(100% - 16px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 16px), transparent 100%);
 }
 .vault-note-tab {
+  /* Never shrink: a crowded strip OVERFLOWS (and the wheel scrolls it) —
+     shrinkable tabs just squeeze, the strip never overflows, and scrolling
+     can never engage. Same contract as the tool panel's chips. */
+  flex: none;
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -26,7 +53,7 @@
   color: var(--text-dim);
   font-size: 11.5px;
   font-family: inherit;
-  cursor: pointer;
+  cursor: grab;
   min-width: 0;
   max-width: 170px;
   white-space: nowrap;
@@ -40,6 +67,13 @@
   background: var(--surface-3);
   color: var(--text);
   font-weight: 600;
+}
+.vault-note-tab.dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+.vault-note-tab.drag-over {
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 .vault-note-tab-name {
   overflow: hidden;

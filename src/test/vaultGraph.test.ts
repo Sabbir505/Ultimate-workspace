@@ -82,4 +82,20 @@ describe("simulateStep", () => {
     }
     expect(energy).toBeLessThan(10);
   });
+
+  it("holds the fixedId node immobile (dropped nodes keep their spot)", () => {
+    // A dragged node released far from spring equilibrium must stay put
+    // during the settle — without the pin, a low-degree node is pulled
+    // straight back along its single spring ("subnodes won't drag").
+    const a: LayoutNode = { id: "a", label: "a", unresolved: false, degree: 1, x: 100, y: 300, vx: 0, vy: 0 };
+    const b: LayoutNode = { id: "b", label: "b", unresolved: false, degree: 1, x: 700, y: 300, vx: 0, vy: 0 };
+    const edges = [{ src: "a", dst: "b" }];
+    for (let i = 0; i < 30; i += 1) {
+      simulateStep([a, b], edges, { width: W, height: H, fixedId: "a" });
+    }
+    expect(a.x).toBe(100);
+    expect(a.y).toBe(300);
+    // The unpinned partner still feels the spring.
+    expect(b.x).toBeLessThan(700);
+  });
 });

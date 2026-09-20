@@ -33,6 +33,10 @@ export interface LayoutOptions {
   repulsion?: number;
   spring?: number;
   center?: number;
+  /** Node id held immobile (velocity zeroed, position untouched) — the
+   *  just-dragged node during a post-drag settle, so it stays where it was
+   *  dropped instead of being pulled back by its springs. */
+  fixedId?: string;
   /** Soft-clamp box (world coordinates). Default: the viewport inset by 16px
    *  — the graph component passes a larger pannable world. */
   minX?: number;
@@ -54,13 +58,14 @@ export function simulateStep(
     repulsion?: number;
     spring?: number;
     center?: number;
+    fixedId?: string;
     minX?: number;
     minY?: number;
     maxX?: number;
     maxY?: number;
   },
 ): LayoutNode[] {
-  const { width, height, repulsion, spring, center } = { ...DEFAULT_FORCES, ...opts };
+  const { width, height, repulsion, spring, center, fixedId } = { ...DEFAULT_FORCES, ...opts };
   const cx = width / 2;
   const cy = height / 2;
   const minX = opts.minX ?? 16;
@@ -112,6 +117,13 @@ export function simulateStep(
   }
   // Centering + integrate with velocity damping.
   for (const n of nodes) {
+    if (n.id === fixedId) {
+      // Pinned: the dropped node holds its position while the rest of the
+      // layout resettles around it.
+      n.vx = 0;
+      n.vy = 0;
+      continue;
+    }
     n.vx += (cx - n.x) * center;
     n.vy += (cy - n.y) * center;
     n.vx *= 0.85;
@@ -221,6 +233,10 @@ export function VaultGraph({
   const layoutRef = useRef<LayoutNode[]>([]);
   const viewRef = useRef({ x: 0, y: 0, k: 1 });
   const nodeDragRef = useRef<{ id: string; offsetX: number; offsetY: number; moved: boolean } | null>(null);
+  // Node pinned for the CURRENT settle — the one just dropped, so it stays
+  // where the user left it (a low-degree node otherwise gets dragged straight
+  // back to spring equilibrium: the "subnodes won't move" report).
+  const pinnedNodeRef = useRef<string | null>(null);
   const panRef = useRef<{ sx: number; sy: number; x: number; y: number } | null>(null);
   const hoverRef = useRef<string | null>(null);
   const sizeRef = useRef({ width: 800, height: 600 });
@@ -378,6 +394,7 @@ export function VaultGraph({
           minY: 0,
           maxX: worldW,
           maxY: worldH,
+          fixedId: pinnedNodeRef.current ?? undefined,
         });
       }
       render();
@@ -385,6 +402,7 @@ export function VaultGraph({
       for (const n of layoutRef.current) motion += Math.abs(n.vx) + Math.abs(n.vy);
       if (motion < 1) {
         simulating = false; // settled — the layout freezes again
+        pinnedNodeRef.current = null; // the dropped node keeps its spot
         // Settling moved nodes under a possibly-stationary cursor:
         // re-evaluate hover at the last known position.
         const lc = lastCursorRef.current;
@@ -661,8 +679,12 @@ export function VaultGraph({
         // this handler BEFORE the click-to-open logic ever ran.
       }
       // Only a real node DRAG perturbs the layout — resettle the springs
-      // around its new position.
-      if (drag?.moved) settleRef.current();
+      // around its new position, with the dropped node pinned so it stays
+      // exactly where released while everything else rebalances.
+      if (drag?.moved) {
+        pinnedNodeRef.current = drag.id;
+        settleRef.current();
+      }
       // A click (no drag) opens the node — notes open in the editor, assets
       // in the asset pane (the parent routes by extension).
       if (drag && !drag.moved) {

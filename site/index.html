@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#10191e" />
-  <meta name="description" content="Your AI coding agents, working together. Relay is a local-first desktop workspace for parallel agents, shared context, built-in chat, and git." />
+  <meta name="theme-color" content="#0f1418" />
+  <meta name="description" content="Relay is a local-first desktop workspace for AI coding agents. Run your agent CLIs side by side, chat with cloud or local models, and keep code, notes, browser, terminal, and git in one window." />
   <title>Relay — One workspace. Many minds.</title>
   <link rel="icon" href="./logo.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;650;700;750;800&family=DM+Sans:wght@400;500;550;600;650;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./src/style.css" />
 </head>
 <body>
@@ -23,61 +23,233 @@
     <symbol id="clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
     <symbol id="globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></symbol>
     <symbol id="mesh" viewBox="0 0 24 24"><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M12 3v6m0 6v6M3 12h6m6 0h6M5 5l4 4m6 6 4 4M19 5l-4 4m-6 6-4 4"/></symbol>
-    <symbol id="download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
     <symbol id="windows" viewBox="0 0 24 24"><path d="M3 4h8v7H3zm10 0h8v7h-8zM3 13h8v7H3zm10 0h8v7h-8z" fill="currentColor" stroke="none"/></symbol>
     <symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="book" viewBox="0 0 24 24"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></symbol>
+    <symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="mic" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></symbol>
+    <symbol id="image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.6-3.6a2 2 0 0 0-2.8 0L6 20"/></symbol>
+    <symbol id="doc" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/></symbol>
+    <symbol id="diagram" viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="5" rx="1"/><rect x="2" y="17" width="8" height="5" rx="1"/><rect x="14" y="17" width="8" height="5" rx="1"/><path d="M12 7v4M6 17v-3h12v3"/></symbol>
+    <symbol id="coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15 9h-4a2 2 0 1 0 0 4h2a2 2 0 1 1 0 4H9"/><path d="M12 7v10"/></symbol>
+    <symbol id="bolt" viewBox="0 0 24 24"><path d="M13 2 4.5 13.5H11l-1 8.5L19.5 10H13z"/></symbol>
+    <symbol id="plug" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2M15 8V2"/><path d="M18 8v3a6 6 0 0 1-12 0V8z"/></symbol>
+    <symbol id="layers" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></symbol>
+    <symbol id="palette" viewBox="0 0 24 24"><circle cx="13.5" cy="6.5" r="1"/><circle cx="17.5" cy="10.5" r="1"/><circle cx="8.5" cy="7.5" r="1"/><circle cx="6.5" cy="12.5" r="1"/><path d="M12 2a10 10 0 0 0 0 20 2.5 2.5 0 0 0 2.5-2.5c0-.6-.2-1.1-.6-1.5-.4-.4-.6-.9-.6-1.5A2.5 2.5 0 0 1 15.8 14H18a4 4 0 0 0 4-4c0-4.4-4.5-8-10-8z"/></symbol>
+    <symbol id="command" viewBox="0 0 24 24"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></symbol>
+    <symbol id="shield" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></symbol>
+    <symbol id="grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+    <symbol id="cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+    <symbol id="lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
   </defs></svg>
   <a class="skip-link" href="#main">Skip to content</a>
-  <div class="opening">
-    <header class="header wrap">
+  <header class="header" id="site-header">
+    <div class="header-inner wrap">
       <a class="brand" href="#" aria-label="Relay home"><img src="./logo.png" alt="" width="35" height="35"/>relay<span class="brand-period">.</span></a>
-      <nav aria-label="Main navigation"><a href="#workspace">Workspace</a><a href="#features">Why Relay</a><a href="#questions">FAQ</a></nav>
+      <nav aria-label="Main navigation"><a href="#workspace">Workspace</a><a href="#capabilities">Capabilities</a><a href="#models">Models</a><a href="#mobile">Mobile</a><a href="#questions">FAQ</a></nav>
       <a class="header-cta" href="https://github.com/Sabbir505/Ultimate-workspace/releases/latest">Download Relay<svg class="icon"><use href="#up-right"/></svg></a>
-    </header>
+    </div>
+  </header>
+  <div class="opening">
     <main id="main">
       <section class="hero wrap" aria-labelledby="hero-title">
         <div class="hero-topline"><span class="eyebrow"><i class="signal-dot"></i> THE LOCAL-FIRST AGENT WORKSPACE</span><a href="https://github.com/Sabbir505/Ultimate-workspace/releases">Built for Windows<svg class="icon"><use href="#up-right"/></svg></a></div>
-        <div class="hero-layout"><h1 id="hero-title">One workspace.<br /><span>Many minds.</span></h1><div class="hero-aside"><p>Give your AI agents <br />a place to work <em>together.</em></p><div class="hero-description">Code in one pane. Review in another. Keep the context connected—and the whole project in view.</div><a class="button button-light" href="https://github.com/Sabbir505/Ultimate-workspace/releases/latest"><svg class="icon"><use href="#windows"/></svg>Get Relay for Windows<svg class="icon"><use href="#arrow"/></svg></a><span class="hero-note">Your agents. Your models. Your machine.</span></div></div>
-        <div class="hero-bottomline"><a href="#workspace">See how it comes together <span>↓</span></a><span>A desktop home for your entire workflow.</span></div>
-      </section>
-      <section class="workspace-section wrap" id="workspace" aria-labelledby="workspace-title">
-        <div class="product-caption"><h2 id="workspace-title">One project. Three perspectives.</h2><span>ILLUSTRATIVE WORKSPACE · NOT A LIVE SESSION</span></div>
-        <div class="workspace">
-          <div class="window-bar"><div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div><span><svg class="icon"><use href="#panes"/></svg> Relay <span class="path-separator">/</span> orbit</span><span class="window-shortcut">Local workspace</span></div>
-          <div class="app-layout">
-            <aside class="app-sidebar" aria-label="Illustrated project sidebar"><div class="sidebar-project"><span class="project-mark">o.</span><span>orbit<small>Desktop workspace</small></span><span>⌄</span></div><div class="sidebar-eyebrow">SESSIONS <span>+</span></div><div class="sidebar-session selected"><i></i>Build command menu</div><div class="sidebar-session"><i></i>Review accessibility</div><div class="sidebar-session"><i></i>Explore the codebase</div><div class="sidebar-divider"></div><div class="sidebar-tool"><svg class="icon"><use href="#branch"/></svg>Git changes <b>3</b></div><div class="sidebar-tool"><svg class="icon"><use href="#globe"/></svg>Browser</div><div class="sidebar-tool"><svg class="icon"><use href="#clock"/></svg>Automations</div><div class="sidebar-tool"><svg class="icon"><use href="#mesh"/></svg>Memory</div><div class="sidebar-foot"><i class="signal-dot"></i> On your machine<div><svg class="icon"><use href="#branch"/></svg>feature / command-menu</div></div></aside>
-            <div class="app-main"><div class="app-tabs" role="tablist" aria-label="Illustrative workspace views"><button role="tab" aria-selected="true" aria-controls="demo-panel" id="tab-build" data-view="build"><svg class="icon"><use href="#panes"/></svg>Build together</button><button role="tab" aria-selected="false" aria-controls="demo-panel" id="tab-review" data-view="review" tabindex="-1"><svg class="icon"><use href="#branch"/></svg>Review changes</button><button role="tab" aria-selected="false" aria-controls="demo-panel" id="tab-models" data-view="models" tabindex="-1"><svg class="icon"><use href="#terminal"/></svg>Run locally</button></div>
-            <div id="demo-panel" role="tabpanel" aria-labelledby="tab-build" tabindex="0">
-              <article class="agent-pane implementation"><header class="pane-header"><span><b class="agent-monogram warm">✳</b>Claude Code</span><span class="pane-tag">IMPLEMENT</span></header><div class="pane-body"><div class="task-prompt">Add a command menu.<br />Make it feel native. Keep it accessible.</div><div class="agent-line"><span class="agent-monogram warm">✳</span><p>I’ll build the menu and wire up keyboard navigation. The review session can check focus handling in parallel.</p></div><div class="file-operation"><svg class="icon"><use href="#check"/></svg><span>Read <b>src/components/</b></span></div><div class="file-operation"><svg class="icon"><use href="#check"/></svg><span>Create <b>CommandMenu.tsx</b></span></div><div class="code-preview"><div><span>CommandMenu.tsx</span><span>+86</span></div><pre><span class="code-violet">export function</span> <span class="code-blue">CommandMenu</span>() {
-  <span class="code-violet">const</span> [query, setQuery] =
-    <span class="code-blue">useState</span>(<span class="code-green">''</span>);
-
-  <span class="code-violet">return</span> (
-    &lt;<span class="code-green">Dialog</span> label=<span class="code-green">"Commands"</span>&gt;
-      &lt;<span class="code-green">CommandInput</span> /&gt;
-      &lt;<span class="code-green">CommandResults</span> /&gt;
-    &lt;/<span class="code-green">Dialog</span>&gt;
-  );
-}</pre></div><div class="agent-progress"><i></i> Refining keyboard navigation<span>esc to stop</span></div><div class="compose-illustration">Send a message…<span>↑</span></div></div></article>
-              <article class="agent-pane review-pane"><header class="pane-header"><span><b class="agent-monogram blue">&gt;_</b>OpenCode</span><span class="pane-tag">REVIEW</span></header><div class="pane-body"><div class="review-request"><span class="mini-label">SHARED FROM BUILD SESSION</span><p>Check the command menu for keyboard and focus behavior.</p></div><div class="agent-line"><span class="agent-monogram blue">&gt;_</span><p>I’ve read the changes. The filtering looks good. Checking the interaction details next.</p></div><div class="review-checks"><div><svg class="icon"><use href="#check"/></svg>Escape closes the menu</div><div><svg class="icon"><use href="#check"/></svg>Arrow keys move selection</div><div><svg class="icon"><use href="#check"/></svg>Focus returns to the trigger</div></div><div class="review-note"><span class="mini-label">REVIEW NOTE</span><p>Give the results list an accessible name so screen readers can announce it.</p><code>aria-label="Commands"</code></div><div class="shared-message"><svg class="icon"><use href="#mesh"/></svg><span>Feedback shared with build session</span></div></div></article>
-              <aside class="context-pane"><header class="pane-header"><span><svg class="icon"><use href="#mesh"/></svg>Session Mesh</span></header><div class="pane-body"><span class="mini-label">PROJECT CONTEXT</span><h3>In the loop.<br />Not in the way.</h3><p>Sessions can exchange context without you carrying it between them.</p><div class="context-event"><i class="event-dot"></i><div>Build session<span>Shared implementation context</span></div></div><div class="context-event"><i class="event-dot"></i><div>Review session<span>Sent accessibility feedback</span></div></div><div class="context-event"><i class="event-dot"></i><div>Build session<span>Applied review suggestions</span></div></div><div class="context-note"><svg class="icon"><use href="#check"/></svg>Same project.<br />Shared understanding.</div></div></aside>
-            </div><div class="app-status"><span><i class="signal-dot"></i> Workspace connected</span><span>2 agent sessions <i>·</i> 3 files changed</span></div></div>
+        <div class="hero-layout">
+          <h1 id="hero-title">One workspace.<br /><span>Many minds.</span></h1>
+          <div class="hero-aside">
+            <p>Give your agents a place to work <em>together.</em></p>
+            <div class="hero-description">Run the agent CLIs you already use side by side, chat with any model, and keep the code, notes, browser, and git in one window.</div>
+            <a class="button button-light" href="https://github.com/Sabbir505/Ultimate-workspace/releases/latest"><svg class="icon"><use href="#windows"/></svg>Get Relay for Windows<svg class="icon"><use href="#arrow"/></svg></a>
+            <span class="hero-note">Your agents. Your models. Your machine.</span>
           </div>
         </div>
-        <div class="workspace-under"><span>Build. Review. Keep moving.</span><span>Explore the workspace tabs above <svg class="icon"><use href="#panes"/></svg></span></div>
+        <div class="hero-bottomline"><a href="#workspace">See how it comes together <span>↓</span></a><span>A desktop home for your entire workflow.</span></div>
       </section>
-      <section class="agents wrap" aria-labelledby="agents-heading"><h2 id="agents-heading">Bring the agents <br />you already work with.</h2><div class="agent-names"><span><b class="claude-symbol">✳</b>Claude Code</span><span><b class="text-mark">K</b>Kimi Code</span><span><b class="text-mark">&gt;_</b>OpenCode</span><span><b class="pi-symbol">π</b>Pi</span><span><b class="text-mark">O</b>Omp</span><span><b class="text-mark">/</b>CommandCode</span></div></section>
+
+      <section class="workspace-section wrap" id="workspace" aria-labelledby="workspace-title">
+        <div class="product-caption"><h2 id="workspace-title">One window. Your whole project.</h2><span>THE REAL APP · WINDOWS</span></div>
+        <figure class="app-shot">
+          <img src="./app-desktop.webp" alt="A Relay window: the sidebar lists artifacts, automations, the vault, and chat history beside a new chat with starter prompts and the message composer." width="1800" height="975" />
+          <figcaption>Relay running locally — artifacts, automations, the vault, and every chat in the sidebar.</figcaption>
+        </figure>
+        <div class="workspace-under"><span>Build. Review. Remember. Keep moving.</span><span>Everything in one window <svg class="icon"><use href="#panes"/></svg></span></div>
+      </section>
+
+      <section class="agents wrap" aria-labelledby="agents-heading">
+        <h2 id="agents-heading">Bring the agents <br />you already work with.</h2>
+        <div class="agent-names"><span><b class="claude-symbol">✳</b>Claude Code</span><span><b class="text-mark">K</b>Kimi Code</span><span><b class="text-mark">&gt;_</b>OpenCode</span><span><b class="pi-symbol">π</b>Pi</span><span><b class="text-mark">O</b>Omp</span><span><b class="text-mark">/</b>CommandCode</span></div>
+      </section>
     </main>
   </div>
-  <section class="manifesto wrap" id="features" aria-labelledby="manifesto-title"><div class="section-label"><span class="label-line"></span> BUILT FOR PARALLEL THINKING</div><div><h2 id="manifesto-title">The work is connected.<br /><span>Your tools should be, too.</span></h2><p>Your terminal here. Your chat there. Your context somewhere in between. Relay brings the moving parts into a single workspace—without making you give up the tools you chose.</p></div></section>
-  <section class="feature-stories wrap" aria-label="How Relay fits your workflow">
-    <article class="story"><div class="story-copy"><span class="story-category"><svg class="icon"><use href="#panes"/></svg>A WORKSPACE, NOT A WAITING ROOM</span><h2>Don’t wait for one agent <br />to do <em>everything.</em></h2><p>Give implementation, exploration, and review their own space. Run up to six agent panes, split them your way, and keep an eye on the whole project.</p><div class="story-details"><span>Split & resize</span><span>Up to 6 panes</span><span>Your existing CLIs</span></div></div><div class="layout-visual" aria-label="Illustration of parallel build, explore, and review panes"><div class="layout-label"><span>YOUR PROJECT</span><svg class="icon"><use href="#panes"/></svg></div><div class="layout-grid"><div class="layout-pane"><span><i></i>Build</span><div class="line-block"><b></b><b></b><b></b><b></b></div><code>Implement the next idea<span class="cursor"></span></code></div><div class="layout-pane"><span><i></i>Explore</span><div class="file-tree">src/<br />├ components/<br />└ lib/</div></div><div class="layout-pane"><span><i></i>Review</span><div class="mini-diff">+ A second perspective.<br />− Another context switch.</div></div></div><div class="layout-footer"><svg class="icon"><use href="#branch"/></svg>feature / your-next-idea<span>All in view</span></div></div></article>
-    <article class="story story-reversed"><div class="story-copy"><span class="story-category"><svg class="icon"><use href="#mesh"/></svg>CONTEXT THAT KEEPS UP</span><h2>Different sessions. <br /><em>Not different worlds.</em></h2><p>Session Mesh lets agents share context, send messages, and start related sessions. Persistent memory carries useful information between chats, so every conversation doesn’t have to start from scratch.</p><div class="story-details"><span>Cross-session context</span><span>Persistent memory</span></div></div><div class="mesh-visual"><div class="mesh-node node-build"><span class="node-badge">✳</span><div>Implementation<small>Building the command menu</small></div><i></i></div><div class="mesh-path"><span class="mesh-packet">Implementation context</span><div class="mesh-hub"><svg class="icon"><use href="#mesh"/></svg><span>Session Mesh</span></div><span class="mesh-packet">Accessibility feedback</span></div><div class="mesh-node node-review"><span class="node-badge">&gt;_</span><div>Review<small>Checking the interaction details</small></div><i></i></div><div class="memory-strip"><svg class="icon"><use href="#check"/></svg><span>Useful context, carried forward.</span><b>MEMORY</b></div></div></article>
+
+  <section class="manifesto wrap" id="capabilities" aria-labelledby="manifesto-title" data-reveal>
+    <div class="section-label"><span class="label-line"></span> THE WHOLE WORKBENCH</div>
+    <div>
+      <h2 id="manifesto-title">The work is connected.<br /><span>Your tools should be, too.</span></h2>
+      <p>A terminal here. A chat there. Notes somewhere else. Relay gathers the moving parts of a project — agents, code, browser, git, knowledge, and scheduled work — into one local-first window, without asking you to give up the tools you chose.</p>
+    </div>
   </section>
-  <section class="toolbelt wrap" aria-label="More ways to work"><div><svg class="icon"><use href="#branch"/></svg><h3>Stay close to the code.</h3><p>Inspect diffs, manage branches, and work across git worktrees without leaving your workspace.</p></div><div><svg class="icon"><use href="#globe"/></svg><h3>See what you’re building.</h3><p>Native browser panes put your app beside your agents, with agent-driven browser control.</p></div><div><svg class="icon"><use href="#clock"/></svg><h3>Let recurring work run.</h3><p>Schedule tasks on Windows—even when Relay is closed, with background automations enabled.</p></div></section>
-  <section class="ownership" aria-labelledby="ownership-title"><div class="wrap ownership-layout"><div class="ownership-copy"><span class="section-label">LOCAL-FIRST. BY CHOICE.</span><h2 id="ownership-title">Your machine.<br />Your models.<br /><span>Your call.</span></h2><p>Relay is a desktop app. Connect a cloud provider, bring your own endpoint, or run a local model. You choose where the thinking happens.</p><a class="text-link" href="https://github.com/Sabbir505/Ultimate-workspace">Explore the source<svg class="icon"><use href="#up-right"/></svg></a></div><div class="provider-stack"><div class="provider-row"><span class="provider-number">CLOUD</span><h3>The models you know.</h3><p>Anthropic, OpenAI, OpenRouter.<br />Your account. Your provider.</p><svg class="icon"><use href="#globe"/></svg></div><div class="provider-row"><span class="provider-number">CUSTOM</span><h3>The endpoint you choose.</h3><p>Connect an OpenAI-compatible API<br />to the same built-in chat.</p><svg class="icon"><use href="#terminal"/></svg></div><div class="provider-row provider-local"><span class="provider-number">ON-DEVICE</span><h3>A model on your machine.</h3><p>Browse and run local GGUF models<br />with llama-server.</p><svg class="icon"><use href="#panes"/></svg></div><p class="privacy-note">Local-first doesn’t mean every request stays offline. Cloud providers and connected services receive the data needed for the requests you send them.</p></div></div></section>
-  <section class="faq wrap" id="questions"><div><span class="section-label">BEFORE YOU GET STARTED</span><h2>A few good <br />questions.</h2><a class="text-link" href="https://github.com/Sabbir505/Ultimate-workspace#documentation">Read the docs<svg class="icon"><use href="#up-right"/></svg></a></div><div class="faq-list"><details><summary>What exactly is Relay?<svg class="icon"><use href="#plus"/></svg></summary><p>Relay is a local-first desktop workspace for AI coding agents. It combines supported agent CLIs, built-in chat, native browser panes, git tools, persistent memory, and scheduled automations.</p></details><details><summary>Do I need to switch my coding agent?<svg class="icon"><use href="#plus"/></svg></summary><p>No. Relay supports Claude Code, Kimi Code CLI, OpenCode, Pi, Omp, and CommandCode. You can also use built-in chat with your chosen model provider.</p></details><details><summary>Can I use local models?<svg class="icon"><use href="#plus"/></svg></summary><p>Yes. Browse, download, and run GGUF models from Hugging Face through llama-server. Performance depends on your hardware and the model you choose.</p></details><details><summary>Does everything stay on my machine?<svg class="icon"><use href="#plus"/></svg></summary><p>Your workspace is local. Cloud model providers and connected services still receive data when you use them. Local GGUF models offer an on-device inference option.</p></details><details><summary>How do I get started?<svg class="icon"><use href="#plus"/></svg></summary><p>Get the Windows installer from <a href="https://github.com/Sabbir505/Ultimate-workspace/releases/latest">GitHub Releases</a>, then connect a supported agent CLI or configure built-in chat. For development setup, see the <a href="https://github.com/Sabbir505/Ultimate-workspace#quick-start">quick start</a>.</p></details></div></section>
-  <section class="closing"><div class="wrap"><div class="closing-top"><span class="section-label"><i class="signal-dot"></i> READY WHEN YOU ARE</span><span>Built for Windows · Local-first</span></div><div class="closing-main"><h2>Make room<br />for your <em>next idea.</em></h2><div><a class="button button-light" href="https://github.com/Sabbir505/Ultimate-workspace/releases/latest"><svg class="icon"><use href="#windows"/></svg>Get Relay for Windows<svg class="icon"><use href="#arrow"/></svg></a><p>Bring your agents. Get to work.</p></div></div><footer class="footer"><a class="brand" href="#" aria-label="Relay home"><img src="./logo.png" alt="" width="32" height="32"/>relay<span class="brand-period">.</span></a><span>One workspace. Many minds.</span><nav aria-label="Footer navigation"><a href="https://github.com/Sabbir505/Ultimate-workspace">GitHub<svg class="icon"><use href="#up-right"/></svg></a><a href="https://github.com/Sabbir505/Ultimate-workspace/releases">Releases<svg class="icon"><use href="#up-right"/></svg></a><a href="https://github.com/Sabbir505/Ultimate-workspace#documentation">Documentation<svg class="icon"><use href="#up-right"/></svg></a></nav></footer></div></section>
+
+  <section class="feature-stories wrap" aria-label="How Relay fits your workflow">
+    <article class="story" data-reveal>
+      <div class="story-copy">
+        <span class="story-category"><svg class="icon"><use href="#panes"/></svg>A WORKSPACE, NOT A WAITING ROOM</span>
+        <h2>Don't wait for one agent <br />to do <em>everything.</em></h2>
+        <p>Give implementation, exploration, and review their own space. Run up to six agent panes, split and resize them your way, and keep an eye on the whole project while they work in parallel.</p>
+        <div class="story-details"><span>Split &amp; resize</span><span>Up to 6 panes</span><span>Your existing CLIs</span><span>Built-in chat</span></div>
+      </div>
+      <div class="layout-visual" aria-label="Diagram of parallel build, explore, and review panes">
+        <div class="layout-label"><span>YOUR PROJECT</span><svg class="icon"><use href="#panes"/></svg></div>
+        <div class="layout-grid">
+          <div class="layout-pane"><span><i></i>Build</span><div class="line-block"><b></b><b></b><b></b><b></b></div><code>Implement the next idea<span class="cursor"></span></code></div>
+          <div class="layout-pane"><span><i></i>Explore</span><div class="file-tree">src/<br />├ components/<br />└ lib/</div></div>
+          <div class="layout-pane"><span><i></i>Review</span><div class="mini-diff">+ A second perspective.<br />− Another context switch.</div></div>
+        </div>
+        <div class="layout-footer"><svg class="icon"><use href="#branch"/></svg>feature / your-next-idea<span>All in view</span></div>
+      </div>
+    </article>
+
+    <article class="story story-reversed" data-reveal>
+      <div class="story-copy">
+        <span class="story-category"><svg class="icon"><use href="#mesh"/></svg>CONTEXT THAT KEEPS UP</span>
+        <h2>Different sessions. <br /><em>Not different worlds.</em></h2>
+        <p>Session Mesh lets agents share context, message each other, and start related sessions. Persistent memory carries what matters between chats, so no conversation has to start from scratch.</p>
+        <div class="story-details"><span>Cross-session context</span><span>Persistent memory</span><span>Ask a peer session</span></div>
+      </div>
+      <div class="mesh-visual" aria-label="Diagram of two sessions sharing context through Session Mesh, with memory below">
+        <div class="mesh-node node-build"><span class="node-badge">✳</span><div>Implementation<small>Building the command menu</small></div><i></i></div>
+        <div class="mesh-path"><span class="mesh-packet">Implementation context</span><div class="mesh-hub"><svg class="icon"><use href="#mesh"/></svg><span>Session Mesh</span></div><span class="mesh-packet">Accessibility feedback</span></div>
+        <div class="mesh-node node-review"><span class="node-badge">&gt;_</span><div>Review<small>Checking the interaction details</small></div><i></i></div>
+        <div class="memory-strip"><svg class="icon"><use href="#check"/></svg><span>Useful context, carried forward.</span><b>MEMORY</b></div>
+      </div>
+    </article>
+
+    <article class="story" id="knowledge" data-reveal>
+      <div class="story-copy">
+        <span class="story-category"><svg class="icon"><use href="#book"/></svg>KNOWLEDGE YOU OWN</span>
+        <h2>A knowledge base <br />your agent can <em>use.</em></h2>
+        <p>Vault is a folder of plain markdown on your disk — notes, docs, and wikilinks. Search it locally with tags and operators, and let the agent read, write, move, and file what it learns straight into it. Point Relay at any folder and hybrid search pulls the right passages into the turn.</p>
+        <div class="story-details"><span>Markdown vault</span><span>Wikilinks &amp; graph</span><span>Local folder search</span></div>
+      </div>
+      <div class="vault-visual" aria-label="Diagram of a markdown vault with a search, matching notes, and wikilinks">
+        <div class="vault-bar"><svg class="icon"><use href="#book"/></svg> Vault <span>~/notes</span></div>
+        <div class="vault-search"><svg class="icon"><use href="#search"/></svg><span>memory consolidation → 2 notes</span></div>
+        <div class="vault-hit"><b>Memory design.md</b><small>…the judge decides <em>ADD / UPDATE / NOOP</em>…</small></div>
+        <div class="vault-hit"><b>Session mesh.md</b><small>…agents can message <em>[[peer sessions]]</em>…</small></div>
+        <div class="vault-note-card">
+          <span class="mini-label">MEMORY DESIGN.MD</span>
+          <p>The agent files what it learns back into <em>[[Session Mesh]]</em> and <em>[[Compaction]]</em>.</p>
+          <code>#memory #architecture</code>
+        </div>
+        <div class="vault-foot"><svg class="icon"><use href="#check"/></svg> Plain markdown on your disk<span>WIKILINKS · FULL-TEXT SEARCH</span></div>
+      </div>
+    </article>
+  </section>
+
+  <section class="makes wrap" aria-labelledby="makes-title" data-reveal>
+    <div class="makes-copy">
+      <div class="section-label"><span class="label-line"></span> NOT JUST ANSWERS</div>
+      <h2 id="makes-title">Agents that leave <br />something <em>behind.</em></h2>
+      <p>Relay's built-in tooling turns a conversation into files you can open, present, and keep — generated on your machine, with the design handled for you.</p>
+    </div>
+    <div class="makes-grid">
+      <article class="make-card"><svg class="icon"><use href="#doc"/></svg><h3>Documents</h3><p>Generate DOCX, PPTX, XLSX, and PDF from a plan — with a design layer and page-level checks.</p></article>
+      <article class="make-card"><svg class="icon"><use href="#diagram"/></svg><h3>Diagrams</h3><p>Author Mermaid diagrams that restyle with your theme and export as transparent PNG.</p></article>
+      <article class="make-card"><svg class="icon"><use href="#image"/></svg><h3>Images</h3><p>Paint PNGs with a local diffusion model. No cloud, no key, nothing leaving the machine.</p></article>
+      <article class="make-card"><svg class="icon"><use href="#mic"/></svg><h3>Voice</h3><p>Dictate prompts and have answers, docs, and PDFs read aloud — an in-process voice with a transport bar.</p></article>
+    </div>
+  </section>
+
+  <section class="toolkit wrap" aria-labelledby="toolkit-title" data-reveal>
+    <div class="section-label"><span class="label-line"></span> EVERYTHING ELSE ON THE BENCH</div>
+    <h2 id="toolkit-title">The rest of the workbench.</h2>
+    <div class="toolkit-grid">
+      <article class="tool-card"><svg class="icon"><use href="#terminal"/></svg><h3>Terminal panes</h3><p>Real PTY shells beside your agents, with background runs and per-task cleanup.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#globe"/></svg><h3>Native browser</h3><p>WebView panes your agents can drive — read, click, type, and screenshot the page.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#branch"/></svg><h3>Git &amp; pull requests</h3><p>Diffs, branches, worktrees, commit graph, and GitHub PRs without leaving the window.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#clock"/></svg><h3>Automations</h3><p>Cron plus webhook, file-change, git-HEAD, and new-email triggers. Runs unattended — even while Relay is closed.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#coin"/></svg><h3>Cost &amp; budgets</h3><p>Live token and cost tracking, auto-refreshed pricing, and what prompt caching saved you.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#plug"/></svg><h3>Connectors</h3><p>OAuth to Notion, GitHub, Google Drive, Gmail, Calendar, YouTube, Canva, and more.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#layers"/></svg><h3>MCP servers</h3><p>Attach gallery or custom MCP servers on demand, and reach them from any engine.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#bolt"/></svg><h3>Hooks</h3><p>Run your own scripts before and after every tool call — deny, ask, or rewrite the arguments.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#shield"/></svg><h3>Permission modes</h3><p>Plan, read-only, manual, auto-edit, or full-auto — one switch, with always-allow rules.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#grid"/></svg><h3>Skills &amp; artifacts</h3><p>Reusable skills, a 30-day artifact library, and proposals that improve from their own runs.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#command"/></svg><h3>Command palette</h3><p>Fuzzy search across sessions, chats, projects, and actions — plus saveable pane layouts.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#palette"/></svg><h3>Themes &amp; wallpaper</h3><p>Light, dark, or seven curated presets, with wallpaper, sidebar art, and your own fonts.</p></article>
+    </div>
+  </section>
+
+  <section class="ownership" id="models" aria-labelledby="ownership-title" data-reveal>
+    <div class="wrap ownership-layout">
+      <div class="ownership-copy">
+        <span class="section-label">LOCAL-FIRST. BY CHOICE.</span>
+        <h2 id="ownership-title">Your machine.<br />Your models.<br /><span>Your call.</span></h2>
+        <p>Connect a cloud provider, bring your own OpenAI-compatible endpoint, or run a GGUF model locally with llama-server. You choose where the thinking happens — per chat.</p>
+        <a class="text-link" href="https://github.com/Sabbir505/Ultimate-workspace">Explore the source<svg class="icon"><use href="#up-right"/></svg></a>
+      </div>
+      <div class="provider-stack">
+        <div class="provider-row"><span class="provider-number">CLOUD</span><h3>The models you know.</h3><p>Anthropic, OpenAI, OpenRouter.<br />Your account, your provider.</p><svg class="icon"><use href="#globe"/></svg></div>
+        <div class="provider-row"><span class="provider-number">CUSTOM</span><h3>The endpoint you choose.</h3><p>Connect an OpenAI-compatible API<br />to the same built-in chat.</p><svg class="icon"><use href="#terminal"/></svg></div>
+        <div class="provider-row provider-local"><span class="provider-number">ON-DEVICE</span><h3>A model on your machine.</h3><p>Browse and run local GGUF models<br />with llama-server — plus local images and voice.</p><svg class="icon"><use href="#cpu"/></svg></div>
+        <div class="provider-row provider-local"><span class="provider-number">KEYS</span><h3>Kept in your keychain.</h3><p>Provider keys stay in the OS keychain<br />and never reach your phone.</p><svg class="icon"><use href="#lock"/></svg></div>
+        <p class="privacy-note">Local-first doesn't mean every request stays offline. Cloud providers and connected services receive the data needed for the requests you send them.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="faq wrap" id="questions" aria-labelledby="faq-title" data-reveal>
+    <div>
+      <span class="section-label">BEFORE YOU GET STARTED</span>
+      <h2 id="faq-title">A few good <br />questions.</h2>
+      <a class="text-link" href="https://github.com/Sabbir505/Ultimate-workspace#documentation">Read the docs<svg class="icon"><use href="#up-right"/></svg></a>
+    </div>
+    <div class="faq-list">
+      <details><summary>What exactly is Relay?<svg class="icon"><use href="#plus"/></svg></summary><p>Relay is a local-first desktop workspace for AI coding agents. It hosts the agent CLIs you already use — Claude Code, Kimi Code, OpenCode, Pi, Omp, and CommandCode — alongside a built-in chat, plus a terminal, native browser, git tools, a markdown vault, persistent memory, and scheduled automations.</p></details>
+      <details><summary>Do I need to switch my coding agent?<svg class="icon"><use href="#plus"/></svg></summary><p>No. Bring the CLIs you already run, or use built-in chat with your own model provider. Sessions keep their history, and you can move a conversation between engines mid-thread.</p></details>
+      <details><summary>Can I use local models?<svg class="icon"><use href="#plus"/></svg></summary><p>Yes. Browse and download GGUF models from Hugging Face and run them on your machine with llama-server. Local image generation and on-device voice are built in too. Performance depends on your hardware and the model you choose.</p></details>
+      <details><summary>Where does my data live?<svg class="icon"><use href="#plus"/></svg></summary><p>Your workspace, chats, notes, and memory live on your machine, in a local database and folders you choose. The file tools stay inside the folders you grant. Cloud providers and connected services still receive whatever you send them.</p></details>
+      <details><summary>Does Relay run on my operating system?<svg class="icon"><use href="#plus"/></svg></summary><p>Relay ships for Windows today — grab the installer from <a href="https://github.com/Sabbir505/Ultimate-workspace/releases/latest">GitHub Releases</a>. The stack is cross-platform, but Windows is the supported target for now.</p></details>
+      <details><summary>Is there a mobile app?<svg class="icon"><use href="#plus"/></svg></summary><p>Yes. Pair the companion app over a QR code or Tailscale to run chats, answer approvals, and get notifications from your phone. The connection is end-to-end encrypted and your API keys never leave the desktop.</p></details>
+      <details><summary>How do I get started?<svg class="icon"><use href="#plus"/></svg></summary><p>Get the Windows installer from <a href="https://github.com/Sabbir505/Ultimate-workspace/releases/latest">GitHub Releases</a>, then connect a supported agent CLI or configure built-in chat. For development setup, see the <a href="https://github.com/Sabbir505/Ultimate-workspace#quick-start">quick start</a>.</p></details>
+    </div>
+  </section>
+
+  <section class="mobile-band" id="mobile" aria-labelledby="mobile-title" data-reveal>
+    <div class="wrap mobile-layout">
+      <div class="mobile-copy">
+        <span class="section-label"><span class="label-line"></span> TAKE IT WITH YOU</span>
+        <h2 id="mobile-title">Your workspace, <br />in your <em>pocket.</em></h2>
+        <p>Pair once by QR code, then run chats, answer approvals, and get notifications from your phone. The models, the keys, and the files stay on your desktop.</p>
+        <div class="story-details"><span>QR pairing</span><span>End-to-end encrypted</span><span>Keys stay on the desktop</span></div>
+      </div>
+      <figure class="phone-visual">
+        <div class="phone">
+          <div class="phone-screen">
+            <img src="./app-mobile.webp" alt="The Relay mobile app on a phone: an offline badge above the heading “What are we building?”, a “Pair with your desktop” panel explaining the QR pairing step, a Scan QR button, and Home and Settings tabs." width="1179" height="2556" loading="lazy" />
+          </div>
+        </div>
+        <figcaption>Relay Mobile — pair once by QR, then your chats follow you.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="closing">
+    <div class="wrap">
+      <div class="closing-top"><span class="section-label"><i class="signal-dot"></i> READY WHEN YOU ARE</span><span>Built for Windows · Local-first</span></div>
+      <div class="closing-main">
+        <h2>Make room<br />for your <em>next idea.</em></h2>
+        <div>
+          <a class="button button-light" href="https://github.com/Sabbir505/Ultimate-workspace/releases/latest"><svg class="icon"><use href="#windows"/></svg>Get Relay for Windows<svg class="icon"><use href="#arrow"/></svg></a>
+          <p>Bring your agents. Get to work.</p>
+        </div>
+      </div>
+      <footer class="footer">
+        <a class="brand" href="#" aria-label="Relay home"><img src="./logo.png" alt="" width="32" height="32" />relay<span class="brand-period">.</span></a>
+        <span>One workspace. Many minds.</span>
+        <nav aria-label="Footer navigation"><a href="https://github.com/Sabbir505/Ultimate-workspace">GitHub<svg class="icon"><use href="#up-right"/></svg></a><a href="https://github.com/Sabbir505/Ultimate-workspace/releases">Releases<svg class="icon"><use href="#up-right"/></svg></a><a href="https://github.com/Sabbir505/Ultimate-workspace#documentation">Documentation<svg class="icon"><use href="#up-right"/></svg></a></nav>
+      </footer>
+    </div>
+  </section>
   <script type="module" src="./src/main.js"></script>
 </body>
 </html>

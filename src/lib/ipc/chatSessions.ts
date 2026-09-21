@@ -174,6 +174,11 @@ export interface ChatDonePayload {
   tokensPerSecond: number | null;
   /** Prompt/KV-cache hit rate (0.0–1.0), computed from usage cache fields. */
   cacheHitRate: number | null;
+  /** "automation" when the turn was fired by the automations scheduler —
+   *  the backend already sends its own automation-branded run-finished
+   *  notification, so the generic turn-complete toast is suppressed for
+   *  these. Absent for user-initiated turns. */
+  source?: string;
 }
 
 /** End-of-turn citation-integrity verdict for a research report, emitted as

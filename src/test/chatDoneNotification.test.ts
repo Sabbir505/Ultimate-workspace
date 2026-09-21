@@ -106,4 +106,44 @@ describe("chat:done completion notification gate", () => {
     await Promise.resolve();
     expect(notifySpy).not.toHaveBeenCalled();
   });
+
+  it("skips the toast but still merges the store state for automation turns", async () => {
+    // Automation runs are already notified by the backend's branded
+    // automation:run-finished event; the generic "finished — Agent turn
+    // complete" toast here used to double-fire for the same run. The store
+    // merge (streaming cleanup + last-turn metrics) must still happen.
+    renderHook(() => useChatEvents());
+    const handler = listeners.get("chat:done");
+    handler!(donePayload({ source: "automation" }));
+    // onDone's store write lands synchronously, but the handler chain runs
+    // through promises — flush the microtask queue before asserting.
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(notifySpy).not.toHaveBeenCalled();
+    expect(useChatStore.getState().lastTurnPerf["s1"]?.outputTokens).toBe(250);
+    expect(useChatStore.getState().streaming["s1"]).toBeUndefined();
+  });
+
+  it("skips the finished toast when the turn ended by asking a question", async () => {
+    // A question-ended turn already surfaced its own "has a question"
+    // notification (chat:question-request) — the "finished — Agent turn
+    // complete" toast on top of it double-alerted the same event. The card
+    // is still pending at done time (onDone clears it AFTER our read), so
+    // the gate reads it first.
+    renderHook(() => useChatEvents());
+    useChatStore.setState({
+      pendingQuestions: {
+        s1: { pendingId: "q1", questions: [{ question: "What should the image be?" }] },
+      },
+    });
+    const handler = listeners.get("chat:done");
+    handler!(donePayload({}));
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(notifySpy).not.toHaveBeenCalled();
+    // The store merge still happened, and the stale card was cleared by
+    // onDone exactly as before.
+    expect(useChatStore.getState().lastTurnPerf["s1"]?.outputTokens).toBe(250);
+    expect(useChatStore.getState().pendingQuestions["s1"]).toBeUndefined();
+  });
 });

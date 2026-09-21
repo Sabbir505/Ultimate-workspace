@@ -110,6 +110,12 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatDone((payload) => {
         const { chatSessionId, inputTokens, outputTokens, costUsd } = payload;
+        // Read BEFORE onDone clears the card: a turn that ended by ASKING
+        // the user something already fired its own "has a question"
+        // notification — the question IS why the turn ended, so the generic
+        // "finished" toast on top double-alerts the same event.
+        const endedOnQuestion =
+          chatSessionId in useChatStore.getState().pendingQuestions;
         void useChatStore
           .getState()
           .onDone(
@@ -147,7 +153,18 @@ export function useChatEvents(): void {
           .getState()
           .sessions.some((s) => s.id === chatSessionId);
         const realTurn = knownSession && (payload.outputTokens ?? 0) > 0;
-        if (!isViewingSession(chatSessionId) && realTurn) {
+        // Automation-initiated turns (scheduler one-shot runs) are already
+        // notified by the backend's automation-branded run-finished event —
+        // firing this generic toast too made every run alert twice. Only the
+        // toast is skipped: the store merge, mobile relay, and TTS read all
+        // run unchanged.
+        const automationTurn = payload.source === "automation";
+        if (
+          !isViewingSession(chatSessionId) &&
+          realTurn &&
+          !automationTurn &&
+          !endedOnQuestion
+        ) {
           const appFocused = isAppFocused();
           relayNotify({
             kind: "completed",

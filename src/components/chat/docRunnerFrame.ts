@@ -15,8 +15,11 @@ export function scriptSafe(source: string): string {
   return source.replace(/<\/script/gi, "<\\/script");
 }
 
-/** The complete iframe document for one run. */
-export function buildRunnerFrame(libs: string, requestId: string, userCode: string): string {
+/** The complete iframe document for one run. `runToken` (optional) is a
+ *  per-run handshake secret: the frame echoes it on every postMessage so
+ *  the host can reject results that don't belong to this exact run
+ *  (alongside the contentWindow source check in the runner). */
+export function buildRunnerFrame(libs: string, requestId: string, userCode: string, runToken?: string): string {
   return `<!doctype html>
 <html><head><meta charset="utf-8"></head><body>
 <script>${scriptSafe(libs)}</script>
@@ -24,7 +27,11 @@ export function buildRunnerFrame(libs: string, requestId: string, userCode: stri
 "use strict";
 (function () {
   var REQUEST_ID = ${JSON.stringify(requestId)};
+  var RUN_TOKEN = ${JSON.stringify(runToken ?? "")};
   var settled = false;
+  function report(payload) {
+    parent.postMessage(Object.assign({ source: "relay-docgen", requestId: REQUEST_ID, runToken: RUN_TOKEN }, payload), "*");
+  }
   function toBase64(data) {
     if (data == null) return Promise.reject(new Error("relay.save received nothing"));
     if (typeof data === "string") {
@@ -61,15 +68,14 @@ export function buildRunnerFrame(libs: string, requestId: string, userCode: stri
       return toBase64(data).then(function (b64) {
         if (settled) throw new Error("relay.save called more than once");
         settled = true;
-        parent.postMessage({ source: "relay-docgen", requestId: REQUEST_ID, ok: true, base64: b64 }, "*");
+        report({ ok: true, base64: b64 });
       });
     }
   };
   window.addEventListener("error", function (e) {
     if (!settled) {
       settled = true;
-      parent.postMessage({ source: "relay-docgen", requestId: REQUEST_ID, ok: false,
-        error: String((e && e.error && e.error.stack) || e.message || "script error") }, "*");
+      report({ ok: false, error: String((e && e.error && e.error.stack) || e.message || "script error") });
     }
   });
   try {
@@ -78,15 +84,13 @@ export function buildRunnerFrame(libs: string, requestId: string, userCode: stri
     })()).catch(function (err) {
       if (!settled) {
         settled = true;
-        parent.postMessage({ source: "relay-docgen", requestId: REQUEST_ID, ok: false,
-          error: String((err && err.stack) || err) }, "*");
+        report({ ok: false, error: String((err && err.stack) || err) });
       }
     });
   } catch (err) {
     if (!settled) {
       settled = true;
-      parent.postMessage({ source: "relay-docgen", requestId: REQUEST_ID, ok: false,
-        error: String((err && err.stack) || err) }, "*");
+      report({ ok: false, error: String((err && err.stack) || err) });
     }
   }
 })();

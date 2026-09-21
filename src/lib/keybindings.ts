@@ -25,7 +25,8 @@ export type KeybindingAction =
   | "vaultSearch"
   | "vaultGraph"
   | "vaultDailyNote"
-  | "vaultInsertTemplate";
+  | "vaultInsertTemplate"
+  | "vaultSaveNote";
 
 export type KeybindingMap = Record<KeybindingAction, string>;
 
@@ -54,6 +55,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
   vaultGraph: "Mod+G",
   vaultDailyNote: "Mod+Shift+D",
   vaultInsertTemplate: "Mod+T",
+  // Save must work while typing in the note editor, like the palette.
+  vaultSaveNote: "Mod+S",
 };
 
 export interface ParsedAccelerator {

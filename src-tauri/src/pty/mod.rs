@@ -427,7 +427,7 @@ impl Pane {
 
         // Usage/cost scraping (only meaningful with a session to attach to).
         if let Some(usage) = adapter.parse_usage(&tail) {
-            self.record_usage(app, db, usage, None);
+            self.record_usage(app, db, usage);
         }
     }
 
@@ -435,9 +435,8 @@ impl Pane {
     /// Both usage sources (pty scraping, on-disk logs) report cumulative
     /// session totals, but the dashboard's rollups SUM events — inserting
     /// cumulative snapshots would multiply-count. Zero deltas are skipped,
-    /// which also handles TUI redraw dedup. Price is computed per-delta using
-    /// the model parsed from the session log when available (see price_for).
-    fn record_usage(&self, app: &AppHandle, db: &SharedDb, usage: UsageInfo, model: Option<&str>) {
+    /// which also handles TUI redraw dedup.
+    fn record_usage(&self, app: &AppHandle, db: &SharedDb, usage: UsageInfo) {
         let Some(session_id) = &self.session_id else { return };
         let delta = {
             let mut last = self.last_usage.lock();
@@ -483,14 +482,11 @@ impl Pane {
             return;
         }
         // reported_cost_usd = what the harness itself printed (may be None).
-        // pricing_estimated_usd = the computed per-model price, only when the
-        // harness didn't print one (spec §7.5: the two must stay distinct).
-        let harness_reported = delta.cost_usd;
-        let pricing_estimated_usd = if harness_reported.is_none() {
-            self.price_for(db, &delta, model)
-        } else {
-            harness_reported
-        };
+        // pricing_estimated_usd is a write-only fossil: nothing reads the
+        // column back — read-time pricing in harness_adapters/pricing.rs is
+        // the real pricer — so rows insert NULL (the column itself stays for
+        // schema stability).
+        let pricing_estimated_usd = None;
         let adapter_id = self.adapter.as_ref().map(|a| a.id()).unwrap_or("unknown");
         let conn = db.lock();
         if db::insert_cost_event(&conn, session_id, &delta, adapter_id, "pty", pricing_estimated_usd).is_ok() {
@@ -515,7 +511,6 @@ impl Pane {
         app: &AppHandle,
         db: &SharedDb,
         usage: UsageInfo,
-        model: Option<&str>,
     ) {
         let Some(session_id) = &self.session_id else { return };
         let delta = {
@@ -565,14 +560,9 @@ impl Pane {
             return;
         }
         // reported_cost_usd = what the harness itself printed (usually None —
-        // session logs don't carry a cost). pricing_estimated_usd = the
-        // computed per-model price (spec §7.5 keeps the two distinct).
-        let harness_reported = delta.cost_usd;
-        let pricing_estimated_usd = if harness_reported.is_none() {
-            self.price_for(db, &delta, model)
-        } else {
-            harness_reported
-        };
+        // session logs don't carry a cost). pricing_estimated_usd: same
+        // write-only fossil as the pty path above — NULL.
+        let pricing_estimated_usd = None;
         let adapter_id = self.adapter.as_ref().map(|a| a.id()).unwrap_or("unknown");
         let conn = db.lock();
         if db::insert_cost_event(&conn, session_id, &delta, adapter_id, "on_disk", pricing_estimated_usd).is_ok() {
@@ -584,35 +574,6 @@ impl Pane {
                 },
             );
         }
-    }
-
-    /// Estimate a delta's cost using per-model rates. The model id comes from
-    /// the harness's session log (e.g. "claude-sonnet-4-5-…", "kimi-k3",
-    /// "glm-5.2"); unknown models fall back to the harness's default model.
-    /// Rates: Settings keys `price.<model-key>.input_per_mtok` /
-    /// `.output_per_mtok`, else the built-in table (official list prices, see
-    /// harness_adapters::default_rates). Labeled an estimate per PRD §7.12.
-    fn price_for(&self, db: &SharedDb, delta: &UsageInfo, model: Option<&str>) -> Option<f64> {
-        use crate::harness_adapters::{canonical_model_key, default_rates, harness_default_model_key};
-        let adapter = self.adapter.as_ref()?;
-        let key = model
-            .and_then(canonical_model_key)
-            .unwrap_or_else(|| harness_default_model_key(adapter.id()));
-        let (default_in, default_out) = default_rates(key)?;
-        let conn = db.lock();
-        let rate = |suffix: &str, default: f64| {
-            db::get_setting(&conn, &format!("price.{key}.{suffix}"))
-                .ok()
-                .flatten()
-                .and_then(|v| v.parse::<f64>().ok())
-                .unwrap_or(default)
-        };
-        let in_rate = rate("input_per_mtok", default_in);
-        let out_rate = rate("output_per_mtok", default_out);
-        let cost = (delta.input_tokens.unwrap_or(0) as f64 * in_rate
-            + delta.output_tokens.unwrap_or(0) as f64 * out_rate)
-            / 1_000_000.0;
-        (cost > 0.0).then_some(cost)
     }
 
     fn report_harness_id(&self, app: &AppHandle, db: &SharedDb, harness_id: &str) {
@@ -1447,7 +1408,7 @@ impl PtyManager {
                 if do_sync {
                     if let (Some(adapter), Some(hid)) = (&pane.adapter, hid) {
                         if let Some(su) = adapter.usage_from_disk(&pane.cwd, &hid) {
-                            pane.record_usage_on_disk(&mgr.app, &mgr.db, su.usage, su.model.as_deref());
+                            pane.record_usage_on_disk(&mgr.app, &mgr.db, su.usage);
                         }
                     }
                 }

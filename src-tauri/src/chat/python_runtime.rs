@@ -76,11 +76,34 @@ fn bundled_interpreter_in(dir: &std::path::Path) -> Option<PathBuf> {
 /// This is the single source of truth used by both `pygen` (document
 /// generation) and `codeexec` (ad-hoc `run_code`), so the two paths can never
 /// drift on which interpreter they use.
+///
+/// The result is cached in [`RESOLVED`] (L3): without the cache every
+/// `run_code`/document call re-probed the system with blocking `Command`
+/// spawns on the async runtime. The FIRST successful resolution wins for the
+/// process lifetime. A probe that finds NOTHING is deliberately NOT cached —
+/// a Python installed while the app is running must be picked up on the next
+/// call, and the rare all-failed path already degrades to a sensible fallback
+/// candidate (see [`system_interpreter`]).
+static RESOLVED: OnceLock<String> = OnceLock::new();
+
 pub fn interpreter() -> String {
-    if let Some(exe) = bundled_interpreter() {
-        return exe.to_string_lossy().into_owned();
+    if let Some(cached) = RESOLVED.get() {
+        return cached.clone();
     }
-    system_interpreter().to_string()
+    let resolved = match bundled_interpreter() {
+        Some(exe) => exe.to_string_lossy().into_owned(),
+        // No bundle (or it vanished): probe the system. A candidate that
+        // answers is cached; total probe failure stays uncached (see the
+        // RESOLVED doc above).
+        None => match system_interpreter_found() {
+            Some(name) => name.to_string(),
+            None => return system_interpreter(),
+        },
+    };
+    // Lost the race against a concurrent first call → its answer wins; ours
+    // is identical in practice and returned just the same for this call.
+    let _ = RESOLVED.set(resolved.clone());
+    resolved
 }
 
 /// Probe the system for a working Python. On Windows, `python3` is often a
@@ -90,18 +113,25 @@ pub fn interpreter() -> String {
 /// `py` (the official launcher) then `python`, never the bare `python3` alias.
 /// Elsewhere we prefer `python3` then `python`. Returns the last candidate
 /// when none responds, so the failure message stays sensible.
-fn system_interpreter() -> &'static str {
-    let candidates: &[&str] = if cfg!(windows) {
+fn system_interpreter() -> String {
+    system_interpreter_found()
+        .map(String::from)
+        .unwrap_or_else(|| system_candidates()[0].to_string())
+}
+
+/// Platform-ordered candidates for the system probe.
+fn system_candidates() -> &'static [&'static str] {
+    if cfg!(windows) {
         &["py", "python"]
     } else {
         &["python3", "python"]
-    };
-    for cand in candidates {
-        if probe(cand) {
-            return cand;
-        }
     }
-    candidates[0]
+}
+
+/// The first candidate whose probe succeeds, or `None` when none responds
+/// (the expensive, blocking case — see [`interpreter`]'s cache).
+fn system_interpreter_found() -> Option<&'static str> {
+    system_candidates().iter().copied().find(|cand| probe(cand))
 }
 
 /// Run `<candidate> --version` and return true only if it exits successfully —

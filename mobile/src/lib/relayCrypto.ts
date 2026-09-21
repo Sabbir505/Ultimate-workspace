@@ -24,15 +24,42 @@ const HKDF_INFO = 'conduit-e2e-relay-v1';
 
 const te = new TextEncoder();
 
-/** Derive the 32-byte XChaCha20 session key from the 256-bit pairing token. */
-export function deriveSessionKey(token: string): Uint8Array {
+/**
+ * Derive the 32-byte XChaCha20 session key from the 256-bit pairing token.
+ * With `salt` (the desktop's per-connection value from PairOk), the key is
+ * `HKDF(ikm = token, salt = connection salt)` — unique per connection, so the
+ * per-connect counter reset can never reuse (key, nonce) pairs (audit C1).
+ * Without a salt, the legacy static-salt derivation is used.
+ */
+export function deriveSessionKey(token: string, salt?: Uint8Array): Uint8Array {
   return hkdf(
     sha256,
     te.encode(token),
-    te.encode(HKDF_SALT),
+    salt ?? te.encode(HKDF_SALT),
     te.encode(HKDF_INFO),
     32,
   );
+}
+
+/** Decode base64url (no padding) — the PairOk salt encoding. */
+export function b64UrlToBytes(s: string): Uint8Array {
+  const table = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const clean = s.replace(/=+$/, '');
+  const out = new Uint8Array(Math.floor((clean.length * 6) / 8));
+  let bits = 0;
+  let acc = 0;
+  let o = 0;
+  for (const ch of clean) {
+    const v = table.indexOf(ch);
+    if (v < 0) throw new Error('invalid base64url character');
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[o++] = (acc >> bits) & 0xff;
+    }
+  }
+  return out;
 }
 
 /** Compute the pairing proof: hex(HMAC-SHA256(key = token, msg = "E2E")). */

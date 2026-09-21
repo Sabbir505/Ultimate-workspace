@@ -4,7 +4,7 @@
 // "open in system app" card. Notes never reach this component — the store's
 // openFile/openKind split keeps editor buffers note-only.
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FileQuestion, Loader2, X } from "lucide-react";
 import { openArtifact } from "../../lib/ipc/harnessChat";
 import { basenameOf } from "../../lib/vaultLinks";
@@ -18,9 +18,12 @@ const MEDIA_RE = /\.(mp3|wav|ogg|m4a|flac|mp4|webm|mov)$/i;
 
 function useAssetBlobUrl(path: string): string | null {
   const [url, setUrl] = useState<string | null>(null);
+  // The created URL lives in a ref set SYNCHRONOUSLY at creation, so the
+  // cleanup always sees (and revokes) it no matter when unmount lands — a
+  // URL created after the `alive` check would otherwise leak.
+  const madeRef = useRef<string | null>(null);
   useEffect(() => {
     let alive = true;
-    let made: string | null = null;
     setUrl(null);
     void (async () => {
       const { vaultReadBinary } = await import("../../lib/ipc");
@@ -30,12 +33,15 @@ function useAssetBlobUrl(path: string): string | null {
       const bin = atob(b64);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
-      made = URL.createObjectURL(new Blob([bytes], { type: mime }));
-      if (alive) setUrl(made);
+      madeRef.current = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      if (alive) setUrl(madeRef.current);
     })();
     return () => {
       alive = false;
-      if (made) URL.revokeObjectURL(made);
+      if (madeRef.current) {
+        URL.revokeObjectURL(madeRef.current);
+        madeRef.current = null;
+      }
     };
   }, [path]);
   return url;

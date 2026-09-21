@@ -47,11 +47,17 @@ interface RunnerResult {
  *  completion so the tool can narrate them). */
 interface PendingRun {
   requestId: string;
+  runToken: string;
   issues: Issue[];
   payloadKind?: string;
 }
 
 const RUN_TIMEOUT_MS = 90_000;
+
+/** Per-run handshake token: embedded in the frame's script and verified on
+ *  every inbound message (with the contentWindow source check), so a stale
+ *  or sibling frame can never settle someone else's run. */
+let runTokenSeq = 0;
 
 export function DocDesignRunner() {
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -94,9 +100,17 @@ export function DocDesignRunner() {
     };
 
     const messageHandler = (event: MessageEvent) => {
-      const data = event.data as (RunnerResult & { source?: string; requestId?: string }) | null;
+      // Source check first: the result must come from THIS instance's frame
+      // (same rule as InlineDiagram's live visuals) — the sandboxed frame
+      // has no access to this window beyond postMessage, and a foreign
+      // window must never be able to settle a run.
+      if (event.source !== frameRef.current?.contentWindow) return;
+      const data = event.data as (RunnerResult & { source?: string; requestId?: string; runToken?: string }) | null;
       if (!data || data.source !== "relay-docgen") return;
-      if (!pendingRef.current || data.requestId !== pendingRef.current.requestId) return;
+      const pending = pendingRef.current;
+      if (!pending || data.requestId !== pending.requestId) return;
+      // Handshake: only the frame we launched for THIS run knows the token.
+      if (data.runToken !== pending.runToken) return;
       settle({ ok: data.ok, base64: data.base64, error: data.error });
     };
     window.addEventListener("message", messageHandler);
@@ -176,7 +190,8 @@ export function DocDesignRunner() {
             });
             return;
           }
-          pendingRef.current = { requestId: payload.requestId, issues: [] };
+          const runToken = `docgen-${++runTokenSeq}`;
+          pendingRef.current = { requestId: payload.requestId, runToken, issues: [] };
 
           // L1: validate the plan against the catalog. Errors block the run
           // and go straight back to the model for an in-turn patch.
@@ -251,7 +266,7 @@ export function DocDesignRunner() {
           const frame = frameRef.current;
           if (!frame) throw new Error("runner frame unavailable");
 
-          frame.srcdoc = buildRunnerFrame(libs, payload.requestId, code);
+          frame.srcdoc = buildRunnerFrame(libs, payload.requestId, code, runToken);
           timerRef.current = window.setTimeout(() => {
             settle({
               ok: false,

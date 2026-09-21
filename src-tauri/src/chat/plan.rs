@@ -319,6 +319,20 @@ pub(crate) fn gate_denial(plan_mode: bool, name: &str) -> Option<String> {
     ))
 }
 
+/// The same refusal as [`gate_denial`], for the vendor-tool branches in
+/// `run_tool` (connector / MCP-gallery Write tools) whose names the name-based
+/// gate cannot classify — `gate_denial` returns `None` for them, so they format
+/// this message directly instead of degrading to an empty tool result.
+/// `surface` names what mutates (e.g. "connector", "MCP server").
+pub(crate) fn plan_denial_message(name: &str, surface: &str) -> String {
+    format!(
+        "Error: plan mode is active — `{name}` was blocked (read-only). This {surface} action \
+         mutates state outside the workspace. Research the task, then call `present_plan` with \
+         your step-by-step plan; the user's approval unlocks changes. If it turns out no changes \
+         are needed, just answer in text."
+    )
+}
+
 /// Whether a tool name can change user-visible state. Centralized here (next
 /// to `permission::is_mutating_fs_tool`, which it extends to non-FS tools) so
 /// the plan gate and future callers agree on one list.
@@ -474,7 +488,8 @@ pub(crate) fn parse_plan_text(args: &Value) -> Result<(String, String), String> 
     let plan = normalize_plan_markdown(&raw);
     if plan.chars().count() > MAX_PLAN_CHARS {
         return Err(format!(
-            "Plan too long ({plan} > {MAX_PLAN_CHARS} chars) — summarize the approach."
+            "Plan too long ({} > {MAX_PLAN_CHARS} chars) — summarize the approach.",
+            plan.chars().count()
         ));
     }
     let arg_title = args

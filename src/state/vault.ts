@@ -39,6 +39,9 @@ export type VaultRail = "files" | "search" | "tags";
 /** Debounce window for autosave after an edit keystroke. */
 export const VAULT_SAVE_DEBOUNCE_MS = 600;
 
+/** Debounce window for per-keystroke search queries. */
+export const VAULT_SEARCH_DEBOUNCE_MS = 200;
+
 /** Rail layout bounds (px). The drag handles clamp to these; the rails also
  *  flex-shrink toward their min when the view is squeezed (tool panel open
  *  on a narrow window) — the min is what always holds. Files tree and
@@ -68,6 +71,19 @@ interface VaultLayout {
 
 const LAYOUT_KEY = "relay.vault.layout";
 
+/** Cap on restored recent-note entries — the same `slice(0, 12)` openNote
+ *  applies when it refreshes the list. */
+const RECENT_PATHS_CAP = 12;
+
+/** Validate a persisted path list: strings only, non-empty, optionally
+ *  capped (a tampered/hand-edited layout blob must not feed non-strings
+ *  into the tabs/pins/recents rails). */
+function validPathList(v: unknown, cap?: number): string[] {
+  if (!Array.isArray(v)) return [];
+  const out = v.filter((p): p is string => typeof p === "string" && p.trim() !== "");
+  return cap == null ? out : out.slice(0, cap);
+}
+
 function clampPct(v: unknown, fallback: number): number {
   const n = typeof v === "number" && Number.isFinite(v) ? Math.round(v) : fallback;
   return Math.min(80, Math.max(20, n));
@@ -85,6 +101,9 @@ function loadLayout() {
       rightRailWidth: clampWidth(p.rightWidth, VAULT_RIGHT_RAIL),
       leftRailCollapsed: p.leftCollapsed === true,
       assetSplitPct: clampPct(p.assetSplitPct, 58),
+      openNotes: validPathList(p.openNotes),
+      pinnedPaths: validPathList(p.pinnedPaths),
+      recentPaths: validPathList(p.recentPaths, RECENT_PATHS_CAP),
     };
   } catch {
     return fallback;
@@ -232,6 +251,8 @@ interface VaultStore {
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+/** Pending per-keystroke search (set by setSearchQuery). */
+let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 
 /** Record the current note/asset/graph trio in the shell's back/forward
  *  timeline (ui store) — vault navigation joins view history, so the
@@ -334,11 +355,8 @@ export const useVaultStore = create<VaultStore>((set, get) => {
   mode: "preview",
   noteModes: {},
   rail: "files",
-  openNotes: [],
-  pinnedPaths: [],
-  recentPaths: [],
   templatePickerOpen: false,
-  ...loadLayout(),
+  ...loadLayout(), // validated, includes openNotes/pinnedPaths/recentPaths
   rightRailOpen: true,
   meta: null,
   loadingNote: false,
@@ -365,7 +383,16 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     const root = await vaultBind(path);
     // A rebind (change vault) must not keep the previous vault's open note
     // in the editor — the next autosave would write it into the NEW vault.
-    set({ root, activePath: null, assetPath: null, content: "", savedContent: "", meta: null, graph: null, tags: [] });
+    // Tabs/pins/recents/modes are vault-scoped too: left as-is they would
+    // resolve the previous vault's paths against the new one.
+    set({ root, activePath: null, assetPath: null, content: "", savedContent: "", meta: null, graph: null, tags: [], openNotes: [], pinnedPaths: [], recentPaths: [], noteModes: {} });
+    // The editor caches whole-note reads for `#subpath` completion keyed by
+    // path — drop them so the new vault never resolves the old vault's
+    // text. Dynamic import: the editor chunk (CodeMirror) stays lazy.
+    void import("../components/vault/VaultEditor")
+      .then((m) => m.clearNoteContentCache())
+      .catch(() => {});
+    persistLayout();
     await get().loadTree();
     await get().refreshStats();
   },
@@ -649,8 +676,14 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     try {
       await vaultCreateNote(withExt, "");
     } catch (e) {
-      vaultToast("error", "Could not create note", String(e));
-      return;
+      // "Already exists" (the file is on disk but the index hasn't caught
+      // up yet — e.g. a link clicked before the watcher reindexed it):
+      // open it instead of toasting an error, exactly like openDailyNote
+      // tolerates the same race. Any other failure still surfaces.
+      if (!String(e).includes("already exists")) {
+        vaultToast("error", "Could not create note", String(e));
+        return;
+      }
     }
     await get().loadTree();
     await get().refreshStats();
@@ -690,6 +723,19 @@ export const useVaultStore = create<VaultStore>((set, get) => {
   },
 
   deleteNote: async (path) => {
+    // A pending autosave must never flush to a deleted path — the write
+    // would resurrect the file. BEFORE the backend delete: drop the
+    // debounce timer and clear the buffer (content === savedContent also
+    // makes any racing saveNow a no-op), so neither the close below nor a
+    // stray timer can write to the doomed path again. Deleting discards
+    // the buffer by definition.
+    if (get().activePath === path) {
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+      }
+      set({ content: "", savedContent: "" });
+    }
     try {
       await vaultDeleteNote(path);
     } catch (e) {
@@ -723,7 +769,13 @@ export const useVaultStore = create<VaultStore>((set, get) => {
 
   setSearchQuery: (q) => {
     set({ searchQuery: q });
-    void get().runSearch();
+    // Debounce per-keystroke searches: one IPC per quiet window instead of
+    // one per character.
+    if (searchDebounce) clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => {
+      searchDebounce = null;
+      void get().runSearch();
+    }, VAULT_SEARCH_DEBOUNCE_MS);
   },
 
   runSearch: async () => {
@@ -737,6 +789,9 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     // render would crash on hits.map (observed on the IPC stub; a backend
     // regression would crash it for real).
     const hits = (await vaultSearch(q, 40).catch(() => [])) ?? [];
+    // The query changed while we were in flight — a stale response must
+    // never land after (or replace) a newer query's results.
+    if (get().searchQuery.trim() !== q) return;
     set({ searchHits: hits, searchLoading: false });
   },
 
@@ -803,12 +858,18 @@ export const useVaultStore = create<VaultStore>((set, get) => {
   },
 
   restoreSnapshot: async (snap) => {
+    // Generation-guard the whole restore (same mechanism as openNote): a
+    // slow restore over an await must never overwrite the buffer of a note
+    // a NEWER navigation opened — the next autosave would write the old
+    // text into the new file.
+    const gen = ++openGeneration;
     // Flush pending edits first — a restore must not drop them.
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
       await get().saveNow();
     }
+    if (gen !== openGeneration) return; // a newer open superseded this restore
     if (get().activePath !== snap.activePath) {
       if (!snap.activePath) {
         set({ activePath: null, content: "", savedContent: "", meta: null });
@@ -821,14 +882,17 @@ export const useVaultStore = create<VaultStore>((set, get) => {
           openNotes: s0.openNotes.includes(snap.activePath!) ? s0.openNotes : [...s0.openNotes, snap.activePath!],
           recentPaths: [snap.activePath!, ...s0.recentPaths.filter((p) => p !== snap.activePath)].slice(0, 12),
         });
-        persistLayout();
         const content = await vaultReadNote(snap.activePath).catch(() => null);
         // The snapshot may have been superseded mid-load — only land the
         // text if the restore is still the latest navigation.
+        if (gen !== openGeneration) return;
         set({ content: content ?? "", savedContent: content ?? "", loadingNote: false, meta: null });
+        persistLayout();
         if (get().activePath === snap.activePath) {
           void vaultNoteMeta(snap.activePath)
-            .then((m) => set({ meta: m }))
+            .then((m) => {
+              if (gen === openGeneration) set({ meta: m });
+            })
             .catch(() => {});
         }
       }

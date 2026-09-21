@@ -459,14 +459,16 @@ export function VaultGraph({
   // content) on every vault:changed — re-seeding then teleports every node
   // and breaks hover under a stationary cursor. Compare content signatures
   // and keep the frozen layout unless something actually changed.
-  const dataSignature = useMemo(
-    () =>
-      JSON.stringify([
-        nodes.map((n) => [n.id, n.unresolved, n.degree]),
-        edges.map((e) => [e.src, e.dst]),
-      ]),
-    [nodes, edges],
-  );
+  // Cheap incremental fingerprint instead of a full JSON.stringify of every
+  // node+edge: counts + per-item id/degree appended to a string — the same
+  // invalidation semantics without serializing the whole graph on every
+  // store reload.
+  const dataSignature = useMemo(() => {
+    let sig = `n${nodes.length}:e${edges.length}`;
+    for (const n of nodes) sig += `|${n.id},${n.unresolved ? 1 : 0},${n.degree}`;
+    for (const e of edges) sig += `;${e.src}>${e.dst}`;
+    return sig;
+  }, [nodes, edges]);
   const signatureRef = useRef<string>(dataSignature);
   useEffect(() => {
     if (signatureRef.current === dataSignature && layoutRef.current.length > 0) {

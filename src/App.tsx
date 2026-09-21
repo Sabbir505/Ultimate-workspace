@@ -141,6 +141,7 @@ export default function App() {
   useEffect(() => {
     const win = getCurrentWindow();
     let unlisten: (() => void) | null = null;
+    let disposed = false;
     const refresh = () => void win.isMaximized().then(setWinMaximized).catch(() => {});
     void win
       .onResized(() => {
@@ -148,10 +149,17 @@ export default function App() {
         setTimeout(refresh, 60);
       })
       .then((u) => {
+        // Unmount beat the subscription — unlisten now, or the backend
+        // listener (and its closure) leaks for the app's lifetime.
+        if (disposed) {
+          u();
+          return;
+        }
         unlisten = u;
       });
     refresh();
     return () => {
+      disposed = true;
       unlisten?.();
     };
   }, []);

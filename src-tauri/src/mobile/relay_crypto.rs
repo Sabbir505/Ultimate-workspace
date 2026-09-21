@@ -31,11 +31,38 @@ const HKDF_INFO: &[u8] = b"conduit-e2e-relay-v1";
 const HKDF_SALT: &[u8] = b"conduit-e2e-relay-salt-v1";
 
 /// Derive a 32-byte XChaCha20 session key from a 256-bit (43-char base64url) token.
+/// LEGACY derivation (static salt) — kept for the pinned cross-implementation
+/// vectors; live pairing now uses [`derive_session_key_with_salt`].
 pub fn derive_session_key(token: &str) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), token.as_bytes());
     let mut okm = [0u8; 32];
     hk.expand(HKDF_INFO, &mut okm).expect("HKDF 32-byte output");
     okm
+}
+
+/// Per-connection derivation (audit C1 fix, 2026-09-21): the session key is
+/// `HKDF(ikm = token, salt = conn_salt)` where `conn_salt` is a fresh random
+/// value the desktop generates per pairing and sends in the plaintext
+/// `PairOk` frame. The salt is public — secrecy rests on the token alone —
+/// but a fresh salt makes the key unique per CONNECTION, so the counter
+/// nonces reset at reconnect can no longer repeat (key, nonce) pairs across
+/// connections of one desktop run. It also retroactively neutralizes the
+/// replayable static pairing proof: an attacker who replays a captured
+/// proof is paired and receives a salt, but cannot derive the key without
+/// the token, so every frame they send fails the tag check.
+pub fn derive_session_key_with_salt(token: &str, salt: &[u8]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(salt), token.as_bytes());
+    let mut okm = [0u8; 32];
+    hk.expand(HKDF_INFO, &mut okm).expect("HKDF 32-byte output");
+    okm
+}
+
+/// Fresh random per-pairing salt (32 bytes).
+pub fn random_salt() -> [u8; 32] {
+    use rand::RngCore;
+    let mut salt = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut salt);
+    salt
 }
 
 /// Compute the pairing proof: HMAC-SHA256(key=token, data="E2E").
@@ -110,6 +137,26 @@ pub fn decrypt(key: &[u8; 32], counter: u64, frame: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn salted_key_differs_from_legacy_and_binds_the_salt() {
+        let token = "token-one-0000000000000000000000";
+        let legacy = derive_session_key(token);
+        let k1 = derive_session_key_with_salt(token, b"conn-salt-A");
+        let k2 = derive_session_key_with_salt(token, b"conn-salt-A");
+        let k3 = derive_session_key_with_salt(token, b"conn-salt-B");
+        assert_eq!(k1, k2, "same salt must be deterministic");
+        assert_ne!(k1, k3, "different connection salts must differ");
+        assert_ne!(k1, legacy, "salted derivation must not equal the legacy key");
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_with_salted_key() {
+        let key = derive_session_key_with_salt("tok-000000000000000000000000", b"s");
+        let ct = encrypt(&key, 0, b"hello");
+        assert_eq!(decrypt(&key, 0, &ct).as_deref(), Some(b"hello".as_slice()));
+        assert_eq!(decrypt(&key, 1, &ct), None);
+    }
 
     #[test]
     fn derive_key_is_stable_and_distinct() {

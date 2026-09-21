@@ -114,9 +114,23 @@ where
             let _ = send_msg(&write, &err).await;
             return Err("pairing failed: invalid E2E proof".into());
         }
-        let key = super::relay_crypto::derive_session_key(&expected_token);
+        // Per-connection key (audit C1): a fresh salt per pairing makes the
+        // session key unique per connection, so the counters that reset on
+        // reconnect can never repeat (key, nonce) pairs. The salt rides the
+        // plaintext PairOk frame — it is public; secrecy rests on the token.
+        // Sent BEFORE enable_e2e so it stays plaintext and WS ordering
+        // guarantees the phone derives the key before any encrypted frame.
+        let salt = super::relay_crypto::random_salt();
+        {
+            use base64::Engine as _;
+            let pair_ok = DesktopMessage::PairOk {
+                salt: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(salt),
+            };
+            let _ = send_msg(write, &pair_ok).await;
+        }
+        let key = super::relay_crypto::derive_session_key_with_salt(&expected_token, &salt);
         super::relay_ws::enable_e2e(&write, key).await;
-        eprintln!("[mobile-relay] paired (E2E encrypted); processing commands");
+        eprintln!("[mobile-relay] paired (E2E encrypted, per-connection key); processing commands");
     }
     Ok(true)
 }

@@ -182,6 +182,13 @@ pub enum DesktopMessage {
     },
     /// Connection handshake / heartbeat.
     DesktopStatus { connected: bool },
+    /// Pairing accepted. Sent PLAINTEXT immediately after a valid Pair proof
+    /// and before any encrypted frame (same-socket ordering guarantees the
+    /// phone processes it first). The salt is public: the session key is
+    /// `HKDF(ikm = token, salt)` on both sides, so the key is unique per
+    /// connection (audit C1 — reconnecting must not reuse nonces under one
+    /// key). Base64url (no padding), 32 bytes.
+    PairOk { salt: String },
     /// Response to GetTranscript — the rendered terminal screen (SGR-styled
     /// rows) plus the terminal size, so the phone can fit the font to the
     /// terminal's column count instead of sideways-scrolling a desktop-width

@@ -1,3 +1,9 @@
+// Negative ephemeral ids: a module counter instead of Date.now() — two sends
+// in the same millisecond used to collide (audit L17), producing duplicate
+// list keys and confusing the desktop-echo replacement.
+let optimisticIdCounter = 0;
+const nextOptimisticId = () => --optimisticIdCounter;
+
 /**
  * useSessionChat — per-conversation state store + WS bridge.
  *
@@ -214,7 +220,7 @@ export function useSessionChat(sessionId: string | null) {
         }
         // Promote the streaming buffer to a real assistant message.
         const finalized: SessionMessageRecord = {
-          id: -Date.now(), // Negative = ephemeral, never sent to the desktop.
+          id: nextOptimisticId(), // Negative = ephemeral, never sent to the desktop.
           role: 'assistant',
           content: s.streamingContent,
           created_at: Math.floor(Date.now() / 1000),
@@ -362,7 +368,7 @@ export function useSessionChat(sessionId: string | null) {
       // Optimistically show the user message immediately so the UI feels
       // responsive before the desktop echoes it back via GetSessionMessages.
       const userMsg: SessionMessageRecord = {
-        id: -Date.now() - 1, // Distinct from the streaming-finalize id above.
+        id: nextOptimisticId(),
         role: 'user',
         content: text,
         created_at: Math.floor(Date.now() / 1000),

@@ -55,6 +55,13 @@ let openLinkHandler: ((target: string, subpath: string | null) => void) | null =
 /** Subpath completion reads whole notes — cache the reads (per session). */
 const noteContentCache = new Map<string, string>();
 
+/** Drop the subpath-completion read cache. The store's bind() calls this on
+ *  a vault (re)bind — cached entries are keyed by path, and a new vault
+ *  must never resolve the previous vault's text. */
+export function clearNoteContentCache() {
+  noteContentCache.clear();
+}
+
 /** Wrap the selection (or insert an empty pair at the cursor) — the engine
  *  behind Ctrl+B/I and the slash menu's inline constructs. Multi-cursor safe
  *  via changeByRange. */
@@ -218,11 +225,19 @@ function mathBlockRanges(doc: { iterLines(): Iterator<string> }): { from: number
  *  allows BLOCK decorations from state-level sources ("Block decorations
  *  may not be specified via plugins"). When the cursor sits inside a block
  *  it renders raw (editable); otherwise the whole block collapses into one
- *  katex display widget. */
-const mathBlockField = StateField.define<DecorationSet>({
-  create: () => Decoration.none,
-  update(deco, tr) {
-    if (!tr.docChanged && !tr.selection) return deco;
+ *  katex display widget. The field stores the block RANGES alongside the
+ *  decorations so the live-preview plugin never rescans the document. */
+interface MathBlockState {
+  ranges: { from: number; to: number; tex: string }[];
+  deco: DecorationSet;
+}
+
+const mathBlockField = StateField.define<MathBlockState>({
+  create: () => ({ ranges: [], deco: Decoration.none }),
+  update(value, tr) {
+    if (!tr.docChanged && !tr.selection) return value;
+    // One mathBlockRanges scan per transaction — buildDeco reads these
+    // ranges back out of the field instead of computing them again.
     const blocks = mathBlockRanges(tr.state.doc);
     const cursor = tr.state.selection.main;
     let emitted = false;
@@ -241,14 +256,17 @@ const mathBlockField = StateField.define<DecorationSet>({
         }
       }
     }
-    if (!emitted) return Decoration.none;
-    try {
-      return Decoration.set(pending, true);
-    } catch {
-      return Decoration.none;
+    let deco = Decoration.none;
+    if (emitted) {
+      try {
+        deco = Decoration.set(pending, true);
+      } catch {
+        deco = Decoration.none;
+      }
     }
+    return { ranges: blocks, deco };
   },
-  provide: (f) => EditorView.decorations.from(f),
+  provide: (f) => EditorView.decorations.compute([f], (state) => state.field(f).deco),
 });
 
 /** One inline markdown token found on a line. */
@@ -354,10 +372,10 @@ const livePreviewDeco = ViewPlugin.fromClass(
       const mark = (cls: string) => Decoration.mark({ class: cls });
 
       const cursor = view.state.selection.main;
-      const mathBlocks = mathBlockRanges(view.state.doc);
-      // $$ block decorations themselves come from mathBlockField (state
-      // level); here we only need the ranges to skip inline scanning of the
-      // raw TeX while it is being edited.
+      // $$ block ranges AND decorations come from mathBlockField (computed
+      // once per transaction there); here we only need the ranges to skip
+      // inline scanning of the raw TeX while it is being edited.
+      const mathBlocks = view.state.field(mathBlockField).ranges;
       const inMathBlock = (pos: number) => mathBlocks.some((b) => pos >= b.from && pos <= b.to);
 
       for (const range of view.visibleRanges) {

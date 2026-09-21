@@ -581,21 +581,9 @@ export function VaultView() {
     [openNotes, reorderNoteTab],
   );
 
-  // Ctrl/Cmd+P quick switcher while the view is up; Mod+S flushes a save.
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "p" && !e.shiftKey) {
-        e.preventDefault();
-        setSwitcherOpen(true);
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        void saveNow();
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [setSwitcherOpen, saveNow]);
+  // Ctrl/Cmd+P quick switcher and Mod+S save are owned by the global
+  // keybinding registry (vaultQuickSwitcher / vaultSaveNote — the save is
+  // editable-exempt so it fires while typing in the editor).
 
   // Warn before closing with unsaved edits (autosave makes this rare).
   const dirtyRef = useRef(dirty);

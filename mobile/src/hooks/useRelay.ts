@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { computePairProof, deriveSessionKey, decryptFrame, encryptFrame } from '../lib/relayCrypto';
+import { b64UrlToBytes, computePairProof, deriveSessionKey, decryptFrame, encryptFrame } from '../lib/relayCrypto';
 
 /** The desktop relay binds loopback ONLY (127.0.0.1) on a persisted-but-random
  *  port, so there is no universal default URL: physical devices connect via a
@@ -41,6 +41,7 @@ function toSession(s: SessionInfo): Session {
     provider: s.harness, model: '', lastActivity: s.last_active_at * 1000, isLive: s.is_live ?? false };
 }
 type DesktopMessage =
+  | { type: 'PairOk'; salt: string }
   | { type: 'AvailableProviders'; providers: ProviderInfo[] }
   | { type: 'SessionList'; sessions: SessionInfo[] }
   | { type: 'ChatToken'; chat_session_id: string; token: string }
@@ -193,6 +194,12 @@ let _token: string | null = null;
 let _e2eKey: Uint8Array | null = null;
 let _outCounter = 0;
 let _inCounter = 0;
+// Pairing handshake: the key is derived only when the desktop's PairOk
+// (carrying the per-connection salt) arrives; sends between Pair and PairOk
+// are queued and flushed on keying. Audit C1 — the key must be unique per
+// connection because both counters reset at reconnect.
+let _pairingToken: string | null = null;
+let _pendingFrames: string[] = [];
 // Loaded once from AsyncStorage; connect() awaits this so a persisted URL
 // wins over the loopback default on cold start. Pre-rebuild builds stored
 // the token under its own key — when the legacy URL carries no fragment, the
@@ -252,6 +259,10 @@ function _send(msg: MobileMessagePlain): boolean {
   const json = JSON.stringify(msg);
   if (_e2eKey) {
     _ws.send(encryptFrame(_e2eKey, _outCounter++, new TextEncoder().encode(json)));
+  } else if (_pairingToken) {
+    // Paired-pending: the desktop rejects plaintext after a Pair frame, so
+    // hold the message until PairOk delivers the connection salt.
+    _pendingFrames.push(json);
   } else {
     _ws.send(json);
   }
@@ -313,6 +324,7 @@ function _doConnect(target: string) {
   _url = target;
   _token = extractToken(target);
   _e2eKey = null; _outCounter = 0; _inCounter = 0;
+  _pairingToken = null; _pendingFrames = [];
   _connecting = true;
   try {
     const ws = new WebSocket(target); _ws = ws;
@@ -331,7 +343,7 @@ function _doConnect(target: string) {
       // token in the URL (legacy/dev) → skip Pair; the relay rejects and the
       // user sees the connect error state.
       if (_token) {
-        _e2eKey = deriveSessionKey(_token);
+        _pairingToken = _token;
         ws.send(JSON.stringify({ type: 'Pair', proof: computePairProof(_token) }));
       }
       _send({ type: 'ListAvailableProviders' });
@@ -364,6 +376,22 @@ function _doConnect(target: string) {
         }
         const msg = JSON.parse(text) as DesktopMessage;
         switch (msg.type) {
+          case 'PairOk': {
+            // Per-connection key (audit C1): derive from the desktop's fresh
+            // salt, then flush whatever queued between Pair and PairOk.
+            if (_pairingToken) {
+              _e2eKey = deriveSessionKey(_pairingToken, b64UrlToBytes(msg.salt));
+              _pairingToken = null;
+              const queued = _pendingFrames;
+              _pendingFrames = [];
+              const sock = _ws;
+              for (const frame of queued) {
+                sock?.send(encryptFrame(_e2eKey, _outCounter++, new TextEncoder().encode(frame)));
+              }
+              resetReconnectBackoff();
+            }
+            break;
+          }
           case 'AvailableProviders': np(msg.providers || []); break;
           case 'SessionList': ns((msg.sessions || []).map(toSession)); break;
           case 'ChatToken': onChatToken.emit({ chatSessionId: msg.chat_session_id, token: msg.token }); break;

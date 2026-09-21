@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { AppState, Text, StyleSheet, TouchableOpacity, View } from 'react-native';
+import { AppState, Text, StyleSheet, TouchableOpacity, View, Alert } from 'react-native';
 import { NavigationContainer, DarkTheme, DefaultTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -119,7 +119,15 @@ function AppShell() {
   useEffect(() => {
     return initDeepLinkHandling(
       (url) => {
-        if (url) connect(url);
+        if (!url) return;
+        // A deep link repoints this phone at an arbitrary relay host — a
+        // malicious link could serve fake sessions and harvest approvals.
+        // Confirm before connecting (audit M19).
+        const host = url.split('#')[0].replace(/^ws(s?):\/\//, '');
+        Alert.alert('Connect to relay?', 'Connect this phone to ' + host + '?', [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Connect', onPress: () => connect(url) },
+        ]);
       },
       (token) => {
         if (token) applyPairingToken(token);

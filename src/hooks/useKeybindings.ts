@@ -40,13 +40,16 @@ export function useKeybindings(): void {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Don't fire global shortcuts while typing in inputs/textareas, except
-      // for the palette toggle and pane shortcuts which are expected to work
-      // from inside terminals too (xterm renders into a textarea helper).
+      // for the palette toggle, the vault save and pane shortcuts which are
+      // expected to work from inside terminals/editors too (xterm renders
+      // into a textarea helper).
       const target = e.target as HTMLElement | null;
       const inEditable =
         target &&
         (target.tagName === "INPUT" || target.tagName === "TEXTAREA") &&
         !target.classList.contains("xterm-helper-textarea");
+      const editableExempt = (action: KeybindingAction) =>
+        action === "openPalette" || action === "vaultSaveNote";
 
       const actions: Array<[KeybindingAction, () => void]> = [
         ["openPalette", () => useUiStore.getState().togglePalette()],
@@ -159,10 +162,17 @@ export function useKeybindings(): void {
             vault.setGraphOpen(!vault.graphOpen);
           },
         ],
+        [
+          "vaultSaveNote",
+          () => {
+            if (useUiStore.getState().activeView !== "vault") return;
+            void useVaultStore.getState().saveNow();
+          },
+        ],
       ];
 
       for (const [action, run] of actions) {
-        if (inEditable && action !== "openPalette") continue;
+        if (inEditable && !editableExempt(action)) continue;
         const accel = keybindings[action];
         if (accel && matchesAccelerator(accel, e)) {
           // Once one action matches, stop checking — otherwise a second

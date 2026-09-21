@@ -150,15 +150,18 @@ pub(super) fn handle_kimi_event(
             if let Some(calls) = v.get("tool_calls").and_then(|t| t.as_array()) {
                 for c in calls.iter() {
                     if let Some((name, values)) = tool_meta_kimi(c) {
+                        // Raw arguments (H2): kimi carries them as a JSON
+                        // STRING under function.arguments (same parse as
+                        // tool_meta_kimi). Hooks and the subagent spawn need
+                        // these, NOT the display card in `values`.
+                        let args = match c.get("function").and_then(|f| f.get("arguments")) {
+                            Some(Value::String(s)) => {
+                                serde_json::from_str::<Value>(s).unwrap_or(json!({}))
+                            }
+                            Some(val) => val.clone(),
+                            None => json!({}),
+                        };
                         if is_subagent_tool_name(&name) {
-                            let input = c.get("function").and_then(|f| f.get("arguments"));
-                            let args = match input {
-                                Some(Value::String(s)) => {
-                                    serde_json::from_str::<Value>(s).unwrap_or(json!({}))
-                                }
-                                Some(val) => val.clone(),
-                                None => json!({}),
-                            };
                             emit_subagent_spawn(
                                 tools,
                                 full,
@@ -169,9 +172,7 @@ pub(super) fn handle_kimi_event(
                                 &args,
                             );
                         } else {
-                            let hook_input =
-                                values.first().cloned().unwrap_or(serde_json::json!({}));
-                            crate::hooks::harness_observation(app, sid, &name, &hook_input);
+                            crate::hooks::harness_observation(app, sid, &name, &args);
                             let marker = tools.tool_use(&name, values);
                             full.push_str(&marker);
                             emit_token(app, sid, &marker);
@@ -422,6 +423,10 @@ pub(super) fn handle_opencode_event(
                 // part (`state.output` / `state.error`); attach it for shell tools.
                 let out_text = part.pointer("/state/output").and_then(|o| o.as_str());
                 let err_text = part.pointer("/state/error").and_then(|e| e.as_str());
+                // M10/H2: this per-turn arm had NO post-tool-use hook at all.
+                // Fire it once per call with the RAW arguments (`inp`),
+                // matching the server-path reader's first-sight placement.
+                crate::hooks::harness_observation(app, sid, name, &inp);
                 let marker = tools.tool_use_with_output(name, value, out_text, err_text);
                 full.push_str(&marker);
                 emit_token(app, sid, &marker);
@@ -766,7 +771,9 @@ pub(super) fn handle_commandcode_event(
                             // through them rendered the chat chip but never
                             // emitted chat:subagent-spawn — the Agents pane
                             // stayed empty and the entry never finalized.
-                            crate::hooks::harness_observation(app, sid, name, &value);
+                            // H2: the hook gets the RAW arguments (`inp`),
+                            // not the display card (`value`).
+                            crate::hooks::harness_observation(app, sid, name, &inp);
                             let marker = if is_subagent_tool_name(name) {
                                 let role = inp
                                     .get("subagent_type")

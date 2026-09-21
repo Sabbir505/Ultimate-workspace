@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 
 use super::parse::{
     self, FileMeta, ParsedNote,
@@ -276,7 +276,15 @@ fn index_note(
         Ok(())
     })();
     match result {
-        Ok(()) => conn.execute_batch("COMMIT")?,
+        Ok(()) => {
+            // A failed COMMIT must roll back: leaving the connection inside
+            // an open transaction bricks every later statement on the
+            // shared connection until restart.
+            if let Err(e) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
             return Err(e);
@@ -509,7 +517,14 @@ pub fn remove_from_index(conn: &Connection, rel: &str) -> DbResult<()> {
         Ok(())
     })();
     match r {
-        Ok(()) => conn.execute_batch("COMMIT")?,
+        Ok(()) => {
+            // Same rule as index_note: a failed COMMIT leaves the shared
+            // connection in an open transaction — roll it back.
+            if let Err(e) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
             return Err(e);
@@ -737,36 +752,26 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> DbResult<Vec<Sear
             hits.push(row?);
         }
     } else {
+        // LEFT JOIN pulls title/basename/folder in the same query — no
+        // per-hit lookup loop. A hit missing from vault_files keeps the
+        // same shape the old fill pass left (NULL title, empty base/folder).
         let mut stmt = conn.prepare(
-            "SELECT path, snippet(vault_fts, 2, '⟨', '⟩', '…', 24), '' , '', '' \
-             FROM vault_fts WHERE vault_fts MATCH ?1 ORDER BY rank LIMIT 500",
+            "SELECT f.path, f.title, f.basename, f.folder, \
+             snippet(vault_fts, 2, '⟨', '⟩', '…', 24) \
+             FROM vault_fts LEFT JOIN vault_files f ON f.path = vault_fts.path \
+             WHERE vault_fts MATCH ?1 ORDER BY rank LIMIT 500",
         )?;
         let rows = stmt.query_map(rusqlite::params![match_q], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                None,
-                String::new(),
-                String::new(),
-                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                r.get::<_, String>(4)?,
             ))
         })?;
         for row in rows {
             hits.push(row?);
-        }
-        // Fill title/basename/folder from vault_files.
-        for h in hits.iter_mut() {
-            if let Some((t, b, f)) = conn
-                .query_row(
-                    "SELECT title, basename, folder FROM vault_files WHERE path = ?1",
-                    rusqlite::params![h.0],
-                    |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
-                )
-                .optional()?
-            {
-                h.1 = t;
-                h.2 = b;
-                h.3 = f;
-            }
         }
     }
 
@@ -1067,12 +1072,17 @@ pub fn graph(
             edges.push(row?);
         }
     }
-    // Degrees recompute (edges added after the initial count).
+    // Degrees recompute (edges added after the initial count): one pass over
+    // the edges into a count map, then applied to the nodes — no edges ×
+    // nodes scan.
+    let mut degrees: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     for e in &edges {
-        for n in nodes.iter_mut() {
-            if n.id == e.src || n.id == e.dst {
-                n.degree += 1;
-            }
+        *degrees.entry(e.src.clone()).or_insert(0) += 1;
+        *degrees.entry(e.dst.clone()).or_insert(0) += 1;
+    }
+    for n in nodes.iter_mut() {
+        if let Some(d) = degrees.get(&n.id) {
+            n.degree += d;
         }
     }
     Ok((nodes, edges))

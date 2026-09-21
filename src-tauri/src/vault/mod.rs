@@ -327,6 +327,26 @@ pub fn sweep_stale_tmp(root: &Path) {
     }
 }
 
+/// Never-clobber target for the import/copy paths: `dir/<stem>.<ext>` when
+/// free, otherwise `dir/<stem> - 1.<ext>`, `dir/<stem> - 2.<ext>`, … (an
+/// empty `ext` yields `dir/<stem>`, `dir/<stem> - 1`, …).
+fn next_free_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    let name = |n: u32| match (n, ext.is_empty()) {
+        (0, true) => stem.to_string(),
+        (0, false) => format!("{stem}.{ext}"),
+        (_, true) => format!("{stem} - {n}"),
+        (_, false) => format!("{stem} - {n}.{ext}"),
+    };
+    let mut n = 0;
+    loop {
+        let candidate = dir.join(name(n));
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// Import (copy) an external file into the vault — the insert-image path.
 /// `dest` is a vault-relative path (e.g. `assets/diagram.png`); on collision
 /// a numeric suffix is appended instead of clobbering. Returns the final
@@ -341,20 +361,9 @@ pub fn import_file_core(root: &Path, src: &str, dest: &str) -> Result<String, St
     if dest_abs.exists() {
         // Never clobber: insert " - 1", " - 2", … before the extension.
         let stem = dest_abs.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let ext = dest_abs.extension().map(|s| s.to_string_lossy().into_owned());
+        let ext = dest_abs.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let dir = dest_abs.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| root.to_path_buf());
-        let mut n = 1;
-        loop {
-            let name = match &ext {
-                Some(e) => format!("{stem} - {n}.{e}"),
-                None => format!("{stem} - {n}"),
-            };
-            dest_abs = dir.join(name);
-            if !dest_abs.exists() {
-                break;
-            }
-            n += 1;
-        }
+        dest_abs = next_free_path(&dir, &stem, &ext);
     }
     ensure_parents(root, &dest_abs)?;
     std::fs::copy(src, &dest_abs).map_err(|e| format!("import failed: {e}"))?;
@@ -382,23 +391,13 @@ pub fn write_binary_core(root: &Path, rel: &str, bytes: &[u8]) -> Result<String,
             .unwrap_or_default();
         let ext = abs
             .extension()
-            .map(|s| s.to_string_lossy().into_owned());
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let dir = abs
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| root.to_path_buf());
-        let mut n = 1;
-        loop {
-            let name = match &ext {
-                Some(e) => format!("{stem} - {n}.{e}"),
-                None => format!("{stem} - {n}"),
-            };
-            abs = dir.join(name);
-            if !abs.exists() {
-                break;
-            }
-            n += 1;
-        }
+        abs = next_free_path(&dir, &stem, &ext);
     }
     ensure_parents(root, &abs)?;
     std::fs::write(&abs, bytes).map_err(|e| format!("write failed: {e}"))?;
@@ -772,17 +771,19 @@ pub fn install_watcher(app: &AppHandle) {
         return;
     };
     let state = app.state::<VaultState>();
-    {
-        // Rebinding the SAME root is a no-op; a DIFFERENT root drops the old
-        // watcher (kernel handle + debounce thread) before the new install.
-        let existing = state.watcher.lock().take();
-        if let Some((watched, w)) = existing {
-            if watched == root {
-                *state.watcher.lock() = Some((watched, w));
-                return;
-            }
-            // else: `w` drops here → old watcher + thread exit.
+    // Hold the watcher-state lock across the WHOLE install: the take/compare/
+    // restore below must be atomic with the final assignment, or two
+    // concurrent installs can both build watchers and the second orphans
+    // the first (a watcher nobody drops, leaking its thread).
+    let mut watcher_slot = state.watcher.lock();
+    // Rebinding the SAME root is a no-op; a DIFFERENT root drops the old
+    // watcher (kernel handle + debounce thread) before the new install.
+    if let Some((watched, w)) = watcher_slot.take() {
+        if watched == root {
+            *watcher_slot = Some((watched, w));
+            return;
         }
+        // else: `w` drops here → old watcher + thread exit.
     }
     let (tx, rx) = mpsc::channel::<Vec<PathBuf>>();
     let mut watcher: RecommendedWatcher = match notify::recommended_watcher(
@@ -832,20 +833,19 @@ pub fn install_watcher(app: &AppHandle) {
             }
         })
         .ok();
-    // Keep the kernel handle alive.
-    *state.watcher.lock() = Some((root, watcher));
+    // Keep the kernel handle alive (still under the held lock — same
+    // critical section as the take/compare/restore above).
+    *watcher_slot = Some((root, watcher));
 }
 
 /// Reindex the changed paths (md files only) and emit `vault:changed`.
 fn reindex_changed(app: &AppHandle, root: &Path, paths: &[PathBuf]) {
-    {
-        // The vault may have been unbound or rebound while this debounced
-        // batch sat queued — never write index rows for a root that is no
-        // longer the watched vault.
-        let state = app.state::<VaultState>();
-        if state.root.lock().as_deref() != Some(root) {
-            return;
-        }
+    // The vault may have been unbound or rebound while this debounced
+    // batch sat queued (or while it runs) — never write index rows for a
+    // root that is no longer the watched vault.
+    let root_is_watched = || app.state::<VaultState>().root.lock().as_deref() == Some(root);
+    if !root_is_watched() {
+        return;
     }
     let mut rels: Vec<String> = Vec::new();
     for p in paths {
@@ -865,6 +865,11 @@ fn reindex_changed(app: &AppHandle, root: &Path, paths: &[PathBuf]) {
     }
     let db = app.state::<crate::DbState>();
     for rel in &rels {
+        // Re-check per file: an unbind/rebind mid-batch makes the remaining
+        // paths stale — bail instead of writing rows for the wrong vault.
+        if !root_is_watched() {
+            return;
+        }
         if rel.to_ascii_lowercase().ends_with(".md") {
             // File IO outside the lock, SQL inside (reindex_file_locked).
             let _ = index::reindex_file_locked(&db.0, root, rel);
@@ -1090,13 +1095,16 @@ pub async fn vault_search(app: AppHandle, query: String, limit: Option<usize>) -
 pub async fn vault_note_meta(app: AppHandle, path: String) -> Result<index::NoteMeta, String> {
     vault_blocking(app, move |app| {
         let root = current_root(app)?;
+        let rel = normalize_rel(&path);
+        // Same traversal gate every sibling read goes through —
+        // `normalize_rel` alone does not reject `..`/absolute/dot paths.
+        let abs = safe_join(&root, &rel)?;
         let db = app.state::<DbState>().inner().0.clone();
         let conn = db.lock();
-        let rel = normalize_rel(&path);
         let mut meta = index::note_meta(&conn, &rel).map_err(|e| e.to_string())?;
         // Best-effort filesystem timestamps (unix epoch ms). `created()` is
         // Windows-only in practice; on error/unsupported both stay None.
-        if let Ok(md) = std::fs::metadata(root.join(&rel)) {
+        if let Ok(md) = std::fs::metadata(&abs) {
             let to_unix_ms =
                 |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis() as u64);
             meta.modified_ms = md.modified().ok().and_then(to_unix_ms);

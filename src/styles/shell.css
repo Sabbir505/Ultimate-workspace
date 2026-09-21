@@ -522,7 +522,11 @@
    therefore NEVER moves between states. */
 .git-sidebar {
   position: absolute;
-  top: 0;
+  /* Clear the overlay title bar the same way the transcript's first row does
+     (.chat-messages top padding): the bar floats over this container's top
+     edge, so a bare `top: 0` slid the chip's git icon under the window
+     controls. Same offset convention as the floating pane-close ✕. */
+  top: calc(var(--toolbar-h, 37px) + 6px);
   right: 12px;
   width: 260px;
   max-height: 600px;
@@ -544,7 +548,6 @@
   box-shadow: var(--glass-rim), var(--glass-drop);
   overflow: hidden;
   animation: git-sidebar-slide 0.2s var(--ease);
-  margin-top: 6px;
   transition: width 0.28s var(--ease);
 }
 /* Light theme: a touch more body so text keeps contrast on bright backdrops
@@ -573,6 +576,15 @@
 }
 .git-sidebar.git-sidebar-collapsed .git-sidebar-header {
   height: 42px;
+}
+/* Re-center the git icon in the 42px chip. The expanded-panel inset is tuned
+   for the 48px header / the chip's own padding, so keeping it here left the
+   14px glyph 3px off on BOTH axes (measured: 11px left / 17px right, 17px
+   top / 11px bottom). Button 26×18 = 14px glyph + 6px/2px padding, so top
+   12px / right 8px land a 14px gutter on every side. */
+.git-sidebar.git-sidebar-collapsed .git-sidebar-collapse-btn {
+  top: 12px;
+  right: 8px;
 }
 /* Collapsed WITH live status (running goal / in-progress plan step / changes):
    the chip widens into a pill so the status line fits beside the git icon.
@@ -759,9 +771,12 @@ button.git-sidebar-header-left:focus-visible {
    top-right corner (the shell is position:absolute, so it is the containing
    block — the header deliberately has no `position`). The shell's right
    edge never moves (right: 12px), so the icon sits at the same on-screen
-   spot expanded (panel) and collapsed (48×48 chip): top 15px centers the
-   18px-tall button in the 48px header, right 11px centers it in the 48px
-   chip. Always visible, always clickable, zero travel. */
+   spot expanded (panel) and collapsed (chip). THIS rule is the expanded
+   panel's geometry: the 48px header centers the 14px glyph (top 15px + the
+   button's 2px padding = 17px above and below), and right 11px insets it
+   17px from the shell's right edge like a header action. The 42px collapsed
+   chip re-insets the button (see .git-sidebar-collapsed below) so the glyph
+   keeps a 14px gutter on every side instead of inheriting these offsets. */
 .git-sidebar-collapse-btn {
   position: absolute;
   top: 15px;

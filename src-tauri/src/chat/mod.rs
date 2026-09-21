@@ -469,21 +469,21 @@ impl ChatManager {
         let sid = chat_session_id.clone();
         let pcaps = prompts::provider_capabilities(provider_id.clone(), &chat_req.model);
         let local_model = matches!(provider_id, ChatProviderId::LocalGguf);
-        // Local-docs search tool is exposed only when (a) the embedding
-        // sidecar is already running for this turn, AND (b) at least one
-        // enabled corpus has chunks indexed. Both are cheap DB/registry queries
-        // that flip the `search_docs` schema in. Computed before the spawn so
-        // the registry's status snapshot is taken under the same turn setup.
+        // Local-docs search tool is exposed when at least one enabled corpus
+        // has chunks indexed. Hybrid search answers keyword-only with the
+        // embedding sidecar down, so the sidecar no longer gates the TOOL —
+        // only the auto-retrieval below (which needs it to embed the query).
+        // Cheap DB query that flips the `search_docs` schema in; computed
+        // before the spawn so the registry's status snapshot is taken under
+        // the same turn setup.
         let local_docs = {
-            let sidecar_up = app
-                .try_state::<local_models::LocalModelState>()
-                .is_some_and(|s| s.0.embedding_status().is_some());
             let conn = db.lock();
-            sidecar_up && db::any_searchable_corpus(&conn)
+            db::any_searchable_corpus(&conn)
         };
         // Keep the embedding sidecar URL for the turn — the auto-retrieval
-        // below and the `search_docs` tool both need it. Snapshot under the
-        // same registry lock as the capability flag so both see one state.
+        // below needs it. The `search_docs` tool resolves the sidecar itself
+        // at call time and works without it. Snapshot under the same registry
+        // lock as the capability flag so both see one state.
         let embedding_base = if local_docs {
             app.try_state::<local_models::LocalModelState>()
                 .and_then(|s| s.0.embedding_status())
@@ -1361,6 +1361,10 @@ impl ChatManager {
                             // keeps these two keys out of the event.
                             cache_creation_input_tokens: None,
                             cache_read_input_tokens: None,
+                            // Interactive built-in chat turns are
+                            // user-initiated — no automation tag, so the
+                            // generic turn-complete toast fires as before.
+                            source: None,
                         },
                     );
 
@@ -1561,17 +1565,13 @@ pub(crate) async fn compute_docs_retrieval(
     query: Option<String>,
     pinned_ids: &[String],
 ) -> Vec<String> {
+    // Embed when possible; a failed/absent embedding degrades to the keyword
+    // leg instead of dropping retrieval entirely (hybrid handles it).
     let query_vec = match &query {
-        Some(q) => {
-            let vecs = match local_models::embed_texts(base_url, &[q.clone()]).await {
-                Ok(v) => v,
-                Err(_) => return Vec::new(),
-            };
-            match vecs.into_iter().next() {
-                Some(v) => Some(v),
-                None => None,
-            }
-        }
+        Some(q) => local_models::embed_texts(base_url, &[q.clone()])
+            .await
+            .ok()
+            .and_then(|v| v.into_iter().next()),
         None => None,
     };
 
@@ -1579,33 +1579,49 @@ pub(crate) async fn compute_docs_retrieval(
     // guard held across an await would make the spawn future non-Send. The Arc
     // is Send+Sync (Connection is Send), so it clones cleanly into the closure.
     let db = Arc::clone(db);
-    let _base_url_owned = base_url.to_string();
+    let query_owned = query;
     let query_vec_owned = query_vec;
     let pinned_ids_owned: Vec<String> = pinned_ids.iter().cloned().collect();
+    // Each leg is cut at 50 before fusion — the same width the future
+    // reranker stage would consume.
+    const LEG_LIMIT: usize = 50;
     let hits = tokio::task::spawn_blocking(move || {
         let conn = db.lock();
-        let mut results: Vec<(String, String, f32)> = Vec::new();
+        // path, content, score (fused RRF), heading
+        let mut results: Vec<(String, String, f32, String)> = Vec::new();
+        let q = query_owned.as_deref().unwrap_or("");
 
         // Pinned: always include top 2 hits per pinned corpus.
         for corpus_id in &pinned_ids_owned {
-            if let Ok(list) = crate::db::search_chunks_in_corpus(
+            if let Ok(list) = crate::db::search_chunks_hybrid(
                 &conn,
-                query_vec_owned.as_deref().unwrap_or(&[]),
-                corpus_id,
+                q,
+                query_vec_owned.as_deref(),
+                Some(corpus_id),
+                LEG_LIMIT,
                 2,
             ) {
                 for h in list {
-                    results.push((h.path, h.content, h.score));
+                    results.push((h.path, h.content, h.score, h.heading));
                 }
             }
         }
 
         // Auto-matched: top 2 from all corpora (deduplicated against pinned).
-        if let Some(ref qv) = query_vec_owned {
-            if let Ok(auto) = crate::db::search_chunks(&conn, qv, 2) {
+        // Any non-empty query runs it — the keyword leg answers even when the
+        // embedding is missing.
+        if !q.is_empty() {
+            if let Ok(auto) = crate::db::search_chunks_hybrid(
+                &conn,
+                q,
+                query_vec_owned.as_deref(),
+                None,
+                LEG_LIMIT,
+                2,
+            ) {
                 for h in auto {
-                    if !results.iter().any(|(p, _, _)| p == &h.path) {
-                        results.push((h.path, h.content, h.score));
+                    if !results.iter().any(|(p, _, _, _)| p == &h.path) {
+                        results.push((h.path, h.content, h.score, h.heading));
                     }
                 }
             }
@@ -1625,7 +1641,7 @@ pub(crate) async fn compute_docs_retrieval(
     let body: Vec<String> = hits
         .into_iter()
         .take(MAX_HITS)
-        .map(|(path, content, score)| {
+        .map(|(path, content, score, heading)| {
             // Char-safe cap: a raw byte slice panics when MAX_CHUNK lands
             // mid-codepoint (any CJK/emoji corpus) — and this runs inside the
             // spawned turn task, where a panic kills the turn silently (B-1).
@@ -1635,7 +1651,14 @@ pub(crate) async fn compute_docs_retrieval(
             } else {
                 text
             };
-            format!("[{} · score={:.2}]\n{}", path, score, text)
+            // Heading enrichment: `path · heading` first line when the chunk
+            // carries a markdown heading trail.
+            let locator = if heading.is_empty() {
+                path
+            } else {
+                format!("{path} · {heading}")
+            };
+            format!("[{} · score={:.2}]\n{}", locator, score, text)
         })
         .collect();
 
@@ -2255,8 +2278,11 @@ mod tests {
         // +0.5k for `get_automation`: the full-prompt read path —
         // list_automations truncates to a one-liner, and update_automation
         // overwrites whole fields, so an edit turn needs the verbatim text.
+        // +0.5k for automation trigger engines beyond cron (create/update
+        // automation trigger_type+trigger params): webhook / file-watch /
+        // git firing — without them the model can only schedule cron rows.
         assert!(
-            total < 58_500,
+            total < 59_500,
             "fresh-turn baseline over fixed-cost budget: {total} chars"
         );
     }

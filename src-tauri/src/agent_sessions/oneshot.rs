@@ -182,8 +182,7 @@ pub fn run_one_shot(
         .map(|(dir, broad)| DirWatch::new(dir, broad))
         .collect();
     no_console_window(&mut cmd);
-    let mut child = cmd
-        .spawn()
+    let mut child = spawn_harness_child(&mut cmd)
         .map_err(|e| format!("failed to spawn {} CLI: {e}", spec.program))?;
     if prompt_via_stdin {
         // Write the prompt and close the pipe — EOF tells the CLI the prompt
@@ -226,14 +225,7 @@ pub fn run_one_shot(
         let mut guard = child.lock().map_err(|e| e.to_string())?;
         guard.stderr.take().ok_or("failed to capture CLI stderr")?
     };
-    let (etx, erx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let mut buf = String::new();
-        let mut stderr = stderr;
-        use std::io::Read as _;
-        let _ = stderr.read_to_string(&mut buf);
-        let _ = etx.send(buf);
-    });
+    let erx = drain_stderr(stderr);
 
     let db2 = DbState(Arc::clone(db));
     let sid2 = chat_session_id.to_string();
@@ -281,6 +273,10 @@ pub fn run_one_shot(
                 &generation,
                 1,
                 None,
+                // Tag the turn's chat:done so the frontend skips its generic
+                // turn-complete toast — the automations backend already sends
+                // its own branded run-finished notification for this run.
+                Some("automation"),
             );
         } else {
             let cell = Arc::new(Mutex::new(None));
@@ -297,6 +293,7 @@ pub fn run_one_shot(
                 &generation,
                 1,
                 None,
+                Some("automation"),
             );
         }
     });
@@ -533,8 +530,7 @@ pub(super) fn harness_oneshot_blocking(
         cmd.current_dir(dir);
     }
     no_console_window(&mut cmd);
-    let mut child = cmd
-        .spawn()
+    let mut child = spawn_harness_child(&mut cmd)
         .map_err(|e| format!("failed to spawn {harness_id} CLI: {e} (is it installed?)"))?;
 
     if prompt_via_stdin {

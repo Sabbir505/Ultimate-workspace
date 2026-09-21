@@ -119,9 +119,11 @@ pub(super) fn send_opencode_turn(
         .ok_or_else(|| "opencode server url missing".to_string())?;
 
     // Resolve or create the server-side session id INSIDE the turn thread —
-    // it (and every other opencode HTTP call) must never run inline here:
-    // this function executes on the tokio runtime (async command), where a
-    // nested block_on panics and would poison the sessions lock.
+    // every opencode HTTP call below block_on()s, which is only safe because
+    // send_agent_chat_message runs send() inside spawn_blocking
+    // (commands/agent_cmds.rs): this thread is a blocking-pool worker, not a
+    // runtime worker. Do NOT move these calls back inline into the async
+    // command — a nested block_on on the tokio runtime panics.
     let model_body = split_opencode_model(&entry.model);
     // Harness-native plan mode rides the message body's `agent` field
     // (verified against the server OpenAPI spec). Read per turn so a mode
@@ -265,6 +267,7 @@ pub(super) fn send_opencode_turn(
                     &mut watches,
                     started_at,
                     actual.as_deref(),
+                    None,
                 );
                 drop(full);
                 if let Some(questions) = ask {
@@ -398,21 +401,21 @@ pub(super) fn spawn_opencode_server(
         cmd.current_dir(dir);
     }
     no_console_window(&mut cmd);
-    let mut child = cmd
-        .spawn()
+    let mut child = spawn_harness_child(&mut cmd)
         .map_err(|e| format!("failed to spawn opencode serve: {e}"))?;
     // stderr drain (diagnosis): the tail is surfaced on the failure paths
     // below; on a healthy server the thread simply lives until it exits.
-    let stderr = child.stderr.take();
-    let (etx, erx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let mut buf = String::new();
-        if let Some(mut stderr) = stderr {
-            use std::io::Read as _;
-            let _ = stderr.read_to_string(&mut buf);
+    let erx = match child.stderr.take() {
+        Some(stderr) => drain_stderr(stderr),
+        // Unreachable — stderr is piped above — but an already-closed
+        // channel still yields an empty tail on the recv paths instead of
+        // a hang.
+        None => {
+            let (etx, erx) = std::sync::mpsc::channel::<String>();
+            drop(etx);
+            erx
         }
-        let _ = etx.send(buf);
-    });
+    };
 
     if !opencode_wait_ready(&base_url, Duration::from_secs(20)) {
         kill_child_tree(&mut child);
@@ -446,7 +449,10 @@ pub(super) fn spawn_opencode_server(
     // while the event stream was gone (which used to persist an empty reply
     // with no error).
     reader_alive.store(true, Ordering::SeqCst);
-    std::thread::Builder::new()
+    // The closure owns the flag from here on; the spawn-failure branch below
+    // needs its own handle to lower it again.
+    let reader_flag_on_err = reader_alive.clone();
+    if let Err(e) = std::thread::Builder::new()
         .name(format!("oc-sse-{port}"))
         .spawn(move || {
             read_opencode_server_events(
@@ -460,7 +466,15 @@ pub(super) fn spawn_opencode_server(
             );
             reader_alive.store(false, Ordering::SeqCst);
         })
-        .map_err(|e| format!("failed to spawn opencode SSE reader: {e}"))?;
+    {
+        // L11: a failed reader spawn must not leak the already-running
+        // server child (the old `?` returned it un-killed, holding the
+        // port). The reader never starts, so the liveness flag goes back
+        // down too — the turn path keys its dead-stream detection on it.
+        kill_child_tree(&mut child);
+        reader_flag_on_err.store(false, Ordering::SeqCst);
+        return Err(format!("failed to spawn opencode SSE reader: {e}"));
+    }
 
     Ok((child, base_url))
 }
@@ -1145,6 +1159,18 @@ pub(super) fn emit_opencode_tool(
         // A tool call ends any open thinking block (keeps markers outside it).
         close_opencode_think(app, sid, think_cell, full_cell);
         let value = tool_meta_generic(name, &inp);
+        // M10/H2: the post-tool-use hook fires EXACTLY ONCE per call — here,
+        // at FIRST sight of the part, with the RAW arguments (`inp`). Parts
+        // frequently arrive already `status:"completed"`, so the old
+        // not-done-only placement skipped the hook for most calls, and it
+        // passed the display card (`value`) whose {"kind":…,"title":…} shape
+        // broke ${tool_input.…} substitutions in user hooks. The `seen`
+        // state machine guarantees single-fire: the completion arm below
+        // (seen == 1) never re-fires. Subagent spawns stay unobserved, like
+        // the other harness readers.
+        if !is_subagent_tool_name(name) {
+            crate::hooks::harness_observation(app, sid, name, &inp);
+        }
         // Subagent dispatch must be checked BEFORE the done short-circuit: a
         // part can arrive already finished (status completed on first sight),
         // and routing it to tool_use_with_output emitted the chat chip but
@@ -1174,7 +1200,6 @@ pub(super) fn emit_opencode_tool(
             let err = state.get("error").and_then(|e| e.as_str());
             tools.tool_use_with_output(name, value, out, err)
         } else {
-            crate::hooks::harness_observation(app, sid, name, &value);
             tools.tool_use(name, vec![value])
         };
         {

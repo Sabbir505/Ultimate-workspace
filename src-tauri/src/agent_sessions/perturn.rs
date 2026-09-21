@@ -363,8 +363,7 @@ End your reply with the plan and wait for the user's approval.]"
         })
     };
     no_console_window(&mut cmd);
-    let mut child = cmd
-        .spawn()
+    let mut child = spawn_harness_child(&mut cmd)
         .map_err(|e| format!("failed to spawn {} CLI: {e}", spec.program))?;
 
     // Stdin transport (pi/omp/commandcode): write the prompt and close the
@@ -395,14 +394,7 @@ End your reply with the plan and wait for the user's approval.]"
     // turn produced no output (the pipe closes at process exit, so the recv
     // below never waits long on that path).
     let stderr = child.stderr.take().ok_or("failed to capture CLI stderr")?;
-    let (etx, erx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let mut buf = String::new();
-        let mut stderr = stderr;
-        use std::io::Read as _;
-        let _ = stderr.read_to_string(&mut buf);
-        let _ = etx.send(buf);
-    });
+    let erx = drain_stderr(stderr);
     entry.turn_in_flight.store(true, Ordering::SeqCst);
     entry.child = Some(child);
 
@@ -457,6 +449,7 @@ End your reply with the plan and wait for the user's approval.]"
             &proc_generation,
             my_generation,
             Some(erx),
+            None,
         );
     });
     Ok(())
@@ -480,6 +473,9 @@ pub(super) fn read_per_turn_stream(
     proc_generation: &AtomicU64,
     my_generation: u64,
     stderr_tail: Option<std::sync::mpsc::Receiver<String>>,
+    // `Some("automation")` for one-shot scheduler runs — rides chat:done so
+    // the frontend can skip its generic turn-complete toast. None otherwise.
+    source: Option<&str>,
 ) {
     let mut full = String::new();
     // Crash-flush accumulator (see PartialFlush): keeps a seconds-stale
@@ -711,6 +707,7 @@ pub(super) fn read_per_turn_stream(
             &mut watches,
             started_at,
             None,
+            source,
         );
     }
     // The card goes out only after chat:done — the turn is complete; the

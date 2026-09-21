@@ -685,6 +685,13 @@ pub struct ChatDonePayload {
     /// claude prompt. `input_tokens` stays the uncached slice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<i64>,
+    /// `"automation"` when the turn was fired by the automations scheduler
+    /// (one-shot harness run). The frontend suppresses its generic
+    /// turn-complete toast for these — the backend already sends the
+    /// automation-branded `automation:run-finished` notification. Absent
+    /// (key omitted) for user-initiated turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// End-of-turn citation-integrity verdict for a research report (`chat:citation-report`

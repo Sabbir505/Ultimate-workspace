@@ -100,6 +100,91 @@ pub(crate) fn kill_child_tree(child: &mut Child) {
     drop(child.stdin.take());
 }
 
+/// Assign a freshly-spawned harness child to a Windows Job Object with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — the kernel-level backstop for
+/// `kill_all`'s exit sweep. The sweep only runs when OUR exit path runs; if
+/// relay.exe dies any other way (crash, taskkill on relay itself, power
+/// loss, a wedged shutdown), the `cmd.exe /C`-wrapped CLI trees survived as
+/// orphans. With the job assigned, the OS closes our job handle at process
+/// death — and closing the last job handle IS the kill, for the whole tree.
+///
+/// Returns the raw job handle so tests can close it and observe the kill;
+/// the spawn path deliberately never closes it (see `spawn_harness_child`).
+/// `None` = assignment failed: usually the child already exited (lost the
+/// race between spawn and assign — ERROR_ACCESS_DENIED) or it inherited an
+/// unbreakable job of its own. Both are non-fatal; the normal exit sweep
+/// still covers them.
+#[cfg(windows)]
+pub(super) fn assign_kill_on_close_job(
+    child: &Child,
+) -> Option<windows_sys::Win32::Foundation::HANDLE> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    unsafe {
+        let job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) == 0
+        {
+            CloseHandle(job);
+            return None;
+        }
+        if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
+            CloseHandle(job);
+            return None;
+        }
+        Some(job)
+    }
+}
+
+#[cfg(not(windows))]
+pub(super) fn assign_kill_on_close_job(_child: &Child) -> Option<()> {
+    None
+}
+
+/// Spawn a harness CLI process AND fold it into the crash-proof job-object
+/// net (Windows). Every `entry.child` spawn goes through this so no CLI
+/// tree can outlive relay.exe by any death path. The job handle is
+/// intentionally left open for the child's lifetime — closing it early
+/// would kill the turn; the OS reaps it (and the tree with it) whenever
+/// relay.exe exits, cleanly or not.
+pub(super) fn spawn_harness_child(cmd: &mut Command) -> std::io::Result<Child> {
+    let child = cmd.spawn()?;
+    let _job = assign_kill_on_close_job(&child);
+    Ok(child)
+}
+
+/// Shared stderr-drain pump (L15): reads a spawned CLI's stderr to EOF on its
+/// own thread and hands the collected text to the caller through the channel.
+/// Consumers keep the text in the receiver and only `recv_timeout` it on the
+/// error paths — the pipe closes at process exit, so a recv there never waits
+/// long. One helper instead of four copy-pasted spawn sites (claude /
+/// opencode server / per-turn CLIs / one-shot).
+pub(super) fn drain_stderr(stderr: std::process::ChildStderr) -> std::sync::mpsc::Receiver<String> {
+    let (etx, erx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let mut stderr = stderr;
+        use std::io::Read as _;
+        let _ = stderr.read_to_string(&mut buf);
+        let _ = etx.send(buf);
+    });
+    erx
+}
+
 /// RAII guard for a reader thread's liveness (B-4/B-5): drops
 /// `reader_alive` to `false` on EVERY exit path from the reader — EOF, an
 /// early `return` (mid-handshake failures), or a panic unwinding through
@@ -248,4 +333,89 @@ pub(super) fn drop_stale_cli_id_on_cwd_change(
     let conn = db.0.lock();
     let _ = crate::db::delete_setting(&conn, &cli_session_key(harness, sid));
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The drain pump must deliver everything the child wrote to stderr once
+    /// the pipe closes at process exit (the contract every harness spawn
+    /// relies on for its error-path `recv_timeout` diagnosis tail).
+    #[test]
+    fn drain_stderr_collects_child_stderr_to_eof() {
+        let mut cmd = Command::new(if cfg!(windows) { "cmd.exe" } else { "sh" });
+        cmd.arg(if cfg!(windows) { "/C" } else { "-c" })
+            .arg("echo boom 1>&2")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        no_console_window(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn probe process");
+        let stderr = child.stderr.take().expect("stderr piped");
+        let erx = drain_stderr(stderr);
+        let _ = child.wait();
+        let tail = erx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stderr tail delivered");
+        assert!(tail.contains("boom"), "stderr tail: {tail}");
+    }
+
+    /// THE crash-proof contract: closing the job handle kills the assigned
+    /// tree. relay.exe dying closes every handle it holds — so a job-assigned
+    /// harness CLI can never outlive the app, even on a crash or taskkill
+    /// where the exit-time `kill_all` sweep never runs. Probe with a ~8s
+    /// sleeper and assert it dies well before its natural exit once the
+    /// handle closes.
+    #[test]
+    #[cfg(windows)]
+    fn closing_the_job_handle_kills_the_assigned_tree() {
+        use std::time::Instant;
+
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        let mut cmd = Command::new("cmd.exe");
+        cmd.args(["/C", "ping -n 8 127.0.0.1 >nul"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        no_console_window(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn sleeper");
+
+        let job = assign_kill_on_close_job(&child).expect("job assignment on a live child");
+        // Still running while the handle is open (nothing else kills it).
+        assert!(matches!(child.try_wait(), Ok(None)), "sleeper died early");
+
+        // The spawn path never closes this handle — the TEST does, simulating
+        // relay.exe's death. The kernel then kills the whole job.
+        unsafe { CloseHandle(job) };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break, // killed by the job-close, ~instantly
+                Ok(None) => {
+                    assert!(Instant::now() < deadline, "sleeper outlived the closed job");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => panic!("try_wait failed: {e}"),
+            }
+        }
+    }
+
+    /// Idempotence / dead-child tolerance: assigning an already-exited child
+    /// must return None (ACCESS_DENIED on the dead handle) without panicking
+    /// or leaking a half-configured job into the caller's control.
+    #[test]
+    #[cfg(windows)]
+    fn assign_job_on_exited_child_is_none() {
+        let mut cmd = Command::new("cmd.exe");
+        cmd.args(["/C", "exit 0"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        no_console_window(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn exiter");
+        let _ = child.wait(); // fully reaped — no longer assignable
+        // Either None (expected) or a race-tolerant Some on a recycled
+        // assignment is acceptable; the contract is just "must not panic".
+        let _ = assign_kill_on_close_job(&child);
+    }
 }

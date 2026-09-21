@@ -149,8 +149,7 @@ pub(super) fn spawn_claude(
         .map(|(dir, broad)| DirWatch::new(dir, broad))
         .collect();
     no_console_window(&mut cmd);
-    let mut child = cmd
-        .spawn()
+    let mut child = spawn_harness_child(&mut cmd)
         .map_err(|e| format!("failed to spawn claude CLI: {e}"))?;
     let stdout = child
         .stdout
@@ -162,14 +161,7 @@ pub(super) fn spawn_claude(
         .stderr
         .take()
         .ok_or("failed to capture claude stderr")?;
-    let (etx, erx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let mut buf = String::new();
-        let mut stderr = stderr;
-        use std::io::Read as _;
-        let _ = stderr.read_to_string(&mut buf);
-        let _ = etx.send(buf);
-    });
+    let erx = drain_stderr(stderr);
     // Take stdin and share it so the reader thread can write user input —
     // turn prompts AND, for gated modes, control responses that answer the
     // CLI's can_use_tool permission prompts.
@@ -231,6 +223,7 @@ pub(super) fn spawn_claude(
             &generation_cell2,
             generation,
             Some(erx),
+            None,
         );
     });
     // The mode label the flags above were built from — the caller records it
@@ -277,18 +270,30 @@ pub(super) fn can_use_tool_response(request_id: &str, approved: bool, input: &Va
             },
         })
     } else {
-        json!({
-            "type": "control_response",
-            "response": {
-                "subtype": "success",
-                "request_id": request_id,
-                "response": {
-                    "behavior": "deny",
-                    "message": "The user denied this action in Relay. Do not retry it unless the user explicitly asks.",
-                },
-            },
-        })
+        can_use_tool_response_deny_with(
+            request_id,
+            "The user denied this action in Relay. Do not retry it unless the user explicitly asks.",
+        )
     }
+}
+
+/// Deny variant of [`can_use_tool_response`] carrying a CUSTOM message (L13):
+/// a hook that denied the call supplies its reason, and the canned text used
+/// to discard it — the model then retried blind instead of heeding the hook.
+/// The reason is truncated so an oversized hook output can't blow up the
+/// control line.
+pub(super) fn can_use_tool_response_deny_with(request_id: &str, message: &str) -> Value {
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {
+                "behavior": "deny",
+                "message": crate::util::truncate_chars(message, 300),
+            },
+        },
+    })
 }
 
 /// Answer one Claude Code `can_use_tool` control request. Registers a
@@ -357,8 +362,9 @@ pub(super) fn handle_can_use_tool(
             mode,
         )) {
             crate::hooks::HarnessGateVerdict::Deny { reason } => {
-                let _ = reason; // the CLI's deny response carries its own message
-                let response = can_use_tool_response(&request_id, false, &input);
+                // L13: forward the hook's own reason as the deny message —
+                // the canned text left the model guessing why it was blocked.
+                let response = can_use_tool_response_deny_with(&request_id, &reason);
                 if let Ok(mut guard) = shared_stdin.lock() {
                     if let Some(stdin) = guard.as_mut() {
                         let _ = stdin
@@ -378,12 +384,17 @@ pub(super) fn handle_can_use_tool(
     };
     // A hook's rewritten input becomes the CLI's updatedInput on allow.
     let input = hook_input;
-    // `hook_ask` needs no branch here: in card-capable postures the flow
-    // below already shows the card for BOTH ask and proceed, and in
+    // `hook_ask` needs no behavior branch here: in card-capable postures the
+    // flow below already shows the card for BOTH ask and proceed, and in
     // full_auto the no-cards contract degrades an ask to proceed (deny
-    // hooks — the actual guardrail — already answered above).
-    let _ = hook_ask;
+    // hooks — the actual guardrail — already answered above). The dropped
+    // ask is only reported so the Hooks panel shows why no card appeared.
     if full_auto {
+        if hook_ask {
+            if let Some(app) = app {
+                crate::hooks::emit_ask_dropped(app, sid, &tool);
+            }
+        }
         let line = can_use_tool_response(&request_id, true, &input).to_string();
         if let Ok(mut guard) = shared_stdin.lock() {
             if let Some(stdin) = guard.as_mut() {
@@ -582,6 +593,9 @@ pub(super) fn read_claude_stream(
     proc_generation: &AtomicU64,
     my_generation: u64,
     stderr_tail: Option<std::sync::mpsc::Receiver<String>>,
+    // `Some("automation")` for one-shot scheduler runs — rides chat:done so
+    // the frontend can skip its generic turn-complete toast. None otherwise.
+    source: Option<&str>,
 ) {
     let mut full = String::new();
     // Crash-flush accumulator: keeps a seconds-stale snapshot of the live
@@ -833,8 +847,12 @@ pub(super) fn read_claude_stream(
                             } else {
                                 // Post-hook observation of the CLI's own tool
                                 // call (fire-and-forget; never delays the reader).
+                                // H2: pass the block's RAW `input` — `values`
+                                // holds the UI display card ({"kind":…,
+                                // "title":…}), which would feed user hooks'
+                                // ${tool_input.path} substitutions garbage.
                                 let hook_input =
-                                    values.first().cloned().unwrap_or(serde_json::json!({}));
+                                    b.get("input").cloned().unwrap_or(serde_json::json!({}));
                                 crate::hooks::harness_observation(app, sid, &name, &hook_input);
                                 let marker = tools.tool_use(&name, values);
                                 full.push_str(&marker);
@@ -979,6 +997,7 @@ pub(super) fn read_claude_stream(
                         &mut watches,
                         turn_started,
                         actual_model.as_deref(),
+                        source,
                     );
                     // finish_turn unregistered the turn's accumulator — drop
                     // the local handle so the next turn's message_start

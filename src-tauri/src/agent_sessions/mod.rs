@@ -536,7 +536,23 @@ impl AgentSessionManager {
         // to run first, killing the in-flight turn's process tree and only
         // then rejecting the send.)
         if entry.turn_in_flight.load(Ordering::SeqCst) {
-            return Err("a turn is already running for this chat".to_string());
+            // Send-time self-heal: the flag is supposed to be cleared by the
+            // turn's reader (generation-guarded), but a reader that died
+            // without reaching its cleanup tail leaves it stuck — the turn
+            // LOOKS finished (its output rendered) yet every later send
+            // bounces off "a turn is already running" until the next webview
+            // reload (reconcile_wedged_turns only runs at boot). Only heal
+            // when the turn is verifiably dead: BOTH readers gone and the
+            // child process exited (or no child at all). A live reader or a
+            // live child still rejects — a real turn keeps an honest guard.
+            if turn_actually_running(&mut entry) {
+                return Err("a turn is already running for this chat".to_string());
+            }
+            eprintln!(
+                "[agent_sessions] chat {chat_session_id}: turn_in_flight stuck with no live \
+                 reader/child — clearing and proceeding"
+            );
+            entry.turn_in_flight.store(false, Ordering::SeqCst);
         }
         // Harness switch on an existing chat: kill the old CLI's process and
         // drop its resume id — a kimi session id means nothing to opencode.
@@ -1013,6 +1029,7 @@ impl AgentSessionManager {
             None,
             None,
             None,
+            None,
         );
         Ok(())
     }
@@ -1140,21 +1157,47 @@ impl AgentSessionManager {
             if !c.turn_in_flight.load(Ordering::SeqCst) {
                 continue;
             }
-            // A live reader (claude/ACP set this via ReaderAliveGuard) may
-            // still be streaming or about to clear the flag at EOF — leave it.
-            if c.reader_alive.load(Ordering::SeqCst) {
+            // One shared definition of "still actually running" (see the
+            // free fn below): a live reader may still be streaming or about
+            // to clear the flag at EOF — leave it.
+            if turn_actually_running(&mut c) {
                 continue;
             }
-            let child_gone = match c.child.as_mut() {
-                None => true,
-                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
-            };
-            if child_gone {
-                c.turn_in_flight.store(false, Ordering::SeqCst);
-                recovered.push(sid.clone());
-            }
+            c.turn_in_flight.store(false, Ordering::SeqCst);
+            recovered.push(sid.clone());
         }
         recovered
+    }
+}
+
+/// Whether a turn with `turn_in_flight` set is STILL actually running. One
+/// definition shared by the send guard's self-heal and
+/// `reconcile_wedged_turns`: a turn counts as running only while a live
+/// reader (the claude/ACP stdout reader or the opencode SSE reader) is
+/// draining it, or its child process has not exited yet. Anything else —
+/// both readers gone AND the child exited (or never spawned) — can no
+/// longer produce output, so a flag left over from such a turn is stuck
+/// and safe to clear. Deliberately conservative: when in doubt, the turn
+/// counts as running and the send rejection stays honest.
+fn turn_actually_running(c: &mut AgentChild) -> bool {
+    turn_running_signals(&c.reader_alive, &c.oc_reader_alive, &mut c.child)
+}
+
+/// The signal-level core of [`turn_actually_running`], split out so tests
+/// can exercise it without constructing a full `AgentChild`.
+fn turn_running_signals(
+    reader_alive: &AtomicBool,
+    oc_reader_alive: &AtomicBool,
+    child: &mut Option<Child>,
+) -> bool {
+    if reader_alive.load(Ordering::SeqCst) || oc_reader_alive.load(Ordering::SeqCst) {
+        return true;
+    }
+    match child.as_mut() {
+        None => false,
+        // Err on try_wait = the handle is unusable — nothing to wait on, so
+        // treat the process as gone rather than wedging the flag forever.
+        Some(c) => !matches!(c.try_wait(), Ok(Some(_)) | Err(_)),
     }
 }
 
@@ -1255,6 +1298,10 @@ fn finish_turn(
     // fell back to the session's stale catalog id and priced opus/sonnet
     // rates for a completely different model.
     model_key: Option<&str>,
+    // `Some("automation")` for one-shot scheduler runs (run_one_shot); None
+    // for interactive sends. Rides chat:done so the frontend can skip the
+    // generic turn-complete toast for automation turns.
+    source: Option<&str>,
 ) {
     // Context-chain trace: the harness's own per-turn report — the model it
     // actually ran and the prompt size it counted, which the frontend meter
@@ -1439,6 +1486,7 @@ fn finish_turn(
         ttft,
         tok_s,
         llm_ms,
+        source,
     );
 
     // Per-turn git checkpoint against the spawn dir (watches are ordered
@@ -1483,6 +1531,10 @@ fn emit_done(
     ttft: Option<i64>,
     tokens_per_second: Option<f64>,
     llm_time_ms: Option<i64>,
+    // `Some("automation")` for scheduler-fired one-shot turns: tags the event
+    // so the frontend suppresses its generic turn-complete toast (the backend
+    // already notifies via automation:run-finished). None for user turns.
+    source: Option<&str>,
 ) {
     // Cache fields ride along when the harness reported them (absent →
     // null, so older frontend consumers keep working unchanged). `input`
@@ -1512,6 +1564,7 @@ fn emit_done(
             cache_hit_rate,
             cache_creation_input_tokens: cache_creation,
             cache_read_input_tokens: cache_read,
+            source: source.map(str::to_string),
         },
     );
 }
@@ -1582,6 +1635,52 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The send-guard self-heal's one truth: a turn with `turn_in_flight` up
+    /// counts as running only while a reader (claude/ACP stdout or opencode
+    /// SSE) is alive OR the child process has not exited. Everything else is
+    /// a stuck flag a send must clear instead of rejecting on.
+    #[test]
+    fn turn_running_signals_distinguish_live_turns_from_wedged_flags() {
+        let mk_child = |sleeper: bool| -> Child {
+            let mut cmd = Command::new("cmd.exe");
+            cmd.args(["/C", if sleeper { "ping -n 8 127.0.0.1 >nul" } else { "exit 0" }])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            no_console_window(&mut cmd);
+            cmd.spawn().expect("probe spawn")
+        };
+
+        // Live reader → running (no child needed).
+        let reader = AtomicBool::new(true);
+        let oc = AtomicBool::new(false);
+        let mut no_child: Option<Child> = None;
+        assert!(turn_running_signals(&reader, &oc, &mut no_child));
+
+        // opencode SSE reader alone also counts.
+        let reader = AtomicBool::new(false);
+        let oc = AtomicBool::new(true);
+        assert!(turn_running_signals(&reader, &oc, &mut no_child));
+
+        // No readers + no child → the wedged-flag case: NOT running.
+        let reader = AtomicBool::new(false);
+        let oc = AtomicBool::new(false);
+        assert!(!turn_running_signals(&reader, &oc, &mut no_child));
+
+        // No readers + exited child (the reported repro: one-shot turn
+        // finished, flag never cleared) → NOT running, heal may proceed.
+        let mut exited = Some(mk_child(false));
+        let _ = exited.as_mut().unwrap().wait();
+        assert!(!turn_running_signals(&reader, &oc, &mut exited));
+
+        // No readers but a LIVE child → conservative: still counts as
+        // running (a lingering process is not proof the turn ended).
+        let mut live = Some(mk_child(true));
+        assert!(turn_running_signals(&reader, &oc, &mut live));
+        let _ = live.as_mut().unwrap().kill();
+        let _ = live.as_mut().unwrap().wait();
+    }
 
     #[test]
     fn connector_stamp_ignores_tokens_and_order() {
@@ -2497,6 +2596,7 @@ mod tests {
             &generation,
             1,
             None,
+            None,
         );
 
         let conn = db.0.lock();
@@ -2543,6 +2643,7 @@ mod tests {
             &generation,
             1,
             None,
+            None,
         );
 
         let conn = db.0.lock();
@@ -2581,6 +2682,7 @@ mod tests {
             Vec::new(),
             &generation,
             1,
+            None,
             None,
         );
 

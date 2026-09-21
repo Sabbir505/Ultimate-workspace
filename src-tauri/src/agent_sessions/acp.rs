@@ -271,8 +271,7 @@ pub(super) fn send_acp_turn(
             .map(|(dir, broad)| DirWatch::new(dir, broad))
             .collect();
         no_console_window(&mut cmd);
-        let mut child = cmd
-            .spawn()
+        let mut child = spawn_harness_child(&mut cmd)
             .map_err(|e| format!("failed to spawn ACP agent '{}': {e}", agent.display_name))?;
         let stdout = child.stdout.take().ok_or("failed to capture ACP stdout")?;
         {
@@ -742,6 +741,7 @@ pub(super) fn read_acp_stream(
                             usage.cache_read_tokens,
                             &mut watches,
                             started,
+                            None,
                             None,
                         );
                     }

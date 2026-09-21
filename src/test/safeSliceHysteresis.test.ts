@@ -89,4 +89,29 @@ describe("A5: per-token slice cost past the cap (slice-op counting)", () => {
     expect(len).toBe(CAP - MARGIN + 5000);
     expect(len).toBeLessThanOrEqual(CAP + MARGIN);
   });
+
+  it("onToken skips the store write for an empty delta (no-op flush guard)", () => {
+    // Harnesses close a stream with runs of empty deltas; each used to clone
+    // the streaming map and re-render the transcript for zero new text.
+    useChatStore.setState({
+      streaming: { s1: "partial answer" },
+      streamingChatSessionId: "s1",
+    });
+    const mapBefore = useChatStore.getState().streaming;
+    useChatStore.getState().onToken("s1", "");
+    expect(useChatStore.getState().streaming).toBe(mapBefore); // identity kept — no flush
+    expect(useChatStore.getState().streaming.s1).toBe("partial answer");
+    // Still writes when there IS something to change: new text appends…
+    useChatStore.getState().onToken("s1", " plus more");
+    expect(useChatStore.getState().streaming.s1).toBe("partial answer plus more");
+    // …and an empty delta still clears a pending status line.
+    useChatStore.setState({
+      streaming: { s2: "" },
+      streamingChatSessionId: "s2",
+      chatStatus: { s2: { reason: "thinking", message: "loading" } },
+    });
+    useChatStore.getState().onToken("s2", "");
+    expect(useChatStore.getState().chatStatus.s2).toBeUndefined();
+    expect(useChatStore.getState().streaming.s2).toBe("");
+  });
 });

@@ -500,8 +500,11 @@ export function ThinkingBlock({
    *  don't share a timer. */
   sessionId?: string | null;
 }) {
-  // Expanded while streaming (live), collapsed once the turn finishes.
-  const [open, setOpen] = useState(!done);
+  // Collapsed by default — always. The live tail rides the collapsed row
+  // (see `peek`), so the stream stays visible without the block's height
+  // chasing every token (an expanded block resizing mid-stream shook the
+  // whole transcript). The user can still open any block mid-stream.
+  const [open, setOpen] = useState(false);
   // Auto-collapse when the turn completes — but only if the user hasn't
   // manually toggled it.
   const [userToggled, setUserToggled] = useState(false);

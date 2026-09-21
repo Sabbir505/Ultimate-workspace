@@ -39,7 +39,7 @@ vi.mock("../lib/ipc", () => ({
   listenVaultScanned: vi.fn().mockResolvedValue(() => {}),
 }));
 
-import { useVaultStore, VAULT_SAVE_DEBOUNCE_MS } from "../state/vault";
+import { useVaultStore, VAULT_SAVE_DEBOUNCE_MS, VAULT_SEARCH_DEBOUNCE_MS } from "../state/vault";
 import { useUiStore } from "../state/ui";
 
 const NOTE = { path: "Notes/Idea.md" };
@@ -388,6 +388,33 @@ describe("vault store — back/forward navigation", () => {
     expect(useUiStore.getState().viewHistory.length).toBe(before);
     vaultReadNoteMock.mockResolvedValue("body");
   });
+
+  it("a slow restoreSnapshot cannot clobber a newer open's buffer", async () => {
+    let releaseRestore: (v: string) => void = () => {};
+    vaultReadNoteMock.mockImplementation((p: unknown) =>
+      p === "Slow.md"
+        ? new Promise<string>((res) => {
+            releaseRestore = res;
+          })
+        : Promise.resolve("B body"),
+    );
+    await useVaultStore.getState().openNote("B.md");
+    const pRestore = useVaultStore.getState().restoreSnapshot({
+      graphOpen: false,
+      assetPath: null,
+      activePath: "Slow.md",
+    });
+    // A newer navigation supersedes the restore mid-load…
+    await useVaultStore.getState().openNote("B2.md");
+    // …then the stale restore's read lands — it must be discarded, or the
+    // next autosave would write the old text into the new file.
+    releaseRestore("stale restore body");
+    await pRestore;
+    const s = useVaultStore.getState();
+    expect(s.activePath).toBe("B2.md");
+    expect(s.content).toBe("B body");
+    expect(s.savedContent).toBe("B body");
+  });
 });
 
 describe("vault store — mutations", () => {
@@ -446,6 +473,20 @@ describe("vault store — mutations", () => {
     expect(useVaultStore.getState().activePath).toBe("Old.md");
     expect(useVaultStore.getState().openNotes).toEqual(["Old.md"]);
   });
+
+  it("deleteNote with a pending autosave never writes the doomed path", async () => {
+    // Flushing the pending autosave to the deleted path would resurrect
+    // the file — a delete must never trigger a write.
+    vi.useFakeTimers();
+    vaultReadNoteMock.mockResolvedValue("doomed body");
+    await useVaultStore.getState().openNote("Doomed.md");
+    useVaultStore.getState().setContent("unsaved edits");
+    useVaultStore.getState().scheduleSave();
+    await useVaultStore.getState().deleteNote("Doomed.md");
+    await vi.advanceTimersByTimeAsync(VAULT_SAVE_DEBOUNCE_MS + 100);
+    expect(vaultWriteNoteMock).not.toHaveBeenCalled();
+    expect(useVaultStore.getState().activePath).toBeNull();
+  });
 });
 
 describe("vault store — search", () => {
@@ -464,6 +505,36 @@ describe("vault store — search", () => {
     await useVaultStore.getState().runSearch();
     expect(vaultSearchMock).toHaveBeenCalledWith("hello", 40);
     expect(useVaultStore.getState().searchHits).toHaveLength(1);
+  });
+
+  it("setSearchQuery debounces the round-trip instead of firing per keystroke", async () => {
+    vi.useFakeTimers();
+    vaultSearchMock.mockResolvedValue([]);
+    useVaultStore.getState().setSearchQuery("hello");
+    expect(vaultSearchMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(VAULT_SEARCH_DEBOUNCE_MS + 50);
+    expect(vaultSearchMock).toHaveBeenCalledWith("hello", 40);
+  });
+
+  it("a stale search response cannot land after a newer query's results", async () => {
+    let releaseOld: (v: unknown) => void = () => {};
+    vaultSearchMock.mockImplementation((q: unknown) =>
+      q === "old"
+        ? new Promise((res) => {
+            releaseOld = res;
+          })
+        : Promise.resolve([{ path: "New.md", title: null, basename: "New", snippet: "" }]),
+    );
+    useVaultStore.getState().setSearchQuery("old");
+    const staleRun = useVaultStore.getState().runSearch();
+    useVaultStore.getState().setSearchQuery("new");
+    await useVaultStore.getState().runSearch();
+    expect(useVaultStore.getState().searchHits.map((h) => h.path)).toEqual(["New.md"]);
+    // The old query's late response is discarded — the newer results stay.
+    releaseOld([{ path: "Old.md", title: null, basename: "Old", snippet: "" }]);
+    await staleRun;
+    expect(useVaultStore.getState().searchHits.map((h) => h.path)).toEqual(["New.md"]);
+    expect(useVaultStore.getState().searchLoading).toBe(false);
   });
 });
 
@@ -505,6 +576,23 @@ describe("vault store — bind flow", () => {
     expect(vaultTreeMock).toHaveBeenCalled();
   });
 
+  it("bind clears the previous vault's tabs, pins, recents and modes", async () => {
+    vaultReadNoteMock.mockResolvedValue("body");
+    await useVaultStore.getState().openNote("Old.md");
+    useVaultStore.getState().setMode("edit");
+    useVaultStore.setState({ pinnedPaths: ["Old.md"], recentPaths: ["Old.md"] });
+    vaultBindMock.mockResolvedValue("C:/other");
+    await useVaultStore.getState().bind("C:/other");
+    const s = useVaultStore.getState();
+    expect(s.root).toBe("C:/other");
+    expect(s.activePath).toBeNull();
+    // The previous vault's rails must not resolve against the new vault.
+    expect(s.openNotes).toEqual([]);
+    expect(s.pinnedPaths).toEqual([]);
+    expect(s.recentPaths).toEqual([]);
+    expect(s.noteModes).toEqual({});
+  });
+
   it("init picks up a persisted root", async () => {
     vaultGetStateMock.mockResolvedValue({
       root: "C:/persisted",
@@ -519,5 +607,38 @@ describe("vault store — bind flow", () => {
     vaultGetStateMock.mockResolvedValue({ root: null, stats: null });
     await useVaultStore.getState().init();
     expect(useVaultStore.getState().root).toBeNull();
+  });
+});
+
+describe("vault store — persisted layout restore", () => {
+  it("restores path lists, dropping invalid entries and capping recents", async () => {
+    // Earlier tests schedule the store's debounced layout persist (250ms
+    // real timer on the module instance this file imported). Under suite
+    // load that timer can fire between our setItem below and the fresh
+    // module's evaluation, overwriting the blob with the OLD instance's
+    // (empty) state — a nondeterministic [] instead of the seeded lists.
+    // Wait it out first: nothing can still be pending past 250ms + a tick.
+    await new Promise((r) => setTimeout(r, 300));
+    const recents = Array.from({ length: 20 }, (_, i) => `R${i}.md`);
+    localStorage.setItem(
+      "relay.vault.layout",
+      JSON.stringify({
+        leftWidth: 300,
+        rightWidth: 300,
+        leftCollapsed: false,
+        assetSplitPct: 58,
+        openNotes: ["A.md", 42, null, "", "B.md"],
+        pinnedPaths: ["P.md", { nope: 1 }, 7],
+        recentPaths: recents,
+      }),
+    );
+    // loadLayout runs at store creation — re-import the module to re-read it.
+    vi.resetModules();
+    const { useVaultStore: fresh } = await import("../state/vault");
+    const s = fresh.getState();
+    expect(s.openNotes).toEqual(["A.md", "B.md"]);
+    expect(s.pinnedPaths).toEqual(["P.md"]);
+    // Recents keep the same 12-entry cap openNote applies on refresh.
+    expect(s.recentPaths).toEqual(recents.slice(0, 12));
   });
 });

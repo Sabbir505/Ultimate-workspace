@@ -534,6 +534,19 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // CREATES the turn's entry: sendMessage and broadcastToSessions
       // pre-create it (as "") before the first token can arrive.
       if (!(chatSessionId in get().streaming)) return;
+      // No-op flush guard: harnesses close a stream with runs of EMPTY
+      // deltas (dozens can land in one IPC sweep on teardown/restart). Each
+      // used to clone the whole streaming map and re-render ChatView for
+      // zero new text — layout churn mid-turn (the transcript "shakes") and,
+      // in a tight burst, 50+ synchronously nested updates → React's
+      // "Maximum update depth exceeded" pointing at this set. Skip the set
+      // when nothing would change: same buffer, dot flag already set, no
+      // status line to clear.
+      {
+        const s0 = get();
+        const dotSet = s0.streamingChatSessionId === chatSessionId;
+        if (token === "" && dotSet && !(chatSessionId in s0.chatStatus)) return;
+      }
       set((s) => {
         const prev = s.streaming[chatSessionId] ?? "";
         // Cap the streaming buffer per session to avoid OOM on extremely long

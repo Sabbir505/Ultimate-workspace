@@ -11,13 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-21
+
 ### Added
 - **Automation triggers beyond cron** — automations can fire from an inbound webhook (`/trigger/<id>/<secret>` on a loopback listener, constant-time secret, works while Relay runs), a watched file path (1s debounce, per-automation re-fire interval), a git HEAD change (evaluated on the tick AND by the run-while-closed sidecar), or new Gmail activity (historyId polling via the Gmail connector; v1 fires on any mailbox activity). Schema: `triggerType`/`triggerConfig`/`lastTriggerState`/`lastEventRunAt` — event runs advance a separate timestamp so they never delay the cron clock; `automation_next_fire` returns human labels for event types; full trigger picker in the Automations form with copyable webhook URLs; create/update via the `create_automation`/`update_automation` chat tools.
 - **Hybrid local search (Knowledge/RAG)** — `doc_chunks_fts` + Reciprocal Rank Fusion (k=60) of keyword and vector legs; `search_docs` degrades to keyword-only when the embedding sidecar is down; chunks carry a markdown heading trail shown in excerpts (corpus `chunk_version` forces a one-time re-index); optional reranker stage (default off): a llama-server reranker sidecar (`--embedding --reranking --pooling rank`, any `*reranker*.gguf` in the models folder, e.g. bge-reranker-v2-m3) re-scores the fused top-50 via `/v1/rerank`, fail-open. Offline eval fixtures gate hybrid recall in `cargo test`.
 - **Live harness model catalog** — the static per-CLI model list is gone; the AgentModelPicker runs on live `list_harness_models` discovery with a "Refresh from CLI" force-reload, provenance badges (config/cli/builtin), and omp's per-model cost surfaced as $/Mtok notes.
 - **Auto-refreshed pricing + cache-savings hero** — a daily background fetch of the LiteLLM pricing registry (`price.lite.db`, manual "Refresh model prices" button) adds a live rate layer under user pins (explicit cache-read rates supersede the family-multiplier fallback; rollups re-price automatically); the Cost hero headline shows "Saved $X by prompt caching" with the cached-input share. The dead `price_for`/`pricing_estimated_usd` write path was removed (column retained, always NULL).
-
-### Added
 - **User hooks — pre/post tool-call scripts** (Settings → Hooks): a hook is a user command that runs around
   every agent tool call in the built-in chat (main loop, spawned subagent Tasks, Session Mesh children), the
   subagent loop, and the `relay-tools` MCP bridge. `pre_tool_use` hooks can deny a call (exit 2 or JSON
@@ -35,6 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proceed under full_auto's no-cards contract); all six harness panes fire detached post-tool observations;
   and `hooks_import_claude` imports command-type hooks from `~/.claude/settings.json`. See
   `docs/research/HOOKS_SYSTEM_RESEARCH.md`.
+
+### Changed
+- **Token-efficiency pass II — attach-on-demand built-in tool families (~20% less fixed overhead per turn)** — the research source-ledger tools now ride research mode only (the research scaffolding is the sole prompt text that references them, so ordinary turns stop paying ~0.9k tokens for unreachable tools), and Session Mesh, the automation write half (`create/update/delete_automation` + `run_automation_now`) and `totp_code` became family-locked attach-on-demand built-ins: absent from the default tool schema, listed as one-line entries in the "Connected apps & servers" manifest, and restored with a single `attach_connector("<family>")` call via the existing late-attach machinery (mid-turn spec rebuild, turn-scoped, same contract as connector/MCP attaches). A send-time keyword fast-path (`detect_family_unlocks`, mirroring the connector keyword path) pre-unlocks a family on obvious asks — "create an automation…", "the other chat", "2FA code" — so those turns skip the attach hop; the automations read half (`list_automation`/`get_automation`) stays always-on and both CORE prompts were reworded to point at the unlock while keeping the never-claim-scheduling-is-impossible behavior. Tool-surface budgets re-baselined: the fresh-turn fixed overhead (system prompt + tool schemas + manifest) dropped 58.9k → 44.2k chars — measured ~15.5k → ~12.4k tokens per frontier default turn, ~14.6k → ~11.5k for local models (on a 32k window that is overhead 45% → 36%), and the harness `relay-tools` MCP payload shrank 6.8k → 5.0k tokens since the bridge passes descriptions through. The harness relay bridge, subagents, the prompt warmup and every token estimator render from an unlocked registry so no capability goes missing on any family.
+- **Tool description diet** — the fattest always-on specs (`Task`, `plan_document`, `run_shell`, `generate_document`, `search_content`, `generate_diagram`, `todo_write`, `browser_read`) were trimmed of redundant phrasing; every parameter, mode, default and warning preserved, and the budget guard tests tightened so the registry cannot silently re-bloat.
+- **Honest capability reporting for family-locked tools** — `get_capabilities` now reports locked families the same way it reports attachable connectors (available with their unlock, never silently missing), pinned by a new report↔schema parity test; a new inventory test pins every tool name reachable in at least one cap state, and the unlock delta is asserted to be exactly the family's tools in both wire formats.
+
+### Fixed
+- **Stray literal `n` in every harness instructions.md** — a `s.push('n')` meant as a newline glued a stray character onto the Artifacts section's closing sentence in every generated harness bundle ("…chat session.n" with relay tools, "…this sectionn" for the prompt-only CLIs pi/omp/commandcode). Regression-tested across all four variants.
 
 ## [0.5.0] — 2026-09-17
 

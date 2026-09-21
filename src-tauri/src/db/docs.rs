@@ -126,6 +126,34 @@ pub fn finish_index(
     Ok(())
 }
 
+/// Schema version of the chunk SHAPES (chunker behavior + enrichment
+/// metadata) a corpus was last indexed with. Bump when chunking or chunk
+/// metadata changes so every corpus is re-chunked once: the mtime/size diff
+/// can never see these changes on its own. v1 = heading-trail enrichment +
+/// the doc_chunks_fts keyword index.
+pub const DOCS_CHUNK_SCHEMA_VERSION: i64 = 1;
+
+/// The corpus's stored chunk-schema version (0 = pre-versioning / never
+/// indexed).
+pub fn corpus_chunk_version(conn: &Connection, corpus_id: &str) -> DbResult<i64> {
+    conn.query_row(
+        "SELECT chunk_version FROM doc_corpora WHERE id = ?1",
+        params![corpus_id],
+        |r| r.get(0),
+    )
+}
+
+/// Record that a full index pass completed at the current chunk-schema
+/// version. Only called after a successful pass — a cancelled/errored run
+/// leaves the old version, so the next run re-chunks everything again.
+pub fn stamp_corpus_chunk_version(conn: &Connection, corpus_id: &str, version: i64) -> DbResult<()> {
+    conn.execute(
+        "UPDATE doc_corpora SET chunk_version = ?2 WHERE id = ?1",
+        params![corpus_id, version],
+    )?;
+    Ok(())
+}
+
 /// True when at least one enabled corpus has searchable chunks — drives the
 /// `search_docs` tool's ToolCaps gate.
 pub fn any_searchable_corpus(conn: &Connection) -> bool {
@@ -205,12 +233,14 @@ pub fn delete_indexed_files_not_in(
 // ---- doc_chunks ----
 
 /// Replace all chunks of one file (called with the freshly embedded set).
+/// Each tuple is `(content, embedding, heading)`; heading is the markdown
+/// heading trail for display only — it is never embedded.
 pub fn replace_file_chunks(
     conn: &Connection,
     corpus_id: &str,
     path: &str,
     kind: &str,
-    chunks: &[(String, Vec<f32>)],
+    chunks: &[(String, Vec<f32>, String)],
 ) -> DbResult<()> {
     // B-29: the delete-then-insert sweep must be atomic. A crash midway used
     // to leave partial chunks behind while doc_files.mtime recorded a fresh
@@ -221,16 +251,17 @@ pub fn replace_file_chunks(
         "DELETE FROM doc_chunks WHERE corpus_id = ?1 AND path = ?2",
         params![corpus_id, path],
     )?;
-    for (i, (content, embedding)) in chunks.iter().enumerate() {
+    for (i, (content, embedding, heading)) in chunks.iter().enumerate() {
         tx.execute(
-            "INSERT INTO doc_chunks (corpus_id, path, chunk_index, kind, content, embedding)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO doc_chunks (corpus_id, path, chunk_index, kind, content, heading, embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 corpus_id,
                 path,
                 i as i64,
                 kind,
                 content,
+                heading,
                 f32_slice_to_blob(embedding)
             ],
         )?;
@@ -271,43 +302,74 @@ pub fn blob_to_f32_slice(blob: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// One search hit: the chunk plus its cosine similarity.
+/// One search hit: the chunk plus its score. For the cosine-only searches
+/// `score` is the cosine similarity; for [`search_chunks_hybrid`] it is the
+/// Reciprocal Rank Fusion score (Σ 1/(60 + rank) over both legs) — same
+/// "bigger is better" ordering either way.
 #[derive(Debug, Clone)]
 pub struct ChunkHit {
     pub corpus_id: String,
     pub path: String,
     pub kind: String,
     pub content: String,
+    /// Markdown heading trail at the chunk's start ('' when none) — display
+    /// enrichment only, never part of the embedded text.
+    pub heading: String,
     pub score: f32,
 }
 
-/// Brute-force cosine top-k over all enabled corpora. Loads every chunk blob
-/// for those corpora — fine at folder scale; revisit with an ANN index if a
-/// user ever indexes hundreds of thousands of chunks.
-pub fn search_chunks(conn: &Connection, query: &[f32], top_k: usize) -> DbResult<Vec<ChunkHit>> {
-    let mut stmt = conn.prepare(
-        "SELECT c.corpus_id, c.path, c.kind, c.content, c.embedding
-           FROM doc_chunks c
-           JOIN doc_corpora co ON co.id = c.corpus_id
-          WHERE co.enabled != 0",
-    )?;
-    let rows = stmt.query_map([], |r| {
+/// Shared cosine top-k scan. `corpus_id: None` searches every ENABLED corpus
+/// (the `search_chunks` contract); `Some(id)` scopes to one corpus regardless
+/// of its enabled flag (the `search_chunks_in_corpus` contract — pinned docs
+/// must come back regardless of the rest). Returns chunk rowids alongside the
+/// hits so the RRF fusion in [`search_chunks_hybrid`] can key them.
+fn cosine_top_k(
+    conn: &Connection,
+    query: &[f32],
+    corpus_id: Option<&str>,
+    top_k: usize,
+) -> DbResult<Vec<(i64, ChunkHit)>> {
+    let sql = match corpus_id {
+        Some(_) => {
+            "SELECT c.id, c.corpus_id, c.path, c.kind, c.content, c.heading, c.embedding
+               FROM doc_chunks c
+              WHERE c.corpus_id = ?1"
+        }
+        None => {
+            "SELECT c.id, c.corpus_id, c.path, c.kind, c.content, c.heading, c.embedding
+               FROM doc_chunks c
+               JOIN doc_corpora co ON co.id = c.corpus_id
+              WHERE co.enabled != 0"
+        }
+    };
+    let mut stmt = conn.prepare(sql)?;
+    // Parameter count differs by branch: the scoped query takes the corpus
+    // id, the global one takes nothing.
+    fn map_row(
+        r: &rusqlite::Row,
+    ) -> rusqlite::Result<(i64, String, String, String, String, String, Vec<u8>)> {
         Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, Vec<u8>>(4)?,
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+            r.get(6)?,
         ))
-    })?;
+    }
+    let rows = match corpus_id {
+        Some(id) => stmt.query_map([id], map_row)?,
+        None => stmt.query_map([], map_row)?,
+    };
 
     let qnorm = query.iter().map(|x| x * x).sum::<f32>().sqrt();
     if qnorm == 0.0 {
         return Ok(Vec::new());
     }
-    let mut hits: Vec<ChunkHit> = Vec::new();
+    let mut hits: Vec<(i64, ChunkHit)> = Vec::new();
     for row in rows {
-        let (corpus_id, path, kind, content, blob) = row?;
+        let (id, corpus_id, path, kind, content, heading, blob) = row?;
         let v = blob_to_f32_slice(&blob);
         if v.len() != query.len() {
             continue; // mixed-dimension corpora (model swapped) — skip
@@ -318,21 +380,35 @@ pub fn search_chunks(conn: &Connection, query: &[f32], top_k: usize) -> DbResult
         }
         let dot = query.iter().zip(v.iter()).map(|(a, b)| a * b).sum::<f32>();
         let score = dot / (qnorm * vnorm);
-        hits.push(ChunkHit {
-            corpus_id,
-            path,
-            kind,
-            content,
-            score,
-        });
+        hits.push((
+            id,
+            ChunkHit {
+                corpus_id,
+                path,
+                kind,
+                content,
+                heading,
+                score,
+            },
+        ));
     }
     hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+        b.1.score
+            .partial_cmp(&a.1.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     hits.truncate(top_k);
     Ok(hits)
+}
+
+/// Brute-force cosine top-k over all enabled corpora. Loads every chunk blob
+/// for those corpora — fine at folder scale; revisit with an ANN index if a
+/// user ever indexes hundreds of thousands of chunks.
+pub fn search_chunks(conn: &Connection, query: &[f32], top_k: usize) -> DbResult<Vec<ChunkHit>> {
+    Ok(cosine_top_k(conn, query, None, top_k)?
+        .into_iter()
+        .map(|(_, h)| h)
+        .collect())
 }
 
 /// Cosine top-k within a SINGLE corpus (used for per-chat pinned docs — those
@@ -343,53 +419,140 @@ pub fn search_chunks_in_corpus(
     corpus_id: &str,
     top_k: usize,
 ) -> DbResult<Vec<ChunkHit>> {
+    Ok(cosine_top_k(conn, query, Some(corpus_id), top_k)?
+        .into_iter()
+        .map(|(_, h)| h)
+        .collect())
+}
+
+// ---- hybrid (FTS + vector) search ----
+
+/// Build a safe FTS5 MATCH expression from free-form user input. FTS5 has its
+/// own query language (AND/OR/NOT, phrases, column filters), so each term is
+/// stripped to alphanumerics, double-quoted (quoted strings are never parsed
+/// as operators) and ORed together as prefix terms — "stream" also hits
+/// "streaming", and bm25 ranks docs matching more terms higher. Returns None
+/// when nothing searchable remains (the caller skips the FTS leg). Same
+/// escaping discipline as the memories keyword leg (db/memory.rs).
+fn fts_match_query(query: &str) -> Option<String> {
+    let safe: String = query
+        .split_whitespace()
+        .map(|t| {
+            t.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\"*"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    if safe.is_empty() {
+        None
+    } else {
+        Some(safe)
+    }
+}
+
+/// The FTS (keyword) leg: top `limit` chunk rowids + hits ordered by bm25
+/// (ascending rank = best first). `corpus_id: None` spans every enabled
+/// corpus; `Some(id)` scopes to one (mirroring `cosine_top_k`).
+fn fts_leg(
+    conn: &Connection,
+    match_expr: &str,
+    corpus_id: Option<&str>,
+    limit: usize,
+) -> DbResult<Vec<(i64, ChunkHit)>> {
     let mut stmt = conn.prepare(
-        "SELECT c.corpus_id, c.path, c.kind, c.content, c.embedding
-           FROM doc_chunks c
-          WHERE c.corpus_id = ?1",
+        "SELECT c.id, c.corpus_id, c.path, c.kind, c.content, c.heading
+           FROM doc_chunks_fts f
+           JOIN doc_chunks c ON c.id = f.rowid
+           JOIN doc_corpora co ON co.id = c.corpus_id
+          WHERE doc_chunks_fts MATCH ?1 AND co.enabled != 0
+            AND (?2 IS NULL OR c.corpus_id = ?2)
+          ORDER BY bm25(doc_chunks_fts)
+          LIMIT ?3",
     )?;
-    let rows = stmt.query_map([corpus_id], |r| {
+    let rows = stmt.query_map(params![match_expr, corpus_id, limit as i64], |r| {
         Ok((
-            r.get::<_, String>(0)?,
+            r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
             r.get::<_, String>(3)?,
-            r.get::<_, Vec<u8>>(4)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
         ))
     })?;
-
-    let qnorm = query.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if qnorm == 0.0 {
-        return Ok(Vec::new());
-    }
-    let mut hits: Vec<ChunkHit> = Vec::new();
+    let mut out = Vec::new();
     for row in rows {
-        let (corpus_id, path, kind, content, blob) = row?;
-        let v = blob_to_f32_slice(&blob);
-        if v.len() != query.len() {
-            continue; // mixed-dimension corpora (model swapped) — skip
-        }
-        let vnorm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if vnorm == 0.0 {
-            continue;
-        }
-        let dot = query.iter().zip(v.iter()).map(|(a, b)| a * b).sum::<f32>();
-        let score = dot / (qnorm * vnorm);
-        hits.push(ChunkHit {
-            corpus_id,
-            path,
-            kind,
-            content,
-            score,
-        });
+        let (id, corpus_id, path, kind, content, heading) = row?;
+        out.push((
+            id,
+            ChunkHit {
+                corpus_id,
+                path,
+                kind,
+                content,
+                heading,
+                score: 0.0,
+            },
+        ));
     }
-    hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    hits.truncate(top_k);
-    Ok(hits)
+    Ok(out)
+}
+
+/// Reciprocal Rank Fusion constant. k=60 is the standard value from the RRF
+/// paper (Cormack et al., 2009) and dampens the contribution of deep ranks.
+const RRF_K: f32 = 60.0;
+
+/// Hybrid corpus search: an FTS5 keyword leg (bm25-ranked) fused with the
+/// brute-force cosine vector leg by Reciprocal Rank Fusion —
+/// `score = Σ 1/(60 + rank)` over each leg a chunk appears in, best first.
+/// `query_embedding: None` (sidecar down / embed failed) degrades cleanly to
+/// keyword-only, where each hit's fused score is just its FTS RRF term.
+/// `corpus_id: None` searches all enabled corpora; `Some(id)` scopes to one.
+///
+/// Enrichment (`heading`) rides along for display; `score` on the returned
+/// hits is the fused RRF score.
+pub fn search_chunks_hybrid(
+    conn: &Connection,
+    query: &str,
+    query_embedding: Option<&[f32]>,
+    corpus_id: Option<&str>,
+    limit_each: usize,
+    top_k: usize,
+) -> DbResult<Vec<ChunkHit>> {
+    // (hit, fused score) keyed by chunk rowid — the fusion key across legs.
+    let mut fused: std::collections::HashMap<i64, (ChunkHit, f32)> = std::collections::HashMap::new();
+
+    if let Some(expr) = fts_match_query(query) {
+        for (rank, (id, hit)) in fts_leg(conn, &expr, corpus_id, limit_each)?.into_iter().enumerate() {
+            fused.entry(id).or_insert((hit, 0.0)).1 += 1.0 / (RRF_K + rank as f32 + 1.0);
+        }
+    }
+    if let Some(qv) = query_embedding {
+        for (rank, (id, hit)) in cosine_top_k(conn, qv, corpus_id, limit_each)?
+            .into_iter()
+            .enumerate()
+        {
+            fused.entry(id).or_insert((hit, 0.0)).1 += 1.0 / (RRF_K + rank as f32 + 1.0);
+        }
+    }
+
+    let mut ranked: Vec<(ChunkHit, f32)> = fused.into_values().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // RERANKER STAGE: implemented in chat/dispatch.rs::run_search_docs_tool —
+    // it needs the async HTTP client + the reranker sidecar, which stay out
+    // of db/ (this module is pure storage). It consumes this fused top-50.
+    ranked.truncate(top_k);
+    // The fused RRF score is the hit's exposed score (the leg-local values —
+    // 0 for FTS rows, cosine for vector rows — are internal).
+    Ok(ranked
+        .into_iter()
+        .map(|(mut hit, score)| {
+            hit.score = score;
+            hit
+        })
+        .collect())
 }
 
 /// Pin a corpus to a chat session so its documents are always in the
@@ -478,14 +641,16 @@ mod tests {
         let near = vec![1.0f32, 0.1, 0.0];
         let far = vec![0.0f32, 0.0, 1.0];
         let wrong_dims = vec![1.0f32; 8];
-        replace_file_chunks(&conn, &c.id, "a.md", "text", &[("near".into(), near)]).unwrap();
-        replace_file_chunks(&conn, &c.id, "b.md", "text", &[("far".into(), far)]).unwrap();
+        replace_file_chunks(&conn, &c.id, "a.md", "text", &[("near".into(), near, String::new())])
+            .unwrap();
+        replace_file_chunks(&conn, &c.id, "b.md", "text", &[("far".into(), far, String::new())])
+            .unwrap();
         replace_file_chunks(
             &conn,
             &c.id,
             "c.md",
             "text",
-            &[("wrong".into(), wrong_dims)],
+            &[("wrong".into(), wrong_dims, String::new())],
         )
         .unwrap();
 
@@ -512,7 +677,14 @@ mod tests {
         let c = add_corpus(&conn, "D:/docs", "docs").unwrap();
         upsert_indexed_file(&conn, &c.id, "keep.md", 1, 10).unwrap();
         upsert_indexed_file(&conn, &c.id, "gone.md", 1, 10).unwrap();
-        replace_file_chunks(&conn, &c.id, "gone.md", "text", &[("x".into(), vec![1.0])]).unwrap();
+        replace_file_chunks(
+            &conn,
+            &c.id,
+            "gone.md",
+            "text",
+            &[("x".into(), vec![1.0], String::new())],
+        )
+        .unwrap();
 
         delete_indexed_files_not_in(&conn, &c.id, &["keep.md".to_string()]).unwrap();
         let files = list_indexed_files(&conn, &c.id).unwrap();
@@ -534,13 +706,23 @@ mod tests {
     fn replace_file_chunks_replaces_atomically() {
         let conn = mem();
         let c = add_corpus(&conn, "D:/docs", "docs").unwrap();
-        replace_file_chunks(&conn, &c.id, "a.md", "text", &[("v1".into(), vec![1.0])]).unwrap();
         replace_file_chunks(
             &conn,
             &c.id,
             "a.md",
             "text",
-            &[("v2a".into(), vec![1.0]), ("v2b".into(), vec![0.0])],
+            &[("v1".into(), vec![1.0], String::new())],
+        )
+        .unwrap();
+        replace_file_chunks(
+            &conn,
+            &c.id,
+            "a.md",
+            "text",
+            &[
+                ("v2a".into(), vec![1.0], String::new()),
+                ("v2b".into(), vec![0.0], String::new()),
+            ],
         )
         .unwrap();
         assert_eq!(count_chunks(&conn, &c.id).unwrap(), 2);
@@ -588,7 +770,7 @@ mod tests {
             &a.id,
             "a1.md",
             "text",
-            &[("in a".into(), query_vec.clone())],
+            &[("in a".into(), query_vec.clone(), String::new())],
         )
         .unwrap();
         replace_file_chunks(
@@ -596,7 +778,7 @@ mod tests {
             &b.id,
             "b1.md",
             "text",
-            &[("in b".into(), query_vec.clone())],
+            &[("in b".into(), query_vec.clone(), String::new())],
         )
         .unwrap();
 
@@ -608,5 +790,190 @@ mod tests {
         let hits_b = search_chunks_in_corpus(&conn, &query_vec, &b.id, 5).unwrap();
         assert_eq!(hits_b.len(), 1);
         assert_eq!(hits_b[0].path, "b1.md");
+    }
+
+    // ---- hybrid (RRF) search ----
+
+    /// One-chunk file helper with a hand-authored embedding (memory/eval.rs
+    /// fixture style) plus the display heading.
+    fn put(
+        conn: &Connection,
+        corpus_id: &str,
+        path: &str,
+        content: &str,
+        emb: &[f32],
+        heading: &str,
+    ) {
+        replace_file_chunks(
+            conn,
+            corpus_id,
+            path,
+            "text",
+            &[(content.to_string(), emb.to_vec(), heading.to_string())],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn corpus_chunk_version_stamps_and_reads() {
+        let conn = mem();
+        let c = add_corpus(&conn, "D:/docs", "docs").unwrap();
+        assert_eq!(corpus_chunk_version(&conn, &c.id).unwrap(), 0);
+        stamp_corpus_chunk_version(&conn, &c.id, DOCS_CHUNK_SCHEMA_VERSION).unwrap();
+        assert_eq!(
+            corpus_chunk_version(&conn, &c.id).unwrap(),
+            DOCS_CHUNK_SCHEMA_VERSION
+        );
+    }
+
+    /// (a) A keyword query must surface the keyword doc even when the
+    /// (hand-authored) embedder ranks it low: the FTS leg hands it rank 1 and
+    /// RRF lifts it over every vector-near distractor.
+    #[test]
+    fn hybrid_keyword_query_finds_doc_the_embedder_ranks_low() {
+        let conn = mem();
+        let c = add_corpus(&conn, "D:/corp", "corp").unwrap();
+        put(&conn, &c.id, "manual/flux.md", "flux capacitor calibration guide", &[0.1, 0.95, 0.1], "Manual");
+        put(&conn, &c.id, "notes/aero.md", "aerodynamics of wings and lift", &[0.93, 0.12, 0.02], "");
+        put(&conn, &c.id, "notes/birds.md", "migratory birds fly south in autumn", &[0.95, 0.05, 0.1], "");
+        put(&conn, &c.id, "notes/aviation.md", "aviation pioneers and early flight", &[0.9, 0.2, 0.05], "");
+
+        let qvec = [1.0f32, 0.1, 0.0];
+        // The embedder alone ranks the gold doc LAST (cosine ≈ 0.2).
+        let vector_only = search_chunks(&conn, &qvec, 2).unwrap();
+        assert!(
+            vector_only.iter().all(|h| h.path != "manual/flux.md"),
+            "fixture broken: embedder should rank the keyword doc out of the top 2"
+        );
+
+        let hits = search_chunks_hybrid(&conn, "flux capacitor", Some(&qvec), None, 10, 5).unwrap();
+        assert_eq!(hits[0].path, "manual/flux.md", "RRF must lift the FTS winner");
+        assert!(hits[0].score > 0.0);
+
+        // Sidecar down (no embedding): the FTS leg alone still answers.
+        let fts_only = search_chunks_hybrid(&conn, "flux capacitor", None, None, 10, 5).unwrap();
+        assert_eq!(fts_only.len(), 1);
+        assert_eq!(fts_only[0].path, "manual/flux.md");
+    }
+
+    /// (b) A semantic query sharing NO tokens with any document — the FTS leg
+    /// finds nothing — still reaches its gold doc through the vector leg.
+    #[test]
+    fn hybrid_semantic_query_works_via_vector_leg() {
+        let conn = mem();
+        let c = add_corpus(&conn, "D:/corp", "corp").unwrap();
+        put(
+            &conn,
+            &c.id,
+            "ml/training.md",
+            "neural network training with gradient descent",
+            &[0.05, 0.1, 0.98],
+            "",
+        );
+        put(&conn, &c.id, "home/washer.md", "the washing machine repair guide", &[0.2, 0.9, 0.1], "");
+
+        let qvec = [0.05f32, 0.05, 1.0];
+        // Pure cosine still finds it (the leg was never broken).
+        let vector_only = search_chunks(&conn, &qvec, 1).unwrap();
+        assert_eq!(vector_only[0].path, "ml/training.md");
+
+        // Hybrid: "deep model optimization" matches no document text, so the
+        // FTS leg contributes nothing and the vector leg decides.
+        let hits =
+            search_chunks_hybrid(&conn, "deep model optimization", Some(&qvec), None, 10, 5)
+                .unwrap();
+        assert_eq!(hits[0].path, "ml/training.md");
+
+        // Keyword-only search for the same query correctly finds nothing —
+        // the vector leg is what makes the difference here.
+        let fts_only =
+            search_chunks_hybrid(&conn, "deep model optimization", None, None, 10, 5).unwrap();
+        assert!(fts_only.is_empty());
+    }
+
+    /// (c) A chunk hit by BOTH legs outranks chunks hit by only one.
+    #[test]
+    fn hybrid_fusion_ranks_both_legs_doc_first() {
+        let conn = mem();
+        let c = add_corpus(&conn, "D:/corp", "corp").unwrap();
+        put(
+            &conn,
+            &c.id,
+            "manual/bank.md",
+            "capacitor bank capacitor inspection",
+            &[0.92, 0.12, 0.05],
+            "Manual > Maintenance",
+        );
+        put(&conn, &c.id, "manual/flux.md", "flux capacitor calibration", &[0.0, 0.0, 0.0], "");
+        put(&conn, &c.id, "notes/birds.md", "bird migration patterns", &[0.96, 0.08, 0.02], "");
+
+        let qvec = [1.0f32, 0.05, 0.0];
+        let hits = search_chunks_hybrid(&conn, "capacitor bank", Some(&qvec), None, 10, 5).unwrap();
+        assert_eq!(hits[0].path, "manual/bank.md", "both-legs doc must fuse to rank 1");
+        // Heading enrichment rides along (and beats the zero-vector doc that
+        // only the FTS leg can see — the vector leg skips zero norms).
+        assert_eq!(hits[0].heading, "Manual > Maintenance");
+        let kw_only = hits.iter().find(|h| h.path == "manual/flux.md");
+        assert!(kw_only.is_some(), "FTS-only chunk stays in the fused list");
+    }
+
+    /// (d) Empty and FTS-syntax-shaped queries never error: the safe MATCH
+    /// builder reduces them to nothing (leg skipped) or quoted literal terms.
+    #[test]
+    fn hybrid_survives_empty_and_odd_match_queries() {
+        let conn = mem();
+        let c = add_corpus(&conn, "D:/corp", "corp").unwrap();
+        put(&conn, &c.id, "a.md", "calm pond notes", &[0.9, 0.1, 0.0], "");
+        let qvec = [1.0f32, 0.0, 0.0];
+
+        // FTS-syntax garbage reduces to nothing searchable (no alphanumeric
+        // tokens): the leg is skipped, never a syntax error.
+        for q in ["", "   ", "!!! ***", "\"unbalanced", "NEAR( -]*"] {
+            let hits = search_chunks_hybrid(&conn, q, None, None, 10, 5).unwrap();
+            assert!(hits.is_empty(), "query {q:?} should have no FTS matches");
+            // With an embedding the vector leg carries the query instead.
+            let hits = search_chunks_hybrid(&conn, q, Some(&qvec), None, 10, 5).unwrap();
+            assert_eq!(hits.len(), 1, "query {q:?}: vector leg must still answer");
+            assert_eq!(hits[0].path, "a.md");
+        }
+
+        // Operator-looking words become quoted LITERAL prefix terms — no
+        // syntax error, and they match like any word ("not"* hits "notes").
+        let hits = search_chunks_hybrid(&conn, "( ) AND OR NOT", None, None, 10, 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "a.md");
+
+        // Non-ASCII tokens are safe too: alphanumeric, just unmatched here.
+        let hits = search_chunks_hybrid(&conn, "日本語", None, None, 10, 5).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    /// The FTS leg respects the enabled flag + corpus scope, and the
+    /// external-content triggers keep it in sync with chunk deletes.
+    #[test]
+    fn hybrid_fts_leg_scopes_and_stays_synced() {
+        let conn = mem();
+        let a = add_corpus(&conn, "D:/a", "a").unwrap();
+        let b = add_corpus(&conn, "D:/b", "b").unwrap();
+        put(&conn, &a.id, "a.md", "zeppelin diagrams", &[1.0, 0.0, 0.0], "");
+        put(&conn, &b.id, "b.md", "zeppelin history", &[0.0, 1.0, 0.0], "");
+
+        // Corpus-scoped keyword search.
+        let scoped = search_chunks_hybrid(&conn, "zeppelin", None, Some(&a.id), 10, 5).unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].corpus_id, a.id);
+
+        // Disabled corpora drop out of the global keyword leg.
+        set_corpus_enabled(&conn, &b.id, false).unwrap();
+        let global = search_chunks_hybrid(&conn, "zeppelin", None, None, 10, 5).unwrap();
+        assert_eq!(global.len(), 1);
+        assert_eq!(global[0].corpus_id, a.id);
+        set_corpus_enabled(&conn, &b.id, true).unwrap();
+
+        // Deleting a file's chunks removes it from the FTS index too.
+        delete_chunks_for_file(&conn, &b.id, "b.md").unwrap();
+        let global = search_chunks_hybrid(&conn, "zeppelin", None, None, 10, 5).unwrap();
+        assert_eq!(global.len(), 1);
+        assert_eq!(global[0].corpus_id, a.id);
     }
 }

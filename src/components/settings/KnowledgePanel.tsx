@@ -14,6 +14,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   docsAddCorpus,
   docsRemoveCorpus,
@@ -22,6 +23,9 @@ import {
   docsStartIndex,
   docsCancelIndex,
   docsEmbeddingStatus,
+  docsStartReranker,
+  getSetting,
+  setSetting,
   onDocsIndexProgress,
   onDocsCorpusUpdated,
   cancelModelDownload,
@@ -64,6 +68,16 @@ const EMBEDDING_SUGGESTIONS: { repo: string; label: string; note: string }[] = [
   },
 ];
 
+/** Known-good Hugging Face repo carrying bge-reranker-v2-m3 GGUFs (GPUStack's
+ *  reranker conversion collection). Referenced only as a plain link — the
+ *  user downloads the GGUF (or points their browser at the repo) and drops it
+ *  into the models folder, where `find_reranker_gguf` picks it up. */
+const RERANKER_SUGGESTION_URL = "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF";
+
+/** Settings key for the opt-in reranker stage (`search_docs` second-pass
+ *  ranking). Default off until evaluated; the stage fails open. */
+const RERANK_SETTING_KEY = "docs.rerank";
+
 function fitClass(sizeBytes: number, budget: number): "fits" | "tight" | "too_large" {
   if (!budget) return "tight";
   const r = sizeBytes / budget;
@@ -83,6 +97,7 @@ interface PerCorpusProgress {
 export function KnowledgePanel() {
   const [corpora, setCorpora] = useState<DocCorpus[] | null>(null);
   const [sidecar, setSidecar] = useState<DocsEmbeddingStatus | null>(null);
+  const [rerankEnabled, setRerankEnabled] = useState(false);
   const [busy, setBusy] = useState<string | null>(null); // corpusId being mutated
   const [progress, setProgress] = useState<Record<string, PerCorpusProgress>>({});
   const [error, setError] = useState<string | null>(null);
@@ -113,6 +128,11 @@ export function KnowledgePanel() {
       .then((s) => setSidecar(s))
       .catch(() => {
         /* status is supplementary — the corpora list stays authoritative */
+      });
+    void getSetting(RERANK_SETTING_KEY)
+      .then((v) => setRerankEnabled(v === "true"))
+      .catch(() => {
+        /* default stays off */
       });
   };
   useEffect(refresh, []);
@@ -299,9 +319,33 @@ export function KnowledgePanel() {
     }
   };
 
+  const handleToggleRerank = async (on: boolean) => {
+    setError(null);
+    setRerankEnabled(on);
+    try {
+      await setSetting(RERANK_SETTING_KEY, on ? "true" : "false");
+      if (on && !sidecar?.reranker?.running) {
+        // Warm the sidecar now so the first reranked search is fast.
+        // Best-effort: no model installed → the status line says so, and the
+        // search stage fails open regardless.
+        await docsStartReranker().catch(() => undefined);
+        void docsEmbeddingStatus()
+          .then((s) => s && setSidecar(s))
+          .catch(() => undefined);
+      }
+    } catch (err) {
+      setError(`Failed to save reranker setting: ${String(err)}`);
+    }
+  };
+
   const sidecarReady = !!sidecar?.running;
   const hasCorpora = (corpora ?? []).length > 0;
   const hasInstalledModel = !!sidecar?.modelPath;
+
+  // Reranker status (optional second-stage ranking for search_docs).
+  const reranker = sidecar?.reranker ?? null;
+  const rerankerPath = reranker?.modelPath ?? null;
+  const rerankerRunning = !!reranker?.running;
 
   // A suggestion counts as installed when the discovered embedding model's
   // path contains its repo-name fragment ("nomic-embed-text-v1.5", …).
@@ -521,6 +565,63 @@ export function KnowledgePanel() {
           })}
         </div>
       )}
+
+      {/* Reranker row — opt-in second-stage ranking for search_docs. Off by
+          default until evaluated; the backend stage fails open, so search
+          keeps working whenever the sidecar is down. Sits below the corpus
+          list so it reads as an advanced, optional knob. */}
+      <div className="settings-note" style={{ marginTop: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label className="corpus-toggle">
+            <input
+              type="checkbox"
+              aria-label="Rerank search results"
+              checked={rerankEnabled}
+              onChange={(e) => void handleToggleRerank(e.target.checked)}
+            />
+          </label>
+          <span style={{ fontWeight: 600, fontSize: 12 }}>Rerank search results</span>
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+          Optional: re-scores the fused hybrid hits with a local reranker
+          model for better <code>search_docs</code> ranking. Expects a
+          bge-reranker-v2-m3 GGUF (filename containing “reranker”) in your
+          models folder.
+        </div>
+        <div style={{ fontSize: 11, marginTop: 2 }}>
+          Reranker model:&nbsp;
+          {rerankerRunning ? (
+            <span style={{ color: "var(--success, #3fb950)" }}>
+              running · {shortName(reranker?.modelPath ?? "")}
+            </span>
+          ) : rerankerPath ? (
+            <>
+              <code className="mono" style={{ fontSize: 11 }}>
+                {shortName(rerankerPath)}
+              </code>{" "}
+              <span style={{ color: "var(--warn, #d29922)" }}>
+                — starts when reranking is enabled
+              </span>
+            </>
+          ) : (
+            <span style={{ color: "var(--warn, #d29922)" }}>no reranker model found</span>
+          )}
+        </div>
+        {!rerankerPath && (
+          <div style={{ fontSize: 11, marginTop: 2 }}>
+            Get a GGUF:{" "}
+            <button
+              type="button"
+              className="ghost"
+              style={{ padding: "0 4px", fontSize: 11, textDecoration: "underline" }}
+              title="Open the bge-reranker-v2-m3 GGUF repo on Hugging Face"
+              onClick={() => void openUrl(RERANKER_SUGGESTION_URL)}
+            >
+              gpustack/bge-reranker-v2-m3-GGUF
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* Embedding-model detail sheet — same visual language as the Model
           Market's detail page: hero, quant variant rows with fit dots, and a

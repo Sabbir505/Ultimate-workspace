@@ -172,14 +172,62 @@ fn best_break(text: &str, start: usize, hard_end: usize) -> usize {
 /// Split document text into overlapping chunks (~1800 chars, 200 overlap).
 /// Chunk offsets are byte offsets aligned to char boundaries; content is
 /// trimmed. Empty/whitespace-only input yields no chunks.
+///
+/// Thin wrapper over [`chunk_text_with_meta`] — content bytes are identical.
 pub fn chunk_text(text: &str) -> Vec<String> {
+    chunk_text_with_meta(text, "")
+        .into_iter()
+        .map(|m| m.content)
+        .collect()
+}
+
+/// One chunk plus its display metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkMeta {
+    pub content: String,
+    /// Markdown heading trail in effect where the chunk starts
+    /// ("Guide > Setup", '' before any heading). Display enrichment only —
+    /// it is stored alongside the chunk and rendered at query time, NEVER
+    /// embedded (embedding it would double-pay tokens and pollute vector
+    /// space).
+    pub heading: String,
+}
+
+/// [`chunk_text`] with enrichment: `path` decides whether heading trails are
+/// tracked (markdown files only — `.md`/`.markdown`; anything else gets ''
+/// headings). The slicing itself is byte-identical to `chunk_text`.
+pub fn chunk_text_with_meta(text: &str, path: &str) -> Vec<ChunkMeta> {
     let normalized = text.replace("\r\n", "\n");
     let trimmed = normalized.trim();
     if trimmed.is_empty() {
         return Vec::new();
     }
+    let is_markdown = matches!(
+        Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("md") | Some("markdown")
+    );
+    let trails = if is_markdown { heading_trails(trimmed) } else { Vec::new() };
+    // Trail in effect at a chunk's start: the last heading at or before that
+    // offset (a heading starting exactly at the chunk start IS part of the
+    // chunk). Trails is sorted by offset.
+    let heading_at = |start: usize| -> String {
+        let upto = trails.partition_point(|(off, _)| *off <= start);
+        if upto == 0 {
+            String::new()
+        } else {
+            trails[upto - 1].1.clone()
+        }
+    };
+
     if trimmed.len() <= CHUNK_TARGET + CHUNK_OVERLAP {
-        return vec![trimmed.to_string()];
+        return vec![ChunkMeta {
+            content: trimmed.to_string(),
+            heading: heading_at(0),
+        }];
     }
     let mut chunks = Vec::new();
     let mut start = 0usize;
@@ -193,7 +241,10 @@ pub fn chunk_text(text: &str) -> Vec<String> {
         };
         let piece = trimmed[start..end].trim();
         if !piece.is_empty() {
-            chunks.push(piece.to_string());
+            chunks.push(ChunkMeta {
+                content: piece.to_string(),
+                heading: heading_at(start),
+            });
         }
         if end >= len {
             break;
@@ -204,6 +255,36 @@ pub fn chunk_text(text: &str) -> Vec<String> {
         start = floor_boundary(trimmed, start);
     }
     chunks
+}
+
+/// Byte-offset → heading-trail snapshots for a markdown document, one entry
+/// per heading line. Line-based heuristic: a heading is a line of 1-6 `#`
+/// followed by a space and non-empty title (leading whitespace tolerated);
+/// deeper headings nest on the trail ("H1 > H2"). Offsets are byte offsets
+/// into `text` (normalized to '\n' line endings by the caller).
+fn heading_trails(text: &str) -> Vec<(usize, String)> {
+    let mut snapshots: Vec<(usize, String)> = Vec::new();
+    let mut stack: Vec<(usize, String)> = Vec::new(); // (level, title)
+    let mut offset = 0usize;
+    for line in text.split('\n') {
+        let t = line.trim();
+        let hashes = t.bytes().take_while(|b| *b == b'#').count();
+        if (1..=6).contains(&hashes) && t.as_bytes().get(hashes) == Some(&b' ') {
+            let title = t[hashes + 1..].trim();
+            if !title.is_empty() {
+                stack.truncate(hashes - 1);
+                stack.push((hashes, title.to_string()));
+                let joined = stack
+                    .iter()
+                    .map(|(_, s)| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" > ");
+                snapshots.push((offset, joined));
+            }
+        }
+        offset += line.len() + 1;
+    }
+    snapshots
 }
 
 #[cfg(test)]
@@ -277,6 +358,81 @@ mod tests {
                 || ch == 'ト'
                 || ch == '。'));
         }
+    }
+
+    #[test]
+    fn meta_non_markdown_gets_empty_headings() {
+        let metas = chunk_text_with_meta("plain text file", "notes/readme.txt");
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].content, "plain text file");
+        assert_eq!(metas[0].heading, "");
+        // Even markdown heading lines in a non-.md file are inert.
+        let metas = chunk_text_with_meta("# Title\nbody", "code/main.rs");
+        assert_eq!(metas[0].heading, "");
+    }
+
+    #[test]
+    fn meta_tracks_markdown_heading_trail() {
+        // Short doc (single-chunk fast path): the trail in effect at the
+        // chunk's start — the leading heading counts, an early one doesn't.
+        let lead = chunk_text_with_meta("## Setup\n\nsetup body.", "x.md");
+        assert_eq!(lead.len(), 1);
+        assert_eq!(lead[0].heading, "Setup");
+        let late = chunk_text_with_meta("intro.\n\n# Guide\n\nguide body.", "x.md");
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].heading, "", "chunk starts before any heading");
+
+        // Trail building itself: nesting, the '>' join, and popping back up.
+        let text = "intro\n\n# A\ntext\n\n## B\ntext\n\n### C\ntext\n\n# D\nend";
+        let trails = heading_trails(text);
+        let heads: Vec<&str> = trails.iter().map(|(_, h)| h.as_str()).collect();
+        assert_eq!(heads, ["A", "A > B", "A > B > C", "D"]);
+        assert!(trails.windows(2).all(|w| w[0].0 < w[1].0), "offsets ascend");
+
+        // `#` without a space or with an empty title is not a heading.
+        let tricky = "#not a heading\n\n# \n\nreal body";
+        let metas3 = chunk_text_with_meta(tricky, "x.md");
+        assert_eq!(metas3[0].heading, "");
+        assert_eq!(
+            chunk_text_with_meta(tricky, "x.md")
+                .into_iter()
+                .map(|m| m.content)
+                .collect::<Vec<_>>(),
+            chunk_text(tricky)
+        );
+    }
+
+    #[test]
+    fn meta_long_markdown_chunks_carry_their_section() {
+        // Section bodies are single ~1000-char lines (no interior paragraph
+        // breaks), so chunk boundaries land on section edges only — best_break
+        // prefers the "\n\n" between sections.
+        let body = |word: &str| format!("{word} {}", "lorem ipsum dolor sit amet ".repeat(36));
+        let text = format!(
+            "intro paragraph before any heading.\n\n# Guide\n\n{}\n\n## Setup\n\n{}\n\n### Advanced\n\n{}",
+            body("guide"),
+            body("setup"),
+            body("advanced"),
+        );
+        let metas = chunk_text_with_meta(&text, "big.md");
+        assert!(metas.len() >= 3, "expected several chunks");
+        // First chunk starts before any heading.
+        assert_eq!(metas[0].heading, "");
+        // Every chunk's trail is one of the document's heading trails (or ''
+        // before the first) — and at least the mid-document trails appear.
+        let valid = ["", "Guide", "Guide > Setup", "Guide > Setup > Advanced"];
+        for m in &metas {
+            assert!(
+                valid.contains(&m.heading.as_str()),
+                "unexpected trail {:?}",
+                m.heading
+            );
+        }
+        assert!(metas.iter().any(|m| m.heading == "Guide > Setup"));
+        // Content bytes unchanged vs the heading-free chunker.
+        let plain = chunk_text(&text);
+        let with_meta: Vec<String> = metas.into_iter().map(|m| m.content).collect();
+        assert_eq!(plain, with_meta);
     }
 
     #[test]

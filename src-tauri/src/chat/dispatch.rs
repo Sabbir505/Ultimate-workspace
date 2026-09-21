@@ -1193,10 +1193,7 @@ async fn subagent_run_tool(
             ));
         }
         crate::hooks::PreVerdict::Ask { .. } => {
-            return ToolOutcome::text(format!(
-                "Error: `{name}` needs manual approval per a user hook, and subagents cannot ask. \
-                 Run it from the main chat instead."
-            ));
+            return ToolOutcome::text(crate::hooks::refuse_ask(name));
         }
         crate::hooks::PreVerdict::Proceed { .. } => {}
     }
@@ -2292,10 +2289,11 @@ async fn run_tool_inner(
         return crate::session_fabric::execute_mesh_tool(app, Some(sid), name, args).await;
     }
 
-    // Local-docs search: needs both DB (corpora + chunks) and the embedding
-    // sidecar (to vectorize the query), so it dispatches here rather than in
-    // execute_tool. Gated at the schema level via ToolCaps.local_docs, but we
-    // double-check the gate cheaply in case a model calls a removed tool.
+    // Local-docs search: needs the DB (corpora + chunks) and dispatches here
+    // rather than in execute_tool; the embedding sidecar is optional (hybrid
+    // search degrades to keyword-only when it's down). Gated at the schema
+    // level via ToolCaps.local_docs, but we double-check the gate cheaply in
+    // case a model calls a removed tool.
     if name == tools::SEARCH_DOCS {
         return run_search_docs_tool(app, name, args).await;
     }
@@ -2324,7 +2322,7 @@ async fn run_tool_inner(
         // Write-kind remote tool mutates the connected account, so plan mode
         // refuses it with the same guidance.
         if plan_mode && matches!(kind, permission::ConnectorToolKind::Write) {
-            return crate::chat::plan::gate_denial(true, name).unwrap_or_default();
+            return crate::chat::plan::plan_denial_message(name, "connector");
         }
         let decision = permission::check_connector_permission(sandbox, approval, kind);
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
@@ -2352,7 +2350,7 @@ async fn run_tool_inner(
     if let Some((_, entry)) = crate::mcp_gallery::find_tool(&caps.mcp_tools, name) {
         // Same plan-mode refusal as connector writes (see above).
         if plan_mode && matches!(entry.kind, permission::ConnectorToolKind::Write) {
-            return crate::chat::plan::gate_denial(true, name).unwrap_or_default();
+            return crate::chat::plan::plan_denial_message(name, "MCP server");
         }
         let decision = permission::check_connector_permission(sandbox, approval, entry.kind);
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
@@ -3015,11 +3013,46 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
     })
 }
 
-/// Dispatch the local-docs `search_docs` tool. Embeds the query via the running
-/// embedding sidecar, then brute-force cosine top-k against all enabled corpora,
-/// returning the same short summary format as `search_content`. Image hits
-/// include a path citation only (no inline pixels).
-async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Value) -> String {
+/// Reorder fused hybrid hits by reranker scores. Scored hits lead, ordered by
+/// score (best first); hits the reranker didn't score keep their fused order
+/// at the end. The sort is stable, so equal scores never shuffle fused ties.
+/// Pure function — unit-tested below without any network.
+fn apply_rerank_order(
+    hits: Vec<crate::db::ChunkHit>,
+    reranked: &[(usize, f64)],
+) -> Vec<crate::db::ChunkHit> {
+    let scores: std::collections::HashMap<usize, f64> = reranked.iter().copied().collect();
+    let mut keyed: Vec<(Option<f64>, crate::db::ChunkHit)> = hits
+        .into_iter()
+        .enumerate()
+        .map(|(i, h)| (scores.get(&i).copied(), h))
+        .collect();
+    keyed.sort_by(|a, b| match (a.0, b.0) {
+        (Some(sa), Some(sb)) => sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    keyed.into_iter().map(|(_, h)| h).collect()
+}
+
+/// Dispatch the local-docs `search_docs` tool: hybrid retrieval over all
+/// enabled corpora — an FTS5 keyword leg fused with the cosine vector leg via
+/// Reciprocal Rank Fusion. The embedding sidecar is OPTIONAL: the query is
+/// embedded only when the sidecar is up, and a dead sidecar (or a failed
+/// embed) degrades cleanly to keyword-only search instead of failing the
+/// tool. Image hits include a path citation only (no inline pixels).
+///
+/// Reranker stage (opt-in `docs.rerank`, default off): when enabled, the
+/// reranker sidecar is up, and `top_k > 1`, the fused top-50 is re-scored
+/// through the sidecar's `/v1/rerank` and reordered before the final
+/// `top_k` cut. The stage lives here (not in db/) because it needs the async
+/// HTTP client, and it FAILS OPEN: any rerank failure keeps the fused order.
+/// `pub(crate)` because the relay-tools bridge reaches this handler through
+/// `tools::execute_tool`'s `SEARCH_DOCS` arm (mcp_tools_bridge advertises
+/// `search_docs` and runs the shared dispatcher, so the arm must exist there).
+/// The built-in chat keeps its early intercept in `run_tool_inner` above.
+pub(crate) async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Value) -> String {
     // Parse args.
     let query = args
         .get("query")
@@ -3035,44 +3068,75 @@ async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Value) -> Str
         .map(|v| v.min(20).max(1) as usize)
         .unwrap_or(5);
 
-    let base_url = match app.try_state::<crate::chat::local_models::LocalModelState>() {
-        Some(state) => match state.0.embedding_status() {
-            Some(active) => active.base_url,
-            None => {
-                return "search_docs unavailable — the local embedding sidecar is \
-                        not running. Re-index a corpus from Settings → Knowledge \
-                        to start it."
-                    .to_string();
-            }
-        },
-        None => {
-            return "search_docs unavailable — the local embedding sidecar is not \
-                    registered."
-                .to_string();
-        }
-    };
+    // Embed the query ONLY when the sidecar is up (one query here). Any
+    // failure downgrades to keyword-only — the tool must never fail just
+    // because the embedder is off.
+    let query_vec: Option<Vec<f32>> =
+        match app.try_state::<crate::chat::local_models::LocalModelState>() {
+            Some(state) => match state.0.embedding_status() {
+                Some(active) => {
+                    match crate::chat::local_models::embed_texts(&active.base_url, &[query.to_string()])
+                        .await
+                    {
+                        Ok(v) => v.into_iter().next(),
+                        Err(e) => {
+                            eprintln!("[docs] query embedding failed, falling back to keyword-only: {e}");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            },
+            None => None,
+        };
 
-    // Embed the query (sidecar can vectorize one or many; one query here).
-    let vecs = match crate::chat::local_models::embed_texts(&base_url, &[query.to_string()]).await {
-        Ok(v) => v,
-        Err(e) => return format!("search_docs embedding failed: {e}"),
-    };
-    let query_vec = match vecs.into_iter().next() {
-        Some(v) => v,
-        None => {
-            return "search_docs embedding failed: sidecar returned no vectors.".to_string();
-        }
-    };
+    // The hybrid search scans a cosine leg over ALL indexed chunks (the DB's
+    // own doc says so) — hundreds of ms on a large corpus. Run it on the
+    // blocking pool like `compute_docs_retrieval` does for the same query:
+    // holding the shared DB mutex across that scan on the async runtime
+    // stalled every IPC command and stream persist.
+    // Each leg is cut at 50 before fusion (top_k is at most 20) — the same
+    // width the reranker stage consumes.
+    const LEG_LIMIT: usize = 50;
+    // Reranker-stage width: when active, keep the full fused top-50 for
+    // re-scoring and cut to top_k only afterwards.
+    const RERANK_FETCH: usize = 50;
+    // Per-document char cap for the rerank call (~400 tokens — the model was
+    // fine-tuned at a 1024-token window, so keep query + doc well inside it).
+    const RERANK_DOC_CHARS: usize = 1500;
 
-    // The chunk search is a brute-force cosine scan over ALL indexed chunks
-    // (the DB's own doc says so) — hundreds of ms on a large corpus. Run it
-    // on the blocking pool like `compute_docs_retrieval` does for the same
-    // query: holding the shared DB mutex across that scan on the async
-    // runtime stalled every IPC command and stream persist.
     let db = Arc::clone(&app.state::<crate::DbState>().0);
+    let query_owned = query.to_string();
+
+    // Reranker gate: only when the `docs.rerank` setting is on (default
+    // "false"), the reranker sidecar is up, and the caller wants more than
+    // one hit. Latency-sensitive auto-retrieval (compute_docs_retrieval)
+    // never reranks.
+    let rerank_base_url = app
+        .try_state::<crate::chat::local_models::LocalModelState>()
+        .and_then(|s| s.0.reranker_status())
+        .map(|a| a.base_url);
+    let rerank_on = rerank_base_url.is_some()
+        && top_k > 1
+        && {
+            let conn = db.lock();
+            crate::db::get_setting(&conn, "docs.rerank")
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some("true")
+        };
+
     let hits = match tokio::task::spawn_blocking(move || {
         let conn = db.lock();
-        crate::db::search_chunks(&conn, &query_vec, top_k)
+        crate::db::search_chunks_hybrid(
+            &conn,
+            &query_owned,
+            query_vec.as_deref(),
+            None,
+            LEG_LIMIT,
+            if rerank_on { RERANK_FETCH } else { top_k },
+        )
     })
     .await
     {
@@ -3084,6 +3148,36 @@ async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Value) -> Str
     if hits.is_empty() {
         return "No local documents matched your query.".to_string();
     }
+
+    // Reranker stage: one /v1/rerank call over the fused hits' content
+    // (truncated — see RERANK_DOC_CHARS), reorder by returned scores, then
+    // cut to top_k. Fail-open: ANY failure (sidecar down mid-flight, HTTP
+    // error, parse error) keeps the fused order — one diagnostic line.
+    let hits = if rerank_on {
+        let documents: Vec<String> = hits
+            .iter()
+            .map(|h| crate::util::truncate_chars(&h.content, RERANK_DOC_CHARS))
+            .collect();
+        match crate::chat::local_models::rerank_texts(
+            rerank_base_url.as_deref().unwrap_or_default(),
+            crate::chat::local_models::RERANKER_MODEL_KEY,
+            query,
+            &documents,
+        )
+        .await
+        {
+            Ok(scores) => apply_rerank_order(hits, &scores)
+                .into_iter()
+                .take(top_k)
+                .collect(),
+            Err(e) => {
+                eprintln!("[docs] rerank failed, keeping fused order: {e}");
+                hits
+            }
+        }
+    } else {
+        hits
+    };
 
     // Format hits. Cap per-chunk content at 800 chars and the whole response at
     // ~6k chars so a single tool result can't blow out the context window.
@@ -3102,6 +3196,13 @@ async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Value) -> Str
                 hit.score,
             )
         } else {
+            // Heading enrichment: situate the excerpt with a `path · heading`
+            // first line when the chunk carries a markdown heading trail.
+            let locator = if hit.heading.is_empty() {
+                hit.path.clone()
+            } else {
+                format!("{} · {}", hit.path, hit.heading)
+            };
             // Char-safe cap — a byte slice panics mid-codepoint (B-1), and
             // this runs inline in the tool loop, killing the whole turn.
             let content = if hit.content.chars().count() > MAX_CHUNK {
@@ -3112,7 +3213,7 @@ async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Value) -> Str
             format!(
                 "[{}] {}  ·  {}  ·  score={:.3}\n{}",
                 i + 1,
-                hit.path,
+                locator,
                 hit.kind,
                 hit.score,
                 content,
@@ -3177,6 +3278,47 @@ mod tests {
             subagent_openai_base("openai_compatible", Some("http://127.0.0.1:8999")).unwrap(),
             "http://127.0.0.1:8999"
         );
+    }
+
+    // ---- reranker reorder-merge (run_search_docs_tool stage) ----
+
+    fn hit(path: &str) -> crate::db::ChunkHit {
+        crate::db::ChunkHit {
+            corpus_id: "c".into(),
+            path: path.into(),
+            kind: "text".into(),
+            content: String::new(),
+            heading: String::new(),
+            score: 0.0,
+        }
+    }
+
+    #[test]
+    fn rerank_order_puts_scored_hits_first_missing_keep_fused_order_at_end() {
+        // Fused order a,b,c,d. Reranker scores b best, d second; a and c are
+        // unscored → they trail in their original fused order.
+        let fused = vec![hit("a"), hit("b"), hit("c"), hit("d")];
+        let out = apply_rerank_order(fused, &[(1, 0.9), (3, 0.1)]);
+        let paths: Vec<_> = out.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["b", "d", "a", "c"]);
+    }
+
+    #[test]
+    fn rerank_order_ignores_out_of_range_indexes_and_keeps_ties_stable() {
+        let fused = vec![hit("a"), hit("b")];
+        // Index 9 doesn't exist (server bug) → ignored; equal scores keep the
+        // fused order for the scored pair.
+        let out = apply_rerank_order(fused, &[(9, 0.5), (0, 0.5), (1, 0.5)]);
+        let paths: Vec<_> = out.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn rerank_order_with_no_scores_is_identity() {
+        let fused = vec![hit("a"), hit("b"), hit("c")];
+        let out = apply_rerank_order(fused.clone(), &[]);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().zip(fused.iter()).all(|(o, f)| o.path == f.path));
     }
 
     // ---- run_shell availability-probe guard ----
@@ -3320,9 +3462,10 @@ async fn run_totp_tool(app: &AppHandle, sid: &str, args: &Value) -> String {
             let mut cmd = tokio::process::Command::new("bw");
             cmd.args(["get", "totp", key]);
             crate::util::no_console_window_tokio(&mut cmd);
-            match cmd.output().await
-            {
-                Ok(out) if out.status.success() => {
+            // The CLI can stall on a locked vault / network sync; bound it so
+            // the tool call always returns.
+            match tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await {
+                Ok(Ok(out)) if out.status.success() => {
                     let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if code.is_empty() {
                         format!("Error: bw returned an empty code for {key:?}.")
@@ -3330,16 +3473,17 @@ async fn run_totp_tool(app: &AppHandle, sid: &str, args: &Value) -> String {
                         code
                     }
                 }
-                Ok(out) => {
+                Ok(Ok(out)) => {
                     let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
                     format!(
                         "Error: Bitwarden CLI failed for {key:?}: {}. Is the bw CLI installed and the vault unlocked (BW_SESSION)?",
                         if err.is_empty() { "unknown error" } else { &err }
                     )
                 }
-                Err(e) => format!(
+                Ok(Err(e)) => format!(
                     "Error: could not run the Bitwarden CLI (`bw`): {e}. Install it or use source 'keyring'."
                 ),
+                Err(_) => "Error: password-manager CLI timed out.".to_string(),
             }
         }
         "1password" => {
@@ -3351,8 +3495,8 @@ async fn run_totp_tool(app: &AppHandle, sid: &str, args: &Value) -> String {
             let mut cmd = tokio::process::Command::new("op");
             cmd.args(["read", key]);
             crate::util::no_console_window_tokio(&mut cmd);
-            match cmd.output().await {
-                Ok(out) if out.status.success() => {
+            match tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await {
+                Ok(Ok(out)) if out.status.success() => {
                     let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if code.is_empty() {
                         format!("Error: op returned an empty code for {key:?}.")
@@ -3360,16 +3504,17 @@ async fn run_totp_tool(app: &AppHandle, sid: &str, args: &Value) -> String {
                         code
                     }
                 }
-                Ok(out) => {
+                Ok(Ok(out)) => {
                     let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
                     format!(
                         "Error: 1Password CLI failed: {}. Is the op CLI installed and signed in?",
                         if err.is_empty() { "unknown error" } else { &err }
                     )
                 }
-                Err(e) => format!(
+                Ok(Err(e)) => format!(
                     "Error: could not run the 1Password CLI (`op`): {e}. Install it or use source 'keyring'."
                 ),
+                Err(_) => "Error: password-manager CLI timed out.".to_string(),
             }
         }
         other => format!("Error: unknown totp_code source {other:?} — use 'keyring', 'bitwarden', or '1password'."),

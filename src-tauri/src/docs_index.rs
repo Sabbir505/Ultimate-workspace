@@ -76,8 +76,9 @@ pub struct IndexRegistry {
 /// The folders we scan for GGUFs. Mirrors scan_local_models (minus the
 /// chat-only default locations): the market dir override, its default, and
 /// user-added folders. The Knowledge panel downloads the embedding model into
-/// the market dir, so it's always covered.
-fn model_scan_dirs(conn: &Connection) -> Vec<PathBuf> {
+/// the market dir, so it's always covered. Also walked by
+/// `local_models::find_reranker_gguf` for the reranker sidecar's model.
+pub(crate) fn model_scan_dirs(conn: &Connection) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(Some(dir)) = db::get_setting(conn, "local_models.dir") {
         if !dir.trim().is_empty() {
@@ -119,7 +120,11 @@ pub fn find_embedding_gguf(conn: &Connection) -> Option<String> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_lowercase();
-            if !name.ends_with(".gguf") || name.starts_with("mmproj") {
+            // "reranker"-named GGUFs (bge-reranker-*) are cross-encoders
+            // served with --reranking; their header carries an embedding arch
+            // (xlm-roberta) but they cannot produce corpus embeddings — keep
+            // them out of the embedder pick (find_reranker_gguf owns them).
+            if !name.ends_with(".gguf") || name.starts_with("mmproj") || name.contains("reranker") {
                 continue;
             }
             let meta = local_models::parse_gguf(entry.path());
@@ -172,6 +177,18 @@ pub struct DocsEmbeddingStatus {
     pub model_path: Option<String>,
     pub running: bool,
     pub base_url: Option<String>,
+    /// Reranker sidecar status (the optional `docs.rerank` second-stage
+    /// ranking for `search_docs`).
+    pub reranker: RerankerStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RerankerStatus {
+    /// Path of the reranker GGUF on disk, if one is installed.
+    pub model_path: Option<String>,
+    pub running: bool,
+    pub base_url: Option<String>,
 }
 
 #[tauri::command(async)]
@@ -179,16 +196,53 @@ pub fn docs_embedding_status(
     db: State<'_, DbState>,
     local: State<'_, LocalModelState>,
 ) -> CmdResult<DocsEmbeddingStatus> {
-    let model_path = {
+    let (model_path, reranker_path) = {
         let conn = db.0.lock();
-        find_embedding_gguf(&conn)
+        (
+            find_embedding_gguf(&conn),
+            local_models::find_reranker_gguf(&conn),
+        )
     };
     let active = local.0.embedding_status();
+    let reranker_active = local.0.reranker_status();
     Ok(DocsEmbeddingStatus {
         model_path,
         running: active.is_some(),
         base_url: active.map(|a| a.base_url),
+        reranker: RerankerStatus {
+            model_path: reranker_path,
+            running: reranker_active.is_some(),
+            base_url: reranker_active.map(|a| a.base_url),
+        },
     })
+}
+
+/// Start the reranker sidecar for the installed reranker GGUF. Invoked by the
+/// Knowledge panel when the user enables "Rerank search results", so the
+/// first reranked search doesn't pay the model load. No-op (`false`) when the
+/// sidecar is already up; errors when no reranker GGUF is found. The search
+/// stage itself never starts the sidecar — it fails open when it's down.
+#[tauri::command]
+pub async fn docs_start_reranker(
+    db: State<'_, DbState>,
+    local: State<'_, LocalModelState>,
+) -> CmdResult<bool> {
+    if local.0.reranker_status().is_some() {
+        return Ok(false);
+    }
+    let gguf = {
+        let conn = db.0.lock();
+        local_models::find_reranker_gguf(&conn)
+    };
+    let Some(gguf) = gguf else {
+        return Err(
+            "no reranker model installed — place a bge-reranker-v2-m3 GGUF (filename \
+             containing \"reranker\") in your models folder"
+                .to_string(),
+        );
+    };
+    local.0.start_reranker(&gguf).await?;
+    Ok(true)
 }
 
 #[tauri::command(async)]
@@ -412,6 +466,17 @@ async fn run_index(
                 .unwrap_or(0);
             let chunks = docs_db::count_chunks(&conn, &corpus_id).unwrap_or(0);
             let _ = docs_db::finish_index(&conn, &corpus_id, files, chunks);
+            // Stamp the chunk-schema version only on a COMPLETED pass — a
+            // cancelled/errored run leaves chunks in mixed old/new shape, so
+            // the stored version stays behind and the next run re-chunks
+            // everything again.
+            if progress.state == "done" {
+                let _ = docs_db::stamp_corpus_chunk_version(
+                    &conn,
+                    &corpus_id,
+                    docs_db::DOCS_CHUNK_SCHEMA_VERSION,
+                );
+            }
             return progress;
         }};
     }
@@ -449,9 +514,15 @@ async fn run_index(
             drop(conn);
             finish!("error", Some(e.to_string()));
         }
+        // Corpus schema versioning: when the stored chunk_version lags the
+        // current chunk-shape schema (chunker behavior + enrichment
+        // metadata), treat EVERY file as changed — the mtime/size diff can
+        // never see chunk-shape changes on its own.
+        let stored_version = docs_db::corpus_chunk_version(&conn, &corpus_id).unwrap_or(0);
+        let schema_outdated = stored_version < docs_db::DOCS_CHUNK_SCHEMA_VERSION;
         let changed = entries
             .into_iter()
-            .filter(|e| indexed.get(&e.rel_path) != Some(&(e.mtime, e.size)))
+            .filter(|e| schema_outdated || indexed.get(&e.rel_path) != Some(&(e.mtime, e.size)))
             .collect::<Vec<_>>();
         drop(conn);
         changed
@@ -483,18 +554,21 @@ async fn run_index(
         let rel = entry.rel_path.clone();
         let abs = entry.abs_path.clone();
 
-        let built: Option<(String, Vec<String>)> = match entry.kind {
+        let built: Option<(String, Vec<docs::ChunkMeta>)> = match entry.kind {
             docs::WalkKind::Text => match std::fs::read_to_string(&abs) {
                 Ok(text) => {
-                    let mut chunks = docs::chunk_text(&text);
+                    // chunk_text_with_meta additionally tracks the markdown
+                    // heading trail (display enrichment); the embedded text
+                    // is unchanged.
+                    let mut metas = docs::chunk_text_with_meta(&text, &rel);
                     let remaining = docs::MAX_CHUNKS_PER_CORPUS - total_chunks;
-                    chunks.truncate(remaining);
-                    if chunks.is_empty() {
+                    metas.truncate(remaining);
+                    if metas.is_empty() {
                         // Empty/whitespace file: still record it as indexed so
                         // the diff doesn't reprocess it every run.
                         None
                     } else {
-                        Some(("text".to_string(), chunks))
+                        Some(("text".to_string(), metas))
                     }
                 }
                 Err(e) => {
@@ -523,7 +597,14 @@ async fn run_index(
                 ) {
                     Some(surrogate) => {
                         progress.images_processed += 1;
-                        Some(("image".to_string(), vec![surrogate]))
+                        // Image surrogates have no heading trail.
+                        Some((
+                            "image".to_string(),
+                            vec![docs::ChunkMeta {
+                                content: surrogate,
+                                heading: String::new(),
+                            }],
+                        ))
                     }
                     None => {
                         progress.images_skipped += 1;
@@ -541,7 +622,7 @@ async fn run_index(
             }
         };
 
-        let Some((kind, texts)) = built else {
+        let Some((kind, metas)) = built else {
             // Unreadable/empty file: record so the diff skips it next time.
             let conn = db.lock();
             let _ = docs_db::delete_chunks_for_file(&conn, &corpus_id, &rel);
@@ -552,6 +633,7 @@ async fn run_index(
         };
 
         // A dead sidecar fails every embed from here on — abort the run.
+        let texts: Vec<String> = metas.iter().map(|m| m.content.clone()).collect();
         let vectors = match embed_all(&base_url, &texts).await {
             Ok(v) => v,
             Err(e) => finish!(
@@ -569,7 +651,11 @@ async fn run_index(
                 ))
             );
         }
-        let pairs: Vec<(String, Vec<f32>)> = texts.into_iter().zip(vectors).collect();
+        let pairs: Vec<(String, Vec<f32>, String)> = metas
+            .into_iter()
+            .zip(vectors)
+            .map(|(m, v)| (m.content, v, m.heading))
+            .collect();
 
         {
             let conn = db.lock();

@@ -14,6 +14,13 @@ import { DocCorpus, DocsEmbeddingStatus, DocsIndexProgressPayload } from "../ipc
 export const docsEmbeddingStatus = () =>
   safeInvoke<DocsEmbeddingStatus | null>("docs_embedding_status");
 
+/** Start the reranker sidecar for the installed reranker GGUF (Knowledge
+ *  panel's "Rerank search results" toggle). Resolves `false` when it was
+ *  already running; errors when no reranker GGUF is found. The search stage
+ *  itself never starts the sidecar — it fails open when it's down. */
+export const docsStartReranker = () =>
+  safeInvoke<boolean>("docs_start_reranker");
+
 /** Add a folder as a corpus. The backend canonicalises the path and rejects
  *  re-adds of an already-indexed folder; `name` defaults to the folder's
  *  last segment when omitted. */

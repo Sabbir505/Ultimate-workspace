@@ -22,9 +22,16 @@ const docsCancelIndexMock = vi.fn();
 const onDocsIndexProgressMock = vi.fn();
 const onDocsCorpusUpdatedMock = vi.fn();
 const openMock = vi.fn();
+const getSettingMock = vi.fn();
+const setSettingMock = vi.fn();
+const docsStartRerankerMock = vi.fn();
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: (...a: unknown[]) => openMock(...a),
+}));
+
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openUrl: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../lib/ipc", () => ({
@@ -37,6 +44,10 @@ vi.mock("../lib/ipc", () => ({
   docsCancelIndex: (...a: unknown[]) => docsCancelIndexMock(...a),
   onDocsIndexProgress: (...a: unknown[]) => onDocsIndexProgressMock(...a),
   onDocsCorpusUpdated: (...a: unknown[]) => onDocsCorpusUpdatedMock(...a),
+  // Reranker row (docs.rerank toggle + sidecar warm-up).
+  getSetting: (...a: unknown[]) => getSettingMock(...a),
+  setSetting: (...a: unknown[]) => setSettingMock(...a),
+  docsStartReranker: (...a: unknown[]) => docsStartRerankerMock(...a),
   fetchModelCatalog: vi.fn().mockResolvedValue(null),
   getGpuVram: vi.fn().mockResolvedValue(null),
   onModelDownloadProgress: vi.fn().mockResolvedValue(() => {}),
@@ -91,6 +102,9 @@ async function renderWithDefaults(list: DocCorpus[] | null, status: DocsEmbeddin
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getSettingMock.mockResolvedValue(null);
+  setSettingMock.mockResolvedValue(undefined);
+  docsStartRerankerMock.mockResolvedValue(false);
   onDocsIndexProgressMock.mockImplementation(() => Promise.resolve(vi.fn()));
   onDocsCorpusUpdatedMock.mockImplementation(() => Promise.resolve(vi.fn()));
   confirmSpy = vi.fn().mockReturnValue(true);
@@ -169,6 +183,20 @@ describe("KnowledgePanel", () => {
     fireEvent.click(screen.getByText(/^Remove$/));
     await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
     await waitFor(() => expect(docsRemoveCorpusMock).toHaveBeenCalledWith("corp-1"));
+  });
+
+  it("persists the reranker toggle to docs.rerank and warms the sidecar", async () => {
+    // Found model + sidecar down: enabling should write the setting and kick
+    // docs_start_reranker (best-effort warm-up).
+    await renderWithDefaults(
+      [corpus()],
+      sidecar({
+        reranker: { modelPath: "C:/models/bge-reranker-v2-m3-Q8_0.gguf", running: false, baseUrl: null },
+      }),
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: /rerank search results/i }));
+    await waitFor(() => expect(setSettingMock).toHaveBeenCalledWith("docs.rerank", "true"));
+    await waitFor(() => expect(docsStartRerankerMock).toHaveBeenCalled());
   });
 });
 

@@ -486,18 +486,23 @@ pub fn scan_default_locations() -> Vec<GgufFile> {
 
 // ---- Sidecar registry ----
 
-/// What a sidecar is for. Chat and embedding sidecars coexist (the corpus
-/// embedder runs alongside the chat model); starting one kind never stops
-/// the other.
+/// What a sidecar is for. Chat, embedding, and reranker sidecars coexist
+/// (the corpus embedder and reranker run alongside the chat model); starting
+/// one kind never stops the others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidecarKind {
     Chat,
     Embedding,
+    Reranker,
 }
 
 /// Registry key for the embedding sidecar (it's a singleton by policy, like
 /// the chat sidecar, but keyed apart so the two never evict each other).
 pub const EMBEDDING_MODEL_KEY: &str = "__embedding__";
+
+/// Registry key for the reranker sidecar (sibling singleton of the embedding
+/// sidecar — see [`SidecarKind::Reranker`]).
+pub const RERANKER_MODEL_KEY: &str = "__reranker__";
 
 pub struct SidecarHandle {
     pub child: tokio::process::Child,
@@ -1191,6 +1196,20 @@ impl LocalModelRegistry {
             })
     }
 
+    /// Status of the reranker sidecar, if running.
+    pub fn reranker_status(&self) -> Option<ActiveLocalModel> {
+        self.handles
+            .lock()
+            .get(RERANKER_MODEL_KEY)
+            .map(|h| ActiveLocalModel {
+                model_id: h.model_id.clone(),
+                port: h.port,
+                n_ctx: h.n_ctx,
+                n_gpu_layers: h.n_gpu_layers,
+                base_url: format!("http://127.0.0.1:{}", h.port),
+            })
+    }
+
     /// Start the embedding sidecar (llama-server --embedding) for a corpus
     /// embedder GGUF. Small fixed context — nomic-embed-text is a 2k-ctx
     /// model and chunks are ~450 tokens. Stops any previous embedding
@@ -1295,6 +1314,139 @@ impl LocalModelRegistry {
         }
         Err("llama-server embedding sidecar failed to start (GPU and CPU)".to_string())
     }
+
+    /// Start the reranker sidecar (llama-server cross-encoder reranking) for a
+    /// bge-reranker-v2-m3-style GGUF. Mirrors `start_embedding`: ephemeral
+    /// port, GPU-first + CPU fallback, singleton under [`RERANKER_MODEL_KEY`];
+    /// chat and embedding sidecars are untouched.
+    pub async fn start_reranker(&self, gguf_path: &str) -> Result<StartedModel, String> {
+        self.stop_kind(SidecarKind::Reranker).await;
+
+        let resolved = resolve_llama_server_binary(None)?;
+        let bin = &resolved.path;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("failed to bind port: {e}"))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| format!("local addr: {e}"))?
+            .port();
+        drop(listener);
+
+        // Full GPU offload first, CPU fallback. The reranker is ~600 MB at
+        // Q8_0, but a crowded GPU can still reject the allocation.
+        for try_ngl in [auto_ngl(gguf_path), 0] {
+            let args = vec![
+                "--model".to_string(),
+                gguf_path.to_string(),
+                "--port".to_string(),
+                port.to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "-c".to_string(),
+                "2048".to_string(),
+                // Research-tested working combo for llama-server's /v1/rerank
+                // (docs/research/TRIGGERS_RAG_PRICING_CATALOG_RESEARCH.md
+                // B.2b): `--reranking --pooling rank --embedding`. Some
+                // llama.cpp builds only expose the rank-pooling path when
+                // `--embedding` is also present; the extra flag is harmless
+                // on builds that don't need it.
+                "--embedding".to_string(),
+                "--reranking".to_string(),
+                "--pooling".to_string(),
+                "rank".to_string(),
+                "--n-gpu-layers".to_string(),
+                try_ngl.to_string(),
+            ];
+            let mut cmd = tokio::process::Command::new(bin);
+            cmd.args(&args)
+                .current_dir(&resolved.dir)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    if try_ngl != 0 {
+                        eprintln!("[local-models] reranker sidecar spawn failed (ngl={try_ngl}): {e}; retrying on CPU");
+                        continue;
+                    }
+                    return Err(format!("failed to spawn llama-server for reranking: {e}"));
+                }
+            };
+
+            // Readiness probe: POST /v1/rerank with a tiny 2-document payload
+            // instead of /health. While the model loads, llama-server answers
+            // 503; a 200 (JSON body) means the rank endpoint is actually
+            // serving — and a build that rejects the --reranking flags dies
+            // here visibly instead of half-starting.
+            let rerank_url = format!("http://127.0.0.1:{port}/v1/rerank");
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default();
+            // Load budget scales with the GGUF (same formula as the chat
+            // sidecar); rerankers are small, so this usually lands ~35-40s.
+            let gb = fs::metadata(gguf_path).map(|m| m.len()).unwrap_or(0) as f64
+                / (1024.0 * 1024.0 * 1024.0);
+            let timeout_secs = (30.0 + gb * 15.0).clamp(30.0, 180.0) as u64;
+            let mut ready = false;
+            for _ in 0..timeout_secs * 2 {
+                match child.try_wait() {
+                    Ok(Some(_)) => break, // died — next ladder step
+                    _ => {}
+                }
+                match client
+                    .post(&rerank_url)
+                    .json(&serde_json::json!({
+                        "model": "reranker",
+                        "query": "readiness probe",
+                        "documents": ["probe document one", "probe document two"],
+                    }))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        ready = true;
+                        break;
+                    }
+                    _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+                }
+            }
+            if ready {
+                self.handles.lock().insert(
+                    RERANKER_MODEL_KEY.to_string(),
+                    SidecarHandle {
+                        child,
+                        port,
+                        model_id: RERANKER_MODEL_KEY.to_string(),
+                        kind: SidecarKind::Reranker,
+                        n_ctx: 2048,
+                        n_gpu_layers: try_ngl,
+                        overrides_sig: String::new(),
+                    },
+                );
+                eprintln!("[local-models] reranker sidecar up on port {port} (ngl={try_ngl})");
+                return Ok(StartedModel {
+                    model_id: RERANKER_MODEL_KEY.to_string(),
+                    port,
+                    n_ctx: 2048,
+                    n_gpu_layers: try_ngl,
+                    base_url: format!("http://127.0.0.1:{port}"),
+                });
+            }
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        Err("llama-server reranker sidecar failed to start (GPU and CPU)".to_string())
+    }
 }
 
 /// Embed a batch of texts against a running embedding sidecar
@@ -1374,6 +1526,117 @@ fn parse_embedding_response(
         ));
     }
     Ok(out)
+}
+
+/// Re-score `documents` against `query` via a running reranker sidecar
+/// (llama-server `POST /v1/rerank`, served under `--reranking --pooling rank`).
+/// Returns `(index, score)` pairs — indexes refer to positions in `documents`
+/// — sorted by score, best first. Tolerant by design: documents the server
+/// didn't score are simply absent from the result (the caller keeps their
+/// previous order).
+pub async fn rerank_texts(
+    base_url: &str,
+    model: &str,
+    query: &str,
+    documents: &[String],
+) -> Result<Vec<(usize, f64)>, String> {
+    if documents.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(format!("{base_url}/v1/rerank"))
+        .json(&serde_json::json!({
+            "model": model,
+            "query": query,
+            "documents": documents,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("rerank request failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "rerank HTTP {status}: {}",
+            text.chars().take(200).collect::<String>()
+        ));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let mut out = parse_rerank_response(&json, documents.len())?;
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(out)
+}
+
+/// Extract `(index, score)` pairs from a llama-server `/v1/rerank` response
+/// (`{"results": [{"index": 0, "relevance_score": 0.9}, …]}`). Pure function,
+/// no network. Tolerant: entries with a missing/non-numeric score or a
+/// missing/out-of-range index are SKIPPED rather than failing the whole
+/// response; only a fundamentally wrong shape (no `results` array) is an
+/// error. The score field name varies across servers/builds —
+/// `relevance_score` (llama.cpp/OpenAI-style) or `score` (Jina/Cohere-style)
+/// — so both are accepted.
+fn parse_rerank_response(
+    json: &serde_json::Value,
+    doc_count: usize,
+) -> Result<Vec<(usize, f64)>, String> {
+    let results = json
+        .get("results")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "rerank response missing `results` array".to_string())?;
+    let mut out = Vec::with_capacity(results.len());
+    for item in results {
+        let index = match item.get("index").and_then(|v| v.as_u64()) {
+            Some(i) if (i as usize) < doc_count => i as usize,
+            _ => continue, // missing, non-numeric, or out-of-range index
+        };
+        let score = item
+            .get("relevance_score")
+            .or_else(|| item.get("score"))
+            .and_then(|v| v.as_f64());
+        if let Some(s) = score {
+            out.push((index, s));
+        }
+    }
+    Ok(out)
+}
+
+/// Locate a reranker GGUF on disk (bge-reranker-v2-m3 style). The filename
+/// alone identifies the role — cross-encoder conversions carry the word
+/// "reranker" — so no architecture filter is needed (and their xlm-roberta
+/// header would otherwise collide with the embedding-arch list). Walks the
+/// same model dirs as the embedding scan; prefers the shortest filename
+/// (typically the smallest/cleanest quant present).
+pub fn find_reranker_gguf(conn: &rusqlite::Connection) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for dir in crate::docs_index::model_scan_dirs(conn) {
+        for entry in walkdir::WalkDir::new(&dir)
+            .max_depth(6)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if !name.ends_with(".gguf") || !name.contains("reranker") {
+                continue;
+            }
+            let path = entry.path().to_string_lossy().to_string();
+            let better = match &best {
+                Some((best_len, _)) => name.len() < *best_len,
+                None => true,
+            };
+            if better {
+                best = Some((name.len(), path));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
 }
 
 // ---- Sidecar response types ----
@@ -2493,5 +2756,45 @@ mod tests {
         assert!(parse_embedding_response(&empty, 1).is_err());
         let not_arr = serde_json::json!({"embedding": [1.0]});
         assert!(parse_embedding_response(&not_arr, 1).is_err());
+    }
+
+    #[test]
+    fn parse_rerank_accepts_both_score_field_names() {
+        let json = serde_json::json!({
+            "results": [
+                {"index": 0, "relevance_score": 0.9},
+                {"index": 1, "score": 0.4}
+            ]
+        });
+        assert_eq!(
+            parse_rerank_response(&json, 2).unwrap(),
+            vec![(0, 0.9), (1, 0.4)]
+        );
+    }
+
+    #[test]
+    fn parse_rerank_skips_missing_scores_and_bad_indexes() {
+        let json = serde_json::json!({
+            "results": [
+                {"index": 0, "relevance_score": 0.5},
+                {"index": 1},                            // no score → skipped
+                {"index": 9, "relevance_score": 99.0},   // out of range → skipped
+                {"relevance_score": 1.0},                // no index → skipped
+                {"index": "2", "relevance_score": 1.0},  // non-numeric index → skipped
+                {"index": 3, "relevance_score": "high"}, // non-numeric score → skipped
+                {"index": 2, "score": -0.25}             // still valid
+            ]
+        });
+        assert_eq!(
+            parse_rerank_response(&json, 4).unwrap(),
+            vec![(0, 0.5), (2, -0.25)]
+        );
+    }
+
+    #[test]
+    fn parse_rerank_rejects_missing_results_array() {
+        assert!(parse_rerank_response(&serde_json::json!({}), 2).is_err());
+        assert!(parse_rerank_response(&serde_json::json!({"results": "nope"}), 2).is_err());
+        assert!(parse_rerank_response(&serde_json::json!([]), 2).is_err());
     }
 }

@@ -249,11 +249,21 @@ export interface DocCorpus {
   chunkCount: number;
 }
 
+/** Status of the local reranker sidecar (optional `docs.rerank` second-stage
+ *  ranking for `search_docs`). */
+export interface RerankerStatus {
+  modelPath?: string | null;
+  running: boolean;
+  baseUrl?: string | null;
+}
+
 /** Status of the local embedding model/sidecar (Settings → Knowledge). */
 export interface DocsEmbeddingStatus {
   modelPath?: string | null;
   running: boolean;
   baseUrl?: string | null;
+  /** Reranker entry — absent on older backend payloads. */
+  reranker?: RerankerStatus | null;
 }
 
 /** Event payload streamed by the `docs:index:progress` listener. */

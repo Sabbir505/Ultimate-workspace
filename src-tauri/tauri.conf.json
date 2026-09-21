@@ -4,7 +4,7 @@
   "version": "0.5.0",
   "identifier": "dev.relay.app",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "node scripts/dev-sidecars.mjs && npm run dev",
     "devUrl": "http://localhost:1500",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"

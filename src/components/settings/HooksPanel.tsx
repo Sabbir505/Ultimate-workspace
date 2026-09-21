@@ -16,9 +16,11 @@ import {
   saveHooks,
   testHook,
   importFromClaude,
+  onHookRun,
   type ClaudeImportReport,
   type HookDef,
   type HookEvent,
+  type HookRunPayload,
   type HookTestReport,
 } from "../../lib/ipc";
 
@@ -92,6 +94,7 @@ export function HooksPanel() {
   const [draft, setDraft] = useState<HookDef>(() => emptyHook("pre_tool_use"));
   const [draftArgs, setDraftArgs] = useState("");
   const [reports, setReports] = useState<Record<string, HookTestReport>>({});
+  const [runs, setRuns] = useState<HookRunPayload[]>([]);
   const [importNote, setImportNote] = useState<string | null>(null);
 
   const handleImport = async () => {
@@ -124,6 +127,24 @@ export function HooksPanel() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Live hook-run observations (same subscription pattern as KnowledgePanel's
+  // index progress): newest first, capped at 20.
+  useEffect(() => {
+    let stale = false;
+    let unlisten: (() => void) | null = null;
+    void onHookRun((run) => {
+      if (stale) return;
+      setRuns((prev) => [run, ...prev].slice(0, 20));
+    }).then((u) => {
+      if (stale) u();
+      else unlisten = u;
+    });
+    return () => {
+      stale = true;
+      unlisten?.();
+    };
+  }, []);
 
   const persist = async (next: HookDef[]) => {
     setHooks(next);
@@ -189,6 +210,16 @@ export function HooksPanel() {
         <h3>Hooks</h3>
         {hooks.length > 0 && <span className="panel-count">{hooks.length} hook{hooks.length === 1 ? "" : "s"}</span>}
       </div>
+
+      {runs.length > 0 && (
+        <div className="settings-note mono" style={{ maxHeight: 160, overflow: "auto", fontSize: 11 }}>
+          {runs.map((run, i) => (
+            <div key={`${run.event}-${i}`}>
+              {run.event} · {run.hookName || "(unnamed)"} · {run.tool || "—"} · {run.verdict} · {run.durationMs}ms
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="perm-card perm-info-card">
         <Webhook className="perm-icon" size={20} />

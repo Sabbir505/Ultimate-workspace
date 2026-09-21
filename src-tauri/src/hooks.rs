@@ -28,6 +28,8 @@
 //! Settings → Hooks; the models never see the config, but denial text names
 //! the hook so the conversation stays recoverable.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -127,8 +129,31 @@ impl HookDef {
 
 /// Load the enabled-hook list from settings. A corrupt/missing entry degrades
 /// to "no hooks" — config problems must never take chat down (the Settings
-/// panel surfaces validation errors instead).
+/// panel surfaces validation errors instead). Invalid ENTRIES inside an
+/// otherwise-valid array are skipped individually (see [`parse_config_entries`]).
+///
+/// Cached process-wide for 2 seconds ([`CONFIG_CACHE`]): this runs twice per
+/// tool call (pre + post pass), and the DB read adds up. Trade-off: a config
+/// change takes effect within ~2s, or immediately — every writer
+/// ([`save_config`], hence the Claude import too) calls
+/// [`invalidate_config_cache`]; the Settings panel's generic set_setting path
+/// relies on the TTL.
 pub fn load_config(app: &AppHandle) -> Vec<HookDef> {
+    if let Ok(guard) = CONFIG_CACHE.read() {
+        if let Some((at, defs)) = guard.as_ref() {
+            if at.elapsed() < CONFIG_CACHE_TTL {
+                return defs.as_ref().clone();
+            }
+        }
+    }
+    let defs = std::sync::Arc::new(load_config_from_db(app));
+    if let Ok(mut guard) = CONFIG_CACHE.write() {
+        *guard = Some((Instant::now(), std::sync::Arc::clone(&defs)));
+    }
+    defs.as_ref().clone()
+}
+
+fn load_config_from_db(app: &AppHandle) -> Vec<HookDef> {
     let db = app.state::<crate::DbState>();
     let raw = {
         let conn = db.0.lock();
@@ -137,7 +162,43 @@ pub fn load_config(app: &AppHandle) -> Vec<HookDef> {
     let Some(raw) = raw else {
         return Vec::new();
     };
-    serde_json::from_str::<Vec<HookDef>>(&raw).unwrap_or_default()
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Array(items)) => parse_config_entries(&items),
+        // A non-array/garbage blob disables everything — that is the one case
+        // where there is nothing salvageable to run.
+        _ => Vec::new(),
+    }
+}
+
+/// Process-wide hook-config cache: `(loaded_at, defs)` behind a RwLock. The
+/// TTL keeps a config edit from needing an IPC round-trip to invalidate.
+static CONFIG_CACHE: std::sync::RwLock<Option<(Instant, std::sync::Arc<Vec<HookDef>>)>> =
+    std::sync::RwLock::new(None);
+const CONFIG_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Drop the cached hook config so the next [`load_config`] re-reads settings.
+/// Called by every Rust-side config writer.
+pub fn invalidate_config_cache() {
+    if let Ok(mut guard) = CONFIG_CACHE.write() {
+        *guard = None;
+    }
+}
+
+/// Per-entry parse of the hooks settings array: one bad entry is skipped (and
+/// logged) instead of disabling the whole system — the previous
+/// all-or-nothing `from_str::<Vec<HookDef>>` turned a single typo into "no
+/// hooks". Pure so it is unit-testable.
+fn parse_config_entries(items: &[Value]) -> Vec<HookDef> {
+    items
+        .iter()
+        .filter_map(|item| match serde_json::from_value::<HookDef>(item.clone()) {
+            Ok(def) => Some(def),
+            Err(e) => {
+                eprintln!("[hooks] skipping invalid hook entry: {e}");
+                None
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +226,11 @@ pub fn hook_matches(matcher: &str, tool: &str) -> bool {
         m.split('|')
             .map(str::trim)
             .any(|part| !part.is_empty() && part == tool)
+    } else if m == tool {
+        // Exact equality wins before the regex reading: a dotted name like
+        // `fs.read` (or any pattern that doesn't match its own literal text,
+        // e.g. `a+b`) must still be exact-matchable as a tool name.
+        true
     } else {
         match regex::Regex::new(m) {
             Ok(re) => re.is_match(tool),
@@ -437,12 +503,15 @@ pub fn event_name(event: HookEvent) -> &'static str {
 }
 
 /// Persist the full hook list (the import command writes merged output;
-/// the Settings panel uses the generic set_setting IPC).
+/// the Settings panel uses the generic set_setting IPC). Drops the config
+/// cache so the new list is live immediately on this path.
 pub fn save_config(app: &AppHandle, defs: &[HookDef]) -> Result<(), String> {
     let json = serde_json::to_string(defs).map_err(|e| e.to_string())?;
     let db = app.state::<crate::DbState>();
     let conn = db.0.lock();
-    crate::db::set_setting(&conn, SETTINGS_KEY, &json).map_err(|e| e.to_string())
+    crate::db::set_setting(&conn, SETTINGS_KEY, &json).map_err(|e| e.to_string())?;
+    invalidate_config_cache();
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -543,9 +612,31 @@ pub enum HarnessGateVerdict {
     Proceed,
     /// A hook denied: answer the CLI's control request with a deny now.
     Deny { reason: String },
-    /// A hook asked: force the approval card even in full_auto (more
-    /// restrictive, never less).
+    /// A hook asked: in card-capable postures this forces the approval card
+    /// (more restrictive, never less); under full_auto the no-cards contract
+    /// degrades it to proceed (the CLI is auto-allowed and the dropped ask is
+    /// reported via [`emit_ask_dropped`]).
     Ask,
+}
+
+/// Report a hook `ask` that full_auto's no-cards contract degraded to a
+/// proceed. Purely observational, on the same `chat:hook-run` channel and
+/// payload shape as [`emit_hook_run`] — no hook actually ran, so the outcome
+/// fields are empty.
+pub fn emit_ask_dropped(app: &AppHandle, sid: &str, tool: &str) {
+    let _ = app.emit(
+        "chat:hook-run",
+        json!({
+            "chat_session_id": sid,
+            "event": "pre_tool_use",
+            "hookName": "",
+            "tool": tool,
+            "verdict": "ask-dropped",
+            "exitCode": null,
+            "timedOut": false,
+            "durationMs": 0,
+        }),
+    );
 }
 
 /// Pre-hook gate for harness tool calls, evaluated from the reader thread via
@@ -588,8 +679,11 @@ pub struct ClaudeImportReport {
 /// Only `type: "command"` handlers import — Relay's exec-form spawn cannot
 /// faithfully express http/prompt/agent handlers. Because Claude runs command
 /// hooks through a shell and Relay never does, the raw command string is
-/// wrapped as `cmd /C <string>` (explicitly shell, explicitly the user's own
-/// config — same trust class as the imported file itself).
+/// wrapped for the platform shell (`cmd /C` on Windows, `sh -c` elsewhere —
+/// explicitly shell, explicitly the user's own config: same trust class as
+/// the imported file itself). Ids are content-derived
+/// (`claude-{event}-{hash}`), so re-imports dedupe idempotently instead of
+/// colliding positional ids across events.
 pub fn parse_claude_hooks(raw: &str, existing: &[HookDef]) -> (Vec<HookDef>, ClaudeImportReport) {
     let mut report = ClaudeImportReport {
         imported: Vec::new(),
@@ -638,22 +732,34 @@ pub fn parse_claude_hooks(raw: &str, existing: &[HookDef]) -> (Vec<HookDef>, Cla
                     .and_then(Value::as_u64)
                     .map(|s| s.clamp(1, 600))
                     .unwrap_or_else(default_timeout);
+                // Claude command hooks are shell lines; Relay spawns
+                // exec-form, so the import wraps the line for the platform
+                // shell (cmd on Windows, sh elsewhere).
+                let (shell, shell_flag) = if cfg!(windows) {
+                    ("cmd", "/C")
+                } else {
+                    ("sh", "-c")
+                };
+                // Content-derived id: two parses of the same (event, matcher,
+                // command line) produce the SAME id, so re-imports stay
+                // idempotent and ids from different events never collide the
+                // way the old positional `claude-{event}-{n}` ids did.
                 let def = HookDef {
-                    id: format!(
-                        "claude-{}-{}",
-                        event_name(event),
-                        out.len() + report.skipped_duplicates
-                    ),
+                    id: {
+                        let mut hasher = DefaultHasher::new();
+                        event_name(event).hash(&mut hasher);
+                        matcher.hash(&mut hasher);
+                        command.hash(&mut hasher);
+                        format!("claude-{}-{:016x}", event_name(event), hasher.finish())
+                    },
                     event,
                     name: format!(
                         "claude-import {}",
                         command.split_whitespace().next().unwrap_or("hook")
                     ),
                     matcher: matcher.clone(),
-                    // Claude command hooks are shell lines; Relay spawns
-                    // exec-form, so the import wraps the line for cmd.exe.
-                    command: "cmd".into(),
-                    args: vec!["/C".to_string(), command.to_string()],
+                    command: shell.into(),
+                    args: vec![shell_flag.to_string(), command.to_string()],
                     timeout_secs,
                     on_error: OnError::Open,
                     run_async: false,
@@ -780,16 +886,6 @@ pub async fn run_pre_tool(
         );
         let started = Instant::now();
         let outcome = run_hook(app, &def, &payload).await;
-        emit_hook_run(
-            app,
-            sid,
-            HookEvent::PreToolUse,
-            &def,
-            tool,
-            "checked",
-            &outcome,
-            started.elapsed().as_millis(),
-        );
 
         let deny_reason = if !outcome.ran {
             (def.on_error == OnError::Closed)
@@ -810,6 +906,29 @@ pub async fn run_pre_tool(
         } else {
             None
         };
+        // The per-hook verdict mirrors the classified outcome (deny wins —
+        // the emit happens even on the short-circuit return below).
+        let verdict = if deny_reason.is_some() {
+            "deny"
+        } else if outcome.gate_denied {
+            "untrusted"
+        } else if outcome.parse.decision.as_deref() == Some("ask") {
+            "ask"
+        } else if !outcome.ran || outcome.timed_out || outcome.exit_code != Some(0) {
+            "error"
+        } else {
+            "ok"
+        };
+        emit_hook_run(
+            app,
+            sid,
+            HookEvent::PreToolUse,
+            &def,
+            tool,
+            verdict,
+            &outcome,
+            started.elapsed().as_millis(),
+        );
         if let Some(reason) = deny_reason {
             return PreVerdict::Deny { reason };
         }
@@ -853,9 +972,26 @@ fn blocking_reason(name: &str, stderr_reason: &str) -> String {
     }
 }
 
+/// The standard refusal when a hook's `ask` lands on a path that cannot show
+/// an approval card (subagents, unattended harness bridges) — one wording for
+/// every caller so the model sees a uniform instruction.
+pub fn refuse_ask(name: &str) -> String {
+    format!(
+        "Error: `{name}` needs manual approval per a user hook, and this path cannot ask. \
+         Run it from the main chat instead."
+    )
+}
+
 // ---------------------------------------------------------------------------
 // post_tool_use
 // ---------------------------------------------------------------------------
+
+/// Whether a post-hook outcome flags the result (annotated as such in the
+/// tool text): Claude Code's PostToolUse contract blocks via exit 2 OR a JSON
+/// `decision` of `deny`/`block`. Pure so the contract is unit-testable.
+fn post_flagged(ran: bool, exit_code: Option<i32>, decision: Option<&str>) -> bool {
+    ran && (exit_code == Some(2) || matches!(decision, Some("deny") | Some("block")))
+}
 
 /// Run the matching `post_tool_use` hooks against a completed tool result and
 /// return the (possibly annotated) result text. Sync hooks contribute context;
@@ -922,8 +1058,7 @@ pub async fn run_post_tool(
 
         let started = Instant::now();
         let outcome = run_hook(app, &def, &payload).await;
-        let flagged =
-            outcome.ran && (outcome.exit_code == Some(2) || outcome.parse.decision.as_deref() == Some("deny"));
+        let flagged = post_flagged(outcome.ran, outcome.exit_code, outcome.parse.decision.as_deref());
         emit_hook_run(
             app,
             sid,
@@ -979,19 +1114,44 @@ pub struct HookTestReport {
     pub duration_ms: u32,
 }
 
-/// Run one hook against a synthetic `pre_tool_use` payload — the Settings
-/// panel's Test button. Goes through the same exec gate, so confirming the
-/// dialog here also trusts the hook for live turns.
+/// Run one hook against a synthetic payload shaped for ITS event (lifecycle
+/// hooks get a turn_complete/session_start payload; tool hooks get the
+/// write_file one) — the Settings panel's Test button. Goes through the same
+/// exec gate, so confirming the dialog here also trusts the hook for live
+/// turns.
 pub async fn test_hook(app: &AppHandle, def: &HookDef) -> HookTestReport {
-    let payload = hook_payload(
-        HookEvent::PreToolUse,
-        None,
-        "write_file",
-        &json!({ "path": "hooks-test.txt", "content": "Relay hook test" }),
-        "test",
-        "test",
-        None,
-    );
+    let payload = match def.event {
+        HookEvent::TurnComplete => json!({
+            "hook_event_name": "turn_complete",
+            "chat_session_id": null,
+            "status": "done",
+            "reply_preview": "Relay hook test",
+        }),
+        HookEvent::SessionStart => json!({
+            "hook_event_name": "session_start",
+            "chat_session_id": null,
+            "status": "start",
+            "reply_preview": "Relay hook test",
+        }),
+        HookEvent::PreToolUse => hook_payload(
+            HookEvent::PreToolUse,
+            None,
+            "write_file",
+            &json!({ "path": "hooks-test.txt", "content": "Relay hook test" }),
+            "test",
+            "test",
+            None,
+        ),
+        HookEvent::PostToolUse => hook_payload(
+            HookEvent::PostToolUse,
+            None,
+            "write_file",
+            &json!({ "path": "hooks-test.txt", "content": "Relay hook test" }),
+            "test",
+            "test",
+            Some("Relay hook test"),
+        ),
+    };
     let started = Instant::now();
     let outcome = run_hook(app, def, &payload).await;
     HookTestReport {
@@ -1137,8 +1297,10 @@ mod tests {
         // never by position.
         let guard = defs.iter().find(|d| d.matcher == "Bash").unwrap();
         assert_eq!(guard.event, HookEvent::PreToolUse);
-        assert_eq!(guard.command, "cmd");
-        assert_eq!(guard.args, vec!["/C".to_string(), "my-guard.js".to_string()]);
+        // The import wraps shell lines for the PLATFORM shell.
+        let (shell, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
+        assert_eq!(guard.command, shell);
+        assert_eq!(guard.args, vec![flag.to_string(), "my-guard.js".to_string()]);
         assert_eq!(guard.timeout_secs, 600, "seconds, clamped to 600");
         assert!(defs.iter().any(|d| d.event == HookEvent::PostToolUse && d.matcher.is_empty()));
         assert!(defs.iter().any(|d| d.matcher == "Write|Edit"));
@@ -1174,5 +1336,68 @@ mod tests {
         assert_eq!(payload["origin"], "chat");
         let result = payload["tool_result"].as_str().unwrap();
         assert_eq!(result.chars().count(), RESULT_SNIPPET_CHARS);
+    }
+
+    #[test]
+    fn claude_import_ids_are_deterministic() {
+        let raw = r#"{"hooks":{
+            "PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"my-guard.js"}]}],
+            "PostToolUse":[{"matcher":"","hooks":[{"type":"command","command":"audit.js"}]}]
+        }}"#;
+        // Two parses of the same config produce the SAME content-derived ids
+        // (the old positional ids collided across events/import batches).
+        let (defs, _) = parse_claude_hooks(raw, &[]);
+        let (defs2, _) = parse_claude_hooks(raw, &[]);
+        assert_eq!(defs.len(), 2);
+        for (a, b) in defs.iter().zip(defs2.iter()) {
+            assert_eq!(a.id, b.id, "ids must be deterministic across parses");
+            assert!(a.id.starts_with(&format!("claude-{}-", event_name(a.event))));
+        }
+        assert_ne!(defs[0].id, defs[1].id);
+    }
+
+    #[test]
+    fn post_flagged_contract() {
+        // Claude Code's PostToolUse contract: exit 2 OR decision deny/block.
+        assert!(post_flagged(true, Some(2), None));
+        assert!(post_flagged(true, Some(0), Some("deny")));
+        assert!(post_flagged(true, Some(0), Some("block")));
+        // Other outcomes are not flags.
+        assert!(!post_flagged(true, Some(0), None));
+        assert!(!post_flagged(true, Some(0), Some("ask")));
+        assert!(!post_flagged(true, Some(1), None), "non-2 exit is an error, not a flag");
+        // A hook that never ran cannot flag anything.
+        assert!(!post_flagged(false, Some(2), Some("deny")));
+    }
+
+    #[test]
+    fn matcher_exact_equality_beats_regex_mode() {
+        // A metachar-containing matcher still exact-matches ITSELF: dotted
+        // tool names (`fs.read`) and patterns that don't match their own
+        // literal text (`a+b`) must be expressible.
+        assert!(hook_matches("fs.read", "fs.read"));
+        assert!(hook_matches("a+b", "a+b"));
+        // The regex reading is unchanged for non-equal names.
+        assert!(hook_matches("fs.read", "fsXread"));
+    }
+
+    #[test]
+    fn config_entries_skip_invalid_items() {
+        let good = json!({
+            "id": "h1",
+            "event": "pre_tool_use",
+            "command": "node",
+            "args": ["-e", "1"]
+        });
+        let entries = vec![
+            good,
+            // Bad enum value + a non-object entry: skipped, not fatal.
+            json!({ "id": "bad", "event": "no_such_event", "command": "x" }),
+            json!("garbage"),
+        ];
+        let defs = parse_config_entries(&entries);
+        assert_eq!(defs.len(), 1, "invalid entries are skipped individually");
+        assert_eq!(defs[0].id, "h1");
+        assert_eq!(defs[0].command, "node");
     }
 }

@@ -4,7 +4,7 @@
 // `permissions.rules`); the only dedicated command is `hooks_test`, which runs
 // a hook against a synthetic payload through the same exec-gate trust as live
 // turns. Command names and payload shapes are binding (CONTRACT.md).
-import { safeInvoke } from "../ipcCore";
+import { safeInvoke, safeListen } from "../ipcCore";
 import { jsonSetting } from "../ipc";
 
 export type HookEvent =
@@ -66,3 +66,21 @@ export interface ClaudeImportReport {
 /** Import command-type hooks from ~/.claude/settings.json (deduped). */
 export const importFromClaude = () =>
   safeInvoke<ClaudeImportReport>("hooks_import_claude", {});
+
+/** One live hook-run observation, emitted by the backend on `chat:hook-run`
+ *  after each hook execution (and for a hook `ask` degraded to proceed under
+ *  full_auto — `verdict: "ask-dropped"`, no hook name). */
+export interface HookRunPayload {
+  chatSessionId: string | null;
+  event: HookEvent;
+  hookName: string;
+  tool: string;
+  verdict: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+}
+
+/** Stream `chat:hook-run` events for the Hooks panel's live run list. */
+export const onHookRun = (handler: (p: HookRunPayload) => void) =>
+  safeListen<HookRunPayload>("chat:hook-run", handler);

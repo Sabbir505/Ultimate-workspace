@@ -1,6 +1,6 @@
 # Triggers beyond cron · Hybrid RAG · Live model catalog · Pricing & cache savings
 
-> **Status:** research complete, not yet built · **Date:** 2026-09-19
+> **Status:** IMPLEMENTED end-to-end (2026-09-21): Part A (webhook/file/git/gmail triggers + schema + UI; gmail v1 fires on any mailbox activity), Part B (FTS+RRF hybrid, keyword-only fallback, heading enrichment + forced re-index, eval fixtures, reranker stage via llama-server /v1/rerank — default OFF), Part C (static catalog removed, force refresh, source badges, omp cost, stale union fixed), Part D (LiteLLM auto-refresh layer + cache-savings hero + fossil removed). Original research below. · Research date: 2026-09-19
 > **Scope:** §5 improvement items 6 (automation triggers), 7 (hybrid RAG), 13 (live harness catalog),
 > 14 (pricing refresh + cache savings) from `FEATURE_MAP_AND_GAP_ANALYSIS_2026-09-19.md`.
 > All internal claims verified in code on this date. Headline corrections to the original gap analysis are

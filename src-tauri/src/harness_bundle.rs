@@ -300,7 +300,7 @@ pub fn build_artifacts_section(
              `search_sessions` tools, which cover every Relay chat session.",
         );
     }
-    s.push('n');
+    // The recent-list block below opens with its own newline.
     if !recent.is_empty() {
         s.push_str("\nArtifacts THIS session produced (most recent first):\n");
         for line in recent {
@@ -807,6 +807,36 @@ mod tests {
         assert!(no_tools.contains("report.docx"));
         assert!(!no_tools.contains("list_sessions"));
         assert!(!no_tools.contains("relay-tools"));
+    }
+
+    #[test]
+    fn artifacts_section_has_no_stray_trailing_character() {
+        // Regression: the section used to end with a literal `n` glued to
+        // the last sentence ("…chat session.n") from a `s.push('n')` meant
+        // as a newline. The section ships in EVERY harness instructions
+        // file, so the typo rode every spawn.
+        for relay_tools in [true, false] {
+            for recent in [vec![], vec!["- a.csv (csv, 2026-09-04)".into()]] {
+                let section = build_artifacts_section("C:/out", &recent, relay_tools);
+                // The old `s.push('n')` glued a literal n onto the closing
+                // sentence — "…chat session.n" with relay tools, and
+                // "…this sectionn" without (the last word already ends in n,
+                // which is why a bare ends_with('n') assert would false-fire).
+                assert!(
+                    !section.contains("session.n"),
+                    "stray `n` glued to the closing sentence (relay_tools={relay_tools})"
+                );
+                assert!(
+                    !section.contains("sectionn"),
+                    "stray `n` doubled the closing word (relay_tools={relay_tools})"
+                );
+                // With relay tools the final guidance sentence closes with a
+                // period; the recent list, when present, ends with a newline.
+                if relay_tools && recent.is_empty() {
+                    assert!(section.trim_end().ends_with("session."));
+                }
+            }
+        }
     }
 
     #[test]

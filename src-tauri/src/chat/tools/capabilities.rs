@@ -103,7 +103,8 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
             "code_execution": caps.code_exec,
             "local_docs_search": caps.local_docs,
             "connect_on_demand": !caps.attachable_connectors.is_empty()
-                || !caps.attachable_mcp.is_empty(),
+                || !caps.attachable_mcp.is_empty()
+                || !caps.unlockable_families.is_empty(),
             // Match the schema: the mutating half is stripped under a
             // read-only posture, so a plain `true` would promise writes the
             // model cannot call.
@@ -125,11 +126,31 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
                 "bound folder of markdown notes; vault_list/read/search only (write tools are stripped in this read-only posture)"
             },
             // Match the schema: list/get are always on, but the CRUD/run half
-            // is stripped under a read-only posture like every mutating tool.
-            "automations": if caps.allows_mutating {
+            // is family-locked (unlocked via attach_connector("automations")
+            // or the send-time keyword fast-path) AND stripped under a
+            // read-only posture, so the report must not claim full CRUD
+            // unless both gates are open.
+            "automations": if caps.automations_write && caps.allows_mutating {
                 "list_automations/get_automation + create/update/delete/run_automation_now (full CRUD)"
+            } else if caps.allows_mutating {
+                "list_automations/get_automation only — the write tools are family-locked: attach_connector(\"automations\") unlocks them for this turn"
             } else {
                 "list_automations/get_automation only (the write tools are stripped in this read-only posture)"
+            },
+            // Family-locked built-ins (see UNLOCKABLE_FAMILIES): the schema
+            // hides them until attach_connector("<id>") unlocks, which the
+            // manifest lists every turn. The report must state the lock the
+            // same way it states an attachable connector — available, not
+            // loaded.
+            "session_mesh": if caps.session_mesh {
+                "list_sessions/read_session/search_sessions/message_session/spawn_session — unlocked this turn"
+            } else {
+                "locked — attach_connector(\"session-mesh\") unlocks list/read/search/message/spawn for this turn"
+            },
+            "totp_codes": if caps.totp {
+                "totp_code — unlocked this turn"
+            } else {
+                "locked — attach_connector(\"totp\") unlocks totp_code for this turn"
             },
             // Unconditionally callable — there is NO availability gate: the
             // tool ships in every schema (specs.rs) and every call reaches the
@@ -329,8 +350,16 @@ mod tests {
     /// is actually callable.
     #[test]
     fn report_matches_posture_for_gated_families() {
-        let full = ToolCaps::default(); // allows_mutating: true
-        let mut read_only = ToolCaps::default();
+        // "Full" = mutating posture AND the automations family unlocked —
+        // both gates the schema applies to the write half.
+        let full = ToolCaps {
+            automations_write: true,
+            ..ToolCaps::default()
+        };
+        let mut read_only = ToolCaps {
+            automations_write: true,
+            ..ToolCaps::default()
+        };
         read_only.allows_mutating = false;
 
         let full: Value =
@@ -348,6 +377,76 @@ mod tests {
 
         assert!(full["built_in"]["vault"].as_str().unwrap().contains("vault_write"));
         assert!(!ro["built_in"]["vault"].as_str().unwrap().contains("vault_write"));
+    }
+
+    /// Report/schema parity for the family-locked built-ins: a LOCKED family
+    /// must be absent from the schema yet named with its unlock in the
+    /// report (never silently missing), and unlocking flips both sides.
+    #[test]
+    fn report_matches_family_locks_in_both_directions() {
+        for format in ["openai", "anthropic"] {
+            let specs = |caps: &ToolCaps| -> Vec<String> {
+                let raw = if format == "openai" {
+                    crate::chat::tools::openai_tool_specs(
+                        caps,
+                        crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+                    )
+                } else {
+                    crate::chat::tools::anthropic_tool_specs(
+                        caps,
+                        crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+                    )
+                };
+                raw.iter()
+                    .map(|s| {
+                        s["function"]["name"]
+                            .as_str()
+                            .or_else(|| s["name"].as_str())
+                            .unwrap_or("?")
+                            .to_string()
+                    })
+                    .collect()
+            };
+            let locked = ToolCaps::default();
+            let mut unlocked = ToolCaps::default();
+            unlocked.unlock_family(crate::chat::tools::FAMILY_SESSION_MESH);
+            unlocked.unlock_family(crate::chat::tools::FAMILY_AUTOMATIONS);
+            unlocked.unlock_family(crate::chat::tools::FAMILY_TOTP);
+
+            let locked_names = specs(&locked);
+            let unlocked_names = specs(&unlocked);
+            // Locked: the family tools are NOT in the schema…
+            assert!(!locked_names.iter().any(|n| n == crate::chat::tools::LIST_SESSIONS));
+            assert!(!locked_names.iter().any(|n| n == crate::chat::tools::TOTP_CODE));
+            assert!(!locked_names.iter().any(|n| n == crate::chat::tools::CREATE_AUTOMATION));
+            // …but list_automations/get_automation stay (the read half)…
+            assert!(locked_names.iter().any(|n| n == crate::chat::tools::LIST_AUTOMATIONS));
+            // …and the attach meta-tool carries the family ids in its enum.
+            let attach = locked_names.iter().any(|n| *n == crate::chat::tools::ATTACH_CONNECTOR);
+            assert!(attach, "{format}: attach_connector must be advertised while families are locked");
+
+            // Unlocked: everything is in the schema.
+            for n in [
+                crate::chat::tools::LIST_SESSIONS,
+                crate::chat::tools::SPAWN_SESSION,
+                crate::chat::tools::TOTP_CODE,
+                crate::chat::tools::CREATE_AUTOMATION,
+            ] {
+                assert!(unlocked_names.iter().any(|x| x == n), "{format}: {n} missing after unlock");
+            }
+
+            // And the report agrees with the schema on both sides.
+            let report_locked: Value =
+                serde_json::from_str(&capabilities_report(&locked)).unwrap();
+            let report_unlocked: Value =
+                serde_json::from_str(&capabilities_report(&unlocked)).unwrap();
+            assert!(report_locked["built_in"]["session_mesh"].as_str().unwrap().contains("locked"));
+            assert!(report_unlocked["built_in"]["session_mesh"].as_str().unwrap().contains("unlocked"));
+            assert!(report_locked["built_in"]["automations"].as_str().unwrap().contains("attach_connector"));
+            assert!(!report_unlocked["built_in"]["automations"].as_str().unwrap().contains("attach_connector"));
+            assert!(report_locked["built_in"]["totp_codes"].as_str().unwrap().contains("locked"));
+            assert!(report_unlocked["built_in"]["totp_codes"].as_str().unwrap().contains("unlocked"));
+        }
     }
 
     #[test]

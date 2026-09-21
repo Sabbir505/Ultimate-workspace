@@ -71,27 +71,36 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         // point to whatever page is open); the interaction tools need a live
         // page and are gated on caps.browser below.
         openai_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
-        // Research source ledger — always on (state tools, not gated by permission mode).
-        openai_fn(
-            ADD_SOURCE_NOTE,
-            ADD_SOURCE_NOTE_DESC,
-            add_source_note_parameters(),
-        ),
-        openai_fn(
-            GET_SOURCE_LEDGER,
-            GET_SOURCE_LEDGER_DESC,
-            get_source_ledger_parameters(),
-        ),
-        openai_fn(
-            RESET_SOURCE_LEDGER,
-            RESET_SOURCE_LEDGER_DESC,
-            no_parameters(),
-        ),
-        openai_fn(
-            CHECK_SUFFICIENCY,
-            CHECK_SUFFICIENCY_DESC,
-            check_sufficiency_parameters(),
-        ),
+        // Research source ledger — rides caps.research: the research
+        // scaffolding is the only prompt text that references these tools,
+        // so an ordinary turn doesn't pay ~0.9k tokens for an unreachable
+        // family (research turns set the flag in chat/mod.rs send()).
+    ]);
+    if caps.research {
+        specs.extend(vec![
+            openai_fn(
+                ADD_SOURCE_NOTE,
+                ADD_SOURCE_NOTE_DESC,
+                add_source_note_parameters(),
+            ),
+            openai_fn(
+                GET_SOURCE_LEDGER,
+                GET_SOURCE_LEDGER_DESC,
+                get_source_ledger_parameters(),
+            ),
+            openai_fn(
+                RESET_SOURCE_LEDGER,
+                RESET_SOURCE_LEDGER_DESC,
+                no_parameters(),
+            ),
+            openai_fn(
+                CHECK_SUFFICIENCY,
+                CHECK_SUFFICIENCY_DESC,
+                check_sufficiency_parameters(),
+            ),
+        ]);
+    }
+    specs.extend(vec![
         // Plan tracking — always on (session-state tools, not gated by permission
         // mode; the plan gate, not the schema, decides what's blocked per mode).
         openai_fn(TODO_WRITE, TODO_WRITE_DESC, todo_items_parameters(true)),
@@ -130,15 +139,22 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             GET_AUTOMATION_DESC,
             automation_id_parameters(),
         ),
-        // Session Mesh — sibling-session awareness + consultation. The read
-        // trio is read-only; message/spawn are gated at dispatch (see
-        // dispatch.rs + plan.rs is_mutating_tool).
-        openai_fn(LIST_SESSIONS, LIST_SESSIONS_DESC, list_sessions_parameters()),
-        openai_fn(READ_SESSION, READ_SESSION_DESC, read_session_parameters()),
-        openai_fn(SEARCH_SESSIONS, SEARCH_SESSIONS_DESC, search_sessions_parameters()),
-        openai_fn(MESSAGE_SESSION, MESSAGE_SESSION_DESC, message_session_parameters()),
-        openai_fn(SPAWN_SESSION, SPAWN_SESSION_DESC, spawn_session_parameters()),
+        // Session Mesh — sibling-session awareness + consultation. Locked
+        // with the whole family: ~1.3k tokens of specs most turns never
+        // touch; `attach_connector("session-mesh")` brings all five in for
+        // the turn (see UNLOCKABLE_FAMILIES + dispatch run_attach_tool).
+        // message/spawn additionally gate at dispatch (see dispatch.rs +
+        // plan.rs is_mutating_tool).
     ]);
+    if caps.session_mesh {
+        specs.extend(vec![
+            openai_fn(LIST_SESSIONS, LIST_SESSIONS_DESC, list_sessions_parameters()),
+            openai_fn(READ_SESSION, READ_SESSION_DESC, read_session_parameters()),
+            openai_fn(SEARCH_SESSIONS, SEARCH_SESSIONS_DESC, search_sessions_parameters()),
+            openai_fn(MESSAGE_SESSION, MESSAGE_SESSION_DESC, message_session_parameters()),
+            openai_fn(SPAWN_SESSION, SPAWN_SESSION_DESC, spawn_session_parameters()),
+        ]);
+    }
     // Browser interaction tools — advertised only when the built-in pane has
     // a page (ToolCaps.browser is sticky per session, so a turn that opened
     // a page mid-turn advertises these from the next round on — see the
@@ -183,8 +199,12 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         ]);
     }
     // TOTP 2FA codes — read-only (the seed stays in the keychain / password
-    // manager; only the code is returned), always registered.
-    specs.push(openai_fn(TOTP_CODE, TOTP_CODE_DESC, totp_code_parameters()));
+    // manager; only the code is returned), but locked with the family: the
+    // tool rides almost no turns, so it joins the attach-on-demand built-ins
+    // (`attach_connector("totp")`) instead of the standing schema.
+    if caps.totp {
+        specs.push(openai_fn(TOTP_CODE, TOTP_CODE_DESC, totp_code_parameters()));
+    }
     // Local-docs search — exposed when at least one corpus is indexed
     // (computed per turn into ToolCaps.local_docs); hybrid search answers
     // keyword-only with the embedding sidecar down, so it doesn't gate here.
@@ -230,11 +250,13 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         specs.push(openai_fn(RUN_SHELL, RUN_SHELL_DESC, run_shell_parameters()));
         specs.push(openai_fn(OPEN_FILE, OPEN_FILE_DESC, path_parameters()));
     }
-    // Automation CRUD/run tools — mutating (persisted schedule + unattended
-    // runs), stripped under read_only like the filesystem writes. Schemas
-    // mirror commands::automation_cmds::validate so a call the model makes
-    // cannot be rejected for shape reasons.
-    if sandbox.allows_mutating_tools() {
+    // Automation CRUD/run tools — the write half is double-gated: mutating
+    // (persisted schedule + unattended runs, stripped under read_only like
+    // the filesystem writes) AND family-locked (unlocked via
+    // `attach_connector("automations")` or the send-time keyword fast-path).
+    // Schemas mirror commands::automation_cmds::validate so a call the model
+    // makes cannot be rejected for shape reasons.
+    if sandbox.allows_mutating_tools() && caps.automations_write {
         specs.push(openai_fn(
             CREATE_AUTOMATION,
             CREATE_AUTOMATION_DESC,
@@ -298,7 +320,10 @@ fn openai_fn(name: &str, description: &str, parameters: Value) -> Value {
 }
 
 /// Enum-of-ids parameter for the attach meta-tools. `param` is the argument
-/// name ("connector_id" / "server_id").
+/// name ("connector_id" / "server_id"). The connector enum carries the
+/// unlockable built-in families alongside real connectors — one
+/// `attach_connector(id)` call either attaches a source or flips a family's
+/// per-turn flag (dispatch run_attach_tool branches on the id).
 fn attach_source_parameters(param: &str, ids: &[(String, String)]) -> Value {
     let enum_ids: Vec<&str> = ids.iter().map(|(id, _)| id.as_str()).collect();
     json!({
@@ -314,12 +339,27 @@ fn attach_source_parameters(param: &str, ids: &[(String, String)]) -> Value {
     })
 }
 
+/// Connectors available-but-not-attached PLUS the unlockable built-in
+/// families — the ids `attach_connector` accepts this turn. Families ride
+/// the same enum so the model always has a loadable handle for them; when
+/// both lists are empty the meta-tool is not advertised at all.
+fn attachable_connector_ids(caps: &ToolCaps) -> Vec<(String, String)> {
+    let mut ids: Vec<(String, String)> = (*caps.attachable_connectors).clone();
+    for pair in caps.unlockable_families.iter() {
+        if !ids.iter().any(|(id, _)| id == &pair.0) {
+            ids.push(pair.clone());
+        }
+    }
+    ids
+}
+
 fn specs_attach_tools_openai(caps: &ToolCaps, specs: &mut Vec<Value>) {
-    if !caps.attachable_connectors.is_empty() {
+    let connector_ids = attachable_connector_ids(caps);
+    if !connector_ids.is_empty() {
         specs.push(openai_fn(
             ATTACH_CONNECTOR,
             ATTACH_CONNECTOR_DESC,
-            attach_source_parameters("connector_id", &caps.attachable_connectors),
+            attach_source_parameters("connector_id", &connector_ids),
         ));
     }
     if !caps.attachable_mcp.is_empty() {
@@ -332,11 +372,12 @@ fn specs_attach_tools_openai(caps: &ToolCaps, specs: &mut Vec<Value>) {
 }
 
 fn specs_attach_tools_anthropic(caps: &ToolCaps, specs: &mut Vec<Value>) {
-    if !caps.attachable_connectors.is_empty() {
+    let connector_ids = attachable_connector_ids(caps);
+    if !connector_ids.is_empty() {
         specs.push(anthropic_fn(
             ATTACH_CONNECTOR,
             ATTACH_CONNECTOR_DESC,
-            attach_source_parameters("connector_id", &caps.attachable_connectors),
+            attach_source_parameters("connector_id", &connector_ids),
         ));
     }
     if !caps.attachable_mcp.is_empty() {
@@ -408,27 +449,35 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         // point to whatever page is open); the interaction tools need a live
         // page and are gated on caps.browser below.
         anthropic_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
-        // Research source ledger — always on (state tools, not gated by permission mode).
-        anthropic_fn(
-            ADD_SOURCE_NOTE,
-            ADD_SOURCE_NOTE_DESC,
-            add_source_note_parameters(),
-        ),
-        anthropic_fn(
-            GET_SOURCE_LEDGER,
-            GET_SOURCE_LEDGER_DESC,
-            get_source_ledger_parameters(),
-        ),
-        anthropic_fn(
-            RESET_SOURCE_LEDGER,
-            RESET_SOURCE_LEDGER_DESC,
-            no_parameters(),
-        ),
-        anthropic_fn(
-            CHECK_SUFFICIENCY,
-            CHECK_SUFFICIENCY_DESC,
-            check_sufficiency_parameters(),
-        ),
+        // Research source ledger — rides caps.research (mirror of the
+        // OpenAI block): only research turns reference these tools, so
+        // ordinary turns don't carry them.
+    ]);
+    if caps.research {
+        specs.extend(vec![
+            anthropic_fn(
+                ADD_SOURCE_NOTE,
+                ADD_SOURCE_NOTE_DESC,
+                add_source_note_parameters(),
+            ),
+            anthropic_fn(
+                GET_SOURCE_LEDGER,
+                GET_SOURCE_LEDGER_DESC,
+                get_source_ledger_parameters(),
+            ),
+            anthropic_fn(
+                RESET_SOURCE_LEDGER,
+                RESET_SOURCE_LEDGER_DESC,
+                no_parameters(),
+            ),
+            anthropic_fn(
+                CHECK_SUFFICIENCY,
+                CHECK_SUFFICIENCY_DESC,
+                check_sufficiency_parameters(),
+            ),
+        ]);
+    }
+    specs.extend(vec![
         // Plan tracking — mirror of the OpenAI builder's block above.
         anthropic_fn(TODO_WRITE, TODO_WRITE_DESC, todo_items_parameters(true)),
         anthropic_fn(
@@ -460,13 +509,18 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             GET_AUTOMATION_DESC,
             automation_id_parameters(),
         ),
-        // Session Mesh — mirror of the OpenAI block above.
-        anthropic_fn(LIST_SESSIONS, LIST_SESSIONS_DESC, list_sessions_parameters()),
-        anthropic_fn(READ_SESSION, READ_SESSION_DESC, read_session_parameters()),
-        anthropic_fn(SEARCH_SESSIONS, SEARCH_SESSIONS_DESC, search_sessions_parameters()),
-        anthropic_fn(MESSAGE_SESSION, MESSAGE_SESSION_DESC, message_session_parameters()),
-        anthropic_fn(SPAWN_SESSION, SPAWN_SESSION_DESC, spawn_session_parameters()),
+        // Session Mesh — mirror of the OpenAI block above: the whole family
+        // rides caps.session_mesh (locked by default, attach-to-unlock).
     ]);
+    if caps.session_mesh {
+        specs.extend(vec![
+            anthropic_fn(LIST_SESSIONS, LIST_SESSIONS_DESC, list_sessions_parameters()),
+            anthropic_fn(READ_SESSION, READ_SESSION_DESC, read_session_parameters()),
+            anthropic_fn(SEARCH_SESSIONS, SEARCH_SESSIONS_DESC, search_sessions_parameters()),
+            anthropic_fn(MESSAGE_SESSION, MESSAGE_SESSION_DESC, message_session_parameters()),
+            anthropic_fn(SPAWN_SESSION, SPAWN_SESSION_DESC, spawn_session_parameters()),
+        ]);
+    }
     // Browser interaction tools — mirror of the OpenAI block's caps.browser
     // gate (sticky per session; refreshed mid-turn by streaming.rs).
     if caps.browser {
@@ -503,11 +557,14 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             ),
         ]);
     }
-    specs.push(anthropic_fn(
-        TOTP_CODE,
-        TOTP_CODE_DESC,
-        totp_code_parameters(),
-    ));
+    // TOTP 2FA — mirror of the OpenAI block: family-locked by default.
+    if caps.totp {
+        specs.push(anthropic_fn(
+            TOTP_CODE,
+            TOTP_CODE_DESC,
+            totp_code_parameters(),
+        ));
+    }
     if caps.local_docs {
         specs.push(anthropic_fn(
             SEARCH_DOCS,
@@ -566,8 +623,9 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         ));
         specs.push(anthropic_fn(OPEN_FILE, OPEN_FILE_DESC, path_parameters()));
     }
-    // Automation CRUD/run tools — mirror of the OpenAI block above.
-    if sandbox.allows_mutating_tools() {
+    // Automation CRUD/run tools — mirror of the OpenAI block above: the
+    // write half is both mutating-gated AND family-locked.
+    if sandbox.allows_mutating_tools() && caps.automations_write {
         specs.push(anthropic_fn(
             CREATE_AUTOMATION,
             CREATE_AUTOMATION_DESC,
@@ -2075,11 +2133,14 @@ mod tests {
         }
         // Whole-registry budgets. DEFAULT: the fresh-turn surface (web search
         // + memory on; no live browser pane, no connectors/MCP, no local docs,
-        // no code exec). ALL-ON: same but with the browser interaction tools
-        // advertised. Tool specs are re-sent on every request and every tool
-        // round, so sum creep is a per-turn tax forever. HEADROOM ≈ 4% above
-        // the measured sizes at the diet pass — a deliberate bump needs a
-        // reason in the PR.
+        // no code exec; the family-locked built-ins — ledger/mesh/automation
+        // writes/totp — are NOT in this surface, they return via
+        // attach_connector). ALL-ON: same plus the browser interaction tools
+        // AND every family unlocked — the full registry, so its sizes stay
+        // guarded even though no single chat turn carries all of it. Tool
+        // specs are re-sent on every request and every tool round, so sum
+        // creep is a per-turn tax forever. HEADROOM ≈ 4% above the measured
+        // sizes — a deliberate bump needs a reason in the PR.
         // Bumped 38_000→42_000 / 41_000→45_000 for Session Mesh
         // (SESSION_MESH_DESIGN_ARCHITECTURE.md): five tools (~3.2k chars)
         // giving sibling-session awareness, messaging, and spawning. The read
@@ -2111,13 +2172,19 @@ mod tests {
         // params (webhook / file-watch / git) — without them the model can
         // only schedule cron rows and must claim the other triggers are
         // impossible.
+        // TIGHTENED 49_000→36_000 (2026-09-21, token-efficiency pass II):
+        // the source ledger now rides `caps.research`, and Session Mesh /
+        // automation writes / totp_code became family-locked attach-on-demand
+        // built-ins — the default fresh-turn surface dropped 48.8k → 35.1k
+        // chars (57 → 44 tools). Locked families return via one
+        // attach_connector call; the manifest line keeps them discoverable.
         assert!(
-            total < 49_000,
-            "default tool specs total {total} chars (budget 49_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            total < 36_000,
+            "default tool specs total {total} chars (budget 36_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
         let all_on_caps = ToolCaps {
             browser: true,
-            ..ToolCaps::default()
+            ..ToolCaps::unlocked_registry()
         };
         let all_on: usize = openai_tool_specs(&all_on_caps, permission::SandboxPolicy::WorkspaceWrite)
             .iter()
@@ -2136,9 +2203,16 @@ mod tests {
         // Bumped 51_000→52_000 for automation trigger engines beyond cron
         // (create/update automation trigger_type+trigger params, ~0.9k) —
         // both specs ride the all-on surface too.
+        // Bumped 52_000→53_500 (2026-09-21, token-efficiency pass II): the
+        // all-on surface is now the FULL registry — `unlocked_registry()` +
+        // browser — including every family-locked built-in AND the
+        // attach_connector meta-tool (its enum carries the three family ids,
+        // so it renders even with no connectors attachable). No single chat
+        // turn carries this whole surface any more; the budget guards the
+        // registry's aggregate size.
         assert!(
-            all_on < 52_000,
-            "all-on tool specs total {all_on} chars (budget 52_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 53_500,
+            "all-on tool specs total {all_on} chars (budget 53_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 
@@ -2319,5 +2393,226 @@ mod tests {
             assert!(names(&browser_on).iter().any(|n| n == crate::chat::tools::BROWSER_CLICK),
                 "{name}: browser_click must be advertised once the pane is live");
         }
+    }
+
+    /// The family-locked built-ins: ledger rides `caps.research`, mesh /
+    /// automation-writes / totp ride their unlock flags. Locked families are
+    /// absent from BOTH wire formats; the read half of automations
+    /// (list/get) always stays; unlocking admits exactly the family's tools.
+    /// The unlock result must never be a silent drop: `unlocked − locked`
+    /// is EXACTLY the 14 family tools, so a rename or refactor that moves a
+    /// tool between states fails here instead of quietly deleting a
+    /// capability from a turn.
+    #[test]
+    fn family_locked_tools_gate_in_both_wire_formats() {
+        let locked = ToolCaps::default();
+        let mut unlocked = ToolCaps::unlocked_registry();
+        unlocked.unlock_family(crate::chat::tools::FAMILY_SESSION_MESH);
+        unlocked.unlock_family(crate::chat::tools::FAMILY_AUTOMATIONS);
+        unlocked.unlock_family(crate::chat::tools::FAMILY_TOTP);
+        let mut research_on = ToolCaps::default();
+        research_on.research = true;
+        for (name, build) in [
+            ("openai", openai_tool_specs as fn(&ToolCaps, permission::SandboxPolicy) -> Vec<Value>),
+            ("anthropic", anthropic_tool_specs as fn(&ToolCaps, permission::SandboxPolicy) -> Vec<Value>),
+        ] {
+            let names = |caps: &ToolCaps| -> Vec<String> {
+                build(caps, permission::SandboxPolicy::WorkspaceWrite)
+                    .iter()
+                    .map(|s| {
+                        s["function"]["name"]
+                            .as_str()
+                            .or_else(|| s["name"].as_str())
+                            .unwrap_or("?")
+                            .to_string()
+                    })
+                    .collect()
+            };
+            let l = names(&locked);
+            // Ledger, mesh, automation writes and totp absent while locked…
+            for gone in [
+                crate::chat::tools::ADD_SOURCE_NOTE,
+                crate::chat::tools::GET_SOURCE_LEDGER,
+                crate::chat::tools::RESET_SOURCE_LEDGER,
+                crate::chat::tools::CHECK_SUFFICIENCY,
+                crate::chat::tools::LIST_SESSIONS,
+                crate::chat::tools::READ_SESSION,
+                crate::chat::tools::SEARCH_SESSIONS,
+                crate::chat::tools::MESSAGE_SESSION,
+                crate::chat::tools::SPAWN_SESSION,
+                crate::chat::tools::CREATE_AUTOMATION,
+                crate::chat::tools::UPDATE_AUTOMATION,
+                crate::chat::tools::DELETE_AUTOMATION,
+                crate::chat::tools::RUN_AUTOMATION_NOW,
+                crate::chat::tools::TOTP_CODE,
+            ] {
+                assert!(!l.iter().any(|x| x == gone),
+                    "{name}: `{gone}` must be family-locked out of the default schema");
+            }
+            // …but the automations READ half never locks (the model must be
+            // able to see what's scheduled before unlocking writes), and the
+            // attach meta-tool carries every family id in its enum so the
+            // locked families are always one call away.
+            assert!(l.iter().any(|x| x == crate::chat::tools::LIST_AUTOMATIONS));
+            assert!(l.iter().any(|x| x == crate::chat::tools::GET_AUTOMATION));
+            let attach_spec = build(&locked, permission::SandboxPolicy::WorkspaceWrite)
+                .into_iter()
+                .find(|s| {
+                    s["function"]["name"]
+                        .as_str()
+                        .or_else(|| s["name"].as_str())
+                        == Some(crate::chat::tools::ATTACH_CONNECTOR)
+                })
+                .expect("attach_connector must be advertised while families are locked");
+            let enum_ids: Vec<String> = attach_spec
+                .pointer("/function/parameters/properties/connector_id/enum")
+                .or_else(|| attach_spec.pointer("/input_schema/properties/connector_id/enum"))
+                .and_then(|e| e.as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            for family in crate::chat::tools::UNLOCKABLE_FAMILIES {
+                assert!(
+                    enum_ids.iter().any(|e| e == family.0),
+                    "{name}: family id `{}` missing from the attach_connector enum",
+                    family.0
+                );
+            }
+            // Research mode admits exactly the four ledger tools…
+            let r = names(&research_on);
+            for ledger in [
+                crate::chat::tools::ADD_SOURCE_NOTE,
+                crate::chat::tools::GET_SOURCE_LEDGER,
+                crate::chat::tools::RESET_SOURCE_LEDGER,
+                crate::chat::tools::CHECK_SUFFICIENCY,
+            ] {
+                assert!(r.iter().any(|x| x == ledger),
+                    "{name}: `{ledger}` must ride research mode");
+            }
+            assert!(!r.iter().any(|x| x == crate::chat::tools::LIST_SESSIONS),
+                "{name}: research mode must not silently unlock the mesh family");
+            // …and a full unlock admits exactly locked+14 (family tools),
+            // with wire-format parity of the whole array.
+            let u = names(&unlocked);
+            assert_eq!(l.len() + 14, u.len(), "{name}: unlock delta must be exactly the 14 family tools");
+            for gone in [
+                crate::chat::tools::ADD_SOURCE_NOTE,
+                crate::chat::tools::LIST_SESSIONS,
+                crate::chat::tools::MESSAGE_SESSION,
+                crate::chat::tools::SPAWN_SESSION,
+                crate::chat::tools::CREATE_AUTOMATION,
+                crate::chat::tools::RUN_AUTOMATION_NOW,
+                crate::chat::tools::TOTP_CODE,
+            ] {
+                assert!(u.iter().any(|x| x == gone),
+                    "{name}: `{gone}` missing after unlock — nothing may go missing");
+            }
+            // Wire parity: both formats render the same name set per state.
+            let mut l_sorted = l.clone();
+            l_sorted.sort();
+            assert_eq!(l_sorted, {
+                let mut v = build_anthropic_names(&locked);
+                v.sort();
+                v
+            });
+        }
+    }
+
+    fn build_anthropic_names(caps: &ToolCaps) -> Vec<String> {
+        anthropic_tool_specs(caps, permission::SandboxPolicy::WorkspaceWrite)
+            .iter()
+            .map(|s| {
+                s["function"]["name"]
+                    .as_str()
+                    .or_else(|| s["name"].as_str())
+                    .unwrap_or("?")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// NOTHING GOES MISSING — the inventory contract. Every tool name any
+    /// surface can reach must be present in at least one standard cap state:
+    /// the locked default schema, the fully unlocked registry, or the
+    /// read-only posture. The only deliberate exception is
+    /// `download_progress` (kept dispatchable for history replay, never
+    /// advertised — see its const doc). A new tool that joins the registry
+    /// without landing in a spec state fails here.
+    #[test]
+    fn every_tool_is_reachable_in_some_cap_state() {
+        let ws = permission::SandboxPolicy::WorkspaceWrite;
+        let names_of = |specs: &[Value]| -> Vec<String> {
+            specs
+                .iter()
+                .map(|s| {
+                    s["function"]["name"]
+                        .as_str()
+                        .or_else(|| s["name"].as_str())
+                        .unwrap_or("?")
+                        .to_string()
+                })
+                .collect()
+        };
+        let mut reachable = names_of(&openai_tool_specs(&ToolCaps::default(), ws));
+        reachable.extend(names_of(&openai_tool_specs(&ToolCaps::unlocked_registry(), ws)));
+        reachable.extend(names_of(&openai_tool_specs(
+            &ToolCaps {
+                browser: true,
+                local_docs: true,
+                code_exec: true,
+                memory: true,
+                attachable_connectors: std::sync::Arc::new(vec![(
+                    "gmail".to_string(),
+                    "Gmail".to_string(),
+                )]),
+                attachable_mcp: std::sync::Arc::new(vec![(
+                    "filesystem".to_string(),
+                    "Filesystem".to_string(),
+                )]),
+                ..ToolCaps::unlocked_registry()
+            },
+            ws,
+        )));
+        let required = [
+            // web / browser entry
+            WEB_SEARCH, FETCH_URL, OPEN_URL, BROWSER_READ,
+            // generate family
+            GENERATE_FILE, GENERATE_DOCUMENT, PLAN_DOCUMENT, REVISE_DOCUMENT,
+            GENERATE_DIAGRAM, GENERATE_IMAGE,
+            // skills / artifacts / introspection / attach
+            GET_SKILL, LIST_SKILLS, LIST_ARTIFACTS, GET_CAPABILITIES,
+            ATTACH_CONNECTOR, ATTACH_MCP_SERVER,
+            // fs
+            LIST_DIRECTORY, READ_FILE, SEARCH_FILES, SEARCH_CONTENT, SEARCH_DOCS,
+            WRITE_FILE, EDIT_FILE, DELETE_FILE, MOVE_FILE, COPY_FILE,
+            // vault
+            VAULT_LIST, VAULT_READ, VAULT_SEARCH, VAULT_WRITE, VAULT_MOVE, VAULT_DELETE,
+            // system
+            DOWNLOAD_FILE, RUN_SHELL, OPEN_FILE, GET_TASK_STATUS, CANCEL_TASK, RUN_CODE,
+            // subagent + plan
+            TASK, TODO_WRITE, ENTER_PLAN_MODE, PRESENT_PLAN,
+            // research ledger
+            ADD_SOURCE_NOTE, GET_SOURCE_LEDGER, RESET_SOURCE_LEDGER, CHECK_SUFFICIENCY,
+            // automations (read half + unlocked write half)
+            LIST_AUTOMATIONS, GET_AUTOMATION, CREATE_AUTOMATION, UPDATE_AUTOMATION,
+            DELETE_AUTOMATION, RUN_AUTOMATION_NOW,
+            // session mesh
+            LIST_SESSIONS, READ_SESSION, SEARCH_SESSIONS, MESSAGE_SESSION, SPAWN_SESSION,
+            // memory + totp
+            MEMORY_SAVE, MEMORY_RECALL, MEMORY_FORGET, TOTP_CODE,
+        ];
+        for name in required {
+            assert!(
+                reachable.iter().any(|n| n == name),
+                "`{name}` is not advertised in ANY cap state — a capability went missing"
+            );
+        }
+        // download_progress is the ONLY deliberate ghost: dispatchable for
+        // replay, never advertised (get_task_status covers it).
+        assert!(
+            !reachable.iter().any(|n| n == DOWNLOAD_PROGRESS),
+            "download_progress must stay unadvertised"
+        );
     }
 }

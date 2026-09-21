@@ -1149,7 +1149,14 @@ const SUBAGENT_RESULT_CAP: usize = 6_000;
 /// Spec list for the subagent's provider format, filtered to the read-only
 /// allowlist above.
 fn subagent_tool_specs(is_anthropic: bool) -> Vec<Value> {
-    let caps = tools::ToolCaps::default();
+    // research: the allowlist carries the ledger tools (research fan-out
+    // records against the SESSION's ledger — see the allowlist comment), so
+    // the subagent registry renders with the research family on even though
+    // a subagent never runs "in research mode" itself.
+    let caps = tools::ToolCaps {
+        research: true,
+        ..tools::ToolCaps::default()
+    };
     let all = if is_anthropic {
         tools::anthropic_tool_specs(&caps, permission::SandboxPolicy::ReadOnly)
     } else {
@@ -1912,6 +1919,43 @@ async fn run_attach_tool(
         return format!(
             "Error: {name} requires a \"{key}\" argument — pick one from the \
              \"Connected apps & servers\" list in the system prompt."
+        );
+    }
+    // Built-in family unlocks ride the same meta-tool: the id flips the
+    // family's per-turn flag (fold_late_attaches picks it up and the round's
+    // rebuilt specs admit its tools) instead of connecting a source. Same
+    // turn-scoped, read-kind contract — no approval card, no DB row.
+    if tools::is_unlockable_family(&id) {
+        let display = caps
+            .unlockable_families
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| id.clone());
+        let already = match id.as_str() {
+            tools::FAMILY_SESSION_MESH => caps.session_mesh,
+            tools::FAMILY_AUTOMATIONS => caps.automations_write,
+            _ => caps.totp,
+        };
+        if already {
+            return format!(
+                "{display} is already unlocked — its tools are in your tool list; call them directly."
+            );
+        }
+        if let Some(slot) = mgr.late_attach_slot(sid) {
+            slot.lock().families.push(id.clone());
+        }
+        stream_events::emit_status_reason(
+            Some(app),
+            sid,
+            "connector_attached",
+            format!("Unlocked {display}"),
+        );
+        stream_events::emit_status_clear(Some(app), sid);
+        return format!(
+            "Unlocked {display}: {} are in your tool list from your next call and \
+             stay unlocked for the rest of this turn.",
+            tools::family_tool_list(&id)
         );
     }
     let attachable = if is_mcp {

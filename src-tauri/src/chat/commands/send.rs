@@ -660,9 +660,22 @@ pub async fn send_chat_message(
     }
     // Manifest of still-attachable sources for the system prompt. Derived
     // AFTER the fast-path so just-attached connectors drop out of it.
+    // Families this message obviously needs pre-unlock here (their tools
+    // ride the schema directly this turn), so they drop out of the manifest
+    // too — one source of truth for both the prompt and the caps flags.
+    let pre_unlocked_families = if tools_on {
+        crate::chat::prompts::detect_family_unlocks(&content)
+    } else {
+        Vec::new()
+    };
     let manifest = {
         let (conns, mcp) = attach_availability(&app, &connector_ids, &mcp_server_ids);
-        crate::chat::prompts::attach_manifest_segment(&conns, &mcp)
+        let families: Vec<crate::chat::prompts::ManifestEntry> =
+            crate::chat::prompts::unlockable_family_entries()
+                .into_iter()
+                .filter(|f| !pre_unlocked_families.iter().any(|u| u == &f.id))
+                .collect();
+        crate::chat::prompts::attach_manifest_segment(&conns, &mcp, &families)
     };
 
     // 2. Persist the user message.
@@ -1696,6 +1709,7 @@ pub async fn send_chat_message(
         shared_db,
         app,
         research_mode,
+        pre_unlocked_families,
         thinking,
         auto_fallbacks,
         auto_system_inputs,
@@ -1853,7 +1867,14 @@ pub(crate) async fn run_prompt_warmup(
         (custom, fs_rules, sandbox, attached_c)
     };
     let (avail_c, avail_m) = attach_availability(app, &attached_c, &[]);
-    let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+    // Mirror the send's manifest exactly: the families are locked on a fresh
+    // turn (the whole catalog lists), so the warmup prompt carries the same
+    // lines and the provider's cached prefix matches.
+    let manifest = crate::chat::prompts::attach_manifest_segment(
+        &avail_c,
+        &avail_m,
+        &crate::chat::prompts::unlockable_family_entries(),
+    );
     let mut system = crate::chat::build_system_prompt(
         ChatProviderId::LocalGguf,
         model_id,
@@ -1926,6 +1947,16 @@ pub(crate) async fn run_prompt_warmup(
             || app.state::<crate::BrowserState>().0.has_active_page(),
         // Mirror the send's posture (the specs below use the same sandbox).
         allows_mutating: sandbox.allows_mutating_tools(),
+        // Mirror the send's fresh-turn family gates: everything locked (the
+        // keyword fast-path can't fire here — no message content), research
+        // off. The warmup request must stay byte-identical to the real send.
+        research: false,
+        session_mesh: false,
+        automations_write: false,
+        totp: false,
+        unlockable_families: std::sync::Arc::new(
+            crate::chat::tools::unlockable_family_pairs(),
+        ),
     };
     let mut body = serde_json::json!({
         "model": model_id,

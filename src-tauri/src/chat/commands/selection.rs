@@ -437,6 +437,15 @@ pub(super) fn builtin_tool_specs_json(provider_id: &ChatProviderId, model: &str,
         browser: false,
         // Preview paths always pair with the WorkspaceWrite sandbox below.
         allows_mutating: true,
+        // Mirror the fresh-turn family gates: locked (one attach brings a
+        // family back), research off.
+        research: false,
+        session_mesh: false,
+        automations_write: false,
+        totp: false,
+        unlockable_families: std::sync::Arc::new(
+            crate::chat::tools::unlockable_family_pairs(),
+        ),
         fs_rules: Vec::new(),
     };
     serde_json::to_string(&crate::chat::tools::openai_tool_specs(
@@ -722,7 +731,11 @@ pub async fn count_context_tokens(
                 let provider_id =
                     parse_provider_id(&provider_str).unwrap_or(ChatProviderId::OpenAI);
                 let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
-                let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+                let manifest = crate::chat::prompts::attach_manifest_segment(
+                    &avail_c,
+                    &avail_m,
+                    &crate::chat::prompts::unlockable_family_entries(),
+                );
                 crate::chat::build_system_prompt(
                     provider_id,
                     &model_str,
@@ -758,6 +771,14 @@ pub async fn count_context_tokens(
                             browser: false,
                             // Preview paths always pair with WorkspaceWrite.
                             allows_mutating: true,
+                            // Mirror the fresh-turn family gates: locked.
+                            research: false,
+                            session_mesh: false,
+                            automations_write: false,
+                            totp: false,
+                            unlockable_families: std::sync::Arc::new(
+                                crate::chat::tools::unlockable_family_pairs(),
+                            ),
                             fs_rules: Vec::new(),
                         },
                         crate::chat::permission::SandboxPolicy::WorkspaceWrite,
@@ -847,7 +868,11 @@ pub async fn count_context_tokens(
         .collect();
     let system_str: String = {
         let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
-        let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+        let manifest = crate::chat::prompts::attach_manifest_segment(
+            &avail_c,
+            &avail_m,
+            &crate::chat::prompts::unlockable_family_entries(),
+        );
         crate::chat::build_system_prompt(
             ChatProviderId::LocalGguf,
             &model_str,
@@ -1018,7 +1043,11 @@ pub async fn count_context_breakdown(
                 let provider_id =
                     parse_provider_id(&provider_str).unwrap_or(ChatProviderId::OpenAI);
                 let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
-                let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+                let manifest = crate::chat::prompts::attach_manifest_segment(
+                    &avail_c,
+                    &avail_m,
+                    &crate::chat::prompts::unlockable_family_entries(),
+                );
                 crate::chat::build_system_prompt(
                     provider_id,
                     &model_str,
@@ -1048,6 +1077,15 @@ pub async fn count_context_breakdown(
                 browser: false,
                 // Preview paths always pair with WorkspaceWrite.
                 allows_mutating: true,
+                // Mirror the fresh-turn family gates: locked (one attach
+                // brings a family back), research off.
+                research: false,
+                session_mesh: false,
+                automations_write: false,
+                totp: false,
+                unlockable_families: std::sync::Arc::new(
+                    crate::chat::tools::unlockable_family_pairs(),
+                ),
                 fs_rules: Vec::new(),
             };
             let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(
@@ -1106,7 +1144,11 @@ pub async fn count_context_breakdown(
         .collect();
     let system_str: String = {
         let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
-        let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+        let manifest = crate::chat::prompts::attach_manifest_segment(
+            &avail_c,
+            &avail_m,
+            &crate::chat::prompts::unlockable_family_entries(),
+        );
         crate::chat::build_system_prompt(
             ChatProviderId::LocalGguf,
             &model_str,
@@ -1169,6 +1211,15 @@ pub async fn count_context_breakdown(
         browser: false,
         // Preview paths always pair with the WorkspaceWrite sandbox below.
         allows_mutating: true,
+        // Mirror the fresh-turn family gates: locked (one attach brings a
+        // family back), research off.
+        research: false,
+        session_mesh: false,
+        automations_write: false,
+        totp: false,
+        unlockable_families: std::sync::Arc::new(
+            crate::chat::tools::unlockable_family_pairs(),
+        ),
         fs_rules: Vec::new(),
     };
     let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(
@@ -1339,7 +1390,11 @@ pub async fn chat_compact_now(
         cfg.threshold = 0.0;
         let system = {
             let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
-            let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+            let manifest = crate::chat::prompts::attach_manifest_segment(
+            &avail_c,
+            &avail_m,
+            &crate::chat::prompts::unlockable_family_entries(),
+        );
             crate::chat::build_system_prompt(
                 ChatProviderId::LocalGguf,
                 &model_str,
@@ -1435,7 +1490,11 @@ pub async fn chat_compact_now(
             });
         let system = {
             let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
-            let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+            let manifest = crate::chat::prompts::attach_manifest_segment(
+            &avail_c,
+            &avail_m,
+            &crate::chat::prompts::unlockable_family_entries(),
+        );
             crate::chat::build_system_prompt(
                 provider_id,
                 &model_str,

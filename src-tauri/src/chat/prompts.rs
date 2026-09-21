@@ -182,8 +182,9 @@ pub(crate) fn core_prompt_base() -> String {
      servers run as a background task, then open http://localhost:PORT.\n\n\
      ## Automations\n\
      Relay schedules headless agent runs — cron \"automations\", managed in the app's \
-     Automations view and in-chat via `list_automations`, `get_automation`, \
-     `create_automation`, `update_automation`, `delete_automation`, `run_automation_now`. When the user asks to \
+     Automations view and in-chat. `list_automations` reads them any time; writes \
+     (`create_automation` etc.) need `attach_connector(\"automations\")` first — \
+     families attach like sources. When the user asks to \
      schedule/repeat/automate a task, create one — never claim scheduling is impossible; \
      confirm an ambiguous schedule first. The `prompt` must be self-contained (runs have \
      no conversation memory) and fires on a 5-field local-time cron schedule; each run \
@@ -312,10 +313,11 @@ pub(crate) fn core_prompt_base_local() -> String {
      ## Vault\n\
      The user's vault = their notes. `vault_search` \"my notes say X\" FIRST; `vault_write/read/move/delete` manage them.\n\\n\
      ## Automations\n\
-     Scheduled headless runs (Automations view). `list_automations`, \
-     `create_automation(name, prompt, schedule)`, `run_automation_now` manage \
-     them — when the user asks to schedule/repeat a task, create one; never say \
-     you can't. `schedule` = 5-field local cron (\"0 9 * * 1-5\" = 09:00 \
+     Scheduled headless runs (Automations view). `list_automations` reads \
+     them; writes need `attach_connector(\"automations\")` first, then \
+     `create_automation(name, prompt, schedule)` works. When the \
+     user asks to schedule/repeat a task, create one; never say you can't. \
+     `schedule` = 5-field local cron (\"0 9 * * 1-5\" = 09:00 \
      weekdays); `prompt` runs unattended, no conversation memory.\n\n\
      ## Skills\n\
      Skills (`~/.claude/skills/`, `~/.agents/skills/`, plus built-in `docx`/`pptx`/`pdf`/\
@@ -625,25 +627,27 @@ pub struct ManifestEntry {
 }
 
 /// The `## Connected apps & servers` system-prompt segment: one line per
-/// attachable connector / MCP server so the model knows what exists WITHOUT
-/// paying for the tool schemas. Attachment happens via the `attach_connector`
-/// / `attach_mcp_server` tools (see specs) or the user's `@id` pin. Both
-/// lists empty → `None`.
+/// attachable connector / MCP server / unlockable built-in family so the
+/// model knows what exists WITHOUT paying for the tool schemas. Attachment
+/// happens via the `attach_connector` / `attach_mcp_server` tools (see
+/// specs) or the user's `@id` pin. All three lists empty → `None`.
 pub fn attach_manifest_segment(
     connectors: &[ManifestEntry],
     mcp_servers: &[ManifestEntry],
+    families: &[ManifestEntry],
 ) -> Option<String> {
-    if connectors.is_empty() && mcp_servers.is_empty() {
+    if connectors.is_empty() && mcp_servers.is_empty() && families.is_empty() {
         return None;
     }
     let mut s = String::from(
         "## Connected apps & servers (attach on demand)\n\
-        These are connected but their tools are NOT loaded yet. When a request \
-        needs one, call `attach_connector(\"<id>\")` (or `attach_mcp_server` \
-        for servers) FIRST — its tools join your tool list for this turn \
-        immediately; re-attach in a later turn when needed. Attach only what \
-        the request needs — never attach everything just to check access. The \
-        user can also pin one for the whole conversation with `@<id>`.\n\
+        These are connected or built in, but their tools are NOT loaded yet. \
+        When a request needs one, call `attach_connector(\"<id>\")` (or \
+        `attach_mcp_server` for servers) FIRST — its tools join your tool \
+        list for this turn immediately; re-attach in a later turn when \
+        needed. Attach only what the request needs — never attach \
+        everything just to check access. The user can also pin one for the \
+        whole conversation with `@<id>`.\n\
         Never answer that you can't access a source listed here — attaching is \
         one cheap call, and the description next to an entry is what it CAN do, \
         not proof you already have it loaded.\n\
@@ -655,6 +659,9 @@ pub fn attach_manifest_segment(
     for c in connectors {
         s.push_str(&format!("- {} — {}\n", c.id, c.description));
     }
+    for f in families {
+        s.push_str(&format!("- {} (built-in) — {}\n", f.id, f.description));
+    }
     for m in mcp_servers {
         s.push_str(&format!(
             "- {} (MCP server) — {}\n",
@@ -663,6 +670,94 @@ pub fn attach_manifest_segment(
         ));
     }
     Some(s)
+}
+
+/// Manifest entries for the unlockable BUILT-IN tool families
+/// (`attach_connector("session-mesh")`, …). One short line per family per
+/// turn is what keeps the locked families discoverable — the whole point of
+/// the families is that their schemas (~2.5k tokens together) stay out of
+/// the request until a request actually needs them.
+pub(crate) fn unlockable_family_entries() -> Vec<ManifestEntry> {
+    vec![
+        ManifestEntry {
+            id: crate::chat::tools::FAMILY_SESSION_MESH.into(),
+            name: "Session Mesh".into(),
+            description: "read, search, message or spawn your other chat sessions".into(),
+        },
+        ManifestEntry {
+            id: crate::chat::tools::FAMILY_AUTOMATIONS.into(),
+            name: "Automations".into(),
+            description: "create, update, delete or run-now a scheduled automation (list/get are always loaded)".into(),
+        },
+        ManifestEntry {
+            id: crate::chat::tools::FAMILY_TOTP.into(),
+            name: "TOTP codes".into(),
+            description: "generate a TOTP (2FA) code from a stored seed".into(),
+        },
+    ]
+}
+
+/// Send-time keyword fast-path for the unlockable built-in families, mirroring
+/// [`detect_connector_mentions`]: when this message obviously needs a family
+/// ("create an automation that…", "what did the other chat say"), unlock it
+/// for THIS turn directly so the model doesn't burn an attach round-trip on
+/// an obvious ask. Deliberately high-recall, low-false-positive-cost: a miss
+/// just means the model takes the one-call attach path from the manifest, and
+/// a hit only costs one turn's schema tokens. Unknown ids never leak — only
+/// the three family constants are returned.
+pub fn detect_family_unlocks(content: &str) -> Vec<String> {
+    let lower = content.to_lowercase();
+    let mut hits: Vec<String> = Vec::new();
+    let mut probe = |id: &'static str, needles: &[&str]| {
+        if !hits.iter().any(|h| h == id)
+            && needles.iter().any(|n| lower.contains(n))
+        {
+            hits.push(id.to_string());
+        }
+    };
+    probe(
+        crate::chat::tools::FAMILY_AUTOMATIONS,
+        &[
+            "automation",
+            "automate",
+            "cron",
+            "recurring",
+            "remind me every",
+            "every day at",
+            "every week on",
+            "every morning",
+        ],
+    );
+    probe(
+        crate::chat::tools::FAMILY_SESSION_MESH,
+        &[
+            "other chat",
+            "other session",
+            "another chat",
+            "another session",
+            "previous chat",
+            "previous conversation",
+            "earlier chat",
+            "earlier conversation",
+            "last conversation",
+            "other conversation",
+            "session mesh",
+            "spawn a session",
+        ],
+    );
+    probe(
+        crate::chat::tools::FAMILY_TOTP,
+        &[
+            "totp",
+            "2fa",
+            "two-factor",
+            "two factor",
+            "one-time code",
+            "one time code",
+            "otp code",
+        ],
+    );
+    hits
 }
 
 /// Send-time relevance fast-path: which available connector ids does this
@@ -860,6 +955,11 @@ mod tests {
         // frontier budget above.
         // 4900 → 5050: the Vault section (~0.35k) — search-before-deny for the user's
         // own notes, compressed for the local window.
+        // 5050 stays (2026-09-21, token-efficiency pass II): the Automations
+        // section reworded for the family lock ("writes need
+        // attach_connector(\"automations\") first") — measured 5,027, inside
+        // the existing budget; the schemas it no longer enumerates left the
+        // default tool array entirely.
         assert!(
             local.len() < 5_050,
             "local CORE prompt bloated: {} bytes",
@@ -915,8 +1015,21 @@ mod tests {
     /// full/summary_only/section + browser_click/type/scroll).
     #[test]
     fn core_prompts_never_reference_phantom_tools() {
+        // The prompt may name any tool REACHABLE this turn: the unlocked
+        // registry (family-locked tools return via attach_connector, which
+        // the prompt also names) plus one attachable connector so the
+        // attach meta-tool itself renders. Default caps hide the locked
+        // families — asserting against them would flag tools the model can
+        // genuinely get back with one call.
+        let registry_caps = crate::chat::tools::ToolCaps {
+            attachable_connectors: std::sync::Arc::new(vec![(
+                "gmail".to_string(),
+                "Gmail".to_string(),
+            )]),
+            ..crate::chat::tools::ToolCaps::unlocked_registry()
+        };
         let registry = crate::chat::tools::openai_tool_specs(
-            &crate::chat::tools::ToolCaps::default(),
+            &registry_caps,
             crate::chat::permission::SandboxPolicy::WorkspaceWrite,
         );
         let names: Vec<String> = registry
@@ -1034,7 +1147,7 @@ mod tests {
 
     #[test]
     fn attach_manifest_lists_entries_and_omits_when_empty() {
-        assert!(attach_manifest_segment(&[], &[]).is_none());
+        assert!(attach_manifest_segment(&[], &[], &[]).is_none());
         let seg = attach_manifest_segment(
             &[ManifestEntry {
                 id: "gmail".into(),
@@ -1042,9 +1155,50 @@ mod tests {
                 description: "Read and send email.".into(),
             }],
             &[],
+            &[],
         )
         .unwrap();
         assert!(seg.contains("attach_connector"));
         assert!(seg.contains("- gmail — Read and send email."));
+        // Built-in families render as "(built-in)" lines so the model can
+        // tell them from vendor connectors.
+        let fam = attach_manifest_segment(
+            &[],
+            &[],
+            &unlockable_family_entries(),
+        )
+        .unwrap();
+        assert!(fam.contains("- session-mesh (built-in) —"));
+        assert!(fam.contains("- automations (built-in) —"));
+        assert!(fam.contains("- totp (built-in) —"));
+    }
+
+    /// The keyword fast-path pre-unlocks families on obvious asks so the
+    /// model skips the attach round-trip. Deliberately high-recall: a false
+    /// positive costs one turn's schema tokens, a miss costs one cheap
+    /// attach call.
+    #[test]
+    fn detect_family_unlocks_matches_obvious_asks() {
+        assert_eq!(
+            detect_family_unlocks("create an automation that runs the backup daily"),
+            vec!["automations"]
+        );
+        assert_eq!(
+            detect_family_unlocks("what did we decide in the other chat about the API?"),
+            vec!["session-mesh"]
+        );
+        assert_eq!(
+            detect_family_unlocks("give me the 2FA code for GitHub"),
+            vec!["totp"]
+        );
+        // Combined asks surface every family, in a stable order.
+        let both = detect_family_unlocks(
+            "set a cron automation and check the other session's summary, plus my totp",
+        );
+        assert!(both.contains(&"automations".to_string()));
+        assert!(both.contains(&"session-mesh".to_string()));
+        assert!(both.contains(&"totp".to_string()));
+        // Ordinary asks unlock nothing.
+        assert!(detect_family_unlocks("fix the login bug in auth.rs").is_empty());
     }
 }

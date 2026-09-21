@@ -80,9 +80,14 @@ pub fn relay_tool_schemas<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<V
     // local_docs: `search_docs` is capability-gated in the registry but is
     // bridged unconditionally (hybrid search degrades to keyword-only at
     // runtime when the embedding sidecar is down).
+    // unlocked_registry: the bridge serves HARNESS CLIs, which have no
+    // attach hop — a family the built-in chat locks behind
+    // `attach_connector` (session mesh, automation writes) must stay in the
+    // bridged `tools/list` or it goes missing on the harness side. There is
+    // a test pinning every allowlisted tool to a live registry spec.
     let caps = ToolCaps {
         local_docs: true,
-        ..ToolCaps::default()
+        ..ToolCaps::unlocked_registry()
     };
     let all = tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite);
     let mut out: Vec<Value> = ALLOWED_RELAY_TOOLS
@@ -719,9 +724,11 @@ mod tests {
     fn bridge_allowlist_matches_registry() {
         // Every allowlist entry must resolve to a live registry spec — a typo
         // or a renamed tool would otherwise silently vanish from harnesses.
+        // unlocked_registry mirrors relay_tool_schemas: harnesses have no
+        // attach hop, so family-locked built-ins must still render here.
         let caps = ToolCaps {
             local_docs: true,
-            ..Default::default()
+            ..ToolCaps::unlocked_registry()
         };
         let all = tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite);
         let names: Vec<&str> = all

@@ -983,10 +983,16 @@ fn fold_late_attaches(mgr: &Arc<ChatManager>, sid: &str, live_caps: &mut tools::
         return false;
     };
     let late = std::mem::take(&mut *slot.lock());
-    if late.connectors.is_empty() && late.mcp.is_empty() {
+    if late.connectors.is_empty() && late.mcp.is_empty() && late.families.is_empty() {
         return false;
     }
     let mut changed = false;
+    // Built-in family unlocks: flip each per-turn flag so the rebuilt specs
+    // admit the family's tools from the next round on — same one-way,
+    // turn-scoped contract as the source attaches below.
+    for id in &late.families {
+        changed |= live_caps.unlock_family(id);
+    }
     if !late.connectors.is_empty() {
         let taken = std::mem::replace(
             &mut live_caps.attached_connectors,

@@ -442,12 +442,118 @@ pub struct ToolCaps {
     /// strips the write tools, so `get_capabilities` (which reports from this
     /// struct) can never claim vault/fs writes in a read-only posture.
     pub allows_mutating: bool,
+    /// Research-mode turn: the source-ledger tools (`add_source_note`,
+    /// `get_source_ledger`, `reset_source_ledger`, `check_sufficiency`) ride
+    /// the schema ONLY here. The research scaffolding is the only prompt text
+    /// that references them, so an ordinary turn shouldn't pay ~0.9k tokens
+    /// for tools nothing can reach. Subagents and the harness relay bridge
+    /// force this on — research fan-out shares the session ledger.
+    pub research: bool,
+    /// Session Mesh unlocked for THIS turn. Locked by default (~1.3k tokens
+    /// of specs most turns never touch); `attach_connector("session-mesh")`
+    /// flips it mid-turn via the late-attach slot. Harness/subagent surfaces
+    /// that serve other runtimes force it on.
+    pub session_mesh: bool,
+    /// Automation WRITE half (`create/update/delete_automation`,
+    /// `run_automation_now`) unlocked for this turn. `list_automation` /
+    /// `get_automation` stay always-on. Locked by default; unlocked via
+    /// `attach_connector("automations")` or the send-time keyword fast-path
+    /// (`prompts::detect_family_unlocks`).
+    pub automations_write: bool,
+    /// `totp_code` unlocked for this turn (attach_connector("totp")). The
+    /// 2FA-code tool rides almost no turns; locked by default.
+    pub totp: bool,
+    /// Attachable BUILT-IN families: (id, display) pairs advertised in the
+    /// attach manifest and merged into the `attach_connector` enum. Locked
+    /// families are absent from the schema but never absent from the
+    /// catalog — one call brings them back this turn (see `unlock_family`).
+    pub unlockable_families: std::sync::Arc<Vec<(String, String)>>,
+}
+
+/// Built-in families hidden from the default schema and unlocked via
+/// `attach_connector("<id>")` for the rest of the turn (dispatch routes the
+/// id to `ToolCaps::unlock_family`, not a connector connect). Turn-scoped on
+/// purpose — the same contract as connector/MCP attaches: the manifest is
+/// rebuilt every turn, so a later turn re-attaches (or the send-time keyword
+/// fast-path pre-unlocks obvious asks).
+pub const FAMILY_SESSION_MESH: &str = "session-mesh";
+pub const FAMILY_AUTOMATIONS: &str = "automations";
+pub const FAMILY_TOTP: &str = "totp";
+
+pub const UNLOCKABLE_FAMILIES: [(&str, &str); 3] = [
+    (FAMILY_SESSION_MESH, "Session Mesh"),
+    (FAMILY_AUTOMATIONS, "Automations"),
+    (FAMILY_TOTP, "TOTP codes"),
+];
+
+/// True when `id` names an unlockable built-in family (vs a real connector).
+pub fn is_unlockable_family(id: &str) -> bool {
+    matches!(id, FAMILY_SESSION_MESH | FAMILY_AUTOMATIONS | FAMILY_TOTP)
+}
+
+/// Comma-separated tool names a family unlock admits — the attach result
+/// text tells the model exactly what became callable.
+pub fn family_tool_list(id: &str) -> &'static str {
+    match id {
+        FAMILY_SESSION_MESH => {
+            "list_sessions, read_session, search_sessions, message_session, spawn_session"
+        }
+        FAMILY_AUTOMATIONS => {
+            "create_automation, update_automation, delete_automation, run_automation_now"
+        }
+        FAMILY_TOTP => "totp_code",
+        _ => "",
+    }
+}
+
+/// The (id, display) pairs for the caps catalog and the attach enum.
+pub fn unlockable_family_pairs() -> Vec<(String, String)> {
+    UNLOCKABLE_FAMILIES
+        .iter()
+        .map(|(id, name)| (id.to_string(), name.to_string()))
+        .collect()
+}
+
+impl ToolCaps {
+    /// Flip the per-turn flag for an unlockable family id. Returns false for
+    /// an unknown id or an already-unlocked family (no spec rebuild needed).
+    pub fn unlock_family(&mut self, id: &str) -> bool {
+        match id {
+            FAMILY_SESSION_MESH => !std::mem::replace(&mut self.session_mesh, true),
+            FAMILY_AUTOMATIONS => !std::mem::replace(&mut self.automations_write, true),
+            FAMILY_TOTP => !std::mem::replace(&mut self.totp, true),
+            _ => false,
+        }
+    }
+
+    /// Full registry: every family ON plus research — the contract for
+    /// surfaces that serve OTHER agent runtimes (the harness relay-tools
+    /// bridge, subagents). Those contexts don't pay a per-turn token bill
+    /// the built-in chat optimizes, and dropping a family there would
+    /// silently remove a capability the harness side advertises in its
+    /// bundle text.
+    pub fn unlocked_registry() -> Self {
+        ToolCaps {
+            research: true,
+            session_mesh: true,
+            automations_write: true,
+            totp: true,
+            ..ToolCaps::default()
+        }
+    }
 }
 
 impl Default for ToolCaps {
     /// Defaults reflect the hosted-provider norm: web search available, no
     /// sandbox constraint. Local models override `web_search = false` and
     /// `requires_local_sandbox = true` via `provider_capabilities`.
+    ///
+    /// The unlockable families default to LOCKED (with the full catalog in
+    /// `unlockable_families`): a fresh chat turn pays ~2.5k fewer schema
+    /// tokens and re-unlocks with one `attach_connector` call when needed.
+    /// Surfaces that serve other runtimes must start from
+    /// [`ToolCaps::unlocked_registry`] instead so nothing goes missing on
+    /// the harness/subagent side.
     fn default() -> Self {
         ToolCaps {
             code_exec: false,
@@ -464,6 +570,11 @@ impl Default for ToolCaps {
             memory: true,
             browser: false,
             allows_mutating: true,
+            research: false,
+            session_mesh: false,
+            automations_write: false,
+            totp: false,
+            unlockable_families: std::sync::Arc::new(unlockable_family_pairs()),
         }
     }
 }
@@ -549,21 +660,19 @@ const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text file and \
 const GENERATE_DOCUMENT_DESC: &str = "Create a professionally designed \
     docx/pptx/xlsx/pdf by writing a program in `code` — the engine is chosen by \
     `language` (default per format; see that parameter). For PowerPoint decks \
-    prefer plan_document instead — it plans the deck first and compiles it \
-    against the shared design system. The full editorial style guide + engine \
-    cheatsheet is returned with the tool result; regenerate if the first \
-    attempt falls short.";
+    prefer plan_document (it plans first and compiles against the shared \
+    design system). The editorial style guide + engine cheatsheet is returned \
+    with the tool result; regenerate if the first attempt falls short.";
 
 const PLAN_DOCUMENT_DESC: &str = "Create a professionally designed PowerPoint deck, \
-    Word document, or PDF by authoring a structured PLAN (not code): \
-    { format: \"pptx\"|\"docx\"|\"pdf\", filename, theme?, plan }. Deck plans (pptx) \
-    are a slide outline — per-slide layout from a fixed catalog, slot content and \
-    speaker notes; document plans (docx/pdf) are sections of typed blocks (see the \
-    `plan` parameter). The app validates the plan, compiles it against the shared \
-    design system (typography, spacing, colors handled for you), and runs design \
-    QA — fix reported issues by re-calling with a REVISED plan (same filename \
-    overwrites). Prefer this over generate_document for pptx/docx/pdf. The full \
-    planner guide is returned with any error.";
+    Word document, or PDF by authoring a structured PLAN, not code (see the \
+    `plan` parameter: pptx plans are a slide outline — per-slide layout, slot \
+    content, speaker notes; docx/pdf plans are sections of typed blocks). The \
+    app validates the plan, compiles it against the shared design system \
+    (typography, spacing, colors handled for you), and runs design QA — fix \
+    reported issues by re-calling with a REVISED plan (same filename \
+    overwrites). Prefer this over generate_document for pptx/docx/pdf. The \
+    full planner guide is returned with any error.";
 
 const REVISE_DOCUMENT_DESC: &str = "Make targeted edits to a document you created \
     with plan_document: { path, patches } — each patch addresses one slide slot or \
@@ -574,14 +683,14 @@ const REVISE_DOCUMENT_DESC: &str = "Make targeted edits to a document you create
 
 const GENERATE_DIAGRAM_DESC: &str = "Create a freeform STATIC vector illustration \
     (concept sketch, annotated architecture art) as a self-contained .html file. \
-    Author it as ONE root inline <svg> (explicit xmlns, viewBox, width/height): \
-    nodes as <rect rx=..>, labels as <text>, connectors as <path>/<line> with an \
-    arrowhead <marker>; wrap that svg in a minimal complete HTML document in the \
-    `html` argument. Inline presentation only — no external resources, scripts, \
-    or CDN fonts. For structured graph diagrams (flowchart, sequence, ER, state, \
-    mind-map) prefer a ```mermaid block; for charts/dashboards prefer a .tsx file \
-    via write_file (recharts/d3/lucide-react pre-installed in the preview \
-    sandbox). The full routing + layout guide is returned with the tool result.";
+    Author it as ONE root inline <svg> (explicit xmlns, viewBox, width/height; \
+    nodes/labels/connectors as plain SVG shapes) wrapped in a minimal complete \
+    HTML document in the `html` argument. Inline presentation only — no \
+    external resources, scripts, or CDN fonts. For structured graph diagrams \
+    (flowchart, sequence, ER, state, mind-map) prefer a ```mermaid block; for \
+    charts/dashboards prefer a .tsx file via write_file (recharts/d3/\
+    lucide-react pre-installed in the preview sandbox). The full routing + \
+    layout guide is returned with the tool result.";
 
 const GENERATE_IMAGE_DESC: &str = "Generate a new image from a text description \
     with the LOCAL image model (offline) and save it as a PNG artifact shown to \
@@ -616,9 +725,12 @@ const LIST_ARTIFACTS_DESC: &str = "List the user's generated artifacts — docum
 
 const ATTACH_CONNECTOR_DESC: &str = "Load a connected app's tools into this \
     turn (Gmail, Notion, Drive, … — ids in \"Connected apps & servers\" in the \
-    system prompt). The app's tools become callable immediately. Attach only \
-    what the current request needs; call this FIRST when one is needed — never \
-    claim a service is unavailable before attaching.";
+    system prompt). Also UNLOCKS built-in tool families by id: \
+    \"session-mesh\" (read/message/spawn your other chat sessions), \
+    \"automations\" (create/update/delete/run scheduled automations), \
+    \"totp\" (2FA codes). Tools become callable immediately. Attach only \
+    what the current request needs; call this FIRST when one is needed — \
+    never claim a service is unavailable before attaching.";
 
 const ATTACH_MCP_SERVER_DESC: &str = "Load an installed MCP server's tools into \
     this turn (see \"Connected apps & servers\" in the system prompt for ids). \
@@ -648,10 +760,9 @@ const SEARCH_FILES_DESC: &str = "Recursively find LOCAL files under a directory 
 
 const SEARCH_CONTENT_DESC: &str = "Search the CONTENT of files under a directory \
     for a substring (default) or regex; returns `path:line:col: matched-line` \
-    rows capped to max_results. The DEFAULT tool for 'find where X is \
-    defined/used' or grepping code — call it whenever the user means what's \
-    INSIDE files, not their names. Skips build/cache directories (node_modules, \
-    .git, target, …) so broad sweeps stay fast. Read-only.";
+    rows capped to max_results. The tool for 'find where X is defined/used' — \
+    call it whenever the user means what's INSIDE files, not their names. \
+    Skips build/cache dirs (node_modules, .git, target, …). Read-only.";
 
 const WRITE_FILE_DESC: &str = "Create or overwrite a file with the given text \
     content. Creates parent directories as needed. Mutating — may require \
@@ -683,8 +794,7 @@ const BROWSER_READ_DESC: &str = "Inspect the page currently open in the app's \
     after any click/type to refresh the ref map; use `mode` (see parameter) to \
     read one section or just the summary of a long page. On extraction failure \
     a `failureReason` is set (paywalled, login_required, extraction_failed, \
-    blocked). Cookie/consent banners are auto-dismissed; lazy-loaded content \
-    is surfaced via a bounded scroll loop.";
+    blocked).";
 
 const BROWSER_CLICK_DESC: &str = "Click an element in the built-in browser pane \
     by its `ref` number (from the most recent browser_read). Use for links, \
@@ -796,31 +906,26 @@ const DOWNLOAD_FILE_DESC: &str = "Stream a file from an http(s) URL to an \
 
 
 const RUN_SHELL_DESC: &str = "Run a native shell command (cmd.exe / sh) with \
-    the user's privileges — CLI tools like git, pip, ffmpeg work as in a \
-    terminal. FOREGROUND (default) runs to completion, killed at 120s — use \
-    for probes, builds, git, anything whose output you need next. LONG-RUNNING \
-    work (dev servers, watchers, long installs) MUST use background=true — \
-    see that parameter; temporary processes that must self-terminate use \
-    timeout_secs. NEVER use this to inspect connector/MCP availability \
-    (refused — call get_capabilities), or to open/launch a file for the user \
-    (that is open_file's job). ALWAYS approval-gated. Prefer download_file \
-    for plain URL downloads and run_code for short snippets.";
+    the user's privileges. FOREGROUND (default) runs to completion, killed at \
+    120s — use for probes, builds, git, anything whose output you need next. \
+    LONG-RUNNING work (dev servers, watchers, long installs) MUST use \
+    background=true — see that parameter; temporary processes that must \
+    self-terminate use timeout_secs. NEVER use this to inspect connector/MCP \
+    availability (refused — call get_capabilities), or to open/launch a file \
+    for the user (that is open_file's job). ALWAYS approval-gated. Prefer \
+    download_file for plain URL downloads and run_code for short snippets.";
 
 const TASK_DESC: &str = "Spawn a focused IN-SESSION subagent that runs ONE task with its \
-    own model turn and reports back — delegate self-contained sub-tasks \
-    (explore a codebase, research a topic, draft a section) so the main turn \
-    stays lean. Skip it for simple or quick work — a direct answer, a small \
-    tweak, a short lookup; do it yourself. Reserve subagents for genuinely \
-    self-contained, substantial sub-work. The \
-    subagent lives inside THIS conversation (a chip in the \
-    chat, NOT a new sidebar session — that is spawn_session) and its final \
-    text returns directly as this tool's result. Runs this session's \
-    provider+model by default; pass `model` to override. Output streams \
-    live to the Agents panel. \
-    For INDEPENDENT subtasks, call Task multiple times in the same turn — the \
-    calls run in parallel (subagents have read-only tools: they can read files \
-    and fetch pages); only sequence them when one subtask genuinely depends on \
-    another's result.";
+    own model turn and reports back — for genuinely self-contained, substantial \
+    sub-work (explore a codebase, research a topic, draft a section); skip it \
+    for quick work you can do directly. The subagent lives inside THIS \
+    conversation (a chip in the chat, NOT a new sidebar session — that is \
+    spawn_session) and its final text returns as this tool's result, streaming \
+    to the Agents panel. Runs this session's provider+model by default; pass \
+    `model` to override. INDEPENDENT subtasks: call Task several times in one \
+    turn — the calls run in parallel (subagents have read-only tools: they can \
+    read files and fetch pages); sequence only when one subtask truly depends \
+    on another's result.";
 
 const GET_TASK_STATUS_DESC: &str = "Report any background task's status — a \
     `download_file`, a background `run_shell`, or a background `Task` \
@@ -862,13 +967,12 @@ const CHECK_SUFFICIENCY_DESC: &str = "Evidence-sufficiency gate before writing a
     after the second NOT SUFFICIENT, write the report and say what stayed \
     unverified.";
 
-const TODO_WRITE_DESC: &str = "Create or update your task list for the current \
-    task. Use it for any multi-step work (2+ distinct steps or files); skip it \
-    for trivial single-step answers. Rules: rewrite the WHOLE list on every \
-    call (it replaces the previous one); at most one item in_progress at a \
-    time; mark an item completed IMMEDIATELY after finishing it, not in \
-    batches; revise the list whenever scope changes. The list is rendered to \
-    the user as a live progress tracker — do not repeat it in your reply.";
+const TODO_WRITE_DESC: &str = "Create or update your task list — any multi-step \
+    work (2+ distinct steps or files); skip for trivial answers. Rules: rewrite \
+    the WHOLE list every call (it replaces the previous one); at most one item \
+    in_progress; mark items completed IMMEDIATELY, not in batches; revise when \
+    scope changes. The list renders as a live progress tracker — do not repeat \
+    it in your reply.";
 
 const ENTER_PLAN_MODE_DESC: &str = "Switch this session into plan mode before \
     starting complex or risky work: multiple files/steps, ambiguous \
@@ -1468,21 +1572,36 @@ mod tests {
 
     #[test]
     fn ledger_tools_listed_in_both_specs() {
-        // The three source-ledger tools are always on (state tools, not gated
-        // by sandbox) and must appear in both provider specs.
+        // The source-ledger tools ride `caps.research` (the research
+        // scaffolding is the only prompt text that references them), so a
+        // DEFAULT turn ships none of them while a research turn carries all
+        // four in both provider specs — in every sandbox posture.
         for sandbox in [SandboxPolicy::WorkspaceWrite, SandboxPolicy::ReadOnly] {
-            let o = openai_names(&ToolCaps::default(), sandbox);
+            let plain = openai_names(&ToolCaps::default(), sandbox);
+            assert!(
+                !plain.contains(&ADD_SOURCE_NOTE.to_string()),
+                "openai {sandbox:?}: add_source_note must be research-gated"
+            );
+            assert!(!plain.contains(&GET_SOURCE_LEDGER.to_string()));
+            assert!(!plain.contains(&RESET_SOURCE_LEDGER.to_string()));
+            let caps = ToolCaps {
+                research: true,
+                ..ToolCaps::default()
+            };
+            let o = openai_names(&caps, sandbox);
             assert!(
                 o.contains(&ADD_SOURCE_NOTE.to_string()),
-                "openai {sandbox:?}: add_source_note missing"
+                "openai {sandbox:?}: add_source_note missing in research mode"
             );
             assert!(o.contains(&GET_SOURCE_LEDGER.to_string()));
             assert!(o.contains(&RESET_SOURCE_LEDGER.to_string()));
-            let a = anthropic_tool_specs(&ToolCaps::default(), sandbox);
+            assert!(o.contains(&CHECK_SUFFICIENCY.to_string()));
+            let a = anthropic_tool_specs(&caps, sandbox);
             let an: Vec<&str> = a.iter().map(|s| s["name"].as_str().unwrap()).collect();
             assert!(an.contains(&ADD_SOURCE_NOTE));
             assert!(an.contains(&GET_SOURCE_LEDGER));
             assert!(an.contains(&RESET_SOURCE_LEDGER));
+            assert!(an.contains(&CHECK_SUFFICIENCY));
         }
     }
 
@@ -1615,9 +1734,22 @@ mod tests {
                 "read-only {name} missing from the openai schema"
             );
         }
-        let openai = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
+        // The write half rides BOTH gates: family-locked by default (the
+        // manifest + attach_connector("automations") bring it back) and
+        // stripped under read_only even when unlocked. With the family
+        // unlocked, both provider schemas carry all six.
+        let unlocked = ToolCaps {
+            automations_write: true,
+            ..ToolCaps::default()
+        };
+        let plain = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
+        assert!(
+            !plain.contains(&CREATE_AUTOMATION.to_string()),
+            "create_automation must be family-locked out of the default schema"
+        );
+        let openai = openai_names(&unlocked, SandboxPolicy::WorkspaceWrite);
         let anthropic: Vec<String> =
-            anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
+            anthropic_tool_specs(&unlocked, SandboxPolicy::WorkspaceWrite)
                 .iter()
                 .map(|s| s["name"].as_str().unwrap().to_string())
                 .collect();
@@ -1638,7 +1770,7 @@ mod tests {
                 "anthropic schema missing {name}"
             );
         }
-        let ro = openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly);
+        let ro = openai_names(&unlocked, SandboxPolicy::ReadOnly);
         for name in [
             CREATE_AUTOMATION,
             UPDATE_AUTOMATION,

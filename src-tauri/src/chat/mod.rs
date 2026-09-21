@@ -174,11 +174,15 @@ pub struct ChatManager {
 }
 
 /// Sources attached mid-turn by the `attach_connector` / `attach_mcp_server`
-/// meta-tools, awaiting pickup by the turn's tool loop.
+/// meta-tools, awaiting pickup by the turn's tool loop. `families` are the
+/// unlockable built-in family ids ("session-mesh", "automations", "totp")
+/// — each flips its `ToolCaps` flag (and the rebuilt specs admit the
+/// family's tools) instead of connecting a source.
 #[derive(Default)]
 pub(crate) struct LateAttach {
     pub connectors: Vec<crate::connectors::AttachedConnector>,
     pub mcp: Vec<crate::mcp_gallery::McpToolEntry>,
+    pub families: Vec<String>,
 }
 
 impl ChatManager {
@@ -432,6 +436,10 @@ impl ChatManager {
         db: Arc<Mutex<Connection>>,
         app: AppHandle,
         research_mode: bool,
+        // Built-in families the send-time keyword fast-path pre-unlocked for
+        // this exact ask (prompts::detect_family_unlocks) — they join the
+        // schema directly instead of costing an attach round-trip.
+        pre_unlocked_families: Vec<String>,
         thinking: Option<bool>,
         // Auto fail-over chain (primary already applied by the caller).
         fallbacks: Vec<AutoFallback>,
@@ -551,6 +559,22 @@ impl ChatManager {
                 // Same posture signal the schema build uses to strip the
                 // write tools — get_capabilities reads it.
                 allows_mutating: sandbox.allows_mutating_tools(),
+                // Research turns carry the source-ledger tools; ordinary
+                // turns don't (the research scaffolding is the only prompt
+                // text that references them).
+                research: research_mode,
+                // Built-in families stay LOCKED unless the send-time keyword
+                // fast-path pre-unlocked one for this ask — the manifest
+                // lists them, and one attach_connector call brings a family
+                // back mid-turn (see UNLOCKABLE_FAMILIES).
+                session_mesh: pre_unlocked_families
+                    .iter()
+                    .any(|f| f == tools::FAMILY_SESSION_MESH),
+                automations_write: pre_unlocked_families
+                    .iter()
+                    .any(|f| f == tools::FAMILY_AUTOMATIONS),
+                totp: pre_unlocked_families.iter().any(|f| f == tools::FAMILY_TOTP),
+                unlockable_families: Arc::new(tools::unlockable_family_pairs()),
             }
         };
         // Fresh late-attach slot for this turn (replaces any stale one).
@@ -2238,6 +2262,9 @@ mod tests {
                 description: "Read and send email.".into(),
             }],
             &[],
+            // A real fresh turn lists every unlockable built-in family
+            // (they start locked) — mirror that here.
+            &prompts::unlockable_family_entries(),
         );
         let system = build_system_prompt(
             ChatProviderId::LocalGguf,
@@ -2281,8 +2308,16 @@ mod tests {
         // +0.5k for automation trigger engines beyond cron (create/update
         // automation trigger_type+trigger params): webhook / file-watch /
         // git firing — without them the model can only schedule cron rows.
+        // TIGHTENED 59.5k → 46.0k (2026-09-21, token-efficiency pass II):
+        // the source ledger rides research mode now, and Session Mesh /
+        // automation writes / totp_code became family-locked (attach via
+        // `attach_connector`, discoverable through the manifest, listed in
+        // the families budget line here); fattest tool descriptions dieted.
+        // Measured baseline 44.2k chars (system 9.2k + specs 35.0k) vs the
+        // old 58.9k — a ~25% cut in the fixed per-turn overhead. The budget
+        // keeps ~4% headroom so re-bloat fails here, not in production.
         assert!(
-            total < 59_500,
+            total < 46_000,
             "fresh-turn baseline over fixed-cost budget: {total} chars"
         );
     }

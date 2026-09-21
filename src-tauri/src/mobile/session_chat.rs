@@ -471,6 +471,9 @@ fn handle_send_chat_message(
         Arc::clone(db),
         app.clone(),
         false,
+        // No keyword fast-path on the mobile path — the desktop composer
+        // owns prompt assembly; families unlock via attach there.
+        Vec::new(),
         None,
         // Mobile turns have no fail-over chain (the desktop composer runs
         // the full resolver) and no system-prompt rebuild inputs.

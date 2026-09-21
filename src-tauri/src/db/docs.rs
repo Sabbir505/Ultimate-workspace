@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(blob.len(), 16);
         let back = blob_to_f32_slice(&blob);
         assert_eq!(back, v);
-        // Truncated blobs don't panic — chunks_exact drops the tail.
+        // Truncated blobs don't panic — a trailing partial chunk is dropped.
         assert_eq!(blob_to_f32_slice(&blob[..15]).len(), 3);
     }
 

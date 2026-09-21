@@ -5,15 +5,26 @@ function usd(n: number): string {
 }
 
 export function CostHero({ rollups }: { rollups: CostRollups }) {
-  const { totals, perProvider, rangeStart, rangeEnd } = rollups;
+  const { totals, perProvider, rangeStart, rangeEnd, byKind, costQuality } = rollups;
   // Only providers that actually incurred cost appear in the breakdown —
   // local/openai-compatible models are free (cost 0) and add noise.
   const priced = perProvider.filter(p => p.costUsd > 0);
+  // Share of input served from cache (processed = uncached + cached). Only
+  // shown when there IS cached input; rows priced by provider-reported cost
+  // still estimate the counterfactual from the rate table, and
+  // cache-creation tokens contribute zero savings by design.
+  const cachedShare = byKind.cachedInputTokens > 0 && byKind.processedTokens > 0
+    ? ((byKind.cachedInputTokens / byKind.processedTokens) * 100).toFixed(1)
+    : null;
   return (
     <section className="cost-hero">
       <div className="cost-hero-headline">
         <div className="cost-hero-label">RAW TOKEN COST</div>
         <div className="cost-hero-value">{usd(totals.rawTokenCostUsd)}</div>
+        <div className="cost-hero-savings">
+          Saved {usd(costQuality.cacheSavingsUsd)} by prompt caching
+          {cachedShare && <> · {cachedShare}% of input cached</>}
+        </div>
         <div className="cost-hero-range">{formatDate(rangeStart)} to {formatDate(rangeEnd)}</div>
       </div>
       <div className="cost-hero-breakdown">

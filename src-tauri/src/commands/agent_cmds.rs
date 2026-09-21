@@ -152,10 +152,12 @@ pub async fn reconcile_agent_sessions(
 /// to be a sync command, which Tauri runs on the MAIN thread: opening the
 /// agent picker froze the whole window for the length of every probe. It must
 /// stay off the main thread (spawn_blocking), and a short TTL cache keeps
-/// repeat picker opens free.
+/// repeat picker opens free. `force` (the picker's "↻ Refresh from CLI")
+/// skips the TTL and re-probes.
 #[tauri::command]
 pub async fn list_harness_models(
     harness_id: String,
+    force: Option<bool>,
 ) -> Result<crate::harness_config::HarnessModelConfig, String> {
     use once_cell::sync::Lazy;
     use std::collections::HashMap;
@@ -165,10 +167,12 @@ pub async fn list_harness_models(
     static CACHE: Lazy<std::sync::Mutex<HashMap<String, (Instant, crate::harness_config::HarnessModelConfig)>>> =
         Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
 
-    if let Ok(guard) = CACHE.lock() {
-        if let Some((at, cfg)) = guard.get(&harness_id) {
-            if at.elapsed() < TTL {
-                return Ok(cfg.clone());
+    if !force.unwrap_or(false) {
+        if let Ok(guard) = CACHE.lock() {
+            if let Some((at, cfg)) = guard.get(&harness_id) {
+                if at.elapsed() < TTL {
+                    return Ok(cfg.clone());
+                }
             }
         }
     }

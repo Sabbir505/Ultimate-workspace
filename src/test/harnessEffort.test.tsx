@@ -179,7 +179,7 @@ describe("harness pane effort slider", () => {
     });
     renderPicker({ harnessEffort: "", onHarnessEffortChange: vi.fn() });
     await waitFor(() =>
-      expect(listHarnessModelsMock).toHaveBeenCalledWith("claude_code"),
+      expect(listHarnessModelsMock).toHaveBeenCalledWith("claude_code", false),
     );
     // Let the settle microtask land before asserting absence.
     await waitFor(() => expect(paneCache.get("harness:claude_code")?.status).toBe("ready"));
@@ -212,7 +212,9 @@ describe("harness pane effort slider", () => {
     });
     renderPicker({ harnessEffort: "", onHarnessEffortChange: vi.fn() });
     // The stale pane renders first (stale-while-revalidate)…
-    await waitFor(() => expect(listHarnessModelsMock).toHaveBeenCalledWith("claude_code"));
+    await waitFor(() =>
+      expect(listHarnessModelsMock).toHaveBeenCalledWith("claude_code", false),
+    );
     // …and the fresh fetch swaps in with the spawn tiers.
     await waitFor(() => expect(slider()).toBeTruthy());
   });

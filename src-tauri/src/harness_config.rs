@@ -1,7 +1,7 @@
 //! Reads each CLI harness's OWN configuration to discover the models and
-//! endpoints the user actually has set up (mockup 02: the static catalog in
-//! `src/lib/harnessModels.ts` can lie when a CLI is pointed at a custom
-//! endpoint with custom model ids — which is the norm, not the exception).
+//! endpoints the user actually has set up (a static catalog can lie when a
+//! CLI is pointed at a custom endpoint with custom model ids — which is the
+//! norm, not the exception).
 //!
 //! Config locations (verified on a stock Windows install):
 //! - Claude Code: `~/.claude/settings.json` — `model`, plus `env` overrides
@@ -39,6 +39,14 @@ pub struct HarnessModelInfo {
     /// [`tier_rank`] so the slider reads weakest → strongest.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub thinking: Vec<String>,
+    /// The CLI's published list prices in $/Mtok (omp's per-model `cost`
+    /// object: `"cost":{"input":0.14,"output":0.28}` — its values are already
+    /// per million tokens). None = the CLI published no rates; the picker
+    /// then shows no price note.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_input_per_mtok: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_output_per_mtok: Option<f64>,
 }
 
 impl HarnessModelInfo {
@@ -48,6 +56,8 @@ impl HarnessModelInfo {
             label,
             source,
             thinking: Vec::new(),
+            cost_input_per_mtok: None,
+            cost_output_per_mtok: None,
         }
     }
 }
@@ -626,6 +636,13 @@ fn parse_omp_models_json(out: &str) -> Vec<HarnessModelInfo> {
                 names.sort_by_key(|t| tier_rank(t));
                 info.thinking = names;
             }
+            // Per-model list prices ride along too — omp's cost values are
+            // already $/Mtok (verified against the dump: glm-5.2 at
+            // {"input":0.14,"output":0.28}).
+            if let Some(cost) = m.get("cost") {
+                info.cost_input_per_mtok = cost.get("input").and_then(|v| v.as_f64());
+                info.cost_output_per_mtok = cost.get("output").and_then(|v| v.as_f64());
+            }
             Some(info)
         })
         .collect()
@@ -828,6 +845,21 @@ mod tests {
         // The dump's per-model thinking tiers ride along, reordered weakest →
         // strongest for the slider (the dump itself is unordered).
         assert_eq!(rows[0].thinking, vec!["minimal", "low", "max"]);
+        // And the per-model cost object survives (its values are $/Mtok).
+        assert_eq!(rows[0].cost_input_per_mtok, Some(0.14));
+        assert_eq!(rows[0].cost_output_per_mtok, Some(0.28));
+    }
+
+    #[test]
+    fn parse_omp_models_json_without_cost_or_thinking() {
+        // Models without a cost object / thinking array just omit the
+        // optional fields rather than serializing zeros.
+        let out = r#"{"models":[{"provider":"sharkai","id":"mimo-v2.5","selector":"sharkai/mimo-v2.5","name":"Mimo 2.5"}]}"#;
+        let rows = parse_omp_models_json(out);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].thinking.is_empty());
+        assert_eq!(rows[0].cost_input_per_mtok, None);
+        assert_eq!(rows[0].cost_output_per_mtok, None);
     }
 
     #[test]

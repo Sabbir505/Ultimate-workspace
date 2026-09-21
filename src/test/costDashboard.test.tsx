@@ -30,6 +30,14 @@ describe("CostDashboard", () => {
     expect(await screen.findByText(/claude-sonnet-4-5/)).toBeTruthy();
   });
 
+  it("surfaces the cache-savings headline with the cached share", async () => {
+    // CostHero leads with what prompt caching saved (costQuality
+    // .cacheSavingsUsd) plus the cached share of input when there is one.
+    render(<CostDashboard />);
+    expect(await screen.findByText(/Saved \$12\.30 by prompt caching/)).toBeTruthy();
+    expect(await screen.findByText(/90\.9% of input cached/)).toBeTruthy();
+  });
+
   it("switches the range toggle", async () => {
     render(<CostDashboard />);
     fireEvent.click(await screen.findByText("7d"));

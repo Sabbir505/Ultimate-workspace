@@ -89,6 +89,19 @@
   white-space: nowrap;
   opacity: 0.9;
 }
+/* Provenance suffix on harness model rows ("config" | "cli" | "builtin" —
+   where the row came from, see harness_config.rs). Dimmer still than the
+   note badge so it reads as metadata, never as the model name. */
+.model-source-badge {
+  margin-left: 5px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs, 4px);
+  color: var(--text-dim);
+  font-size: 9.5px;
+  white-space: nowrap;
+  opacity: 0.85;
+}
 .model-effort-check {
   color: var(--accent, var(--text));
 }

@@ -44,7 +44,6 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
 const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m) => ({ default: m.ArtifactProposalCard })));
 import { listHarnessModels, stopLocalModel, localModelStatus, deleteEmptyChatSessions, reconcileAgentSessions, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel, getResearchCitationReport, PROVIDER_INPUT_INCLUDES_CACHE, providerKindOf } from "../../lib/ipc";
-import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatSelectionPrefill } from "../../lib/chatSelection";
 import { useTranscriptScroll } from "./useTranscriptScroll";
 import { useLocalModelSidecar } from "./useLocalModelSidecar";
@@ -172,10 +171,9 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
   const isLocal = activeSession?.provider === "local_gguf";
   // CLI agent selected for this session ("harness:<id>") — the model chip is
-  // populated from the CLI's OWN config files (settings.json / config.toml /
-  // opencode.json via listHarnessModels), merged with the static catalog as a
-  // fallback. Sends for these sessions route to the headless CLI process
-  // (agent_sessions.rs), not the built-in provider path.
+  // populated from the CLI's OWN config files + live model listing
+  // (listHarnessModels). Sends for these sessions route to the headless CLI
+  // process (agent_sessions.rs), not the built-in provider path.
   const harnessAgent = activeSession?.agent?.startsWith("harness:")
     ? activeSession.agent.slice("harness:".length)
     : null;
@@ -213,7 +211,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
       })
       .catch(() => {
         /* harness discovery is best-effort — keep whatever is on screen
-           (the static catalog still lists; don't poison the cache) */
+           (the last-known list still shows; don't poison the cache) */
       })
       .finally(() => {
         if (!cancelled) setHarnessLoading(false);
@@ -223,15 +221,13 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
     };
   }, [harnessAgent]);
 
-  // Config-discovered models first, then static-catalog entries the config
-  // didn't mention (e.g. built-in aliases a stock setup still accepts).
-  const harnessModels = useMemo(() => {
-    if (!harnessAgent) return [];
-    const fromCfg = harnessCfg?.models ?? [];
-    const cfgIds = new Set(fromCfg.map((m) => m.id));
-    const extra = harnessModelCatalog(harnessAgent).filter((m) => !cfgIds.has(m.id));
-    return [...fromCfg, ...extra];
-  }, [harnessAgent, harnessCfg]);
+  // Exactly what the CLI's own config + live listing reported — no static
+  // fallback rows (a stale static id the CLI rejects is worse than a short
+  // list).
+  const harnessModels = useMemo(
+    () => (harnessAgent ? harnessCfg?.models ?? [] : []),
+    [harnessAgent, harnessCfg],
+  );
 
   // id → label map for the composer's agent chip. MEMOIZED: a fresh object
   // per render would defeat the ChatComposer memo and re-render the whole

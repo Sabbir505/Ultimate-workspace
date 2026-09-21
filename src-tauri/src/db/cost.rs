@@ -32,6 +32,9 @@ pub fn insert_cost_event(
     usage: &UsageInfo,
     provider: &str,
     source: &str,
+    // Write-only legacy column (nothing reads it back) — read-time pricing
+    // in harness_adapters/pricing.rs is the real pricer; callers now pass
+    // NULL.
     pricing_estimated_usd: Option<f64>,
 ) -> DbResult<i64> {
     conn.execute(

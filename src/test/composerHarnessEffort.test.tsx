@@ -92,7 +92,7 @@ describe("ChatComposer → AgentModelPicker harness effort wiring", () => {
     );
     fireEvent.click(container.querySelector<HTMLElement>(".agent-chip")!);
     await waitFor(() =>
-      expect(listHarnessModelsMock).toHaveBeenCalledWith("claude_code"),
+      expect(listHarnessModelsMock).toHaveBeenCalledWith("claude_code", false),
     );
     // There is no harness session to persist a tier onto.
     await waitFor(() => expect(paneCache.get("harness:claude_code")?.status).toBe("ready"));

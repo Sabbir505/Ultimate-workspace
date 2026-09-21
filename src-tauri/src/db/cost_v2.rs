@@ -15,15 +15,36 @@ use crate::types::*;
 use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, HashMap};
 
-/// Read Settings overrides once: `price.<key>.{input,cache_read,output}_per_mtok`,
-/// then blend in the OBSERVED rates learned from provider-reported costs
-/// (see [`record_observed_pricing`]). Explicit `price.*` fields win per
-/// field; observed fills the rest — so the learned rate from the user's
-/// actual endpoint prices models the hardcoded table doesn't know (or knows
-/// wrong, e.g. proxied billing), while a user-pinned field always wins.
-/// Each row contributes one field; if the field is 0 the next layer stands.
+/// Read Settings overrides once, in layer order (weakest → strongest):
+/// the live LiteLLM registry blob (`price.lite.db`, see pricing_live.rs),
+/// then the explicit `price.<key>.{input,cache_read,output}_per_mtok` user
+/// pins (each wins PER FIELD over the live rate), then the OBSERVED rates
+/// learned from provider-reported costs (see [`record_observed_pricing`])
+/// fill whatever both left unset — real provider billing outranks community
+/// list prices. The compiled table sits under all of them: zero fields fall
+/// back there inside `pricing::resolve_rate`. Each row contributes one
+/// field; if the field is 0 the next layer stands.
 pub fn read_rate_overrides(conn: &Connection) -> HashMap<String, ModelRate> {
-    let mut out = read_explicit_rate_overrides(conn);
+    let mut out = crate::pricing_live::live_overrides(conn);
+    // Explicit user pins beat the live registry per field; a field they
+    // leave at 0 keeps the live rate (or stays 0 for the observed/compiled
+    // layers below).
+    for (model, rate) in read_explicit_rate_overrides(conn) {
+        let entry = out.entry(model).or_insert(ModelRate {
+            input_per_mtok: 0.0,
+            cache_read_per_mtok: 0.0,
+            output_per_mtok: 0.0,
+        });
+        if rate.input_per_mtok > 0.0 {
+            entry.input_per_mtok = rate.input_per_mtok;
+        }
+        if rate.cache_read_per_mtok > 0.0 {
+            entry.cache_read_per_mtok = rate.cache_read_per_mtok;
+        }
+        if rate.output_per_mtok > 0.0 {
+            entry.output_per_mtok = rate.output_per_mtok;
+        }
+    }
     // Observed (learned) layer: `cost.observed.<model>.{total_cost_usd,total_tokens}`.
     // A single blended $/Mtok across all token kinds — the observation
     // bundles cache multipliers, so no per-kind split is attempted. Keys are
@@ -815,6 +836,78 @@ mod tests {
             (rate.output_per_mtok - 2.0).abs() < 1e-9,
             "unpinned field inherits observed: got {}",
             rate.output_per_mtok
+        );
+    }
+
+    #[test]
+    fn live_layer_sits_between_default_and_user_override() {
+        let conn = super::super::mem();
+        // The live LiteLLM blob exactly as the refresher stores it: sonnet
+        // $2.50 in / $12.00 out, no cache-read price published.
+        crate::db::set_setting(
+            &conn,
+            "price.lite.db",
+            r#"{"fetched_at":100,"models":{"claude-sonnet-4-5":{"input":2.5,"output":12.0,"cache_read":null}}}"#,
+        )
+        .unwrap();
+        let rates = read_rate_overrides(&conn);
+        let rate = rates.get("claude-sonnet-4-5").expect("live rate must surface");
+        assert!((rate.input_per_mtok - 2.5).abs() < 1e-9);
+        assert!((rate.output_per_mtok - 12.0).abs() < 1e-9);
+        assert_eq!(
+            rate.cache_read_per_mtok, 0.0,
+            "unset in the blob stays unset (0 = no explicit cache price)"
+        );
+
+        // A user pin beats the live layer PER FIELD: only output is pinned.
+        crate::db::set_setting(&conn, "price.claude-sonnet-4-5.output_per_mtok", "20.0")
+            .unwrap();
+        let rates = read_rate_overrides(&conn);
+        let rate = rates.get("claude-sonnet-4-5").unwrap();
+        assert!((rate.input_per_mtok - 2.5).abs() < 1e-9, "live input still stands");
+        assert!((rate.output_per_mtok - 20.0).abs() < 1e-9, "user pin wins");
+
+        // resolve_rate puts the compiled table UNDER the merged layer, so
+        // the unset cache_read keeps the existing semantics: compiled input
+        // × the family multiplier (a layered replacement, not a recompute
+        // from the live rate) — and the live input/output prices through.
+        let resolved =
+            crate::harness_adapters::pricing::resolve_rate("claude-sonnet-4-5", &rates).unwrap();
+        assert!((resolved.input_per_mtok - 2.5).abs() < 1e-9);
+        assert!((resolved.output_per_mtok - 20.0).abs() < 1e-9);
+        assert!(
+            (resolved.cache_read_per_mtok - 0.3).abs() < 1e-9,
+            "compiled $3 input × 0.1 fallback: got {}",
+            resolved.cache_read_per_mtok
+        );
+    }
+
+    #[test]
+    fn live_blob_change_changes_freshness_marker() {
+        // A refreshed blob must invalidate the rollup cache so aggregates
+        // re-price (the marker hashes the merged override map).
+        let conn = super::super::mem();
+        let before = rollup_freshness_marker(&conn).unwrap();
+        crate::db::set_setting(
+            &conn,
+            "price.lite.db",
+            r#"{"fetched_at":100,"models":{"claude-sonnet-4-5":{"input":2.5,"output":12.0,"cache_read":null}}}"#,
+        )
+        .unwrap();
+        let after = rollup_freshness_marker(&conn).unwrap();
+        assert_ne!(before, after, "a new live blob must re-price rollups");
+        // A materially different blob (rate changed, not just fetched_at)
+        // changes the marker again.
+        crate::db::set_setting(
+            &conn,
+            "price.lite.db",
+            r#"{"fetched_at":200,"models":{"claude-sonnet-4-5":{"input":2.75,"output":12.0,"cache_read":null}}}"#,
+        )
+        .unwrap();
+        assert_ne!(
+            after,
+            rollup_freshness_marker(&conn).unwrap(),
+            "a rate change in the blob must re-price rollups"
         );
     }
 

@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useUiStore } from "../../state/ui";
 import { useCostRollups } from "../../hooks/useCostRollups";
+import { getPriceInfo, pricesRefreshNow, toastError } from "../../lib/ipc";
 import { RangeToggle } from "./RangeToggle";
 import { CostHero } from "./CostHero";
 import { DailyChart } from "./DailyChart";
@@ -13,6 +14,28 @@ export function CostDashboard() {
   const closeOverlay = useUiStore(s => s.closeOverlay);
   const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
   const { rollups, loading, error, refresh } = useCostRollups(rangeDays);
+  // Live price table (LiteLLM): age of the stored blob + a manual re-fetch,
+  // so the user can see (and fix) stale rates without leaving the dashboard.
+  const [priceFetchedAt, setPriceFetchedAt] = useState<number | null>(null);
+  const [refreshingPrices, setRefreshingPrices] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void getPriceInfo()
+      .then(info => { if (!cancelled) setPriceFetchedAt(info.fetchedAt); })
+      .catch(() => { /* non-fatal — the footer just shows no age */ });
+    return () => { cancelled = true; };
+  }, []);
+  const refreshPrices = async () => {
+    setRefreshingPrices(true);
+    try {
+      const report = await pricesRefreshNow();
+      if (report) setPriceFetchedAt(report.fetchedAt);
+    } catch (err) {
+      toastError("Couldn't refresh model prices", err);
+    } finally {
+      setRefreshingPrices(false);
+    }
+  };
 
   return (
     <div className="view-overlay modal-centered"
@@ -55,6 +78,18 @@ export function CostDashboard() {
                 <CostQualityPanel q={rollups.costQuality} cacheSavingsUsd={rollups.costQuality.cacheSavingsUsd} />
               </div>
               <BudgetPanel perProject={rollups.perProject} />
+              {/* Footer: manual refresh of the live LiteLLM price table plus
+                  the age of the currently stored rates. */}
+              <div className="cost-footer">
+                <button className="ghost" onClick={refreshPrices} disabled={refreshingPrices}>
+                  {refreshingPrices ? "Refreshing…" : "↻ Refresh model prices"}
+                </button>
+                <span className="cost-footer-note">
+                  {priceFetchedAt
+                    ? `Live prices updated ${new Date(priceFetchedAt * 1000).toLocaleString()}`
+                    : "Live prices not fetched yet — using the built-in rate table"}
+                </span>
+              </div>
             </>
           ) : null}
         </div>

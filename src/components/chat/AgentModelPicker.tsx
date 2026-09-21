@@ -28,7 +28,6 @@ import { fuzzyFilter, type FuzzyResult } from "../../lib/fuzzy";
 import { shortModelName } from "../../lib/modelLabel";
 import { CLOUD_PROVIDER_IDS as PROVIDER_IDS } from "../../lib/agents";
 import { useSettingsStore } from "../../state/settings";
-import { harnessModelCatalog } from "../../lib/harnessModels";
 import {
   acpIdOf,
   dedupeIds,
@@ -214,8 +213,10 @@ export function AgentModelPickerInner({
   // Fetch one rail pane's model list into the cache, updating the live pane
   // state only when the user is still looking at that entry. Shared by the
   // pane effect, the open-time refresh, and the warm-up; the module-level
-  // in-flight guard keeps them from double-fetching the same pane.
-  const startPaneFetch = useCallback((key: string) => {
+  // in-flight guard keeps them from double-fetching the same pane. `force`
+  // bypasses the backend's 30s discovery TTL (the "↻ Refresh from CLI"
+  // affordance) and re-probes the CLI.
+  const startPaneFetch = useCallback((key: string, force = false) => {
     if (paneInFlight.has(key)) return;
     paneInFlight.add(key);
     const settle = (data: PaneData) => {
@@ -225,22 +226,31 @@ export function AgentModelPickerInner({
     };
     if (key.startsWith("harness:")) {
       const id = key.slice("harness:".length);
-      void listHarnessModels(id)
+      void listHarnessModels(id, force)
         .then((cfg: HarnessModelConfig | null) => {
-          // Config-discovered models first, then static-catalog entries the
-          // config didn't mention (same merge ChatView uses). Per-model
-          // thinking tiers ride along when the CLI reports them (omp).
-          const toRow = (m: { id: string; label: string; thinking?: string[] }) => ({
+          // Exactly what the CLI's own config + live listing reported. The
+          // per-model provenance (config/cli/builtin) and thinking tiers
+          // ride along when the CLI reports them (omp).
+          const toRow = (m: {
+            id: string;
+            label: string;
+            source?: string;
+            thinking?: string[];
+            costInputPerMtok?: number;
+            costOutputPerMtok?: number;
+          }) => ({
             id: m.id,
             label: m.label || m.id,
+            ...(m.source ? { source: m.source } : {}),
             ...(m.thinking?.length ? { thinking: m.thinking } : {}),
+            ...(m.costInputPerMtok != null
+              ? { costInPerMtok: m.costInputPerMtok, costOutPerMtok: m.costOutputPerMtok }
+              : {}),
           });
-          const fromCfg = cfg?.models ?? [];
-          const cfgIds = new Set(fromCfg.map((m) => m.id));
-          const extra = harnessModelCatalog(id).filter((m) => !cfgIds.has(m.id));
+          const rows = (cfg?.models ?? []).map(toRow);
           settle({
             status: "ready",
-            rows: [...fromCfg.map(toRow), ...extra.map(toRow)],
+            rows,
             endpoint: cfg?.endpoint ?? null,
             // Read-only effort level the CLI publishes in its own config
             // (Claude Code's settings env today; null = nothing published).
@@ -573,13 +583,11 @@ export function AgentModelPickerInner({
     if (query.trim().length === 0) {
       return paneRows.map((r) => ({ ...r, matches: [] as number[], score: 0 }));
     }
-    return fuzzyFilter(query, paneRows, (r) => r.label).map((h) => ({
-      id: h.item.id,
-      label: h.item.label,
-      note: h.item.note,
-      matches: h.matches,
-      score: h.score,
-    }));
+  return fuzzyFilter(query, paneRows, (r) => r.label).map((h) => ({
+    ...h.item,
+    matches: h.matches,
+    score: h.score,
+  }));
   }, [paneRows, query, isAcpPane]);
 
   useEffect(() => {
@@ -912,6 +920,20 @@ export function AgentModelPickerInner({
                       >
                         Retry discovery
                       </button>
+                      {/* The mockup's "↻ Refresh list from CLI": force a live
+                          re-probe, bypassing the backend's 30s discovery TTL
+                          (a fresh install/login lands without waiting it out). */}
+                      <button
+                        type="button"
+                        className="model-effort-retry"
+                        onClick={() => {
+                          paneCache.delete(railKey);
+                          bumpFetch();
+                          startPaneFetch(railKey, true);
+                        }}
+                      >
+                        ↻ Refresh from CLI
+                      </button>
                     </>
                   ) : (
                     "No models — set base URL & key in Settings → API Keys"
@@ -953,6 +975,22 @@ export function AgentModelPickerInner({
                               {" "}
                               [{r.note}]
                             </span>
+                          )}
+                          {/* Per-model list prices when the CLI publishes
+                              them (omp's models dump, $/Mtok). */}
+                          {r.costInPerMtok != null && (
+                            <span className="model-note-badge">
+                              {" "}${r.costInPerMtok} in / $
+                              {r.costOutPerMtok ?? "?"} out per Mtok
+                            </span>
+                          )}
+                          {/* Provenance: where this row came from. "cli" is
+                              the default for every harness rail row — the
+                              badge would just repeat the rail — so only the
+                              deviations (config file, built-in default) get
+                              marked. */}
+                          {r.source && r.source !== "cli" && (
+                            <span className="model-source-badge">{r.source}</span>
                           )}
                         </span>
                         <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>

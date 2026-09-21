@@ -621,10 +621,17 @@ export const reconcileAgentSessions = () =>
 export interface HarnessModelInfo {
   id: string;
   label: string;
-  source: "config" | "builtin";
+  /** Where the row came from: "config" = discovered in the CLI's own config
+   *  file, "cli" = listed live by the CLI itself (`opencode models`, omp's
+   *  `models --json` dump), "builtin" = the CLI's built-in default. */
+  source: "config" | "cli" | "builtin";
   /** Thinking tiers THIS model supports (omp's models dump), ordered weakest
    *  → strongest. Absent when the CLI reports no per-model tiers. */
   thinking?: string[];
+  /** Per-model list prices in $/Mtok when the CLI publishes them (omp's
+   *  per-model `cost` object). Absent = no rates published. */
+  costInputPerMtok?: number;
+  costOutputPerMtok?: number;
 }
 export interface HarnessModelConfig {
   defaultModel: string | null;
@@ -639,5 +646,7 @@ export interface HarnessModelConfig {
   effortOptions: string[];
   models: HarnessModelInfo[];
 }
-export const listHarnessModels = (harnessId: string) =>
-  safeInvoke<HarnessModelConfig | null>("list_harness_models", { harnessId });
+/** `force` bypasses the backend's 30s discovery TTL and re-probes the CLI
+ *  (the picker's "↻ Refresh from CLI" affordance). */
+export const listHarnessModels = (harnessId: string, force = false) =>
+  safeInvoke<HarnessModelConfig | null>("list_harness_models", { harnessId, force });

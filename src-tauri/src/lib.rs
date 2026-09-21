@@ -104,6 +104,8 @@ mod acp;
 mod acp_agents;
 mod automation_task;
 pub mod automations;
+pub mod automation_triggers;
+pub mod automation_webhook;
 pub mod artifacts;
 mod chat;
 mod commands;
@@ -124,9 +126,13 @@ mod installed_skills;
 pub mod memory;
 mod mcp_gallery;
 mod mcp_tools_bridge;
+// The browser-mcp bin's static-fallback parity test pins its tools/list copy
+// against this allowlist (test-build only — the shipped bin stays lib-free).
+pub use mcp_tools_bridge::ALLOWED_RELAY_TOOLS;
 mod mobile;
 // OS toasts under the app's own identity (Windows) — see the module doc.
 mod os_toast;
+mod pricing_live;
 mod pty;
 mod secrets;
 mod session_fabric;
@@ -378,6 +384,11 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     git_watcher::install_all_known(&app_handle, &db_state);
+                    // Automation file triggers (automation_triggers.rs): one
+                    // notify watcher per distinct trigger_config.path of every
+                    // enabled `file` automation. Same deferred slot as the git
+                    // watcher — same reasons.
+                    automation_triggers::sync_fs_watchers(&app_handle, &db_state.0);
                 });
             }
             // STT auto-start (Settings → Knowledge opt-in): same deferred
@@ -432,8 +443,26 @@ pub fn run() {
             }
 
             // Automations scheduler: 30s tick, fires due cron schedules as
-            // headless one-shot agent turns (see automations.rs).
+            // headless one-shot agent turns (see automations.rs). The tick
+            // also evaluates git triggers (automation_triggers.rs).
             automations::start(app.handle().clone(), Arc::clone(&shared_db));
+
+            // Inbound webhook trigger listener (automation_webhook.rs):
+            // loopback HTTP on an ephemeral port; GET/POST
+            // /trigger/<id>/<secret> fires the automation (app-open only).
+            // Bind failure is non-fatal — webhook triggers just don't answer.
+            {
+                let app_handle = app.handle().clone();
+                let db = Arc::clone(&shared_db);
+                // Tracked for the exit handler (same pattern as mi20):
+                // aborting the task closes the accept loop + its listener.
+                let handle = tauri::async_runtime::spawn(async move {
+                    automation_webhook::serve(app_handle, db).await;
+                });
+                app.manage(automation_webhook::WebhookServerHandle(Mutex::new(
+                    Some(handle),
+                )));
+            }
 
             // Budget alert timer (commands/budget.rs): the frontend re-checks
             // after cost events, but a backend cadence keeps threshold alerts
@@ -451,6 +480,40 @@ pub fn run() {
                         )
                         .await;
                         tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+                    }
+                });
+            }
+
+            // Live model pricing (pricing_live.rs): auto-fetch the LiteLLM
+            // community registry ~60s after boot, then daily, so the rate
+            // table tracks new model releases without a settings visit.
+            // Failure keeps the previous blob and only logs — stale rates
+            // beat no rates (see refresh_prices).
+            {
+                let db_state = DbState(Arc::clone(&shared_db));
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    loop {
+                        let client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(30))
+                            .user_agent("relay-desktop")
+                            .build();
+                        match client {
+                            Ok(client) => {
+                                if let Err(e) = crate::pricing_live::refresh_prices(
+                                    client,
+                                    Arc::clone(&db_state.0),
+                                )
+                                .await
+                                {
+                                    eprintln!("[relay] live price refresh failed: {e}");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[relay] live price http client unavailable: {e}")
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
                     }
                 });
             }
@@ -596,6 +659,7 @@ pub fn run() {
             commands::automation_cmds::list_automation_runs,
             commands::automation_cmds::count_automation_runs,
             commands::automation_cmds::automation_next_fire,
+            commands::automation_cmds::automation_webhook_info,
             // artifact generation (conversational creation)
             commands::artifact_cmds::generate_artifact_cmd,
             commands::artifact_cmds::validate_artifact_cmd,
@@ -624,6 +688,7 @@ pub fn run() {
             commands::data::list_secret_keys,
             commands::data::get_cost_events,
             commands::data::get_cost_rollups,
+            commands::pricing_cmds::prices_refresh_now,
             commands::data::export_session_markdown,
             commands::data::read_file_text,
             // workspaces (pane layout save/restore)
@@ -757,6 +822,7 @@ pub fn run() {
             commands::local_model_market::delete_downloaded_model,
             commands::local_model_market::download_mmproj,
             docs_index::docs_embedding_status,
+            docs_index::docs_start_reranker,
             docs_index::docs_add_corpus,
             docs_index::docs_remove_corpus,
             docs_index::docs_list_corpora,
@@ -1000,6 +1066,13 @@ pub fn run() {
             mcp_gallery::kill_all(handle);
             // Abort the browser MCP server task (mi20).
             if let Some(state) = handle.try_state::<BrowserMcpHandle>() {
+                if let Some(h) = state.0.lock().take() {
+                    h.abort();
+                }
+            }
+            // Abort the automation webhook trigger listener too — same
+            // orphaned-accept-loop concern as the browser MCP server.
+            if let Some(state) = handle.try_state::<automation_webhook::WebhookServerHandle>() {
                 if let Some(h) = state.0.lock().take() {
                     h.abort();
                 }

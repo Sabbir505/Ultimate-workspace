@@ -429,7 +429,14 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         // execute_relay_tool already route these to
         // session_fabric::execute_mesh_tool.
         | "list_sessions" | "read_session" | "search_sessions"
-        | "message_session" | "spawn_session" => Ok(format!("relay_tools:{tool}")),
+        | "message_session" | "spawn_session"
+        // Vault CRUD — advertised by the app (get_capabilities' relay_tools
+        // list AND the live tools/list) and dispatched app-side via
+        // execute_vault_tool. Mapped here (not left to route_tool_op's
+        // forward-unknown fallback) so the static copy's schemas and the op
+        // mapping can never disagree.
+        | "vault_list" | "vault_read" | "vault_search"
+        | "vault_write" | "vault_move" | "vault_delete" => Ok(format!("relay_tools:{tool}")),
         _ => Err("unknown tool"),
     }
 }
@@ -1034,7 +1041,7 @@ fn static_relay_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "search_docs",
-            "description": "Search the user's locally-indexed document folders (Settings → Knowledge). Use when the user asks about their own files, notes, or docs. Returns ranked hits with path, score, and text excerpt. Images return a path citation only. Self-reports unavailable when the embedding sidecar isn't running.",
+            "description": "Search the user's locally-indexed document folders (Settings → Knowledge). Use when the user asks about their own files, notes, or docs. Hybrid retrieval: semantic embedding matches fused with keyword (FTS) matching — with the embedding sidecar off it falls back to keyword-only instead of failing. Returns ranked hits with path, heading, score, and text excerpt. Images return a path citation only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1195,6 +1202,89 @@ fn static_relay_schemas() -> Vec<Value> {
                 "required": ["task"]
             }
         }),
+        // ---- Vault CRUD ----
+        // The app advertises these six on EVERY surface (get_capabilities'
+        // relay_tools list, the live tools/list, the harness instructions'
+        // "## Vault" section) and dispatches them app-side via
+        // execute_vault_tool. The static fallback tools/list must carry them
+        // too: when this copy is served (app unreachable / envelope mismatch
+        // / older app) a missing entry makes the harness client answer
+        // "no such tool" to a tool the report just claimed. Names are pinned
+        // against the app allowlist by
+        // `static_relay_schemas_cover_every_allowlisted_bridge_tool`;
+        // descriptions mirror the registry (chat/tools/mod.rs).
+        json!({
+            "name": "vault_list",
+            "description": "List the notes in the user's bound vault (optionally one folder). Read-only; vault_read for content, vault_search to find by text/tag.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "folder": { "type": "string", "description": "Optional vault-relative folder to scope the listing (e.g. \"Projects\"). Omit for the whole vault." }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "vault_read",
+            "description": "Read one vault note's full markdown text by vault-relative path (from vault_list/vault_search). Raw source: YAML frontmatter, [[wikilinks]], ^block-ids.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Vault-relative note path with extension, e.g. \"Projects/Ideas.md\"." }
+                },
+                "required": ["path"]
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "vault_search",
+            "description": "Full-text search over the user's OWN vault notes. Ranked hits with path + snippet. Operators: tag:work, path:Projects, file:2026, \"quoted phrase\", -exclude. An empty result means genuinely nothing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search text. Operators: tag:work, path:Projects, file:2026, \"quoted phrase\", -exclude." },
+                    "limit": { "type": "integer", "description": "Max hits (default 20, max 50)." }
+                },
+                "required": ["query"]
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "vault_write",
+            "description": "Create or overwrite one vault note: {path (vault-relative, ends in .md), content}. Overwrite is wholesale — vault_read first. Link notes with [[WikiLinks]]; metadata in YAML frontmatter (tags:, aliases:).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Vault-relative note path ending in .md (folders are created as needed). Overwrites when the note exists." },
+                    "content": { "type": "string", "description": "The complete markdown content of the note (overwrite is wholesale). Optional YAML frontmatter first." }
+                },
+                "required": ["path", "content"]
+            }
+        }),
+        json!({
+            "name": "vault_move",
+            "description": "Rename/move a vault note: {from, to}. EVERY inbound link is rewritten vault-wide — prefer this over delete+recreate when reorganizing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "Current vault-relative .md path." },
+                    "to": { "type": "string", "description": "New vault-relative .md path. Inbound links are rewritten vault-wide." }
+                },
+                "required": ["from", "to"]
+            }
+        }),
+        json!({
+            "name": "vault_delete",
+            "description": "Delete a vault note by path (moves to the vault's .trash/, recoverable); inbound links become unresolved. Ask before deleting notes you didn't create this turn.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Vault-relative .md path of the note to delete (moves to .trash)." }
+                },
+                "required": ["path"]
+            },
+            "annotations": { "destructiveHint": true }
+        }),
     ]
 }
 
@@ -1217,6 +1307,10 @@ mod tests {
                      "delete_automation", "run_automation_now",
                      "list_sessions", "read_session", "search_sessions",
                      "message_session", "spawn_session",
+                     // Vault CRUD: advertised app-side on every surface, so the
+                     // static copy must serve them too (see the parity test below).
+                     "vault_list", "vault_read", "vault_search",
+                     "vault_write", "vault_move", "vault_delete",
                      "history", "hover", "evaluate", "click_and_wait", "screenshot"] {
             assert!(names.contains(&tool), "missing tool schema: {tool}");
         }
@@ -1229,6 +1323,32 @@ mod tests {
         // Read-only tools carry the annotation so MCP clients can auto-approve.
         let screenshot = schemas.iter().find(|t| t["name"] == "screenshot").unwrap();
         assert_eq!(screenshot["annotations"]["readOnlyHint"], true);
+    }
+
+    /// THE fallback contract: the static copy is what harnesses see whenever
+    /// the live fetch fails (app unreachable, round-trip timeout, envelope
+    /// mismatch, older app), while `get_capabilities` on the app still
+    /// advertises the full allowlist. A name missing here means the harness
+    /// client answers "no such tool" to a tool the report just claimed —
+    /// the exact advertise/call divergence this file's fallback comments
+    /// warn about. Pinned against the APP's allowlist constant via the rlib
+    /// (test-build only — the shipped binary stays lib-free), so a new entry
+    /// in `ALLOWED_RELAY_TOOLS` fails here until the static copy gains it.
+    #[test]
+    fn static_relay_schemas_cover_every_allowlisted_bridge_tool() {
+        let schemas = static_relay_schemas();
+        let static_names: Vec<&str> = schemas
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for name in relay_lib::ALLOWED_RELAY_TOOLS {
+            assert!(
+                static_names.contains(&name),
+                "static fallback tools/list is missing `{name}` — the app advertises it \
+                 via get_capabilities' relay_tools list, so this copy must serve it too \
+                 (otherwise harnesses get \"no such tool\" whenever the fallback is served)"
+            );
+        }
     }
 
     #[test]

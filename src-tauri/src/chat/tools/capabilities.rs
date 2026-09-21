@@ -104,7 +104,14 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
             "local_docs_search": caps.local_docs,
             "connect_on_demand": !caps.attachable_connectors.is_empty()
                 || !caps.attachable_mcp.is_empty(),
-            "filesystem_tools": true,
+            // Match the schema: the mutating half is stripped under a
+            // read-only posture, so a plain `true` would promise writes the
+            // model cannot call.
+            "filesystem_tools": if caps.allows_mutating {
+                "read + write (list/read/search/search_content + write/edit/delete/move/copy)"
+            } else {
+                "read-only (list/read/search/search_content; the write tools are stripped in this read-only posture)"
+            },
             // Interaction tools (click/type/scroll/screenshot/observe/extract)
             // need a live page or prior browser use this session; browser_read
             // and open_url are always available.
@@ -117,7 +124,19 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
             } else {
                 "bound folder of markdown notes; vault_list/read/search only (write tools are stripped in this read-only posture)"
             },
-            "automations": true,
+            // Match the schema: list/get are always on, but the CRUD/run half
+            // is stripped under a read-only posture like every mutating tool.
+            "automations": if caps.allows_mutating {
+                "list_automations/get_automation + create/update/delete/run_automation_now (full CRUD)"
+            } else {
+                "list_automations/get_automation only (the write tools are stripped in this read-only posture)"
+            },
+            // Unconditionally callable — there is NO availability gate: the
+            // tool ships in every schema (specs.rs) and every call reaches the
+            // engine (an unconfigured engine degrades to a "set it up in
+            // Settings" error, not a missing tool). The report must claim it
+            // exactly as unconditionally as the schema advertises it.
+            "image_generation": "generate_image — local diffusion (no cloud); always available as a tool (a missing engine/model returns setup guidance instead of a failure)",
             "subagents": true,
             "skills": "listed under '## Available skills' in the system prompt; get_skill(slug) loads one",
         },
@@ -262,6 +281,73 @@ mod tests {
         // Lifecycle contract present (get_capabilities is also how the model
         // learns the terminal rules).
         assert!(v["terminal"]["foreground"]["ceiling_seconds"].is_u64());
+    }
+
+    /// Report/schema parity for the unconditional tools: generate_image ships
+    /// in EVERY schema (openai + anthropic, all caps/postures) and every call
+    /// dispatches (an unconfigured engine returns setup guidance, not a
+    /// missing tool) — so the report must claim it, unconditionally, on the
+    /// same surface. (It used to be absent entirely while the built-in CORE
+    /// prompt said "never claim image generation is impossible".)
+    #[test]
+    fn report_claims_image_generation_like_the_schema_does() {
+        let v: Value = serde_json::from_str(&capabilities_report(&ToolCaps::default())).unwrap();
+        let img = v["built_in"]["image_generation"]
+            .as_str()
+            .expect("image_generation must be listed");
+        assert!(img.contains("generate_image"));
+        // And the schema side of the parity really is unconditional: both
+        // wire formats advertise it with default caps. The name's envelope
+        // path differs — OpenAI nests it under "function", Anthropic puts it
+        // top-level — so probe both (a miss on either format means the
+        // report overclaims on that wire).
+        for specs in [
+            crate::chat::tools::openai_tool_specs(
+                &ToolCaps::default(),
+                crate::chat::permission::SandboxPolicy::ReadOnly,
+            ),
+            crate::chat::tools::anthropic_tool_specs(
+                &ToolCaps::default(),
+                crate::chat::permission::SandboxPolicy::ReadOnly,
+            ),
+        ] {
+            assert!(
+                specs.iter().any(|s| {
+                    s["name"] == crate::chat::tools::GENERATE_IMAGE
+                        || s["function"]["name"] == crate::chat::tools::GENERATE_IMAGE
+                }),
+                "generate_image left the schema — the report now overclaims"
+            );
+        }
+    }
+
+    /// Report/schema parity for the posture-gated families: under a read-only
+    /// posture the write half of fs/vault/automations is STRIPPED from the
+    /// schema, so the report must not claim full CRUD there (a plain
+    /// `automations: true` made the model call create_automation the schema
+    /// no longer carried). The strings must name the write half only when it
+    /// is actually callable.
+    #[test]
+    fn report_matches_posture_for_gated_families() {
+        let full = ToolCaps::default(); // allows_mutating: true
+        let mut read_only = ToolCaps::default();
+        read_only.allows_mutating = false;
+
+        let full: Value =
+            serde_json::from_str(&capabilities_report(&full)).unwrap();
+        let ro: Value =
+            serde_json::from_str(&capabilities_report(&read_only)).unwrap();
+
+        assert!(full["built_in"]["automations"].as_str().unwrap().contains("create"));
+        assert!(!ro["built_in"]["automations"].as_str().unwrap().contains("create"));
+        assert!(ro["built_in"]["automations"].as_str().unwrap().contains("list_automations"));
+
+        assert!(full["built_in"]["filesystem_tools"].as_str().unwrap().contains("read + write"));
+        assert!(!ro["built_in"]["filesystem_tools"].as_str().unwrap().contains("read + write"));
+        assert!(ro["built_in"]["filesystem_tools"].as_str().unwrap().contains("read-only"));
+
+        assert!(full["built_in"]["vault"].as_str().unwrap().contains("vault_write"));
+        assert!(!ro["built_in"]["vault"].as_str().unwrap().contains("vault_write"));
     }
 
     #[test]

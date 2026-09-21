@@ -78,8 +78,8 @@ pub const ALLOWED_RELAY_TOOLS: [&str; 28] = [
 /// `tools/call` (Workspace MCP Developer Preview gate).
 pub fn relay_tool_schemas<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Value> {
     // local_docs: `search_docs` is capability-gated in the registry but is
-    // bridged unconditionally (it self-guards at runtime when the embedding
-    // sidecar is down).
+    // bridged unconditionally (hybrid search degrades to keyword-only at
+    // runtime when the embedding sidecar is down).
     let caps = ToolCaps {
         local_docs: true,
         ..ToolCaps::default()
@@ -176,12 +176,9 @@ pub async fn execute_relay_tool(
                 "artifact": Value::Null
             }));
         }
-        crate::hooks::PreVerdict::Ask { reason } => {
+        crate::hooks::PreVerdict::Ask { .. } => {
             return Ok(json!({
-                "text": format!(
-                    "Error: `{tool_name}` needs manual approval per a user hook ({reason}), which \
-                     is not available on this path. The main chat can run it interactively."
-                ),
+                "text": crate::hooks::refuse_ask(tool_name),
                 "artifact": Value::Null
             }));
         }
@@ -355,13 +352,15 @@ fn generate_image_background(app: &tauri::AppHandle, args: &Value) -> Value {
     // In-flight dedupe: harness MCP clients retry on their own timeouts, and
     // each retry used to spawn a SECOND full render for the same prompt.
     // Same prompt within the dedupe window → return the existing render's
-    // path instead of starting another one.
+    // path instead of starting another one. (L4: parking_lot — the lock is
+    // never held across an await and poisoning would only mean stale dedupe
+    // state, so the infallible lock replaces the unwrap/Ok-tolerant mix.)
     static INFLIGHT: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>,
-    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+        parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>,
+    > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
     let dedupe_key = format!("{}|{}x{}", prompt.trim().to_lowercase(), width, height);
     {
-        let mut map = INFLIGHT.lock().unwrap();
+        let mut map = INFLIGHT.lock();
         map.retain(|_, (t, _)| t.elapsed() < std::time::Duration::from_secs(600));
         if let Some((_, existing)) = map.get(&dedupe_key) {
             return json!({
@@ -395,9 +394,7 @@ fn generate_image_background(app: &tauri::AppHandle, args: &Value) -> Value {
         // finished (or failed) render blocked same-prompt retries for the
         // whole window while pointing at a path that already exists (or will
         // never appear).
-        if let Ok(mut map) = INFLIGHT.lock() {
-            map.remove(&dedupe_key);
-        }
+        INFLIGHT.lock().remove(&dedupe_key);
         match result {
             Ok(img) => {
                 // Register in the Artifacts gallery (global listing — harness
@@ -735,6 +732,57 @@ mod tests {
             assert!(
                 names.contains(&name),
                 "bridged tool `{name}` has no registry spec — fix the allowlist entry or add the spec"
+            );
+        }
+    }
+
+    /// THE call-side parity contract: every tool the bridge ADVERTISES
+    /// (tools/list via `relay_tool_schemas`, and get_capabilities'
+    /// `relay_tools` list) must also DISPATCH. The bridge's split router has
+    /// exactly two paths — an interception family (get_capabilities /
+    /// automations / mesh / vault / generate_image / connector fallbacks) or
+    /// the shared `execute_tool` — so the second half is probed behaviorally:
+    /// a registry tool with no `execute_tool` arm comes back as
+    /// "Error: unknown tool …", which is precisely the "advertised but the
+    /// call gets no such tool" breach this module exists to prevent
+    /// (`search_docs` was the regression: in every advertised list, yet
+    /// rejected at dispatch because only the built-in chat's dispatcher had
+    /// the arm).
+    #[test]
+    fn every_advertised_bridge_tool_dispatches() {
+        // Names the bridge routes through an interception family BEFORE the
+        // shared dispatcher — checked via their pure predicates.
+        let intercepted = |name: &str| {
+            name == tools::GET_CAPABILITIES
+                || name == tools::GENERATE_IMAGE
+                || tools::is_automation_tool(name)
+                || tools::is_mesh_tool(name)
+                || tools::is_vault_tool(name)
+                || crate::connectors::fallback_tool_owner(name).is_some()
+        };
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir().join("relay-bridge-dispatch-parity");
+        for name in ALLOWED_RELAY_TOOLS {
+            if intercepted(name) {
+                continue;
+            }
+            // Empty args + no app: every handler must degrade to a clear
+            // argument/runtime error — NEVER the unknown-tool catch-all.
+            let outcome = tauri::async_runtime::block_on(tools::execute_tool(
+                &client,
+                &dir,
+                &ToolCaps::default(),
+                name,
+                &serde_json::json!({}),
+                None,
+                None,
+            ));
+            assert!(
+                !outcome.text.contains("unknown tool"),
+                "bridge-advertised tool `{name}` has no dispatch path — tools/list and \
+                 get_capabilities offer it, but execute_tool answers {:?}. Add the arm \
+                 (or route it through an interception family).",
+                outcome.text
             );
         }
     }

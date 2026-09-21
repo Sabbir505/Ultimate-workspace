@@ -165,8 +165,8 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         ]);
     }
     // Persistent memory (MEMORY_DESIGN_ARCHITECTURE.md §12.1) — gated by the
-    // Settings toggle the way search_docs is gated by its sidecar; dispatch
-    // still returns a clear error as a backstop.
+    // Settings toggle the way search_docs is gated by corpus availability;
+    // dispatch still returns a clear error as a backstop.
     if caps.memory {
         specs.extend(vec![
             openai_fn(MEMORY_SAVE, MEMORY_SAVE_DESC, memory_save_parameters()),
@@ -185,8 +185,9 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
     // TOTP 2FA codes — read-only (the seed stays in the keychain / password
     // manager; only the code is returned), always registered.
     specs.push(openai_fn(TOTP_CODE, TOTP_CODE_DESC, totp_code_parameters()));
-    // Local-docs search — only exposed when the embedding sidecar is up and at
-    // least one corpus is indexed (computed per turn into ToolCaps.local_docs).
+    // Local-docs search — exposed when at least one corpus is indexed
+    // (computed per turn into ToolCaps.local_docs); hybrid search answers
+    // keyword-only with the embedding sidecar down, so it doesn't gate here.
     if caps.local_docs {
         specs.push(openai_fn(
             SEARCH_DOCS,
@@ -1380,11 +1381,11 @@ const GET_AUTOMATION_DESC: &str = "Read one automation in full by id (from \
     enabled, status. update_automation overwrites whole fields — read this \
     verbatim text before editing.";
 
-const CREATE_AUTOMATION_DESC: &str = "Create a scheduled automation: `prompt` runs \
-    unattended on a 5-field local-time cron `schedule` via the chosen agent. \
-    Use when the user asks to schedule/repeat/automate a task — never claim \
-    scheduling is impossible; confirm an ambiguous schedule first. Runs have \
-    no conversation memory.";
+const CREATE_AUTOMATION_DESC: &str = "Create an automation: `prompt` runs \
+    unattended via the chosen agent — default trigger is a 5-field local-time \
+    cron `schedule`; set trigger_type+trigger for webhook / file-change / \
+    git-commit / new-email firing instead. Confirm an ambiguous schedule \
+    first. Runs have no conversation memory.";
 
 const UPDATE_AUTOMATION_DESC: &str = "Update an automation by id (from \
     list_automations). Only passed fields change; `enabled` toggles it.";
@@ -1575,7 +1576,8 @@ fn create_automation_parameters() -> Value {
             "schedule": {
                 "type": "string",
                 "description": "5-field cron in LOCAL time, minute-first \
-                    (\"0 9 * * 1-5\" = 09:00 weekdays).",
+                    (\"0 9 * * 1-5\" = 09:00 weekdays). Leave empty for \
+                    webhook/file/git/gmail triggers.",
             },
             "agent": {
                 "type": "string",
@@ -1586,8 +1588,22 @@ fn create_automation_parameters() -> Value {
                 "type": "boolean",
                 "description": "Active. Default true.",
             },
+            "trigger_type": {
+                "type": "string",
+                "enum": ["cron", "webhook", "file", "git", "gmail"],
+                "description": "Firing engine. Default cron. webhook = \
+                    authenticated HTTP call (URL in reply); file = watched \
+                    folder changes; git = repo HEAD changes; gmail = new \
+                    email in the connected Gmail account.",
+            },
+            "trigger": {
+                "type": "object",
+                "description": "Config per type. webhook: {}. file: {path, \
+                    minIntervalSecs? (default 60)}. git: {cwd, branch? \
+                    (default HEAD)}. gmail: {label? (default inbox)}.",
+            },
         },
-        "required": ["name", "prompt", "schedule"],
+        "required": ["name", "prompt"],
     })
 }
 
@@ -1603,7 +1619,8 @@ fn update_automation_parameters() -> Value {
             "prompt": { "type": "string", "description": "New prompt (optional)." },
             "schedule": {
                 "type": "string",
-                "description": "New 5-field local-time cron (optional).",
+                "description": "New 5-field local-time cron (optional; empty \
+                    is valid for webhook/file/git/gmail triggers).",
             },
             "agent": {
                 "type": "string",
@@ -1621,6 +1638,17 @@ fn update_automation_parameters() -> Value {
             "enabled": {
                 "type": "boolean",
                 "description": "Turn on/off (optional).",
+            },
+            "trigger_type": {
+                "type": "string",
+                "enum": ["cron", "webhook", "file", "git", "gmail"],
+                "description": "Switch the firing engine (optional); omit \
+                    trigger_type+trigger to keep the stored engine.",
+            },
+            "trigger": {
+                "type": "object",
+                "description": "New trigger config (create_automation's \
+                    trigger shape).",
             },
         },
         "required": ["automation_id"],
@@ -2078,9 +2106,14 @@ mod tests {
         // expressible (and preserved) via the schema.
         // 48_000 stays: get_automation (~0.5k) fit inside the existing
         // headroom after trimming its description to schema-carrying essentials.
+        // Bumped 48_000→49_000 for automation trigger engines beyond cron
+        // (create/update automation, ~0.9k): trigger_type + trigger config
+        // params (webhook / file-watch / git) — without them the model can
+        // only schedule cron rows and must claim the other triggers are
+        // impossible.
         assert!(
-            total < 48_000,
-            "default tool specs total {total} chars (budget 48_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            total < 49_000,
+            "default tool specs total {total} chars (budget 49_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
         let all_on_caps = ToolCaps {
             browser: true,
@@ -2100,9 +2133,12 @@ mod tests {
         // Bumped 50_500→51_000 for `get_automation` (~0.5k): the full-prompt
         // read path (list_automations truncates to a one-liner) — an edit
         // turn must start from verbatim text, not a reconstruction.
+        // Bumped 51_000→52_000 for automation trigger engines beyond cron
+        // (create/update automation trigger_type+trigger params, ~0.9k) —
+        // both specs ride the all-on surface too.
         assert!(
-            all_on < 51_000,
-            "all-on tool specs total {all_on} chars (budget 51_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 52_000,
+            "all-on tool specs total {all_on} chars (budget 52_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 
@@ -2249,7 +2285,7 @@ mod tests {
         // idle session shouldn't pay ~2.9k chars for tools there's nothing to
         // click on), while browser_read stays always-on as the entry point.
         // The memory tools ride caps.memory (default on; the Settings toggle
-        // strips them like search_docs' sidecar gate does).
+        // strips them like search_docs' corpus-availability gate does).
         let default_caps = ToolCaps::default();
         let mut no_memory = ToolCaps::default();
         no_memory.memory = false;

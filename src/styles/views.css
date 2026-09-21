@@ -488,6 +488,13 @@
   font-size: 12px;
   color: var(--text-dim);
 }
+/* Cache-savings headline under the raw-cost number — same accent the
+   cost-quality panel's savings value uses, so "saved" reads as money back. */
+.cost-hero-savings {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--accent);
+}
 .cost-hero-breakdown {
   display: flex;
   flex-direction: column;
@@ -807,6 +814,19 @@
   font-size: 15px;
   font-weight: 600;
   color: var(--accent);
+}
+
+/* Dashboard footer: manual refresh of the live LiteLLM price table + the
+   age of the currently stored rates. */
+.cost-footer {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 2px 2px 0;
+}
+.cost-footer-note {
+  font-size: 11.5px;
+  color: var(--text-dim);
 }
 
 .cost-error {

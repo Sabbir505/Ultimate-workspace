@@ -397,9 +397,10 @@ pub struct ToolCaps {
     /// and `ToolCaps` must remain cheaply cloneable.
     #[allow(dead_code)]
     pub attached_connectors: std::sync::Arc<Vec<crate::connectors::AttachedConnector>>,
-    /// Whether the local-docs `search_docs` tool is exposed this turn. True only
-    /// when the embedding sidecar is running AND at least one enabled corpus
-    /// has indexed chunks. Computed per turn in chat/mod.rs from DB + registry.
+    /// Whether the local-docs `search_docs` tool is exposed this turn. True
+    /// when at least one enabled corpus has indexed chunks — hybrid search
+    /// answers keyword-only with the embedding sidecar down, so the sidecar
+    /// no longer gates the tool. Computed per turn in chat/mod.rs from DB.
     pub local_docs: bool,
     /// MCP-gallery servers attached to this turn (§3.2.14): every ENABLED
     /// installed server's tools, under prefixed wire names (`mcp_<server>_
@@ -509,11 +510,11 @@ const WEB_SEARCH_DESC: &str = "Search the public web for up-to-date information 
 /// Description fed to the model for the local-docs `search_docs` tool. Kept
 /// distinct from `web_search` so the model doesn't conflate the two.
 const SEARCH_DOCS_DESC: &str = "Search the user's locally-indexed document folders \
-    (Settings → Knowledge corpora) — for answers drawn from THEIR OWN files, notes, \
-    or docs rather than the public web ('what did I write about X', 'find my notes \
-    on Y'). Returns ranked hits with file path, type tag, score and the matching \
-    excerpt; image hits return the path only. If nothing matches, say so rather \
-    than inventing content.";
+    (Settings → Knowledge) — answers from THEIR OWN files, notes, or docs rather \
+    than the public web. Hybrid semantic+keyword matching; keyword-only when the \
+    embedding sidecar is off. Hits: path, heading, type, score, excerpt; image \
+    hits return the path only. If nothing matches, say so rather than inventing \
+    content.";
 
 const MEMORY_SAVE_DESC: &str = "Save a durable fact about the user to persistent \
 memory so future conversations remember it. ONLY stable, reusable facts: \
@@ -1018,6 +1019,22 @@ pub async fn execute_tool(
                 "Error: generate_image needs the app runtime, which is unavailable here.",
             ),
         },
+        // Local-docs search. THE PARITY ARM: the relay-tools bridge advertises
+        // `search_docs` in its tools/list (`ALLOWED_RELAY_TOOLS`) and routes
+        // calls through THIS dispatcher — without this arm every bridge call
+        // died on the unknown-tool catch-all below while tools/list and
+        // get_capabilities both claimed the tool ("no such tool" contract
+        // breach). The built-in chat never reaches this arm (dispatch.rs
+        // intercepts SEARCH_DOCS earlier with the same handler); headless and
+        // bridge callers land here, with the AppHandle the signature carries.
+        SEARCH_DOCS => match app {
+            Some(app) => {
+                ToolOutcome::text(crate::chat::dispatch::run_search_docs_tool(app, name, args).await)
+            }
+            None => ToolOutcome::text(
+                "Error: search_docs needs the app runtime, which is unavailable here.",
+            ),
+        },
         FETCH_URL => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
             match fetch_url(client, url).await {
@@ -1242,14 +1259,16 @@ pub async fn execute_tool(
         // is enforced by the caller BEFORE reaching here — these branches only
         // run for actions that have been authorized (auto-run, or approved by
         // the user). `read_only` mode additionally strips the mutating tools
-        // from the schema so the model can't even call them.
-        LIST_DIRECTORY => fs_list_directory(args),
+        // from the schema so the model can't even call them. EVERY arm routes
+        // through the blocking pool: directory listings/writes/deletes stall
+        // the async runtime the same way the read side did, and none of the
+        // fs_* helpers take locks, so the routing changes no locking semantics.
+        LIST_DIRECTORY => run_blocking_tool(args, fs_list_directory).await,
         // D2: read_file used to load the ENTIRE file inline on the async
         // runtime (a big read stalls every tokio worker — chat streams, PTY,
         // IPC), and edit_file does a whole-file read-modify-write. Both now
         // run on the dedicated blocking pool like the recursive scans below;
-        // read_file is ALSO byte-bounded inside fs_read_file. Neither tool
-        // takes locks, so the routing changes no locking semantics.
+        // read_file is ALSO byte-bounded inside fs_read_file.
         READ_FILE => run_blocking_tool(args, fs_read_file).await,
         // The two recursive scans walk unbounded trees (search_content reads
         // up to 5 MiB per file) — running them inline on the async runtime
@@ -1257,11 +1276,11 @@ pub async fn execute_tool(
         // PTY, IPC). Push the blocking walk to the dedicated pool.
         SEARCH_FILES => run_blocking_tool(args, fs_search_files).await,
         SEARCH_CONTENT => run_blocking_tool(args, fs_search_content).await,
-        WRITE_FILE => fs_write_file(args),
+        WRITE_FILE => run_blocking_tool(args, fs_write_file).await,
         EDIT_FILE => run_blocking_tool(args, fs_edit_file).await,
-        DELETE_FILE => fs_delete_file(args),
-        MOVE_FILE => fs_move_file(args),
-        COPY_FILE => fs_copy_file(args),
+        DELETE_FILE => run_blocking_tool(args, fs_delete_file).await,
+        MOVE_FILE => run_blocking_tool(args, fs_move_file).await,
+        COPY_FILE => run_blocking_tool(args, fs_copy_file).await,
         other => ToolOutcome::text(format!("Error: unknown tool \"{other}\".")),
     }
 }

@@ -15,6 +15,8 @@ mod connector_credentials;
 mod cost;
 mod cost_v2;
 pub mod docs;
+#[cfg(test)]
+mod docs_eval;
 pub mod improve;
 mod memory;
 mod projects;
@@ -165,6 +167,29 @@ fn migrate_automations_origin(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Trigger engine per automation row ("cron" | "webhook" | "file" | "git" |
+/// "gmail") plus its JSON config and dedupe/last-fire state. Existing rows
+/// keep firing on cron unchanged (default 'cron'); see automation_triggers.rs.
+/// `last_event_run_at` is the event-source analogue of `last_run_at` — event
+/// runs advance it INSTEAD of `last_run_at` so they never delay the cron
+/// clock (next_fire computes from last_run_at).
+fn migrate_automations_triggers(conn: &Connection) -> DbResult<()> {
+    for sql in [
+        "ALTER TABLE automations ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'cron'",
+        "ALTER TABLE automations ADD COLUMN trigger_config TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE automations ADD COLUMN last_trigger_state TEXT",
+        "ALTER TABLE automations ADD COLUMN last_event_run_at INTEGER",
+    ] {
+        if let Err(e) = conn.execute(sql, []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn migrate_chat_fts(conn: &Connection) -> DbResult<()> {
     // LOW: the docsize COUNT probe is O(chat_messages) on every startup.
     // The FTS triggers keep the index in sync after the one-time backfill,
@@ -192,6 +217,67 @@ fn migrate_chat_fts(conn: &Connection) -> DbResult<()> {
         conn.execute_batch("INSERT INTO chat_messages_fts(chat_messages_fts) VALUES('rebuild');")?;
     }
     settings::set_setting(conn, "db.migration.chat_fts.synced", "1")?;
+    Ok(())
+}
+
+/// One-time backfill of `doc_chunks_fts` (hybrid doc search's keyword leg),
+/// for databases whose doc_chunks rows predate the index. Same external-content
+/// detection + marker pattern as `migrate_chat_fts` above: the FTS table is
+/// external-content, so compare row counts against the `docsize` shadow table
+/// and `rebuild` (re-reading doc_chunks) on mismatch. Clear the
+/// `db.migration.doc_chunks_fts.synced` marker to re-check a drifted DB.
+fn migrate_doc_chunks_fts(conn: &Connection) -> DbResult<()> {
+    ensure_settings_table(conn);
+    let checked = settings::get_setting(conn, "db.migration.doc_chunks_fts.synced")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1");
+    if checked {
+        return Ok(());
+    }
+    let in_sync = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM doc_chunks)
+                   = (SELECT COUNT(*) FROM doc_chunks_fts_docsize)",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .ok();
+    if in_sync != Some(true) {
+        conn.execute_batch("INSERT INTO doc_chunks_fts(doc_chunks_fts) VALUES('rebuild');")?;
+    }
+    settings::set_setting(conn, "db.migration.doc_chunks_fts.synced", "1")?;
+    Ok(())
+}
+
+/// Add the `heading` column to `doc_chunks` (hybrid-RAG contextual
+/// enrichment): the markdown heading trail at the chunk's start, written by
+/// the indexer for display. `''` for chunks before any heading and for
+/// non-markdown files.
+fn migrate_doc_chunks_heading(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE doc_chunks ADD COLUMN heading TEXT NOT NULL DEFAULT ''";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Add the `chunk_version` column to `doc_corpora` (corpus schema versioning).
+/// 0 = pre-versioning (or never indexed); the indexer stamps
+/// DOCS_CHUNK_SCHEMA_VERSION (db/docs.rs) after a successful pass and
+/// re-chunks every file while the stored value lags — that is how enrichment
+/// metadata and the FTS backfill reach old corpora despite the mtime/size
+/// diff seeing no file changes.
+fn migrate_doc_corpora_chunk_version(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE doc_corpora ADD COLUMN chunk_version INTEGER NOT NULL DEFAULT 0";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
     Ok(())
 }
 
@@ -230,10 +316,14 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_improve_autonomy(conn)?;
     migrate_automation_runs_improve_link(conn)?;
     migrate_automations_origin(conn)?;
+    migrate_automations_triggers(conn)?;
     migrate_chat_fts(conn)?;
+    migrate_doc_chunks_fts(conn)?;
     migrate_memory_reflected(conn)?;
     migrate_chat_message_kind(conn)?;
     migrate_chat_session_origin(conn)?;
+    migrate_doc_chunks_heading(conn)?;
+    migrate_doc_corpora_chunk_version(conn)?;
     // Research caches grow without bound otherwise: drop rows past their TTL
     // on every open (research_cache.rs also purges on insert).
     research_cache::purge_expired(conn)?;
@@ -699,9 +789,12 @@ pub fn migrate_chat_messages_perf(conn: &Connection) -> DbResult<()> {
 }
 
 /// Schema = PRD §6.3 verbatim + the `quick_actions` table from CONTRACT.md.
+/// Raw string: schema comments may contain double quotes (they'd otherwise
+/// terminate a plain `"` literal — that actually happened with the doc_chunks
+/// heading-trail comment below).
 pub fn init_schema(conn: &Connection) -> DbResult<()> {
     conn.execute_batch(
-        "
+        r#"
         CREATE TABLE IF NOT EXISTS projects (
           id TEXT PRIMARY KEY,
           path TEXT NOT NULL UNIQUE,
@@ -1177,6 +1270,11 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         -- origin: user (Automations view form) or agent (chat
         -- create_automation tool) — the UI badges agent-authored rows so the
         -- user can see what the model scheduled.
+        -- trigger_type picks the firing engine ('cron' | 'webhook' | 'file'
+        -- | 'git'); trigger_config is its JSON payload; last_trigger_state
+        -- holds the engine's dedupe state (last git SHA / last fs-fire
+        -- epoch); last_event_run_at is the event-source twin of last_run_at
+        -- (event runs must not delay the cron clock).
         CREATE TABLE IF NOT EXISTS automations (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
@@ -1190,7 +1288,11 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           last_status TEXT,
           chat_session_id TEXT,
           created_at INTEGER NOT NULL,
-          origin TEXT NOT NULL DEFAULT 'user'
+          origin TEXT NOT NULL DEFAULT 'user',
+          trigger_type TEXT NOT NULL DEFAULT 'cron',
+          trigger_config TEXT NOT NULL DEFAULT '{}',
+          last_trigger_state TEXT,
+          last_event_run_at INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS automation_runs (
@@ -1324,6 +1426,10 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
 
         -- Local document corpora (local RAG). Chunks carry their embedding as
         -- a little-endian f32 BLOB; search is brute-force cosine in Rust.
+        -- chunk_version stamps the chunk-shape (chunker + enrichment) schema
+        -- the corpus was last indexed with; when it lags behind
+        -- DOCS_CHUNK_SCHEMA_VERSION (db/docs.rs) the next index pass re-chunks
+        -- EVERY file, because mtime/size diffs can't see chunk-shape changes.
         CREATE TABLE IF NOT EXISTS doc_corpora (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
@@ -1332,7 +1438,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           created_at INTEGER NOT NULL,
           last_indexed_at INTEGER,
           file_count INTEGER NOT NULL DEFAULT 0,
-          chunk_count INTEGER NOT NULL DEFAULT 0
+          chunk_count INTEGER NOT NULL DEFAULT 0,
+          chunk_version INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS doc_files (
@@ -1343,6 +1450,9 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           PRIMARY KEY (corpus_id, path)
         );
 
+        -- heading holds the markdown heading trail at the chunk's start
+        -- ("Guide > Setup", '' when none/non-markdown) — display enrichment
+        -- only, it is NOT part of what gets embedded.
         CREATE TABLE IF NOT EXISTS doc_chunks (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           corpus_id TEXT NOT NULL,
@@ -1350,10 +1460,36 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           chunk_index INTEGER NOT NULL,
           kind TEXT NOT NULL DEFAULT 'text',
           content TEXT NOT NULL,
+          heading TEXT NOT NULL DEFAULT '',
           embedding BLOB NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_doc_chunks_corpus ON doc_chunks(corpus_id, path);
+
+        -- Full-text leg of hybrid doc search. External-content table over
+        -- doc_chunks.content — doc_chunks stays the source of truth and the
+        -- triggers below keep the index in sync, mirroring
+        -- chat_messages_fts above. Existing rows are backfilled once by
+        -- migrate_doc_chunks_fts().
+        CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunks_fts USING fts5(
+          content,
+          content='doc_chunks',
+          content_rowid='id',
+          tokenize='unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS doc_chunks_fts_ai AFTER INSERT ON doc_chunks BEGIN
+          INSERT INTO doc_chunks_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS doc_chunks_fts_ad AFTER DELETE ON doc_chunks BEGIN
+          INSERT INTO doc_chunks_fts(doc_chunks_fts, rowid, content)
+            VALUES('delete', old.id, old.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS doc_chunks_fts_au AFTER UPDATE OF content ON doc_chunks BEGIN
+          INSERT INTO doc_chunks_fts(doc_chunks_fts, rowid, content)
+            VALUES('delete', old.id, old.content);
+          INSERT INTO doc_chunks_fts(rowid, content) VALUES (new.id, new.content);
+        END;
 
         -- Per-chat attached corpora (§3.1.7): when a user explicitly pins a
         -- corpus to a chat, its chunks are included in the auto-retrieval
@@ -1365,7 +1501,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           attached_at INTEGER NOT NULL,
           PRIMARY KEY (chat_session_id, corpus_id)
         );
-        ",
+        "#,
     )?;
     // Vault (local markdown knowledge base) — derived index over the bound
     // folder's markdown files (see vault/index.rs). A deletable cache.
@@ -1448,7 +1584,9 @@ pub use docs::{
     blob_to_f32_slice, count_chunks, delete_chunks_for_file, delete_indexed_files_not_in,
     detach_corpus_from_chat, f32_slice_to_blob, finish_index, get_corpus, get_corpus_by_path,
     list_corpora, list_indexed_files, remove_corpus, replace_file_chunks, search_chunks,
-    search_chunks_in_corpus, set_corpus_enabled, upsert_indexed_file, ChunkHit, DocCorpus,
+    search_chunks_hybrid, search_chunks_in_corpus, set_corpus_enabled,
+    stamp_corpus_chunk_version, corpus_chunk_version, upsert_indexed_file, ChunkHit, DocCorpus,
+    DOCS_CHUNK_SCHEMA_VERSION,
 };
 
 // chat checkpoints (per-turn git working-tree snapshots)
@@ -1472,8 +1610,8 @@ pub use workspaces::{
 pub use automations::{
     count_runs_for, create_automation, delete_automation, finish_run, get_automation,
     list_automations, list_runs_for, record_run, record_status, set_automation_chat_session,
-    set_automation_enabled, start_run, update_automation, Automation, AutomationInput,
-    AutomationRun,
+    set_automation_enabled, set_automation_trigger_state, start_run, update_automation,
+    Automation, AutomationInput, AutomationRun,
 };
 
 // persistent user memory (MEMORY_DESIGN_ARCHITECTURE.md §9)
@@ -1520,6 +1658,9 @@ pub(crate) fn mem() -> Connection {
     migrate_chat_messages_perf(&conn).unwrap();
     migrate_chat_message_kind(&conn).unwrap();
     migrate_chat_session_origin(&conn).unwrap();
+    migrate_doc_chunks_heading(&conn).unwrap();
+    migrate_doc_corpora_chunk_version(&conn).unwrap();
+    migrate_doc_chunks_fts(&conn).unwrap();
     migrate_unc_paths(&conn).unwrap();
     conn
 }

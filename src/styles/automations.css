@@ -191,6 +191,20 @@
   color: var(--red, #ff6b6b);
   font-weight: 600;
 }
+/* Trigger-engine badge for event rows (webhook/file/git/email) — neutral
+   styling on purpose: it is metadata, not a state. */
+.automations-list-trigger-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
 .automations-list-empty {
   padding: 24px;
   text-align: center;
@@ -418,6 +432,35 @@
   color: var(--text-dim);
   margin-top: 4px;
 }
+/* Webhook trigger URL row (detail pane): mono URL + copy button. */
+.automation-detail-webhook-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  min-width: 0;
+}
+.automation-detail-webhook-label,
+.automation-detail-webhook-missing {
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.automation-detail-webhook-url {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: all;
+}
 
 /* Past runs */
 .automation-detail-runs {
@@ -604,6 +647,29 @@
   border-radius: 4px;
   padding: 1px 5px;
   margin-left: 2px;
+}
+/* Webhook trigger URL row (form): full URL + copy actions; the URL
+   ellipsizes but stays selectable/copyable. */
+.automation-form-webhook-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.automation-form-webhook-url {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: all;
 }
 .automation-form-hint {
   font-size: 11px;

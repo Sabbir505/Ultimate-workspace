@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use relay_lib::{automations, db, user_dirs};
+use relay_lib::{automation_triggers, automations, db, user_dirs};
 
 /// Reattach to the launching terminal after starting as a GUI-subsystem
 /// process. No-op when there's no parent console (Task Scheduler / wscript),
@@ -160,6 +160,16 @@ fn run(id: &str) -> ExitCode {
 /// same `due_automations` the in-app tick uses. Runs execute sequentially;
 /// each is recorded as a "scheduled" run. One failing run doesn't stop the
 /// rest.
+///
+/// Git triggers are evaluated here too: the HEAD-SHA comparison is pure DB +
+/// `git rev-parse`, so it's the one event trigger that works run-while-closed
+/// (fired via `run_blocking_with_source(GitChange)`, the same blocking path
+/// `run-due` uses — no AppHandle needed, launch_run's thread/emit side is
+/// simply not exercised). Webhook, file, AND gmail triggers stay app-open-
+/// only: this is a short-lived process that can neither listen on a port,
+/// keep a notify watcher alive, nor refresh a Gmail OAuth token and poll the
+/// API (gmail additionally needs a tokio reactor for its async poll — see
+/// automation_webhook.rs / automation_triggers.rs).
 fn run_due() -> ExitCode {
     let db = match open_db() {
         Ok(db) => db,
@@ -182,6 +192,30 @@ fn run_due() -> ExitCode {
         ) {
             eprintln!("run-due: '{}' failed: {e}", automation.name);
             failed = true;
+        }
+    }
+    for id in automation_triggers::evaluate_git_triggers(&db) {
+        let automation = {
+            let conn = db.lock();
+            db::get_automation(&conn, &id)
+        };
+        match automation {
+            Ok(Some(a)) => {
+                if let Err(e) = automations::run_blocking_with_source(
+                    None,
+                    &db,
+                    &a,
+                    automations::RunSource::GitChange,
+                ) {
+                    eprintln!("run-due (git): '{}' failed: {e}", a.name);
+                    failed = true;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("run-due (git): failed to load automation {id}: {e}");
+                failed = true;
+            }
         }
     }
     if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }

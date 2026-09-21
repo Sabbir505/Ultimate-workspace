@@ -143,6 +143,10 @@ fn adapt_automation(spec: &AutomationSpec) -> AutomationInput {
         // Artifact-spec automations are model-driven (the chat proposes the
         // artifact) — badge them like chat-tool creations.
         origin: Some("agent".into()),
+        // Artifact specs always describe cron schedules (spec.trigger.kind);
+        // event trigger engines aren't expressible in the artifact schema.
+        trigger_type: None,
+        trigger_config: None,
     }
 }
 

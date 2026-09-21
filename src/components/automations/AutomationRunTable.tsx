@@ -27,6 +27,17 @@ function runDuration(startSec: number, endSec: number | null, liveNowSec?: numbe
   return formatDuration(diff);
 }
 
+/** Human label per automation_runs.source (automation_runs.source is free
+ *  text; unknown values fall back to "Scheduled", which was the old
+ *  binary's behavior for everything but "manual"). */
+const SOURCE_LABELS: Record<string, string> = {
+  manual: "Manual",
+  scheduled: "Scheduled",
+  webhook: "Webhook",
+  fs: "File change",
+  git: "Git change",
+};
+
 /** Wall-clock seconds, re-rendered once a second while `active` — one timer
  *  for the whole table, and only while a run is actually in flight. */
 function useNowSeconds(active: boolean): number {
@@ -191,7 +202,7 @@ export function AutomationRunTable({
                     )}
                   </td>
                   <td className="px-3 py-2 text-gray-500 dark:text-slate-400 text-xs">
-                    {r.source === "manual" ? "Manual" : "Scheduled"}
+                    {SOURCE_LABELS[r.source] ?? "Scheduled"}
                   </td>
                   <td
                     className="px-3 py-2 text-gray-700 dark:text-slate-200 text-xs max-w-[280px] truncate"

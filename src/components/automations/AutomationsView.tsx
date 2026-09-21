@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import {
   automationNextFire,
+  automationWebhookInfo,
   getRunWhileClosed,
   getSetting,
   installHarness,
@@ -41,6 +42,7 @@ import {
   toastSuccess,
   type Automation,
   type AutomationInput,
+  type AutomationNextFire,
   type AutomationRun,
   type HarnessModelConfig,
   type GgufModel,
@@ -75,6 +77,66 @@ const SCHEDULE_PRESETS: { label: string; cron: string }[] = [
   { label: "Weekdays at 9:00 AM", cron: "2 9 * * 1-5" },
   { label: "Nightly at 2:00 AM", cron: "1 2 * * *" },
 ];
+
+// ---- Trigger engines (automation_triggers.rs; "cron" = the schedule) ----
+
+type TriggerType = "cron" | "webhook" | "file" | "git" | "gmail";
+
+const TRIGGER_OPTIONS: { value: TriggerType; label: string }[] = [
+  { value: "cron", label: "Cron" },
+  { value: "webhook", label: "Webhook" },
+  { value: "file", label: "File change" },
+  { value: "git", label: "Git change" },
+  { value: "gmail", label: "New email" },
+];
+
+function isTriggerType(v: string): v is TriggerType {
+  return TRIGGER_OPTIONS.some((t) => t.value === v);
+}
+
+/** Compact badge text for event triggers in list/detail ("cron" rows keep
+ *  showing the schedule itself). */
+function triggerBadge(triggerType: string): string | null {
+  switch (triggerType) {
+    case "webhook": return "webhook";
+    case "file": return "file";
+    case "git": return "git";
+    case "gmail": return "email";
+    default: return null;
+  }
+}
+
+/** Parsed-on-demand trigger_config (never throws — a malformed stored payload
+ *  degrades to empty fields, matching the backend's skip-on-parse-failure). */
+function safeTriggerConfig(json: string): Record<string, unknown> {
+  try {
+    const v: unknown = JSON.parse(json || "{}");
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** One-line engine summary for the detail card. Cron rows keep the schedule
+ *  label as today; event rows describe what actually fires them. */
+function triggerSummary(a: Automation): string {
+  const cfg = safeTriggerConfig(a.triggerConfig);
+  switch (a.triggerType) {
+    case "webhook":
+      return "Webhook call";
+    case "file":
+      return `File change — ${typeof cfg.path === "string" && cfg.path ? cfg.path : "no path set"}`;
+    case "git": {
+      const where = typeof cfg.cwd === "string" && cfg.cwd ? cfg.cwd : "no repo set";
+      const branch = typeof cfg.branch === "string" && cfg.branch ? ` (${cfg.branch})` : "";
+      return `Git change — ${where}${branch}`;
+    }
+    case "gmail":
+      return `New email — ${typeof cfg.label === "string" && cfg.label ? cfg.label : "inbox"}`;
+    default:
+      return scheduleLabel(a.schedule);
+  }
+}
 
 function agentGroupLabel(group: string): string {
   if (group === "harness") return "CLI Agents";
@@ -325,7 +387,16 @@ export function AutomationsView() {
                       ) : null}
                     </div>
                     <div className="automations-list-row-meta">
-                      <span>{scheduleLabel(a.schedule)}</span>
+                      {triggerBadge(a.triggerType) ? (
+                        // Event rows fire from their own engine, so their
+                        // (usually empty) cron string says nothing — badge
+                        // the engine instead.
+                        <span className="automations-list-trigger-badge">
+                          {triggerBadge(a.triggerType)}
+                        </span>
+                      ) : (
+                        <span>{scheduleLabel(a.schedule)}</span>
+                      )}
                       <span>·</span>
                       <span>{relativeTime(a.lastRunAt)}</span>
                       {state === "failing" ? (
@@ -576,10 +647,24 @@ function AutomationDetail({
   const [runsLoading, setRunsLoading] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [promptExpanded, setPromptExpanded] = useState(false);
-  const [nextRunAt, setNextRunAt] = useState<number | null | undefined>(undefined);
+  const [nextFire, setNextFire] = useState<AutomationNextFire | null | undefined>(undefined);
   // One-time harness install (failure banner): the automation's harness CLI
   // isn't on this device, so "Run again" becomes "Install" until it lands.
   const [installing, setInstalling] = useState(false);
+
+  // Webhook trigger URL — the secret is redacted from list/get, so the only
+  // source is the dedicated getter. Fetched once per selection; null renders
+  // as "listener not running" (the URL only exists while the app serves it).
+  const [detailWebhookUrl, setDetailWebhookUrl] = useState<string | null>(null);
+  const isWebhookTrigger = automation.triggerType === "webhook";
+  useEffect(() => {
+    if (!isWebhookTrigger) return;
+    let cancelled = false;
+    automationWebhookInfo(automation.id)
+      .then((info) => { if (!cancelled) setDetailWebhookUrl(info.url); })
+      .catch(() => { if (!cancelled) setDetailWebhookUrl(null); });
+    return () => { cancelled = true; };
+  }, [isWebhookTrigger, automation.id]);
 
   // True only when the automation runs a CLI harness that exists in the
   // registry but isn't installed — provider/local agents never match.
@@ -618,13 +703,15 @@ function AutomationDetail({
   // Next scheduled fire — same math the scheduler uses for due-ness, so the
   // display can't drift from what will actually run. Recomputed when the
   // schedule changes and every minute (the "Today/Tomorrow" framing ages).
+  // Event triggers (webhook/file/git) come back with a human label instead
+  // of a timestamp.
   useEffect(() => {
-    if (!automation.enabled) { setNextRunAt(undefined); return; }
+    if (!automation.enabled) { setNextFire(undefined); return; }
     let cancelled = false;
     const fetchNext = () => {
-      void automationNextFire(automation.schedule)
-        .then((t) => { if (!cancelled) setNextRunAt(t ?? null); })
-        .catch(() => { if (!cancelled) setNextRunAt(null); });
+      void automationNextFire(automation.schedule, automation.triggerType, automation.triggerConfig)
+        .then((v) => { if (!cancelled) setNextFire(v); })
+        .catch(() => { if (!cancelled) setNextFire(null); });
     };
     fetchNext();
     const interval = window.setInterval(fetchNext, 60_000);
@@ -632,7 +719,7 @@ function AutomationDetail({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [automation.enabled, automation.id, automation.schedule]);
+  }, [automation.enabled, automation.id, automation.schedule, automation.triggerType, automation.triggerConfig]);
 
   // How many most-recent runs failed with the exact same error — powers the
   // "failed N times in a row" banner copy.
@@ -891,12 +978,40 @@ function AutomationDetail({
       <div className="automation-detail-schedule">
         <div className="automation-detail-schedule-label">AUTOMATION</div>
         <div className="automation-detail-schedule-value">
-          {scheduleLabel(automation.schedule)}
-          <code className="automation-detail-schedule-cron">{automation.schedule}</code>
+          {triggerSummary(automation)}
+          {automation.schedule && (
+            <code className="automation-detail-schedule-cron">{automation.schedule}</code>
+          )}
         </div>
+        {isWebhookTrigger && (
+          <div className="automation-detail-webhook-row">
+            <span className="automation-detail-webhook-label">Webhook URL</span>
+            {detailWebhookUrl ? (
+              <>
+                <code className="automation-detail-webhook-url" title={detailWebhookUrl}>
+                  {detailWebhookUrl}
+                </code>
+                <button
+                  className="automations-btn ghost"
+                  onClick={() =>
+                    void navigator.clipboard
+                      .writeText(detailWebhookUrl)
+                      .then(() => toastSuccess("Webhook URL copied"))
+                  }
+                >
+                  Copy
+                </button>
+              </>
+            ) : (
+              <span className="automation-detail-webhook-missing">
+                trigger listener not running
+              </span>
+            )}
+          </div>
+        )}
         <div className="automation-detail-schedule-info">
-          {automation.enabled && nextRunAt != null && (
-            <>Next run: {formatNextFire(nextRunAt)}<br /></>
+          {automation.enabled && nextFire != null && (nextFire.at != null || nextFire.label !== "") && (
+            <>Next run: {nextFire.at != null ? formatNextFire(nextFire.at) : nextFire.label}<br /></>
           )}
           Last run: {relativeTime(automation.lastRunAt)}
           {automation.lastStatus && (
@@ -952,6 +1067,34 @@ function AutomationForm({
   const [agentId, setAgentId] = useState(automation?.harness ?? "claude_code");
   const [model, setModel] = useState(automation?.model ?? "");
   const [cwd, setCwd] = useState(automation?.cwd ?? "");
+  // Trigger engine + its per-type fields, loaded from the stored row on edit.
+  // Switching type keeps every other field's value intact.
+  const storedTriggerType = automation?.triggerType ?? "cron";
+  const [triggerType, setTriggerType] = useState<TriggerType>(
+    isTriggerType(storedTriggerType) ? storedTriggerType : "cron",
+  );
+  const storedCfg = safeTriggerConfig(automation?.triggerConfig ?? "{}");
+  const [filePath, setFilePath] = useState(
+    typeof storedCfg.path === "string" ? storedCfg.path : "",
+  );
+  const [fileMinSecs, setFileMinSecs] = useState(
+    typeof storedCfg.minIntervalSecs === "number" ? String(storedCfg.minIntervalSecs) : "",
+  );
+  const [gitCwd, setGitCwd] = useState(
+    typeof storedCfg.cwd === "string" ? storedCfg.cwd : "",
+  );
+  const [gitBranch, setGitBranch] = useState(
+    typeof storedCfg.branch === "string" ? storedCfg.branch : "",
+  );
+  const [gmailLabel, setGmailLabel] = useState(
+    typeof storedCfg.label === "string" && storedCfg.label.trim() !== "" ? storedCfg.label : "inbox",
+  );
+  // Webhook trigger URL (list/get redact the secret) — fetched while editing
+  // a webhook row, or right after creating one.
+  const [webhookUrl, setWebhookUrl] = useState<string | null>(null);
+  // Set when a webhook automation was just created: the form stays open so
+  // the trigger URL can be copied once; "Done" hands the id to the parent.
+  const [createdId, setCreatedId] = useState<string | null>(null);
   const [availableModels, setAvailableModels] = useState<{ id: string; label: string }[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const parsedCustom = automation ? parseSimpleCron(automation.schedule) : null;
@@ -1055,36 +1198,98 @@ function AutomationForm({
   }, []);
 
   const schedule = scheduleChoice === "custom" ? buildCron(freq, weekday, time) : scheduleChoice;
+  // Event triggers fire from their own engine, not the cron clock — the
+  // schedule builder is hidden for them (their stored cron string may be
+  // empty; switching back to cron restores whatever the builder holds).
+  const eventTrigger = triggerType !== "cron";
+  // Per-type required fields (file/git carry a required path/cwd; webhook and
+  // gmail have none).
+  const triggerValid =
+    triggerType === "file" ? filePath.trim() !== "" :
+    triggerType === "git" ? gitCwd.trim() !== "" :
+    true;
   const canSave = useMemo(
-    () => name.trim() !== "" && prompt.trim() !== "" && schedule !== "",
-    [name, prompt, schedule],
+    () => name.trim() !== "" && prompt.trim() !== "" && (eventTrigger ? triggerValid : schedule !== ""),
+    [name, prompt, eventTrigger, triggerValid, schedule],
   );
 
-  // Live "next run" preview for the chosen schedule (debounced — recomputed
-  // on every keystroke of a custom time would otherwise spam the backend).
-  // Falls back to the static human-readable label if the query fails.
-  const [previewNextAt, setPreviewNextAt] = useState<number | null>(null);
+  // The exact triggerConfig JSON each type stores — the same camelCase
+  // shapes validate_trigger parses backend-side.
+  const triggerConfigJson = useMemo(() => {
+    switch (triggerType) {
+      case "file": {
+        const cfg: Record<string, unknown> = { path: filePath.trim() };
+        const min = Number.parseInt(fileMinSecs, 10);
+        if (!Number.isNaN(min)) cfg.minIntervalSecs = min;
+        return JSON.stringify(cfg);
+      }
+      case "git": {
+        const cfg: Record<string, unknown> = { cwd: gitCwd.trim() };
+        if (gitBranch.trim() !== "") cfg.branch = gitBranch.trim();
+        return JSON.stringify(cfg);
+      }
+      case "gmail": {
+        const label = gmailLabel.trim();
+        return JSON.stringify(label !== "" ? { label } : {});
+      }
+      default:
+        return "{}"; // cron + webhook carry no user fields
+    }
+  }, [triggerType, filePath, fileMinSecs, gitCwd, gitBranch, gmailLabel]);
+
+  // Live "next run" preview for the chosen trigger (debounced — recomputing
+  // on every keystroke would otherwise spam the backend). Cron rows preview
+  // from the schedule; event rows preview from the trigger type itself and
+  // come back with a human label ("on file change") instead of a timestamp.
+  const [previewFire, setPreviewFire] = useState<AutomationNextFire | null>(null);
   useEffect(() => {
-    if (!schedule) { setPreviewNextAt(null); return; }
+    if (!eventTrigger && !schedule) { setPreviewFire(null); return; }
     let cancelled = false;
-    setPreviewNextAt(null);
+    setPreviewFire(null);
     const handle = window.setTimeout(() => {
-      void automationNextFire(schedule)
-        .then((t) => { if (!cancelled && t) setPreviewNextAt(t); })
+      void automationNextFire(schedule, triggerType, triggerConfigJson)
+        .then((v) => { if (!cancelled && (v.at != null || v.label !== "")) setPreviewFire(v); })
         .catch(() => {});
     }, 250);
     return () => { cancelled = true; window.clearTimeout(handle); };
-  }, [schedule]);
+  }, [schedule, eventTrigger, triggerType, triggerConfigJson]);
+
+  // The webhook URL only exists once the row does (the secret is generated
+  // server-side), so it is fetched for an existing webhook row, or right
+  // after create via createdId.
+  const webhookInfoId = triggerType === "webhook" ? (automation?.id ?? createdId) : null;
+  useEffect(() => {
+    if (!webhookInfoId) { setWebhookUrl(null); return; }
+    let cancelled = false;
+    automationWebhookInfo(webhookInfoId)
+      .then((info) => { if (!cancelled) setWebhookUrl(info.url); })
+      .catch(() => { if (!cancelled) setWebhookUrl(null); });
+    return () => { cancelled = true; };
+  }, [webhookInfoId]);
 
   const save = async () => {
+    // Per-type required fields — the button is disabled too, but this shows
+    // the inline error for keyboard/programmatic paths.
+    if (triggerType === "file" && filePath.trim() === "") {
+      setError("A file-change trigger needs a folder path to watch.");
+      return;
+    }
+    if (triggerType === "git" && gitCwd.trim() === "") {
+      setError("A git-change trigger needs a repository folder.");
+      return;
+    }
     const input: AutomationInput = {
       name: name.trim(),
       prompt: prompt.trim(),
       harness: agentId,
       model: model || undefined,
       cwd: cwd || undefined,
+      // Event triggers ignore the cron string; it rides along untouched so a
+      // later switch back to cron restores it.
       schedule,
       enabled: automation?.enabled ?? true,
+      triggerType,
+      triggerConfig: triggerConfigJson,
     };
     setSaving(true);
     setError(null);
@@ -1095,6 +1300,13 @@ function AutomationForm({
       } else {
         const created = await create(input);
         if (!created) throw new Error("Failed to create automation");
+        if (triggerType === "webhook") {
+          // Keep the form open: the trigger URL (with its secret) must be
+          // surfaced once, right where the user created it. The footer flips
+          // to "Done", which selects the new row and closes.
+          setCreatedId(created.id);
+          return;
+        }
         onCreated?.(created.id);
       }
     } catch (e) {
@@ -1105,7 +1317,7 @@ function AutomationForm({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && canSave && !saving) {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && canSave && !saving && !createdId) {
       e.preventDefault();
       void save();
     }
@@ -1194,53 +1406,196 @@ function AutomationForm({
         </div>
 
         <div className="automation-form-field">
-          <label>Schedule</label>
-          <select value={scheduleChoice} onChange={(e) => setScheduleChoice(e.target.value)}>
-            {SCHEDULE_PRESETS.map((p) => (
-              <option key={p.cron} value={p.cron}>{p.label}</option>
+          <label>Trigger</label>
+          <select
+            aria-label="Trigger type"
+            value={triggerType}
+            onChange={(e) => setTriggerType(e.target.value as TriggerType)}
+          >
+            {TRIGGER_OPTIONS.map((t) => (
+              <option key={t.value} value={t.value}>{t.label}</option>
             ))}
-            {keepOriginalCron && (
-              <option value={automation!.schedule}>Current: {automation!.schedule}</option>
-            )}
-            <option value="custom">Custom…</option>
           </select>
         </div>
 
-        {scheduleChoice === "custom" && (
-          <div className="automation-form-row automation-form-row-3">
+        {triggerType === "cron" && (
+          <>
             <div className="automation-form-field">
-              <label>Frequency</label>
-              <select value={freq} onChange={(e) => setFreq(e.target.value as Freq)}>
-                <option value="daily">Every day</option>
-                <option value="weekdays">Weekdays</option>
-                <option value="weekly">Weekly</option>
+              <label>Schedule</label>
+              <select value={scheduleChoice} onChange={(e) => setScheduleChoice(e.target.value)}>
+                {SCHEDULE_PRESETS.map((p) => (
+                  <option key={p.cron} value={p.cron}>{p.label}</option>
+                ))}
+                {keepOriginalCron && (
+                  <option value={automation!.schedule}>Current: {automation!.schedule}</option>
+                )}
+                <option value="custom">Custom…</option>
               </select>
             </div>
-            {freq === "weekly" && (
-              <div className="automation-form-field">
-                <label>Day</label>
-                <select value={weekday} onChange={(e) => setWeekday(e.target.value)}>
-                  {WEEKDAYS.map((w) => (
-                    <option key={w.dow} value={w.dow}>{w.label}</option>
-                  ))}
-                </select>
+
+            {scheduleChoice === "custom" && (
+              <div className="automation-form-row automation-form-row-3">
+                <div className="automation-form-field">
+                  <label>Frequency</label>
+                  <select value={freq} onChange={(e) => setFreq(e.target.value as Freq)}>
+                    <option value="daily">Every day</option>
+                    <option value="weekdays">Weekdays</option>
+                    <option value="weekly">Weekly</option>
+                  </select>
+                </div>
+                {freq === "weekly" && (
+                  <div className="automation-form-field">
+                    <label>Day</label>
+                    <select value={weekday} onChange={(e) => setWeekday(e.target.value)}>
+                      {WEEKDAYS.map((w) => (
+                        <option key={w.dow} value={w.dow}>{w.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <div className="automation-form-field">
+                  <label>Time</label>
+                  <input type="time" value={time} onChange={(e) => setTime(e.target.value)} />
+                </div>
               </div>
             )}
-            <div className="automation-form-field">
-              <label>Time</label>
-              <input type="time" value={time} onChange={(e) => setTime(e.target.value)} />
+          </>
+        )}
+
+        {triggerType === "webhook" && (
+          <p className="automation-form-hint">
+            Fires whenever the trigger URL is called (GET or POST) — the URL
+            appears here after you create the automation. No schedule needed.
+          </p>
+        )}
+
+        {triggerType === "file" && (
+          <>
+            <div className="automation-form-row">
+              <div className="automation-form-field">
+                <label>Folder to watch</label>
+                <input
+                  aria-label="Folder to watch"
+                  value={filePath}
+                  onChange={(e) => setFilePath(e.target.value)}
+                  placeholder="D:\projects\site\dist"
+                />
+              </div>
+              <div className="automation-form-field">
+                <label>Min re-fire seconds <span className="automation-form-optional">(optional, default 60)</span></label>
+                <input
+                  aria-label="Min re-fire seconds"
+                  type="number"
+                  min={0}
+                  value={fileMinSecs}
+                  onChange={(e) => setFileMinSecs(e.target.value)}
+                  placeholder="60"
+                />
+              </div>
             </div>
+            <p className="automation-form-hint">
+              Runs when anything in the folder is created, modified, or removed
+              (debounced). The project folder above may stay empty for file
+              triggers.
+            </p>
+          </>
+        )}
+
+        {triggerType === "git" && (
+          <>
+            <div className="automation-form-row">
+              <div className="automation-form-field">
+                <label>Repository folder</label>
+                <input
+                  aria-label="Repository folder"
+                  value={gitCwd}
+                  onChange={(e) => setGitCwd(e.target.value)}
+                  placeholder="D:\projects\site"
+                />
+              </div>
+              <div className="automation-form-field">
+                <label>Branch <span className="automation-form-optional">(optional, default HEAD)</span></label>
+                <input
+                  aria-label="Git branch"
+                  value={gitBranch}
+                  onChange={(e) => setGitBranch(e.target.value)}
+                  placeholder="main"
+                />
+              </div>
+            </div>
+            <p className="automation-form-hint">
+              Runs when the branch's HEAD commit changes. Works while Relay is
+              open — and while closed with "Run while closed" on.
+            </p>
+          </>
+        )}
+
+        {triggerType === "gmail" && (
+          <>
+            <div className="automation-form-field">
+              <label>Gmail label <span className="automation-form-optional">(optional)</span></label>
+              <input
+                aria-label="Gmail label"
+                value={gmailLabel}
+                onChange={(e) => setGmailLabel(e.target.value)}
+                placeholder="inbox"
+              />
+            </div>
+            <p className="automation-form-hint">
+              Fires when the connected Gmail account sees new activity
+              (requires the Gmail connector). Works while Relay is running.
+            </p>
+          </>
+        )}
+
+        {triggerType === "webhook" && webhookUrl && (
+          <div className="automation-form-field">
+            <label>Trigger URL</label>
+            <div className="automation-form-webhook-row">
+              <code className="automation-form-webhook-url" title={webhookUrl}>
+                {webhookUrl}
+              </code>
+              <button
+                className="automations-btn ghost"
+                onClick={() =>
+                  void navigator.clipboard
+                    .writeText(webhookUrl)
+                    .then(() => toastSuccess("Webhook URL copied"))
+                }
+              >
+                Copy
+              </button>
+              <button
+                className="automations-btn ghost"
+                title="Copy a ready-to-run curl command"
+                onClick={() =>
+                  void navigator.clipboard
+                    .writeText(`curl -X POST "${webhookUrl}"`)
+                    .then(() => toastSuccess("curl command copied"))
+                }
+              >
+                Copy curl
+              </button>
+            </div>
+            <p className="automation-form-hint">Works while Relay is running.</p>
           </div>
         )}
 
-        {schedule && (
+        {(schedule || eventTrigger) && (
           <p className="automation-form-schedule-preview">
-            {previewNextAt != null ? (
-              <>Next run: <strong>{formatNextFire(previewNextAt)}</strong></>
+            {previewFire != null && (previewFire.at != null || previewFire.label !== "") ? (
+              <>
+                {previewFire.at != null ? "Next run: " : "Fires "}
+                <strong>{previewFire.at != null ? formatNextFire(previewFire.at) : previewFire.label}</strong>
+              </>
+            ) : eventTrigger ? (
+              <>
+                Fires on <strong>{TRIGGER_OPTIONS.find((t) => t.value === triggerType)?.label.toLowerCase() ?? triggerType}</strong>
+              </>
             ) : (
               <>Runs: {scheduleLabel(schedule)}</>
             )}
-            {scheduleChoice === "custom" && (
+            {scheduleChoice === "custom" && triggerType === "cron" && (
               <>
                 {" "}<code className="automation-form-cron">{schedule}</code>
               </>
@@ -1259,12 +1614,23 @@ function AutomationForm({
       <div className="automation-form-footer">
         <button onClick={onClose} className="automations-btn ghost">Cancel</button>
         <button
-          onClick={() => void save()}
-          disabled={!canSave || saving}
+          onClick={() => {
+            // Post-create webhook state: hand the new id to the parent (it
+            // selects the row) and close.
+            if (createdId) {
+              onCreated?.(createdId);
+              onClose();
+              return;
+            }
+            void save();
+          }}
+          disabled={!createdId && (!canSave || saving)}
           className="automations-btn primary"
         >
           {saving ? (
             <><Loader2 size={14} strokeWidth={2} className="animate-spin" /> Saving…</>
+          ) : createdId ? (
+            "Done"
           ) : (
             automation ? "Save changes" : "Create automation"
           )}

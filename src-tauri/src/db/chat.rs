@@ -1173,6 +1173,8 @@ mod tests {
                 schedule: "* * * * *".into(),
                 enabled: Some(true),
                 origin: None,
+                trigger_type: None,
+                trigger_config: None,
             },
         )
         .unwrap();

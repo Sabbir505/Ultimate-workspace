@@ -67,13 +67,32 @@ fn arg_bool(args: &Value, key: &str) -> Option<bool> {
     args.get(key).and_then(|v| v.as_bool())
 }
 
-fn format_next_fire(schedule: &str) -> Option<String> {
+/// Human next-fire preview for one row, degraded for non-cron trigger types
+/// ("fires on webhook call" — never "schedule error — will not fire").
+fn format_next_fire(trigger_type: &str, schedule: &str) -> Option<String> {
     // For a fresh human-readable preview, "next fire after now" is what the
     // user wants to hear; the scheduler's own due-ness math (from the last
     // run) lives in automations::due_automations.
-    let ts = crate::automations::next_fire(schedule, crate::db::now_ts())?;
-    let dt = chrono::DateTime::from_timestamp(ts, 0)?.with_timezone(&chrono::Local);
-    Some(dt.format("%a %Y-%m-%d %H:%M").to_string())
+    let (ts, degraded) =
+        crate::automations::describe_next_fire(trigger_type, schedule, crate::db::now_ts());
+    if let Some(ts) = ts {
+        let dt = chrono::DateTime::from_timestamp(ts, 0)?.with_timezone(&chrono::Local);
+        return Some(dt.format("%a %Y-%m-%d %H:%M").to_string());
+    }
+    if degraded.is_empty() {
+        None
+    } else {
+        Some(degraded)
+    }
+}
+
+/// The row's trigger type with the cron default applied.
+fn trigger_type_of(a: &crate::db::Automation) -> &str {
+    if a.trigger_type.is_empty() {
+        crate::automation_triggers::TRIGGER_CRON
+    } else {
+        &a.trigger_type
+    }
 }
 
 fn list_automations(app: &AppHandle) -> String {
@@ -92,7 +111,7 @@ fn list_automations(app: &AppHandle) -> String {
             let mut out = String::from("## Automations\n");
             for a in &rows {
                 let next = if a.enabled {
-                    format_next_fire(&a.schedule)
+                    format_next_fire(trigger_type_of(a), &a.schedule)
                         .map(|t| format!("; next run {t}"))
                         .unwrap_or_else(|| "; schedule error — will not fire".to_string())
                 } else {
@@ -100,11 +119,12 @@ fn list_automations(app: &AppHandle) -> String {
                 };
                 let status = a.last_status.as_deref().unwrap_or("never run");
                 out.push_str(&format!(
-                    "- {} `{}` — agent `{}`, cron `{}`{}; last run: {status}\n  prompt: {}\n",
+                    "- {} `{}` — agent `{}`, cron `{}`, trigger `{}`{}; last run: {status}\n  prompt: {}\n",
                     a.name,
                     a.id,
                     a.harness,
                     a.schedule,
+                    trigger_type_of(a),
                     next,
                     one_line(&a.prompt),
                 ));
@@ -160,7 +180,7 @@ fn get_automation(app: &AppHandle, args: &Value) -> String {
 /// copies this text through with only its intended edits applied.
 fn format_automation_detail(a: &crate::db::Automation) -> String {
     let next = if a.enabled {
-        format_next_fire(&a.schedule)
+        format_next_fire(trigger_type_of(a), &a.schedule)
             .map(|t| format!("; next run {t}"))
             .unwrap_or_else(|| "; schedule error — will not fire".to_string())
     } else {
@@ -172,6 +192,10 @@ fn format_automation_detail(a: &crate::db::Automation) -> String {
         "user" => "user-authored (Automations view)",
         other => other,
     };
+    let trigger = match a.trigger_type.as_str() {
+        "cron" | "" => String::new(),
+        t => format!("\n- trigger: `{t}` — {}", trigger_config_brief(a)),
+    };
     format!(
         "# {}\n\
          - id: `{}`\n\
@@ -179,7 +203,7 @@ fn format_automation_detail(a: &crate::db::Automation) -> String {
          - cwd: {}\n\
          - cron: `{}`{}\n\
          - enabled: {}; last run: {status}\n\
-         - origin: {origin}\n\
+         - origin: {origin}{trigger}\n\
          \n\
          ## Prompt (verbatim — pass it back unchanged through update_automation's \
          `prompt` field, with your edits applied)\n\
@@ -205,31 +229,125 @@ fn format_automation_detail(a: &crate::db::Automation) -> String {
     )
 }
 
-fn validate_automation_input(
-    name: &str,
-    prompt: &str,
-    schedule: &str,
-    agent: &str,
-) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("Error: create_automation requires a non-empty \"name\".".into());
+/// One-line human summary of a row's trigger config for get_automation.
+/// The webhook secret is never included (see strip_webhook_secret).
+fn trigger_config_brief(a: &crate::db::Automation) -> String {
+    match crate::automation_triggers::TriggerSpec::parse(&a.trigger_type, &a.trigger_config) {
+        Ok(Some(crate::automation_triggers::TriggerSpec::Webhook {})) => {
+            "fires on an authenticated webhook call while the app is open \
+             (automation_webhook_info via the UI carries the URL)"
+                .to_string()
+        }
+        Ok(Some(crate::automation_triggers::TriggerSpec::FsWatch {
+            path,
+            min_interval_secs,
+        })) => match min_interval_secs {
+            Some(secs) => format!("watches `{path}` (min interval {secs}s)"),
+            None => format!("watches `{path}`"),
+        },
+        Ok(Some(crate::automation_triggers::TriggerSpec::GitChange { cwd, branch })) => {
+            match branch {
+                Some(b) => format!("fires when HEAD of `{b}` in `{cwd}` changes"),
+                None => format!("fires when HEAD in `{cwd}` changes"),
+            }
+        }
+        Ok(Some(crate::automation_triggers::TriggerSpec::Gmail { label })) => match label {
+            // v1 polls the account-wide historyId — the label is recorded but
+            // does not narrow the poll yet (see evaluate_gmail_triggers).
+            Some(l) => format!("fires on new activity in the connected Gmail \
+                 account (label preference `{l}`)"),
+            None => "fires on new activity in the connected Gmail account \
+                 (default inbox)".to_string(),
+        },
+        _ => "cron schedule".to_string(),
     }
-    if prompt.is_empty() {
-        return Err(
-            "Error: create_automation requires a non-empty \"prompt\" — it is the \
-             full instruction the automation runs unattended."
-                .into(),
-        );
+}
+
+/// Pull (`trigger_type`, `trigger_config`) out of tool args. `None, None` =
+/// not specified (create defaults to cron, update keeps the stored engine).
+/// Config objects use the schema's camelCase keys:
+///   file → {path, minIntervalSecs?}, git → {cwd, branch?}, webhook → {},
+///   gmail → {label?}.
+fn parse_trigger_args(args: &Value) -> Result<(Option<String>, Option<String>), String> {
+    use crate::automation_triggers::{
+        TriggerSpec, TRIGGER_CRON, TRIGGER_FILE, TRIGGER_GMAIL, TRIGGER_GIT, TRIGGER_WEBHOOK,
+    };
+    let raw_type = args
+        .get("trigger_type")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let trigger_given = raw_type.is_some() || args.get("trigger").is_some();
+    let Some(raw_type) = raw_type else {
+        if trigger_given {
+            return Err(
+                "Error: create_automation: \"trigger\" requires \"trigger_type\" \
+                 (cron | webhook | file | git | gmail)."
+                    .into(),
+            );
+        }
+        return Ok((None, None));
+    };
+    let t = TriggerSpec::normalize_type(Some(raw_type));
+    if t == TRIGGER_CRON {
+        return Ok((Some(t), None));
     }
-    if !crate::commands::automation_cmds::is_allowed_automation_agent(agent) {
-        return Err(format!(
-            "Error: agent \"{agent}\" cannot run automations. Use one of: \
-             claude_code, opencode, pi, omp, commandcode, anthropic, openai, \
-             openrouter, anthropic_compatible, openai_compatible, local_gguf."
-        ));
-    }
-    crate::automations::validate_schedule(schedule)
-        .map_err(|e| format!("Error: create_automation: {e}"))
+    let obj = match args.get("trigger").and_then(|v| v.as_object()) {
+        Some(o) => o.clone(),
+        None => {
+            return Err(format!(
+                "Error: create_automation: trigger type \"{t}\" requires a \
+                 \"trigger\" object."
+            ))
+        }
+    };
+    let config = match t.as_str() {
+        TRIGGER_WEBHOOK => serde_json::json!({}),
+        TRIGGER_FILE => {
+            let mut c = serde_json::json!({
+                "path": obj.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+            });
+            if let Some(v) = obj.get("minIntervalSecs").and_then(|v| v.as_u64()) {
+                c["minIntervalSecs"] = serde_json::json!(v);
+            }
+            c
+        }
+        TRIGGER_GIT => {
+            let mut c = serde_json::json!({
+                "cwd": obj.get("cwd").and_then(|v| v.as_str()).unwrap_or(""),
+            });
+            if let Some(b) = obj
+                .get("branch")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                c["branch"] = serde_json::json!(b);
+            }
+            c
+        }
+        TRIGGER_GMAIL => {
+            // Blank/absent label → {} (the engine reads that as the account
+            // default); any other label passes through verbatim.
+            let mut c = serde_json::json!({});
+            if let Some(l) = obj
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                c["label"] = serde_json::json!(l);
+            }
+            c
+        }
+        other => {
+            return Err(format!(
+                "Error: create_automation: unknown trigger type \"{other}\" \
+                 (webhook | file | git | gmail)."
+            ))
+        }
+    };
+    Ok((Some(t), Some(config.to_string())))
 }
 
 fn create_automation(app: &AppHandle, args: &Value) -> String {
@@ -246,10 +364,11 @@ fn create_automation(app: &AppHandle, args: &Value) -> String {
         }
     };
     let enabled = arg_bool(args, "enabled").unwrap_or(true);
-    if let Err(e) = validate_automation_input(&name, &prompt, &schedule, &agent) {
-        return e;
-    }
-    let input = crate::db::AutomationInput {
+    let (trigger_type, trigger_config) = match parse_trigger_args(args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let mut input = crate::db::AutomationInput {
         name,
         prompt,
         harness: agent,
@@ -261,26 +380,55 @@ fn create_automation(app: &AppHandle, args: &Value) -> String {
         // the dispatch gate already required an explicit user approval card
         // for THIS tool call (in every permission posture) before we got here.
         origin: Some("agent".into()),
+        trigger_type,
+        trigger_config,
     };
+    // Same validation + webhook-secret settle the form command uses (one
+    // code path, no drift). Cron rows still validate `schedule` here.
+    if let Err(e) = crate::commands::automation_cmds::validate_input(&mut input, None) {
+        return format!("Error: create_automation: {e}");
+    }
     let created = {
         let db = app.state::<crate::DbState>();
         let conn = db.0.lock();
         crate::db::create_automation(&conn, &input)
     };
+    // File triggers need their watcher installed right away.
+    {
+        let db = app.state::<crate::DbState>();
+        crate::automation_triggers::sync_fs_watchers(app, &db.0);
+    }
     match created {
         Ok(a) => {
-            let next = format_next_fire(&a.schedule)
+            let next = format_next_fire(trigger_type_of(&a), &a.schedule)
                 .map(|t| format!(" Next run: {t}."))
                 .unwrap_or_default();
+            // The webhook secret is generated in validate_input; surface the
+            // ready-to-curl URL directly (the model relayed the user's intent,
+            // so they need the URL to actually call it).
+            let webhook_note = if trigger_type_of(&a) == "webhook" {
+                let db = app.state::<crate::DbState>();
+                match crate::automation_webhook::trigger_url(&db.0, &a) {
+                    Ok(url) => format!(
+                        " Trigger URL (contains the secret — share carefully): {url}"
+                    ),
+                    Err(_) => " Webhook trigger set — the URL is available from \
+                               the Automations view while the app is open."
+                        .to_string(),
+                }
+            } else {
+                String::new()
+            };
             format!(
-                "Created automation \"{}\" (id `{}`) — agent `{}`, cron `{}`, {}. \
-                 It fires on schedule while the app runs (one catch-up run after a \
-                 missed window); every run is logged to its own chat session and the \
-                 app's Automations view.{next}",
+                "Created automation \"{}\" (id `{}`) — agent `{}`, cron `{}`, trigger `{}`, {}. \
+                 It fires while the app runs (one catch-up run after a missed cron \
+                 window); every run is logged to its own chat session and the \
+                 app's Automations view.{webhook_note}{next}",
                 a.name,
                 a.id,
                 a.harness,
                 a.schedule,
+                trigger_type_of(&a),
                 if a.enabled { "enabled" } else { "disabled" },
             )
         }
@@ -355,25 +503,43 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
         _ if existing.cwd.is_empty() => None,
         _ => Some(existing.cwd.clone()),
     };
-    if let Err(e) = validate_automation_input(&name, &prompt, &schedule, &agent) {
-        // Same validation as create, with the tool name corrected.
-        return e.replace("create_automation", "update_automation");
+    // Trigger engine: explicit args re-derive type+config; absent → keep the
+    // stored engine (the DB update COALESCEs None into the old values).
+    let (trigger_type, trigger_config) = if args.get("trigger_type").is_some()
+        || args.get("trigger").is_some()
+    {
+        match parse_trigger_args(args) {
+            Ok(v) => v,
+            Err(e) => return e.replace("create_automation", "update_automation"),
+        }
+    } else {
+        (None, None)
+    };
+    let mut input = crate::db::AutomationInput {
+        name: name.clone(),
+        prompt: prompt.clone(),
+        harness: agent.clone(),
+        model,
+        cwd,
+        schedule: schedule.clone(),
+        enabled: None,
+        // Update preserves the row's original origin (the column is not
+        // part of the UPDATE).
+        origin: None,
+        trigger_type: trigger_type.clone(),
+        trigger_config,
+    };
+    // Same validation + webhook-secret settle as the form command, WITH the
+    // stored row so a switch to webhook (or a redacted config) carries the
+    // existing secret instead of rotating it.
+    if let Err(e) =
+        crate::commands::automation_cmds::validate_input(&mut input, Some(&existing))
+    {
+        return format!("Error: update_automation: {e}");
     }
     let result: Result<(), String> = {
         let db = app.state::<crate::DbState>();
         let conn = db.0.lock();
-        let input = crate::db::AutomationInput {
-            name: name.clone(),
-            prompt: prompt.clone(),
-            harness: agent.clone(),
-            model,
-            cwd,
-            schedule: schedule.clone(),
-            enabled: None,
-            // Update preserves the row's original origin (the column is not
-            // part of the UPDATE).
-            origin: None,
-        };
         crate::db::update_automation(&conn, &id, &input)
             .map_err(|e| format!("update failed: {e}"))
             .and_then(|_| {
@@ -386,6 +552,10 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
                 }
             })
     };
+    // Re-sync after the write: a path edit or an enable toggle changes which
+    // watchers should exist.
+    let db = app.state::<crate::DbState>();
+    crate::automation_triggers::sync_fs_watchers(app, &db.0);
     match result {
         Ok(()) => {
             let enabled_note = match arg_bool(args, "enabled") {
@@ -399,12 +569,17 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
                     }
                 }
             };
-            let next = format_next_fire(&schedule)
+            let trigger_note = match trigger_type.as_deref() {
+                Some(t) => format!(", trigger `{t}`"),
+                None => String::new(),
+            };
+            let effective_type = trigger_type.unwrap_or_else(|| trigger_type_of(&existing).to_string());
+            let next = format_next_fire(&effective_type, &schedule)
                 .map(|t| format!(" Next run: {t}."))
                 .unwrap_or_default();
             format!(
                 "Updated automation \"{name}\" (id `{id}`) — agent `{agent}`, cron \
-                 `{schedule}`.{enabled_note}{next}",
+                 `{schedule}`{trigger_note}.{enabled_note}{next}",
             )
         }
         Err(e) => format!("Error: update_automation failed: {e}"),
@@ -431,7 +606,12 @@ fn delete_automation(app: &AppHandle, args: &Value) -> String {
         }
     };
     match deleted {
-        Ok(()) => format!("Deleted automation \"{name}\" (id `{id}`)."),
+        Ok(()) => {
+            // A deleted fs trigger frees its watcher path.
+            let db = app.state::<crate::DbState>();
+            crate::automation_triggers::sync_fs_watchers(app, &db.0);
+            format!("Deleted automation \"{name}\" (id `{id}`).")
+        }
         Err(e) => format!("Error: delete_automation failed: {e}"),
     }
 }
@@ -527,6 +707,10 @@ mod tests {
             chat_session_id: None,
             created_at: 0,
             origin: "user".into(),
+            trigger_type: "cron".into(),
+            trigger_config: "{}".into(),
+            last_trigger_state: None,
+            last_event_run_at: None,
         };
         let out = format_automation_detail(&a);
         assert!(out.contains(&long_prompt), "prompt must be verbatim");

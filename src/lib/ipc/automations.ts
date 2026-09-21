@@ -28,6 +28,17 @@ export interface Automation {
    *  create_automation tool — badged in the UI so agent-scheduled prompts are
    *  always visible). */
   origin: string;
+  /** Firing engine: "cron" (default) | "webhook" | "file" | "git" | "gmail". */
+  triggerType: string;
+  /** JSON payload for the trigger engine (file: {path, minIntervalSecs?};
+   *  git: {cwd, branch?}; gmail: {label?}; webhook: {} — the secret is
+   *  redacted here and only comes back from automationWebhookInfo). */
+  triggerConfig: string;
+  /** Trigger dedupe state (last git SHA / last fs-fire epoch). */
+  lastTriggerState: string | null;
+  /** Timestamp of the last webhook/file/git run (never moves the cron
+   *  clock — that's lastRunAt's job). */
+  lastEventRunAt: number | null;
 }
 export interface AutomationInput {
   name: string;
@@ -37,6 +48,8 @@ export interface AutomationInput {
   cwd?: string;
   schedule: string;
   enabled?: boolean;
+  triggerType?: string;
+  triggerConfig?: string;
 }
 export const listAutomations = () => safeInvoke<Automation[]>("list_automations");
 export const createAutomation = (input: AutomationInput) =>
@@ -56,11 +69,31 @@ export const runAutomationNow = (automationId: string) =>
 export const stopAutomationRun = (automationId: string) =>
   safeInvoke<boolean>("stop_automation_run", { automationId });
 
-/** Next fire time (unix seconds, local time) for a 5-field cron schedule,
- *  strictly after now — same math the scheduler uses for due-ness.
- *  Null when the schedule never fires again. */
-export const automationNextFire = (schedule: string) =>
-  safeInvoke<number | null>("automation_next_fire", { schedule });
+/** Next fire for a row of any trigger type. Cron rows carry `at` (unix
+ *  seconds, local time — same math the scheduler uses for due-ness);
+ *  webhook/file/git/gmail rows carry a human `label` ("on webhook call",
+ *  "on new email") instead. Cron rows return `at: null` + empty label when
+ *  the schedule never fires. */
+export interface AutomationNextFire {
+  at: number | null;
+  label: string;
+}
+export const automationNextFire = (
+  schedule: string,
+  triggerType?: string,
+  triggerConfig?: string,
+) =>
+  safeInvoke<AutomationNextFire>("automation_next_fire", {
+    schedule,
+    triggerType: triggerType ?? null,
+    triggerConfig: triggerConfig ?? null,
+  });
+
+/** The full local webhook trigger URL + secret for one automation — the
+ *  dedicated getter, since list/get responses redact the secret. Rejects
+ *  while the listener isn't running or the row isn't a webhook trigger. */
+export const automationWebhookInfo = (automationId: string) =>
+  safeInvoke<{ url: string; secret: string }>("automation_webhook_info", { automationId });
 
 /** One past (or in-flight) run of an automation — backed by the
  *  automation_runs SQLite table. Used by the Automations view's
@@ -74,7 +107,8 @@ export interface AutomationRun {
   status: string;
   summary: string;
   chatSessionId: string | null;
-  /** "scheduled" (cron tick) | "manual" (run-now button). */
+  /** "scheduled" (cron tick) | "manual" (run-now) | "webhook" | "fs" | "git"
+   *  | "email" (new-email trigger). */
   source: string;
 }
 export const listAutomationRuns = (automationId: string, limit = 100, beforeStartedAt?: number) =>

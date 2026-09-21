@@ -125,6 +125,23 @@ pub fn start(app: AppHandle, db: Arc<Mutex<Connection>>) {
         loop {
             interval.tick().await;
             tick(Some(&app), &db);
+            // Gmail triggers ride the same 30s cadence but need async HTTP
+            // (DB-backed token refresh + profile poll), so they evaluate
+            // OUTSIDE the sync tick — per-automation tasks are spawned and
+            // joined inside evaluate_gmail_triggers. Launches go through the
+            // same launch_run overlap guard as every other source. (The git
+            // evaluation stays inside the sync tick above.)
+            let fired = crate::automation_triggers::evaluate_gmail_triggers(&db).await;
+            for id in fired {
+                let automation = {
+                    let conn = db.lock();
+                    db::get_automation(&conn, &id).ok().flatten()
+                };
+                let Some(automation) = automation else { continue };
+                if let Err(e) = launch_run(Some(&app), &db, &automation, RunSource::Email) {
+                    eprintln!("[automations] gmail-triggered launch failed for {}: {e}", automation.id);
+                }
+            }
         }
     });
 }
@@ -153,6 +170,23 @@ fn tick(app: Option<&AppHandle>, db: &Arc<Mutex<Connection>>) {
             eprintln!("[automations] scheduled launch failed for {}: {e}", automation.id);
         }
     }
+    // Event triggers that need no resident process: a git HEAD-SHA comparison
+    // is pure DB + `git rev-parse`, so it rides the same 30s tick. (Webhook
+    // and file triggers have their own listeners/watchers; gmail needs async
+    // HTTP and is evaluated in start's loop, right after this tick — see
+    // automation_webhook.rs / automation_triggers.rs.) Fires respect the same
+    // RUNNING overlap guard via launch_run.
+    let fired_ids = crate::automation_triggers::evaluate_git_triggers(db);
+    for id in fired_ids {
+        let automation = {
+            let conn = db.lock();
+            db::get_automation(&conn, &id).ok().flatten()
+        };
+        let Some(automation) = automation else { continue };
+        if let Err(e) = launch_run(app, db, &automation, RunSource::GitChange) {
+            eprintln!("[automations] git-triggered launch failed for {}: {e}", automation.id);
+        }
+    }
 }
 
 /// Every enabled automation whose next fire time (computed from the last run,
@@ -164,6 +198,11 @@ pub fn due_automations(conn: &Connection, now: i64) -> Vec<Automation> {
         .unwrap_or_default()
         .into_iter()
         .filter(|a| a.enabled)
+        // Only rows whose firing engine IS the cron tick participate in
+        // cron due-ness. Event rows (webhook/file/git) have their own
+        // engines; their `schedule` may be empty, and an empty string would
+        // otherwise fail cron parsing on every tick forever.
+        .filter(|a| a.trigger_type == "cron")
         .filter(|a| {
             let after = a.last_run_at.unwrap_or(a.created_at);
             next_fire(&a.schedule, after).is_some_and(|t| t <= now)
@@ -187,6 +226,23 @@ fn parse_schedule(expr: &str) -> Result<cron::Schedule, String> {
 /// Validate a schedule string (command layer rejects bad input up front).
 pub fn validate_schedule(expr: &str) -> Result<(), String> {
     parse_schedule(expr).map(|_| ())
+}
+
+/// The next fire for a row of ANY trigger type, as the IPC layer reports it:
+/// cron rows return `(Some(unix_ts), "")`; event rows return a degraded human
+/// string and no timestamp — never the misleading "schedule error — will not
+/// fire" an unparsable (often empty) cron string would otherwise produce.
+pub fn describe_next_fire(trigger_type: &str, schedule: &str, after_ts: i64) -> (Option<i64>, String) {
+    match trigger_type {
+        "webhook" => (None, "on webhook call".into()),
+        "file" => (None, "on file change".into()),
+        "git" => (None, "on git change".into()),
+        "gmail" => (None, "on new email".into()),
+        // cron (and anything unknown — treated as cron, matching the default
+        // column value): the timestamp speaks for itself; the frontend formats
+        // it, so the label stays empty.
+        _ => (next_fire(schedule, after_ts), String::new()),
+    }
 }
 
 /// The next fire time (unix ts) strictly after `after_ts`, in local time.
@@ -251,11 +307,23 @@ pub fn launch_run(
 }
 
 /// How a run was triggered. Stored on the run row so the UI can show the
-/// source ("scheduled" vs "manual") in the Past Runs list.
-#[derive(Debug, Clone, Copy)]
+/// source ("scheduled"/"manual"/"webhook"/"fs"/"git"/"email") in the Past
+/// Runs list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunSource {
+    /// Cron tick (in-app 30s loop or the run-due sidecar).
     Scheduled,
+    /// Run-now button / chat run_automation_now.
     Manual,
+    /// Inbound webhook trigger (automation_webhook.rs; app-open only).
+    Webhook,
+    /// File-watch trigger (automation_triggers.rs fs registry).
+    FsWatch,
+    /// Git HEAD-change trigger (30s tick or the run-due sidecar).
+    GitChange,
+    /// New-email trigger (Gmail historyId poll, automation_triggers.rs;
+    /// app-open only).
+    Email,
 }
 
 impl RunSource {
@@ -263,8 +331,28 @@ impl RunSource {
         match self {
             RunSource::Scheduled => "scheduled",
             RunSource::Manual => "manual",
+            RunSource::Webhook => "webhook",
+            RunSource::FsWatch => "fs",
+            RunSource::GitChange => "git",
+            RunSource::Email => "email",
         }
     }
+
+    /// True only for the cron engine: `db::record_run` advances
+    /// `last_run_at` (the cron clock) for these and `last_event_run_at` for
+    /// every event source, so a webhook/fs/git/email run never delays the
+    /// schedule.
+    pub fn is_scheduled(self) -> bool {
+        matches!(self, RunSource::Scheduled)
+    }
+}
+
+/// Whether an automation has a run in flight IN THIS PROCESS — used by the
+/// webhook listener to answer 409 instead of launching a run that would only
+/// be recorded as "skipped". (Runs owned by the Task Scheduler sidecar are
+/// invisible here, same as for `stop_run`.)
+pub fn is_running(automation_id: &str) -> bool {
+    RUNNING.lock().contains(automation_id)
 }
 
 /// Blocking variant for the headless `relay-automation` binary: the process
@@ -309,6 +397,10 @@ struct PreparedRun {
     /// Set by `stop_run` from the Automations view. Shared with the RUNNING
     /// guard's lifetime: both are released together in `release_guards`.
     cancel: Arc<AtomicBool>,
+    /// How this run was triggered — finalize routes the timestamp advance
+    /// (last_run_at vs last_event_run_at) and the automation_runs.source
+    /// label from it.
+    source: RunSource,
 }
 
 fn prepare_run(db: &Arc<Mutex<Connection>>, automation: &Automation, source: RunSource) -> Result<Option<PreparedRun>, String> {
@@ -523,7 +615,7 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
             }
         }
     };
-    Ok(Some(PreparedRun { chat_session_id, lock_path, run_id, cancel }))
+    Ok(Some(PreparedRun { chat_session_id, lock_path, run_id, cancel, source }))
 }
 
 /// `<db file>.automation-<id>.lock` — next to relay.db so every process
@@ -611,18 +703,20 @@ fn finalize(
     let summary = summarize(&status);
     {
         let conn = db.lock();
-        // record_run is what advances last_run_at. If that write fails and we
-        // swallow it, the next 30 s tick still sees the automation as due and
-        // fires it AGAIN — repeated duplicate paid-API/harness runs until a
-        // write happens to succeed. Retry once (transient SQLITE_BUSY), then
-        // log loudly so the failure is at least diagnosable.
-        if let Err(e) = record_run(&conn, &automation.id, &status, Some(&prepared.chat_session_id)) {
+        // record_run is what advances the cron clock (last_run_at) for
+        // scheduled runs — or last_event_run_at for webhook/fs/git runs, so
+        // event triggers never delay the schedule. If that write fails and we
+        // swallow it, the next 30 s tick still sees a cron automation as due
+        // and fires it AGAIN — repeated duplicate paid-API/harness runs until
+        // a write happens to succeed. Retry once (transient SQLITE_BUSY),
+        // then log loudly so the failure is at least diagnosable.
+        if let Err(e) = record_run(&conn, &automation.id, &status, Some(&prepared.chat_session_id), prepared.source.as_str()) {
             eprintln!(
                 "[automations] record_run failed for {} ({}), retrying once: {e}",
                 automation.id, automation.name
             );
             std::thread::sleep(Duration::from_millis(250));
-            if let Err(e2) = record_run(&conn, &automation.id, &status, Some(&prepared.chat_session_id)) {
+            if let Err(e2) = record_run(&conn, &automation.id, &status, Some(&prepared.chat_session_id), prepared.source.as_str()) {
                 eprintln!(
                     "[automations] record_run retry ALSO failed for {} — the scheduler may re-fire this automation: {e2}",
                     automation.id
@@ -948,6 +1042,37 @@ mod tests {
     }
 
     #[test]
+    fn next_fire_degrades_to_human_strings_for_event_triggers() {
+        let now = db::now_ts();
+        // Event rows: no timestamp, a human string — never a cron parse error.
+        let (at, label) = describe_next_fire("webhook", "", now);
+        assert_eq!(at, None);
+        assert_eq!(label, "on webhook call");
+        let (at, label) = describe_next_fire("file", "", now);
+        assert_eq!(at, None);
+        assert_eq!(label, "on file change");
+        let (at, label) = describe_next_fire("git", "", now);
+        assert_eq!(at, None);
+        assert_eq!(label, "on git change");
+        let (at, label) = describe_next_fire("gmail", "", now);
+        assert_eq!(at, None);
+        assert_eq!(label, "on new email");
+        // The empty cron string must NOT read as "unparsable" anywhere —
+        // the labels above replace the old "schedule error — will not fire".
+        assert!(next_fire("", now).is_none());
+
+        // Cron rows (the default, and anything unknown): timestamp, no label.
+        let (at, label) = describe_next_fire("cron", "*/15 * * * *", now);
+        assert!(at.is_some_and(|t| t > now));
+        assert_eq!(label, "");
+        let (at2, label) = describe_next_fire("weird-legacy-value", "*/15 * * * *", now);
+        assert_eq!(at2.is_some(), true);
+        assert_eq!(label, "");
+        // Invalid cron still yields None (the IPC layer surfaces the error).
+        assert_eq!(describe_next_fire("cron", "not a schedule", now).0, None);
+    }
+
+    #[test]
     fn summarize_truncates_on_char_boundary_not_byte() {
         // Regression: `&status[..120]` panicked when byte 120 fell mid-
         // codepoint — and the panic skipped RUNNING/lock cleanup, wedging
@@ -990,6 +1115,10 @@ mod tests {
             chat_session_id: None,
             created_at: 0,
             origin: "user".to_string(),
+            trigger_type: "cron".to_string(),
+            trigger_config: "{}".to_string(),
+            last_trigger_state: None,
+            last_event_run_at: None,
         };
         let p = webhook_payload(&a, "ok", "Completed", 1234);
         assert_eq!(p["event"], "automation.run_finished");
@@ -1049,6 +1178,8 @@ mod tests {
                     schedule: "* * * * *".into(),
                     enabled: Some(true),
                     origin: None,
+                    trigger_type: None,
+                    trigger_config: None,
                 },
             )
             .unwrap();
@@ -1096,6 +1227,8 @@ mod tests {
                     schedule: schedule.into(),
                     enabled: Some(enabled),
                     origin: None,
+                    trigger_type: None,
+                    trigger_config: None,
                 },
             )
             .unwrap()
@@ -1110,5 +1243,126 @@ mod tests {
         let ids: Vec<&str> = due.iter().map(|a| a.id.as_str()).collect();
         assert!(ids.contains(&due_one.id.as_str()), "enabled + past-due fires");
         assert_eq!(due.len(), 1, "disabled rows never fire");
+    }
+
+    #[test]
+    fn event_rows_are_never_cron_due() {
+        // A git-triggered row with an EMPTY schedule must not fail cron
+        // parsing on every tick (or fire) — it has its own engine.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let a = crate::db::create_automation(
+            &conn,
+            &crate::db::AutomationInput {
+                name: "git-fired".into(),
+                prompt: "p".into(),
+                harness: "claude_code".into(),
+                model: None,
+                cwd: None,
+                schedule: String::new(),
+                enabled: Some(true),
+                origin: None,
+                trigger_type: Some("git".into()),
+                trigger_config: Some("{\"cwd\":\"D:/repo\"}".into()),
+            },
+        )
+        .unwrap();
+        let due = due_automations(&conn, db::now_ts() + 999_999);
+        assert!(!due.iter().any(|x| x.id == a.id), "event rows never fire via cron");
+        // Same for a gmail row: its engine is the async poll in start's loop.
+        let g = crate::db::create_automation(
+            &conn,
+            &crate::db::AutomationInput {
+                name: "gmail-fired".into(),
+                prompt: "p".into(),
+                harness: "claude_code".into(),
+                model: None,
+                cwd: None,
+                schedule: String::new(),
+                enabled: Some(true),
+                origin: None,
+                trigger_type: Some("gmail".into()),
+                trigger_config: Some("{}".into()),
+            },
+        )
+        .unwrap();
+        assert!(!due_automations(&conn, db::now_ts() + 999_999).iter().any(|x| x.id == g.id));
+        // A leftover cron schedule on an event row must not fire cron-side
+        // either — the trigger_type owns the firing decision.
+        crate::db::update_automation(
+            &conn,
+            &a.id,
+            &crate::db::AutomationInput {
+                name: "git-fired".into(),
+                prompt: "p".into(),
+                harness: "claude_code".into(),
+                model: None,
+                cwd: None,
+                schedule: "* * * * *".into(),
+                enabled: Some(true),
+                origin: None,
+                trigger_type: None,
+                trigger_config: None,
+            },
+        )
+        .unwrap();
+        assert!(due_automations(&conn, db::now_ts() + 999_999).is_empty());
+    }
+
+    #[test]
+    fn email_source_is_event_classed() {
+        // The wire string db::record_run switches on — "email" must stay
+        // event-classed (anything but "scheduled" advances
+        // last_event_run_at, never the cron clock).
+        assert_eq!(RunSource::Email.as_str(), "email");
+        assert!(!RunSource::Email.is_scheduled());
+    }
+
+    #[test]
+    fn record_run_splits_cron_clock_from_event_clock() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let mk = |name: &str| {
+            crate::db::create_automation(
+                &conn,
+                &crate::db::AutomationInput {
+                    name: name.into(),
+                    prompt: "p".into(),
+                    harness: "claude_code".into(),
+                    model: None,
+                    cwd: None,
+                    schedule: "* * * * *".into(),
+                    enabled: Some(true),
+                    origin: None,
+                    trigger_type: None,
+                    trigger_config: None,
+                },
+            )
+            .unwrap()
+        };
+        let cron_row = mk("cron-row");
+        let event_row = mk("event-row");
+
+        // A scheduled run advances last_run_at ONLY.
+        crate::db::record_run(&conn, &cron_row.id, "ok", None, "scheduled").unwrap();
+        let after_cron = crate::db::get_automation(&conn, &cron_row.id).unwrap().unwrap();
+        assert!(after_cron.last_run_at.is_some(), "cron run advances the cron clock");
+        assert_eq!(after_cron.last_event_run_at, None);
+
+        // An event run (webhook/fs/git/email — the exact strings RunSource
+        // writes) advances last_event_run_at INSTEAD: next_fire computes from
+        // last_run_at, so an event run must never delay the schedule.
+        for source in ["webhook", "fs", "git", "email", "manual"] {
+            crate::db::record_run(&conn, &event_row.id, "ok", None, source).unwrap();
+        }
+        let after_event = crate::db::get_automation(&conn, &event_row.id).unwrap().unwrap();
+        assert_eq!(
+            after_event.last_run_at, None,
+            "event runs never advance last_run_at"
+        );
+        assert!(after_event.last_event_run_at.is_some(), "event runs advance last_event_run_at");
+        // The cron automation's clock is untouched by the event row's runs.
+        let after_cron2 = crate::db::get_automation(&conn, &cron_row.id).unwrap().unwrap();
+        assert_eq!(after_cron2.last_event_run_at, None);
     }
 }

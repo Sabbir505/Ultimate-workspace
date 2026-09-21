@@ -40,10 +40,37 @@ pub struct Automation {
     /// so the user can always see what the model scheduled.
     #[serde(default = "default_origin")]
     pub origin: String,
+    /// Firing engine: "cron" (default) | "webhook" | "file" | "git" |
+    /// "gmail". Everything except "cron" is evaluated by
+    /// crate::automation_triggers; for those the `schedule` column may be
+    /// empty.
+    #[serde(default = "default_trigger_type")]
+    pub trigger_type: String,
+    /// JSON payload for the trigger engine (serde-shaped by
+    /// automation_triggers::TriggerSpec): webhook = {} (plus the secret),
+    /// file = {path, minIntervalSecs?}, git = {cwd, branch?},
+    /// gmail = {label?}.
+    #[serde(default)]
+    pub trigger_config: String,
+    /// Trigger engine dedupe state — last seen git SHA, the epoch of the
+    /// last fs-triggered fire, or the last Gmail historyId (see
+    /// crate::automation_triggers). NULL until the first evaluation.
+    #[serde(default)]
+    pub last_trigger_state: Option<String>,
+    /// Timestamp of the most recent EVENT-triggered run
+    /// (webhook/file/git/email). Event runs advance this instead of
+    /// `last_run_at`, so they never push the cron schedule's next fire into
+    /// the future.
+    #[serde(default)]
+    pub last_event_run_at: Option<i64>,
 }
 
 fn default_origin() -> String {
     "user".to_string()
+}
+
+fn default_trigger_type() -> String {
+    "cron".to_string()
 }
 
 /// One past (or in-flight) run of an automation. Used by the Automations
@@ -83,6 +110,13 @@ pub struct AutomationInput {
     /// "user" (UI form — the default when absent) or "agent" (chat tool).
     #[serde(default)]
     pub origin: Option<String>,
+    /// Firing engine ("cron" default | "webhook" | "file" | "git" |
+    /// "gmail"). None keeps the stored value on update.
+    #[serde(default)]
+    pub trigger_type: Option<String>,
+    /// JSON trigger payload. None keeps the stored value on update.
+    #[serde(default)]
+    pub trigger_config: Option<String>,
 }
 
 fn map_automation(row: &Row) -> rusqlite::Result<Automation> {
@@ -100,17 +134,23 @@ fn map_automation(row: &Row) -> rusqlite::Result<Automation> {
         chat_session_id: row.get("chat_session_id")?,
         created_at: row.get("created_at")?,
         origin: row.get("origin").unwrap_or_else(|_| default_origin()),
+        trigger_type: row
+            .get("trigger_type")
+            .unwrap_or_else(|_| default_trigger_type()),
+        trigger_config: row.get("trigger_config").unwrap_or_else(|_| "{}".into()),
+        last_trigger_state: row.get("last_trigger_state").unwrap_or(None),
+        last_event_run_at: row.get("last_event_run_at").unwrap_or(None),
     })
 }
 
 const COLUMNS: &str =
-    "id, name, prompt, harness, model, cwd, schedule, enabled, last_run_at, last_status, chat_session_id, created_at, origin";
+    "id, name, prompt, harness, model, cwd, schedule, enabled, last_run_at, last_status, chat_session_id, created_at, origin, trigger_type, trigger_config, last_trigger_state, last_event_run_at";
 
 pub fn create_automation(conn: &Connection, input: &AutomationInput) -> DbResult<Automation> {
     let id = new_id();
     conn.execute(
-        "INSERT INTO automations (id, name, prompt, harness, model, cwd, schedule, enabled, created_at, origin)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO automations (id, name, prompt, harness, model, cwd, schedule, enabled, created_at, origin, trigger_type, trigger_config)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             id,
             input.name,
@@ -122,6 +162,8 @@ pub fn create_automation(conn: &Connection, input: &AutomationInput) -> DbResult
             input.enabled.unwrap_or(true) as i64,
             now_ts(),
             input.origin.as_deref().unwrap_or("user"),
+            input.trigger_type.as_deref().filter(|t| !t.is_empty()).unwrap_or("cron"),
+            input.trigger_config.as_deref().unwrap_or("{}"),
         ],
     )?;
     get_automation(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
@@ -133,7 +175,8 @@ pub fn update_automation(
     input: &AutomationInput,
 ) -> DbResult<()> {
     conn.execute(
-        "UPDATE automations SET name = ?2, prompt = ?3, harness = ?4, model = ?5, cwd = ?6, schedule = ?7
+        "UPDATE automations SET name = ?2, prompt = ?3, harness = ?4, model = ?5, cwd = ?6, schedule = ?7,
+           trigger_type = COALESCE(?8, trigger_type), trigger_config = COALESCE(?9, trigger_config)
          WHERE id = ?1",
         params![
             automation_id,
@@ -143,6 +186,10 @@ pub fn update_automation(
             input.model.as_deref().unwrap_or(""),
             input.cwd.as_deref().unwrap_or(""),
             input.schedule,
+            // None = "keep the stored trigger engine/payload" (the chat tool's
+            // partial-update merge relies on this); Some overwrites.
+            input.trigger_type,
+            input.trigger_config,
         ],
     )?;
     Ok(())
@@ -201,17 +248,43 @@ pub fn record_status(conn: &Connection, automation_id: &str, status: &str) -> Db
 
 /// Stamp a run attempt (launch time + outcome) and, on the first run, bind
 /// the freshly created chat session as the automation's run log.
+///
+/// The timestamp split follows the run's SOURCE: a "scheduled" (cron) run
+/// advances `last_run_at` — that's what makes the cron clock tick. An event
+/// run (webhook / fs / git / email) advances `last_event_run_at` INSTEAD,
+/// because next_fire computes from last_run_at: letting a webhook call move
+/// the schedule would silently delay every later cron slot.
 pub fn record_run(
     conn: &Connection,
     automation_id: &str,
     status: &str,
     chat_session_id: Option<&str>,
+    source: &str,
 ) -> DbResult<()> {
     conn.execute(
-        "UPDATE automations SET last_run_at = ?2, last_status = ?3,
-           chat_session_id = COALESCE(?4, chat_session_id)
+        "UPDATE automations SET
+           last_status = ?3,
+           chat_session_id = COALESCE(?4, chat_session_id),
+           last_run_at = CASE WHEN ?5 = 'scheduled' THEN ?2 ELSE last_run_at END,
+           last_event_run_at = CASE WHEN ?5 = 'scheduled' THEN last_event_run_at ELSE ?2 END
          WHERE id = ?1",
-        params![automation_id, now_ts(), status, chat_session_id],
+        params![automation_id, now_ts(), status, chat_session_id, source],
+    )?;
+    Ok(())
+}
+
+/// Store the trigger engine's dedupe state — the last seen git SHA for
+/// `git` triggers, the last-fire epoch for `file` triggers (see
+/// crate::automation_triggers). Compare-then-fire protocol: the engine
+/// reads this, decides, and writes the new value back in the same pass.
+pub fn set_automation_trigger_state(
+    conn: &Connection,
+    automation_id: &str,
+    state: &str,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE automations SET last_trigger_state = ?2 WHERE id = ?1",
+        params![automation_id, state],
     )?;
     Ok(())
 }
@@ -425,6 +498,8 @@ mod tests {
                 schedule: "0 3 * * *".into(),
                 enabled: Some(true),
                 origin: None,
+                trigger_type: None,
+                trigger_config: None,
             },
         )
         .unwrap();
@@ -470,6 +545,8 @@ mod tests {
             schedule: "2 9 * * 1-5".into(),
             enabled: None,
             origin: None,
+            trigger_type: None,
+            trigger_config: None,
         }
     }
 
@@ -495,14 +572,14 @@ mod tests {
         set_automation_enabled(&conn, &a.id, false).unwrap();
         assert!(!get_automation(&conn, &a.id).unwrap().unwrap().enabled);
 
-        record_run(&conn, &a.id, "ok", Some("chat-1")).unwrap();
+        record_run(&conn, &a.id, "ok", Some("chat-1"), "scheduled").unwrap();
         let after = get_automation(&conn, &a.id).unwrap().unwrap();
         assert_eq!(after.last_status.as_deref(), Some("ok"));
         assert_eq!(after.chat_session_id.as_deref(), Some("chat-1"));
         assert!(after.last_run_at.is_some());
 
         // A later run without a session id keeps the bound one.
-        record_run(&conn, &a.id, "skipped", None).unwrap();
+        record_run(&conn, &a.id, "skipped", None, "scheduled").unwrap();
         let after2 = get_automation(&conn, &a.id).unwrap().unwrap();
         assert_eq!(after2.chat_session_id.as_deref(), Some("chat-1"));
 

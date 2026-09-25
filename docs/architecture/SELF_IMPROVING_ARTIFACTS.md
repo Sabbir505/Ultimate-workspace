@@ -1,9 +1,11 @@
 # Self-Improving Artifacts — Design
 
-Status: design — P0 (registry) + P1 (engine) implemented · 2026-09-04, updated 2026-09-05
+Status: design — P0 (registry) + P1 (engine) + P2 (canary promotion) implemented · 2026-09-04, updated 2026-09-21
 Scope: Skills, Loops, Prompt Templates, Automations
 
-> **Implementation status (2026-09-05):** the observe/propose/evaluate/promote loop described in §6–§8 ships as `src-tauri/src/improve_engine.rs` + `src-tauri/src/commands/improve_cmds.rs` (20 commands) + `src-tauri/src/db/improve.rs` (improve_* tables + `loop_sessions`), with the Settings → Improvements panel (`src/components/settings/ImprovementsPanel.tsx`). Later phases remain as designed below.
+> **Implementation status (2026-09-05, status corrected 2026-09-21):** the observe/propose/evaluate/promote loop described in §6–§9 ships as `src-tauri/src/improve_engine.rs` + `src-tauri/src/commands/improve_cmds.rs` (20 commands) + `src-tauri/src/db/improve.rs` (improve_* tables + `loop_sessions`), with the Settings → Improvements panel (`src/components/settings/ImprovementsPanel.tsx`). **P2 is built too** — `improve_canaries` (db/mod.rs), canary shadow windows with auto-promote (capped 1/24h), auto-rollback / stale marking, blast-radius demotion to manual, and the `improvements.enabled` kill switch are all in `improve_engine.rs`; canary defaults are `min_runs 10` / `max_age_secs 172800` (48h), not the "20 runs / 48h" example below.
+>
+> **Naming drift (verified against source 2026-09-21):** the body SQL below uses pre-shipping table names. The shipped names are `improve_artifacts`, `improve_versions`, `improve_channels`, `improve_runs`, `improve_feedback`, `improve_proposals`, `improve_eval_cases`, `improve_eval_runs`, `improve_eval_results`, `improve_canaries`, `improve_events` (the bare `artifacts` table is a different, chat-attachment table). The §10 file list is stale: there is no `src-tauri/src/artifacts/improver.rs` or `eval.rs` — the engine is `src-tauri/src/improve_engine.rs`; `parse_invoked_skills` now lives in `chat/commands/send.rs`.
 
 ---
 

@@ -234,6 +234,8 @@ the same lesson via its truncation fix.
 
 ### 3.1 A shared context engine (new `src-tauri/src/chat/context_mgr.rs`)
 
+> **Shipped as:** `chat/compaction.rs` (thresholds, summarization, map-reduce) + `chat/cloud_compact.rs` (provider summarize + persist) + `chat/context_windows.rs` (window catalog) — the design's `context_mgr.rs` file name was not used. §4 records the L1 deviation (per-message `trim_entry_content` instead of tool-result eviction).
+
 Extract from the LocalGguf-only hook into a provider-agnostic engine:
 
 - **Model window registry** (replaces the flat 500k): bundled JSON of per-model windows
@@ -347,7 +349,9 @@ extend `compactionSettings.test.ts` for the unified settings.
 ## 4. Implementation status (2026-09-02)
 
 All five phases are implemented and green: **614 Rust tests + 513 TS tests passing,
-`tsc` clean, `vite build` clean.**
+`tsc` clean, `vite build` clean.** _(Counts updated 2026-09-21: the suite has grown to
+**1315 Rust tests** (0 failed, 16 ignored) and **1286 TS tests** across 174 files — the
+per-phase status below still reflects the original landing.)_
 
 ### P0 — honesty ✅
 - `src-tauri/src/chat/context_windows.rs` + `src/lib/contextWindow.ts`: per-model window

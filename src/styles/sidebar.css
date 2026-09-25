@@ -591,6 +591,25 @@ button.sidebar-section-label:hover {
   filter: brightness(1.12);
 }
 
+/* Running app version, right of the wordmark. The packaged build's identity is
+ * otherwise invisible in-app â€” UpdateButton only ever shows the version of an
+ * AVAILABLE update â€” so a channel build (e.g. 0.6.1-staging.1) could not be
+ * told apart from production. Ellipsizes rather than displacing the nav cluster. */
+.sidebar-version {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  opacity: 0.75;
+  user-select: none;
+  cursor: default;
+}
+
 
 /* Collapse-sidebar icon button (top of the sidebar) */
 .sidebar-collapse-btn {

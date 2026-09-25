@@ -1742,8 +1742,12 @@ mod tests {
         // user's shell env (HTTP_PROXY etc.), where hostname resolution is
         // skipped by design.
         assert!(host_blocked_in("localhost", false));
-        // RFC 2606 `.invalid` is guaranteed unresolvable → fail-closed true.
-        assert!(host_blocked_in("relay-does-not-exist.invalid", false));
+        // A syntactically invalid host can never resolve → fail-closed true.
+        // Deliberately NOT a `.invalid` name: machines running a TUN/proxy
+        // resolver (Clash-style fake-IP) answer those with 198.18.0.0/15, so
+        // the "guaranteed unresolvable" assumption held only on bare DNS and
+        // the test failed on a correct build.
+        assert!(host_blocked_in("bad host name", false));
         // Proxied path: hostname checks are skipped (the proxy resolves),
         // literal IPs are still judged.
         assert!(!host_blocked_in("example.com", true));

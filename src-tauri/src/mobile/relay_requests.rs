@@ -422,12 +422,28 @@ pub(super) async fn spawn_session_arm(
     db: &Arc<Mutex<Connection>>,
     write: &super::relay_ws::SharedWsWrite,
 ) {
-                // Delegate spawning to the desktop frontend: it opens the session
-                // in a pane via the normal session-launcher path (frontend-owned
-                // pane ids, harness flags like Claude's --mcp-config, grid
-                // placement rules). Spawning directly here used a `mobile-{uuid}`
-                // pane id the frontend knew nothing about, so phone-spawned
-                // sessions ran invisibly in the dev tab.
+                // Chat sessions (chat_sessions — everything the phone's list
+                // shows) are chat-driven: harness turns spawn per-send via the
+                // session bundle, so there is no terminal pane to open. Just
+                // bump activity so the phone's list ordering follows.
+                let chat_hit = {
+                    let conn = db.lock();
+                    crate::db::get_chat_session(&conn, &session_id)
+                        .map(|hit| hit.is_some())
+                        .map_err(|e| format!("{e}"))
+                };
+                if chat_hit == Ok(true) {
+                    let conn = db.lock();
+                    let _ = crate::db::touch_chat_session(&conn, &session_id);
+                    return;
+                }
+                // Legacy `sessions` ids keep the old path. Delegate spawning to
+                // the desktop frontend: it opens the session in a pane via the
+                // normal session-launcher path (frontend-owned pane ids, harness
+                // flags like Claude's --mcp-config, grid placement rules).
+                // Spawning directly here used a `mobile-{uuid}` pane id the
+                // frontend knew nothing about, so phone-spawned sessions ran
+                // invisibly in the dev tab.
                 let result = {
                     let conn = db.lock();
                     crate::db::get_session_with_project(&conn, &session_id)
@@ -472,24 +488,66 @@ pub(super) async fn spawn_session_arm(
 pub(super) async fn create_session_arm(
     project_id: String,
     harness: String,
-    app: &AppHandle,
+    provider: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    connectors: Option<Vec<String>>,
+    _app: &AppHandle,
     db: &Arc<Mutex<Connection>>,
     write: &super::relay_ws::SharedWsWrite,
 ) {
+                // Create a real chat_sessions row — the store the desktop's
+                // chat rail lists — so a phone-started chat exists everywhere.
+                // The legacy `sessions` insert previously produced rows no
+                // surface (desktop or phone) ever listed again.
                 let session = {
                     let conn = db.lock();
-                    crate::db::create_session(&conn, &project_id, &harness)
-                        .map_err(|e| format!("{e}"))
+                    // Provider/model: the phone's model chip, or "auto"
+                    // routing (the desktop's fresh-chat default) when omitted.
+                    let prov = provider.unwrap_or_else(|| "auto".to_string());
+                    let mdl = model.unwrap_or_else(|| "auto".to_string());
+                    let prov = if harness == "local" { "local_gguf".to_string() } else { prov };
+                    crate::db::create_chat_session(
+                        &conn,
+                        &prov,
+                        &mdl,
+                        if project_id.is_empty() { None } else { Some(project_id.as_str()) },
+                    )
+                    .and_then(|mut chat| {
+                        if !harness.is_empty() && harness != "auto" {
+                            crate::db::update_chat_session_agent(
+                                &conn,
+                                &chat.id,
+                                Some(&format!("harness:{harness}")),
+                            )?;
+                            chat.agent = Some(format!("harness:{harness}"));
+                        }
+                        // The picker's effort slider rides the same create —
+                        // "" normalizes to NULL (provider default) inside.
+                        if let Some(effort) = &effort {
+                            crate::db::update_chat_session_effort(&conn, &chat.id, effort)?;
+                            chat.effort_level = {
+                                let e = effort.trim();
+                                if e.is_empty() { None } else { Some(e.to_string()) }
+                            };
+                        }
+                        // Connectors attached from the composer's @-menu before
+                        // the chat existed — same per-session set the desktop
+                        // composer edits.
+                        if let Some(ids) = &connectors {
+                            if !ids.is_empty() {
+                                crate::db::set_chat_session_connectors(&conn, &chat.id, ids)?;
+                            }
+                        }
+                        Ok(chat)
+                    })
+                    .map_err(|e| format!("{e}"))
                 };
                 match session {
                     Ok(s) => {
-                        // Tell the desktop frontend to open the new session in a
-                        // dev-tab pane (and spawn it via the normal launcher
-                        // path) so phone-started sessions show up on the desktop.
-                        let _ = app.emit(
-                            "mobile:session-open-requested",
-                            serde_json::json!({ "sessionId": s.id.clone() }),
-                        );
+                        // No mobile:session-open-requested: a fresh chat has no
+                        // terminal pane to open — it surfaces in the desktop's
+                        // chat rail on its next list refresh.
                         let pname = {
                             let conn = db.lock();
                             crate::db::get_project(&conn, &project_id)
@@ -503,10 +561,13 @@ pub(super) async fn create_session_arm(
                             project_id: project_id.clone(),
                             project_name: pname,
                             title: s.title.unwrap_or_else(|| "Untitled".to_string()),
-                            harness: s.harness,
+                            harness: harness.clone(),
                             status: "idle".to_string(),
                             last_active_at: s.last_active_at,
                             is_live: false,
+                            starred: false,
+                            unread: false,
+                            effort: s.effort_level,
                         };
                         let _ = send_msg(&write, &DesktopMessage::SessionCreated { session: info })
                             .await;

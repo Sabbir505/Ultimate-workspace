@@ -7,7 +7,7 @@
 use super::relay_ws::OwnerMap;
 use super::protocol::DesktopMessage;
 use serde::Deserialize;
-use tauri::Listener;
+use tauri::{AppHandle, Listener, Manager};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Process-global guard for the `mobile:session_chat_event` listener. Every
@@ -36,6 +36,246 @@ pub struct SessionChatEventPayload {
 
 /// Payload structure for the `mobile:session_chat_owner` Tauri event emitted
 /// by the Rust side. The React side listens and stores the mapping.
+/// chat_session_id -> owner_session_id for relay-run turns. The owner's
+/// WebSocket channel is looked up from the owner map at forward time; this
+/// only resolves which phone a backend `chat:*` event belongs to.
+static CHAT_OWNERS: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashMap<String, Vec<String>>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+/// Remember which phone started the turn on `chat_session_id`.
+pub fn record_chat_owner(chat_session_id: &str, owner_session_id: &str) {
+    let mut map = CHAT_OWNERS.lock();
+    let owners = map.entry(chat_session_id.to_string()).or_default();
+    if !owners.iter().any(|o| o == owner_session_id) {
+        owners.push(owner_session_id.to_string());
+    }
+}
+
+/// Remember that a phone is WATCHING `chat_session_id` (it just opened the
+/// chat). Desktop-started turns in a watched chat stream to the phone live —
+/// without this the phone only saw them after a manual refresh, because the
+/// desktop frontend's re-broadcast needs an owner mapping that only a
+/// phone-sent turn ever created (and it dies with the desktop store).
+pub fn watch_chat(chat_session_id: &str, owner_session_id: &str) {
+    record_chat_owner(chat_session_id, owner_session_id);
+}
+
+pub(crate) fn owners_for_chat(chat_session_id: &str) -> Vec<String> {
+    CHAT_OWNERS.lock().get(chat_session_id).cloned().unwrap_or_default()
+}
+
+fn forward_to_owner(
+    owner_map: &OwnerMap,
+    chat_session_id: &str,
+    build: impl Fn(String) -> super::protocol::DesktopMessage,
+) {
+    for owner in owners_for_chat(chat_session_id) {
+        let sender = { owner_map.lock().get(&owner).cloned() };
+        let Some(tx) = sender else { continue };
+        let _ = tx.try_send(build(owner));
+    }
+}
+
+/// TRUE streaming for relay-run (phone-originated) turns.
+///
+/// The desktop frontend re-broadcasts `chat:*` events as
+/// `mobile:session_chat_event` ONLY for the chat it currently has open, so a
+/// turn the PHONE started streamed nowhere: not to the phone (it appeared
+/// only after a manual refresh) and not live on the desktop either. The
+/// backend already emits `chat:token` / `chat:status` / `chat:done` /
+/// `chat:error` / `chat:approval_request` / `chat:artifact` for every turn
+/// the relay runs — so the relay listens to them itself and ships frames to
+/// the owning phone. The frontend path stays for desktop-started turns.
+pub fn start_chat_stream_forwarder(app: &AppHandle, owner_map: OwnerMap) {
+    use serde_json::Value;
+    // Owned clone: the listener closures are 'static and must not capture
+    // the borrowed &AppHandle.
+    let app_owned = app.clone();
+
+    {
+        let owner_map = owner_map.clone();
+        let _ = app.listen("chat:token", move |event| {
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
+            let (Some(cid), Some(tok)) = (
+                v.get("chatSessionId").and_then(Value::as_str),
+                v.get("token").and_then(Value::as_str),
+            ) else { return };
+            forward_to_owner(&owner_map, cid, |owner| {
+                super::protocol::DesktopMessage::SessionChatToken {
+                    session_id: owner,
+                    token: tok.to_string(),
+                }
+            });
+        });
+    }
+    {
+        let owner_map = owner_map.clone();
+        let _ = app.listen("chat:status", move |event| {
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
+            let Some(cid) = v.get("chatSessionId").and_then(Value::as_str) else { return };
+            let reason = v.get("reason").and_then(Value::as_str).unwrap_or_default().to_string();
+            let message = v.get("message").and_then(Value::as_str).unwrap_or_default().to_string();
+            forward_to_owner(&owner_map, cid, |owner| {
+                super::protocol::DesktopMessage::SessionChatStatus {
+                    session_id: owner,
+                    reason: reason.clone(),
+                    message: message.clone(),
+                }
+            });
+        });
+    }
+    {
+        let owner_map = owner_map.clone();
+        let _ = app.listen("chat:done", move |event| {
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
+            let Some(cid) = v.get("chatSessionId").and_then(Value::as_str) else { return };
+            let usage = v.get("usage").and_then(|u| {
+                Some(super::protocol::MobileChatUsage {
+                    input_tokens: u.get("inputTokens").and_then(Value::as_i64).unwrap_or(0),
+                    output_tokens: u.get("outputTokens").and_then(Value::as_i64).unwrap_or(0),
+                    cost_usd: u.get("costUsd").and_then(Value::as_f64),
+                })
+            });
+            forward_to_owner(&owner_map, cid, |owner| {
+                super::protocol::DesktopMessage::SessionChatDone {
+                    session_id: owner,
+                    usage: usage.clone(),
+                }
+            });
+            // A RELAY_ASK question is surfaced right AFTER this event, so
+            // dropping the owner mapping here made the question card
+            // undeliverable to the phone (forward_to_owner found no owners).
+            // Keep the mapping while a card is still waiting for an answer.
+            let awaiting_question = app_owned
+                .try_state::<crate::agent_sessions::AgentSessionState>()
+                .map(|s| s.0.has_pending_ask(cid))
+                .unwrap_or(false);
+            if !awaiting_question {
+                CHAT_OWNERS.lock().remove(cid);
+            }
+
+            // Relay-run turns never hit the desktop frontend's
+            // after-first-turn title hook, so the chat stayed "Untitled"
+            // forever (desktop parity: name it with the same generator).
+            let app2 = app_owned.clone();
+            let cid2 = cid.to_string();
+            tauri::async_runtime::spawn(async move {
+                let state = app2.state::<crate::DbState>();
+                let untitled = {
+                    let conn = state.0.lock();
+                    crate::db::get_chat_session(&conn, &cid2)
+                        .ok()
+                        .flatten()
+                        .and_then(|s| s.title)
+                        .map(|t| {
+                            let t = t.trim();
+                            t.is_empty() || t == "Untitled"
+                        })
+                        .unwrap_or(false)
+                };
+                if untitled {
+                    let _ = crate::chat::commands::generators::generate_chat_title(cid2, state).await;
+                }
+            });
+        });
+    }
+    {
+        let owner_map = owner_map.clone();
+        let _ = app.listen("chat:error", move |event| {
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
+            // ChatErrorPayload serializes camelCase: {chatSessionId, message, code}.
+            // The legacy "error" key is kept as a fallback for hand-built payloads.
+            let (Some(cid), Some(err)) = (
+                v.get("chatSessionId").and_then(Value::as_str),
+                v.get("message")
+                    .or_else(|| v.get("error"))
+                    .and_then(Value::as_str),
+            ) else { return };
+            forward_to_owner(&owner_map, cid, |owner| {
+                super::protocol::DesktopMessage::SessionChatError {
+                    session_id: owner,
+                    error: err.to_string(),
+                }
+            });
+        });
+    }
+    {
+        let owner_map = owner_map.clone();
+        let _ = app.listen("chat:approval_request", move |event| {
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
+            let (Some(cid), Some(pending_id), Some(tool)) = (
+                v.get("chatSessionId").and_then(Value::as_str),
+                v.get("pendingId").and_then(Value::as_str),
+                v.get("tool").and_then(Value::as_str),
+            ) else { return };
+            let summary = v
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("A tool action is waiting for your approval.")
+                .to_string();
+            let args = v.get("args").cloned().unwrap_or(Value::Null);
+            forward_to_owner(&owner_map, cid, |owner| {
+                super::protocol::DesktopMessage::SessionApprovalRequest {
+                    session_id: owner,
+                    pending_id: pending_id.to_string(),
+                    tool: tool.to_string(),
+                    summary: summary.clone(),
+                    args: args.clone(),
+                }
+            });
+        });
+    }
+    {
+        let owner_map = owner_map.clone();
+        // A harness asking the user a question parks the turn — the phone
+        // must show the same card the desktop does, or the turn deadlocks
+        // until the user walks to the desktop.
+        let _ = app.listen("chat:question-request", move |event| {
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
+            let (Some(cid), Some(pending_id), questions) = (
+                v.get("chatSessionId").and_then(Value::as_str),
+                v.get("pendingId").and_then(Value::as_str),
+                v.get("questions").cloned(),
+            ) else { return };
+            let questions = questions.unwrap_or(Value::Null);
+            forward_to_owner(&owner_map, cid, |owner| {
+                super::protocol::DesktopMessage::SessionQuestionRequest {
+                    session_id: owner,
+                    pending_id: pending_id.to_string(),
+                    questions: questions.clone(),
+                }
+            });
+        });
+    }
+    {
+        let owner_map = owner_map.clone();
+        let _ = app.listen("chat:artifact", move |event| {
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
+            let (Some(cid), Some(path), Some(filename)) = (
+                v.get("chatSessionId").and_then(Value::as_str),
+                v.get("path").and_then(Value::as_str),
+                v.get("filename").and_then(Value::as_str),
+            ) else { return };
+            let message_id = v.get("messageId").and_then(Value::as_i64);
+            forward_to_owner(&owner_map, cid, |owner| {
+                super::protocol::DesktopMessage::SessionArtifact {
+                    session_id: owner,
+                    message_id,
+                    artifact: super::protocol::ChatArtifactPayload {
+                        path: path.to_string(),
+                        filename: filename.to_string(),
+                        kind: v
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .map(|k| k.to_string()),
+                        inline: None,
+                    },
+                }
+            });
+        });
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionChatOwnerPayload {
     pub chat_session_id: String,

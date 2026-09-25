@@ -4,7 +4,7 @@ import React, {
 } from 'react';
 import {
   Alert, Animated, BackHandler, Easing, Modal, Pressable,
-  ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
+  FlatList, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
   useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,10 +15,13 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 // app. This wrapper preserves the lucide call-site's (size, color) props.
 const PencilSquare = ({ size, color }: { size?: number; color?: string }) =>
   <Ionicons name="create-outline" size={size} color={color} />;
-import { getRelayUrl, onSessionCreated, useRelay, type Session } from '../hooks/useRelay';
+import { getRelayUrl, onProjectList, onProjectRemoved, onProjectUpserted, onSearchResults, onSessionCreated, useRelay, type ChatSearchHit, type ProjectInfo, type Session } from '../hooks/useRelay';
 import { theme, useTheme } from '../theme';
 import ConnectionIndicator from './ConnectionIndicator';
 import { tapLight, tapMedium } from '../lib/haptics';
+import { beginScreenTiming } from '../lib/screenTiming';
+import DomainErrorBar from './DomainErrorBar';
+import ProjectManager from './ProjectManager';
 
 // ---------------------------------------------------------------------------
 // Drawer context — the provider wraps the whole app so ANY screen can call
@@ -26,46 +29,76 @@ import { tapLight, tapMedium } from '../lib/haptics';
 // mounted as a sibling of the Tab.Navigator inside the NavigationContainer).
 // ---------------------------------------------------------------------------
 
-export interface DrawerApi {
-  isOpen: boolean;
+/** Actions only — a STABLE object. Screens that merely open the drawer
+ *  (HomeScreen) consume this, so opening/closing it never re-renders them.
+ *
+ *  Why the split: the provider wraps the whole app, so every state change
+ *  used to re-render every useDrawer() consumer. Tapping a drawer row fires
+ *  open/close state updates in the same batch as the navigation, which meant
+ *  the screen being left behind re-rendered at the exact moment the next one
+ *  mounted — two screens' worth of work inside one navigation frame.
+ */
+export interface DrawerActions {
   open: () => void;
   close: () => void;
-  /** Whether the inline "new chat" project/agent picker sheet is up. */
-  newChatOpen: boolean;
+  closeNow: () => void;
+  openNewChat: () => void;
+  closeNewChat: () => void;
+  /** @internal — <AppDrawer> registers the real implementation. */
+  register: (impl: DrawerImpl | null) => void;
+}
+
+/** The real drawer behaviour, implemented by <AppDrawer>. */
+export interface DrawerImpl {
+  open: () => void;
+  close: () => void;
+  closeNow: () => void;
   openNewChat: () => void;
   closeNewChat: () => void;
 }
 
-const DrawerContext = createContext<DrawerApi>({
-  isOpen: false,
+const DrawerActionsContext = createContext<DrawerActions>({
   open: () => {},
   close: () => {},
-  newChatOpen: false,
+  closeNow: () => {},
   openNewChat: () => {},
   closeNewChat: () => {},
+  register: () => {},
 });
 
 export function DrawerProvider({ children }: { children: ReactNode }) {
-  const [isOpen, setIsOpen] = useState(false);
-  const [newChatOpen, setNewChatOpen] = useState(false);
+  // The provider holds ONLY stable callbacks; all drawer state lives inside
+  // <AppDrawer>, which renders as a sibling of the navigator. Opening or
+  // closing the drawer therefore re-renders exactly one component instead of
+  // every useDrawerActions() consumer in the tree — and, critically, closing
+  // it to navigate no longer puts a state update in the same React batch as
+  // the navigation itself.
+  //
+  // <AppDrawer> registers its real implementation here; until it mounts the
+  // callbacks are harmless no-ops.
+  const impl = useRef<DrawerImpl | null>(null);
+  const call = useCallback((k: keyof DrawerImpl) => () => impl.current?.[k](), []);
 
-  // Haptics live here (not at call sites) so every opener/closer gets the same
-  // physical feedback and row taps can't double-fire the pattern.
-  const open = useCallback(() => { tapMedium(); setIsOpen(true); }, []);
-  const close = useCallback(() => { tapLight(); setIsOpen(false); }, []);
-  const openNewChat = useCallback(() => { setIsOpen(false); setNewChatOpen(true); }, []);
-  const closeNewChat = useCallback(() => { setNewChatOpen(false); }, []);
+  const api = useMemo<DrawerActions>(() => ({
+    open: call('open'),
+    close: call('close'),
+    closeNow: call('closeNow'),
+    openNewChat: call('openNewChat'),
+    closeNewChat: call('closeNewChat'),
+    register: (i: DrawerImpl | null) => { impl.current = i; },
+  }), [call]);
 
-  const api = useMemo<DrawerApi>(() => ({
-    isOpen, open, close, newChatOpen, openNewChat, closeNewChat,
-  }), [isOpen, open, close, newChatOpen, openNewChat, closeNewChat]);
-
-  return <DrawerContext.Provider value={api}>{children}</DrawerContext.Provider>;
+  return <DrawerActionsContext.Provider value={api}>{children}</DrawerActionsContext.Provider>;
 }
 
-export function useDrawer(): DrawerApi {
-  return useContext(DrawerContext);
+/** Drawer actions — stable for the app's lifetime, so consuming this never
+ *  re-renders the consumer. */
+export function useDrawerActions(): DrawerActions {
+  return useContext(DrawerActionsContext);
 }
+
+/** @deprecated use useDrawerActions() — same stable object. */
+export const useDrawer = useDrawerActions;
 
 // ---------------------------------------------------------------------------
 // Shared helpers (also used by HomeScreen's quick-start rows)
@@ -84,11 +117,14 @@ export function harnessLabel(value: string): string {
 
 export interface ProjectSummary { id: string; name: string; provider: string; }
 
-/** Unique projects seen in the session list, newest activity first. */
+/** Unique projects seen in the session list, newest activity first.
+ *  Project-less chats (the desktop default) are skipped — synthesizing an
+ *  'unknown' project here once filled the picker with a fake row. */
 export function collectProjects(sessions: Session[]): ProjectSummary[] {
   const byKey = new Map<string, { id: string; name: string; provider: string; last: number }>();
   for (const s of sessions) {
-    const key = s.projectId || s.projectName || 'unknown';
+    if (!s.projectId && !s.projectName) continue;
+    const key = s.projectId || s.projectName;
     const prev = byKey.get(key);
     if (!prev || s.lastActivity > prev.last) {
       byKey.set(key, {
@@ -127,7 +163,10 @@ function bucketSessions(sessions: Session[]): { label: TimeBucket; items: Sessio
   const now = new Date();
   const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const bounds = [dayStart, dayStart - 86_400_000, dayStart - 6 * 86_400_000];
-  const sorted = [...sessions].sort((a, b) => b.lastActivity - a.lastActivity);
+  // Starred pins first inside each bucket (desktop sidebar: starred DESC,
+  // then most recent).
+  const sorted = [...sessions].sort((a, b) =>
+    (b.starred ? 1 : 0) - (a.starred ? 1 : 0) || b.lastActivity - a.lastActivity);
   const groups = BUCKETS.map((label) => ({ label, items: [] as Session[] }));
   for (const s of sorted) {
     const idx = s.lastActivity >= bounds[0] ? 0
@@ -159,11 +198,20 @@ export function useCreateSessionFlow() {
 
   useEffect(() => clear, [clear]);
 
-  return useCallback((projectId: string, harness: string) => {
+  return useCallback((
+    projectId: string,
+    harness: string,
+    firstMessage?: string,
+    provider?: string,
+    model?: string,
+    firstAttachments?: { name: string; kind: 'text' | 'image' | 'doc'; text?: string; data?: string; media_type?: string; format?: string }[],
+    effort?: string,
+    connectors?: string[],
+  ) => {
     clear();
     // createSession returns false when the socket isn't OPEN — surface that
     // instead of waiting the full 15s for an event that can never arrive.
-    if (!createSession(projectId, harness)) {
+    if (!createSession(projectId, harness, provider, model, effort, connectors)) {
       Alert.alert(
         "Can't reach your desktop",
         'Check that Relay is running and your phone is connected, then try again.',
@@ -179,6 +227,10 @@ export function useCreateSessionFlow() {
       navigation.navigate('SessionDetail', {
         session: { ...s, isLive: true },
         sessionId: s.id,
+        // The chat screen sends this through the normal composer path once
+        // mounted (optimistic bubble + stream — not a blind frame).
+        firstMessage: firstMessage?.trim() || undefined,
+        firstAttachments: firstAttachments && firstAttachments.length > 0 ? firstAttachments : undefined,
       });
     });
     timerRef.current = setTimeout(() => {
@@ -196,16 +248,71 @@ export function useCreateSessionFlow() {
 // ---------------------------------------------------------------------------
 
 function NewChatModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
-  const { sessions, connected } = useRelay();
+  const { sessions, connected, harnesses } = useRelay();
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
   useTheme();
   const c = theme.colors;
   const start = useCreateSessionFlow();
+  // Real project list from the desktop (ListProjects) — the session-derived
+  // list missed projects that have no chats yet. Session-derived entries
+  // still fill in the default agent per project.
+  const [serverProjects, setServerProjects] = useState<ProjectInfo[]>([]);
+  const { listProjects } = useRelay();
+  useEffect(() => {
+    if (!visible) return;
+    listProjects();
+    const offList = onProjectList.on(({ projects: list }) => setServerProjects(list));
+    const offUpsert = onProjectUpserted.on(({ project }) =>
+      setServerProjects((prev) =>
+        prev.some((p) => p.id === project.id)
+          ? prev.map((p) => (p.id === project.id ? project : p))
+          : [...prev, project],
+      ),
+    );
+    const offRemoved = onProjectRemoved.on(({ projectId }) =>
+      setServerProjects((prev) => prev.filter((p) => p.id !== projectId)),
+    );
+    // NOTE: a `useRef` used to be created HERE, inside the effect body. That
+    // is a hook call outside a component render, so opening this sheet threw
+    // "Invalid hook call" and the new-chat picker never appeared at all. The
+    // ref was never read, so it is simply gone.
+    return () => { offList(); offUpsert(); offRemoved(); };
+  }, [visible, listProjects]);
 
-  const projects = useMemo(() => collectProjects(sessions), [sessions]);
+  const projects = useMemo(() => {
+    const fromSessions = collectProjects(sessions);
+    const rows = serverProjects.map((p) => ({
+      id: p.id,
+      name: p.name,
+      provider: fromSessions.find((s) => s.id === p.id)?.provider ?? '',
+    }));
+    for (const s of fromSessions) {
+      if (!rows.some((r) => r.id === s.id)) rows.push(s);
+    }
+    return rows;
+  }, [sessions, serverProjects]);
+  const [manageOpen, setManageOpen] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [harness, setHarness] = useState('claude_code');
+
+  // The project list arrives asynchronously; if the sheet is already open,
+  // nothing was selected and Start created a project-less chat.
+  React.useEffect(() => {
+    if (!visible || projectId != null || projects.length === 0) return;
+    setProjectId(projects[0].id);
+    if (projects[0].provider) setHarness(projects[0].provider);
+  }, [visible, projectId, projects]);
+
+  // Agent chips mirror the desktop's agent picker: the harness list the
+  // desktop advertises (installed state included). Static fallback for a
+  // desktop that hasn't sent the list yet.
+  const agentOptions = useMemo(
+    () => (harnesses.length > 0
+      ? harnesses.map((h) => ({ label: h.display_name, value: h.id, installed: h.installed }))
+      : HARNESS_OPTIONS.map((o) => ({ ...o, installed: true }))),
+    [harnesses],
+  );
 
   // Fresh selection every time the sheet opens.
   useEffect(() => {
@@ -218,18 +325,20 @@ function NewChatModal({ visible, onClose }: { visible: boolean; onClose: () => v
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
-  const canStart = Boolean(projectId) && connected;
+  const canStart = connected;
 
   const handleStart = () => {
-    if (!projectId || !connected) return;
+    if (!connected) return;
     onClose();
     // Land on the chat home while the desktop creates the session (the
-    // SessionCreated listener in `start` opens the chat itself).
-    navigation.navigate('Home');
-    start(projectId, harness);
+    // SessionCreated listener in `start` opens the chat itself). No project
+    // picked → project-less chat, bindable on the desktop later.
+    navigation.navigate('HomeMain');
+    start(projectId ?? '', harness);
   };
 
   return (
+    <>
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View style={[styles.modalScrim, { backgroundColor: c.scrim }]}>
         <Pressable
@@ -247,13 +356,13 @@ function NewChatModal({ visible, onClose }: { visible: boolean; onClose: () => v
             Pick a project and an agent to start with.
           </Text>
 
-          {projects.length === 0 ? (
+          {projects.length === 0 && (
             <Text style={[styles.sheetEmpty, { color: c.textSecondary }, theme.type.secondary]}>
-              No projects yet — start a CLI session on your desktop and it will show up here.
+              No project picked — the chat starts project-less; bind one on the desktop anytime.
             </Text>
-          ) : (
-            <>
-              <ScrollView style={styles.projectList}>
+          )}
+          {projects.length > 0 && (
+            <ScrollView style={styles.projectList}>
                 {projects.map((p) => {
                   const selected = p.id === projectId;
                   return (
@@ -291,11 +400,24 @@ function NewChatModal({ visible, onClose }: { visible: boolean; onClose: () => v
                     </TouchableOpacity>
                   );
                 })}
-              </ScrollView>
+          </ScrollView>
+          )}
+              <TouchableOpacity
+                style={styles.manageRow}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel="Manage projects"
+                onPress={() => { tapLight(); setManageOpen(true); }}
+              >
+                <Ionicons name="options-outline" size={15} color={c.textSecondary} />
+                <Text style={[{ color: c.textSecondary }, theme.type.secondary]}>
+                  Manage projects
+                </Text>
+              </TouchableOpacity>
 
               <Text style={[styles.sheetLabel, { color: c.textSecondary }, theme.type.label]}>AGENT</Text>
               <View style={styles.chipRow}>
-                {HARNESS_OPTIONS.map((opt) => {
+                {agentOptions.map((opt) => {
                   const selected = harness === opt.value;
                   return (
                     <TouchableOpacity
@@ -318,9 +440,10 @@ function NewChatModal({ visible, onClose }: { visible: boolean; onClose: () => v
                           styles.chipText,
                           theme.type.label,
                           { color: selected ? c.white : c.textSecondary },
+                          !opt.installed && !selected ? { opacity: 0.55 } : null,
                         ]}
                       >
-                        {opt.label}
+                        {opt.label}{opt.installed ? '' : ' ·'}
                       </Text>
                     </TouchableOpacity>
                   );
@@ -349,11 +472,11 @@ function NewChatModal({ visible, onClose }: { visible: boolean; onClose: () => v
                   Start chat
                 </Text>
               </TouchableOpacity>
-            </>
-          )}
         </View>
       </View>
     </Modal>
+      <ProjectManager visible={manageOpen} onClose={() => setManageOpen(false)} />
+    </>
   );
 }
 
@@ -363,8 +486,32 @@ function NewChatModal({ visible, onClose }: { visible: boolean; onClose: () => v
 // ---------------------------------------------------------------------------
 
 export default function AppDrawer() {
-  const { isOpen, close, newChatOpen, closeNewChat, openNewChat } = useDrawer();
-  const { sessions, connected, deleteSession, spawnSession } = useRelay();
+  const { close, closeNow, openNewChat, closeNewChat, register } = useDrawer();
+  // Drawer state lives HERE, not in the provider: the overlay is a sibling of
+  // the navigator, so its state changes re-render only this component.
+  const [isOpen, setIsOpen] = React.useState(false);
+  const [newChatOpen, setNewChatOpen] = React.useState(false);
+  const [mounted, setMounted] = React.useState(false);
+
+  const { sessions, connected, deleteSession, spawnSession, setSessionStarred, searchChatMessages } = useRelay();
+  // Full-text message search (desktop command-palette parity). The title
+  // filter below still runs; this adds the message-body hits the desktop
+  // palette finds through SQLite FTS.
+  const [hits, setHits] = React.useState<ChatSearchHit[]>([]);
+  const searchTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(() => {
+    const off = onSearchResults.on(({ results }) => setHits(results));
+    return off;
+  }, []);
+  const onSearchChange = React.useCallback((text: string) => {
+    setQuery(text);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (text.trim().length < 2) {
+      setHits([]);
+      return;
+    }
+    searchTimer.current = setTimeout(() => searchChatMessages(text.trim(), 30), 300);
+  }, [searchChatMessages]);
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
   const { width: winWidth } = useWindowDimensions();
@@ -373,10 +520,31 @@ export default function AppDrawer() {
 
   const panelWidth = Math.min(Math.round(winWidth * 0.82), 380);
   const progress = useRef(new Animated.Value(0)).current;
-  // Keep the panel mounted through the close animation, unmount when settled.
-  const [mounted, setMounted] = useState(isOpen);
 
-  useEffect(() => {
+  // `mounted` comes from the provider so a closeNow() teardown lands in the
+  // SAME commit as the navigation. A plain close() still slides, and the
+  // panel stays up until the animation settles.
+  // No slide for taps that immediately push a full screen: the destination
+  // covers the panel anyway, and a JS-driven 250ms close would compete with
+  // the incoming screen's render.
+  const snapRef = React.useRef(false);
+  React.useEffect(() => {
+    register({
+      open: () => { tapMedium(); snapRef.current = false; setMounted(true); setIsOpen(true); },
+      close: () => { tapLight(); setIsOpen(false); },
+      closeNow: () => { tapLight(); snapRef.current = true; setIsOpen(false); setMounted(false); },
+      openNewChat: () => { setIsOpen(false); setNewChatOpen(true); },
+      closeNewChat: () => { setNewChatOpen(false); },
+    });
+    return () => register(null);
+  }, [register]);
+
+  React.useEffect(() => {
+    if (snapRef.current) {
+      snapRef.current = false;
+      progress.setValue(0);
+      return;
+    }
     Animated.timing(progress, {
       toValue: isOpen ? 1 : 0,
       duration: 250,
@@ -385,7 +553,7 @@ export default function AppDrawer() {
     }).start(({ finished }) => {
       if (finished && !isOpen) setMounted(false);
     });
-    if (isOpen) setMounted(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, progress]);
 
   // Android hardware back closes the drawer instead of leaving the app/screen.
@@ -409,21 +577,37 @@ export default function AppDrawer() {
     [sessions, q],
   );
   const groups = useMemo(() => bucketSessions(visibleSessions), [visibleSessions]);
+  // One flat row stream (headers interleaved with sessions) so FlatList can
+  // virtualize it. Rendering every session inside a plain ScrollView mounted
+  // all ~200 rows on each drawer open — a 250ms+ main-thread block that made
+  // every subsequent navigation feel slow, since the tap that opens a screen
+  // always pays for the drawer it came from.
+  type HistoryRow =
+    | { kind: 'header'; key: string; label: TimeBucket }
+    | { kind: 'session'; key: string; session: Session };
+  const historyRows = useMemo<HistoryRow[]>(() => {
+    const out: HistoryRow[] = [];
+    for (const g of groups) {
+      out.push({ kind: 'header', key: `h:${g.label}`, label: g.label });
+      for (const s of g.items) out.push({ kind: 'session', key: s.id, session: s });
+    }
+    return out;
+  }, [groups]);
 
   const confirmClear = useCallback((session: Session) => {
     Alert.alert(
-      'Clear conversation history?',
-      'The session stays on the desktop. This clears the chat history linked to your phone.',
+      session.title || 'Untitled',
+      undefined,
       [
-        { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Clear conversation',
-          style: 'destructive',
-          onPress: () => deleteSession(session.id),
+          text: session.starred ? 'Unstar' : 'Star',
+          onPress: () => setSessionStarred(session.id, !session.starred),
         },
+        { text: 'Clear conversation', style: 'destructive', onPress: () => deleteSession(session.id) },
+        { text: 'Cancel', style: 'cancel' },
       ],
     );
-  }, [deleteSession]);
+  }, [deleteSession, setSessionStarred]);
 
   const openSession = useCallback((s: Session) => {
     close();
@@ -438,12 +622,22 @@ export default function AppDrawer() {
   }, [close, navigation, spawnSession]);
 
   const goToSettings = useCallback(() => {
-    close();
+    beginScreenTiming();
+    closeNow();
     navigation.navigate('Settings');
   }, [close, navigation]);
 
-  // The picker modal must stay mounted even while the panel itself is gone.
-  if (!mounted) return <NewChatModal visible={newChatOpen} onClose={closeNewChat} />;
+  // Once the close animation is DONE, drop the panel's entire subtree. It
+  // only needs to survive the 250ms slide; keeping the session list mounted
+  // behind the screen the user just navigated to meant two full trees
+  // rendering at once, which showed up as ~150ms of extra paint latency on
+  // every push.
+  if (!mounted)
+    return (
+      <>
+        <NewChatModal visible={newChatOpen} onClose={closeNewChat} />
+      </>
+    );
 
   const translateX = progress.interpolate({ inputRange: [0, 1], outputRange: [-panelWidth - 24, 0] });
   const scrimOpacity = progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
@@ -468,7 +662,12 @@ export default function AppDrawer() {
         </Pressable>
       </Animated.View>
 
+      {/* pointerEvents follows `isOpen`, NOT `mounted`: the panel stays
+          mounted through its 250ms close animation, and without this the
+          sliding-out drawer kept intercepting every touch on the screen the
+          user just navigated to — a dead zone over 80% of the width. */}
       <Animated.View
+        pointerEvents={isOpen ? 'auto' : 'none'}
         style={[
           styles.panel,
           {
@@ -485,6 +684,7 @@ export default function AppDrawer() {
           <Text style={[styles.headerTitle, { color: c.text }, theme.type.title]}>Relay</Text>
           <ConnectionIndicator size={8} showLabel />
         </View>
+        <DomainErrorBar domains={['sessions', 'search', 'acp-agents']} />
 
         {/* New chat */}
         <TouchableOpacity
@@ -506,8 +706,8 @@ export default function AppDrawer() {
           <TextInput
             style={[styles.searchInput, { color: c.text }, theme.type.body]}
             value={query}
-            onChangeText={setQuery}
-            placeholder="Search chats"
+            onChangeText={onSearchChange}
+            placeholder="Search chats and messages"
             placeholderTextColor={c.textSecondary}
             autoCorrect={false}
             autoCapitalize="none"
@@ -523,28 +723,99 @@ export default function AppDrawer() {
           )}
         </View>
 
-        {/* History grouped by time */}
-        <ScrollView style={styles.history} keyboardShouldPersistTaps="handled">
-          {groups.length === 0 && (
-            <View style={styles.historyEmpty}>
-              <Text style={[{ color: c.textSecondary }, theme.type.body]}>
-                {sessions.length === 0 ? 'No chats yet' : 'No matching chats'}
-              </Text>
-              <Text style={[styles.historyEmptySub, { color: c.textSecondary }, theme.type.secondary]}>
-                {sessions.length === 0
-                  ? 'Start a session on your desktop, or tap New chat.'
-                  : 'Try a different search.'}
-              </Text>
-            </View>
-          )}
-          {groups.map((group) => (
-            <View key={group.label} style={styles.group}>
-              <Text style={[styles.groupLabel, { color: c.textSecondary }, theme.type.label]}>
-                {group.label}
-              </Text>
-              {group.items.map((s) => (
+        {/* Message-body hits (full-text) — desktop command-palette parity. */}
+        {hits.length > 0 && (
+          <View style={styles.group}>
+            <Text style={[styles.groupLabel, { color: c.textSecondary }, theme.type.label]}>
+              In messages
+            </Text>
+            {hits.map((h) => (
+              <TouchableOpacity
+                key={`${h.chat_session_id}-${h.message_id ?? h.created_at}`}
+                style={[styles.historyRow, { backgroundColor: c.surface2 }]}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={`Message result: ${(h.snippet || h.session_title || 'result').slice(0, 40)}`}
+                onPress={() => {
+                  tapLight();
+                  const sid = h.chat_session_id;
+                  setHits([]);
+                  setQuery('');
+                  close();
+                  spawnSession(sid);
+                  navigation.navigate('SessionDetail', {
+                    sessionId: sid,
+                    session: {
+                      id: sid,
+                      projectId: '',
+                      projectName: '',
+                      title: h.session_title || 'Chat',
+                      status: 'idle',
+                      provider: '',
+                      model: '',
+                      lastActivity: h.created_at * 1000,
+                      isLive: false,
+                      starred: false,
+                      unread: false,
+                    } as Session,
+                  });
+                }}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={[{ color: c.text }, theme.type.body]} numberOfLines={1}>
+                    {h.session_title || 'Chat'}
+                  </Text>
+                  <Text style={[{ color: c.textSecondary }, theme.type.secondary]} numberOfLines={2}>
+                    {h.snippet || ''}
+                  </Text>
+                </View>
+                {h.role ? (
+                  <Text style={[{ color: c.textSecondary }, theme.type.label]}>
+                    {h.role.slice(0, 1).toUpperCase()}
+                  </Text>
+                ) : null}
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
+        {/* History grouped by time — virtualized: a nested ScrollView here
+            would defeat the FlatList's windowing and reintroduce the
+            mount-everything cost this replaced. */}
+        <FlatList
+            data={historyRows}
+            keyExtractor={(r) => r.key}
+            keyboardShouldPersistTaps="handled"
+            initialNumToRender={14}
+            maxToRenderPerBatch={12}
+            windowSize={7}
+            removeClippedSubviews
+            style={styles.history}
+            ListEmptyComponent={
+              <View style={styles.historyEmpty}>
+                <Text style={[{ color: c.textSecondary }, theme.type.body]}>
+                  {sessions.length === 0 ? 'No chats yet' : 'No matching chats'}
+                </Text>
+                <Text style={[styles.historyEmptySub, { color: c.textSecondary }, theme.type.secondary]}>
+                  {sessions.length === 0
+                    ? 'Start a session on your desktop, or tap New chat.'
+                    : 'Try a different search.'}
+                </Text>
+              </View>
+            }
+            renderItem={({ item }) => {
+              if (item.kind === 'header') {
+                return (
+                  <View style={styles.group}>
+                    <Text style={[styles.groupLabel, { color: c.textSecondary }, theme.type.label]}>
+                      {item.label}
+                    </Text>
+                  </View>
+                );
+              }
+              const s = item.session;
+              return (
                 <TouchableOpacity
-                  key={s.id}
                   style={styles.historyRow}
                   activeOpacity={0.6}
                   accessibilityRole="button"
@@ -555,12 +826,23 @@ export default function AppDrawer() {
                 >
                   <View style={[styles.statusDot, { backgroundColor: statusDotColor(s.status) }]} />
                   <View style={styles.historyText}>
-                    <Text
-                      numberOfLines={1}
-                      style={[styles.historyTitle, { color: c.text }, theme.type.body]}
-                    >
-                      {s.title || 'Untitled'}
-                    </Text>
+                    <View style={styles.historyTitleRow}>
+                      {s.starred && (
+                        <Ionicons name="star" size={11} color={c.accent} />
+                      )}
+                      <Text
+                        numberOfLines={1}
+                        style={[
+                          styles.historyTitle,
+                          { color: c.text },
+                          theme.type.body,
+                          s.unread && styles.historyTitleUnread,
+                        ]}
+                      >
+                        {s.title || 'Untitled'}
+                      </Text>
+                      {s.unread && <View style={[styles.unreadDot, { backgroundColor: c.accent }]} />}
+                    </View>
                     <View style={styles.historyMeta}>
                       <Text
                         numberOfLines={1}
@@ -574,13 +856,26 @@ export default function AppDrawer() {
                     </View>
                   </View>
                 </TouchableOpacity>
-              ))}
-            </View>
-          ))}
-        </ScrollView>
+              );
+          }}
+        />
 
-        {/* Bottom rows: Settings + connection */}
+        {/* Footer: the drawer is for navigation, not a settings index.
+            Automations / Notifications / Memory / Skills / Git moved into
+            Settings, where they sit next to the rest of the app's controls
+            instead of crowding the primary navigation. */}
         <View style={[styles.footer, { borderTopColor: c.border }]}>
+          <TouchableOpacity
+            style={styles.footerRow}
+            activeOpacity={0.6}
+            accessibilityRole="button"
+            accessibilityLabel="Artifacts"
+            onPress={() => { beginScreenTiming(); closeNow(); navigation.navigate('Artifacts'); }}
+          >
+            <Ionicons name="folder-open-outline" size={18} color={c.textSecondary} />
+            <Text style={[styles.footerLabel, { color: c.text }, theme.type.body]}>Artifacts</Text>
+            <Ionicons name="chevron-forward" size={16} color={c.textSecondary} />
+          </TouchableOpacity>
           <TouchableOpacity
             style={styles.footerRow}
             activeOpacity={0.6}
@@ -702,6 +997,18 @@ const styles = StyleSheet.create({
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   historyText: { flex: 1 },
   historyTitle: { flexShrink: 1 },
+  historyTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  historyTitleUnread: { fontWeight: '700' },
+  unreadDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    marginLeft: 4,
+  },
   historyMeta: { flexDirection: 'row', alignItems: 'center' },
   historyProject: { flexShrink: 1 },
   // footer
@@ -738,6 +1045,12 @@ const styles = StyleSheet.create({
   sheetTitle: { marginBottom: 2 },
   sheetSubtitle: { marginBottom: theme.spacing.md },
   sheetEmpty: { paddingVertical: theme.spacing.xl, textAlign: 'center' },
+  manageRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+  },
   sheetLabel: {
     textTransform: 'uppercase',
     letterSpacing: 0.6,

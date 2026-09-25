@@ -1,13 +1,14 @@
 /**
  * ThinkingBlock — the "Thought process" disclosure for `<think>` segments.
  *
- * ChatGPT-app behavior: the block is expanded while the reasoning is still
- * streaming (done === false), auto-collapses to a one-line summary the
- * moment the turn finishes, and a manual toggle by the user overrides the
- * auto-collapse for the life of the row. The body renders in the secondary
- * typeface, muted and italic — it's context, not content.
+ * Collapsed by default — while the reasoning is still streaming AND once the
+ * turn finishes (the desktop transcript made the same call: a live block
+ * shoving the answer down on every token read as noise). A tap opens it;
+ * nothing auto-collapses afterwards, so the row stays where the user put it.
+ * The body renders in the secondary typeface, muted and italic — it's
+ * context, not content.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../../theme';
@@ -25,23 +26,14 @@ export interface ThinkingBlockProps {
 
 export default function ThinkingBlock({ thinking, done }: ThinkingBlockProps) {
   const c = theme.colors;
-  const [open, setOpen] = useState(!done);
-  // Once the user manually toggles, stop auto-driving the state.
-  const [userToggled, setUserToggled] = useState(false);
-
-  useEffect(() => {
-    if (done && !userToggled) setOpen(false);
-  }, [done, userToggled]);
+  const [open, setOpen] = useState(false);
 
   return (
     <View style={styles.wrap}>
       <TouchableOpacity
         style={styles.head}
         activeOpacity={0.7}
-        onPress={() => {
-          setUserToggled(true);
-          setOpen((v) => !v);
-        }}
+        onPress={() => setOpen((v) => !v)}
         accessibilityLabel={open ? 'Hide thought process' : 'Show thought process'}
       >
         <Text style={[styles.label, { color: c.textSecondary }]}>

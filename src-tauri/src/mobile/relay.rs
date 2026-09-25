@@ -214,47 +214,263 @@ pub async fn start_relay(
         "127.0.0.1:0".to_string()
     };
 
-    let listener = match TcpListener::bind(&bind_addr).await {
-        Ok(l) => l,
-        Err(_) => TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|e| format!("failed to bind relay: {e}"))?,
-    };
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("local_addr: {e}"))?
-        .port();
-
-    // Same port on the Tailscale interface, when the machine is on a tailnet.
-    // Wrapped in Arc so the future can own a reference to it (avoids borrow
-    // checker issues when storing the accept future in a local variable).
-    // Best-effort: if this bind fails (interface vanished between the status
-    // call and now) we keep loopback-only rather than fail. The status probe
-    // spawns the `tailscale` CLI (seconds against a cold daemon) — run it off
-    // the async runtime like get_mobile_pairing_info does.
-    let ts_ip = tauri::async_runtime::spawn_blocking(super::tailscale::status)
+    // Tailscale address probe: spawns the `tailscale` CLI (seconds against a
+    // cold daemon), so it runs off the async runtime like
+    // get_mobile_pairing_info does.
+    let ts_ip: Option<String> = tauri::async_runtime::spawn_blocking(super::tailscale::status)
         .await
         .ok()
         .and_then(|ts| ts.tailscale_ip);
-    let tailnet_listener = match ts_ip {
-        Some(ip) => TcpListener::bind(format!("{ip}:{port}"))
-            .await
-            .ok()
-            .map(Arc::new),
-        None => None,
-    };
 
-    // Persist the port; the fresh per-launch pairing token goes to the OS
-    // keychain (secrets::generic_store — audit fix: it used to sit as
-    // plaintext in the settings table, and the token gates full remote
-    // control of the desktop). The token must be presented on the first
-    // frame of the first WebSocket connection from a phone; the handler
-    // validates it before doing anything else.
-    let pairing_token = new_pairing_token();
+    let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let (port_tx, port_rx) = tokio::sync::oneshot::channel::<u16>();
+
+    // DEDICATED RUNTIME. The accept loop used to be a task on the app's
+    // runtime: whenever the desktop ran a blocking turn (model I/O, DB
+    // sweeps), the shared workers starved the accept path and the phone's
+    // socket started flapping (visible to the user as the Automations screen
+    // and connection indicator blinking). The relay now owns an OS thread
+    // with a 4-worker runtime, so desktop work can never keep the phone's
+    // door shut. The listeners are created inside the thread because a tokio
+    // listener is registered with the runtime that created it.
+    let serve_app = app.clone();
+    let serve_db = Arc::clone(&db);
+    let serve_chat_mgr = Arc::clone(&chat_mgr);
+    let serve_state = Arc::clone(&relay_state);
+    let serve_bind = bind_addr.clone();
+    let serve_ts_ip = ts_ip.clone();
+    std::thread::Builder::new()
+        .name("relay-io".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("[mobile-relay] failed to build relay runtime: {e}");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                let app = serve_app;
+                let db = serve_db;
+                let chat_mgr = serve_chat_mgr;
+                let relay_state = serve_state;
+                let bind_addr = serve_bind;
+                let listener = match TcpListener::bind(&bind_addr).await {
+                    Ok(l) => l,
+                    // Retry the saved port a few times before falling back to
+                    // random: on restart the dying process's socket can linger
+                    // briefly, and silently switching ports strands every
+                    // paired phone behind a stale URL.
+                    Err(_) => {
+                        let mut l = None;
+                        for _ in 0..40 {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            if let Ok(bound) = TcpListener::bind(&bind_addr).await {
+                                l = Some(bound);
+                                break;
+                            }
+                        }
+                        match l {
+                            Some(bound) => bound,
+                            None => match TcpListener::bind("127.0.0.1:0").await {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    eprintln!("[mobile-relay] failed to bind relay: {e}");
+                                    return;
+                                }
+                            },
+                        }
+                    }
+                };
+                let port = match listener.local_addr() {
+                    Ok(a) => a.port(),
+                    Err(e) => {
+                        eprintln!("[mobile-relay] local_addr: {e}");
+                        return;
+                    }
+                };
+                // Same port on the Tailscale interface, when the machine is on
+                // a tailnet (best-effort: a vanished interface leaves us
+                // loopback-only).
+                let tailnet_listener = match serve_ts_ip {
+                    Some(ip) => TcpListener::bind(format!("{ip}:{port}"))
+                        .await
+                        .ok()
+                        .map(Arc::new),
+                    None => None,
+                };
+                let mut abort_rx = abort_rx;
+                let _ = port_tx.send(port);
+let tailnet_addr = tailnet_listener
+    .as_ref()
+    .and_then(|l| l.local_addr().ok().map(|a| a.to_string()));
+eprintln!("[mobile-relay] listening on ws://127.0.0.1:{port} (pairing required)");
+if let Some(ref addr) = tailnet_addr {
+    eprintln!("[mobile-relay] also on ws://{addr} (tailnet, pairing required)");
+}
+
+// The tailnet listener runs in its own task and forwards accepted
+// connections over a channel — TcpListener::accept() futures are not
+// Send, so they can't be stored alongside the loopback accept in the
+// same select. Shutdown is signalled via a shared atomic that the
+// main loop sets right before it stops polling.
+let shutdown = Arc::new(AtomicBool::new(false));
+let (tailnet_tx, mut tailnet_rx) = mpsc::channel::<(TcpStream, std::net::SocketAddr)>(64);
+if let Some(listener) = tailnet_listener {
+    let shutdown_task = Arc::clone(&shutdown);
+    tokio::spawn(async move {
+        loop {
+            if shutdown_task.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                    if shutdown_task.load(Ordering::Relaxed) { break; }
+                }
+                accept = listener.accept() => {
+                    if shutdown_task.load(Ordering::Relaxed) { break; }
+                    match accept {
+                        Ok((stream, peer)) => {
+                            if tailnet_tx.send((stream, peer)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+loop {
+    tokio::select! {
+        biased;
+        _ = &mut abort_rx => {
+            eprintln!("[mobile-relay] shutting down");
+            shutdown.store(true, Ordering::Relaxed);
+            break;
+        }
+        accept = listener.accept() => {
+            match accept {
+                Ok((stream, peer)) => {
+                    let app = app.clone();
+                    let db = Arc::clone(&db);
+                    let chat_mgr = Arc::clone(&chat_mgr);
+                    let owner_map = relay_state.owner_map.clone();
+                    let conn_registry = Arc::clone(&relay_state.conns);
+                    let conns = Arc::clone(&relay_state);
+                    // Bounded (audit L-16): the permit is held for the
+                    // handler's whole life; when 64 connections are
+                    // live, new streams wait here instead of piling up
+                    // handler+pump tasks.
+                    let permit = match conns.accept_permits.clone().acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => return, // semaphore closed: relay shutting down
+                    };
+                    let handler = tokio::spawn(async move {
+                        use std::sync::atomic::Ordering as AOrd;
+                        let _permit = permit;
+                        conns.active_connections.fetch_add(1, AOrd::Relaxed);
+                        if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map, conn_registry).await {
+                            eprintln!("[mobile-relay] connection error: {e}");
+                        }
+                        conns.active_connections.fetch_sub(1, AOrd::Relaxed);
+                    });
+                    relay_state.handler_aborts.lock().push(handler.abort_handle());
+                }
+                Err(e) => {
+                    eprintln!("[mobile-relay] accept error: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+        incoming = tailnet_rx.recv() => {
+            match incoming {
+                Some((stream, peer)) => {
+                    let app = app.clone();
+                    let db = Arc::clone(&db);
+                    let chat_mgr = Arc::clone(&chat_mgr);
+                    let owner_map = relay_state.owner_map.clone();
+                    let conn_registry = Arc::clone(&relay_state.conns);
+                    let conns = Arc::clone(&relay_state);
+                    // Bounded (audit L-16): the permit is held for the
+                    // handler's whole life; when 64 connections are
+                    // live, new streams wait here instead of piling up
+                    // handler+pump tasks.
+                    let permit = match conns.accept_permits.clone().acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => return, // semaphore closed: relay shutting down
+                    };
+                    let handler = tokio::spawn(async move {
+                        use std::sync::atomic::Ordering as AOrd;
+                        let _permit = permit;
+                        conns.active_connections.fetch_add(1, AOrd::Relaxed);
+                        if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map, conn_registry).await {
+                            eprintln!("[mobile-relay] connection error: {e}");
+                        }
+                        conns.active_connections.fetch_sub(1, AOrd::Relaxed);
+                    });
+                    relay_state.handler_aborts.lock().push(handler.abort_handle());
+                }
+                None => {
+                    // Tailnet task exited; keep serving loopback.
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+        }
+    }
+});
+            })
+            .map_err(|e| format!("failed to spawn relay thread: {e}"))?;
+    // The bound port arrives from the relay thread; the token persistence,
+    // status, and tailscale-serve sections below all need it.
+    let port = port_rx
+        .await
+        .map_err(|e| format!("relay thread died before binding: {e}"))?;
+
+    // REUSE the persisted pairing token across launches so a paired phone
+    // reconnects AUTOMATICALLY after a desktop restart: the phone retries its
+    // saved `ws://host/#token` URL with capped backoff, and a per-launch
+    // rotated token turned every restart into a manual re-scan. Rotate only
+    // via Settings → Remote → "New pairing token". The token still lives in
+    // the OS keychain, never the settings table (audit fix: plaintext
+    // settings lingered readable).
+    let pairing_token = {
+        let conn = db.lock();
+        match crate::secrets::generic_load(&conn, "mobile", "pairing-token") {
+            Some(t) if t.len() >= 32 => {
+                eprintln!(
+                    "[mobile-relay] pairing token loaded from keychain ({} chars, fp {})",
+                    t.len(),
+                    &t.chars().take(6).collect::<String>()
+                );
+                t
+            }
+            other => {
+                let t = new_pairing_token();
+                let stored = crate::secrets::generic_store(&conn, "mobile", "pairing-token", &t);
+                eprintln!(
+                    "[mobile-relay] pairing token CREATED (load returned {}; store ok={:?}) fp {}",
+                    match &other { Some(v) => format!("short({})", v.len()), None => "None".into() },
+                    stored.is_ok(),
+                    &t.chars().take(6).collect::<String>()
+                );
+                t
+            }
+        }
+    };
     {
         let conn = db.lock();
         let _ = db::set_setting(&conn, "mobile.relay_port", &port.to_string());
-        let _ = crate::secrets::generic_store(&conn, "mobile", "pairing-token", &pairing_token);
         // Migration: a pre-keychain plaintext token (or a revoked stale one)
         // must not linger readable in the settings table.
         let _ = db::delete_setting(&conn, "mobile.pairing_token");
@@ -264,13 +480,16 @@ pub async fn start_relay(
     *relay_state.pairing_token.lock() = Some(pairing_token.clone());
     let _ = app.emit("mobile:pairing-token", pairing_token.clone());
 
-    let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
     *relay_state.abort.lock() = Some(abort_tx);
 
     // Start the Tauri event listener that forwards `mobile:session_chat_event`
     // payloads to the right WebSocket connection via the owner map.
     let owner_map = relay_state.owner_map.clone();
     let app_handle = app.clone();
+    // Relay-side stream forwarder: phone-started turns stream straight from
+    // the backend `chat:*` events to the owning phone (the frontend only
+    // re-broadcasts for the chat it has open).
+    super::relay_owner::start_chat_stream_forwarder(&app, owner_map.clone());
     tokio::spawn(async move {
         if let Err(e) =
             super::relay_owner::start_session_chat_event_listener(&app_handle, owner_map)
@@ -323,134 +542,9 @@ pub async fn start_relay(
         });
     }
 
-    tokio::spawn(async move {
-        let tailnet_addr = tailnet_listener
-            .as_ref()
-            .and_then(|l| l.local_addr().ok().map(|a| a.to_string()));
-        eprintln!("[mobile-relay] listening on ws://127.0.0.1:{port} (pairing required)");
-        if let Some(ref addr) = tailnet_addr {
-            eprintln!("[mobile-relay] also on ws://{addr} (tailnet, pairing required)");
-        }
-
-        // The tailnet listener runs in its own task and forwards accepted
-        // connections over a channel — TcpListener::accept() futures are not
-        // Send, so they can't be stored alongside the loopback accept in the
-        // same select. Shutdown is signalled via a shared atomic that the
-        // main loop sets right before it stops polling.
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let (tailnet_tx, mut tailnet_rx) = mpsc::channel::<(TcpStream, std::net::SocketAddr)>(64);
-        if let Some(listener) = tailnet_listener {
-            let shutdown_task = Arc::clone(&shutdown);
-            tokio::spawn(async move {
-                loop {
-                    if shutdown_task.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    tokio::select! {
-                        biased;
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
-                            if shutdown_task.load(Ordering::Relaxed) { break; }
-                        }
-                        accept = listener.accept() => {
-                            if shutdown_task.load(Ordering::Relaxed) { break; }
-                            match accept {
-                                Ok((stream, peer)) => {
-                                    if tailnet_tx.send((stream, peer)).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Err(_) => {
-                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut abort_rx => {
-                    eprintln!("[mobile-relay] shutting down");
-                    shutdown.store(true, Ordering::Relaxed);
-                    break;
-                }
-                accept = listener.accept() => {
-                    match accept {
-                        Ok((stream, peer)) => {
-                            let app = app.clone();
-                            let db = Arc::clone(&db);
-                            let chat_mgr = Arc::clone(&chat_mgr);
-                            let owner_map = relay_state.owner_map.clone();
-                            let conn_registry = Arc::clone(&relay_state.conns);
-                            let conns = Arc::clone(&relay_state);
-                            // Bounded (audit L-16): the permit is held for the
-                            // handler's whole life; when 64 connections are
-                            // live, new streams wait here instead of piling up
-                            // handler+pump tasks.
-                            let permit = match conns.accept_permits.clone().acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => return, // semaphore closed: relay shutting down
-                            };
-                            let handler = tokio::spawn(async move {
-                                use std::sync::atomic::Ordering as AOrd;
-                                let _permit = permit;
-                                conns.active_connections.fetch_add(1, AOrd::Relaxed);
-                                if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map, conn_registry).await {
-                                    eprintln!("[mobile-relay] connection error: {e}");
-                                }
-                                conns.active_connections.fetch_sub(1, AOrd::Relaxed);
-                            });
-                            relay_state.handler_aborts.lock().push(handler.abort_handle());
-                        }
-                        Err(e) => {
-                            eprintln!("[mobile-relay] accept error: {e}");
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        }
-                    }
-                }
-                incoming = tailnet_rx.recv() => {
-                    match incoming {
-                        Some((stream, peer)) => {
-                            let app = app.clone();
-                            let db = Arc::clone(&db);
-                            let chat_mgr = Arc::clone(&chat_mgr);
-                            let owner_map = relay_state.owner_map.clone();
-                            let conn_registry = Arc::clone(&relay_state.conns);
-                            let conns = Arc::clone(&relay_state);
-                            // Bounded (audit L-16): the permit is held for the
-                            // handler's whole life; when 64 connections are
-                            // live, new streams wait here instead of piling up
-                            // handler+pump tasks.
-                            let permit = match conns.accept_permits.clone().acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => return, // semaphore closed: relay shutting down
-                            };
-                            let handler = tokio::spawn(async move {
-                                use std::sync::atomic::Ordering as AOrd;
-                                let _permit = permit;
-                                conns.active_connections.fetch_add(1, AOrd::Relaxed);
-                                if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map, conn_registry).await {
-                                    eprintln!("[mobile-relay] connection error: {e}");
-                                }
-                                conns.active_connections.fetch_sub(1, AOrd::Relaxed);
-                            });
-                            relay_state.handler_aborts.lock().push(handler.abort_handle());
-                        }
-                        None => {
-                            // Tailnet task exited; keep serving loopback.
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        }
-                    }
-                }
-            }
-        }
-    });
-
     Ok(port)
 }
+
 
 /// Stop the relay server.
 pub fn stop_relay(relay_state: &MobileRelayState) {
@@ -751,18 +845,137 @@ async fn handle_connection(
         match req {
             MobileMessage::ListAvailableProviders => {
                 let providers = build_available_providers(&db, &app).await;
-                let resp = DesktopMessage::AvailableProviders { providers };
+                let harnesses = build_harness_list();
+                let (default_provider, default_model) = {
+                    let conn = db.lock();
+                    match crate::chat::auto_router::resolve_sync_default(&conn, db::now_ts()) {
+                        Some((p, m)) => (Some(p), Some(m)),
+                        None => (None, None),
+                    }
+                };
+                let resp = DesktopMessage::AvailableProviders {
+                    providers,
+                    harnesses,
+                    default_provider,
+                    default_model,
+                };
                 let _ = send_msg(&write, &resp).await;
+                // A freshly started relay has COLD harness caches — the rail
+                // would tell the user every CLI is "not installed" with no
+                // models (they read warm caches only, never probe inline).
+                // Probe once in the background, then PUSH the warmed list so
+                // the already-connected phone repaints without reconnecting.
+                if !HARNESS_WARMING.load(std::sync::atomic::Ordering::Relaxed) {
+                    HARNESS_WARMING.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let warm_write = Arc::clone(&write);
+                    let warm_db = Arc::clone(&db);
+                    let warm_app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        warm_harness_caches().await;
+                        let providers = build_available_providers(&warm_db, &warm_app).await;
+                        let harnesses = build_harness_list();
+                        let (default_provider, default_model) = {
+                            let conn = warm_db.lock();
+                            match crate::chat::auto_router::resolve_sync_default(&conn, db::now_ts()) {
+                                Some((p, m)) => (Some(p), Some(m)),
+                                None => (None, None),
+                            }
+                        };
+                        let resp = DesktopMessage::AvailableProviders {
+                            providers,
+                            harnesses,
+                            default_provider,
+                            default_model,
+                        };
+                        let _ = send_msg(&warm_write, &resp).await;
+                        HARNESS_WARMING.store(false, std::sync::atomic::Ordering::Relaxed);
+                    });
+                }
             }
             MobileMessage::ListSessions => {
-                let sessions = build_session_list(&db, &app);
-                eprintln!(
-                    "[mobile-relay] ListSessions: {} sessions ({} live)",
-                    sessions.len(),
-                    sessions.iter().filter(|s| s.is_live).count()
-                );
-                let resp = DesktopMessage::SessionList { sessions };
-                let _ = send_msg(&write, &resp).await;
+                match build_session_list(&db, &app) {
+                    Ok(sessions) => {
+                        eprintln!(
+                            "[mobile-relay] ListSessions: {} sessions ({} live)",
+                            sessions.len(),
+                            sessions.iter().filter(|s| s.is_live).count()
+                        );
+                        let _ = send_msg(&write, &DesktopMessage::SessionList { sessions }).await;
+                    }
+                    Err(e) => domain_error(&write, "sessions", e).await,
+                }
+            }
+            MobileMessage::SetSessionStarred { session_id, starred } => {
+                match dispatch_mobile(
+                    MobileMessage::SetSessionStarred { session_id, starred },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::ListArtifacts => {
+                let rows = {
+                    let conn = db.lock();
+                    db::list_artifacts(&conn)
+                };
+                match rows {
+                    Ok(rows) => {
+                        let artifacts = rows
+                            .into_iter()
+                            .map(|r| super::protocol::ArtifactLibraryEntry {
+                                chat_session_id: r.chat_session_id,
+                                filename: r.filename,
+                                path: r.path,
+                                kind: r.kind,
+                                created_at: r.created_at,
+                            })
+                            .collect();
+                        let _ = send_msg(&write, &DesktopMessage::ArtifactLibrary { artifacts }).await;
+                    }
+                    Err(e) => domain_error(&write, "artifacts", e.to_string()).await,
+                }
+            }
+            MobileMessage::GetCostRollups { days } => {
+                let days = days.unwrap_or(7).clamp(1, 90);
+                let rollups = {
+                    let conn = db.lock();
+                    db::get_cost_rollups_v2(&conn, days)
+                };
+                match rollups {
+                    Ok(r) => {
+                        let value = serde_json::to_value(&r)
+                            .unwrap_or_else(|_| serde_json::Value::Null);
+                        let resp = DesktopMessage::CostRollups { rollups: value };
+                        let _ = send_msg(&write, &resp).await;
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "cost-rollups".to_string(),
+                                error: format!("{e}"),
+                            },
+                        )
+                        .await;
+                    }
+                }
             }
             MobileMessage::ChatTurn {
                 provider_id,
@@ -841,8 +1054,1086 @@ async fn handle_connection(
             MobileMessage::CreateSession {
                 project_id,
                 harness,
+                provider,
+                model,
+                effort,
+                connectors,
             } => {
-                relay_requests::create_session_arm(project_id, harness, &app, &db, &write).await;
+                relay_requests::create_session_arm(
+                    project_id,
+                    harness,
+                    provider,
+                    model,
+                    effort,
+                    connectors,
+                    &app,
+                    &db,
+                    &write,
+                )
+                .await;
+            }
+            MobileMessage::ReadArtifactPreview { path } => {
+                // Same containment gate as the full read — a preview op that
+                // skipped it would be an arbitrary-file-read primitive.
+                let granted = [
+                    crate::chat::dispatch::artifacts_dir(&app).to_string_lossy().to_string(),
+                    crate::user_dirs::app_data_dir(&app)
+                        .join("generated-images")
+                        .to_string_lossy()
+                        .to_string(),
+                ];
+                if !crate::chat::permission::path_within_scope(&path, &granted) {
+                    let _ = send_msg(
+                        &write,
+                        &DesktopMessage::ChatError {
+                            chat_session_id: "preview".to_string(),
+                            error: "artifact path is outside the artifacts directory".into(),
+                        },
+                    )
+                    .await;
+                } else {
+                    match crate::chat::commands::preview::read_artifact_preview(path.clone()).await
+                    {
+                        Ok(p) => {
+                            let _ = send_msg(
+                                &write,
+                                &DesktopMessage::ArtifactPreviewMsg {
+                                    path: p.path,
+                                    filename: p.filename,
+                                    ext: p.ext,
+                                    kind: p.kind,
+                                    text: p.text,
+                                    data_uri: p.data_uri,
+                                    truncated: p.truncated,
+                                },
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            let _ = send_msg(
+                                &write,
+                                &DesktopMessage::ChatError {
+                                    chat_session_id: "preview".to_string(),
+                                    error: e,
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+            MobileMessage::ListConnectors => {
+                let app2 = app.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::commands::connectors_cmds::list_connectors(
+                        app2.state::<crate::DbState>(),
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("connectors worker failed: {e}")));
+                match result {
+                    Ok(rows) => {
+                        let list = rows
+                            .into_iter()
+                            .map(|c| super::protocol::ConnectorInfo {
+                                id: c.connector.id.to_string(),
+                                display_name: c.connector.display_name.to_string(),
+                                icon: c.connector.icon.to_string(),
+                                family: c.connector.family.to_string(),
+                                description: c.connector.description.to_string(),
+                                connected: c.status.connected,
+                                account_display: c.status.account_display,
+                            })
+                            .collect();
+                        let _ =
+                            send_msg(&write, &DesktopMessage::ConnectorList { connectors: list })
+                                .await;
+                    }
+                    Err(e) => domain_error(&write, "connectors", e).await,
+                }
+            }
+            MobileMessage::SetSessionConnectors { session_id, connector_ids } => {
+                // Resolve FIRST and drop the DB guard before any await — a
+                // parking_lot guard held across a send makes the whole
+                // connection future non-Send.
+                let resolved = {
+                    let conn = db.lock();
+                    super::session_chat::resolve_session_to_chat_id_pub(&conn, &session_id)
+                };
+                let chat_session_id = match resolved {
+                    Some(id) => id,
+                    None => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-connectors".into(),
+                                error: format!("session not found: {session_id}"),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                // Lock the shared handle INSIDE the blocking worker — a
+                // parking_lot guard can't cross the thread boundary.
+                let db_inner = Arc::clone(&db);
+                let ids = connector_ids.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    let conn = db_inner.lock();
+                    db::set_chat_session_connectors(&conn, &chat_session_id, &ids)
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("join failed: {e}")));
+                let msg = match result {
+                    Ok(()) => DesktopMessage::SessionConnectorsSet {
+                        session_id,
+                        connector_ids,
+                    },
+                    Err(e) => DesktopMessage::ChatError {
+                        chat_session_id: "session-connectors".into(),
+                        error: e,
+                    },
+                };
+                let _ = send_msg(&write, &msg).await;
+            }
+            MobileMessage::GetSessionConnectors { session_id } => {
+                let chat_session_id = {
+                    let conn = db.lock();
+                    super::session_chat::resolve_session_to_chat_id_pub(&conn, &session_id)
+                };
+                let id = match chat_session_id {
+                    Some(id) => id,
+                    None => {
+                        domain_error(
+                            &write,
+                            "session-connectors",
+                            format!("session not found: {session_id}"),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let rows = {
+                    let conn = db.lock();
+                    db::list_chat_session_connectors(&conn, &id)
+                };
+                match rows {
+                    Ok(connector_ids) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::SessionConnectors { session_id, connector_ids },
+                        )
+                        .await;
+                    }
+                    Err(e) => domain_error(&write, "session-connectors", e.to_string()).await,
+                }
+            }
+            MobileMessage::ListAcpAgents => {
+                // Probes CLI binaries off the WS task (same as the desktop's
+                // own list_acp_agents).
+                match crate::commands::agent_cmds::list_acp_agents(
+                    app.state::<crate::DbState>(),
+                )
+                .await
+                {
+                    Ok(list) => {
+                        let agents = list
+                            .into_iter()
+                            .map(|a| super::protocol::AcpAgentInfo {
+                                id: a.id,
+                                display_name: a.display_name,
+                                installed: a.installed,
+                            })
+                            .collect();
+                        let _ = send_msg(&write, &DesktopMessage::AcpAgentList { agents }).await;
+                    }
+                    Err(e) => domain_error(&write, "acp-agents", e).await,
+                }
+            }
+            MobileMessage::ListMemoryRecords { include_inactive } => {
+                match crate::commands::memory_cmds::memory_list(
+                    include_inactive,
+                    app.state::<crate::DbState>(),
+                )
+                .await
+                {
+                    Ok(list) => {
+                        let records = list
+                            .into_iter()
+                            .map(|m| super::protocol::MemoryInfo {
+                                id: m.id,
+                                kind: m.kind,
+                                content: m.content,
+                                keywords: m.keywords,
+                                importance: m.importance,
+                                confidence: m.confidence,
+                                status: m.status,
+                                created_at: m.created_at,
+                                updated_at: m.updated_at,
+                            })
+                            .collect();
+                        let _ = send_msg(&write, &DesktopMessage::MemoryList { records }).await;
+                    }
+                    Err(e) => domain_error(&write, "memory", e).await,
+                }
+            }
+            MobileMessage::UpdateMemoryRecord { memory_id, content, importance } => {
+                let result = crate::commands::memory_cmds::memory_update(
+                    memory_id.clone(),
+                    content,
+                    importance,
+                    app.state::<crate::DbState>(),
+                )
+                .await;
+                let msg = match result {
+                    Ok(()) => DesktopMessage::MemoryUpdated { memory_id },
+                    Err(e) => DesktopMessage::ChatError {
+                        chat_session_id: "memory".into(),
+                        error: e,
+                    },
+                };
+                let _ = send_msg(&write, &msg).await;
+            }
+            MobileMessage::DeleteMemoryRecord { memory_id } => {
+                let result = crate::commands::memory_cmds::memory_delete(
+                    memory_id.clone(),
+                    app.state::<crate::DbState>(),
+                )
+                .await;
+                let msg = match result {
+                    Ok(()) => DesktopMessage::MemoryDeleted { memory_id },
+                    Err(e) => DesktopMessage::ChatError {
+                        chat_session_id: "memory".into(),
+                        error: e,
+                    },
+                };
+                let _ = send_msg(&write, &msg).await;
+            }
+            MobileMessage::PurgeMemories => {
+                match crate::commands::memory_cmds::memory_purge(
+                    None,
+                    app.state::<crate::DbState>(),
+                )
+                .await
+                {
+                    Ok(count) => {
+                        let _ = send_msg(&write, &DesktopMessage::MemoryPurged { count }).await;
+                    }
+                    Err(e) => domain_error(&write, "memory", e).await,
+                }
+            }
+            MobileMessage::ListInstalledSkills { kind } => {
+                let kind_key = if kind.trim_end_matches('s') == "loop" { "loop" } else { "skill" };
+                let result = if kind_key == "loop" {
+                    crate::commands::skills_cmds::list_installed_loops().await
+                } else {
+                    crate::commands::skills_cmds::list_installed_skills().await
+                };
+                match result {
+                    Ok(list) => {
+                        let skills = list
+                            .into_iter()
+                            .map(|k| super::protocol::InstalledSkillInfo {
+                                slug: k.slug,
+                                name: k.name,
+                                description: k.description,
+                                source: k.source,
+                                kind: k.kind,
+                            })
+                            .collect();
+                        let _ = send_msg(&write, &DesktopMessage::InstalledSkillList { skills }).await;
+                    }
+                    Err(e) => domain_error(&write, "skills", e).await,
+                }
+            }
+            MobileMessage::ReadInstalledSkill { slug, kind } => {
+                let (slug2, kind2) = (slug.clone(), kind.clone());
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::commands::skills_cmds::read_installed_skill(slug2, kind2)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("skill read worker failed: {e}")));
+                match result {
+                    // None = the slug simply isn't installed; that's a real
+                    // answer, not a failure. Err is a failure.
+                    Ok(found) => {
+                        let content = found.unwrap_or_default();
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::InstalledSkillContent { slug, kind, content },
+                        )
+                        .await;
+                    }
+                    Err(e) => domain_error(&write, "skills", e).await,
+                }
+            }
+            MobileMessage::SaveInstalledSkill { slug, kind, content } => {
+                let (slug2, kind2, content2) = (slug.clone(), kind.clone(), content);
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::commands::skills_cmds::save_installed_skill(slug2, kind2, content2)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("join failed: {e}")));
+                let msg = match result {
+                    Ok(()) => DesktopMessage::InstalledSkillAck { slug, mirrored: 0 },
+                    Err(e) => DesktopMessage::ChatError {
+                        chat_session_id: "skills".into(),
+                        error: e,
+                    },
+                };
+                let _ = send_msg(&write, &msg).await;
+            }
+            MobileMessage::CreateInstalledSkill { name, kind, content } => {
+                let (name2, kind2, content2) = (name.clone(), kind.clone(), content);
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::commands::skills_cmds::create_installed_skill(name2, kind2, content2)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("join failed: {e}")));
+                let msg = match result {
+                    Ok(k) => DesktopMessage::InstalledSkillList {
+                        skills: vec![super::protocol::InstalledSkillInfo {
+                            slug: k.slug,
+                            name: k.name,
+                            description: k.description,
+                            source: k.source,
+                            kind: k.kind,
+                        }],
+                    },
+                    Err(e) => DesktopMessage::ChatError {
+                        chat_session_id: "skills".into(),
+                        error: e,
+                    },
+                };
+                let _ = send_msg(&write, &msg).await;
+            }
+            MobileMessage::DeleteInstalledSkill { slug, kind } => {
+                let (slug2, kind2) = (slug.clone(), kind.clone());
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::commands::skills_cmds::delete_installed_skill(slug2, kind2)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("join failed: {e}")));
+                let msg = match result {
+                    Ok(()) => DesktopMessage::InstalledSkillAck { slug, mirrored: 0 },
+                    Err(e) => DesktopMessage::ChatError {
+                        chat_session_id: "skills".into(),
+                        error: e,
+                    },
+                };
+                let _ = send_msg(&write, &msg).await;
+            }
+            MobileMessage::MakeInstalledSkillsGlobal { kind } => {
+                let kind2 = kind.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::commands::skills_cmds::make_installed_global(kind2)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("globalize worker failed: {e}")));
+                match result {
+                    Ok(mirrored) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::InstalledSkillAck { slug: String::new(), mirrored },
+                        )
+                        .await;
+                    }
+                    Err(e) => domain_error(&write, "skills", e).await,
+                }
+            }
+            MobileMessage::GitStatus { project_id } => {
+                match project_path(&db, &project_id) {
+                    Some(dir) => {
+                        let dir2 = dir.clone();
+                        let status = tauri::async_runtime::spawn_blocking(move || {
+                            let p = std::path::Path::new(&dir2);
+                            let st = crate::git::get_git_status(p);
+                            let changed: Vec<serde_json::Value> =
+                                serde_json::to_value(crate::git::get_changed_files(p))
+                                    .ok()
+                                    .and_then(|v| v.as_array().cloned())
+                                    .unwrap_or_default();
+                            (st, changed, crate::git::get_remote_url(p).map(|s| s.to_string()))
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            eprintln!("[mobile-relay] git status join failed: {e}");
+                            (
+                                crate::types::GitStatusInfo {
+                                    is_repo: false,
+                                    branch: None,
+                                    dirty: false,
+                                    ahead: 0,
+                                    behind: 0,
+                                },
+                                Vec::new(),
+                                None,
+                            )
+                        });
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::GitStatusMsg {
+                                is_repo: status.0.is_repo,
+                                branch: status.0.branch,
+                                dirty: status.0.dirty,
+                                ahead: status.0.ahead,
+                                behind: status.0.behind,
+                                remote_url: status.2,
+                                changed_files: status.1,
+                            },
+                        )
+                        .await;
+                    }
+                    None => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "git".into(),
+                                error: format!("unknown project: {project_id}"),
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::GitDiff { project_id, path } => {
+                let dir = match project_path(&db, &project_id) {
+                    Some(dir) => dir,
+                    None => {
+                        domain_error(
+                            &write,
+                            "git",
+                            format!("unknown project: {project_id}"),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let (d2, f2) = (dir, path.clone());
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    let p = std::path::Path::new(&d2);
+                    match &f2 {
+                        Some(f) if !f.is_empty() => {
+                            let full = crate::git::get_git_diff(p)?;
+                            Ok(filter_diff_to_path(&full, f))
+                        }
+                        _ => crate::git::get_git_diff(p),
+                    }
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("diff worker failed: {e}")));
+                match result {
+                    Ok(out) => {
+                        let _ = send_msg(&write, &DesktopMessage::GitOutput { output: out }).await;
+                    }
+                    Err(e) => domain_error(&write, "git", e).await,
+                }
+            }
+            MobileMessage::GitCommit { project_id, message } => {
+                let out = match project_path(&db, &project_id) {
+                    Some(dir) => {
+                        let (d2, m2) = (dir.clone(), message.clone());
+                        tauri::async_runtime::spawn_blocking(move || {
+                            crate::git::git_commit(std::path::Path::new(&d2), &m2)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("join failed: {e}")))
+                        .unwrap_or_else(|e| e)
+                    }
+                    None => format!("unknown project: {project_id}"),
+                };
+                let _ = send_msg(&write, &DesktopMessage::GitOutput { output: out }).await;
+            }
+            MobileMessage::GitPush { project_id } => {
+                let out = match project_path(&db, &project_id) {
+                    Some(dir) => {
+                        let d2 = dir.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            crate::git::git_push(std::path::Path::new(&d2))
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("join failed: {e}")))
+                        .unwrap_or_else(|e| e)
+                    }
+                    None => format!("unknown project: {project_id}"),
+                };
+                let _ = send_msg(&write, &DesktopMessage::GitOutput { output: out }).await;
+            }
+            MobileMessage::GitBranches { project_id } => {
+                let dir = match project_path(&db, &project_id) {
+                    Some(dir) => dir,
+                    None => {
+                        domain_error(
+                            &write,
+                            "git",
+                            format!("unknown project: {project_id}"),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::git::list_branches(std::path::Path::new(&dir))
+                        .map(|list| {
+                            serde_json::to_value(list)
+                                .ok()
+                                .and_then(|v| v.as_array().cloned())
+                                .unwrap_or_default()
+                        })
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("branch worker failed: {e}")));
+                match result {
+                    Ok(branches) => {
+                        let _ = send_msg(&write, &DesktopMessage::GitBranchesMsg { branches }).await;
+                    }
+                    Err(e) => domain_error(&write, "git", e).await,
+                }
+            }
+            MobileMessage::GitLog { project_id, limit } => {
+                let dir = match project_path(&db, &project_id) {
+                    Some(dir) => dir,
+                    None => {
+                        domain_error(
+                            &write,
+                            "git",
+                            format!("unknown project: {project_id}"),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let limit2 = limit.unwrap_or(30).clamp(1, 200);
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::git::get_git_log(std::path::Path::new(&dir)).map(|mut entries| {
+                        entries.truncate(limit2);
+                        serde_json::to_value(entries)
+                            .ok()
+                            .and_then(|v| v.as_array().cloned())
+                            .unwrap_or_default()
+                    })
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("log worker failed: {e}")));
+                match result {
+                    Ok(entries) => {
+                        let _ = send_msg(&write, &DesktopMessage::GitLogMsg { entries }).await;
+                    }
+                    Err(e) => domain_error(&write, "git", e).await,
+                }
+            }
+            MobileMessage::ListBudgets => {
+                match crate::commands::budget::list_budgets(app.state::<crate::DbState>()) {
+                    Ok(list) => {
+                        let budgets = list.into_iter().map(to_budget_info).collect();
+                        let _ = send_msg(&write, &DesktopMessage::BudgetList { budgets }).await;
+                    }
+                    Err(e) => domain_error(&write, "budget", e).await,
+                }
+            }
+            MobileMessage::SetBudget { project_id, monthly_usd, threshold_pct } => {
+                let result = crate::commands::budget::set_budget(
+                    app.state::<crate::DbState>(),
+                    project_id.clone(),
+                    monthly_usd,
+                    threshold_pct,
+                );
+                match result {
+                    Ok(cfg) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::BudgetList { budgets: vec![to_budget_info(cfg)] },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "budget".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::RemoveBudget { project_id } => {
+                let result = crate::commands::budget::remove_budget(
+                    app.state::<crate::DbState>(),
+                    project_id.clone(),
+                );
+                match result {
+                    Ok(()) => {
+                        let budgets = crate::commands::budget::list_budgets(
+                            app.state::<crate::DbState>(),
+                        )
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(to_budget_info)
+                        .collect();
+                        let _ = send_msg(&write, &DesktopMessage::BudgetList { budgets }).await;
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "budget".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::ListHiddenCostProjects => {
+                match crate::commands::budget::list_hidden_cost_projects(
+                    app.state::<crate::DbState>(),
+                ) {
+                    Ok(project_ids) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::HiddenCostProjects { project_ids },
+                        )
+                        .await;
+                    }
+                    Err(e) => domain_error(&write, "budget", e).await,
+                }
+            }
+            MobileMessage::HideCostProject { project_id } => {
+                if let Err(e) = crate::commands::budget::hide_cost_project(
+                    app.state::<crate::DbState>(),
+                    project_id.clone(),
+                ) {
+                    let _ = send_msg(
+                        &write,
+                        &DesktopMessage::ChatError {
+                            chat_session_id: "budget".to_string(),
+                            error: e,
+                        },
+                    )
+                    .await;
+                } else {
+                        let project_ids = crate::commands::budget::list_hidden_cost_projects(
+                        app.state::<crate::DbState>(),
+                    )
+                    .unwrap_or_default();
+                    let _ = send_msg(
+                        &write,
+                        &DesktopMessage::HiddenCostProjects { project_ids },
+                    )
+                    .await;
+                }
+            }
+            MobileMessage::UnhideCostProject { project_id } => {
+                if let Err(e) = crate::commands::budget::unhide_cost_project(
+                    app.state::<crate::DbState>(),
+                    project_id.clone(),
+                ) {
+                    let _ = send_msg(
+                        &write,
+                        &DesktopMessage::ChatError {
+                            chat_session_id: "budget".to_string(),
+                            error: e,
+                        },
+                    )
+                    .await;
+                } else {
+                    let project_ids = crate::commands::budget::list_hidden_cost_projects(
+                        app.state::<crate::DbState>(),
+                    )
+                    .unwrap_or_default();
+                    let _ = send_msg(
+                        &write,
+                        &DesktopMessage::HiddenCostProjects { project_ids },
+                    )
+                    .await;
+                }
+            }
+            MobileMessage::ListProjects => {
+                let rows = {
+                    let conn = db.lock();
+                    crate::db::list_projects(&conn)
+                };
+                match rows {
+                    Ok(list) => {
+                        let projects = list.into_iter().map(to_project_info).collect();
+                        let _ = send_msg(&write, &DesktopMessage::ProjectList { projects }).await;
+                    }
+                    Err(e) => domain_error(&write, "projects", e.to_string()).await,
+                }
+            }
+            MobileMessage::AddProject { path, name } => {
+                let path = path.trim().to_string();
+                if path.is_empty() {
+                    let _ = send_msg(
+                        &write,
+                        &DesktopMessage::ChatError {
+                            chat_session_id: "project".to_string(),
+                            error: "project path must not be empty".into(),
+                        },
+                    )
+                    .await;
+                } else {
+                    // Name defaults to the folder's last segment (the desktop
+                    // derives the same way when the user doesn't rename it).
+                    let name = name
+                        .map(|n| n.trim().to_string())
+                        .filter(|n| !n.is_empty());
+                    // The desktop command validates the dir, canonicalizes,
+                    // strips the Windows UNC prefix, derives the folder name,
+                    // and detects git — the phone must not invent rows.
+                    let result = crate::commands::projects::add_project(
+                        path,
+                        app.state::<crate::DbState>(),
+                    )
+                    .await;
+                    let result = result.inspect(|p| {
+                        if let Some(n) = name {
+                            let conn = db.lock();
+                            let _ = crate::db::rename_project(&conn, &p.id, &n);
+                        }
+                    });
+                    match result {
+                        Ok(p) => {
+                            let _ = send_msg(
+                                &write,
+                                &DesktopMessage::ProjectUpserted { project: to_project_info(p) },
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            let _ = send_msg(
+                                &write,
+                                &DesktopMessage::ChatError {
+                                    chat_session_id: "project".to_string(),
+                                    error: e,
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+            MobileMessage::RenameProject { project_id, name } => {
+                let name = name.trim().to_string();
+                let result = if name.is_empty() {
+                    Err("project name must not be empty".to_string())
+                } else {
+                    let conn = db.lock();
+                    crate::db::rename_project(&conn, &project_id, &name)
+                        .map_err(|e| e.to_string())?;
+                    crate::db::list_projects(&conn)
+                        .ok()
+                        .and_then(|ps| ps.into_iter().find(|p| p.id == project_id))
+                        .ok_or_else(|| "project vanished after rename".to_string())
+                };
+                match result {
+                    Ok(p) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ProjectUpserted { project: to_project_info(p) },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "project".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::RemoveProject { project_id } => {
+                // Desktop command: also tears down the project's git worktrees
+                // before dropping the row (the db fn alone leaked worktrees).
+                let result = crate::commands::projects::remove_project(
+                    project_id.clone(),
+                    app.state::<crate::DbState>(),
+                )
+                .await
+                .map_err(|e| e.to_string());
+                match result {
+                    Ok(()) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ProjectRemoved { project_id },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "project".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::ListAutomations => {
+                let app2 = app.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::commands::automation_cmds::list_automations(
+                        app2.state::<crate::DbState>(),
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("automation worker failed: {e}")));
+                match result {
+                    Ok(list) => {
+                        let automations = list.into_iter().map(to_automation_info).collect();
+                        let _ = send_msg(&write, &DesktopMessage::AutomationList { automations }).await;
+                    }
+                    Err(e) => domain_error(&write, "automation", e).await,
+                }
+            }
+            MobileMessage::CreateAutomation { input } => {
+                let parsed: Result<crate::db::automations::AutomationInput, _> =
+                    serde_json::from_value(input);
+                let result = match parsed {
+                    Err(e) => Err(e.to_string()),
+                    Ok(i) => {
+                        let app2 = app.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let app_state = app2.clone();
+                            let state = app_state.state::<crate::DbState>();
+                            crate::commands::automation_cmds::create_automation(app2, state, i)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("automation create join failed: {e}")))
+                    }
+                };
+                match result {
+                    Ok(a) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::AutomationUpdated { automation_id: a.id },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "automation".into(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::UpdateAutomation { automation_id, input } => {
+                let parsed: Result<crate::db::automations::AutomationInput, _> =
+                    serde_json::from_value(input);
+                let result = match parsed {
+                    Err(e) => Err(e.to_string()),
+                    Ok(i) => {
+                        let app2 = app.clone();
+                        let id2 = automation_id.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let app_state = app2.clone();
+                            let state = app_state.state::<crate::DbState>();
+                            crate::commands::automation_cmds::update_automation(app2, state, id2, i)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("automation update join failed: {e}")))
+                    }
+                };
+                automation_ack(&write, automation_id, result).await;
+            }
+            MobileMessage::DeleteAutomation { automation_id } => {
+                let app2 = app.clone();
+                let id2 = automation_id.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    let app_state = app2.clone();
+                    let state = app_state.state::<crate::DbState>();
+                    crate::commands::automation_cmds::delete_automation(app2, state, id2)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("automation delete join failed: {e}")));
+                match result {
+                    Ok(()) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::AutomationDeleted { automation_id },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "automation".into(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::SetAutomationEnabled { automation_id, enabled } => {
+                let app2 = app.clone();
+                let id2 = automation_id.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    let app_state = app2.clone();
+                    let state = app_state.state::<crate::DbState>();
+                    crate::commands::automation_cmds::set_automation_enabled(app2, state, id2, enabled)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("automation toggle join failed: {e}")));
+                automation_ack(&write, automation_id, result).await;
+            }
+            MobileMessage::RunAutomationNow { automation_id } => {
+                let app2 = app.clone();
+                let id2 = automation_id.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    let app_state = app2.clone();
+                    let state = app_state.state::<crate::DbState>();
+                    crate::commands::automation_cmds::run_automation_now(app2, state, id2)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("automation run join failed: {e}")));
+                match result {
+                    Ok(()) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::AutomationRunStarted { automation_id },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "automation".into(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::StopAutomationRun { automation_id } => {
+                match crate::commands::automation_cmds::stop_automation_run(automation_id.clone()) {
+                    Ok(stopped) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::AutomationRunStopped { automation_id, stopped },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "automation".into(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::ListAutomationRuns { automation_id, limit } => {
+                let app2 = app.clone();
+                let id2 = automation_id.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::commands::automation_cmds::list_automation_runs(
+                        app2.state::<crate::DbState>(),
+                        id2,
+                        limit,
+                        None,
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("runs worker failed: {e}")));
+                match result {
+                    Ok(list) => {
+                        let runs = list
+                            .into_iter()
+                            .map(|r| super::protocol::AutomationRunInfo {
+                                id: r.id,
+                                automation_id: r.automation_id,
+                                started_at: r.started_at,
+                                finished_at: r.finished_at,
+                                status: r.status,
+                                summary: r.summary,
+                                chat_session_id: r.chat_session_id,
+                                source: r.source,
+                            })
+                            .collect();
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::AutomationRuns { automation_id, runs },
+                        )
+                        .await;
+                    }
+                    Err(e) => domain_error(&write, "automation", e).await,
+                }
+            }
+            MobileMessage::ListChatSkills => {
+                // Small directory scan over skill roots (ms-scale, same scan the
+                // desktop slash menu triggers on keystroke).
+                match crate::commands::skills_cmds::list_chat_skills() {
+                    Ok(list) => {
+                        let skills = list
+                            .into_iter()
+                            .map(|s| super::protocol::ChatSkillInfo {
+                                slug: s.slug,
+                                name: s.name,
+                                description: s.description,
+                                origin: s.origin,
+                            })
+                            .collect();
+                        let _ = send_msg(&write, &DesktopMessage::ChatSkills { skills }).await;
+                    }
+                    Err(e) => domain_error(&write, "chat-skills", e).await,
+                }
+            }
+            MobileMessage::ListHarnessModels { harness_id } => {
+                // Same shared probe cache the desktop picker uses; the
+                // blocking CLI probe runs off the WS task.
+                let outcome =
+                    crate::commands::agent_cmds::harness_models_cached(harness_id.clone(), false)
+                        .await;
+                let msg = match outcome {
+                    Ok(cfg) => DesktopMessage::HarnessModels {
+                        harness_id,
+                        models: cfg
+                            .models
+                            .iter()
+                            .map(|m| super::protocol::HarnessModelRow {
+                                id: m.id.clone(),
+                                label: m.label.clone(),
+                                source: m.source.to_string(),
+                                thinking: m.thinking.clone(),
+                            })
+                            .collect(),
+                        default_model: cfg.default_model,
+                        endpoint: cfg.endpoint,
+                        effort: cfg.effort,
+                        effort_options: cfg.effort_options,
+                    },
+                    // Tag the DOMAIN, not the harness id: a ChatError
+                    // carrying "claude_code" is indistinguishable from a real
+                    // session id, so the phone routed it to the chat's error
+                    // banner (invisible here) and the picker's pending spinner
+                    // never cleared.
+                    Err(e) => DesktopMessage::ChatError {
+                        chat_session_id: "harness-models".to_string(),
+                        error: format!("harness models: {e}"),
+                    },
+                };
+                let _ = send_msg(&write, &msg).await;
             }
             MobileMessage::GetSessionMessages {
                 session_id,
@@ -1008,12 +2299,14 @@ async fn handle_connection(
                 session_id,
                 provider_id,
                 model,
+                effort,
             } => {
                 match dispatch_mobile(
                     MobileMessage::SetSessionModel {
                         session_id,
                         provider_id,
                         model,
+                        effort,
                     },
                     &app,
                     Arc::clone(&db),
@@ -1203,6 +2496,75 @@ async fn handle_connection(
             } => {
                 relay_requests::transcribe_audio_arm(data_base64, media_type, &app, &write).await;
             }
+            MobileMessage::SearchChatMessages { query, limit } => {
+                match super::session_chat::handle_search_chat_messages(&db, query, limit) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "search".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::CompactSession { session_id } => {
+                match super::session_chat::handle_compact_session(&app, &db, session_id).await {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "compact".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            MobileMessage::DeleteChatMessage { .. }
+            | MobileMessage::EditUserMessage { .. }
+            | MobileMessage::RegenerateMessage { .. }
+            | MobileMessage::ListChatCheckpoints { .. }
+            | MobileMessage::RestoreChatCheckpoint { .. }
+            | MobileMessage::SetSessionPermissionMode { .. }
+            | MobileMessage::ResolveSessionQuestion { .. } => {
+                match dispatch_mobile(
+                    req,
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(
+                            &write,
+                            &DesktopMessage::ChatError {
+                                chat_session_id: "session-chat".to_string(),
+                                error: e,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
             // A second Pair frame after a successful pairing is a protocol
             // violation — already handled above before this match.
             MobileMessage::Pair { .. } => unreachable!("Pair is intercepted above"),
@@ -1210,6 +2572,104 @@ async fn handle_connection(
     }
 
     Ok(())
+}
+
+fn to_budget_info(b: crate::commands::budget::BudgetConfig) -> super::protocol::BudgetInfo {
+    super::protocol::BudgetInfo {
+        project_id: b.project_id,
+        monthly_usd: b.monthly_usd,
+        threshold_pct: b.threshold_pct,
+    }
+}
+
+/// Registered project id → its folder path. Git ops resolve through this:
+/// the phone can only touch repos the desktop already knows as projects.
+fn project_path(
+    db: &Arc<Mutex<Connection>>,
+    project_id: &str,
+) -> Option<String> {
+    let conn = db.lock();
+    crate::db::list_projects(&conn)
+        .ok()?
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.path)
+}
+
+/// Keep only the file-diff sections a single file's diff should show.
+fn filter_diff_to_path(diff: &str, path: &str) -> String {
+    let header = format!("+++ b/{}", path.trim_start_matches("./"));
+    let mut out = String::new();
+    let mut keep = false;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            keep = line.contains(path.trim_start_matches("./")) || line.contains(&header);
+        }
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if out.is_empty() { diff.to_string() } else { out }
+}
+
+fn to_project_info(p: crate::types::Project) -> super::protocol::ProjectInfo {
+    super::protocol::ProjectInfo {
+        id: p.id,
+        path: p.path,
+        name: p.name,
+        is_git_repo: p.is_git_repo,
+        created_at: p.created_at,
+        last_opened_at: p.last_opened_at,
+    }
+}
+
+/// Send a domain error to the phone instead of a plausible empty success —
+/// an error-shaped answer is how the UI can tell "nothing yet" from
+/// "the backend failed".
+async fn domain_error(write: &super::relay_ws::SharedWsWrite, domain: &str, e: String) {
+    let _ = send_msg(
+        write,
+        &DesktopMessage::ChatError {
+            chat_session_id: domain.to_string(),
+            error: e,
+        },
+    )
+    .await;
+}
+
+fn to_automation_info(a: crate::db::automations::Automation) -> super::protocol::AutomationInfo {
+    super::protocol::AutomationInfo {
+        id: a.id,
+        name: a.name,
+        prompt: a.prompt,
+        harness: a.harness,
+        model: a.model,
+        cwd: a.cwd,
+        schedule: a.schedule,
+        enabled: a.enabled,
+        last_run_at: a.last_run_at,
+        last_status: a.last_status,
+        chat_session_id: a.chat_session_id,
+        created_at: a.created_at,
+        origin: a.origin,
+        trigger_type: a.trigger_type,
+    }
+}
+
+async fn automation_ack(
+    write: &super::relay_ws::SharedWsWrite,
+    automation_id: String,
+    result: Result<(), String>,
+) {
+    let msg = match result {
+        Ok(()) => DesktopMessage::AutomationUpdated { automation_id },
+        Err(e) => DesktopMessage::ChatError {
+            chat_session_id: "automation".into(),
+            error: e,
+        },
+    };
+    let _ = send_msg(write, &msg).await;
 }
 
 /// Send one DesktopMessage on the socket. Delegates to the shared sink
@@ -1638,8 +3098,12 @@ async fn send_done(
 // Provider list builder
 // ---------------------------------------------------------------------------
 
-/// Query active CLI sessions. Uses the same db::list_sessions that the
-/// desktop sidebar calls, so the phone sees exactly what the desktop sees.
+/// Query the desktop's chat list for the phone. Reads `chat_sessions` — the
+/// same store the desktop sidebar's chat rail lists — not the legacy
+/// `sessions` table (empty on every fresh install, which made the phone see
+/// zero chats). Agent mapping: `harness:<id>` agents lose the prefix;
+/// builtin/local chats fall back to their provider so the phone still shows
+/// a meaningful agent label.
 ///
 /// PERF (PERFORMANCE_AUDIT.md C5): previously this held the SQLite mutex
 /// across N `get_project` calls (one per session). For 20+ sessions that
@@ -1651,14 +3115,11 @@ async fn send_done(
 fn build_session_list(
     db: &Arc<Mutex<Connection>>,
     app: &AppHandle,
-) -> Vec<super::protocol::SessionInfo> {
-    // Phase 1: read sessions under one short lock.
+) -> Result<Vec<super::protocol::SessionInfo>, String> {
+    // Phase 1: read chats under one short lock.
     let sessions = {
         let conn = db.lock();
-        match crate::db::list_sessions(&conn, None) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        }
+        crate::db::list_chat_sessions(&conn).map_err(|e| e.to_string())?
     };
     // Phase 2: bulk-resolve all referenced projects in one query (still
     // under one short lock — the previous code held the lock per row).
@@ -1669,8 +3130,9 @@ fn build_session_list(
         let mut seen = std::collections::HashSet::new();
         let mut ids: Vec<&str> = Vec::new();
         for s in &sessions {
-            if seen.insert(s.project_id.clone()) {
-                ids.push(&s.project_id);
+            let Some(pid) = s.project_id.as_deref() else { continue };
+            if seen.insert(pid.to_string()) {
+                ids.push(pid);
             }
         }
         if ids.is_empty() {
@@ -1696,13 +3158,24 @@ fn build_session_list(
         }
     };
     let pty_state = app.try_state::<crate::PtyState>();
-    sessions
+    let list = sessions
         .into_iter()
         .map(|s| {
+            let project_id = s.project_id.clone().unwrap_or_default();
             let project_name = project_names
-                .get(&s.project_id)
+                .get(&project_id)
                 .cloned()
                 .unwrap_or_default();
+            // `harness:<family>` agents carry the family the phone's UI keys
+            // on; builtin chats fall back to their model provider and `local`
+            // keeps its GGUF name.
+            let harness = match s.agent.as_deref().and_then(|a| a.strip_prefix("harness:")) {
+                Some(family) => family.to_string(),
+                None => match s.agent.as_deref() {
+                    Some(a) if a != "builtin" => a.to_string(),
+                    _ => s.provider.clone(),
+                },
+            };
             let (is_live, status) = if let Some(pty) = pty_state.as_ref() {
                 if let Some(pid) = pty.0.pane_id_for_session(&s.id) {
                     let state = pty
@@ -1718,13 +3191,74 @@ fn build_session_list(
             };
             super::protocol::SessionInfo {
                 id: s.id,
-                project_id: s.project_id.clone(),
+                project_id,
                 project_name,
                 title: s.title.unwrap_or_else(|| "Untitled".to_string()),
-                harness: s.harness,
+                harness,
                 status,
                 last_active_at: s.last_active_at,
                 is_live,
+                starred: s.starred,
+                unread: s.unread,
+                effort: s.effort_level,
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(list)
+}
+
+/// Agent-harness families for the phone's composer chips — the same adapter
+/// registry the desktop agent picker lists. `installed` comes from the 30s
+/// probe cache when warm (populated at boot / agent-menu opens); the cache's
+/// CLI probes spawn each binary with --version, far too slow to run inline
+/// on the relay's async path, so a cold cache simply reports not-installed.
+/// Set while the background harness-cache warm-up runs — at most one.
+static HARNESS_WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// One background pass over the harness probe caches (install status via
+/// `list_harnesses`, then each harness's model catalog). Probes spawn one
+/// CLI process each (~5s worst case) — never run these on the WS task.
+async fn warm_harness_caches() {
+    let _ = crate::commands::pty_cmds::list_harnesses(None).await;
+    for a in crate::harness_adapters::all_adapters() {
+        let _ =
+            crate::commands::agent_cmds::harness_models_cached(a.id().to_string(), false).await;
+    }
+}
+
+fn build_harness_list() -> Vec<super::protocol::HarnessInfo> {
+    crate::harness_adapters::all_adapters()
+        .into_iter()
+        .map(|a| {
+            // Catalog from the WARM probe cache only — probing inline would
+            // stall the relay's WS task for seconds per CLI. A cold pane is
+            // fetched by the phone via ListHarnessModels on pane open.
+            let cfg = crate::commands::agent_cmds::harness_models_cache_get(a.id());
+            super::protocol::HarnessInfo {
+                id: a.id().to_string(),
+                display_name: a.display_name().to_string(),
+                installed: crate::commands::pty_cmds::harness_status_cached_installed(a.id()),
+                models: cfg
+                    .as_ref()
+                    .map(|c| {
+                        c.models
+                            .iter()
+                            .map(|m| super::protocol::HarnessModelRow {
+                                id: m.id.clone(),
+                                label: m.label.clone(),
+                                source: m.source.to_string(),
+                                thinking: m.thinking.clone(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                default_model: cfg.as_ref().and_then(|c| c.default_model.clone()),
+                endpoint: cfg.as_ref().and_then(|c| c.endpoint.clone()),
+                effort: cfg.as_ref().and_then(|c| c.effort.clone()),
+                effort_options: cfg
+                    .as_ref()
+                    .map(|c| c.effort_options.clone())
+                    .unwrap_or_default(),
             }
         })
         .collect()
@@ -2340,3 +3874,4 @@ pub async fn warm_up_local_model(
     }
     Ok(result.base_url)
 }
+

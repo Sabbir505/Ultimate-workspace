@@ -2,6 +2,8 @@
 
 **Status:** Implemented (Phases 0–4; see §15) · **Date:** 2026-09-04 · **Supersedes the open items in** `DOCUMENT_FIDELITY_RESEARCH.md` (its engine migration is done; this covers the missing design/validation layers)
 
+> **Implementation drift (verified against source 2026-09-21):** §6.1's `plan_document` arg surface rejects `"xlsx"` (supported: pptx/docx/pdf — `chat/docdesign/plan.rs`); §11's file layout is stale — there is no `tokens.rs` (tokens are the embedded `TOKENS_JSON` in `chat/docdesign/mod.rs`) and the TS files are flat (`tokens.json`, `tokens.ts`, `catalog.ts`, `compileDeck.ts`, `compileDoc.ts`, `compilePdfHtml.ts`, `ir.ts`, `irDoc.ts`, `systems.json`, `systems.ts`, `rasterize.ts`); the deck catalog shipped with **13** layouts — `cover`, `section`, `bullets`, `agenda`, `two-col`, `chart-text`, `chart-full`, `kpi`, `quote`, `timeline`, `table`, `statement`, `closing` (no `image-text`; `kpi-3`/`kpi-4` collapsed into one `kpi`) — §15 already says 13; the §15 note referring to `bin/conduit_browser_mcp.rs` / "conduit-tools MCP" means today's `src-tauri/src/bin/relay_browser_mcp.rs` / `relay-tools`. The §7.4 print-window pool was intentionally not built (§15 marks it so).
+
 ---
 
 ## 1. Executive summary

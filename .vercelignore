@@ -1,0 +1,15 @@
+# Vercel upload filter: only site/ + the site build config produce dist-site/.
+# Mirrors netlify.toml's publish contract.
+src-tauri/
+target/
+mobile/
+video/
+mockups/
+docs/
+generated_docs/
+logs/
+Thesis Diagrams/
+.playwright-mcp/
+dist/
+dist-site/
+*.log

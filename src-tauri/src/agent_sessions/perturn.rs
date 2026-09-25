@@ -692,6 +692,13 @@ pub(super) fn read_per_turn_stream(
                 );
             }
         }
+        // Register the question BEFORE finish_turn emits chat:done: the
+        // relay's done handler drops the chat→phone owner mapping unless an
+        // ask is still pending, so registering afterwards left the card with
+        // no owner and the phone never received it.
+        let registered_ask = ask.clone().and_then(|questions| {
+            app.and_then(|h| super::ask::register_relay_ask(h, sid, questions))
+        });
         // per-turn CLI streams don't reliably expose a model id on their
         // events — the cost rollup falls back to the session's model.
         finish_turn(
@@ -709,10 +716,10 @@ pub(super) fn read_per_turn_stream(
             None,
             source,
         );
-    }
-    // The card goes out only after chat:done — the turn is complete; the
-    // answer arrives as a follow-up turn.
-    if let Some(questions) = ask {
-        surface_relay_ask(app, sid, questions);
+        // The card goes out only after chat:done — the turn is complete; the
+        // answer arrives as a follow-up turn.
+        if let (Some(pending_id), Some(h)) = (registered_ask, app) {
+            super::ask::emit_relay_ask(h, sid, pending_id);
+        }
     }
 }

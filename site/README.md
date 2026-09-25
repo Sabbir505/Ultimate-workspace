@@ -21,6 +21,17 @@ npm run site:preview
 
 Preview: http://127.0.0.1:1511. Deploy the contents of `dist-site/` to a static host. Relative asset URLs support subdirectory hosting. The existing `npm run build` and Tauri output remain unchanged.
 
+## Netlify
+
+The site is live at https://ultimate-workspace.netlify.app. The root `netlify.toml` tells Netlify to run `npm run site:build` and publish `dist-site/`, so the same command works for CI deploys if the GitHub repo is connected in the Netlify UI.
+
+Manual redeploy after a change (the folder is already linked via `.netlify/state.json`):
+
+```sh
+npm run site:build
+netlify deploy --prod
+```
+
 ## Tests
 
 ```sh
@@ -36,7 +47,7 @@ The landing tests use Vitest and are also included in the full `npm test` suite.
 - The three story visuals (parallel panes, Session Mesh + memory, Vault) are CSS diagrams, not screenshots, and are labelled as diagrams for assistive tech.
 - Page structure follows the product: hero → workspace shot → agent CLIs → the workbench (parallel panes, Session Mesh + memory, Vault + knowledge search) → generation (documents, diagrams, images, voice) → a workbench grid (terminal, browser, git, automations, cost, connectors, MCP, hooks, permissions, skills, palette, themes) → model ownership → FAQ → mobile companion → download.
 - FAQ disclosures use native HTML details/summary.
-- Download links go to the repository’s latest GitHub release page, not a hardcoded installer version.
+- Download links go to the public releases-only repo (`Sabbir505/relay-releases`) latest-release page, not a hardcoded installer version. The source repo is private; downloads and the app's auto-update feed live there.
 - The site advertises Windows distribution and distinguishes local workspace storage from cloud-provider requests.
 - The logo is copied from the existing product asset in `public/logo.png`.
 - Typography and palette are aligned with the desktop app: Space Grotesk (display), Inter (body), Space Mono (labels), on the app’s cyan accent (`#88c0d0`) and dark surface.

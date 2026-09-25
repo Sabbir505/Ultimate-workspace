@@ -477,3 +477,64 @@ html.js [data-reveal].is-visible { opacity: 1; transform: none; }
   html.js [data-reveal] { opacity: 1; transform: none; transition: none; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ── Subpages: docs & releases ───────────────────────────────────────────── */
+.page-hero { padding: 64px 0 36px; max-width: 900px; }
+.page-hero h1 {
+  font-family: var(--font-display); font-size: clamp(44px, 6vw, 84px); line-height: 1.04;
+  font-weight: 500; letter-spacing: -.045em; margin: 14px 0 18px;
+}
+.page-hero h1 span { color: var(--cyan); }
+.page-lede { font-size: 17px; line-height: 1.65; color: #95a8a9; max-width: 66ch; margin: 0; }
+.page-lede a { color: var(--cyan); text-decoration: underline; text-underline-offset: 3px; }
+.page-body { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 64px; padding: 30px 0 110px; }
+.page-body-narrow { grid-template-columns: minmax(0, 1fr); max-width: 900px; }
+.toc { position: sticky; top: 104px; align-self: start; display: flex; flex-direction: column; gap: 10px; font-size: 13.5px; }
+.toc-title { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: .14em; color: #95a8a9; }
+.toc a { color: #9fb3b2; }
+.toc a:hover { color: var(--cyan); }
+.prose { max-width: 74ch; }
+.prose h2 {
+  font-family: var(--font-display); font-size: 27px; font-weight: 500; letter-spacing: -.02em;
+  color: #f0f3ee; margin: 2.1em 0 .55em; scroll-margin-top: 110px;
+}
+.prose h2:first-child { margin-top: 0; }
+.prose p, .prose li { line-height: 1.7; color: #c7d2d2; font-size: 15.5px; }
+.prose strong { color: #eef3f0; font-weight: 600; }
+.prose ul, .prose ol { padding-left: 1.25em; margin: .8em 0; }
+.prose li { margin: .45em 0; }
+.prose code { font-family: var(--font-mono); font-size: .84em; background: rgba(255,255,255,.08); padding: 2px 7px; border-radius: 6px; }
+.prose a { color: var(--cyan); text-decoration: underline; text-decoration-color: rgba(136,192,208,.45); text-underline-offset: 3px; }
+.prose a:hover { text-decoration-color: var(--cyan); }
+.page-cta { margin-top: 3.2em; padding-top: 2.4em; border-top: 1px solid rgba(255,255,255,.12); }
+.page-cta p { color: #95a8a9; margin: 14px 0 0; font-size: 13px; }
+.page-cta a { color: var(--cyan); }
+
+.release-list { list-style: none; margin: 0; padding: 0; }
+.release { padding: 42px 0; border-bottom: 1px solid rgba(255,255,255,.1); }
+.release:first-child { padding-top: 6px; }
+.release-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.version { font-family: var(--font-mono); font-weight: 700; font-size: 19px; color: #f0f3ee; letter-spacing: -.01em; }
+.release-date { display: inline-flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 12px; color: #95a8a9; }
+.release-date .icon { width: 14px; height: 14px; }
+.badge-latest {
+  display: inline-flex; align-items: center; gap: 6px; background: var(--cyan); color: var(--night);
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .1em; padding: 5px 12px; border-radius: 999px;
+}
+.badge-latest .icon { width: 12px; height: 12px; }
+.release-summary { max-width: 76ch; line-height: 1.7; color: #c7d2d2; font-size: 15.5px; margin: 0 0 20px; }
+.release-summary strong { color: #eef3f0; }
+.release-summary code { font-family: var(--font-mono); font-size: .84em; background: rgba(255,255,255,.08); padding: 2px 7px; border-radius: 6px; }
+.release-actions { display: flex; align-items: center; gap: 26px; flex-wrap: wrap; }
+.release-actions .text-link { margin-top: 0; }
+.release-compact { padding: 26px 0; }
+.release-compact .release-summary { margin-bottom: 12px; font-size: 14.5px; }
+.release-note { margin: 30px 0 0; color: #95a8a9; font-size: 13.5px; line-height: 1.7; max-width: 70ch; }
+.release-note a { color: var(--cyan); }
+.header nav a[aria-current="page"] { color: var(--cyan); }
+
+@media (max-width: 960px) {
+  .page-body { grid-template-columns: 1fr; gap: 36px; }
+  .toc { position: static; flex-direction: row; flex-wrap: wrap; gap: 8px 20px; }
+}

@@ -1,0 +1,16 @@
+# Relay landing page — static host config.
+# The site is built from site/ by the root Vite config into dist-site/
+# (see vite.site.config.ts). Everything else in the repo is desktop-app code.
+
+[build]
+  command = "npm run site:build"
+  publish = "dist-site"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# Vite emits content-hashed bundles under assets/ — safe to cache forever.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

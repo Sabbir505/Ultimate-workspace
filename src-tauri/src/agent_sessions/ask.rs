@@ -230,19 +230,31 @@ pub(crate) fn compose_ask_display(
     parts.join("\n")
 }
 
-/// Register a surfaced RELAY_ASK question and emit the question card. The
-/// answer comes back through `resolve_agent_question` →
-/// `dispatch_ask_follow_up` (nothing blocks: the asking turn is already
-/// finished and persisted by the time this runs).
-pub(super) fn surface_relay_ask(app: Option<&AppHandle>, sid: &str, questions: serde_json::Value) {
-    let Some(app) = app else { return };
-    let Some(state) = app.try_state::<AgentSessionState>() else {
-        return;
-    };
-    let pending_id =
+/// Register a surfaced RELAY_ASK question WITHOUT emitting the card. Returns
+/// the synthetic pending id. Callers register BEFORE the turn finalizes so
+/// the registry entry exists by the time `chat:done` runs (the relay drops a
+/// chat's owner mapping on done unless a question is still pending — without
+/// this the card was emitted into a chat nobody owned and the phone never
+/// saw it), then emit with `emit_relay_ask` once the turn is persisted.
+pub(super) fn register_relay_ask(
+    app: &AppHandle,
+    sid: &str,
+    questions: serde_json::Value,
+) -> Option<String> {
+    let state = app.try_state::<AgentSessionState>()?;
+    Some(
         state
             .0
-            .register_pending_ask(sid, questions.clone(), PendingAskRoute::FollowUpTurn);
+            .register_pending_ask(sid, questions, PendingAskRoute::FollowUpTurn),
+    )
+}
+
+/// Emit the question card for an id returned by `register_relay_ask`.
+pub(super) fn emit_relay_ask(app: &AppHandle, sid: &str, pending_id: String) {
+    let questions = app
+        .try_state::<AgentSessionState>()
+        .and_then(|s| s.0.peek_pending_ask_questions(sid, &pending_id))
+        .unwrap_or(serde_json::Value::Array(vec![]));
     let _ = app.emit(
         "chat:question-request",
         crate::types::ChatQuestionRequestPayload {

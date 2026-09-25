@@ -47,6 +47,11 @@ export const startMobileRelay = () =>
 export const stopMobileRelay = () =>
   safeInvoke<void>("stop_mobile_relay");
 
+/** Rotate the pairing token (revokes every previously paired phone; they
+ *  must re-scan) and restart the relay with the fresh token. */
+export const regenMobilePairingToken = () =>
+  safeInvoke<number | null>("regen_mobile_pairing_token");
+
 export const getMobileRelayStatus = () =>
   safeInvoke<MobileRelayStatus | null>("get_mobile_relay_status");
 

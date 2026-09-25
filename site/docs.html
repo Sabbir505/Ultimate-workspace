@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0f1418" />
+  <meta name="description" content="Relay documentation: install the desktop workspace, connect your agent CLIs or built-in chat, set up local models, automations, the Vault, and the mobile companion." />
+  <title>Docs — Relay</title>
+  <link rel="icon" href="./logo.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./src/style.css" />
+</head>
+<body>
+  <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+    <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="up-right" viewBox="0 0 24 24"><path d="M6 18 18 6M6 6h12v12"/></symbol>
+    <symbol id="windows" viewBox="0 0 24 24"><path d="M3 4h8v7H3zm10 0h8v7h-8zM3 13h8v7H3zm10 0h8v7h-8z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="book" viewBox="0 0 24 24"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></symbol>
+    <symbol id="clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+    <symbol id="phone" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></symbol>
+  </defs></svg>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="header" id="site-header">
+    <div class="header-inner wrap">
+      <a class="brand" href="./index.html" aria-label="Relay home"><img src="./logo.png" alt="" width="35" height="35"/>relay<span class="brand-period">.</span></a>
+      <nav aria-label="Main navigation"><a href="./index.html#workspace">Workspace</a><a href="./index.html#capabilities">Capabilities</a><a href="./index.html#models">Models</a><a href="./docs.html" aria-current="page">Docs</a><a href="./releases.html">Releases</a><a href="https://github.com/Sabbir505" target="_blank" rel="noopener">GitHub<svg class="icon"><use href="#up-right"/></svg></a></nav>
+      <a class="header-cta" href="https://github.com/Sabbir505/relay-releases/releases/latest">Download Relay<svg class="icon"><use href="#up-right"/></svg></a>
+    </div>
+  </header>
+  <div class="opening">
+    <main id="main">
+      <section class="page-hero wrap">
+        <span class="eyebrow"><i class="signal-dot"></i> DOCUMENTATION</span>
+        <h1>The basics,<br /><span>in one page.</span></h1>
+        <p class="page-lede">Everything you need to install Relay, bring your agents, and find your way around. For the version history, see <a href="./releases.html">Releases</a>.</p>
+      </section>
+
+      <section class="page-body wrap" data-reveal>
+        <nav class="toc" aria-label="On this page">
+          <span class="toc-title">On this page</span>
+          <a href="#what">What Relay is</a>
+          <a href="#install">Install &amp; update</a>
+          <a href="#agents">Bring your agents</a>
+          <a href="#workspace">Workspace &amp; permissions</a>
+          <a href="#models">Local models</a>
+          <a href="#beyond">Vault, automations &amp; more</a>
+          <a href="#mobile">Mobile companion</a>
+          <a href="#privacy">Where your data lives</a>
+        </nav>
+
+        <div class="prose">
+          <h2 id="what">What Relay is</h2>
+          <p>Relay is a local-first desktop workspace for AI coding agents, built for Windows. It wraps the agent CLIs you already run — Claude Code, Kimi Code, OpenCode, Pi, Omp, and CommandCode — next to a built-in chat that talks to cloud providers or models on your own machine. Around the chats: a native browser pane, a git sidebar, a markdown Vault, scheduled automations, a cost dashboard, and a phone companion — one window instead of ten.</p>
+
+          <h2 id="install">Install &amp; update</h2>
+          <ol>
+            <li>Grab the Windows installer from <a href="https://github.com/Sabbir505/relay-releases/releases/latest">GitHub Releases</a> and run it. No admin rights, no account.</li>
+            <li>Relay checks for updates on startup and every four hours. When one is available you get a banner with the changelog and a one-click install.</li>
+            <li>Prefer to browse versions yourself? Every release lives on the <a href="./releases.html">Releases page</a>.</li>
+          </ol>
+
+          <h2 id="agents">Bring your agents</h2>
+          <p>In <strong>Settings → Agent harnesses</strong> you can one-click install any supported CLI; if you already have one, Relay finds it on your PATH. Each agent runs in its own pane with real terminal emulation, keeps its own sessions, and can be resumed later. Or skip the CLIs: the <strong>built-in chat</strong> connects to Anthropic, OpenAI, OpenRouter, any OpenAI-compatible endpoint, or local GGUF models — your keys, your accounts, stored in your OS keychain.</p>
+          <p>Agents are not islands: up to <strong>six chats share one window</strong> as resizable panes, and the Session Mesh lets them see, consult, and message each other.</p>
+
+          <h2 id="workspace">Workspace &amp; permissions</h2>
+          <p>Pick a working folder and Relay scopes its file tools to the roots you grant — the agent works where you point it, not everywhere. Permission modes (read-only, plan, auto-edit, full auto) are one switch away in the composer, and native dialogs gate the few surfaces that execute arbitrary commands. A git sidebar with status, diffs, branches, worktrees and an AI diff review keeps the changes visible.</p>
+
+          <h2 id="models">Local models</h2>
+          <p>The built-in <strong>Model Market</strong> browses and downloads GGUF models from Hugging Face and serves them with llama-server — chat, read-aloud (Kokoro TTS), speech-to-text (whisper), and even image generation (sd.cpp) can run entirely on your machine, with optional CUDA builds one click away in Settings.</p>
+
+          <h2 id="beyond">Vault, automations &amp; more</h2>
+          <ul>
+            <li><strong>Vault</strong> — a bound folder of markdown notes the model can genuinely work in: operator search, atomic writes, vault-wide <code>[[wikilink]]</code> rewrites, recoverable deletes, a local graph, and an in-app PDF viewer.</li>
+            <li><strong>Automations</strong> — cron schedules that fire even while Relay is closed, plus event triggers: an inbound webhook, a watched file, a git HEAD change, or new Gmail activity.</li>
+            <li><strong>Making things</strong> — designed DOCX/PPTX/PDF documents, mermaid diagrams, and local image generation surface as artifacts you can preview, export, and voice-read.</li>
+            <li><strong>Memory</strong> — a persistent, inspectable memory survives across chats; a Settings browser shows every stored fact and its evidence.</li>
+          </ul>
+
+          <h2 id="mobile">Mobile companion</h2>
+          <p>Relay Mobile (Android/iOS, built with Expo) pairs with the desktop over a QR code or Tailscale. Chats, approvals, notifications and automations follow you — end-to-end encrypted, and your API keys never leave the desktop.</p>
+
+          <h2 id="privacy">Where your data lives</h2>
+          <p>Workspace, chats, notes, memory, and artifacts live on your machine in a local database and folders you choose. Local-first doesn't mean offline-only: cloud providers and connected services receive whatever you send them — nothing more. There is no telemetry and no Relay-side account.</p>
+
+          <div class="page-cta">
+            <a class="button button-light" href="https://github.com/Sabbir505/relay-releases/releases/latest"><svg class="icon"><use href="#windows"/></svg>Get Relay for Windows<svg class="icon"><use href="#arrow"/></svg></a>
+            <p>Questions? The <a href="./index.html#questions">FAQ</a> covers the rest.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <section class="closing">
+    <div class="wrap">
+      <footer class="footer">
+        <a class="brand" href="./index.html" aria-label="Relay home"><img src="./logo.png" alt="" width="32" height="32" />relay<span class="brand-period">.</span></a>
+        <span>One workspace. Many minds.</span>
+        <nav aria-label="Footer navigation"><a href="./docs.html">Docs</a><a href="./releases.html">Releases</a><a href="https://github.com/Sabbir505" target="_blank" rel="noopener">GitHub<svg class="icon"><use href="#up-right"/></svg></a></nav>
+      </footer>
+    </div>
+  </section>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

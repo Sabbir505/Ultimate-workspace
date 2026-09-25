@@ -607,6 +607,10 @@ export interface ChatState {
    *  automation:run-finished — covers providers whose one-shot path never
    *  emits chat:done, and failure paths that die before a terminal event. */
   endRemoteTurn: (chatSessionId: string) => Promise<void>;
+  /** Refetch a displayed session's transcript and merge it into the open
+   *  buffer (mergeOptimistic). Fired on remote-turn start so the backend-
+   *  persisted user row shows while the turn streams. */
+  syncTranscript: (chatSessionId: string) => Promise<void>;
   onStatus: (chatSessionId: string, reason: string, message: string) => void;
   onDone: (
     chatSessionId: string,

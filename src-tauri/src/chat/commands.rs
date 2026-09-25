@@ -19,12 +19,12 @@ pub(crate) type CmdResult<T> = Result<T, String>;
 // ---- domain children (mechanical split of the former monolith) ----
 
 mod api_keys;
-mod approval;
+pub mod approval;
 mod artifacts;
-mod generators;
+pub mod generators;
 mod llama_sidecar;
-mod preview;
-mod selection;
+pub mod preview;
+pub mod selection;
 pub(crate) mod send;
 mod sessions;
 

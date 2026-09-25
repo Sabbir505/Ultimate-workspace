@@ -1,25 +1,34 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AppState, Text, StyleSheet, TouchableOpacity, View, Alert } from 'react-native';
 import { NavigationContainer, DarkTheme, DefaultTheme } from '@react-navigation/native';
-import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { useSafeAreaInsets, SafeAreaProvider } from 'react-native-safe-area-context';
-import Ionicons from '@expo/vector-icons/Ionicons';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { ThemeProvider, useTheme, theme } from './src/theme';
+import { navigationRef } from './src/lib/navigation';
 import AppDrawer, { DrawerProvider } from './src/components/AppDrawer';
-import { tapLight, tapMedium } from './src/lib/haptics';
+import { tapMedium } from './src/lib/haptics';
 import { initDeepLinkHandling } from './src/lib/deepLinks';
 import { authenticate, markBackgrounded, shouldLockOnResume, deviceCanAuthenticate, appLockPlatformName } from './src/lib/appLock';
 import { useRelay } from './src/hooks/useRelay';
 import HomeScreen from './src/screens/HomeScreen';
 import SessionChat from './src/screens/SessionChat';
-// M1 (PERFORMANCE_AUDIT.md): lazy-load the Settings screen — Metro cannot
-// code-split, but React.lazy defers module evaluation until the tab is first
-// rendered, keeping its ~15-25 KB of factory work off the cold-start path.
-const SettingsScreen = React.lazy(() => import('./src/screens/SettingsScreen'));
+import ArtifactsScreen from './src/screens/ArtifactsScreen';
+import CostScreen from './src/screens/CostScreen';
+import AutomationsScreen from './src/screens/AutomationsScreen';
+import MemoryScreen from './src/screens/MemoryScreen';
+import SkillsScreen from './src/screens/SkillsScreen';
+import GitScreen from './src/screens/GitScreen';
+import NotificationsScreen from './src/screens/NotificationsScreen';
+import TerminalScreen from './src/screens/TerminalScreen';
+// Eager import on purpose: React.lazy + Metro's SDK 57 dev segment splitting
+// crashes the settings tab on Android devices ("Cannot read property … " red
+// box on the segment fetch), while web is unaffected. The screen's own module
+// graph is small enough that eager evaluation costs cold start nothing
+// meaningful — and QrScanModal's lazy import already loaded on Settings mount
+// anyway, so the old deferral never actually deferred anything.
+import SettingsScreen from './src/screens/SettingsScreen';
 
-const Tab = createBottomTabNavigator();
 const HomeStack = createNativeStackNavigator();
 
 /**
@@ -31,80 +40,25 @@ const HomeStack = createNativeStackNavigator();
  */
 function HomeStackScreen() {
   return (
-    <HomeStack.Navigator screenOptions={{ headerShown: false }}>
+    <HomeStack.Navigator screenOptions={{ headerShown: false, animation: "none" }}>
       <HomeStack.Screen name="HomeMain" component={HomeScreen} />
       <HomeStack.Screen name="SessionDetail" component={SessionChat} />
+      <HomeStack.Screen name="Artifacts" component={ArtifactsScreen} />
+      <HomeStack.Screen name="Automations" component={AutomationsScreen} />
+      <HomeStack.Screen name="Memory" component={MemoryScreen} />
+      <HomeStack.Screen name="Skills" component={SkillsScreen} />
+      <HomeStack.Screen name="Git" component={GitScreen} />
+      <HomeStack.Screen name="Terminal" component={TerminalScreen} />
+      <HomeStack.Screen name="Notifications" component={NotificationsScreen} />
+      <HomeStack.Screen name="Settings" component={SettingsScreen} />
+      <HomeStack.Screen name="CostDashboard" component={CostScreen} />
     </HomeStack.Navigator>
   );
 }
 
-// Minimal custom tab bar — Home + Settings, quiet icons, accent when active.
-const TAB_ICONS: Record<string, { active: keyof typeof Ionicons.glyphMap; inactive: keyof typeof Ionicons.glyphMap }> = {
-  Home: { active: 'home', inactive: 'home-outline' },
-  Settings: { active: 'settings', inactive: 'settings-outline' },
-};
-
-function MinimalTabBar({ state, navigation }: any) {
-  useTheme(); // subscribe so theme.colors is reactive
-  const c = theme.colors;
-  const insets = useSafeAreaInsets();
-
-  return (
-    <View
-      style={[
-        styles.tabBar,
-        {
-          backgroundColor: c.background,
-          borderTopColor: c.border,
-          paddingBottom: Math.max(insets.bottom, 8),
-        },
-      ]}
-    >
-      {state.routes.map((route: any, index: number) => {
-        const isFocused = state.index === index;
-        const icons = TAB_ICONS[route.name] ?? TAB_ICONS.Home;
-
-        const onPress = () => {
-          tapLight();
-          const event = navigation.emit({
-            type: 'tabPress',
-            target: route.key,
-            canPreventDefault: true,
-          });
-          if (!isFocused && !event.defaultPrevented) {
-            navigation.navigate(route.name);
-          }
-        };
-
-        return (
-          <TouchableOpacity
-            key={route.key}
-            accessibilityRole="button"
-            accessibilityState={isFocused ? { selected: true } : {}}
-            accessibilityLabel={route.name === 'Home' ? 'Home' : 'Settings'}
-            onPress={onPress}
-            style={styles.tabItem}
-          >
-            <Ionicons
-              name={isFocused ? icons.active : icons.inactive}
-              size={22}
-              color={isFocused ? c.accent : c.textSecondary}
-            />
-            <Text
-              style={[
-                styles.tabLabel,
-                theme.type.label,
-                { color: isFocused ? c.accent : c.textSecondary },
-              ]}
-            >
-              {route.name}
-            </Text>
-          </TouchableOpacity>
-        );
-      })}
-    </View>
-  );
-}
+// Bottom nav removed per user direction: the composer owns the bottom
+// edge (desktop parity). The Tab navigator stays as invisible routing so the
+// drawer's Settings/Artifacts rows keep working.
 
 function AppShell() {
   const { isDark } = useTheme();
@@ -180,25 +134,14 @@ function AppShell() {
     [isDark, c],
   );
 
-  const tabBar = useMemo(() => (props: any) => <MinimalTabBar {...props} />, []);
-
   return (
     <>
       <StatusBar style={isDark ? 'light' : 'dark'} />
-      <NavigationContainer theme={navTheme}>
+      <NavigationContainer ref={navigationRef} theme={navTheme}>
         {/* Plain wrapper so the drawer overlay can stack above the navigator
             while still living inside the container's navigation context. */}
         <View style={styles.shell}>
-          <Tab.Navigator tabBar={tabBar} screenOptions={{ headerShown: false }}>
-            <Tab.Screen name="Home" component={HomeStackScreen} />
-            <Tab.Screen name="Settings">
-              {() => (
-                <React.Suspense fallback={null}>
-                  <SettingsScreen />
-                </React.Suspense>
-              )}
-            </Tab.Screen>
-          </Tab.Navigator>
+          <HomeStackScreen />
           {/* Global drawer overlay — above everything. */}
           <AppDrawer />
           {/* App-lock gate — above even the drawer. */}
@@ -251,19 +194,6 @@ export default function App() {
 
 const styles = StyleSheet.create({
   shell: { flex: 1 },
-  tabBar: {
-    flexDirection: 'row',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    paddingTop: 6,
-  },
-  tabItem: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 2,
-    paddingVertical: 2,
-  },
-  tabLabel: { fontSize: 11 },
   lockGate: {
     position: 'absolute',
     top: 0,

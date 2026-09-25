@@ -498,6 +498,35 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
           streamingChatSessionId: chatSessionId,
         };
       });
+      // The user row that started this turn was persisted backend-side (a
+      // phone-sent message, an automation prompt, a harness follow-up) — the
+      // optimistic-bubble path never ran here, so the live transcript showed
+      // the reply streaming with no prompt above it. Sync the page a beat
+      // after the start: the builtin/relay paths persist the row before the
+      // first token, but the harness spawn path can take a couple of seconds
+      // (connector refresh + primer) to get there, hence the second sweep.
+      for (const delay of [500, 2500]) {
+        setTimeout(() => void get().syncTranscript(chatSessionId), delay);
+      }
+    },
+
+    // Refetch the displayed transcript for a session and merge it into the
+    // open buffer. No-op when the session is displayed nowhere (a background
+    // chat's rows surface on open). Best-effort: a failed fetch leaves the
+    // current list alone.
+    syncTranscript: async (chatSessionId: string) => {
+      if (bufferTargetFor(get(), chatSessionId) == null) return;
+      try {
+        const messages = await getChatMessages(chatSessionId, undefined, 200);
+        if (!messages) return;
+        // Scoped post-await write (same contract as endRemoteTurn): a pane
+        // re-pin mid-fetch must not write rows into another view's buffer.
+        if (bufferTargetFor(get(), chatSessionId) != null) {
+          set((s) => bufferWriteBack(s, chatSessionId, messages, { merge: true }));
+        }
+      } catch {
+        /* best-effort: onDone's refetch converges the list when the turn ends */
+      }
     },
 
     endRemoteTurn: async (chatSessionId: string) => {

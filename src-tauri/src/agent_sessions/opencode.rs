@@ -254,6 +254,11 @@ pub(super) fn send_opencode_turn(
                 // from the reply, surface it as a card after chat:done.
                 let (clean, ask) = split_relay_ask(std::mem::take(&mut *full));
                 *full = clean;
+                // Register before finish_turn: the relay's done handler drops
+                // the chat→phone owner mapping unless an ask is pending, so
+                // registering afterwards left the card with no owner.
+                let registered_ask =
+                    ask.and_then(|questions| register_relay_ask(&app2, &sid2, questions));
                 finish_turn(
                     Some(&app2),
                     &db2,
@@ -270,8 +275,8 @@ pub(super) fn send_opencode_turn(
                     None,
                 );
                 drop(full);
-                if let Some(questions) = ask {
-                    surface_relay_ask(Some(&app2), &sid2, questions);
+                if let Some(pending_id) = registered_ask {
+                    emit_relay_ask(&app2, &sid2, pending_id);
                 }
             }
             Err(e) => {

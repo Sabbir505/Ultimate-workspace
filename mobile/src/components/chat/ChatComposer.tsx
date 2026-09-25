@@ -22,7 +22,7 @@
  * Send gating is unchanged: the caller's `onSend` routes through
  * useSessionChat.send, which reports not-connected errors itself.
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -45,6 +45,7 @@ import {
   setAudioModeAsync,
 } from 'expo-audio';
 import { theme } from '../../theme';
+import { onChatSkills, useRelay, type ChatSkillInfo, type ConnectorInfo } from '../../hooks/useRelay';
 import { tapLight, tapMedium, notifySuccess } from '../../lib/haptics';
 import { onTranscription, type SessionChatAttachment } from '../../hooks/useRelay';
 
@@ -112,6 +113,15 @@ interface ChatComposerProps {
   /** Transcribe a base64 recording on the desktop (useRelay.transcribeAudio).
    *  The reply arrives on the `onTranscription` relay bus. */
   onTranscribe: (dataBase64: string, mediaType?: string) => void;
+  /** Tab rendered into the composer's top edge (the model/agent picker on
+   *  the new-chat screen — desktop composer parity, one card). */
+  notch?: React.ReactNode;
+  /** @-menu connector state (desktop composer parity). */
+  connectors?: {
+    list: ConnectorInfo[];
+    attached: string[];
+    onToggle: (id: string) => void;
+  };
   onCancel?: () => void;
   streaming?: boolean;
   placeholder?: string;
@@ -123,6 +133,8 @@ interface ChatComposerProps {
 export default function ChatComposer({
   onSend,
   onTranscribe,
+  notch,
+  connectors,
   onCancel,
   streaming = false,
   placeholder = 'Message',
@@ -130,6 +142,66 @@ export default function ChatComposer({
 }: ChatComposerProps) {
   const c = theme.colors;
   const [text, setText] = useState('');
+  // Slash menu (desktop composer parity): `/` opens built-in commands plus
+  // the desktop's installed/builtin skills. Selecting inserts `/slug `.
+  const [skills, setSkills] = useState<ChatSkillInfo[]>([]);
+  const { listChatSkills } = useRelay();
+  useEffect(() => {
+    const off = onChatSkills.on(({ skills: list }) => setSkills(list));
+    listChatSkills();
+    return off;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const slashQuery = useMemo(() => {
+    const m = text.match(/(?:^|\s)\/([A-Za-z0-9_-]*)$/);
+    return m ? m[1].toLowerCase() : null;
+  }, [text]);
+  const BUILTIN_COMMANDS: { slug: string; description: string }[] = [
+    { slug: 'compact', description: 'Summarize older context' },
+    { slug: 'research', description: 'Multi-source research mode' },
+    { slug: 'microcompact', description: 'CLI-native context compaction' },
+  ];
+  const slashItems = useMemo(() => {
+    if (slashQuery == null) return [];
+    const q = slashQuery;
+    const cmds = BUILTIN_COMMANDS
+      .filter((c) => c.slug.startsWith(q))
+      .map((c) => ({ slug: c.slug, name: c.slug, description: c.description, builtin: true }));
+    const sk = skills
+      .filter((k) => k.slug.startsWith(q) || k.name.toLowerCase().includes(q))
+      .slice(0, 20)
+      .map((k) => ({ slug: k.slug, name: k.name, description: k.description, builtin: false }));
+    return [...cmds, ...sk];
+  }, [slashQuery, skills]);
+  const applySlash = useCallback((slug: string) => {
+    setText((prev) => prev.replace(/\/[A-Za-z0-9_-]*$/, `/${slug} `));
+  }, []);
+  // @-menu (desktop parity): `@` opens connected connectors/MCP servers;
+  // tapping one attaches/detaches it for the conversation.
+  const atQuery = useMemo(() => {
+    const m = text.match(/(?:^|\s)@([A-Za-z0-9 ._-]*)$/);
+    return m ? m[1].toLowerCase() : null;
+  }, [text]);
+  const atItems = useMemo(() => {
+    if (atQuery == null || !connectors) return [];
+    const q = atQuery;
+    return connectors.list
+      .filter((c) => c.connected)
+      .filter((c) => !q || c.display_name.toLowerCase().includes(q) || c.family.toLowerCase().includes(q))
+      .slice(0, 20);
+  }, [atQuery, connectors]);
+  const toggleConnector = useCallback((id: string) => {
+    connectors?.onToggle(id);
+    // Close the menu: the attachment chip is the state display from here.
+    setText((prev) => prev.replace(/@([A-Za-z0-9 ._-]*)$/, ''));
+  }, [connectors]);
+  const attachedNames = useMemo(
+    () =>
+      (connectors?.attached ?? [])
+        .map((id) => connectors?.list.find((c) => c.id === id)?.display_name ?? id)
+        .filter(Boolean),
+    [connectors],
+  );
   const [attachments, setAttachments] = useState<SessionChatAttachment[]>([]);
   const [recording, setRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
@@ -325,8 +397,60 @@ export default function ChatComposer({
 
   const micDisabled = streaming || disabled || transcribing;
 
+  const menuOpen = slashItems.length > 0 || atItems.length > 0;
+
+  // The `/` and `@` menus are a POPUP above the composer (desktop parity) —
+  // a floating panel anchored to the card's top edge, not something drawn
+  // inside the input's own surface.
+  const menu = menuOpen ? (
+    <View style={styles.menuDock}>
+      <View style={[styles.slashMenu, { backgroundColor: c.elevated, borderColor: c.border }]}>
+        <ScrollView style={styles.slashList} keyboardShouldPersistTaps="always" bounces={false}>
+          {slashItems.map((it) => (
+            <TouchableOpacity
+              key={`${it.builtin ? 'b' : 's'}-${it.slug}`}
+              style={styles.slashRow}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`Command ${it.slug}`}
+              onPress={() => applySlash(it.slug)}
+            >
+              <Text style={[styles.slashName, { color: c.text }]} numberOfLines={1}>
+                /{it.slug}
+              </Text>
+              <Text style={[styles.slashDesc, { color: c.textSecondary }]} numberOfLines={1}>
+                {it.description}
+              </Text>
+            </TouchableOpacity>
+          ))}
+          {atItems.map((conn) => (
+            <TouchableOpacity
+              key={`c-${conn.id}`}
+              style={styles.slashRow}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`Connector ${conn.display_name}`}
+              onPress={() => toggleConnector(conn.id)}
+            >
+              <Text style={[styles.slashName, { color: c.text }]} numberOfLines={1}>
+                {conn.display_name}
+              </Text>
+              <Text style={[styles.slashDesc, { color: c.textSecondary }]} numberOfLines={1}>
+                {connectors?.attached.includes(conn.id) ? 'Attached — tap to detach' : conn.description}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+    </View>
+  ) : null;
+
   return (
-    <View style={[styles.wrap, { backgroundColor: c.surface, borderColor: c.border }]}>
+    <View style={styles.rootWrap}>
+      {menu}
+      <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border }]}>
+      {/* Notch — the model/agent picker tab riding the card's top edge. */}
+      {notch ? <View style={styles.notchSlot}>{notch}</View> : null}
       {voiceError ? (
         <Text style={[styles.voiceError, { color: c.error }]} numberOfLines={2}>
           {voiceError}
@@ -359,7 +483,7 @@ export default function ChatComposer({
         </ScrollView>
       )}
 
-      <View style={[styles.pill, { borderColor: c.border, backgroundColor: c.surface }]}>
+      <View style={[styles.pill, { backgroundColor: 'transparent', borderWidth: 0 }]}>
         <TouchableOpacity
           style={[styles.plusBtn, { borderColor: c.border }]}
           onPress={handleAttach}
@@ -397,6 +521,32 @@ export default function ChatComposer({
             returnKeyType="default"
           />
         )}
+
+        {/* Attached connectors (desktop composer pills) — tap × to detach. */}
+        {attachedNames.length > 0 ? (
+          <View style={styles.attachedRow}>
+            {attachedNames.map((name) => {
+              const id = connectors?.attached.find(
+                (cid) => (connectors?.list.find((c) => c.id === cid)?.display_name ?? cid) === name,
+              );
+              return (
+                <TouchableOpacity
+                  key={name}
+                  style={[styles.attachedChip, { backgroundColor: c.bubble, borderColor: c.border }]}
+                  activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Detach ${name}`}
+                  onPress={() => id && toggleConnector(id)}
+                >
+                  <Ionicons name="attach-outline" size={11} color={c.accent} />
+                  <Text style={[styles.attachedText, { color: c.text }]} numberOfLines={1}>{name}</Text>
+                  <Ionicons name="close-circle" size={12} color={c.textSecondary} />
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        ) : null}
+
 
         {streaming && onCancel ? (
           <TouchableOpacity
@@ -456,6 +606,7 @@ export default function ChatComposer({
         )}
       </View>
     </View>
+    </View>
   );
 }
 
@@ -477,12 +628,6 @@ function useRecPulse() {
 }
 
 const styles = StyleSheet.create({
-  wrap: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: theme.spacing.md,
-    paddingTop: 8,
-    paddingBottom: 10,
-  },
   voiceError: {
     ...theme.type.secondary,
     paddingHorizontal: 4,
@@ -511,12 +656,9 @@ const styles = StyleSheet.create({
   pill: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: theme.radius.pill,
-    paddingLeft: 6,
-    paddingRight: 6,
-    paddingTop: 4,
-    paddingBottom: 4,
+    minHeight: 50,
+    paddingLeft: 2,
+    paddingRight: 2,
     gap: 4,
   },
   plusBtn: {
@@ -527,8 +669,65 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  rootWrap: {
+    position: 'relative',
+  },
+  menuDock: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: '100%',
+    marginBottom: 8,
+  },
+  slashMenu: {
+    maxHeight: 184,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+    // Popup lift off the composer, desktop-menu style.
+    shadowColor: '#000',
+    shadowOpacity: 0.28,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 10,
+  },
+  slashList: { maxHeight: 184 },
+  slashRow: { paddingHorizontal: 12, paddingVertical: 8 },
+  slashName: { fontSize: 13, fontWeight: '600' },
+  slashDesc: { fontSize: 11, marginTop: 1 },
+  card: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 20,
+    paddingHorizontal: theme.spacing.md,
+    paddingTop: 4,
+    paddingBottom: 10,
+  },
+  notchSlot: {
+    alignSelf: 'flex-start',
+    marginTop: -12,
+    marginBottom: 2,
+  },
+  attachedRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingBottom: 6,
+  },
+  attachedChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: theme.radius.pill,
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+  },
+  attachedText: { fontSize: 11, fontWeight: '600' },
   input: {
     flex: 1,
+    // A flex child with no floor collapses to ZERO height inside the
+    // auto-height docked card on Android — typing became invisible.
+    minHeight: 30,
     borderWidth: 0,
     paddingTop: 8,
     paddingBottom: 8,

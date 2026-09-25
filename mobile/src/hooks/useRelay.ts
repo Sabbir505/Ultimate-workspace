@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { journalNotification } from '../lib/notificationJournal';
 import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { b64UrlToBytes, computePairProof, deriveSessionKey, decryptFrame, encryptFrame } from '../lib/relayCrypto';
@@ -34,15 +35,76 @@ export interface ChatMessage { role: string; content: string; }
 export interface SessionInfo {
   id: string; project_id: string; project_name: string; title: string;
   harness: string; status: string; last_active_at: number; is_live?: boolean;
+  starred?: boolean; unread?: boolean; effort?: string | null;
+}
+export interface HarnessModelRow {
+  id: string; label: string;
+  /** "config" | "cli" | "builtin" — the desktop pane's badge. */
+  source: string;
+  /** Per-model thinking tiers (empty → harness-wide effortOptions). */
+  thinking?: string[];
+}
+export interface HarnessInfo {
+  id: string; display_name: string; installed: boolean;
+  /** The CLI's own model catalog + endpoint + effort tiers (warm cache). */
+  models?: HarnessModelRow[];
+  default_model?: string | null;
+  endpoint?: string | null;
+  effort?: string | null;
+  effort_options?: string[];
 }
 function toSession(s: SessionInfo): Session {
   return { id: s.id, projectId: s.project_id, projectName: s.project_name, title: s.title,
     status: s.is_live ? ((s.status as Session['status']) || 'working') : 'idle' as Session['status'],
-    provider: s.harness, model: '', lastActivity: s.last_active_at * 1000, isLive: s.is_live ?? false };
+    provider: s.harness, model: '', lastActivity: s.last_active_at * 1000, isLive: s.is_live ?? false,
+    starred: s.starred ?? false, unread: s.unread ?? false, effort: s.effort ?? null };
 }
 type DesktopMessage =
   | { type: 'PairOk'; salt: string }
-  | { type: 'AvailableProviders'; providers: ProviderInfo[] }
+  | { type: 'AvailableProviders'; providers: ProviderInfo[]; harnesses?: HarnessInfo[]; default_provider?: string; default_model?: string }
+  | { type: 'ArtifactLibrary'; artifacts: ArtifactLibraryEntry[] }
+  | { type: 'CostRollups'; rollups: CostRollupsData }
+  | {
+      type: 'ArtifactPreviewMsg';
+      path: string; filename: string; ext: string; kind: string;
+      text?: string | null; data_uri?: string | null; truncated: boolean;
+    }
+  | { type: 'ProjectList'; projects: ProjectInfo[] }
+  | { type: 'AcpAgentList'; agents: AcpAgentInfo[] }
+  | { type: 'MemoryList'; records: MemoryInfo[] }
+  | { type: 'MemoryUpdated'; memory_id: string }
+  | { type: 'MemoryDeleted'; memory_id: string }
+  | { type: 'MemoryPurged'; count: number }
+  | { type: 'InstalledSkillList'; skills: InstalledSkillInfo[] }
+  | { type: 'InstalledSkillContent'; slug: string; kind: string; content: string }
+  | { type: 'InstalledSkillAck'; slug: string; mirrored: number }
+  | { type: 'GitStatusMsg'; is_repo: boolean; branch?: string | null; dirty: boolean; ahead: number; behind: number; remote_url?: string | null; changed_files: { status: string; kind: string; path: string }[] }
+  | { type: 'GitOutput'; output: string }
+  | { type: 'GitBranchesMsg'; branches: Record<string, unknown>[] }
+  | { type: 'GitLogMsg'; entries: Record<string, unknown>[] }
+  | { type: 'BudgetList'; budgets: BudgetInfo[] }
+  | { type: 'HiddenCostProjects'; project_ids: string[] }
+  | { type: 'ProjectUpserted'; project: ProjectInfo }
+  | { type: 'ProjectRemoved'; project_id: string }
+  | { type: 'ConnectorList'; connectors: ConnectorInfo[] }
+  | { type: 'SessionConnectors'; session_id: string; connector_ids: string[] }
+  | { type: 'SessionConnectorsSet'; session_id: string; connector_ids: string[] }
+  | { type: 'AutomationList'; automations: AutomationInfo[] }
+  | { type: 'AutomationRuns'; automation_id: string; runs: AutomationRunInfo[] }
+  | { type: 'AutomationUpdated'; automation_id: string }
+  | { type: 'AutomationDeleted'; automation_id: string }
+  | { type: 'AutomationRunStarted'; automation_id: string }
+  | { type: 'AutomationRunStopped'; automation_id: string; stopped: boolean }
+  | { type: 'ChatSkills'; skills: ChatSkillInfo[] }
+  | {
+      type: 'HarnessModels';
+      harness_id: string;
+      models: HarnessModelRow[];
+      default_model?: string | null;
+      endpoint?: string | null;
+      effort?: string | null;
+      effort_options?: string[];
+    }
   | { type: 'SessionList'; sessions: SessionInfo[] }
   | { type: 'ChatToken'; chat_session_id: string; token: string }
   | { type: 'ChatDone'; chat_session_id: string; usage?: ChatUsage }
@@ -67,17 +129,25 @@ type DesktopMessage =
   // The approval was resolved on ANY surface — dismiss matching cards here.
   | { type: 'SessionApprovalResolved'; session_id: string; pending_id: string }
   | { type: 'SessionPlanProposal'; session_id: string; pending_id: string; title: string; plan: string }
-  | { type: 'SessionModelSet'; session_id: string; provider_id: string; model: string }
+  | { type: 'SessionModelSet'; session_id: string; provider_id: string; model: string; effort?: string | null }
   | { type: 'SessionDeleted'; session_id: string }
-  | { type: 'SessionMeta'; session_id: string; provider: string; model: string; title?: string }
+  | { type: 'SessionMeta'; session_id: string; provider: string; model: string; title?: string; effort?: string | null; permission_mode?: string | null; project_id?: string | null }
   | { type: 'PushAck'; ok: boolean; error?: string }
+  | { type: 'SessionMessageDeleted'; session_id: string; message_id: number }
+  | { type: 'ChatSearchResults'; query: string; results: ChatSearchHit[] }
+  | { type: 'ChatCheckpoints'; session_id: string; checkpoints: ChatCheckpointInfo[] }
+  | { type: 'SessionCheckpointRestored'; session_id: string; checkpoint_id: number; deleted_messages: number }
+  | { type: 'SessionPermissionModeSet'; session_id: string; mode: string }
+  | { type: 'SessionQuestionRequest'; session_id: string; pending_id: string; questions: AgentQuestion[] }
+  | { type: 'SessionQuestionResolved'; pending_id: string }
+  | { type: 'SessionCompacted'; session_id: string }
   | { type: 'SessionArtifacts'; session_id: string; artifacts: SessionArtifact[] }
   | { type: 'ArtifactContent'; session_id: string; path: string; filename: string; kind: string; text?: string; data_base64?: string; truncated?: boolean }
   | { type: 'Transcription'; text?: string; error?: string }
   | { type: 'SessionArtifact'; session_id: string; message_id?: number; artifact: { path: string; filename: string; kind?: string; inline?: { kind: 'jsx' | 'tsx'; code: string } } }
   // Broadcast (not session-scoped): an automation run finished on the desktop.
   // Shown as a local alert — fires only while the relay is connected.
-  | { type: 'AutomationRunFinished'; automation_id: string; name: string; status: string; summary: string }
+  | { type: 'AutomationRunFinished'; automationId?: string | null; automation_id: string; name: string; status: string; summary: string }
   // Broadcast: a project's monthly spend crossed its budget threshold.
   | { type: 'BudgetAlert'; project_id: string; project_name: string; monthly_usd: number; spent_usd: number };
 interface MobileChatTurn {
@@ -94,7 +164,7 @@ type SessionChatMessage =
   | { type: 'CancelSessionStream'; session_id: string }
   | { type: 'ResolveSessionApproval'; session_id: string; pending_id: string; decision: 'approve' | 'deny'; always_allow?: boolean }
   | { type: 'RenameSession'; session_id: string; title: string }
-  | { type: 'SetSessionModel'; session_id: string; provider_id: string; model: string }
+  | { type: 'SetSessionModel'; session_id: string; provider_id: string; model: string; effort?: string }
   | { type: 'DeleteChatSession'; session_id: string }
   | { type: 'GetSessionMeta'; session_id: string }
   | { type: 'RegisterPushToken'; token: string; platform: string }
@@ -104,10 +174,64 @@ type SessionChatMessage =
   | { type: 'ResolvePlanProposal'; session_id: string; pending_id: string; approved: boolean; feedback?: string };
 type MobileMessagePlain =
   | { type: 'ListAvailableProviders' } | { type: 'ListSessions' }
+  | { type: 'SetSessionStarred'; session_id: string; starred: boolean }
+  | { type: 'ListArtifacts' }
+  | { type: 'ListHarnessModels'; harness_id: string }
+  | { type: 'ListChatSkills' }
+  | { type: 'ListAutomations' }
+  | { type: 'ListProjects' }
+  | { type: 'ListProjects' }
+  | { type: 'ListAcpAgents' }
+  | { type: 'ListMemoryRecords'; include_inactive?: boolean }
+  | { type: 'UpdateMemoryRecord'; memory_id: string; content: string; importance?: number }
+  | { type: 'DeleteMemoryRecord'; memory_id: string }
+  | { type: 'PurgeMemories' }
+  | { type: 'ListInstalledSkills'; kind: string }
+  | { type: 'ReadInstalledSkill'; slug: string; kind: string }
+  | { type: 'SaveInstalledSkill'; slug: string; kind: string; content: string }
+  | { type: 'CreateInstalledSkill'; name: string; kind: string; content: string }
+  | { type: 'DeleteInstalledSkill'; slug: string; kind: string }
+  | { type: 'MakeInstalledSkillsGlobal'; kind: string }
+  | { type: 'GitStatus'; project_id: string }
+  | { type: 'GitDiff'; project_id: string; path?: string }
+  | { type: 'GitCommit'; project_id: string; message: string }
+  | { type: 'GitPush'; project_id: string }
+  | { type: 'GitBranches'; project_id: string }
+  | { type: 'GitLog'; project_id: string; limit?: number }
+  | { type: 'ListBudgets' }
+  | { type: 'SetBudget'; project_id: string; monthly_usd: number; threshold_pct?: number }
+  | { type: 'RemoveBudget'; project_id: string }
+  | { type: 'ListHiddenCostProjects' }
+  | { type: 'HideCostProject'; project_id: string }
+  | { type: 'UnhideCostProject'; project_id: string }
+  | { type: 'AddProject'; path: string; name?: string }
+  | { type: 'RenameProject'; project_id: string; name: string }
+  | { type: 'RemoveProject'; project_id: string }
+  | { type: 'ListConnectors' }
+  | { type: 'ReadArtifactPreview'; path: string }
+  | { type: 'SetSessionConnectors'; session_id: string; connector_ids: string[] }
+  | { type: 'GetSessionConnectors'; session_id: string }
+  | { type: 'CreateAutomation'; input: Record<string, unknown> }
+  | { type: 'UpdateAutomation'; automation_id: string; input: Record<string, unknown> }
+  | { type: 'DeleteAutomation'; automation_id: string }
+  | { type: 'SetAutomationEnabled'; automation_id: string; enabled: boolean }
+  | { type: 'RunAutomationNow'; automation_id: string }
+  | { type: 'StopAutomationRun'; automation_id: string }
+  | { type: 'ListAutomationRuns'; automation_id: string; limit?: number }
+  | { type: 'DeleteChatMessage'; session_id: string; message_id: number }
+  | { type: 'EditUserMessage'; session_id: string; message_id: number; text: string }
+  | { type: 'RegenerateMessage'; session_id: string }
+  | { type: 'ListChatCheckpoints'; session_id: string }
+  | { type: 'RestoreChatCheckpoint'; session_id: string; checkpoint_id: number; rollback_messages?: boolean }
+  | { type: 'SearchChatMessages'; query: string; limit?: number }
+  | { type: 'SetSessionPermissionMode'; session_id: string; mode: string }
+  | { type: 'ResolveSessionQuestion'; session_id: string; pending_id: string; answers: Record<string, string | string[]>; response?: string }
+  | { type: 'CompactSession'; session_id: string }
+  | { type: 'GetCostRollups'; days?: number }
   | MobileChatTurn | { type: 'CancelChatTurn'; chat_session_id: string }
   | { type: 'SendToSession'; session_id: string; text: string }
   | { type: 'GetTranscript'; session_id: string }
-  | { type: 'CreateSession'; project_id: string; harness: string }
+  | { type: 'CreateSession'; project_id: string; harness: string; provider?: string; model?: string; effort?: string; connectors?: string[] }
   | { type: 'SpawnSession'; session_id: string }
   | { type: 'GetCostSummary' }
   | { type: 'GetCostDetails' }
@@ -118,6 +242,10 @@ export interface Session {
   id: string; projectId: string; projectName: string; title: string;
   status: 'working' | 'waiting' | 'diff_ready' | 'idle';
   provider: string; model: string; lastActivity: number; isLive: boolean;
+  /** Desktop sidebar parity: pinned chats sort first; unread show a dot. */
+  starred: boolean; unread: boolean;
+  /** Reasoning effort stored on the chat row (null/'' = provider default). */
+  effort?: string | null;
 }
 export interface CostSummary { today: number; week: number; }
 
@@ -137,25 +265,49 @@ export interface CostDetails {
 }
 
 type Listener<T> = (data: T) => void;
+/** Sessions whose in-flight GetSessionMessages carried a before_id. */
+const paginating = new Set<string>();
+function appendQueue(sessionId: string): boolean {
+  const v = paginating.has(sessionId);
+  paginating.delete(sessionId);
+  return v;
+}
+
 class EventBus<T> {
   private ls = new Set<Listener<T>>();
   on(fn: Listener<T>) { this.ls.add(fn); return () => { this.ls.delete(fn); }; }
   emit(data: T) { this.ls.forEach(fn => fn(data)); }
 }
+/**
+ * `chat_session_id` values the relay uses to tag a non-chat error. Anything
+ * else in ChatError is a real chat session id and belongs to onChatError.
+ */
+const RELAY_DOMAINS = new Set([
+  'acp-agents', 'artifacts', 'budget', 'chat-skills', 'connectors', 'cost-rollups',
+  'create', 'git', 'harness-models', 'memory', 'pair', 'preview', 'project',
+  'projects', 'search', 'session-chat', 'session-connectors', 'sessions',
+  'skills', 'unknown', 'warmup',
+]);
 export const onChatToken = new EventBus<{ chatSessionId: string; token: string }>();
 export const onChatDone = new EventBus<{ chatSessionId: string; usage?: ChatUsage }>();
 export const onChatError = new EventBus<{ chatSessionId: string; error: string }>();
 export const onProviderList = new EventBus<ProviderInfo[]>();
 export const onConnected = new EventBus<boolean>();
 export const onSessionList = new EventBus<Session[]>();
-export const onTranscript  = new EventBus<{ sessionId: string; text: string; cols: number; rows: number }>();
+export const onTranscript  = new EventBus<{ sessionId: string; text: string; cols: number; rows: number; unchanged?: boolean }>();
 export const onSessionCreated = new EventBus<Session>();
 export const onCostDetails = new EventBus<CostDetails>();
 export const onLocalModelReady = new EventBus<{ model: string; baseUrl: string }>();
 export const onLocalModelError = new EventBus<{ model: string; error: string }>();
 
 // Session-scoped chat event buses (Task 6). Keyed by the mobile session id.
-export const onSessionMessages = new EventBus<{ sessionId: string; messages: SessionMessageRecord[]; hasMore: boolean }>();
+/**
+ * `append` is true only for a PAGINATION reply (the caller sent a
+ * before_id). A first-page reply must REPLACE the list: after a delete
+ * the refreshed page is shorter, and inferring intent from ids made the
+ * merge prepend it — the deleted message stayed on screen forever.
+ */
+export const onSessionMessages = new EventBus<{ sessionId: string; messages: SessionMessageRecord[]; hasMore: boolean; append: boolean }>();
 export const onSessionChatToken = new EventBus<{ sessionId: string; token: string }>();
 export const onSessionChatDone = new EventBus<{ sessionId: string; usage?: SessionChatUsage }>();
 export const onSessionChatError = new EventBus<{ sessionId: string; error: string }>();
@@ -163,14 +315,152 @@ export const onSessionChatStatus = new EventBus<{ sessionId: string; reason: str
 export const onSessionApprovalRequest = new EventBus<{ sessionId: string; pendingId: string; tool: string; summary: string; args: unknown }>();
 export const onSessionApprovalResolved = new EventBus<{ sessionId: string; pendingId: string }>();
 export const onSessionPlanProposal = new EventBus<{ sessionId: string; pendingId: string; title: string; plan: string }>();
-export const onSessionModelSet = new EventBus<{ sessionId: string; providerId: string; model: string }>();
+export const onSessionModelSet = new EventBus<{ sessionId: string; providerId: string; model: string; effort?: string | null }>();
 export const onSessionDeleted = new EventBus<{ sessionId: string }>();
-export const onSessionMeta = new EventBus<{ sessionId: string; provider: string; model: string; title?: string }>();
+export const onSessionMeta = new EventBus<{ sessionId: string; provider: string; model: string; title?: string; effort?: string | null; permission_mode?: string | null; projectId?: string | null }>();
 export const onSessionArtifact = new EventBus<{ sessionId: string; messageId?: number; artifact: SessionArtifact }>();
 export const onSessionArtifacts = new EventBus<{ sessionId: string; artifacts: SessionArtifact[] }>();
 export const onArtifactContent = new EventBus<{ sessionId: string; path: string; filename: string; kind: string; text?: string; dataBase64?: string; truncated?: boolean }>();
 export const onTranscription = new EventBus<{ text?: string; error?: string }>();
 export const onBudgetAlert = new EventBus<{ projectId: string; projectName: string; monthlyUsd: number; spentUsd: number }>();
+export const onArtifactLibrary = new EventBus<{ artifacts: ArtifactLibraryEntry[] }>();
+export const onCostRollups = new EventBus<{ rollups: CostRollupsData }>();
+export type HarnessModelsPayload = {
+  harnessId: string;
+  models: HarnessModelRow[];
+  defaultModel: string | null;
+  endpoint: string | null;
+  effort: string | null;
+  effortOptions: string[];
+};
+export const onHarnessModels = new EventBus<HarnessModelsPayload>();
+export interface ArtifactPreview {
+  path: string; filename: string; ext: string;
+  /** text | markdown | csv | json | html | diagram | code | image | pdf | office | binary */
+  kind: string;
+  text?: string | null;
+  data_uri?: string | null;
+  truncated: boolean;
+}
+export const onArtifactPreview = new EventBus<{ preview: ArtifactPreview }>();
+export interface AgentQuestion {
+  question: string;
+  header?: string;
+  options?: { label: string; description?: string }[];
+  multiSelect?: boolean;
+}
+export const onSessionQuestionRequest = new EventBus<{ sessionId: string; pendingId: string; questions: AgentQuestion[] }>();
+export const onSessionQuestionResolved = new EventBus<{ pendingId: string }>();
+export interface AcpAgentInfo { id: string; display_name: string; installed: boolean; }
+export const onAcpAgentList = new EventBus<{ agents: AcpAgentInfo[] }>();
+export interface MemoryInfo {
+  id: string; kind: string; content: string; keywords: string[];
+  importance: number; confidence: number; status: string; created_at: number; updated_at: number;
+}
+export const onMemoryList = new EventBus<{ records: MemoryInfo[] }>();
+export const onMemoryMutated = new EventBus<{ memoryId: string; removed?: boolean; purged?: number }>();
+export interface InstalledSkillInfo {
+  slug: string; name: string; description: string; source: string; kind: string;
+}
+export const onInstalledSkillList = new EventBus<{ skills: InstalledSkillInfo[] }>();
+export const onInstalledSkillContent = new EventBus<{ slug: string; kind: string; content: string }>();
+export const onInstalledSkillAck = new EventBus<{ slug: string; mirrored: number }>();
+export const onGitStatus = new EventBus<{ status: {
+  is_repo: boolean; branch?: string | null; dirty: boolean; ahead: number; behind: number;
+  remote_url?: string | null; changed_files: { status: string; kind: string; path: string }[];
+} }>();
+export const onGitOutput = new EventBus<{ output: string }>();
+export const onGitBranches = new EventBus<{ branches: Record<string, unknown>[] }>();
+export const onGitLog = new EventBus<{ entries: Record<string, unknown>[] }>();
+export interface BudgetInfo {
+  project_id: string; monthly_usd: number; threshold_pct: number;
+}
+export const onBudgetList = new EventBus<{ budgets: BudgetInfo[] }>();
+export const onHiddenCostProjects = new EventBus<{ projectIds: string[] }>();
+export interface ProjectInfo {
+  id: string; path: string; name: string; is_git_repo: boolean;
+  created_at: number; last_opened_at?: number | null;
+}
+export const onProjectList = new EventBus<{ projects: ProjectInfo[] }>();
+export const onProjectUpserted = new EventBus<{ project: ProjectInfo }>();
+export const onProjectRemoved = new EventBus<{ projectId: string }>();
+export interface ConnectorInfo {
+  id: string; display_name: string; icon: string; family: string; description: string;
+  connected: boolean; account_display?: string | null;
+}
+export const onConnectorList = new EventBus<{ connectors: ConnectorInfo[] }>();
+export const onSessionConnectors = new EventBus<{ sessionId: string; connectorIds: string[] }>();
+export const onSessionConnectorsSet = new EventBus<{ sessionId: string; connectorIds: string[] }>();
+export interface AutomationInfo {
+  id: string; name: string; prompt: string; harness: string; model: string; cwd: string;
+  schedule: string; enabled: boolean;
+  last_run_at?: number | null; last_status?: string | null; chat_session_id?: string | null;
+  created_at: number; origin: string;
+  /** "cron" | "webhook" | "file" | "git" | "gmail" */
+  trigger_type: string;
+}
+export interface AutomationRunInfo {
+  id: string; automation_id: string; started_at: number; finished_at?: number | null;
+  status: string; summary: string; chat_session_id?: string | null; source: string;
+}
+export const onAutomationList = new EventBus<{ automations: AutomationInfo[] }>();
+export const onAutomationRunFinished = new EventBus<{ automationId: string | null; status: string; summary: string }>();
+export const onAutomationRuns = new EventBus<{ automationId: string; runs: AutomationRunInfo[] }>();
+export const onAutomationUpdated = new EventBus<{ automationId: string }>();
+export const onAutomationDeleted = new EventBus<{ automationId: string }>();
+export const onAutomationRunStarted = new EventBus<{ automationId: string }>();
+export const onAutomationRunStopped = new EventBus<{ automationId: string; stopped: boolean }>();
+export const onAutomationError = new EventBus<{ error: string }>();
+/**
+ * Errors from the non-chat relay domains (git, memory, skills, projects,
+ * budgets, sessions, artifacts, preview). The desktop answers those arms
+ * with ChatError carrying the domain name in `chat_session_id`; screens
+ * subscribe here so a failed list shows a message instead of an empty page.
+ */
+export const onDomainError = new EventBus<{ domain: string; error: string }>();
+export interface ChatSkillInfo {
+  slug: string; name: string; description: string;
+  /** "installed" | "builtin" */
+  origin: string;
+}
+export const onChatSkills = new EventBus<{ skills: ChatSkillInfo[] }>();
+export const onSearchResults = new EventBus<{ query: string; results: ChatSearchHit[] }>();
+export const onCheckpoints = new EventBus<{ sessionId: string; checkpoints: ChatCheckpointInfo[] }>();
+export const onCheckpointRestored = new EventBus<{ sessionId: string; checkpointId: number; deletedMessages: number }>();
+export const onPermissionModeSet = new EventBus<{ sessionId: string; mode: string }>();
+export const onSessionCompacted = new EventBus<{ sessionId: string }>();
+export const onSessionMessageDeleted = new EventBus<{ sessionId: string; messageId: number }>();
+
+export interface ArtifactLibraryEntry {
+  chat_session_id?: string;
+  filename: string;
+  path: string;
+  kind: string;
+  created_at: number;
+}
+
+/** Desktop CostDashboard parity — the get_cost_rollups_v2 payload
+ *  (camelCase, exactly as the desktop serializes it for its own UI). */
+export interface CostRollupsData {
+  totals: {
+    rawTokenCostUsd: number; providerReportedUsd: number;
+    estimatedUsd: number; unpricedUsd: number;
+  };
+  perProvider: { provider: string; costUsd: number; tokens: number; sharePct: number }[];
+  daily: {
+    day: string; costUsd: number;
+    tokensByProvider: Record<string, number>;
+    costByProvider: Record<string, number>;
+  }[];
+  byKind: {
+    processedTokens: number; cachedInputTokens: number; uncachedInputTokens: number;
+    outputTokens: number; reasoningTokens: number; sessions: number; responses: number;
+  };
+  perModel: { modelKey: string; displayName: string; costUsd: number; sharePct: number; tokens: number; provider?: string }[];
+  costQuality: { providerReportedPct: number; modelPricedPct: number; unpricedPct: number; cacheSavingsUsd: number };
+  perProject: { projectId: string; totalCostUsd: number; totalInputTokens: number; totalOutputTokens: number }[];
+  rangeStart: string; rangeEnd: string; rangeDays: number;
+}
 
 export interface SessionMessageRecord {
   id: number; role: string; content: string; created_at: number;
@@ -179,9 +469,34 @@ export interface SessionMessageRecord {
 }
 export interface SessionChatUsage { input_tokens: number; output_tokens: number; cost_usd?: number; }
 export interface SessionArtifact { path: string; filename: string; kind?: string; inline?: { kind: 'jsx' | 'tsx'; code: string }; }
+export interface ChatSearchHit {
+  chat_session_id: string; session_title?: string | null; message_id?: number | null;
+  snippet?: string | null; role?: string | null; created_at: number;
+}
+export interface CheckpointFileInfo { path: string; status: string; }
+export interface ChatCheckpointInfo {
+  id: number; message_id?: number | null; files: CheckpointFileInfo[]; created_at: number;
+}
 export interface SessionChatAttachment {
   name: string; kind: 'text' | 'image' | 'doc';
   text?: string; data?: string; media_type?: string; format?: string;
+}
+
+// Artifact-preview cache (library grid + sheet): path -> preview, filled as
+// the relay streams them back. The preview sheet paints instantly from this
+// cache instead of re-fetching the whole file, which is what made opening
+// an artifact feel slow.
+const _previewCache = new Map<string, ArtifactPreview>();
+const _previewInFlight = new Set<string>();
+
+export function getCachedArtifactPreview(path: string): ArtifactPreview | undefined {
+  return _previewCache.get(path);
+}
+
+function requestArtifactPreviewFn(path: string) {
+  if (_previewCache.has(path) || _previewInFlight.has(path)) return;
+  _previewInFlight.add(path);
+  _send({ type: 'ReadArtifactPreview', path });
 }
 
 let _ws: WebSocket | null = null;
@@ -244,9 +559,24 @@ const _pl = new Set<(v: ProviderInfo[]) => void>();
 const _sl = new Set<(v: Session[]) => void>();
 const _csl = new Set<(v: CostSummary) => void>();
 const _cdl = new Set<(v: CostDetails) => void>();
+// Agent-harness families + the desktop's auto-route default model
+// (AvailableProviders payload) — composer/agent-picker parity.
+let _harnesses: HarnessInfo[] = [];
+let _defaults: { provider: string; model: string } | null = null;
+const _hl = new Set<(v: HarnessInfo[]) => void>();
+const _dl = new Set<(v: { provider: string; model: string } | null) => void>();
+function nh() { _hl.forEach(fn => fn(_harnesses)); }
+function nd() { _dl.forEach(fn => fn(_defaults)); }
 
 function nc(v: boolean) { onConnected.emit(v); _cl.forEach(fn => fn(v)); }
-function np(v: ProviderInfo[]) { onProviderList.emit(v); _pl.forEach(fn => fn(v)); }
+/** True while a connect attempt is in flight and NOT yet paired. Kept
+ *  separate from `connected` so the UI can hold one stable view for the
+ *  whole handshake instead of flipping between its offline and online
+ *  layouts — see the cold-open flash fix. */
+const _clConnecting = new Set<(v: boolean) => void>();
+function nconnecting(v: boolean) { _clConnecting.forEach(fn => fn(v)); }
+let _providers: ProviderInfo[] = [];
+function np(v: ProviderInfo[]) { _providers = v; onProviderList.emit(v); _pl.forEach(fn => fn(v)); }
 function ns(v: Session[]) { onSessionList.emit(v); _sl.forEach(fn => fn(v)); }
 function ncs(v: CostSummary) { _csl.forEach(fn => fn(v)); }
 function ncd(v: CostDetails) { onCostDetails.emit(v); _cdl.forEach(fn => fn(v)); }
@@ -326,13 +656,16 @@ function _doConnect(target: string) {
   _e2eKey = null; _outCounter = 0; _inCounter = 0;
   _pairingToken = null; _pendingFrames = [];
   _connecting = true;
+  nconnecting(true);
   try {
     const ws = new WebSocket(target); _ws = ws;
     // Binary frames (E2E-encrypted payloads) arrive as ArrayBuffer; without
     // this React Native may hand us a Blob we'd have to read asynchronously.
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
-      _connecting = false; nc(true); startPolling();
+      // Deliberately NOT nc(true) here — the socket being open says nothing
+      // about pairing. nc(true) fires on PairOk below.
+      _connecting = false; startPolling();
       // The relay requires the FIRST frame to be a Pair message (token
       // check at relay.rs). E2E flow (§3.2.11): send an HMAC proof of the
       // token — never the raw token — and derive the session key up front so
@@ -389,16 +722,40 @@ function _doConnect(target: string) {
                 sock?.send(encryptFrame(_e2eKey, _outCounter++, new TextEncoder().encode(frame)));
               }
               resetReconnectBackoff();
+              // Pairing CONFIRMED — this, not ws.onopen, is when the app may
+              // present itself as connected. ws.onopen used to fire nc(true)
+              // immediately, so every reconnect attempt flashed the online
+              // layout for a frame before the pair was accepted (or rejected)
+              // and the offline layout came back: the cold-open flicker.
+              nc(true);
+              nconnecting(false);
             }
             break;
           }
-          case 'AvailableProviders': np(msg.providers || []); break;
+          case 'AvailableProviders': {
+            _harnesses = msg.harnesses || [];
+            _defaults = msg.default_provider && msg.default_model
+              ? { provider: msg.default_provider, model: msg.default_model }
+              : null;
+            np(msg.providers || []);
+            nh(); nd();
+            break;
+          }
           case 'SessionList': ns((msg.sessions || []).map(toSession)); break;
           case 'ChatToken': onChatToken.emit({ chatSessionId: msg.chat_session_id, token: msg.token }); break;
           case 'ChatDone': onChatDone.emit({ chatSessionId: msg.chat_session_id, usage: msg.usage }); break;
-          case 'ChatError': onChatError.emit({ chatSessionId: msg.chat_session_id, error: msg.error }); break;
-          case 'DesktopStatus': nc(msg.connected); break;
-          case 'Transcript': onTranscript.emit({ sessionId: msg.session_id, text: msg.text, cols: msg.cols ?? 0, rows: msg.rows ?? 0 }); break;
+          case 'ChatError':
+            if (msg.chat_session_id === 'automation') onAutomationError.emit({ error: msg.error });
+            else if (msg.chat_session_id === 'compact') onSessionCompacted.emit({ sessionId: 'compact' });
+            else if (RELAY_DOMAINS.has(msg.chat_session_id)) {
+              onDomainError.emit({ domain: msg.chat_session_id, error: msg.error });
+            } else onChatError.emit({ chatSessionId: msg.chat_session_id, error: msg.error });
+            break;
+          // The plaintext hello is sent before pairing; trusting it here
+          // re-claimed `connected` during the handshake. Post-pair frames are
+          // E2E frames, so gate on the key.
+          case 'DesktopStatus': if (_e2eKey) nc(msg.connected); break;
+          case 'Transcript': onTranscript.emit({ sessionId: msg.session_id, text: msg.text, cols: msg.cols ?? 0, rows: msg.rows ?? 0, unchanged: msg.unchanged }); break;
           case 'SessionCreated': onSessionCreated.emit(toSession(msg.session)); break;
           case 'CostSummary': ncs({ today: msg.today, week: msg.week }); break;
           case 'CostDetails': ncd({
@@ -409,23 +766,90 @@ function _doConnect(target: string) {
           case 'LocalModelReady': onLocalModelReady.emit({ model: msg.model, baseUrl: msg.base_url }); break;
           case 'LocalModelError': onLocalModelError.emit({ model: msg.model, error: msg.error }); break;
           // Session-scoped chat events (Task 6). Route to the new event buses.
-          case 'SessionMessages': onSessionMessages.emit({ sessionId: msg.session_id, messages: msg.messages, hasMore: msg.has_more }); break;
+          case 'SessionMessages': onSessionMessages.emit({ sessionId: msg.session_id, messages: msg.messages, hasMore: msg.has_more, append: appendQueue(msg.session_id) }); break;
           case 'SessionChatToken': onSessionChatToken.emit({ sessionId: msg.session_id, token: msg.token }); break;
-          case 'SessionChatDone': onSessionChatDone.emit({ sessionId: msg.session_id, usage: msg.usage }); break;
-          case 'SessionChatError': onSessionChatError.emit({ sessionId: msg.session_id, error: msg.error }); break;
+          case 'SessionChatDone':
+            onSessionChatDone.emit({ sessionId: msg.session_id, usage: msg.usage });
+            journalNotification('turn_done', 'Turn complete', 'Your agent finished a reply.', msg.session_id);
+            break;
+          case 'SessionChatError':
+            onSessionChatError.emit({ sessionId: msg.session_id, error: msg.error });
+            journalNotification('turn_error', 'Turn failed', msg.error, msg.session_id);
+            break;
           case 'SessionChatStatus': onSessionChatStatus.emit({ sessionId: msg.session_id, reason: msg.reason, message: msg.message }); break;
           case 'SessionApprovalRequest': onSessionApprovalRequest.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, tool: msg.tool, summary: msg.summary, args: msg.args }); break;
           case 'SessionApprovalResolved': onSessionApprovalResolved.emit({ sessionId: msg.session_id, pendingId: msg.pending_id }); break;
           case 'SessionPlanProposal': onSessionPlanProposal.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, title: msg.title, plan: msg.plan }); break;
-          case 'SessionModelSet': onSessionModelSet.emit({ sessionId: msg.session_id, providerId: msg.provider_id, model: msg.model }); break;
+          case 'SessionModelSet': onSessionModelSet.emit({ sessionId: msg.session_id, providerId: msg.provider_id, model: msg.model, effort: msg.effort }); break;
           case 'SessionDeleted': onSessionDeleted.emit({ sessionId: msg.session_id }); break;
-          case 'SessionMeta': onSessionMeta.emit({ sessionId: msg.session_id, provider: msg.provider, model: msg.model, title: msg.title }); break;
+          case 'SessionMeta': onSessionMeta.emit({ sessionId: msg.session_id, provider: msg.provider, model: msg.model, title: msg.title, effort: msg.effort, permission_mode: msg.permission_mode, projectId: msg.project_id }); break;
           case 'SessionArtifacts': onSessionArtifacts.emit({ sessionId: msg.session_id, artifacts: msg.artifacts || [] }); break;
           case 'ArtifactContent': onArtifactContent.emit({ sessionId: msg.session_id, path: msg.path, filename: msg.filename, kind: msg.kind, text: msg.text, dataBase64: msg.data_base64, truncated: msg.truncated }); break;
           case 'Transcription': onTranscription.emit({ text: msg.text, error: msg.error }); break;
-          case 'SessionArtifact': onSessionArtifact.emit({ sessionId: msg.session_id, messageId: msg.message_id, artifact: msg.artifact }); break;
+          case 'SessionArtifact':
+            onSessionArtifact.emit({ sessionId: msg.session_id, messageId: msg.message_id, artifact: msg.artifact });
+            journalNotification('artifact', 'New artifact', msg.artifact.filename || msg.artifact.path, msg.session_id);
+            break;
+          case 'ArtifactLibrary': onArtifactLibrary.emit({ artifacts: msg.artifacts || [] }); break;
+          case 'CostRollups': onCostRollups.emit({ rollups: msg.rollups }); break;
+          case 'SessionMessageDeleted': onSessionMessageDeleted.emit({ sessionId: msg.session_id, messageId: msg.message_id }); break;
+          case 'ChatSearchResults': onSearchResults.emit({ query: msg.query, results: msg.results || [] }); break;
+          case 'ChatCheckpoints': onCheckpoints.emit({ sessionId: msg.session_id, checkpoints: msg.checkpoints || [] }); break;
+          case 'SessionCheckpointRestored': onCheckpointRestored.emit({ sessionId: msg.session_id, checkpointId: msg.checkpoint_id, deletedMessages: msg.deleted_messages }); break;
+          case 'SessionPermissionModeSet': onPermissionModeSet.emit({ sessionId: msg.session_id, mode: msg.mode }); break;
+          case 'SessionQuestionRequest': onSessionQuestionRequest.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, questions: (msg.questions as AgentQuestion[]) || [] }); break;
+          case 'SessionQuestionResolved': onSessionQuestionResolved.emit({ pendingId: msg.pending_id }); break;
+          case 'SessionCompacted': onSessionCompacted.emit({ sessionId: msg.session_id }); break;
+          case 'ArtifactPreviewMsg': _previewCache.set(msg.path, {
+              path: msg.path, filename: msg.filename, ext: msg.ext, kind: msg.kind,
+              text: msg.text ?? null, data_uri: msg.data_uri ?? null, truncated: msg.truncated,
+            });
+            _previewInFlight.delete(msg.path);
+            onArtifactPreview.emit({ preview: {
+              path: msg.path, filename: msg.filename, ext: msg.ext, kind: msg.kind,
+              text: msg.text ?? null, data_uri: msg.data_uri ?? null, truncated: msg.truncated,
+            }}); break;
+          case 'ProjectList': onProjectList.emit({ projects: msg.projects || [] }); break;
+          case 'AcpAgentList': onAcpAgentList.emit({ agents: msg.agents || [] }); break;
+          case 'MemoryList': onMemoryList.emit({ records: msg.records || [] }); break;
+          case 'MemoryUpdated': onMemoryMutated.emit({ memoryId: msg.memory_id }); break;
+          case 'MemoryDeleted': onMemoryMutated.emit({ memoryId: msg.memory_id, removed: true }); break;
+          case 'MemoryPurged': onMemoryMutated.emit({ memoryId: '', purged: msg.count }); break;
+          case 'InstalledSkillList': onInstalledSkillList.emit({ skills: msg.skills || [] }); break;
+          case 'InstalledSkillContent': onInstalledSkillContent.emit({ slug: msg.slug, kind: msg.kind, content: msg.content }); break;
+          case 'InstalledSkillAck': onInstalledSkillAck.emit({ slug: msg.slug, mirrored: msg.mirrored }); break;
+          case 'GitStatusMsg': onGitStatus.emit({ status: {
+            is_repo: msg.is_repo, branch: msg.branch, dirty: msg.dirty, ahead: msg.ahead,
+            behind: msg.behind, remote_url: msg.remote_url, changed_files: msg.changed_files || [],
+          }}); break;
+          case 'GitOutput': onGitOutput.emit({ output: msg.output }); break;
+          case 'GitBranchesMsg': onGitBranches.emit({ branches: msg.branches || [] }); break;
+          case 'GitLogMsg': onGitLog.emit({ entries: msg.entries || [] }); break;
+          case 'BudgetList': onBudgetList.emit({ budgets: msg.budgets || [] }); break;
+          case 'HiddenCostProjects': onHiddenCostProjects.emit({ projectIds: msg.project_ids || [] }); break;
+          case 'ProjectUpserted': onProjectUpserted.emit({ project: msg.project }); break;
+          case 'ProjectRemoved': onProjectRemoved.emit({ projectId: msg.project_id }); break;
+          case 'ConnectorList': onConnectorList.emit({ connectors: msg.connectors || [] }); break;
+          case 'SessionConnectors': onSessionConnectors.emit({ sessionId: msg.session_id, connectorIds: msg.connector_ids || [] }); break;
+          case 'SessionConnectorsSet': onSessionConnectorsSet.emit({ sessionId: msg.session_id, connectorIds: msg.connector_ids || [] }); break;
+          case 'AutomationList': onAutomationList.emit({ automations: msg.automations || [] }); break;
+          case 'AutomationRuns': onAutomationRuns.emit({ automationId: msg.automation_id, runs: msg.runs || [] }); break;
+          case 'AutomationUpdated': onAutomationUpdated.emit({ automationId: msg.automation_id }); break;
+          case 'AutomationDeleted': onAutomationDeleted.emit({ automationId: msg.automation_id }); break;
+          case 'AutomationRunStarted': onAutomationRunStarted.emit({ automationId: msg.automation_id }); break;
+          case 'AutomationRunStopped': onAutomationRunStopped.emit({ automationId: msg.automation_id, stopped: msg.stopped }); break;
+          case 'ChatSkills': onChatSkills.emit({ skills: msg.skills || [] }); break;
+          case 'HarnessModels': onHarnessModels.emit({
+              harnessId: msg.harness_id,
+              models: msg.models || [],
+              defaultModel: msg.default_model ?? null,
+              endpoint: msg.endpoint ?? null,
+              effort: msg.effort ?? null,
+              effortOptions: msg.effort_options || [],
+            }); break;
           case 'BudgetAlert': {
             onBudgetAlert.emit({ projectId: msg.project_id, projectName: msg.project_name, monthlyUsd: msg.monthly_usd, spentUsd: msg.spent_usd });
+            journalNotification('budget', `Budget: ${msg.project_name}`, `Spent $${msg.spent_usd.toFixed(2)} of $${msg.monthly_usd.toFixed(2)}.`);
             Alert.alert(
               `Budget: ${msg.project_name}`,
               `Spent $${msg.spent_usd.toFixed(2)} of $${msg.monthly_usd.toFixed(2)} this month.`,
@@ -433,6 +857,12 @@ function _doConnect(target: string) {
             break;
           }
           case 'AutomationRunFinished': {
+            onAutomationRunFinished.emit({ automationId: msg.automationId ?? null, status: msg.status, summary: msg.summary });
+            journalNotification(
+              'automation',
+              msg.status === 'ok' ? `Automation: ${msg.name}` : `Automation failed: ${msg.name}`,
+              msg.summary || '',
+            );
             const ok = msg.status === 'ok';
             Alert.alert(
               ok ? `Automation finished: ${msg.name}` : `Automation failed: ${msg.name}`,
@@ -447,15 +877,15 @@ function _doConnect(target: string) {
     // or an explicit URL/token change) — re-reading _url (not the captured
     // target) so a URL change between close and reconnect wins (audit M8).
     ws.onclose = () => {
-      _connecting = false; stopPolling(); nc(false); _ws = null;
+      _connecting = false; stopPolling(); nc(false); nconnecting(false); _ws = null;
       if (_reconnectTimer === null) {
         const delay = _reconnectDelay;
         _reconnectDelay = Math.min(delay * 2, RECONNECT_MAX_MS);
         _reconnectTimer = setTimeout(() => { _reconnectTimer = null; if (_url) _doConnect(_url); }, delay);
       }
     };
-    ws.onerror = () => { _connecting = false; nc(false); };
-  } catch (e) { _connecting = false; nc(false); }
+    ws.onerror = () => { _connecting = false; nc(false); nconnecting(false); };
+  } catch (e) { _connecting = false; nc(false); nconnecting(false); }
 }
 function globalConnect(url?: string) {
   if (url) {
@@ -498,7 +928,7 @@ export function getRelayUrl(): string | null { return _url; }
  *  token is present — legacy/dev connect). Used by the Settings screen to
  *  show the token status. */
 export function getRelayToken(): string | null { return _token; }
-function globalDisconnect() { stopPolling(); resetReconnectBackoff(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } _e2eKey = null; _outCounter = 0; _inCounter = 0; nc(false); }
+function globalDisconnect() { stopPolling(); resetReconnectBackoff(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } _e2eKey = null; _outCounter = 0; _inCounter = 0; nc(false); nconnecting(false); }
 
 // Stable sender identities (module-level) so screens can safely put them in
 // useEffect dependency arrays — an inline arrow in the return object would
@@ -509,19 +939,33 @@ function refreshCostDetailsSend() { _send({ type: 'GetCostDetails' }); }
 
 export function useRelay() {
   const [connected, setConnected] = useState(_ws?.readyState === WebSocket.OPEN);
+  const [connecting, setConnecting] = useState(_connecting);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [harnesses, setHarnessesState] = useState<HarnessInfo[]>(_harnesses);
+  const [defaultModel, setDefaultModelState] = useState<{ provider: string; model: string } | null>(_defaults);
   const [costSummary, setCostSummary] = useState<CostSummary>({ today: 0, week: 0 });
   const [costDetails, setCostDetails] = useState<CostDetails>({ daily: [], per_project: [], local_models: [] });
   useEffect(() => {
     const c = (v: boolean) => setConnected(v);
+    const cg = (v: boolean) => setConnecting(v);
     const p = (v: ProviderInfo[]) => setProviders(v);
     const s = (v: Session[]) => setSessions(v);
+    const h = (v: HarnessInfo[]) => setHarnessesState(v);
+    const d = (v: { provider: string; model: string } | null) => setDefaultModelState(v);
     const cs = (v: CostSummary) => setCostSummary(v);
     const cd = (v: CostDetails) => setCostDetails(v);
-    _cl.add(c); _pl.add(p); _sl.add(s); _csl.add(cs); _cdl.add(cd);
+    _cl.add(c); _clConnecting.add(cg); _pl.add(p); _sl.add(s); _csl.add(cs); _cdl.add(cd);
+    _hl.add(h); _dl.add(d);
     setConnected(_ws?.readyState === WebSocket.OPEN);
-    return () => { _cl.delete(c); _pl.delete(p); _sl.delete(s); _csl.delete(cs); _cdl.delete(cd); };
+    setConnecting(_connecting);
+    // Late-mounting screens (SessionChat's model sheet) must see the last
+    // broadcast immediately — providers/harnesses only refresh every 30s,
+    // so without this sync the sheet shows "no providers" for up to 30s.
+    setProviders(_providers);
+    setHarnessesState(_harnesses);
+    setDefaultModelState(_defaults);
+    return () => { _cl.delete(c); _clConnecting.delete(cg); _pl.delete(p); _sl.delete(s); _csl.delete(cs); _cdl.delete(cd); _hl.delete(h); _dl.delete(d); };
   }, []);
   const connect = useCallback((url?: string) => { globalConnect(url); }, []);
   const applyPairingToken = useCallback((token: string) => { globalApplyPairingToken(token); }, []);
@@ -542,6 +986,8 @@ export function useRelay() {
   // owner map and persists messages on the chat_sessions table.
   const getSessionMessages = useCallback(
     (sessionId: string, beforeId?: number, limit = 50) => {
+      if (beforeId === undefined) paginating.delete(sessionId);
+      else paginating.add(sessionId);
       _send({ type: 'GetSessionMessages', session_id: sessionId, before_id: beforeId, limit } as SessionChatMessage);
     },
     [],
@@ -562,8 +1008,8 @@ export function useRelay() {
     [],
   );
   const setSessionModel = useCallback(
-    (sessionId: string, providerId: string, model: string) => {
-      _send({ type: 'SetSessionModel', session_id: sessionId, provider_id: providerId, model } as SessionChatMessage);
+    (sessionId: string, providerId: string, model: string, effort?: string) => {
+      _send({ type: 'SetSessionModel', session_id: sessionId, provider_id: providerId, model, effort } as SessionChatMessage);
     },
     [],
   );
@@ -616,12 +1062,123 @@ export function useRelay() {
     [],
   );
 
-  return { connected, desktopUnreachable: !connected, sessions, providers, costSummary, costDetails, connect, applyPairingToken, disconnect, sendChatTurn, sendToSession, getTranscript,
+// Stable sender identities — screens put these in effect dependency
+// arrays, so a fresh arrow on every render turns any such effect into an
+// infinite request loop (the Automations screen's flash was exactly this).
+
+
+// Stable sender identities — screens put these in effect dependency
+// arrays, so a fresh arrow on every render turns any such effect into an
+// infinite request loop (the Automations screen's flash was exactly this).
+
+
+// Stable sender identities — screens put these in effect dependency
+// arrays, so a fresh arrow on every render turns such an effect into an
+// infinite request loop (the Automations screen's flash was exactly this).
+const _setSessionStarred = (sid: string, starred: boolean) => { _send({ type: 'SetSessionStarred', session_id: sid, starred }); };
+const _listArtifacts = () => { _send({ type: 'ListArtifacts' }); };
+const _requestHarnessModels = (harnessId: string) => { _send({ type: 'ListHarnessModels', harness_id: harnessId }); };
+const _listChatSkills = () => { _send({ type: 'ListChatSkills' }); };
+const _listAutomations = () => { _send({ type: 'ListAutomations' }); };
+const _listProjects = () => { _send({ type: 'ListProjects' }); };
+const _listAcpAgents = () => { _send({ type: 'ListAcpAgents' }); };
+const _listMemoryRecords = (includeInactive?: boolean) => { _send({ type: 'ListMemoryRecords', include_inactive: includeInactive }); };
+const _updateMemoryRecord = (memoryId: string, content: string, importance?: number) => { _send({ type: 'UpdateMemoryRecord', memory_id: memoryId, content, importance }); };
+const _deleteMemoryRecord = (memoryId: string) => { _send({ type: 'DeleteMemoryRecord', memory_id: memoryId }); };
+const _purgeMemories = () => { _send({ type: 'PurgeMemories' }); };
+const _listInstalledSkills = (kind: string) => { _send({ type: 'ListInstalledSkills', kind }); };
+const _readInstalledSkill = (slug: string, kind: string) => { _send({ type: 'ReadInstalledSkill', slug, kind }); };
+const _saveInstalledSkill = (slug: string, kind: string, content: string) => { _send({ type: 'SaveInstalledSkill', slug, kind, content }); };
+const _createInstalledSkill = (name: string, kind: string, content: string) => { _send({ type: 'CreateInstalledSkill', name, kind, content }); };
+const _deleteInstalledSkill = (slug: string, kind: string) => { _send({ type: 'DeleteInstalledSkill', slug, kind }); };
+const _makeInstalledSkillsGlobal = (kind: string) => { _send({ type: 'MakeInstalledSkillsGlobal', kind }); };
+const _gitStatus = (projectId: string) => { _send({ type: 'GitStatus', project_id: projectId }); };
+const _gitDiff = (projectId: string, path?: string) => { _send({ type: 'GitDiff', project_id: projectId, path }); };
+const _gitCommit = (projectId: string, message: string) => { _send({ type: 'GitCommit', project_id: projectId, message }); };
+const _gitPush = (projectId: string) => { _send({ type: 'GitPush', project_id: projectId }); };
+const _gitBranches = (projectId: string) => { _send({ type: 'GitBranches', project_id: projectId }); };
+const _gitLog = (projectId: string, limit?: number) => { _send({ type: 'GitLog', project_id: projectId, limit }); };
+const _listBudgets = () => { _send({ type: 'ListBudgets' }); };
+const _setBudget = (projectId: string, monthlyUsd: number, thresholdPct?: number) => { _send({ type: 'SetBudget', project_id: projectId, monthly_usd: monthlyUsd, threshold_pct: thresholdPct }); };
+const _removeBudget = (projectId: string) => { _send({ type: 'RemoveBudget', project_id: projectId }); };
+const _listHiddenCostProjects = () => { _send({ type: 'ListHiddenCostProjects' }); };
+const _hideCostProject = (projectId: string) => { _send({ type: 'HideCostProject', project_id: projectId }); };
+const _unhideCostProject = (projectId: string) => { _send({ type: 'UnhideCostProject', project_id: projectId }); };
+const _addProject = (path: string, name?: string) => { _send({ type: 'AddProject', path, name }); };
+const _renameProject = (projectId: string, name: string) => { _send({ type: 'RenameProject', project_id: projectId, name }); };
+const _removeProject = (projectId: string) => { _send({ type: 'RemoveProject', project_id: projectId }); };
+const _listConnectors = () => { _send({ type: 'ListConnectors' }); };
+const _setSessionConnectors = (sessionId: string, connectorIds: string[]) => { _send({ type: 'SetSessionConnectors', session_id: sessionId, connector_ids: connectorIds }); };
+const _getSessionConnectors = (sessionId: string) => { _send({ type: 'GetSessionConnectors', session_id: sessionId }); };
+const _createAutomation = (input: Record<string, unknown>) => { _send({ type: 'CreateAutomation', input }); };
+const _updateAutomation = (automationId: string, input: Record<string, unknown>) => { _send({ type: 'UpdateAutomation', automation_id: automationId, input }); };
+const _deleteAutomation = (automationId: string) => { _send({ type: 'DeleteAutomation', automation_id: automationId }); };
+const _setAutomationEnabled = (automationId: string, enabled: boolean) => { _send({ type: 'SetAutomationEnabled', automation_id: automationId, enabled }); };
+const _runAutomationNow = (automationId: string) => { _send({ type: 'RunAutomationNow', automation_id: automationId }); };
+const _stopAutomationRun = (automationId: string) => { _send({ type: 'StopAutomationRun', automation_id: automationId }); };
+const _listAutomationRuns = (automationId: string, limit = 50) => { _send({ type: 'ListAutomationRuns', automation_id: automationId, limit }); };
+const _getCostRollups = (days: number) => { _send({ type: 'GetCostRollups', days }); };
+const _deleteChatMessage = (sessionId: string, messageId: number) => { _send({ type: 'DeleteChatMessage', session_id: sessionId, message_id: messageId }); };
+const _editUserMessage = (sessionId: string, messageId: number, text: string) => { _send({ type: 'EditUserMessage', session_id: sessionId, message_id: messageId, text }); };
+const _regenerateMessage = (sessionId: string) => { _send({ type: 'RegenerateMessage', session_id: sessionId }); };
+const _listChatCheckpoints = (sessionId: string) => { _send({ type: 'ListChatCheckpoints', session_id: sessionId }); };
+const _restoreChatCheckpoint = (sessionId: string, checkpointId: number, rollbackMessages = false) => { _send({ type: 'RestoreChatCheckpoint', session_id: sessionId, checkpoint_id: checkpointId, rollback_messages: rollbackMessages }); };
+const _searchChatMessages = (query: string, limit = 50) => { _send({ type: 'SearchChatMessages', query, limit }); };
+const _resolveSessionQuestion = (sessionId: string, pendingId: string, answers: Record<string, string | string[]>, response?: string) => { _send({ type: 'ResolveSessionQuestion', session_id: sessionId, pending_id: pendingId, answers, response }); };
+const _setSessionPermissionMode = (sessionId: string, mode: string) => { _send({ type: 'SetSessionPermissionMode', session_id: sessionId, mode }); };
+const _compactSession = (sessionId: string) => { _send({ type: 'CompactSession', session_id: sessionId }); };
+
+  return { connected, desktopUnreachable: !connected, connecting, sessions, providers, harnesses, defaultModel, costSummary, costDetails, connect, applyPairingToken, disconnect, sendChatTurn, sendToSession, getTranscript,
     cancelChatTurn: (id: string) => _send({ type: 'CancelChatTurn', chat_session_id: id }),
+    setSessionStarred: _setSessionStarred,
+    listArtifacts: _listArtifacts,
+    requestHarnessModels: _requestHarnessModels,
+    listChatSkills: _listChatSkills,
+    listAutomations: _listAutomations,
+    listProjects: _listProjects,
+    listAcpAgents: _listAcpAgents,
+    listMemoryRecords: _listMemoryRecords,
+    updateMemoryRecord: _updateMemoryRecord,
+    deleteMemoryRecord: _deleteMemoryRecord,
+    purgeMemories: _purgeMemories,
+    listInstalledSkills: _listInstalledSkills,
+    readInstalledSkill: _readInstalledSkill,
+    saveInstalledSkill: _saveInstalledSkill,
+    createInstalledSkill: _createInstalledSkill,
+    deleteInstalledSkill: _deleteInstalledSkill,
+    makeInstalledSkillsGlobal: _makeInstalledSkillsGlobal,
+    gitStatus: _gitStatus,
+    gitDiff: _gitDiff,
+    gitCommit: _gitCommit,
+    gitPush: _gitPush,
+    gitBranches: _gitBranches,
+    gitLog: _gitLog,
+    listBudgets: _listBudgets,
+    setBudget: _setBudget,
+    removeBudget: _removeBudget,
+    listHiddenCostProjects: _listHiddenCostProjects,
+    hideCostProject: _hideCostProject,
+    unhideCostProject: _unhideCostProject,
+    addProject: _addProject,
+    renameProject: _renameProject,
+    removeProject: _removeProject,
+    listConnectors: _listConnectors,
+    readArtifactPreview: requestArtifactPreviewFn,
+    setSessionConnectors: _setSessionConnectors,
+    getSessionConnectors: _getSessionConnectors,
+    createAutomation: _createAutomation,
+    updateAutomation: _updateAutomation,
+    deleteAutomation: _deleteAutomation,
+    setAutomationEnabled: _setAutomationEnabled,
+    runAutomationNow: _runAutomationNow,
+    stopAutomationRun: _stopAutomationRun,
+    listAutomationRuns: _listAutomationRuns,
+    getCostRollups: _getCostRollups,
     refreshProviders: refreshProvidersSend,
     refreshCost: refreshCostSend,
     refreshCostDetails: refreshCostDetailsSend,
-    createSession: (pid: string, h: string) => _send({ type: 'CreateSession', project_id: pid, harness: h }),
+    createSession: (pid: string, h: string, provider?: string, model?: string, effort?: string, connectors?: string[]) =>
+      _send({ type: 'CreateSession', project_id: pid, harness: h, provider, model, effort, connectors }),
     spawnSession: (sid: string) => _send({ type: 'SpawnSession', session_id: sid }),
     startLocalModel: (model: string, ggufPath: string) => _send({ type: 'StartLocalModel', model, gguf_path: ggufPath }),
     // Session-scoped chat (Task 6).
@@ -630,6 +1187,15 @@ export function useRelay() {
     cancelSessionStream,
     resolveSessionApproval,
     renameSession,
+    deleteChatMessage: _deleteChatMessage,
+    editUserMessage: _editUserMessage,
+    regenerateMessage: _regenerateMessage,
+    listChatCheckpoints: _listChatCheckpoints,
+    restoreChatCheckpoint: _restoreChatCheckpoint,
+    searchChatMessages: _searchChatMessages,
+    setSessionPermissionMode: _setSessionPermissionMode,
+    resolveSessionQuestion: _resolveSessionQuestion,
+    compactSession: _compactSession,
     setSessionModel,
     deleteSession,
     getSessionMeta,

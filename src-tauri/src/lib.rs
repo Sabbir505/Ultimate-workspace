@@ -801,6 +801,7 @@ pub fn run() {
             commands::updater_cmds::download_and_install_update,
             // mobile relay
             mobile::commands::start_mobile_relay,
+            mobile::commands::regen_mobile_pairing_token,
             mobile::commands::stop_mobile_relay,
             mobile::commands::get_mobile_relay_status,
             mobile::commands::get_mobile_pairing_info,

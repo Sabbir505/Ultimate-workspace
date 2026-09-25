@@ -151,6 +151,12 @@ export interface ChatOwnerPayload {
 export const listenChatOwner = (handler: (payload: ChatOwnerPayload) => void) =>
   safeListen<ChatOwnerPayload>("mobile:session_chat_owner", handler);
 
+/** A relay-side session mutation (e.g. the phone picked a model) landed —
+ *  refresh the desktop's rows so its picker shows the current choice. */
+export const listenChatSessionUpdated = (
+  handler: (payload: { chatSessionId: string }) => void,
+) => safeListen<{ chatSessionId: string }>("chat:session-updated", handler);
+
 /** Read a generated artifact for in-app preview. */
 export const readArtifactPreview = (path: string) =>
   safeInvoke<ArtifactPreview | null>("read_artifact_preview", { path });

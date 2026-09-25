@@ -316,6 +316,33 @@ impl AgentSessionManager {
             .remove(chat_session_id)
     }
 
+    /// Is a question card still waiting for an answer on this chat?
+    ///
+    /// The RELAY_ASK card is emitted AFTER `chat:done` (the asking turn has
+    /// already finished), so anything that tears down per-turn state on done
+    /// must consult this first — otherwise the phone loses its owner mapping
+    /// one frame before the card is emitted and the question is never
+    /// delivered.
+    pub fn has_pending_ask(&self, chat_session_id: &str) -> bool {
+        self.pending_asks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(chat_session_id)
+    }
+
+    /// The questions behind a still-pending ask, for emitting the card after
+    /// registration. `None` once the ask has been answered or replaced.
+    pub fn peek_pending_ask_questions(
+        &self,
+        chat_session_id: &str,
+        pending_id: &str,
+    ) -> Option<serde_json::Value> {
+        let asks = self.pending_asks.lock().unwrap_or_else(|e| e.into_inner());
+        asks.get(chat_session_id)
+            .filter(|p| p.pending_id == pending_id)
+            .map(|p| p.questions.clone())
+    }
+
     /// Take the pending ask ONLY if it is still the one the UI is answering.
     /// A stale resolve (answer raced a replacement question) must leave the
     /// newer pending in place — an unconditional take here used to consume

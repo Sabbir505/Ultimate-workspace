@@ -36,6 +36,27 @@ pub fn stop_mobile_relay(relay_state: State<'_, MobileRelayState>) -> CmdResult<
     Ok(())
 }
 
+/// Rotate the pairing token: revoke the persisted one and restart the relay
+/// (a fresh token is minted on start). Every previously paired phone must
+/// re-scan after this — the whole point of the rotation.
+#[tauri::command]
+pub async fn regen_mobile_pairing_token(
+    app: AppHandle,
+    relay_state: State<'_, MobileRelayState>,
+    db: State<'_, DbState>,
+    chat_state: State<'_, crate::ChatState>,
+) -> CmdResult<u16> {
+    {
+        let conn = db.0.lock();
+        crate::secrets::generic_remove(&conn, "mobile", "pairing-token");
+    }
+    stop_relay(&relay_state.0);
+    let db2 = Arc::clone(&db.0);
+    let chat_mgr = Arc::clone(&chat_state.0);
+    let state = Arc::clone(&relay_state.0);
+    start_relay(app, state, db2, chat_mgr).await.map_err(|e| e)
+}
+
 /// Get the current relay status.
 #[tauri::command(async)]
 pub fn get_mobile_relay_status(relay_state: State<'_, MobileRelayState>) -> CmdResult<MobileRelayStatus> {

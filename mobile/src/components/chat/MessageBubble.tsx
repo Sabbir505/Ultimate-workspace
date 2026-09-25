@@ -30,6 +30,8 @@ export interface MessageBubbleProps {
   content: string;
   /** True while tokens are still arriving — shows the live caret indicator. */
   streaming?: boolean;
+  /** Diff peek (desktop DiffCard parity) — forwarded to file tool rows. */
+  onPeekDiff?: (path: string) => void;
 }
 
 export type Segment =
@@ -129,7 +131,15 @@ function TypingDots() {
   );
 }
 
-function AssistantContent({ content, streaming }: { content: string; streaming: boolean }) {
+function AssistantContent({
+  content,
+  streaming,
+  onPeekDiff,
+}: {
+  content: string;
+  streaming: boolean;
+  onPeekDiff?: (path: string) => void;
+}) {
   const segments = useMemo(() => parseSegments(content), [content]);
   const empty = content.length === 0;
 
@@ -143,7 +153,9 @@ function AssistantContent({ content, streaming }: { content: string; streaming: 
           case 'think':
             return <ThinkingBlock key={i} thinking={seg.text} done={seg.done} />;
           case 'tool':
-            return <ActivityRow key={i} data={seg.data} raw={seg.raw} done={seg.done} />;
+            return (
+              <ActivityRow key={i} data={seg.data} raw={seg.raw} done={seg.done} onPeekDiff={onPeekDiff} />
+            );
           default:
             return (
               <View key={i} style={styles.textSeg}>
@@ -160,7 +172,12 @@ function AssistantContent({ content, streaming }: { content: string; streaming: 
   );
 }
 
-export default function MessageBubble({ role, content, streaming = false }: MessageBubbleProps) {
+export default function MessageBubble({
+  role,
+  content,
+  streaming = false,
+  onPeekDiff,
+}: MessageBubbleProps) {
   const c = theme.colors;
 
   if (role === 'system') {
@@ -185,7 +202,7 @@ export default function MessageBubble({ role, content, streaming = false }: Mess
 
   return (
     <View style={styles.assistantRow}>
-      <AssistantContent content={content} streaming={streaming} />
+      <AssistantContent content={content} streaming={streaming} onPeekDiff={onPeekDiff} />
     </View>
   );
 }

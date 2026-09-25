@@ -19,6 +19,7 @@ import {
   tailscaleLogin,
   startMobileRelay,
   stopMobileRelay,
+  regenMobilePairingToken,
   type MobilePairingInfo,
 } from "../../lib/ipc";
 import { toastError, toastSuccess } from "../../lib/ipc";
@@ -285,6 +286,25 @@ export function RemotePanel() {
                 <code className="mono-text">{info!.token}</code>
                 <button className="ghost" style={{ padding: "2px 8px" }} onClick={() => void copyToClipboard(info!.token, "Token")}>
                   Copy
+                </button>
+                <button
+                  className="ghost"
+                  style={{ padding: "2px 8px" }}
+                  title="Revokes every paired phone — they must re-scan. The token otherwise survives desktop restarts so phones reconnect automatically."
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await regenMobilePairingToken();
+                      toastSuccess("Token rotated", "Paired phones must scan the new QR");
+                      await refresh();
+                    } catch (e) {
+                      toastError("Failed to rotate token", e);
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  New token
                 </button>
               </div>
             </div>

@@ -7,6 +7,8 @@ section and eval scenarios are still open). Companion docs:
 this feature), `RESEARCH_MODE_IMPROVEMENTS_RESEARCH.md` (gap G4 / rec R11: orchestration
 is one-shot and static).
 
+**Implementation drift (verified against source 2026-09-21):** the §4.3 awareness design changed after implementation — the registry block is **not wired into any prompt path** (see §4.3 below; awareness ships as on-demand tools + a one-line per-turn identity hint). Other deviations from the text below: there is no `sessionMesh.summaryModel` setting and no per-capability `messaging`/`spawning` toggles — only `sessionMesh.enabled` (`session_fabric/mod.rs`); `FabricRuntime::on_turn_complete` does not exist (a per-target pump polls busy-state instead of turn-end hooks); `session_fabric/mail.rs` / `spawn.rs` / `eval.rs` do not exist — the whole runtime is `session_fabric/mod.rs`; `read_session` takes no `max_chars` (fixed 24k/8k budgets); the spawn depth guard `MAX_SPAWN_DEPTH = 2` blocks a depth-1 session from spawning (max chain = 1 child), and the "3 children" cap is 3 spawns **in the last 24h** (`CHILDREN_WINDOW_SECS`), not 3 live; the mail rate cap is per **sender** (10/hour), not per target; `spawn_session` has no `project_id` arg (children inherit the parent's project); the five tools are family-locked for built-in chats (`attach_connector("session-mesh")` or the keyword fast-path pre-unlocks) while harness relays always get them; UI wiring is `src/lib/ipc/sessionMesh.ts` + `src/state/chat/slices/meshSlice.ts` (no `SessionMailCard.tsx`); and the built-in prompt-budget guard is now `< 9,850` bytes (`chat/prompts.rs`).
+
 Working name **Session Mesh**. Three capabilities, in dependency order:
 
 1. **Awareness** — an agent knows which other chat sessions exist and what happened in
@@ -27,7 +29,7 @@ for free — same dispatcher, `mcp_tools_bridge.rs`), new tables in `relay.db`, 
 
 - Sessions are already concurrent and enumerable: `AgentSessionManager` keeps a live
   per-chat map (`agent_sessions/mod.rs:69`), the store documents concurrent streaming
-  (`src/state/chat.ts:681`), and `list_chat_sessions` gives every session's id, title,
+  (`src/state/chat/slices/streamingSlice.ts`; the former 3,700-line `src/state/chat.ts` is now a directory), and `list_chat_sessions` gives every session's id, title,
   agent, project, and timestamps (`chat/commands/sessions.rs:37`).
 - The model is currently told nothing about peers. The old doctrine line "No memory of
   other Relay sessions" was replaced by user-memory doctrine (`prompts.rs:810` test
@@ -44,7 +46,7 @@ for free — same dispatcher, `mcp_tools_bridge.rs`), new tables in `relay.db`, 
     opencode's native question parking (`agent_sessions/mod.rs:85-107`). Today only the
     *user* can answer.
   - `broadcastToSessions` — user-side fan-out of one prompt to N sessions, including
-    background sessions that aren't open (`src/state/chat.ts:2387`). Proves a session can
+    background sessions that aren't open (`src/state/chat/slices/streamingSlice.ts`). Proves a session can
     receive and run a turn it didn't originate from its own composer.
   - Automations — programmatically create a session and run turns in it, headless or
     in-app (`automations.rs:302-316`, `agent_sessions/oneshot.rs:14`).
@@ -149,7 +151,9 @@ ChatGPT's inspectable saved memories.
 
 All read-only → immediately also whitelisted in `ALLOWED_RELAY_TOOLS`.
 
-### 4.3 Injection (the standing hint)
+### 4.3 Injection — NOT wired (superseded by on-demand tools)
+
+> **Shipped reality (verified 2026-09-21):** the registry block below was built and then intentionally unwired. Injecting it every turn invalidated the provider prompt prefix cache, so the built-in send path removed it (`chat/commands/send.rs`) and the harness bundle deliberately omits it (`agent_sessions/bundle.rs`). `session_fabric::registry_block` still exists but has no production caller. Awareness ships as: the five on-demand tools (family-locked for built-in chats behind `attach_connector("session-mesh")`, pre-unlockable by the send-time keyword fast-path; always available to harness relays through `relay-tools`), plus a one-line per-turn identity hint (`session_fabric/mod.rs`; harness side `agent_sessions/mod.rs`). The text below is retained as the design record.
 
 A compact registry block, budget ≤ 600 tokens, assembled by
 `session_fabric::registry_block(conn, self_id)`:

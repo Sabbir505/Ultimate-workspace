@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "version": "0.6.1-staging.1",
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Sabbir505/relay-releases-staging/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ1MDgyNzREMUEzODE5NUUKUldSZUdUZ2FUU2NJUlpHbEh4dWVrdmlheldoUGVWSFRERFFUVjI5TGhWTEMzOUpQV2hJRE1ReisK"
+    }
+  }
+}

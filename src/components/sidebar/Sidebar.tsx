@@ -1,4 +1,4 @@
-﻿// Sidebar (Â§5): inbox-style layout â€” brand/search header, Artifacts,
+// Sidebar (Â§5): inbox-style layout â€” brand/search header, Artifacts,
 // Automations, then the Chat History inbox (every chat in one flat list,
 // two lines per row: title + working-spinner/relative time, then the
 // project Â· branch context and the provider/harness/local-model brand icon)
@@ -42,6 +42,7 @@ import { useNewChatAction } from "../../hooks/useNewChatAction";
 import { useViewNav } from "../../hooks/useViewNav";
 import { ArtifactLibrary } from "./ArtifactLibrary";
 import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
+import { AppVersion } from "./AppVersion";
 import { UpdateButton } from "./UpdateButton";
 import { seedFakeUpdate, SHOW_FAKE_UPDATE } from "../../state/updater";
 import { useOcclusion } from "../../hooks/useOcclusion";
@@ -85,15 +86,20 @@ export function SidebarHeader() {
       {/* The brand doubles as the collapse control (no separate panel icon);
           back/forward sit at the header's right edge. */}
       <div className="flex items-center justify-between mb-2">
-        <button
-          type="button"
-          className="sidebar-brand-btn sidebar-wordmark select-none px-1.5 py-0.5 -ml-1.5 rounded-md"
-          onClick={toggleSidebar}
-          title="Collapse sidebar"
-          aria-label="Collapse sidebar"
-        >
-          Relay
-        </button>
+        {/* min-w-0 so a long prerelease version (e.g. 0.6.1-staging.1)
+            ellipsizes instead of pushing the nav cluster off the header. */}
+        <span className="flex items-center gap-1.5 min-w-0">
+          <button
+            type="button"
+            className="sidebar-brand-btn sidebar-wordmark select-none px-1.5 py-0.5 -ml-1.5 rounded-md"
+            onClick={toggleSidebar}
+            title="Collapse sidebar"
+            aria-label="Collapse sidebar"
+          >
+            Relay
+          </button>
+          <AppVersion />
+        </span>
         <span className="flex items-center flex-shrink-0">
           <UpdateButton />
           <button

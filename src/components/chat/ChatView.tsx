@@ -1963,7 +1963,16 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         onEffortChange={setEffort}
         harnessEffort={harnessAgent ? (activeSession?.effortLevel ?? "") : undefined}
         onHarnessEffortChange={handleHarnessEffortChange}
-        provider={activeSession?.autoModel ? "auto" : activeSession?.provider}
+        provider={
+          // A harness session's provider column is cosmetic (the CLI runs the
+          // turn) — showing it made the picker/meter claim "openrouter" for a
+          // commandcode model.
+          activeSession?.agent && activeSession.agent !== "builtin"
+            ? undefined
+            : activeSession?.autoModel
+              ? "auto"
+              : activeSession?.provider
+        }
         modelLoading={localLoading}
         localCtx={localCtx}
         autoBias={autoBias}

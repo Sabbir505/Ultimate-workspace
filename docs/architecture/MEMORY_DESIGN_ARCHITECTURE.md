@@ -2,6 +2,8 @@
 
 **Status:** Implemented (P0–P4 complete: extraction, consolidation, retrieval, injection, tools, UI, reflection §8.4, and the §16 eval harness) · **Date:** 2026-09-04 · **Companion to** `DOCUMENT_DESIGN_ARCHITECTURE.md` (same doc conventions: numbered sections, `file:line` refs, ASCII diagrams, module map, phased migration)
 
+> **Schema/naming drift (verified against source 2026-09-21):** the body text below is the design record; the shipped schema differs in names — the FTS table is `memories_fts` (not `memory_fts`); `memories.project_id` is TEXT (not INTEGER) and `memories` carries a `reflected` column; `memory_evidence.message_id` shipped as `chat_message_id`; `memory_cursor` columns are `chat_session_id`/`last_message_id` (not `session_id`/`last_extracted_message_id`); `memory_ops` adds a `session_id` column; timestamps are Unix epoch INTEGERs (not ISO TEXT); and a `memory_document_versions` table was added. §8.4's reflection trigger shipped as `COUNT_THRESHOLD = 25` unreflected facts (`memory/reflect.rs`), matching the §11 amendment rather than the "200 active memories" line in §8.4. The §14 file map drifted: the tool implementations live in `memory/tools_impl.rs` (not `chat/tools/memory.rs`), the commands in `commands/memory_cmds.rs` (not `commands/memory.rs`), scoring math in `memory/scoring.rs`, and command registration is around `lib.rs:900+`; there is no `src/state/memory.ts` — the UI is `MemoryPanel.tsx` + `useMemoryEvents.ts` over the IPC layer. §11.2's header string shipped as `## About this user (persistent memory)` (`memory/render.rs`).
+
 ---
 
 ## 1. Executive summary

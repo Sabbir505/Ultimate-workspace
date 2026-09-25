@@ -15,7 +15,9 @@
 //!   `provider.<id>.options.baseURL`, `provider.<id>.models` map.
 //!
 //! Everything is best-effort: a missing/unparseable config just yields an
-//! empty result and the frontend falls back to the static catalog.
+//! empty result and the picker shows only what the CLI's live listing
+//! reported (no static fallback rows — a stale id the CLI rejects is worse
+//! than a short list).
 
 use serde::Serialize;
 use serde_json::Value;

@@ -1,0 +1,181 @@
+<!-- conduit:diagram -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Conduit Architecture</title>
+</head>
+<body style="margin:0;padding:24px;background:#ffffff">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 960" width="100%" height="auto" style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="550" y="32" text-anchor="middle" font-size="26" font-weight="700" fill="#0f172a">Conduit — Architecture Overview</text>
+  <text x="550" y="56" text-anchor="middle" font-size="14" fill="#475569">Local-first, multi-pane desktop shell for AI coding agents · Tauri v2 + React 18 + SQLite</text>
+
+  <!-- ===== Tier 1: Frontend ===== -->
+  <rect x="20" y="70" width="1060" height="250" rx="14" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="40" y="98" font-size="15" font-weight="700" fill="#4338ca">REACT 18 + TYPESCRIPT FRONTEND&nbsp;&nbsp;(system webview)</text>
+
+  <rect x="40" y="112" width="180" height="86" rx="8" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="1"/>
+  <text x="130" y="132" text-anchor="middle" font-size="13" font-weight="700" fill="#1e1b4b">Sidebar</text>
+  <text x="130" y="152" text-anchor="middle" font-size="11" fill="#312e81">Projects · Sessions · Chats</text>
+  <text x="130" y="170" text-anchor="middle" font-size="11" fill="#312e81">Search / Cmd+K</text>
+
+  <rect x="232" y="112" width="180" height="86" rx="8" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="1"/>
+  <text x="322" y="132" text-anchor="middle" font-size="13" font-weight="700" fill="#1e1b4b">ChatView</text>
+  <text x="322" y="152" text-anchor="middle" font-size="11" fill="#312e81">MessageBubble · Composer</text>
+  <text x="322" y="170" text-anchor="middle" font-size="11" fill="#312e81">Artifacts · Attachments</text>
+
+  <rect x="424" y="112" width="180" height="86" rx="8" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="1"/>
+  <text x="514" y="132" text-anchor="middle" font-size="13" font-weight="700" fill="#1e1b4b">PaneGrid (≤ 6 panes)</text>
+  <text x="514" y="152" text-anchor="middle" font-size="11" fill="#312e81">TerminalPane (xterm.js)</text>
+  <text x="514" y="170" text-anchor="middle" font-size="11" fill="#312e81">BrowserPane (webview)</text>
+
+  <rect x="616" y="112" width="180" height="86" rx="8" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="1"/>
+  <text x="706" y="132" text-anchor="middle" font-size="13" font-weight="700" fill="#1e1b4b">Git Tools Sidebar</text>
+  <text x="706" y="152" text-anchor="middle" font-size="11" fill="#312e81">Commit · Branch · Plans</text>
+  <text x="706" y="170" text-anchor="middle" font-size="11" fill="#312e81">ToolPanel: Changes / Canvas</text>
+
+  <rect x="808" y="112" width="180" height="86" rx="8" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="1"/>
+  <text x="898" y="132" text-anchor="middle" font-size="13" font-weight="700" fill="#1e1b4b">Overlays</text>
+  <text x="898" y="152" text-anchor="middle" font-size="11" fill="#312e81">Settings · Skills · Cost</text>
+  <text x="898" y="170" text-anchor="middle" font-size="11" fill="#312e81">Automations · CommandPalette</text>
+
+  <rect x="40" y="216" width="300" height="88" rx="8" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="1"/>
+  <text x="190" y="238" text-anchor="middle" font-size="13" font-weight="700" fill="#1e1b4b">Zustand Stores</text>
+  <text x="190" y="258" text-anchor="middle" font-size="11" fill="#312e81">chat · ui · projects · settings</text>
+  <text x="190" y="276" text-anchor="middle" font-size="11" fill="#312e81">panes · artifacts · updater</text>
+
+  <rect x="352" y="216" width="350" height="88" rx="8" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="1"/>
+  <text x="527" y="238" text-anchor="middle" font-size="13" font-weight="700" fill="#1e1b4b">ipc.ts bridge</text>
+  <text x="527" y="258" text-anchor="middle" font-size="11" fill="#312e81">safeInvoke(cmd) → Tauri command</text>
+  <text x="527" y="276" text-anchor="middle" font-size="11" fill="#312e81">safeListen → chat:token · pty:output</text>
+
+  <rect x="714" y="216" width="286" height="88" rx="8" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="1"/>
+  <text x="857" y="238" text-anchor="middle" font-size="13" font-weight="700" fill="#1e1b4b">React Hooks</text>
+  <text x="857" y="258" text-anchor="middle" font-size="11" fill="#312e81">useChatEvents · usePtyEvents</text>
+  <text x="857" y="276" text-anchor="middle" font-size="11" fill="#312e81">usePlanTracker · useKeybindings</text>
+
+  <!-- IPC arrow -->
+  <line x1="527" y1="304" x2="527" y2="346" stroke="#64748b" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="540" y="330" font-size="11.5" fill="#475569">Tauri IPC — invoke / events</text>
+
+  <!-- ===== Tier 2: Backend ===== -->
+  <rect x="20" y="350" width="1060" height="310" rx="14" fill="#ecfeff" stroke="#0891b2" stroke-width="1.5"/>
+  <text x="40" y="378" font-size="15" font-weight="700" fill="#155e75">TAURI V2 RUST BACKEND&nbsp;&nbsp;— lib.rs registers 134 IPC commands + managed shared state</text>
+
+  <!-- G1 Commands -->
+  <rect x="40" y="392" width="470" height="252" rx="10" fill="#ccfbf1" stroke="#5eead4" stroke-width="1"/>
+  <text x="52" y="414" font-size="12.5" font-weight="700" fill="#134e4a">IPC Command Modules&nbsp;&nbsp;(src-tauri/src/commands/)</text>
+  <g font-size="11" fill="#134e4a">
+    <rect x="52" y="424" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="155" y="441" text-anchor="middle">projects.rs · pty_cmds.rs</text>
+    <rect x="274" y="424" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="377" y="441" text-anchor="middle">connectors_cmds.rs</text>
+    <rect x="52" y="452" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="155" y="469" text-anchor="middle">browser_cmds.rs</text>
+    <rect x="274" y="452" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="377" y="469" text-anchor="middle">local_model_market.rs</text>
+    <rect x="52" y="480" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="155" y="497" text-anchor="middle">git_cmds.rs (+ git_watcher)</text>
+    <rect x="274" y="480" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="377" y="497" text-anchor="middle">automation_cmds.rs</text>
+    <rect x="52" y="508" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="155" y="525" text-anchor="middle">chat_cmds.rs</text>
+    <rect x="274" y="508" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="377" y="525" text-anchor="middle">updater_cmds.rs</text>
+    <rect x="52" y="536" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="155" y="553" text-anchor="middle">data.rs (settings/skills/cost)</text>
+    <rect x="274" y="536" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="377" y="553" text-anchor="middle">skills_cmds.rs</text>
+    <rect x="52" y="564" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="155" y="581" text-anchor="middle">agent_cmds.rs</text>
+    <rect x="274" y="564" width="206" height="26" rx="6" fill="#f0fdfa" stroke="#99f6e4"/><text x="377" y="581" text-anchor="middle">mobile (relay)</text>
+  </g>
+
+  <!-- G2 Managers -->
+  <rect x="530" y="392" width="330" height="252" rx="10" fill="#e0f2fe" stroke="#7dd3fc" stroke-width="1"/>
+  <text x="542" y="414" font-size="12.5" font-weight="700" fill="#0c4a6e">Core Managers&nbsp;&nbsp;(shared state)</text>
+  <g font-size="11.5" fill="#0c4a6e">
+    <rect x="542" y="424" width="148" height="46" rx="7" fill="#f0f9ff" stroke="#bae6fd"/><text x="616" y="444" text-anchor="middle" font-weight="700">PtyManager</text><text x="616" y="460" text-anchor="middle" font-size="10">spawn / kill / resume PTYs</text>
+    <rect x="700" y="424" width="148" height="46" rx="7" fill="#f0f9ff" stroke="#bae6fd"/><text x="774" y="444" text-anchor="middle" font-weight="700">BrowserManager</text><text x="774" y="460" text-anchor="middle" font-size="10">native webviews + MCP relay</text>
+    <rect x="542" y="482" width="148" height="46" rx="7" fill="#f0f9ff" stroke="#bae6fd"/><text x="616" y="502" text-anchor="middle" font-weight="700">ChatManager</text><text x="616" y="518" text-anchor="middle" font-size="10">SSE streaming + 29 tools</text>
+    <rect x="700" y="482" width="148" height="46" rx="7" fill="#f0f9ff" stroke="#bae6fd"/><text x="774" y="502" text-anchor="middle" font-weight="700">AgentSessions</text><text x="774" y="518" text-anchor="middle" font-size="10">headless CLI chat</text>
+    <rect x="542" y="540" width="148" height="46" rx="7" fill="#f0f9ff" stroke="#bae6fd"/><text x="616" y="560" text-anchor="middle" font-weight="700">LocalModels</text><text x="616" y="576" text-anchor="middle" font-size="10">llama-server sidecar</text>
+    <rect x="700" y="540" width="148" height="46" rx="7" fill="#f0f9ff" stroke="#bae6fd"/><text x="774" y="560" text-anchor="middle" font-weight="700">Connectors</text><text x="774" y="576" text-anchor="middle" font-size="10">OAuth + remote MCP</text>
+    <rect x="542" y="598" width="148" height="46" rx="7" fill="#f0f9ff" stroke="#bae6fd"/><text x="616" y="618" text-anchor="middle" font-weight="700">Automations</text><text x="616" y="634" text-anchor="middle" font-size="10">cron · 30s tick</text>
+    <rect x="700" y="598" width="148" height="46" rx="7" fill="#f0f9ff" stroke="#bae6fd"/><text x="774" y="618" text-anchor="middle" font-weight="700">MobileRelay</text><text x="774" y="634" text-anchor="middle" font-size="10">localhost WS + pairing token</text>
+  </g>
+
+  <!-- G3 Persistence -->
+  <rect x="880" y="392" width="200" height="252" rx="10" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="892" y="414" font-size="12.5" font-weight="700" fill="#4c1d95">Persistence &amp; Runtime</text>
+  <g font-size="11.5" fill="#4c1d95">
+    <text x="892" y="440">SQLite conduit.db (WAL)</text>
+    <text x="892" y="466">OS Keychain (secrets)</text>
+    <text x="892" y="492">Bundled Python + LibreOffice</text>
+    <text x="892" y="518">Harness bundle (mcp.json)</text>
+    <text x="892" y="544">Artifacts · 30-day sweep</text>
+    <text x="892" y="570">git filesystem watcher</text>
+  </g>
+
+  <!-- intra-tier arrows -->
+  <line x1="510" y1="505" x2="528" y2="505" stroke="#0891b2" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="860" y1="520" x2="878" y2="520" stroke="#0891b2" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ===== inter-tier arrows ===== -->
+  <path d="M616 470 V 674 H120 V 752" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="270" y="666" font-size="11.5" fill="#475569">PTY: spawn / resume-by-id</text>
+
+  <path d="M628 528 V 686 H290 V 752" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="470" y="678" font-size="11.5" fill="#475569">HTTP / SSE streaming</text>
+
+  <path d="M640 586 V 700 H460 V 752" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="500" y="692" font-size="11.5" fill="#475569">HF Hub download</text>
+
+  <path d="M774 586 V 686 H630 V 752" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="640" y="678" font-size="11.5" fill="#475569">OAuth + remote MCP</text>
+
+  <path d="M652 644 V 712 H800 V 752" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="660" y="704" font-size="11.5" fill="#475569">latest.json (HTTPS)</text>
+
+  <path d="M786 644 V 724 H970 V 752" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="880" y="716" font-size="11.5" fill="#475569">WebSocket relay</text>
+
+  <!-- ===== Tier 3: External ===== -->
+  <rect x="20" y="720" width="1060" height="210" rx="14" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="40" y="746" font-size="15" font-weight="700" fill="#b45309">EXTERNAL / THIRD-PARTY</text>
+
+  <rect x="40" y="762" width="158" height="108" rx="8" fill="#fef3c7" stroke="#fcd34d" stroke-width="1"/>
+  <text x="119" y="788" text-anchor="middle" font-size="13" font-weight="700" fill="#78350f">Agent CLIs</text>
+  <text x="119" y="810" text-anchor="middle" font-size="11" fill="#92400e">Claude Code · Kimi</text>
+  <text x="119" y="830" text-anchor="middle" font-size="11" fill="#92400e">OpenCode (PTY child)</text>
+  <text x="119" y="850" text-anchor="middle" font-size="11" fill="#92400e">resume-by-id</text>
+
+  <rect x="210" y="762" width="158" height="108" rx="8" fill="#fef3c7" stroke="#fcd34d" stroke-width="1"/>
+  <text x="289" y="788" text-anchor="middle" font-size="13" font-weight="700" fill="#78350f">LLM Providers</text>
+  <text x="289" y="810" text-anchor="middle" font-size="11" fill="#92400e">Anthropic · OpenAI</text>
+  <text x="289" y="830" text-anchor="middle" font-size="11" fill="#92400e">OpenRouter · compatible</text>
+  <text x="289" y="850" text-anchor="middle" font-size="11" fill="#92400e">SSE over HTTP</text>
+
+  <rect x="380" y="762" width="158" height="108" rx="8" fill="#fef3c7" stroke="#fcd34d" stroke-width="1"/>
+  <text x="459" y="788" text-anchor="middle" font-size="13" font-weight="700" fill="#78350f">Hugging Face Hub</text>
+  <text x="459" y="810" text-anchor="middle" font-size="11" fill="#92400e">GGUF + mmproj models</text>
+  <text x="459" y="830" text-anchor="middle" font-size="11" fill="#92400e">streaming download</text>
+  <text x="459" y="850" text-anchor="middle" font-size="11" fill="#92400e">SHA-256 verified</text>
+
+  <rect x="550" y="762" width="158" height="108" rx="8" fill="#fef3c7" stroke="#fcd34d" stroke-width="1"/>
+  <text x="629" y="788" text-anchor="middle" font-size="13" font-weight="700" fill="#78350f">OAuth + Remote MCP</text>
+  <text x="629" y="810" text-anchor="middle" font-size="11" fill="#92400e">Notion · GitHub · Google</text>
+  <text x="629" y="830" text-anchor="middle" font-size="11" fill="#92400e">Gmail · Kiwi</text>
+  <text x="629" y="850" text-anchor="middle" font-size="11" fill="#92400e">vendor MCP servers</text>
+
+  <rect x="720" y="762" width="158" height="108" rx="8" fill="#fef3c7" stroke="#fcd34d" stroke-width="1"/>
+  <text x="799" y="788" text-anchor="middle" font-size="13" font-weight="700" fill="#78350f">GitHub Releases</text>
+  <text x="799" y="810" text-anchor="middle" font-size="11" fill="#92400e">latest.json + NSIS</text>
+  <text x="799" y="830" text-anchor="middle" font-size="11" fill="#92400e">signed auto-update</text>
+
+  <rect x="890" y="762" width="158" height="108" rx="8" fill="#fef3c7" stroke="#fcd34d" stroke-width="1"/>
+  <text x="969" y="788" text-anchor="middle" font-size="13" font-weight="700" fill="#78350f">Mobile Companion</text>
+  <text x="969" y="810" text-anchor="middle" font-size="11" fill="#92400e">React Native / Expo</text>
+  <text x="969" y="830" text-anchor="middle" font-size="11" fill="#92400e">localhost WebSocket</text>
+  <text x="969" y="850" text-anchor="middle" font-size="11" fill="#92400e">phone holds no keys</text>
+
+  <text x="550" y="920" text-anchor="middle" font-size="13" fill="#64748b">Local-first by design: SQLite + OS keychain + child PTYs on this machine — no cloud backend.</text>
+</svg>
+</body>
+</html>

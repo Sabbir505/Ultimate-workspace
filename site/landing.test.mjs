@@ -75,7 +75,7 @@ test('navigation anchors resolve and downloads use the real release page', () =>
   }
   for (const link of document.querySelectorAll('a')) {
     if (link.textContent.includes('Get Relay')) {
-      expect(link.href).toBe('https://github.com/Sabbir505/Ultimate-workspace/releases/latest');
+      expect(link.href).toBe('https://github.com/Sabbir505/relay-releases/releases/latest');
     }
   }
   dom.window.close();

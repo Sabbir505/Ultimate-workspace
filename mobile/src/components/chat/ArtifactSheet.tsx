@@ -33,12 +33,17 @@ import {
   Image,
   ActivityIndicator,
   Alert,
+  useWindowDimensions,
 } from 'react-native';
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { theme } from '../../theme';
-import { useRelay, onArtifactContent, type SessionArtifact } from '../../hooks/useRelay';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRelay, onArtifactContent, getCachedArtifactPreview, type ArtifactPreview, type SessionArtifact } from '../../hooks/useRelay';
 import { tapLight } from '../../lib/haptics';
+import MarkdownText from './MarkdownText';
+import CodePreview from './CodePreview';
+import { WebView } from 'react-native-webview';
 
 export interface ArtifactSheetProps {
   visible: boolean;
@@ -48,6 +53,9 @@ export interface ArtifactSheetProps {
   sessionId?: string;
   /** Artifact to select when the sheet opens (defaults to the first). */
   initialPath?: string;
+  /** Cached grid preview for this artifact — paints the sheet instantly
+   *  (snippet or thumbnail) while the full file streams in behind it. */
+  initialPreview?: ArtifactPreview;
 }
 
 /** Extensions previewable as monospace text. */
@@ -78,12 +86,20 @@ function mimeFor(a: SessionArtifact): string {
   return IMAGE_MIME[ext] ?? 'application/octet-stream';
 }
 
-type PreviewMode = 'inline' | 'text' | 'image' | 'binary';
+type PreviewMode = 'inline' | 'markdown' | 'html' | 'code' | 'text' | 'image' | 'binary';
 
 function previewModeOf(a: SessionArtifact): PreviewMode {
   if (a.inline) return 'inline';
   const ext = extOf(a.filename || a.path);
   if (IMAGE_MIME[ext] || a.kind === 'image') return 'image';
+  // Markdown gets the FULL renderer (headings, lists, tables, fenced code,
+  // links) like the desktop artifact preview — not a raw text dump.
+  if (ext === 'md' || ext === 'markdown') return 'markdown';
+  // Live-rendered HTML/SVG (desktop HTML preview parity).
+  if (ext === 'html' || ext === 'htm' || ext === 'svg' || ext === 'xml') return 'html';
+  // Syntax-highlighted source for code files.
+  if (['js','jsx','mjs','cjs','ts','tsx','py','rs','go','css','scss','json','sh','bash','yml','yaml','sql','toml','vue'].includes(ext))
+    return 'code';
   if (TEXT_EXTS.has(ext) || a.kind === 'text') return 'text';
   return 'binary';
 }
@@ -98,14 +114,39 @@ interface ArtifactContent {
 /** How long to wait for the desktop's ArtifactContent before showing an error. */
 const FETCH_TIMEOUT_MS = 12_000;
 
-export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialPath }: ArtifactSheetProps): JSX.Element {
+export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialPath, initialPreview }: ArtifactSheetProps): JSX.Element {
   const c = theme.colors;
   const { connected, readArtifact } = useRelay();
+  // Android WebViews inside flex sheets mis-measure (the page's fixed
+  // elements end up under the sheet's own header) — give the web surface an
+  // explicit pixel height instead of flex:1.
+  const { height: winH } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const webHeight = Math.max(220, Math.min(560, Math.round(winH * 0.55)));
 
   const [selectedPath, setSelectedPath] = useState<string | null>(initialPath ?? null);
-  const [content, setContent] = useState<ArtifactContent | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Seed from the grid's cached preview: instant first paint, then the full
+  // artifact replaces it when the read lands.
+  const [content, setContent] = useState<ArtifactContent | null>(() => {
+    if (!initialPreview) return null;
+    if (initialPreview.text) {
+      return { text: initialPreview.text, dataBase64: undefined, truncated: initialPreview.truncated };
+    }
+    if (initialPreview.data_uri) {
+      const comma = initialPreview.data_uri.indexOf(',');
+      const b64 = comma >= 0 ? initialPreview.data_uri.slice(comma + 1) : initialPreview.data_uri;
+      return { text: undefined, dataBase64: b64, truncated: false };
+    }
+    return null;
+  });
+  // Markdown/HTML artifacts: rendered preview by default, source on toggle.
+  const [srcView, setSrcView] = useState(false);
+  // Many generated HTML artifacts pull CSS/JS from CDNs — over a tailnet the
+  // page paints its heading first and fills in late. A slim progress line
+  // says "still loading" instead of "broken".
+  const [webLoading, setWebLoading] = useState(false);
 
   // Selected artifact: explicit tap, else the initial path, else the first.
   const selected = useMemo(
@@ -113,6 +154,10 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
     [artifacts, selectedPath],
   );
   const mode = selected ? previewModeOf(selected) : null;
+  // Primitive identity for the fetch effect: parents re-render on every
+  // session poll, and a fresh `artifacts` array would otherwise re-run (and
+  // re-clear!) the fetch — content flashed, then the spinner came back.
+  const selKey = selected?.path ?? null;
 
   const select = useCallback((path: string) => {
     tapLight();
@@ -135,7 +180,8 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
       setLoading(false);
       return;
     }
-    setContent(null);
+    // Keep any seeded preview on screen while the full read streams in.
+    if (!initialPreview) setContent(null);
     setError(null);
     if (!sessionId) {
       setError('No session context — reopen this artifact from the chat.');
@@ -146,7 +192,8 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
       return;
     }
     let done = false;
-    setLoading(true);
+    if (!initialPreview) setLoading(true);
+    const targetPath = selKey as string;
     const timeout = setTimeout(() => {
       if (!done) {
         done = true;
@@ -155,7 +202,7 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
       }
     }, FETCH_TIMEOUT_MS);
     const off = onArtifactContent.on((p) => {
-      if (done || p.sessionId !== sessionId || p.path !== selected.path) return;
+      if (done || p.sessionId !== sessionId || p.path !== targetPath) return;
       done = true;
       clearTimeout(timeout);
       setLoading(false);
@@ -165,13 +212,14 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
       }
       setContent({ text: p.text, dataBase64: p.dataBase64, truncated: !!p.truncated });
     });
-    readArtifact(sessionId, selected.path);
+    readArtifact(sessionId, targetPath);
     return () => {
       done = true;
       clearTimeout(timeout);
       off();
     };
-  }, [visible, selected, mode, sessionId, connected, readArtifact]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, selKey, mode, sessionId, connected, readArtifact]);
 
   // ---- Save / share (binary kinds) ----
   const handleShare = useCallback(async () => {
@@ -201,6 +249,14 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
   }, [selected, content]);
 
   const filename = selected ? (selected.filename || selected.path.split(/[\\/]/).pop() || selected.path) : '';
+  // WebView document: full pages render as-is (the desktop iframe contract);
+  // fragments get a minimal shell. Transparent background so sheet theme
+  // shows through, like the desktop preview pane.
+  const htmlDoc = useMemo(() => {
+    const src = content?.text ?? '';
+    if (/<html[\s>]/i.test(src)) return src;
+    return `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>html,body{margin:0;padding:0;background:transparent}img,video{max-width:100%;height:auto}</style></head><body>${src}</body></html>`;
+  }, [content]);
 
   // ---- Preview body per kind ----
   let body: JSX.Element;
@@ -212,7 +268,13 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
     );
   } else if (mode === 'inline') {
     body = (
-      <ScrollView style={styles.previewScroll} showsVerticalScrollIndicator>
+      <ScrollView
+        style={styles.previewScroll}
+        showsVerticalScrollIndicator
+        persistentScrollbar
+        scrollIndicatorInsets={{ right: 2 }}
+        contentContainerStyle={styles.previewContent}
+      >
         <View style={[styles.codeBox, { backgroundColor: c.surface2 }]}>
           <Text style={[styles.codeText, { color: c.text }]} selectable>
             {selected.inline!.code}
@@ -226,7 +288,7 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
         <Text style={[styles.errorText, { color: c.error }]}>{error}</Text>
       </View>
     );
-  } else if (loading || !content) {
+  } else if (!content) {
     body = (
       <View style={styles.centered}>
         <ActivityIndicator size="small" color={c.accent} />
@@ -243,10 +305,140 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
         />
       </View>
     );
+  } else if (mode === 'markdown' && content.text != null) {
+    body = (
+      <View style={{ flex: 1 }}>
+        <View style={[styles.mdToggleRow, { borderBottomColor: c.border }]}>
+          {(['preview', 'source'] as const).map((m) => {
+            const active = m === 'preview' ? !srcView : srcView;
+            return (
+              <TouchableOpacity
+                key={m}
+                style={[styles.mdToggle, active && { backgroundColor: c.surface2 }]}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={`${selected?.filename ?? 'file'} ${m} view`}
+                onPress={() => setSrcView(m === 'source')}
+              >
+                <Text style={[styles.mdToggleText, { color: active ? c.text : c.textSecondary }]}>
+                  {m === 'preview' ? 'Preview' : 'Source'}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+        <ScrollView
+        style={styles.previewScroll}
+        showsVerticalScrollIndicator
+        persistentScrollbar
+        scrollIndicatorInsets={{ right: 2 }}
+        contentContainerStyle={styles.previewContent}
+      >
+          {srcView ? (
+            <View style={[styles.codeBox, { backgroundColor: c.surface2 }]}>
+              <Text style={[styles.codeText, { color: c.text }]} selectable>
+                {content.text}
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.mdBody}>
+              <MarkdownText content={content.text} />
+            </View>
+          )}
+        </ScrollView>
+        {content.truncated ? (
+          <View style={[styles.capNote, { borderTopColor: c.border }]}>
+            <Text style={[styles.capNoteText, { color: c.textSecondary }]}>
+              Preview truncated — open on desktop for the full file
+            </Text>
+          </View>
+        ) : null}
+      </View>
+    );
+  } else if (mode === 'html' && (content.text != null || content.dataBase64 != null)) {
+    body = (
+      <View style={{ flex: 1 }}>
+        <View style={[styles.mdToggleRow, { borderBottomColor: c.border }]}>
+          {(['preview', 'source'] as const).map((m) => {
+            const active = m === 'preview' ? !srcView : srcView;
+            return (
+              <TouchableOpacity
+                key={m}
+                style={[styles.mdToggle, active && { backgroundColor: c.surface2 }]}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={`${selected?.filename ?? 'file'} ${m} view`}
+                onPress={() => setSrcView(m === 'source')}
+              >
+                <Text style={[styles.mdToggleText, { color: active ? c.text : c.textSecondary }]}>
+                  {m === 'preview' ? 'Rendered' : 'Source'}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+        {srcView ? (
+          <ScrollView
+        style={styles.previewScroll}
+        showsVerticalScrollIndicator
+        persistentScrollbar
+        scrollIndicatorInsets={{ right: 2 }}
+        contentContainerStyle={styles.previewContent}
+      >
+            <View style={[styles.codeBox, { backgroundColor: c.surface2 }]}>
+              <CodePreview code={content.text ?? ''} filename={filename} showLineNumbers={false} />
+            </View>
+          </ScrollView>
+        ) : (
+          <View style={[styles.webview, { height: webHeight, backgroundColor: 'transparent' }]}>
+          {webLoading ? <View style={[styles.webProgress, { backgroundColor: c.accent }]} /> : null}
+          <WebView
+            style={[styles.webviewInner, { backgroundColor: 'transparent' }]}
+            originWhitelist={['*']}
+            source={{ html: htmlDoc }}
+            opaque={false}
+            setSupportZoomEnabled
+            // Android's WebView draws its own loading spinner over the page
+            // until the document finishes — an empty transparent loading
+            // view keeps the sheet spinner-free while it paints.
+            renderLoading={() => <View style={styles.webLoading} />}
+            onLoadStart={() => setWebLoading(true)}
+            onLoadEnd={() => setWebLoading(false)}
+            onError={() => setWebLoading(false)}
+            // Generated pages can ship their own scripts (the desktop
+            // preview allows them too); the WebView sandbox has no
+            // filesystem or app access.
+            javaScriptEnabled
+          />
+          </View>
+        )}
+      </View>
+    );
+  } else if (mode === 'code' && content.text != null) {
+    body = (
+      <ScrollView
+        style={styles.previewScroll}
+        showsVerticalScrollIndicator
+        persistentScrollbar
+        scrollIndicatorInsets={{ right: 2 }}
+        contentContainerStyle={styles.previewContent}
+        horizontal={false}
+      >
+        <View style={[styles.codeBox, { backgroundColor: c.surface2 }]}>
+          <CodePreview code={content.text} filename={filename} />
+        </View>
+      </ScrollView>
+    );
   } else if (mode === 'text' && content.text != null) {
     body = (
       <View style={{ flex: 1 }}>
-        <ScrollView style={styles.previewScroll} showsVerticalScrollIndicator>
+        <ScrollView
+        style={styles.previewScroll}
+        showsVerticalScrollIndicator
+        persistentScrollbar
+        scrollIndicatorInsets={{ right: 2 }}
+        contentContainerStyle={styles.previewContent}
+      >
           <View style={[styles.codeBox, { backgroundColor: c.surface2 }]}>
             <Text style={[styles.codeText, { color: c.text }]} selectable>
               {content.text.length > 0 ? content.text : '(empty file)'}
@@ -287,12 +479,14 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      {/* Scrim — tap to dismiss. */}
-      <TouchableWithoutFeedback onPress={onClose}>
-        <View style={[styles.scrim, { backgroundColor: c.scrim }]}>
-          <TouchableWithoutFeedback onPress={() => { /* keep taps inside the sheet */ }}>
-            <View style={[styles.sheet, { backgroundColor: c.elevated, maxHeight: '80%' }]}>
-              <View style={[styles.grabber, { backgroundColor: c.border }]} />
+      <View style={styles.scrim}>
+        {/* Dedicated dismiss layer BEHIND the sheet — tapping the exposed
+            chrome closes; the sheet itself is a plain sibling so nothing
+            wraps the scroll views in a touch responder. */}
+        <TouchableWithoutFeedback onPress={onClose} style={styles.scrimBackdrop}>
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: c.scrim }]} />
+        </TouchableWithoutFeedback>
+        <View style={[styles.sheet, { backgroundColor: c.elevated, paddingTop: insets.top + 6 }]}>
               <View style={styles.header}>
                 <View style={styles.headerText}>
                   <Text style={[styles.title, { color: c.text }]} numberOfLines={1}>
@@ -310,8 +504,10 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
                     tapLight();
                     onClose();
                   }}
-                  hitSlop={{ top: 8, left: 8, right: 8, bottom: 8 }}
+                  hitSlop={{ top: 14, left: 14, right: 14, bottom: 14 }}
                   activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close preview"
                 >
                   <Text style={[styles.closeGlyph, { color: c.textSecondary }]}>✕</Text>
                 </TouchableOpacity>
@@ -354,22 +550,23 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
               ) : null}
 
               <View style={styles.previewArea}>{body}</View>
-            </View>
-          </TouchableWithoutFeedback>
         </View>
-      </TouchableWithoutFeedback>
+      </View>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  scrim: { flex: 1, justifyContent: 'flex-end' },
+  scrim: { flex: 1 },
+  scrimBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   sheet: {
-    borderTopLeftRadius: theme.radius.sheet,
-    borderTopRightRadius: theme.radius.sheet,
-    paddingTop: theme.spacing.xs,
+    // Full-screen preview (was an 86% sheet): artifacts get the whole
+    // display — rendered HTML/code/markdown need the room. Definite height +
+    // flex:1 children is the Android-reliable scroll combo.
+    height: '100%',
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
     paddingBottom: theme.spacing.lg,
-    height: '80%',
   },
   grabber: {
     alignSelf: 'center',
@@ -389,9 +586,9 @@ const styles = StyleSheet.create({
   title: { ...theme.type.title, fontSize: theme.fontSize.lg },
   pathText: { ...theme.type.secondary, marginTop: 1 },
   closeButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -419,8 +616,27 @@ const styles = StyleSheet.create({
   },
   pillBadgeText: { fontSize: 9, fontWeight: '700', letterSpacing: 0.5 },
   pillName: { fontSize: theme.fontSize.sm, flexShrink: 1 },
-  previewArea: { flex: 1, paddingHorizontal: theme.spacing.md },
+  // minHeight 0: a ScrollView inside a flex parent without it can
+  // fail to scroll on Android (the markdown preview's symptom).
+  previewArea: { flex: 1, minHeight: 0, flexShrink: 1, paddingHorizontal: theme.spacing.md },
   previewScroll: { flex: 1 },
+  previewContent: { paddingBottom: 28 },
+  mdToggleRow: {
+    flexDirection: 'row',
+    gap: 6,
+    paddingBottom: 8,
+    marginBottom: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  mdToggle: {
+    borderRadius: theme.radius.pill,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+  },
+  mdToggleText: { fontSize: 12, fontWeight: '600' },
+  mdBody: {
+    paddingBottom: 12,
+  },
   codeBox: {
     borderRadius: theme.radius.sm,
     padding: theme.spacing.sm,
@@ -434,6 +650,10 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   image: { flex: 1 },
+  webview: { width: '100%' },
+  webviewInner: { flex: 1, backgroundColor: 'transparent' },
+  webLoading: { flex: 1, backgroundColor: 'transparent' },
+  webProgress: { position: 'absolute', top: 0, left: 0, right: 0, height: 2, zIndex: 5 },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: theme.spacing.sm },
   loadingText: { ...theme.type.secondary },
   errorText: { ...theme.type.secondary, textAlign: 'center', paddingHorizontal: theme.spacing.md },

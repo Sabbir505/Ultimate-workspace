@@ -17,6 +17,19 @@
 //   npm run release:latest-json -- --notes "..."      # inline changelog
 //   npm run release:latest-json -- --notes-file CHANGELOG.md   # from a file
 //
+// Flags (all optional; the defaults are the production channel):
+//   --config <path>   Tauri config to read `version` from. Default
+//                     src-tauri/tauri.conf.json. A partial override file (e.g.
+//                     src-tauri/tauri.staging.conf.json, which `tauri build
+//                     --config` merges over the base) is merged the same way here.
+//   --repo <owner/name>  Releases repo the asset URLs point at. Default
+//                     Sabbir505/relay-releases.
+//   --key <path>      Signing key. Default .tauri/relay-update.key.
+//   --tag <ref>       Release tag the assets are attached to. Default v<version>.
+//   --dry-run         Resolve config/repo/key/tag and print them without
+//                     signing or writing anything. Use this to confirm the
+//                     channel before committing to a full bundle build.
+//
 // Run AFTER `npm run tauri build` (no signing env vars needed).
 // See RELEASE.md for the full workflow.
 import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
@@ -26,11 +39,6 @@ import { execSync } from "node:child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
-const conf = JSON.parse(readFileSync(join(root, "src-tauri/tauri.conf.json"), "utf8"));
-const version = conf.version;
-const repo = "Sabbir505/Ultimate-workspace";
-const bundleDir = join(root, "src-tauri/target/release/bundle");
-const keyPath = join(root, ".tauri/relay-update.key");
 
 // --- parse args ---
 const args = process.argv.slice(2);
@@ -39,22 +47,53 @@ function argValue(name) {
   return i >= 0 ? args[i + 1] : null;
 }
 
+// Production channel defaults — a bare invocation must behave exactly as before.
+const BASE_CONFIG = "src-tauri/tauri.conf.json";
+const DEFAULT_REPO = "Sabbir505/relay-releases";
+const DEFAULT_KEY = ".tauri/relay-update.key";
+
+const baseConfPath = join(root, BASE_CONFIG);
+const confPath = join(root, argValue("--config") ?? BASE_CONFIG);
+
+// The staging config is a PARTIAL override that `tauri build --config` merges
+// over the base config, so mirror that merge here (top-level keys, override
+// wins). `version` then resolves from either file.
+const conf = { ...JSON.parse(readFileSync(baseConfPath, "utf8")) };
+if (confPath !== baseConfPath) {
+  if (!existsSync(confPath)) {
+    console.error(`No config at ${confPath}.`);
+    process.exit(1);
+  }
+  Object.assign(conf, JSON.parse(readFileSync(confPath, "utf8")));
+}
+const version = conf.version;
+
+// Releases live in a public releases-only repo so downloads keep working while
+// the source repo (Ultimate-workspace) stays private. Staging points at its OWN
+// repo so the two channels can't serve each other's builds.
+const repo = argValue("--repo") ?? DEFAULT_REPO;
+const tag = argValue("--tag") ?? `v${version}`;
+const keyPath = join(root, argValue("--key") ?? DEFAULT_KEY);
+const dryRun = args.includes("--dry-run");
+
+const bundleDir = join(root, "src-tauri/target/release/bundle");
+
 const PLATFORMS = {
   "windows-x86_64": {
     dir: "nsis",
     // Accept both the pre-rebrand `Conduit_` installer name and the current
     // `Relay_` one (productName in tauri.conf.json drives the NSIS filename).
     pattern: new RegExp(`^(?:Conduit|Relay)_${version.replace(/\./g, "\\.")}_x64-setup\\.exe$`),
-    fallbackPattern: /^(?:Conduit|Relay)_[\d.]+_x64-setup\.exe$/,
+    fallbackPattern: /^(?:Conduit|Relay)_[\d.]+(?:-[0-9A-Za-z.-]+)?_x64-setup\.exe$/,
     sign: true,
   },
 };
 
-if (!existsSync(bundleDir)) {
+if (!dryRun && !existsSync(bundleDir)) {
   console.error(`No bundle directory at ${bundleDir}. Run \`npm run tauri build\` first.`);
   process.exit(1);
 }
-if (!existsSync(keyPath)) {
+if (!dryRun && !existsSync(keyPath)) {
   console.error(`Missing signing key at ${keyPath}. See RELEASE.md.`);
   process.exit(1);
 }
@@ -133,37 +172,65 @@ for (const [key, spec] of Object.entries(PLATFORMS)) {
   const filePath = join(platformDir, fileName);
   let signature = "";
 
-  // Non-interactive sign with tauri signer.
-  const sigPath = `${filePath}.sig`;
-  console.log(`Signing ${fileName} …`);
-  try {
-    execSync(
-      `npx @tauri-apps/cli signer sign -f "${keyPath}" -p "" "${filePath}"`,
-      { stdio: "inherit", cwd: root },
-    );
-  } catch {
-    console.error(`Signing failed for ${fileName}. See error above.`);
-    process.exit(1);
+  if (dryRun) {
+    console.log(`(dry run) would sign ${fileName}`);
+  } else {
+    // Non-interactive sign with tauri signer.
+    const sigPath = `${filePath}.sig`;
+    console.log(`Signing ${fileName} …`);
+    try {
+      execSync(
+        `npx @tauri-apps/cli signer sign -f "${keyPath}" -p "" "${filePath}"`,
+        { stdio: "inherit", cwd: root },
+      );
+    } catch {
+      console.error(`Signing failed for ${fileName}. See error above.`);
+      process.exit(1);
+    }
+    if (!existsSync(sigPath)) {
+      console.error(`Expected signature at ${sigPath} but it wasn't created.`);
+      process.exit(1);
+    }
+    signature = readFileSync(sigPath, "utf8").trim();
+    console.log(`✓ Signed ${fileName}`);
   }
-  if (!existsSync(sigPath)) {
-    console.error(`Expected signature at ${sigPath} but it wasn't created.`);
-    process.exit(1);
-  }
-  signature = readFileSync(sigPath, "utf8").trim();
-  console.log(`✓ Signed ${fileName}`);
 
   platforms[key] = {
     signature,
-    url: `https://github.com/${repo}/releases/download/v${version}/${fileName}`,
+    url: `https://github.com/${repo}/releases/download/${tag}/${fileName}`,
   };
 }
 
 if (Object.keys(platforms).length === 0) {
+  if (dryRun) {
+    console.log("\n(dry run) resolved channel settings:");
+    console.log(`  config  : ${confPath}`);
+    console.log(`  version : ${version}`);
+    console.log(`  repo    : ${repo}`);
+    console.log(`  tag     : ${tag}`);
+    console.log(`  key     : ${keyPath}`);
+    console.log(`  expected: ${join(bundleDir, "nsis")}${"\\"}Relay_${version}_x64-setup.exe`);
+    console.log("\nNo artifacts present yet — build first, then re-run without --dry-run.");
+    process.exit(0);
+  }
   console.error(
     `\nNo platform artifacts found under ${bundleDir}.\n` +
       `Expected: nsis/ (run \`npm run tauri build\` first).`,
   );
   process.exit(1);
+}
+
+if (dryRun) {
+  console.log("\n(dry run) resolved channel settings:");
+  console.log(`  config  : ${confPath}`);
+  console.log(`  repo    : ${repo}`);
+  console.log(`  tag     : ${tag}`);
+  console.log(`  key     : ${keyPath}`);
+  for (const [key, p] of Object.entries(platforms)) {
+    console.log(`  ${key}: ${p.url}`);
+  }
+  console.log("\nNothing was signed or written. Re-run without --dry-run to sign.");
+  process.exit(0);
 }
 
 const latest = {
@@ -184,7 +251,7 @@ for (const [key, p] of Object.entries(platforms)) {
 }
 console.log("");
 console.log("Next steps (see RELEASE.md):");
-console.log(`  1. Create a GitHub Release tagged v${version} on`);
+console.log(`  1. Create a GitHub Release tagged ${tag} on`);
 console.log(`     https://github.com/${repo}/releases/new`);
 console.log(`  2. Attach these files:`);
 for (const [key, p] of Object.entries(platforms)) {
@@ -194,3 +261,9 @@ for (const [key, p] of Object.entries(platforms)) {
 console.log(`     - latest.json  (src-tauri/target/release/bundle/)`);
 console.log("  3. Paste your changelog into the release description.");
 console.log("  4. Publish. Updates roll out within 4 hours.");
+const assetPaths = Object.entries(platforms).map(
+  ([key, p]) => `src-tauri/target/release/bundle/${PLATFORMS[key].dir}/${p.url.split("/").pop()}`,
+);
+console.log("");
+console.log("  5. Or publish from the CLI:");
+console.log(`     gh release create ${tag} -R ${repo} ${assetPaths.join(" ")} src-tauri/target/release/bundle/latest.json`);

@@ -189,157 +189,153 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.2] — 2026-08-31
 
 ### Added
-- **Boot splash + onboarding modal** — Brand logo shown during app startup; first-run local-model onboarding modal ([7321d69](https://github.com/Conduit-official/Conduit/commit/7321d69))
-- **Parallel subagents with tools** — Subagents can now use tools in parallel; agent chips appear everywhere ([8476da2](https://github.com/Conduit-official/Conduit/commit/8476da2))
-- **CDP execution layer** — Phase 1 of the Chrome DevTools Protocol layer for the in-app browser; subagent rounds raised to 100 ([6f5e452](https://github.com/Conduit-official/Conduit/commit/6f5e452))
-- **Queued messages notch stack** — Steer, edit, delete, and drag-reorder pending messages before they're sent ([1c5bae6](https://github.com/Conduit-official/Conduit/commit/1c5bae6))
-- **Subagent pane at chat-view fidelity** — Ordered segments, streamed thinking, and DiffCards in the agent pane ([d541f3d](https://github.com/Conduit-official/Conduit/commit/d541f3d))
-- **Structured plan tracking** — Model-declared plans surface in chat with a Plan posture; harness-native modes ([19e63f2](https://github.com/Conduit-official/Conduit/commit/19e63f2))
-- **Split chat view** — Full-fidelity second ChatView with glass session menu and a draggable split divider; tool panel docks beside the focused half ([e63de9c](https://github.com/Conduit-official/Conduit/commit/e63de9c), [5aed56c](https://github.com/Conduit-official/Conduit/commit/5aed56c), [c0e7b21](https://github.com/Conduit-official/Conduit/commit/c0e7b21))
-- **Git file viewer with inline diffs** — Per-type file icons, click-to-expand inline diffs, Unstaged/Staged/All-branch/Last-turn filters, styled review cards with full markdown prose ([f4f9b21](https://github.com/Conduit-official/Conduit/commit/f4f9b21), [332ce72](https://github.com/Conduit-official/Conduit/commit/332ce72), [bcd7de1](https://github.com/Conduit-official/Conduit/commit/bcd7de1))
-- **GitHub pull requests — liquid glass scope dropdown** — Scope selector uses liquid glass; GitHub API routes through git's proxy config ([bc605d0](https://github.com/Conduit-official/Conduit/commit/bc605d0))
-- **Welcome screen refresh** — Time-aware greeting, icon cards, 500k context ceiling for cloud/harness meter ([2e85de8](https://github.com/Conduit-official/Conduit/commit/2e85de8))
-- **Relay branding in agent prompts** — Agent self-identifies as Relay across cloud, local, and harness system prompts ([0b6e4e3](https://github.com/Conduit-official/Conduit/commit/0b6e4e3))
-- **Full-fidelity document pipeline** — Browser-grade PDF via WebView2 + Paged.js, docx npm + PptxGenJS generation, pdf.js + docx-preview viewers; built-in `/docx`, `/pptx`, `/pdf` skills rewritten ([3c7b60e](https://github.com/Conduit-official/Conduit/commit/3c7b60e))
-- **Fold same-tool rows** — Compact edit rows, sidebar more-popovers; 1M context default ([449183d](https://github.com/Conduit-official/Conduit/commit/449183d))
+- **Boot splash + onboarding modal** — Brand logo shown during app startup; first-run local-model onboarding modal ([7321d69](https://github.com/Sabbir505/Ultimate-workspace/commit/7321d69))
+- **Parallel subagents with tools** — Subagents can now use tools in parallel; agent chips appear everywhere ([8476da2](https://github.com/Sabbir505/Ultimate-workspace/commit/8476da2))
+- **CDP execution layer** — Phase 1 of the Chrome DevTools Protocol layer for the in-app browser; subagent rounds raised to 100 ([6f5e452](https://github.com/Sabbir505/Ultimate-workspace/commit/6f5e452))
+- **Queued messages notch stack** — Steer, edit, delete, and drag-reorder pending messages before they're sent ([1c5bae6](https://github.com/Sabbir505/Ultimate-workspace/commit/1c5bae6))
+- **Subagent pane at chat-view fidelity** — Ordered segments, streamed thinking, and DiffCards in the agent pane ([d541f3d](https://github.com/Sabbir505/Ultimate-workspace/commit/d541f3d))
+- **Structured plan tracking** — Model-declared plans surface in chat with a Plan posture; harness-native modes ([19e63f2](https://github.com/Sabbir505/Ultimate-workspace/commit/19e63f2))
+- **Split chat view** — Full-fidelity second ChatView with glass session menu and a draggable split divider; tool panel docks beside the focused half ([e63de9c](https://github.com/Sabbir505/Ultimate-workspace/commit/e63de9c), [5aed56c](https://github.com/Sabbir505/Ultimate-workspace/commit/5aed56c), [c0e7b21](https://github.com/Sabbir505/Ultimate-workspace/commit/c0e7b21))
+- **Git file viewer with inline diffs** — Per-type file icons, click-to-expand inline diffs, Unstaged/Staged/All-branch/Last-turn filters, styled review cards with full markdown prose ([f4f9b21](https://github.com/Sabbir505/Ultimate-workspace/commit/f4f9b21), [332ce72](https://github.com/Sabbir505/Ultimate-workspace/commit/332ce72), [bcd7de1](https://github.com/Sabbir505/Ultimate-workspace/commit/bcd7de1))
+- **GitHub pull requests — liquid glass scope dropdown** — Scope selector uses liquid glass; GitHub API routes through git's proxy config ([bc605d0](https://github.com/Sabbir505/Ultimate-workspace/commit/bc605d0))
+- **Welcome screen refresh** — Time-aware greeting, icon cards, 500k context ceiling for cloud/harness meter ([2e85de8](https://github.com/Sabbir505/Ultimate-workspace/commit/2e85de8))
+- **Relay branding in agent prompts** — Agent self-identifies as Relay across cloud, local, and harness system prompts ([0b6e4e3](https://github.com/Sabbir505/Ultimate-workspace/commit/0b6e4e3))
+- **Full-fidelity document pipeline** — Browser-grade PDF via WebView2 + Paged.js, docx npm + PptxGenJS generation, pdf.js + docx-preview viewers; built-in `/docx`, `/pptx`, `/pdf` skills rewritten ([3c7b60e](https://github.com/Sabbir505/Ultimate-workspace/commit/3c7b60e))
+- **Fold same-tool rows** — Compact edit rows, sidebar more-popovers; 1M context default ([449183d](https://github.com/Sabbir505/Ultimate-workspace/commit/449183d))
+- **Conduit → Relay rebrand** — user-visible product name switched from "Conduit" to "Relay" (window title, `package.json` name, `tauri.conf.json` `productName`, `<title>`, sidebar/banner/HTML strings, frost fix for toolbar popovers) ([e9abc7c3](https://github.com/Sabbir505/Ultimate-workspace/commit/e9abc7c3))
+- **Recognizable app icons + branded installer** — new app icon set, branded installer artwork, standalone YouTube consent card ([03c2ab8a](https://github.com/Sabbir505/Ultimate-workspace/commit/03c2ab8a))
+- **Git Graph commit table** — drop the branch list, roomier rows, clip descriptions ([d834ad70](https://github.com/Sabbir505/Ultimate-workspace/commit/d834ad70), [3791b529](https://github.com/Sabbir505/Ultimate-workspace/commit/3791b529))
+- **Floating composer over transcript** — composer floats over the transcript; messages scroll behind the glass, edge reservations, transparent app logo ([bd69c970](https://github.com/Sabbir505/Ultimate-workspace/commit/bd69c970), [f772979b](https://github.com/Sabbir505/Ultimate-workspace/commit/f772979b), [2816f9da](https://github.com/Sabbir505/Ultimate-workspace/commit/2816f9da), [a6088241](https://github.com/Sabbir505/Ultimate-workspace/commit/a6088241))
+- **Liquid glass across the app** — composer glass extended to sidebar, modals, QR frame ([86588979](https://github.com/Sabbir505/Ultimate-workspace/commit/86588979), [09449738](https://github.com/Sabbir505/Ultimate-workspace/commit/09449738), [3ef47dca](https://github.com/Sabbir505/Ultimate-workspace/commit/3ef47dca), [20b3c207](https://github.com/Sabbir505/Ultimate-workspace/commit/20b3c207))
+- **Git sidebar enhancements** — collapsible sections, liquid glass, chat-bound data ([11837617](https://github.com/Sabbir505/Ultimate-workspace/commit/11837617))
+- **Right tool panel as a slide-out** — tool panel slides open/closed like the sidebar ([a6a2ccdb](https://github.com/Sabbir505/Ultimate-workspace/commit/a6a2ccdb))
+- **Mode-colored permission chip + YouTube connector + toolbar as title bar** — permission chip tinted by mode, standalone YouTube card in the connectors panel, slimmer title bar with nav arrows only in the sidebar ([f2c5af1](https://github.com/Sabbir505/Ultimate-workspace/commit/f2c5af1), [85bcd924](https://github.com/Sabbir505/Ultimate-workspace/commit/85bcd924))
+- **GitHub-notch popover** — glass on the wrapper, left-anchored under the chip ([573582b4](https://github.com/Sabbir505/Ultimate-workspace/commit/573582b4))
+- **Mermaid stateLabelColor fix** — state/flow node labels visible ([55740144](https://github.com/Sabbir505/Ultimate-workspace/commit/55740144))
+- **Composer chip with provider icon** — chip shows the provider icon, not the provider name ([1ac84047](https://github.com/Sabbir505/Ultimate-workspace/commit/1ac84047))
+- **Agent/Model picker redesign** — combined agent/model selection with icon rail and per-model local runtime settings ([cb7d782a](https://github.com/Sabbir505/Ultimate-workspace/commit/cb7d782a))
+- **Conversational artifacts** — artifacts support conversational context and can be referenced in chat ([045e9a9d](https://github.com/Sabbir505/Ultimate-workspace/commit/045e9a9d))
+- **MCP server gallery** — built-in chat can launch stdio MCP servers with one click ([b2c3d8ab](https://github.com/Sabbir505/Ultimate-workspace/commit/b2c3d8ab))
+- **AI diff review quick action** — per-file and whole-tree AI diff review cards in the Git tools sidebar ([52e76ddd](https://github.com/Sabbir505/Ultimate-workspace/commit/52e76ddd))
+- **Per-turn RAG auto-retrieval** — chat automatically retrieves relevant documents per turn; per-chat doc attachments and MCP `search_docs` ([a0635298](https://github.com/Sabbir505/Ultimate-workspace/commit/a0635298))
+- **Activity strip** — §3.1.6 activity strip in GitToolsSidebar ([ed35499b](https://github.com/Sabbir505/Ultimate-workspace/commit/ed35499b))
+- **Automation hardening** — dual permission policies and settings improvements ([887d3364](https://github.com/Sabbir505/Ultimate-workspace/commit/887d3364))
+- **Mobile remote access** — E2E relay encryption (HKDF+XChaCha20-Poly1305) and Tailscale auto-serve with QR pairing ([9aed4a84](https://github.com/Sabbir505/Ultimate-workspace/commit/9aed4a84), [03361f16](https://github.com/Sabbir505/Ultimate-workspace/commit/03361f16), [aa7b3e4b](https://github.com/Sabbir505/Ultimate-workspace/commit/aa7b3e4b))
+- **Browser devtools** — new `browser_open_devtools` command to open native devtools for a browser tab
+- **Conduit bundle wiring** — interactive PTY panes integrate the Conduit bundle ([6aae1759](https://github.com/Sabbir505/Ultimate-workspace/commit/6aae1759))
+- **Chat UI** — replaced per-message Save As / Find & Update chips with natural language controls ([4b38ded0](https://github.com/Sabbir505/Ultimate-workspace/commit/4b38ded0))
 
 ### Fixed
-- **Audit sweep** — Relay auth fail-open, browser pane results, stream watchdogs, lifecycle wedges, data integrity ([7a5d6f3](https://github.com/Conduit-official/Conduit/commit/7a5d6f3))
-- **Agent browser calls** — Reuse the existing Browser chip instead of stacking a duplicate; settings/skills/cost keep the chat mounted ([2495c8a](https://github.com/Conduit-official/Conduit/commit/2495c8a), [960bf75](https://github.com/Conduit-official/Conduit/commit/960bf75))
-- **WebView2 controller ownership** — Own WebView2 controller via webview2-com; touch marshals through main thread; controllers created invisible then shown ([18f33f0](https://github.com/Conduit-official/Conduit/commit/18f33f0), [cfa8eb8](https://github.com/Conduit-official/Conduit/commit/cfa8eb8), [d4ccfdb](https://github.com/Conduit-official/Conduit/commit/d4ccfdb), [9d3158e](https://github.com/Conduit-official/Conduit/commit/9d3158e))
-- **Browser pane wedge** — Fixed nested message pump; per-model context windows; real harness model in meter/cost ([8ee0742](https://github.com/Conduit-official/Conduit/commit/8ee0742))
-- **Harness subagent visibility** — Recognize Claude Code's Agent tool (renamed from Task); permission modes actually apply; harness questions get answerable cards ([08aade6](https://github.com/Conduit-official/Conduit/commit/08aade6), [8178ea6](https://github.com/Conduit-official/Conduit/commit/8178ea6))
-- **Agent cursor/typing visuals** — Now appear on every browser page ([d509d11](https://github.com/Conduit-official/Conduit/commit/d509d11))
-- **Inline subagent chips** — Render correctly during parallel fan-out; click opens one agent pane ([91da3e2](https://github.com/Conduit-official/Conduit/commit/91da3e2))
-- **Queue notch polish** — One container, compact inline edit, pointer-based reorder ([2d81808](https://github.com/Conduit-official/Conduit/commit/2d81808))
-- **Subagent research stack** — Subagents get the full read-side research stack; proxy-proof fetch guards ([d342804](https://github.com/Conduit-official/Conduit/commit/d342804))
-- **Stale turn timer** — Background-chat spinners, harness mode reset, camelCase tool args ([e109475](https://github.com/Conduit-official/Conduit/commit/e109475))
-- **Web app preview** — Models can now open/preview built web apps in the in-app browser ([75dc0a6](https://github.com/Conduit-official/Conduit/commit/75dc0a6))
-- **TypeScript fallbacks** — Chat-store fallbacks clear 48 `TS18046 unknown` errors ([c6f4e11](https://github.com/Conduit-official/Conduit/commit/c6f4e11))
-- **Metrics HUD accuracy** — Provider-aware cache rate, decode tok/s, request-anchored TTFT, marker-free token counts, live IN/CACHE display ([9df118b](https://github.com/Conduit-official/Conduit/commit/9df118b))
-- **Artifact gallery cards** — Uniform heights; agent-gated pane auto-open ([76d023b](https://github.com/Conduit-official/Conduit/commit/76d023b))
-- **Split/tool panel** — Global tool panel (no docking); git rail only in the focused half; ✕-only split close ([95a3a74](https://github.com/Conduit-official/Conduit/commit/95a3a74))
-- **Folded/edit row buttons** — Kill global button skin; rim shadow + hover background ([52e50cf](https://github.com/Conduit-official/Conduit/commit/52e50cf))
-- **Git file spinners** — Spinner on scope switch; Send PR/Review-all scoped to focused chat with real feedback ([487ec66](https://github.com/Conduit-official/Conduit/commit/487ec66), [eb483ff](https://github.com/Conduit-official/Conduit/commit/eb483ff))
-- **Docx preview overflow** — Scale pages to fit pane width (fit-to-width) ([0e951c4](https://github.com/Conduit-official/Conduit/commit/0e951c4))
+- **Audit sweep** — Relay auth fail-open, browser pane results, stream watchdogs, lifecycle wedges, data integrity ([7a5d6f3](https://github.com/Sabbir505/Ultimate-workspace/commit/7a5d6f3))
+- **Agent browser calls** — Reuse the existing Browser chip instead of stacking a duplicate; settings/skills/cost keep the chat mounted ([2495c8a](https://github.com/Sabbir505/Ultimate-workspace/commit/2495c8a), [960bf75](https://github.com/Sabbir505/Ultimate-workspace/commit/960bf75))
+- **WebView2 controller ownership** — Own WebView2 controller via webview2-com; touch marshals through main thread; controllers created invisible then shown ([18f33f0](https://github.com/Sabbir505/Ultimate-workspace/commit/18f33f0), [cfa8eb8](https://github.com/Sabbir505/Ultimate-workspace/commit/cfa8eb8), [d4ccfdb](https://github.com/Sabbir505/Ultimate-workspace/commit/d4ccfdb), [9d3158e](https://github.com/Sabbir505/Ultimate-workspace/commit/9d3158e))
+- **Browser pane wedge** — Fixed nested message pump; per-model context windows; real harness model in meter/cost ([8ee0742](https://github.com/Sabbir505/Ultimate-workspace/commit/8ee0742))
+- **Harness subagent visibility** — Recognize Claude Code's Agent tool (renamed from Task); permission modes actually apply; harness questions get answerable cards ([08aade6](https://github.com/Sabbir505/Ultimate-workspace/commit/08aade6), [8178ea6](https://github.com/Sabbir505/Ultimate-workspace/commit/8178ea6))
+- **Agent cursor/typing visuals** — Now appear on every browser page ([d509d11](https://github.com/Sabbir505/Ultimate-workspace/commit/d509d11))
+- **Inline subagent chips** — Render correctly during parallel fan-out; click opens one agent pane ([91da3e2](https://github.com/Sabbir505/Ultimate-workspace/commit/91da3e2))
+- **Queue notch polish** — One container, compact inline edit, pointer-based reorder ([2d81808](https://github.com/Sabbir505/Ultimate-workspace/commit/2d81808))
+- **Subagent research stack** — Subagents get the full read-side research stack; proxy-proof fetch guards ([d342804](https://github.com/Sabbir505/Ultimate-workspace/commit/d342804))
+- **Stale turn timer** — Background-chat spinners, harness mode reset, camelCase tool args ([e109475](https://github.com/Sabbir505/Ultimate-workspace/commit/e109475))
+- **Web app preview** — Models can now open/preview built web apps in the in-app browser ([75dc0a6](https://github.com/Sabbir505/Ultimate-workspace/commit/75dc0a6))
+- **TypeScript fallbacks** — Chat-store fallbacks clear 48 `TS18046 unknown` errors ([c6f4e11](https://github.com/Sabbir505/Ultimate-workspace/commit/c6f4e11))
+- **Metrics HUD accuracy** — Provider-aware cache rate, decode tok/s, request-anchored TTFT, marker-free token counts, live IN/CACHE display ([9df118b](https://github.com/Sabbir505/Ultimate-workspace/commit/9df118b))
+- **Artifact gallery cards** — Uniform heights; agent-gated pane auto-open ([76d023b](https://github.com/Sabbir505/Ultimate-workspace/commit/76d023b))
+- **Split/tool panel** — Global tool panel (no docking); git rail only in the focused half; ✕-only split close ([95a3a74](https://github.com/Sabbir505/Ultimate-workspace/commit/95a3a74))
+- **Folded/edit row buttons** — Kill global button skin; rim shadow + hover background ([52e50cf](https://github.com/Sabbir505/Ultimate-workspace/commit/52e50cf))
+- **Git file spinners** — Spinner on scope switch; Send PR/Review-all scoped to focused chat with real feedback ([487ec66](https://github.com/Sabbir505/Ultimate-workspace/commit/487ec66), [eb483ff](https://github.com/Sabbir505/Ultimate-workspace/commit/eb483ff))
+- **Docx preview overflow** — Scale pages to fit pane width (fit-to-width) ([0e951c4](https://github.com/Sabbir505/Ultimate-workspace/commit/0e951c4))
+- **Full project audit** — 26 bug and edge-case fixes surfaced from a full codebase audit ([c79a9e7a](https://github.com/Sabbir505/Ultimate-workspace/commit/c79a9e7a))
+- **`/create` everywhere** — artifact creation now works across all providers, harness CLIs, and local models ([47ba0e86](https://github.com/Sabbir505/Ultimate-workspace/commit/47ba0e86))
+- **Remote access** — relay binds to the tailnet IP so the phone connects cross-network without HTTPS serve ([760bdffc](https://github.com/Sabbir505/Ultimate-workspace/commit/760bdffc)); centered portal QR modal ([57ca347b](https://github.com/Sabbir505/Ultimate-workspace/commit/57ca347b)); activation check for remote portal ([d9794a82](https://github.com/Sabbir505/Ultimate-workspace/commit/d9794a82))
+- **Family connect** — YouTube connects standalone and stays out of the combined Google consent (Google-side 400) ([254fa25](https://github.com/Sabbir505/Ultimate-workspace/commit/254fa25), [59e2ea7d](https://github.com/Sabbir505/Ultimate-workspace/commit/59e2ea7d), [d73a6d64](https://github.com/Sabbir505/Ultimate-workspace/commit/d73a6d64))
+- **Automation view** — responsive when the tool panel opens ([246ca988](https://github.com/Sabbir505/Ultimate-workspace/commit/246ca988), [d8c79312](https://github.com/Sabbir505/Ultimate-workspace/commit/d8c79312))
 
 ### Changed
-- **Welcome screen** — Time-aware greeting with icon cards; 500k context ceiling for cloud/harness meter ([2e85de8](https://github.com/Conduit-official/Conduit/commit/2e85de8))
-- **GitHub pull requests** — GitHub API routes through git's proxy config ([bc605d0](https://github.com/Conduit-official/Conduit/commit/bc605d0))
-- **Chat message text** — Dimmed with new `--chat-text` token, scoped to bubbles ([fad62ea](https://github.com/Conduit-official/Conduit/commit/fad62ea))
-- **Git file view** — Compact diff gutters, liquid-glass filter menu, loading spinners ([eb483ff](https://github.com/Conduit-official/Conduit/commit/eb483ff))
-- **Session menu** — Uses the composer's liquid glass (true-transparent body, blur24/sat160, 16px) ([b4ea2cc](https://github.com/Conduit-official/Conduit/commit/b4ea2cc))
-- **Browser pane** — Edge-to-edge layout, no glass-card inset; page owns the panel like docs/html ([e255dd3](https://github.com/Conduit-official/Conduit/commit/e255dd3))
-- **UI animations** — Smooth expand/collapse animations matching the tool-panel slide ([3c1aa27](https://github.com/Conduit-official/Conduit/commit/3c1aa27))
-
----
-
-## [0.4.1] — 2026-08-17
-- **Full-fidelity document pipeline (doc/ppt/pdf)** — New generation + preview engines across every document format:
-  - **PDF generation via a real browser engine** — `generate_document` for pdf now takes `language: "html"` (default): the model authors styled HTML, which renders in a hidden WebView2 window with the Paged.js polyfill (real `@page` margin boxes, page numbers, running headers) and prints with `ICoreWebView2_7::PrintToPdf` — full CSS/SVG/Unicode/CJK support, replacing the hand-rolled Latin-1-only PDF writer
-  - **DOCX generation via the `docx` npm library** (default `language: "javascript"`) — the model's program runs in a sandboxed iframe (`DocCodeRunner`) with the library preloaded, delivering real editable OOXML (headings, tables, numbering, styles) with no Python dependency; Python/`conduit_docgen` remains as fallback
-  - **PPTX generation via PptxGenJS** (default `language: "javascript"`) — 16:9 layouts, native charts, slide masters, with the documented gotchas (hex colors, explicit layout) encoded in the prompts/skills
-  - **PDF.js viewer** — in-app PDF pane rebuilt on pdf.js (page nav, zoom, text search, text selection), identical on WebView2/WKWebView/WebKitGTK, replacing the native `<embed>` whose behavior varied with the Evergreen runtime (and doesn't exist on Linux)
-  - **docx-preview viewer** — DOCX previews render with real document styles, headers/footers, numbering and images via docx-preview, falling back to the backend HTML converter on parse failure; new "PDF view" toggle converts the original file through LibreOffice for true pagination (`office_accurate_pdf`)
-  - Built-in `/docx`, `/pptx`, `/pdf` skills rewritten for the new engines
-- **Relay rebrand** — User-visible product name switched from "Conduit" to "Relay" (window title, `package.json` name, `tauri.conf.json` `productName`, `<title>`, sidebar/banner/HTML strings, frost fix for toolbar popovers) ([e9abc7c3](https://github.com/Conduit-official/Conduit/commit/e9abc7c3))
-- **Recognizable app icons + branded installer** — New app icon set, branded installer artwork, standalone YouTube consent card ([03c2ab8a](https://github.com/Conduit-official/Conduit/commit/03c2ab8a))
-- **Git Graph commit table** — Drop the branch list, roomier rows, clip descriptions ([d834ad70](https://github.com/Conduit-official/Conduit/commit/d834ad70), [3791b529](https://github.com/Conduit-official/Conduit/commit/3791b529))
-- **Floating composer over transcript** — Composer floats over the transcript; messages scroll behind the glass, edge reservations, transparent app logo ([bd69c970](https://github.com/Conduit-official/Conduit/commit/bd69c970), [f772979b](https://github.com/Conduit-official/Conduit/commit/f772979b), [2816f9da](https://github.com/Conduit-official/Conduit/commit/2816f9da), [a6088241](https://github.com/Conduit-official/Conduit/commit/a6088241))
-- **Liquid glass across the app** — Composer glass extended to sidebar, modals, QR frame ([86588979](https://github.com/Conduit-official/Conduit/commit/86588979), [09449738](https://github.com/Conduit-official/Conduit/commit/09449738), [3ef47dca](https://github.com/Conduit-official/Conduit/commit/3ef47dca), [20b3c207](https://github.com/Conduit-official/Conduit/commit/20b3c207))
-- **Git sidebar enhancements** — Collapsible sections, liquid glass, chat-bound data ([11837617](https://github.com/Conduit-official/Conduit/commit/11837617))
-- **Right tool panel as a slide-out** — Tool panel slides open/closed like the sidebar ([a6a2ccdb](https://github.com/Conduit-official/Conduit/commit/a6a2ccdb))
-- **Mode-colored permission chip** — Permission chip tinted by current mode ([f2c5af11](https://github.com/Conduit-official/Conduit/commit/f2c5af11))
-- **YouTube connector** — Standalone YouTube card in the connectors panel ([f2c5af11](https://github.com/Conduit-official/Conduit/commit/f2c5af11))
-- **Toolbar as title bar** — Slimmer title bar; Conduit + nav arrows live only in the sidebar ([85bcd924](https://github.com/Conduit-official/Conduit/commit/85bcd924))
-- **GitHub-notch popover** — Glass on the wrapper, left-anchored under the chip ([573582b4](https://github.com/Conduit-official/Conduit/commit/573582b4))
-- **Mermaid stateLabelColor fix** — state/flow node labels visible ([55740144](https://github.com/Conduit-official/Conduit/commit/55740144))
-- **Composer chip with provider icon** — Chip shows the provider icon, not the provider name ([1ac84047](https://github.com/Conduit-official/Conduit/commit/1ac84047))
-- **Agent/Model picker redesign** — Combined agent/model selection with icon rail and per-model local runtime settings ([cb7d782a](https://github.com/Conduit-official/Conduit/commit/cb7d782a))
-- **Conversational artifacts** — Artifacts now support conversational context and can be referenced in chat ([045e9a9d](https://github.com/Conduit-official/Conduit/commit/045e9a9d))
-- **MCP server gallery** — Built-in chat can now launch stdio MCP servers with one click ([b2c3d8ab](https://github.com/Conduit-official/Conduit/commit/b2c3d8ab))
-- **AI diff review quick action** — Per-file and whole-tree AI diff review cards in the Git tools sidebar ([52e76ddd](https://github.com/Conduit-official/Conduit/commit/52e76ddd))
-- **Per-turn RAG auto-retrieval** — Chat automatically retrieves relevant documents per turn; support for per-chat doc attachments and MCP `search_docs` ([a0635298](https://github.com/Conduit-official/Conduit/commit/a0635298))
-- **Activity strip** — §3.1.6 activity strip in GitToolsSidebar ([ed35499b](https://github.com/Conduit-official/Conduit/commit/ed35499b))
-- **Automation hardening** — Dual permission policies and settings improvements ([887d3364](https://github.com/Conduit-official/Conduit/commit/887d3364))
-- **Mobile remote access** — E2E relay encryption (HKDF+XChaCha20-Poly1305) and Tailscale auto-serve with QR pairing ([9aed4a84](https://github.com/Conduit-official/Conduit/commit/9aed4a84), [03361f16](https://github.com/Conduit-official/Conduit/commit/03361f16), [aa7b3e4b](https://github.com/Conduit-official/Conduit/commit/aa7b3e4b))
-- **Browser devtools** — New `browser_open_devtools` command to open native devtools for a browser tab
-- **Conduit bundle wiring** — Interactive PTY panes now integrate the Conduit bundle ([6aae1759](https://github.com/Conduit-official/Conduit/commit/6aae1759))
-
-### Changed
-- **Chat UI** — Replaced per-message Save As / Find & Update chips with natural language controls ([4b38ded0](https://github.com/Conduit-official/Conduit/commit/4b38ded0))
-- **Automation view** — Made responsive when tool panel opens ([246ca988](https://github.com/Conduit-official/Conduit/commit/246ca988), [d8c79312](https://github.com/Conduit-official/Conduit/commit/d8c79312))
-- **Family connect flow** — YouTube connects standalone; slimmer toolbar chips ([254fa255](https://github.com/Conduit-official/Conduit/commit/254fa255))
-
-### Fixed
-- **Artifact creation** — `/create` now works across all providers, harness CLIs, and local models ([47ba0e86](https://github.com/Conduit-official/Conduit/commit/47ba0e86))
-- **Permission policy** — Full Auto mode no longer asks for every shell command or in-roots delete ([ea4e0a96](https://github.com/Conduit-official/Conduit/commit/ea4e0a96))
-- **Automation view responsiveness** — Fixed tool panel open/close behavior ([d8c79312](https://github.com/Conduit-official/Conduit/commit/d8c79312), [246ca988](https://github.com/Conduit-official/Conduit/commit/246ca988))
-- **Bug audit fixes** — 26 bug and edge-case fixes from full-project audit ([c79a9e7a](https://github.com/Conduit-official/Conduit/commit/c79a9e7a))
-- **Remote access binding** — Fixed relay binding to tailnet IP so phone can connect cross-network without HTTPS serve ([760bdffc](https://github.com/Conduit-official/Conduit/commit/760bdffc))
-- **Remote portal QR modal** — Centered the sidebar pairing QR modal on screen ([57ca347b](https://github.com/Conduit-official/Conduit/commit/57ca347b))
-- **Async serve-enable** — Added activation check for remote portal ([d9794a82](https://github.com/Conduit-official/Conduit/commit/d9794a82))
-- **Family connect 400** — YouTube connects standalone; keep YouTube out of the combined Google consent ([59e2ea7d](https://github.com/Conduit-official/Conduit/commit/59e2ea7d), [d73a6d64](https://github.com/Conduit-official/Conduit/commit/d73a6d64))
+- **Welcome screen** — Time-aware greeting with icon cards; 500k context ceiling for cloud/harness meter ([2e85de8](https://github.com/Sabbir505/Ultimate-workspace/commit/2e85de8))
+- **GitHub pull requests** — GitHub API routes through git's proxy config ([bc605d0](https://github.com/Sabbir505/Ultimate-workspace/commit/bc605d0))
+- **Chat message text** — Dimmed with new `--chat-text` token, scoped to bubbles ([fad62ea](https://github.com/Sabbir505/Ultimate-workspace/commit/fad62ea))
+- **Git file view** — Compact diff gutters, liquid-glass filter menu, loading spinners ([eb483ff](https://github.com/Sabbir505/Ultimate-workspace/commit/eb483ff))
+- **Session menu** — Uses the composer's liquid glass (true-transparent body, blur24/sat160, 16px) ([b4ea2cc](https://github.com/Sabbir505/Ultimate-workspace/commit/b4ea2cc))
+- **Browser pane** — Edge-to-edge layout, no glass-card inset; page owns the panel like docs/html ([e255dd3](https://github.com/Sabbir505/Ultimate-workspace/commit/e255dd3))
+- **UI animations** — Smooth expand/collapse animations matching the tool-panel slide ([3c1aa27](https://github.com/Sabbir505/Ultimate-workspace/commit/3c1aa27))
 
 ### Documentation & Maintenance
-- **2026-08-27 doc pass** — `PROJECT_OVERVIEW.md`, `BUG_AUDIT.md`, `PERFORMANCE_AUDIT.md`, `docs/ai-context/AI_CONTEXT.md`, and `README.md` (new) rewritten to match the current implementation. Realized metrics: 235 IPC commands, 21 tables, 68 vitest files / 460 tests passing, 539 cargo-lib tests + 1 failed, 34 `tsc --noEmit` errors, entry chunk 458.96 KB / 141.47 KB gzip. See `BUG_AUDIT.md` for the two open Sev M items.
-- **Earlier (2026-08-23) doc pass** — Updated `PROJECT_OVERVIEW.md` with current architecture and metrics — **superseded by the 2026-08-27 pass above** (the 2026-08-23 numbers no longer match the code).
+- **2026-08-27 doc pass** — `PROJECT_OVERVIEW.md`, `BUG_AUDIT.md`, `PERFORMANCE_AUDIT.md`, `docs/ai-context/AI_CONTEXT.md`, and `README.md` (new) rewritten to match the current implementation. Realized metrics: 235 IPC commands, 21 tables, 68 vitest files / 460 tests passing, 539 cargo-lib tests + 1 failed, 34 `tsc --noEmit` errors, entry chunk 458.96 KB / 141.47 KB gzip.
+- **Earlier (2026-08-23) doc pass** — `PROJECT_OVERVIEW.md` architecture/metrics refresh (superseded by the 2026-08-27 pass above).
 
 ---
 
-## [0.4.1] — 2026-08-17
+## [0.4.1] — 2026-08-11
+
+> Dates and contents of this and earlier sections were reconstructed from the
+> git tag timeline (the original entries had drifted from it).
 
 ### Added
-- **Full project audit** — 26 bug and edge-case fixes surfaced from a full codebase audit ([c79a9e7a](https://github.com/Conduit-official/Conduit/commit/c79a9e7a))
-
-### Fixed
-- **Bug audit issues** — Resolved issues across browser event paths, stream buffering, usage sync, and session id collisions
-
----
-
-## [0.4.0] — 2026-08-14
-
-### Added
-- **Mobile companion app** — React Native/Expo app with E2E encrypted relay and QR pairing ([aa7b3e4b](https://github.com/Conduit-official/Conduit/commit/aa7b3e4b), [9aed4a84](https://github.com/Conduit-official/Conduit/commit/9aed4a84))
-- **Remote access** — Tailscale auto-serve and portal QR modal ([03361f16](https://github.com/Conduit-official/Conduit/commit/03361f16), [57ca347b](https://github.com/Conduit-official/Conduit/commit/57ca347b), [d9794a82](https://github.com/Conduit-official/Conduit/commit/d9794a82))
-- **RAG integration** — Per-turn auto-retrieval and per-chat document attachment ([a0635298](https://github.com/Conduit-workspace/Conduit/commit/a0635298))
-- **AI diff review** — Quick action for per-file and whole-tree AI diff review cards ([52e76ddd](https://github.com/Conduit-official/Conduit/commit/52e76ddd))
-- **Activity strip** — §3.1.6 activity strip in GitToolsSidebar ([ed35499b](https://github.com/Conduit-official/Conduit/commit/ed35499b))
+- **Unified interface** — single-mode layout with nested project chats ([d39d5a2](https://github.com/Sabbir505/Ultimate-workspace/commit/d39d5a2))
+- **Plan detection & preview** — composer card + Canvas markdown + GitSidebar plans ([b3b17a7](https://github.com/Sabbir505/Ultimate-workspace/commit/b3b17a7))
+- **Model market redesign** — greeting prompt, diagram scaling ([456fdb8](https://github.com/Sabbir505/Ultimate-workspace/commit/456fdb8))
+- **Automations redesign** — dynamic model dropdown, peek-to-diff fix, git sidebar collapsed by default ([c46b7c8](https://github.com/Sabbir505/Ultimate-workspace/commit/c46b7c8)); automation API/local support and cost label cleanup ([5a26182](https://github.com/Sabbir505/Ultimate-workspace/commit/5a26182))
+- **Grouped settings navigation** — sections + icons, roomier layout ([503eb68](https://github.com/Sabbir505/Ultimate-workspace/commit/503eb68))
 
 ### Changed
-- **Chat streaming** — Improved token batching and UI flushing
+- **Streaming performance** — `useStreamingText` hook with rAF batching ([9bba1fe](https://github.com/Sabbir505/Ultimate-workspace/commit/9bba1fe)); chat tokens and PTY output routed via `Channel`s instead of JSON events ([6edd82a](https://github.com/Sabbir505/Ultimate-workspace/commit/6edd82a), [62c856c](https://github.com/Sabbir505/Ultimate-workspace/commit/62c856c))
 
 ### Fixed
-- **Automation view** — Made responsive when tool panel opens ([246ca988](https://github.com/Conduit-official/Conduit/commit/246ca988))
+- **Bundled Python + LibreOffice resources** restored to the CI build, staged as explicit steps with the cargo cache fixed ([fa44225](https://github.com/Sabbir505/Ultimate-workspace/commit/fa44225), [11cedfb](https://github.com/Sabbir505/Ultimate-workspace/commit/11cedfb), [92c3f94](https://github.com/Sabbir505/Ultimate-workspace/commit/92c3f94), [e2a81c6](https://github.com/Sabbir505/Ultimate-workspace/commit/e2a81c6))
+- Cargo-check rot cleared ([2c78151](https://github.com/Sabbir505/Ultimate-workspace/commit/2c78151)); soffice version probe timeout; first-run wizard skipped in CI ([c346b87](https://github.com/Sabbir505/Ultimate-workspace/commit/c346b87))
+- `CHANGELOG.md` added as the update banner's release-notes source ([e540d70](https://github.com/Sabbir505/Ultimate-workspace/commit/e540d70))
 
 ---
 
-## [0.3.x] — 2026-07 (series)
+## [0.4.0] — 2026-08-03
 
 ### Added
-- **Permission policies** — Dual policy modes (Full Auto vs Ask) and settings improvements ([887d3364](https://github.com/Conduit-official/Conduit/commit/887d3364))
-- **MCP gallery** — Built-in chat MCP server gallery with one-click install ([b2c3d8ab](https://github.com/Conduit-official/Conduit/commit/b2c3d8ab))
+- **Chat from your phone** — session-scoped mobile chat over the relay WebSocket: protocol types, history pagination, SessionChat screen with message bubbles, composer, approval cards and artifact chips ([f4ff096](https://github.com/Sabbir505/Ultimate-workspace/commit/f4ff096), [a807199](https://github.com/Sabbir505/Ultimate-workspace/commit/a807199), [40cc7fa](https://github.com/Sabbir505/Ultimate-workspace/commit/40cc7fa), [8a36444](https://github.com/Sabbir505/Ultimate-workspace/commit/8a36444), [4a8798d](https://github.com/Sabbir505/Ultimate-workspace/commit/4a8798d), [7181280](https://github.com/Sabbir505/Ultimate-workspace/commit/7181280))
+- **Windows CI release pipeline** — tag-push builds with staged sidecars + bundled resources, a `tauri signer` release job and `latest.json` ([1d5bffd](https://github.com/Sabbir505/Ultimate-workspace/commit/1d5bffd), [87f7dcb](https://github.com/Sabbir505/Ultimate-workspace/commit/87f7dcb), [147881a](https://github.com/Sabbir505/Ultimate-workspace/commit/147881a), [859a1d6](https://github.com/Sabbir505/Ultimate-workspace/commit/859a1d6))
 
 ### Fixed
-- **Shell permission prompts** — Full Auto no longer asks for every shell command ([ea4e0a96](https://github.com/Conduit-official/Conduit/commit/ea4e0a96))
+- llama-server staging on Windows (flat zip layout, launcher name collision) ([fab8f17](https://github.com/Sabbir505/Ultimate-workspace/commit/fab8f17), [3a01d1e](https://github.com/Sabbir505/Ultimate-workspace/commit/3a01d1e)); bundled Python invoked via `-m pip` ([c350c03](https://github.com/Sabbir505/Ultimate-workspace/commit/c350c03)); linux-only resource globs dropped from the bundle ([0ff83fd](https://github.com/Sabbir505/Ultimate-workspace/commit/0ff83fd), [3bef27b](https://github.com/Sabbir505/Ultimate-workspace/commit/3bef27b))
 
 ---
 
-## [0.2.x] — 2026-06 (series)
+## [0.3.2] — 2026-07-29
+
+### Fixed
+- TypeScript build errors (error access, MermaidDiagram import) ([7d3d938](https://github.com/Sabbir505/Ultimate-workspace/commit/7d3d938))
+
+---
+
+## [0.3.1] — 2026-07-28
+
+### Fixed
+- Updater embedded pubkey corrected to match the signing keypair ([d403ec4](https://github.com/Sabbir505/Ultimate-workspace/commit/d403ec4))
+
+---
+
+## [0.3.0] — 2026-07-27
 
 ### Added
-- **Artifact conversational support** — Artifacts now carry conversational context ([045e9a9d](https://github.com/Conduit-official/Conduit/commit/045e9a9d))
-- **Conduit bundle integration** — Interactive PTY panes wire the Conduit bundle ([6aae1759](https://github.com/Conduit-official/Conduit/commit/6aae1759))
-
-### Changed
-- **Chat UI** — Replaced per-message Save As / Find & Update chips with natural language ([4b38ded0](https://github.com/Conduit-official/Conduit/commit/4b38ded0))
-
-### Fixed
-- **Artifact creation** — `/create` now works across all providers and local models ([47ba0e86](https://github.com/Conduit-official/Conduit/commit/47ba0e86))
+- `AI_CONTEXT.md` + `CONTRACT.md` documentation brought in line with the implementation ([b2ae6c1](https://github.com/Sabbir505/Ultimate-workspace/commit/b2ae6c1))
 
 ---
 
-## [0.1.x] — 2026-05 (series)
+## [0.2.0] — 2026-07-23
+
+### Added
+- **Artifact system** — generated files persist with 30-day retention ([ecda53e](https://github.com/Sabbir505/Ultimate-workspace/commit/ecda53e)); artifacts modal with card grid, file list, search, open-in-originating-pane ([0363486](https://github.com/Sabbir505/Ultimate-workspace/commit/0363486)); zoom controls + draggable preview width ([ff89331](https://github.com/Sabbir505/Ultimate-workspace/commit/ff89331), [d05cf72](https://github.com/Sabbir505/Ultimate-workspace/commit/d05cf72))
+- **Vector SVG diagrams** — all diagrams route through `generate_diagram`: inline SVG in chat, PNG/SVG export, fit-to-width ([4d0c343](https://github.com/Sabbir505/Ultimate-workspace/commit/4d0c343), [f8acca5](https://github.com/Sabbir505/Ultimate-workspace/commit/f8acca5), [9526ac8](https://github.com/Sabbir505/Ultimate-workspace/commit/9526ac8), [059a48f](https://github.com/Sabbir505/Ultimate-workspace/commit/059a48f), [85d6278](https://github.com/Sabbir505/Ultimate-workspace/commit/85d6278))
+- **Styled document toolkit** — docx/pptx/pdf generation via `conduit_docgen` ([3e49e40](https://github.com/Sabbir505/Ultimate-workspace/commit/3e49e40)), editorial redesign with faithful fonts/bullets/tables in preview ([e5d0668](https://github.com/Sabbir505/Ultimate-workspace/commit/e5d0668), [9c6aaaa](https://github.com/Sabbir505/Ultimate-workspace/commit/9c6aaaa)), built-in doc skills seeded on first run ([c177258](https://github.com/Sabbir505/Ultimate-workspace/commit/c177258))
+- **Agentic browser tools** — read/click/type/scroll driving the pane webview ([a5e7a72](https://github.com/Sabbir505/Ultimate-workspace/commit/a5e7a72)); external-open fallback fix ([8754d71](https://github.com/Sabbir505/Ultimate-workspace/commit/8754d71))
+- **Richer uploads** — images as vision input, docx/pptx/xlsx text extraction ([bccb162](https://github.com/Sabbir505/Ultimate-workspace/commit/bccb162)); PDF attachment extraction + hover context menu + Claude-style streaming ([e257869](https://github.com/Sabbir505/Ultimate-workspace/commit/e257869))
+- **OpenRouter provider** ([85d6278](https://github.com/Sabbir505/Ultimate-workspace/commit/85d6278)); live token streaming ([be72074](https://github.com/Sabbir505/Ultimate-workspace/commit/be72074))
+- **Terminal** — scroll position preserved across `fit()` ([220ee96](https://github.com/Sabbir505/Ultimate-workspace/commit/220ee96)); only local dev-server URLs auto-open in the browser pane ([f5e8ced](https://github.com/Sabbir505/Ultimate-workspace/commit/f5e8ced))
+
+### Fixed
+- Cross-platform PDF font search (Windows per-user + macOS user dirs) ([9c5c499](https://github.com/Sabbir505/Ultimate-workspace/commit/9c5c499)); PNG export rasterization + double-send guard ([5ba3bef](https://github.com/Sabbir505/Ultimate-workspace/commit/5ba3bef))
+
+---
+
+## [0.1.x] — 2026-07-21 → 2026-07-23 (pre-release development)
 
 ### Added
 - Initial desktop shell with Tauri, multi-pane PTY, browser panes, chat, git sidebar, local models, automations, and cost dashboard.

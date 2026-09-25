@@ -7,54 +7,40 @@ import {
   TouchableOpacity,
   Switch,
   TextInput,
-  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useNavigation } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 // M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
 // bundle of every icon); Ionicons is a glyph font already bundled with the
 // app. These wrappers preserve the lucide call-sites' (size, color) props.
 const Moon = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="moon" size={size} color={color} />;
-const DollarSign = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="cash" size={size} color={color} />;
-const Bell = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="notifications" size={size} color={color} />;
-const Shield = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="shield" size={size} color={color} />;
 const QrIcon = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="qr-code" size={size} color={color} />;
 const Monitor = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="desktop" size={size} color={color} />;
-const Cpu = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="hardware-chip" size={size} color={color} />;
-import { useRelay, getRelayUrl, type CostDetails, type DailyCostEntry, type ProjectCostEntry, type LocalModelUsageEntry } from '../hooks/useRelay';
+import { useRelay, getRelayUrl } from '../hooks/useRelay';
 import { theme, useTheme, type ThemeMode } from '../theme';
-import { useUseChatSession, setUseChatSession } from '../lib/featureFlags';
-import { requestPushPermission, getPushTokenAsync, markTokenRegistered } from '../lib/notifications';
-import { deviceCanAuthenticate, isAppLockEnabled, setAppLockEnabled } from '../lib/appLock';
+import { useScreenMountTiming } from '../lib/screenTiming';
+import { useAfterPaint } from '../lib/afterPaint';
 import { tapLight } from '../lib/haptics';
 import ConnectionIndicator from '../components/ConnectionIndicator';
+import QrScanModal from './QrScanModal';
 
 /** Local flag mirroring the push switch across restarts. The desktop keeps
  *  the last registered token after a disable — acceptable, captioned below. */
 const PUSH_FLAG_KEY = 'settings.pushEnabled';
 
-// Categorical palette for local-model bars, derived from theme tokens so it
-// adapts to dark mode (same idea as the desktop CostDashboard's per-model
-// colors, cycled per model).
-function modelColor(i: number): string {
+// Desktop SettingsView parity: the agent harness families, with install
+// state — the same registry the desktop Settings → Harnesses panel lists.
+function HarnessRow({ id, displayName, installed }: { id: string; displayName: string; installed: boolean }) {
   const c = theme.colors;
-  const palette = [c.accent, c.blue, c.success, c.warning, c.gray, c.error];
-  return palette[i % palette.length];
+  return (
+    <View style={styles.harnessRow}>
+      <View style={[styles.harnessDot, { backgroundColor: installed ? c.success : c.border }]} />
+      <Text style={[styles.harnessName, { color: c.text }]}>{displayName}</Text>
+      <Text style={[styles.harnessState, { color: c.textSecondary }]}>{installed ? 'Installed' : 'Not installed'}</Text>
+    </View>
+  );
 }
-
-function usd(n: number): string {
-  return `$${n.toFixed(n >= 10 ? 2 : 5)}`;
-}
-function tokens(n: number): string {
-  return n.toLocaleString();
-}
-
-// ---------------------------------------------------------------------------
-// QR scan modal (lazy camera — only imported when the user taps "Scan QR")
-// ---------------------------------------------------------------------------
-
-const QrScanModal = React.lazy(() => import('./QrScanModal'));
 
 // ---------------------------------------------------------------------------
 // SettingRow — a grouped-list row: icon, title, subtitle, optional switch
@@ -110,10 +96,57 @@ function SettingRow({ icon, title, subtitle, value, onValueChange, switchDisable
   return inner;
 }
 
+/** Navigation row — opens one of the screens that used to live in the
+ *  drawer. Kept identical in shape to the settings rows so the card reads as
+ *  one list rather than a mix of toggles and links. */
+function NavRow({
+  icon, label, detail, onPress,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  detail?: string;
+  onPress: () => void;
+}) {
+  const c = theme.colors;
+  return (
+    <TouchableOpacity
+      style={styles.row}
+      onPress={() => { tapLight(); onPress(); }}
+      activeOpacity={0.6}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
+      <View style={[styles.rowIcon, { backgroundColor: c.bubble }]}>{icon}</View>
+      <View style={styles.rowText}>
+        <Text style={[styles.rowTitle, { color: c.text }]}>{label}</Text>
+        {detail ? (
+          <Text style={[styles.rowSubtitle, { color: c.textSecondary }]} numberOfLines={1}>
+            {detail}
+          </Text>
+        ) : null}
+      </View>
+      <Ionicons name="chevron-forward" size={16} color={c.textSecondary} />
+    </TouchableOpacity>
+  );
+}
+
 /** Caption line under a row or control inside a card. */
 function RowCaption({ children }: { children: React.ReactNode }) {
   const c = theme.colors;
   return <Text style={[styles.rowCaption, { color: c.textSecondary }]}>{children}</Text>;
+}
+
+/** Section header — desktop `settings-section-title` parity: uppercase
+ *  label + one-line hint, exactly how SettingsView groups its panels. */
+function Section({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
+  const c = theme.colors;
+  return (
+    <View style={styles.section}>
+      <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>{title}</Text>
+      {hint ? <Text style={[styles.sectionHint, { color: c.textSecondary }]}>{hint}</Text> : null}
+      <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border }]}>{children}</View>
+    </View>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -153,163 +186,15 @@ function ModeSegmented({ mode, onChange }: { mode: ThemeMode; onChange: (m: Them
 }
 
 // ---------------------------------------------------------------------------
-// Cost-dashboard charts (mirror the desktop CostDashboard)
-// ---------------------------------------------------------------------------
-
-/** Horizontal daily-spend bars over the last 14 days. Plain View-based bars,
- *  no SVG dependency. Each bar's width is its share of the max day. */
-function DailySpendChart({ data }: { data: DailyCostEntry[] }) {
-  const c = theme.colors;
-  const recent = data.slice(-14);
-  if (recent.length === 0) {
-    return (
-      <View style={[styles.emptyBlock, { backgroundColor: c.background, borderColor: c.border }]}>
-        <Text style={[styles.emptyText, { color: c.textSecondary }]}>No spend recorded yet.</Text>
-      </View>
-    );
-  }
-  const max = Math.max(...recent.map(d => d.cost_usd), 0.0001);
-  return (
-    <View style={styles.dailyChartWrap}>
-      {recent.map((d) => {
-        const pct = Math.max(2, (d.cost_usd / max) * 100);
-        return (
-          <View key={d.day} style={styles.dailyRow}>
-            <Text style={[styles.dailyLabel, { color: c.textSecondary }]}>{d.day.slice(5)}</Text>
-            <View style={[styles.dailyTrack, { backgroundColor: c.background }]}>
-              <View style={[styles.dailyBar, { width: `${pct}%`, backgroundColor: c.accent }]} />
-            </View>
-            <Text style={[styles.dailyValue, { color: c.text }]}>{usd(d.cost_usd)}</Text>
-          </View>
-        );
-      })}
-    </View>
-  );
-}
-
-/** Per-project totals: each row shows project name, token counts, and cost. */
-function ProjectTotals({ data }: { data: ProjectCostEntry[] }) {
-  const c = theme.colors;
-  if (data.length === 0) {
-    return (
-      <View style={[styles.emptyBlock, { backgroundColor: c.background, borderColor: c.border }]}>
-        <Text style={[styles.emptyText, { color: c.textSecondary }]}>No cost events recorded yet.</Text>
-      </View>
-    );
-  }
-  const totalAll = data.reduce((sum, p) => sum + p.total_cost_usd, 0);
-  return (
-    <View>
-      {data.map((row) => (
-        <View key={row.project_id} style={[styles.tableRow, { borderBottomColor: c.border }]}>
-          <Text style={[styles.cellName, { color: c.text }]} numberOfLines={1}>{row.project_name}</Text>
-          <Text style={[styles.cellMono, { color: c.textSecondary }]}>{tokens(row.total_input_tokens)}</Text>
-          <Text style={[styles.cellMono, { color: c.textSecondary }]}>{tokens(row.total_output_tokens)}</Text>
-          <Text style={[styles.cellMono, { color: c.text }]}>{usd(row.total_cost_usd)}</Text>
-        </View>
-      ))}
-      <View style={[styles.tableRow, { borderBottomWidth: 0 }]}>
-        <Text style={[styles.cellName, { color: c.text, fontWeight: '700' }]}>Total</Text>
-        <Text style={styles.cellMono}> </Text>
-        <Text style={styles.cellMono}> </Text>
-        <Text style={[styles.cellMono, { color: c.text, fontWeight: '700' }]}>{usd(totalAll)}</Text>
-      </View>
-    </View>
-  );
-}
-
-/** Aggregate totals across all local models — total input, output, and
- *  combined token counts, plus total messages. Hidden when there's no
- *  local usage (the empty state in LocalModelList covers that). */
-function LocalModelTotals({ data }: { data: LocalModelUsageEntry[] }) {
-  const c = theme.colors;
-  if (data.length === 0) return null;
-  const inT = data.reduce((s, u) => s + u.input_tokens, 0);
-  const outT = data.reduce((s, u) => s + u.output_tokens, 0);
-  const total = inT + outT;
-  const msgs = data.reduce((s, u) => s + u.message_count, 0);
-  return (
-    <View style={[styles.totalsRow, { backgroundColor: c.background, borderColor: c.border }]}>
-      <View style={styles.totalsItem}>
-        <Text style={[styles.totalsLabel, { color: c.textSecondary }]}>Input</Text>
-        <Text style={[styles.totalsValue, { color: c.text }]}>{tokens(inT)}</Text>
-      </View>
-      <View style={[styles.totalsDivider, { backgroundColor: c.border }]} />
-      <View style={styles.totalsItem}>
-        <Text style={[styles.totalsLabel, { color: c.textSecondary }]}>Output</Text>
-        <Text style={[styles.totalsValue, { color: c.text }]}>{tokens(outT)}</Text>
-      </View>
-      <View style={[styles.totalsDivider, { backgroundColor: c.border }]} />
-      <View style={styles.totalsItem}>
-        <Text style={[styles.totalsLabel, { color: c.accent }]}>Total</Text>
-        <Text style={[styles.totalsValue, { color: c.accent }]}>{tokens(total)}</Text>
-      </View>
-      <View style={[styles.totalsDivider, { backgroundColor: c.border }]} />
-      <View style={styles.totalsItem}>
-        <Text style={[styles.totalsLabel, { color: c.textSecondary }]}>Messages</Text>
-        <Text style={[styles.totalsValue, { color: c.text }]}>{tokens(msgs)}</Text>
-      </View>
-    </View>
-  );
-}
-
-/** Per-local-model token usage with a horizontal bar (input + output tokens)
- *  and a stat line. Same data shape as the desktop's local model table. */
-function LocalModelList({ data }: { data: LocalModelUsageEntry[] }) {
-  const c = theme.colors;
-  if (data.length === 0) {
-    return (
-      <View style={[styles.emptyBlock, { backgroundColor: c.background, borderColor: c.border }]}>
-        <Text style={[styles.emptyText, { color: c.textSecondary }]}>
-          No local model usage yet — chat with a local GGUF model to see stats.
-        </Text>
-      </View>
-    );
-  }
-  const max = Math.max(...data.map(u => u.input_tokens + u.output_tokens), 1);
-  return (
-    <View>
-      {data.map((u, i) => {
-        const pct = Math.max(2, ((u.input_tokens + u.output_tokens) / max) * 100);
-        const color = modelColor(i);
-        return (
-          <View key={u.model} style={[styles.modelRow, { borderBottomColor: c.border }]}>
-            <View style={styles.modelHead}>
-              <View style={[styles.modelSwatch, { backgroundColor: color }]} />
-              <Text style={[styles.modelName, { color: c.text }]} numberOfLines={1}>{u.model}</Text>
-              <Text style={[styles.modelLast, { color: c.textSecondary }]}>{u.last_used}</Text>
-            </View>
-            <View style={[styles.modelTrack, { backgroundColor: c.background }]}>
-              <View style={[styles.modelBar, { width: `${pct}%`, backgroundColor: color }]} />
-            </View>
-            <View style={styles.modelStats}>
-              <Text style={[styles.modelStat, { color: c.textSecondary }]}>
-                {u.message_count} msgs · {tokens(u.input_tokens)} in · {tokens(u.output_tokens)} out
-              </Text>
-            </View>
-          </View>
-        );
-      })}
-    </View>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
 
 export default function SettingsScreen() {
-  const { connected, costSummary, costDetails, connect, disconnect, refreshCostDetails, registerPushToken } = useRelay();
+  useScreenMountTiming('SettingsScreen');
+  const navigation = useNavigation<any>();
+    const { connected, connect, disconnect, harnesses } = useRelay();
   const { mode, setMode } = useTheme();
-  const chatSession = useUseChatSession();
   const c = theme.colors;
-
-  // GetCostDetails is no longer part of the 5s relay poll (it's three SQL
-  // aggregations under the desktop DB mutex). Refresh it when this screen
-  // opens and whenever the connection (re)establishes.
-  useEffect(() => {
-    if (connected) refreshCostDetails();
-  }, [connected, refreshCostDetails]);
 
   // Relay URL override. The desktop relay binds loopback only, so a physical
   // phone reaches it via `adb reverse tcp:<port> tcp:<port>` and
@@ -325,26 +210,16 @@ export default function SettingsScreen() {
   // `wss://host/#token` URL emitted by the desktop's Remote settings panel.
   const [qrScanning, setQrScanning] = useState(false);
 
-  // 5-tap easter egg on the version row to reveal the developer toggle.
-  const [tapCount, setTapCount] = useState(0);
-  const [devVisible, setDevVisible] = useState(chatSession);
+  // Progressive render: the first paint carries the header plus the sections
+  // that fit in the viewport; the rest arrive after that frame is on screen.
+  // Settings is ~2x the node count of every other screen, and painting all of
+  // it in one go was the single biggest contributor to its load time.
+  const [showRest, setShowRest] = React.useState(false);
+  useAfterPaint(() => setShowRest(true), [], 140);
 
-  // ---- Push notifications ----
-  const [pushOn, setPushOn] = useState(false);
-  const [pushBusy, setPushBusy] = useState(false);
-  const [pushNote, setPushNote] = useState<string | null>(null);
-
-  // ---- App lock ----
-  const [canAuth, setCanAuth] = useState<boolean | null>(null);
-  const [appLockOn, setAppLockOn] = useState(false);
-
-  // Restore persisted switch states once.
-  useEffect(() => {
-    AsyncStorage.getItem(PUSH_FLAG_KEY).then((v) => setPushOn(v === 'true')).catch(() => {});
-    deviceCanAuthenticate().then(setCanAuth).catch(() => setCanAuth(false));
-    isAppLockEnabled().then(setAppLockOn).catch(() => {});
-  }, []);
-
+  // Restore persisted switch states once — after the first frame. Each of
+  // these three promises is its own setState; running them during the paint
+  // window re-rendered Settings ~60ms in and held the visible frame back.
   const handleConnect = useCallback((url?: string) => {
     connect(url ?? relayUrl.trim() ?? undefined);
   }, [connect, relayUrl]);
@@ -355,69 +230,18 @@ export default function SettingsScreen() {
     connect(scannedUrl);
   }, [connect]);
 
-  const handleVersionTap = useCallback(() => {
-    setTapCount(prev => {
-      const next = prev + 1;
-      if (next >= 5) {
-        setDevVisible(v => !v);
-        return 0;
-      }
-      return next;
-    });
-  }, []);
-
-  // Push enable: permission → Expo token → register with the desktop. When
-  // the token is unavailable (Expo Go / denied) the switch stays off and the
-  // caption says so honestly. Disable only clears the local flag — the token
-  // stays registered on the desktop (harmless; captioned).
-  const handlePushToggle = useCallback((next: boolean) => {
-    tapLight();
-    setPushOn(next);
-    if (!next) {
-      void AsyncStorage.setItem(PUSH_FLAG_KEY, 'false').catch(() => {});
-      setPushNote('Off on this phone — the token saved on your desktop is kept');
-      return;
-    }
-    if (!connected) {
-      setPushOn(false);
-      setPushNote('Connect to the desktop first so it can store your token');
-      return;
-    }
-    setPushBusy(true);
-    setPushNote('Requesting permission…');
-    void (async () => {
-      try {
-        const permitted = await requestPushPermission();
-        if (!permitted) {
-          setPushOn(false);
-          setPushNote('Notifications are blocked — enable them for Relay in system settings');
-          return;
-        }
-        const token = await getPushTokenAsync();
-        if (!token) {
-          setPushOn(false);
-          setPushNote('Needs a development build — Expo Go can’t receive push');
-          return;
-        }
-        registerPushToken(token, Platform.OS);
-        void markTokenRegistered(token);
-        void AsyncStorage.setItem(PUSH_FLAG_KEY, 'true').catch(() => {});
-        setPushNote('Approvals and completions reach you when the app is closed');
-      } finally {
-        setPushBusy(false);
-      }
-    })();
-  }, [connected, registerPushToken]);
-
-  const handleAppLockToggle = useCallback((next: boolean) => {
-    tapLight();
-    setAppLockOn(next);
-    void setAppLockEnabled(next);
-  }, []);
-
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.background }]} edges={['top']}>
       <View style={[styles.header, { borderBottomColor: c.border }]}>
+        <TouchableOpacity
+          onPress={() => { tapLight(); navigation.goBack(); }}
+          hitSlop={{ top: 10, left: 10, right: 10, bottom: 10 }}
+          style={styles.headerBack}
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+        >
+          <Ionicons name="chevron-back" size={24} color={c.text} />
+        </TouchableOpacity>
         <Text style={[styles.headerTitle, { color: c.text }]}>Settings</Text>
       </View>
 
@@ -426,256 +250,159 @@ export default function SettingsScreen() {
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
       >
-        {/* ---- Desktop Connection ---- */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Desktop Connection</Text>
-          <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border }]}>
-            {/* Status row */}
-            <View style={styles.connectionRow}>
-              <Monitor size={20} color={c.textSecondary} />
-              <View style={styles.connectionText}>
-                <Text style={[styles.connectionLabel, { color: c.textSecondary }]}>Status</Text>
-                <Text style={[styles.connectionValue, { color: connected ? c.success : c.error }]}>
-                  {connected ? 'Connected to desktop' : 'Desktop unreachable'}
-                </Text>
-              </View>
-              <ConnectionIndicator connected={connected} size={12} />
-            </View>
-
-            {/* URL input — shown when disconnected so user can enter desktop LAN IP */}
-            {!connected && (
-              <TextInput
-                style={[styles.urlInput, { backgroundColor: c.background, borderColor: c.border, color: c.text }]}
-                placeholder="ws://host:port/#token or wss://machine.tailnet.ts.net/#token"
-                placeholderTextColor={c.textSecondary}
-                value={relayUrl}
-                onChangeText={setRelayUrl}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="url"
-              />
-            )}
-
-            {/* Connect / Disconnect */}
-            <View style={styles.connectionActions}>
-              {!connected ? (
-                <>
-                  <TouchableOpacity
-                    style={[styles.secondaryButton, { borderColor: c.border }]}
-                    onPress={() => {
-                      tapLight();
-                      setQrScanning(true);
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <QrIcon size={16} color={c.text} />
-                    <Text style={[styles.secondaryButtonText, { color: c.text }]}>Scan QR</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.primaryButton, { backgroundColor: c.accent, flex: 1 }]}
-                    onPress={() => handleConnect()}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.primaryButtonText, { color: c.white }]}>Connect</Text>
-                  </TouchableOpacity>
-                </>
-              ) : (
-                <TouchableOpacity
-                  style={[styles.secondaryButton, { borderColor: c.error, flex: 1 }]}
-                  onPress={() => {
-                    tapLight();
-                    disconnect();
-                  }}
-                  activeOpacity={0.7}
-                >
-                  <Text style={[styles.secondaryButtonText, { color: c.error }]}>Disconnect</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          </View>
-        </View>
-
-        {/* ---- Appearance ---- */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Appearance</Text>
-          <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border }]}>
-            <View style={styles.appearanceRow}>
-              <Moon size={20} color={c.blue} />
-              <View style={[styles.appearanceControl, { flex: 1 }]}>
-                <ModeSegmented mode={mode} onChange={setMode} />
-                <RowCaption>Auto follows your phone</RowCaption>
-              </View>
-            </View>
-          </View>
-        </View>
-
-        {/* ---- Notifications ---- */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Notifications</Text>
-          <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border }]}>
-            <SettingRow
-              icon={<Bell size={20} color={c.accent} />}
-              title="Push alerts"
-              subtitle={pushNote ?? undefined}
-              value={pushOn}
-              onValueChange={handlePushToggle}
-              switchDisabled={pushBusy}
-            />
-            {!pushNote ? (
-              <RowCaption>
-                <Text>
-                  {pushOn
-                    ? 'Approvals and completions reach you when the app is closed'
-                    : 'Off — turn on to hear about approvals while away'}
-                </Text>
-              </RowCaption>
-            ) : null}
-          </View>
-        </View>
-
-        {/* ---- Security ---- */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Security</Text>
-          <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border }]}>
-            <SettingRow
-              icon={<Shield size={20} color={c.success} />}
-              title="App lock"
-              subtitle={canAuth === false ? 'No biometrics enrolled' : undefined}
-              value={canAuth === false ? false : appLockOn}
-              onValueChange={handleAppLockToggle}
-              switchDisabled={canAuth !== true}
-              dimmed={canAuth === false}
-            />
-            <RowCaption>Require Face ID / fingerprint after 30s away</RowCaption>
-          </View>
-        </View>
-
-        {/* ---- Cost ---- (live from the desktop's cost ledger, refreshed
-             with the 5s session poll) */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Cost</Text>
-          <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border }]}>
-            <View style={styles.costRow}>
-              <View style={styles.costItem}>
-                <DollarSign size={20} color={c.success} />
-                <View>
-                  <Text style={[styles.costLabel, { color: c.textSecondary }]}>Today</Text>
-                  <Text style={[styles.costValue, { color: c.text }]}>${costSummary.today.toFixed(2)}</Text>
-                </View>
-              </View>
-              <View style={[styles.costDivider, { backgroundColor: c.border }]} />
-              <View style={styles.costItem}>
-                <DollarSign size={20} color={c.accent} />
-                <View>
-                  <Text style={[styles.costLabel, { color: c.textSecondary }]}>This Week</Text>
-                  <Text style={[styles.costValue, { color: c.text }]}>${costSummary.week.toFixed(2)}</Text>
-                </View>
-              </View>
-            </View>
-          </View>
-        </View>
-
-        {/* ---- Daily spend (last 14 days) ---- mirrors the desktop
-             CostDashboard's daily bar chart. */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Daily Spend (last 14 days)</Text>
-          <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border, padding: theme.spacing.md }]}>
-            <Text style={[styles.estimateNote, { color: c.textSecondary }]}>
-              Best-effort estimate parsed from harness output.
-            </Text>
-            <DailySpendChart data={costDetails.daily} />
-          </View>
-        </View>
-
-        {/* ---- Per-project totals ---- */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Per-Project Totals</Text>
-          <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border, padding: theme.spacing.md }]}>
-            <View style={[styles.tableRow, { borderBottomWidth: 0, paddingBottom: 4 }]}>
-              <Text style={[styles.cellHead, styles.cellName, { color: c.textSecondary }]}>Project</Text>
-              <Text style={[styles.cellHead, styles.cellMono, { color: c.textSecondary }]}>In</Text>
-              <Text style={[styles.cellHead, styles.cellMono, { color: c.textSecondary }]}>Out</Text>
-              <Text style={[styles.cellHead, styles.cellMono, { color: c.textSecondary }]}>Cost</Text>
-            </View>
-            <ProjectTotals data={costDetails.per_project} />
-          </View>
-        </View>
-
-        {/* ---- Local model usage ---- per-model token totals, same shape as
-             the desktop's "Local model usage" section. */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Local Model Usage</Text>
-          <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border, padding: theme.spacing.md }]}>
-            <View style={styles.localHead}>
-              <Cpu size={16} color={c.accent} />
-              <Text style={[styles.estimateNote, { color: c.textSecondary, flex: 1 }]}>
-                Token counts per local GGUF model.
+        {/* ---- Desktop Connection (Remote) ---- */}
+        <Section title="Desktop connection" hint="Pair this phone with the relay running on your desktop.">
+          <View style={styles.connectionRow}>
+            <Monitor size={20} color={c.textSecondary} />
+            <View style={styles.connectionText}>
+              <Text style={[styles.connectionLabel, { color: c.textSecondary }]}>Status</Text>
+              <Text style={[styles.connectionValue, { color: connected ? c.success : c.error }]}>
+                {connected ? 'Connected to desktop' : 'Desktop unreachable'}
               </Text>
             </View>
-            <LocalModelTotals data={costDetails.local_models} />
-            <LocalModelList data={costDetails.local_models} />
+            <ConnectionIndicator connected={connected} size={12} />
           </View>
-        </View>
 
-        {/* ---- About ---- */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>About</Text>
-          <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border }]}>
-            <TouchableOpacity
-              style={styles.aboutRow}
-              onPress={() => {
-                tapLight();
-                handleVersionTap();
-              }}
-              activeOpacity={0.6}
-            >
-              <Text style={[styles.aboutLabel, { color: c.text }]}>Version</Text>
-              <Text style={[styles.aboutValue, { color: c.textSecondary }]}>1.0.0</Text>
-            </TouchableOpacity>
-            <View style={[styles.divider, { backgroundColor: c.border }]} />
-            <View style={styles.aboutRow}>
-              <Text style={[styles.aboutLabel, { color: c.text }]}>App</Text>
-              <Text style={[styles.aboutValue, { color: c.textSecondary }]}>Relay Mobile</Text>
-            </View>
-          </View>
-        </View>
+          {!connected && (
+            <TextInput
+              style={[styles.urlInput, { backgroundColor: c.background, borderColor: c.border, color: c.text }]}
+              placeholder="ws://host:port/#token or wss://machine.tailnet.ts.net/#token"
+              placeholderTextColor={c.textSecondary}
+              value={relayUrl}
+              onChangeText={setRelayUrl}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+            />
+          )}
 
-        {devVisible && (
-          <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Developer</Text>
-            <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border }]}>
-              <View style={styles.aboutRow}>
-                <Text style={[styles.aboutLabel, { color: c.text }]}>Chat session UI</Text>
-                <Text style={[styles.aboutValue, { color: chatSession ? c.success : c.textSecondary }]}>
-                  {chatSession ? 'ON' : 'OFF'}
-                </Text>
-              </View>
-              <View style={[styles.divider, { backgroundColor: c.border }]} />
-              <View style={styles.connectionActions}>
+          <View style={styles.connectionActions}>
+            {!connected ? (
+              <>
                 <TouchableOpacity
-                  style={[styles.primaryButton, { backgroundColor: c.accent }]}
+                  style={[styles.secondaryButton, { borderColor: c.border }]}
                   onPress={() => {
                     tapLight();
-                    setUseChatSession(!chatSession);
+                    setQrScanning(true);
                   }}
                   activeOpacity={0.7}
                 >
-                  <Text style={[styles.primaryButtonText, { color: c.white }]}>
-                    {chatSession ? 'Disable' : 'Enable'}
-                  </Text>
+                  <QrIcon size={16} color={c.text} />
+                  <Text style={[styles.secondaryButtonText, { color: c.text }]}>Scan QR</Text>
                 </TouchableOpacity>
-              </View>
+                <TouchableOpacity
+                  style={[styles.primaryButton, { backgroundColor: c.accent, flex: 1 }]}
+                  onPress={() => handleConnect()}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.primaryButtonText, { color: c.white }]}>Connect</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <TouchableOpacity
+                style={[styles.secondaryButton, { borderColor: c.error, flex: 1 }]}
+                onPress={() => {
+                  tapLight();
+                  disconnect();
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.secondaryButtonText, { color: c.error }]}>Disconnect</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </Section>
+
+        {/* ---- Manage: the destinations that used to crowd the drawer ---- */}
+        <Section title="Manage" hint="Your workspace, on this phone.">
+          <NavRow
+            icon={<Ionicons name="flash-outline" size={18} color={c.textSecondary} />}
+            label="Automations"
+            onPress={() => navigation.navigate('Automations')}
+          />
+          <View style={[styles.divider, { backgroundColor: c.border }]} />
+          <NavRow
+            icon={<Ionicons name="git-branch-outline" size={18} color={c.textSecondary} />}
+            label="Git"
+            onPress={() => navigation.navigate('Git')}
+          />
+          <View style={[styles.divider, { backgroundColor: c.border }]} />
+          <NavRow
+            icon={<Ionicons name="bulb-outline" size={18} color={c.textSecondary} />}
+            label="Memory"
+            onPress={() => navigation.navigate('Memory')}
+          />
+          <View style={[styles.divider, { backgroundColor: c.border }]} />
+          <NavRow
+            icon={<Ionicons name="library-outline" size={18} color={c.textSecondary} />}
+            label="Skills & loops"
+            onPress={() => navigation.navigate('Skills')}
+          />
+          <View style={[styles.divider, { backgroundColor: c.border }]} />
+          <NavRow
+            icon={<Ionicons name="notifications-outline" size={18} color={c.textSecondary} />}
+            label="Notifications"
+            onPress={() => navigation.navigate('Notifications')}
+          />
+          <View style={[styles.divider, { backgroundColor: c.border }]} />
+          <NavRow
+            icon={<Ionicons name="cash-outline" size={18} color={c.textSecondary} />}
+            label="Cost dashboard"
+            onPress={() => navigation.navigate('CostDashboard')}
+          />
+        </Section>
+
+        {showRest ? (
+        <Section title="Appearance" hint="Theme & colors — Auto follows your phone.">
+          <View style={styles.appearanceRow}>
+            <Moon size={20} color={c.blue} />
+            <View style={[styles.appearanceControl, { flex: 1 }]}>
+              <ModeSegmented mode={mode} onChange={setMode} />
             </View>
           </View>
-        )}
+        </Section>
+        ) : null}
+
+        {showRest ? (
+        <Section title="Agents" hint="CLI harnesses installed on your desktop.">
+          {harnesses.length > 0 ? (
+            harnesses.map((h) => (
+              <HarnessRow key={h.id} id={h.id} displayName={h.display_name} installed={h.installed} />
+            ))
+          ) : (
+            <Text style={[styles.emptyLine, { color: c.textSecondary }]}>
+              {connected ? 'Connect to see the desktop’s agents.' : 'Connect to your desktop to see agents.'}
+            </Text>
+          )}
+        </Section>
+        ) : null}
+
+        {/* ---- About ---- */}
+        <Section title="About">
+          <View style={styles.aboutRow}>
+            <Text style={[styles.aboutLabel, { color: c.text }]}>Version</Text>
+            <Text style={[styles.aboutValue, { color: c.textSecondary }]}>1.0.0</Text>
+          </View>
+          <View style={[styles.divider, { backgroundColor: c.border }]} />
+          <View style={styles.aboutRow}>
+            <Text style={[styles.aboutLabel, { color: c.text }]}>App</Text>
+            <Text style={[styles.aboutValue, { color: c.textSecondary }]}>Relay Mobile</Text>
+          </View>
+        </Section>
       </ScrollView>
 
-      {/* QR scanner modal — lazy-loaded so expo-camera isn't on the cold-start
-          path. The modal shows a live camera preview and calls onScanned when
-          a barcode/QR is detected. */}
-      <React.Suspense fallback={null}>
+      {/* QR scanner modal — live camera preview; calls onScanned when a
+          barcode/QR is detected. (Eager import: the old React.lazy wrapper
+          evaluated on Settings mount anyway, and device-side Metro segment
+          loading crashes on Android — see App.tsx.) */}
+      {/* Mount the scanner ONLY while it is open. QrScanModal calls
+          useCameraPermissions() at the top of its render, so keeping it in
+          the tree made every Settings mount kick off an async camera
+          permission query (and pull expo-camera's module graph in) for a
+          modal the user had not opened. */}
+      {qrScanning ? (
         <QrScanModal visible={qrScanning} onScanned={handleQrScan} onClose={() => setQrScanning(false)} />
-      </React.Suspense>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -687,16 +414,31 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.colors.background },
   header: {
-    paddingHorizontal: theme.spacing.lg,
-    paddingVertical: theme.spacing.md,
+    // Back + title + spacer: the title stays optically centred.
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  headerTitle: { fontSize: theme.fontSize['2xl'], fontWeight: '800', color: theme.colors.text },
+  headerBack: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
+  headerTitle: {
+    flex: 1,
+    fontSize: theme.fontSize['2xl'],
+    fontWeight: '800',
+    color: theme.colors.text,
+    textAlign: 'center',
+  },
   scrollView: { flex: 1 },
   scrollContent: { padding: theme.spacing.md, paddingBottom: 60 },
   section: { marginBottom: theme.spacing.lg },
   sectionTitle: {
     fontSize: theme.fontSize.sm, fontWeight: '600', color: theme.colors.textSecondary,
+    marginBottom: 2, marginLeft: theme.spacing.sm,
+  },
+  sectionHint: {
+    fontSize: theme.fontSize.xs, color: theme.colors.textSecondary,
     marginBottom: theme.spacing.sm, marginLeft: theme.spacing.sm,
   },
   card: {
@@ -705,6 +447,15 @@ const styles = StyleSheet.create({
     padding: theme.spacing.sm,
     overflow: 'hidden',
   },
+  emptyLine: { fontSize: theme.fontSize.sm, padding: theme.spacing.sm },
+  harnessRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingVertical: 10, paddingHorizontal: theme.spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: theme.colors.border,
+  },
+  harnessDot: { width: 8, height: 8, borderRadius: 4 },
+  harnessName: { flex: 1, fontSize: theme.fontSize.sm, fontWeight: '500' },
+  harnessState: { fontSize: 11 },
   connectionRow: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: theme.spacing.sm },
   connectionText: { flex: 1 },
   connectionLabel: {
@@ -734,7 +485,7 @@ const styles = StyleSheet.create({
   primaryButtonText: { fontWeight: '600', fontSize: theme.fontSize.md },
   secondaryButtonText: { fontWeight: '600', fontSize: theme.fontSize.md },
   appearanceRow: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: theme.spacing.sm },
-  appearanceControl: { gap: theme.spacing.sm },
+  appearanceControl: { flex: 1 },
   segmented: {
     flexDirection: 'row', borderRadius: theme.radius.sm, padding: 2, gap: 2,
   },
@@ -743,9 +494,9 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   segmentText: { fontSize: theme.fontSize.sm },
-  row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: theme.spacing.sm, gap: 12 },
+  row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, paddingHorizontal: theme.spacing.sm, gap: 12 },
   rowIcon: {
-    width: 32, height: 32, borderRadius: theme.radius.sm,
+    width: 28, height: 28, borderRadius: theme.radius.sm,
     justifyContent: 'center', alignItems: 'center',
   },
   rowText: { flex: 1 },
@@ -757,67 +508,14 @@ const styles = StyleSheet.create({
   },
   switchControl: { marginLeft: 4 },
   divider: { height: 1, backgroundColor: theme.colors.border, marginLeft: 52 },
-  costRow: { flexDirection: 'row', padding: theme.spacing.md, gap: theme.spacing.md },
-  costItem: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12 },
-  costDivider: { width: 1, backgroundColor: theme.colors.border },
   costLabel: {
     fontSize: theme.fontSize.xs, color: theme.colors.textSecondary, fontWeight: '600',
     textTransform: 'uppercase', letterSpacing: 0.5,
   },
-  costValue: { fontSize: theme.fontSize.xl, fontWeight: '700', color: theme.colors.text, marginTop: 2 },
   aboutRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingVertical: 12, paddingHorizontal: theme.spacing.sm,
   },
   aboutLabel: { fontSize: theme.fontSize.md, color: theme.colors.text },
   aboutValue: { fontSize: theme.fontSize.md, color: theme.colors.textSecondary, fontWeight: '500' },
-  // ---- cost dashboard ----
-  estimateNote: {
-    fontSize: theme.fontSize.xs, lineHeight: 16, marginBottom: 4,
-  },
-  localHead: {
-    flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10,
-  },
-  emptyBlock: {
-    paddingVertical: 24, paddingHorizontal: 12, borderRadius: theme.radius.md,
-    borderWidth: 1, borderStyle: 'dashed', alignItems: 'center',
-  },
-  emptyText: { fontSize: theme.fontSize.sm, textAlign: 'center' },
-  // daily chart
-  dailyChartWrap: { gap: 8, marginTop: 8 },
-  dailyRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  dailyLabel: { width: 36, fontSize: 10, fontFamily: 'monospace' },
-  dailyTrack: { flex: 1, height: 14, borderRadius: 7, overflow: 'hidden' },
-  dailyBar: { height: 14, borderRadius: 7 },
-  dailyValue: { width: 64, fontSize: 10, fontFamily: 'monospace', textAlign: 'right' },
-  // project totals table
-  tableRow: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  cellHead: { fontSize: 10, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 },
-  cellName: { flex: 1, fontSize: theme.fontSize.sm, fontWeight: '600', paddingRight: 6 },
-  cellMono: { width: 72, fontSize: 11, fontFamily: 'monospace', textAlign: 'right' },
-  // local model list
-  modelRow: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth },
-  modelHead: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },
-  modelSwatch: { width: 10, height: 10, borderRadius: 3 },
-  modelName: { flex: 1, fontSize: theme.fontSize.sm, fontWeight: '600' },
-  modelLast: { fontSize: 10, fontFamily: 'monospace' },
-  modelTrack: { height: 10, borderRadius: 5, overflow: 'hidden', marginBottom: 4 },
-  modelBar: { height: 10, borderRadius: 5 },
-  modelStats: { flexDirection: 'row' },
-  modelStat: { fontSize: 10, fontFamily: 'monospace' },
-  // local model totals row
-  totalsRow: {
-    flexDirection: 'row', alignItems: 'center',
-    borderWidth: 1, borderRadius: theme.radius.md,
-    paddingVertical: 12, paddingHorizontal: 8, marginBottom: 12,
-  },
-  totalsItem: { flex: 1, alignItems: 'center', gap: 2 },
-  totalsDivider: { width: 1, alignSelf: 'stretch' },
-  totalsLabel: {
-    fontSize: 10, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5,
-  },
-  totalsValue: { fontSize: theme.fontSize.lg, fontWeight: '700', fontFamily: 'monospace' },
 });

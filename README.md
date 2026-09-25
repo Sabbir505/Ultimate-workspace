@@ -7,12 +7,16 @@ Relay wraps the AI agent CLIs you already use (Claude Code, Kimi Code CLI, OpenC
 - Up to **6** PTY agent panes, tiled and resizable
 - **Built-in chat** that talks to Anthropic, OpenAI, OpenRouter, OpenAI-compatible endpoints, and local GGUF models (via `llama-server`)
 - **Native browser panes** (WebView2 on Windows, WKWebView on macOS, WebKitGTK on Linux) with agent-driven control and visual feedback
+- **Vault** — a bound folder of markdown notes with full AI read/write (search with `tag:`/`path:`/`file:` operators, atomic writes, vault-wide `[[wikilink]]` rewrites, recoverable deletes), an Obsidian-parity editor with note tabs, local graph, tags, templates and an in-app PDF viewer
+- **Local image generation** — a local diffusion sidecar (`sd.cpp`) paints from a text prompt, no cloud and no API key
+- **User hooks** — Claude-Code-style pre/post tool-call scripts around every agent tool call (deny, ask, rewrite input, annotate results), with a Test button and a `hooks_import_claude` importer
 - **Git sidebar** with status, diff, log, branches, worktrees, AI-proposed plans, and a Git Graph commit table
 - **Local model "market"** — browse, download, and run Hugging Face GGUF models
-- **Cron automations** that fire even while the app is closed (Windows Task Scheduler sidecar)
+- **Automations** — cron schedules that fire even while the app is closed (Windows Task Scheduler sidecar), plus event triggers: inbound webhook, watched file, git HEAD change, and new Gmail activity
 - **Voice** — push-to-talk dictation (whisper STT) and read-aloud answers (Kokoro TTS, in-process via sherpa-onnx, optional CUDA)
 - **Mobile companion** (React Native / Expo, Expo SDK 57) — pair over QR, run chats from your phone, the phone never holds API keys
 - **Connectors** (OAuth): Notion, GitHub, Google Drive/Calendar/Sheets/Docs/Slides/Chat/People, Gmail, YouTube, Kiwi, Canva
+- **Appearance** — stock or custom wallpaper with a dim scrim, sidebar header art, and a theme gallery
 
 ## Naming
 
@@ -36,8 +40,8 @@ npm run tauri build    # NSIS installer in src-tauri/target/release/bundle/nsis/
 ## Tests
 
 ```bash
-npm test                          # vitest, 152 files / 1055 tests
-cd src-tauri && cargo test --lib  # 1078 passed, 0 failed, 15 ignored
+npm test                          # vitest, 174 files / 1286 tests
+cd src-tauri && cargo test --lib  # 1315 passed, 0 failed, 16 ignored
 npx tsc --noEmit                  # clean (also for mobile/: npx tsc --noEmit)
 ```
 
@@ -46,16 +50,18 @@ npx tsc --noEmit                  # clean (also for mobile/: npx tsc --noEmit)
 ```
 src/                React + TypeScript frontend (Zustand stores, components, lib)
 src-tauri/          Rust backend (Tauri v2)
-  src/lib.rs        Tauri command surface (321 registered commands)
-  src/db/           SQLite schema + 24 inline migrations (44 tables, WAL mode)
-  src/commands/     Tauri command handlers, one module per domain (chat, git, tts, stt, …)
+  src/lib.rs        Tauri command surface (369 registered commands)
+  src/db/           SQLite schema + 29 inline migrations (56 tables, WAL mode)
+  src/commands/     Tauri command handlers, one module per domain (chat, git, tts, stt, vault, image gen, …)
   src/chat/         Chat dispatch, prompts, streaming, providers, tools, local models
   src/memory/       Persistent user memory (extraction, consolidation, retrieval)
   src/session_fabric/  Session Mesh — cross-session awareness/messaging/spawning
+  src/vault/        Markdown knowledge base — index, frontmatter/link parser, atomic file ops
+  src/hooks.rs      User pre/post tool-call hooks (exec gate, decisions, observations)
   src/pty/          PTY lifecycle
   src/browser*.rs   Native browser panes + browser MCP
   src/mobile/       Localhost WebSocket relay (E2E encrypted)
-  src/automations*  Cron scheduler
+  src/automations*  Automation scheduler (cron + webhook/file/git/Gmail triggers)
   src/improve_engine.rs  Self-improving artifacts engine
   src/connectors/   OAuth + remote MCP for Notion / GitHub / Google / etc.
   src/harness_adapters/  Per-CLI harness adapters (six harnesses)

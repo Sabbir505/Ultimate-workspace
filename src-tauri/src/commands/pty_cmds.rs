@@ -40,6 +40,16 @@ fn harness_status_cache_store(list: Vec<HarnessStatus>) {
     }
 }
 
+/// Install flag for one harness from the 30s probe cache (false when the
+/// cache is cold — the mobile relay's harness list must never block on a
+/// 5s-per-CLI probe). The cache warms at boot and on agent-menu opens.
+pub(crate) fn harness_status_cached_installed(id: &str) -> bool {
+    harness_status_cache_get()
+        .and_then(|list| list.into_iter().find(|h| h.id == id))
+        .map(|h| h.installed)
+        .unwrap_or(false)
+}
+
 fn harness_update_cache_store(list: Vec<HarnessUpdateStatus>) {
     if let Ok(mut guard) = HARNESS_UPDATE_CACHE.lock() {
         *guard = Some((Instant::now(), list));

@@ -62,6 +62,9 @@ export interface ActivityRowProps {
   raw?: string;
   /** False while the closing marker hasn't streamed in yet (still running). */
   done: boolean;
+  /** Diff peek (desktop DiffCard parity): called with the touched file's
+   *  path for file-mutating tools — the chat opens the git diff sheet. */
+  onPeekDiff?: (path: string) => void;
 }
 
 /** Derive `rgba(r,g,b,a)` from a token hex color — lets us tint edit blocks
@@ -112,7 +115,7 @@ function PulsingDot({ color }: { color: string }) {
   );
 }
 
-export default function ActivityRow({ data, raw, done }: ActivityRowProps) {
+export default function ActivityRow({ data, raw, done, onPeekDiff }: ActivityRowProps) {
   const c = theme.colors;
   const [expanded, setExpanded] = useState(false);
 
@@ -123,6 +126,8 @@ export default function ActivityRow({ data, raw, done }: ActivityRowProps) {
   const detail = isSubagent ? data!.task : (data?.detail || data?.path || '');
 
   const edit = useMemo(() => renderEdit(data?.edit, data?.path), [data]);
+  // A file the agent created/edited/deleted on disk — the peek's target.
+  const peekPath = edit?.path ?? data?.path ?? null;
   const argsText = useMemo(() => {
     if (data?.args == null) return null;
     try {
@@ -178,9 +183,23 @@ export default function ActivityRow({ data, raw, done }: ActivityRowProps) {
       {hasBody ? (
         <View style={styles.body}>
           {data?.path ? (
-            <Text style={[styles.pathText, { color: c.textSecondary }]} numberOfLines={2}>
-              {data.path}
-            </Text>
+            <View style={styles.pathRow}>
+              <Text style={[styles.pathText, { color: c.textSecondary, flex: 1 }]} numberOfLines={2}>
+                {data.path}
+              </Text>
+              {onPeekDiff && peekPath && done ? (
+                <TouchableOpacity
+                  style={[styles.peekBtn, { backgroundColor: c.background, borderColor: c.border }]}
+                  activeOpacity={0.7}
+                  onPress={() => onPeekDiff(peekPath)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`View git diff for ${peekPath}`}
+                >
+                  <Ionicons name="git-compare-outline" size={12} color={c.accent} />
+                  <Text style={[styles.peekText, { color: c.accent }]}>Diff</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
           ) : null}
 
           {isSubagent ? (
@@ -271,10 +290,28 @@ const styles = StyleSheet.create({
     marginTop: 10,
     gap: 8,
   },
+  pathRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   pathText: {
     fontFamily: 'monospace',
     fontSize: 12,
     lineHeight: 17,
+  },
+  peekBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: theme.radius.pill,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+  },
+  peekText: {
+    ...theme.type.label,
+    fontWeight: '600',
   },
   codeBlock: {
     borderRadius: theme.radius.sm,

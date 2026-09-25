@@ -34,6 +34,17 @@ pub enum MobileMessage {
     },
     /// Query the current state of all providers.
     ListAvailableProviders,
+    /// Star/unstar a chat (desktop sidebar pin parity). The phone's list
+    /// picks the new state up on the next poll.
+    SetSessionStarred { session_id: String, starred: bool },
+    /// The artifact library: every chat's latest artifact, newest first
+    /// (desktop Sidebar → ArtifactLibrary parity).
+    ListArtifacts,
+    /// Cost-dashboard rollups for N days (desktop Settings → Cost parity).
+    GetCostRollups {
+        #[serde(default)]
+        days: Option<u32>,
+    },
     /// Query active CLI sessions running on the desktop.
     ListSessions,
     /// Start a chat turn. The desktop creates a temporary session, streams
@@ -56,8 +67,25 @@ pub enum MobileMessage {
     SendToSession { session_id: String, text: String },
     /// Request the pty transcript for a session (the full scrollback).
     GetTranscript { session_id: String },
-    /// Create a new CLI session under a project.
-    CreateSession { project_id: String, harness: String },
+    /// Create a new CLI session under a project. `provider`/`model` are the
+    /// phone-picked model for the new chat (omitted → "auto" routing, the
+    /// desktop's fresh-chat default).
+    CreateSession {
+        project_id: String,
+        harness: String,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        /// Reasoning effort for the new chat ("" / absent = provider default) —
+        /// the phone's picker slider, same wire values the desktop stores.
+        #[serde(default)]
+        effort: Option<String>,
+        /// Connectors attached from the composer's @-menu before the chat
+        /// existed; applied to the new chat row like the desktop's.
+        #[serde(default)]
+        connectors: Option<Vec<String>>,
+    },
     /// Spawn/resume a session on the desktop (activate it in a pane).
     /// The desktop handles pane-slot allocation (max 6, LRU eviction).
     SpawnSession { session_id: String },
@@ -109,6 +137,10 @@ pub enum MobileMessage {
         session_id: String,
         provider_id: String,
         model: String,
+        /// Some("") clears back to the provider default; None leaves the
+        /// session's effort untouched (model-only switches from older phones).
+        #[serde(default)]
+        effort: Option<String>,
     },
     /// Delete a chat session and its messages from the desktop.
     DeleteChatSession {
@@ -129,6 +161,13 @@ pub enum MobileMessage {
     ListSessionArtifacts {
         session_id: String,
     },
+    /// Lightweight artifact preview for the library GRID (desktop
+    /// ArtifactLibrary parity): a text snippet for text-like kinds, a data
+    /// URI for images, nothing for binaries. Same containment gate as
+    /// `ReadArtifact` — the relay applies it before calling the core.
+    ReadArtifactPreview {
+        path: String,
+    },
     /// Read one artifact's bytes for on-device preview. The path is
     /// containment-checked against the desktop's artifacts directory — the
     /// relay must never become an arbitrary-file-read primitive.
@@ -136,12 +175,214 @@ pub enum MobileMessage {
         session_id: String,
         path: String,
     },
+    /// The skills the chat `/` menu offers (installed + builtin).
+    ListChatSkills,
+    /// Automations (desktop Automations view parity).
+    ListAutomations,
+    /// ACP agents (desktop picker "Agents · ACP" rail parity).
+    ListAcpAgents,
+    /// Memory (desktop Settings → Memory parity): browse, edit, forget, purge.
+    ListMemoryRecords {
+        #[serde(default)]
+        include_inactive: Option<bool>,
+    },
+    UpdateMemoryRecord {
+        memory_id: String,
+        content: String,
+        #[serde(default)]
+        importance: Option<i64>,
+    },
+    DeleteMemoryRecord {
+        memory_id: String,
+    },
+    PurgeMemories,
+    /// Installed skills / loops library (desktop SkillsLibrary parity).
+    ListInstalledSkills {
+        /// "skill" | "loop"
+        kind: String,
+    },
+    ReadInstalledSkill {
+        slug: String,
+        kind: String,
+    },
+    SaveInstalledSkill {
+        slug: String,
+        kind: String,
+        content: String,
+    },
+    CreateInstalledSkill {
+        name: String,
+        kind: String,
+        content: String,
+    },
+    DeleteInstalledSkill {
+        slug: String,
+        kind: String,
+    },
+    MakeInstalledSkillsGlobal {
+        kind: String,
+    },
+    /// Git tools (desktop GitToolsSidebar parity), scoped to a REGISTERED
+    /// project (the phone can't hand the backend an arbitrary path).
+    GitStatus {
+        project_id: String,
+    },
+    GitDiff {
+        project_id: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    GitCommit {
+        project_id: String,
+        message: String,
+    },
+    GitPush {
+        project_id: String,
+    },
+    GitBranches {
+        project_id: String,
+    },
+    GitLog {
+        project_id: String,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// Per-project spend caps (desktop Cost → Budgets parity).
+    ListBudgets,
+    SetBudget {
+        project_id: String,
+        monthly_usd: f64,
+        #[serde(default)]
+        threshold_pct: Option<f64>,
+    },
+    RemoveBudget {
+        project_id: String,
+    },
+    ListHiddenCostProjects,
+    HideCostProject {
+        project_id: String,
+    },
+    UnhideCostProject {
+        project_id: String,
+    },
+    /// Projects (desktop sidebar projects parity): list, add by path,
+    /// rename, remove. The phone has no native folder picker, so `path` is
+    /// typed/pasted (the same absolute path the desktop stores).
+    ListProjects,
+    AddProject {
+        path: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    RenameProject {
+        project_id: String,
+        name: String,
+    },
+    RemoveProject {
+        project_id: String,
+    },
+    /// Connectors + their connection state (composer @-menu parity).
+    ListConnectors,
+    /// Replace the connectors attached to a chat session (the @-menu's
+    /// toggle) — same per-session set the desktop composer edits.
+    SetSessionConnectors {
+        session_id: String,
+        connector_ids: Vec<String>,
+    },
+    /// The connectors currently attached to a chat session.
+    GetSessionConnectors {
+        session_id: String,
+    },
+    CreateAutomation {
+        /// `AutomationInput` shape (name/prompt/harness/model/cwd/schedule/…).
+        input: serde_json::Value,
+    },
+    UpdateAutomation {
+        automation_id: String,
+        input: serde_json::Value,
+    },
+    DeleteAutomation {
+        automation_id: String,
+    },
+    SetAutomationEnabled {
+        automation_id: String,
+        enabled: bool,
+    },
+    RunAutomationNow {
+        automation_id: String,
+    },
+    StopAutomationRun {
+        automation_id: String,
+    },
+    ListAutomationRuns {
+        automation_id: String,
+        #[serde(default)]
+        limit: Option<i64>,
+    },
+    /// List one harness's own model catalog (the phone fetches a pane the
+    /// AvailableProviders cache didn't pre-warm, like the desktop picker does
+    /// on pane open).
+    ListHarnessModels {
+        harness_id: String,
+    },
+    /// Delete one persisted message (desktop MessageBubble parity).
+    DeleteChatMessage {
+        session_id: String,
+        message_id: i64,
+    },
+    /// Edit a user message: retire the branch from that message and re-send
+    /// the edited text as a fresh turn (desktop edit-to-fork).
+    EditUserMessage {
+        session_id: String,
+        message_id: i64,
+        text: String,
+    },
+    /// Re-run the session's latest user turn (desktop Regenerate).
+    RegenerateMessage {
+        session_id: String,
+    },
+    /// Turn checkpoints (desktop TurnChangesRow Undo parity).
+    ListChatCheckpoints {
+        session_id: String,
+    },
+    RestoreChatCheckpoint {
+        session_id: String,
+        checkpoint_id: i64,
+        /// Also roll the conversation back to the checkpoint (desktop asks).
+        #[serde(default)]
+        rollback_messages: Option<bool>,
+    },
+    /// Full-text search across the desktop's chat history (phone search).
+    SearchChatMessages {
+        query: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Permission posture: plan | read_only | manual | auto_edit | full_auto.
+    SetSessionPermissionMode {
+        session_id: String,
+        mode: String,
+    },
+    /// `/compact` — summarize older turns now.
+    CompactSession {
+        session_id: String,
+    },
     /// Transcribe a voice note through the desktop's whisper sidecar (the
     /// same `transcribe_audio` core the desktop push-to-talk uses).
     TranscribeAudio {
         /// base64 (no data: prefix) WAV/MP3 bytes.
         data_base64: String,
         media_type: Option<String>,
+    },
+    /// Answer an agent question (desktop QuestionCard parity): the turn is
+    /// parked until this lands. `answers` maps the question text to the chosen
+    /// option label (or an array for multi-select), `response` is free text.
+    ResolveSessionQuestion {
+        session_id: String,
+        pending_id: String,
+        answers: serde_json::Value,
+        #[serde(default)]
+        response: Option<String>,
     },
     /// Approve/reject a plan proposal card. `approved: false` optionally
     /// carries revision feedback back to the model (same core the desktop
@@ -158,13 +399,175 @@ pub enum MobileMessage {
 // Desktop → Mobile messages
 // ---------------------------------------------------------------------------
 
+/// One connector row (composer @-menu parity) — mirrors
+/// `ConnectorWithStatus` without the OAuth plumbing the phone never needs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorInfo {
+    pub id: String,
+    pub display_name: String,
+    pub icon: String,
+    pub family: String,
+    pub description: String,
+    pub connected: bool,
+    pub account_display: Option<String>,
+}
+
+/// One memory record (desktop MemoryPanel row; the full record carries
+/// provenance fields the phone doesn't render).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryInfo {
+    pub id: String,
+    pub kind: String,
+    pub content: String,
+    pub keywords: Vec<String>,
+    pub importance: i64,
+    pub confidence: f64,
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One installed skill/loop (desktop SkillsLibrary row).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledSkillInfo {
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    /// "claude" | "kimi" | "both"
+    pub source: String,
+    /// "skill" | "loop"
+    pub kind: String,
+}
+
+/// One ACP agent row (desktop picker parity).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpAgentInfo {
+    pub id: String,
+    pub display_name: String,
+    pub installed: bool,
+}
+
+/// One per-project budget (mirrors `commands::budget::BudgetConfig`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetInfo {
+    pub project_id: String,
+    /// Monthly cap in USD; non-positive means "no budget".
+    pub monthly_usd: f64,
+    /// 0..100 — percent of the cap at which the alert fires.
+    pub threshold_pct: f64,
+}
+
+/// One project row (mirrors `types::Project`, Serialize-only there).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectInfo {
+    pub id: String,
+    pub path: String,
+    pub name: String,
+    pub is_git_repo: bool,
+    pub created_at: i64,
+    pub last_opened_at: Option<i64>,
+}
+
+/// One automation row (desktop Automations view parity). Mirrors
+/// `db::automations::Automation`, which is Serialize-only and so cannot be
+/// nested directly in this Deserialize+Serialize enum.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationInfo {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    pub harness: String,
+    pub model: String,
+    pub cwd: String,
+    pub schedule: String,
+    pub enabled: bool,
+    pub last_run_at: Option<i64>,
+    pub last_status: Option<String>,
+    pub chat_session_id: Option<String>,
+    pub created_at: i64,
+    pub origin: String,
+    /// "cron" | "webhook" | "file" | "git" | "gmail"
+    pub trigger_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationRunInfo {
+    pub id: String,
+    pub automation_id: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    /// "running" | "ok" | "skipped" | error text
+    pub status: String,
+    pub summary: String,
+    pub chat_session_id: Option<String>,
+    /// "scheduled" | "manual"
+    pub source: String,
+}
+
+/// One `/`-menu skill (desktop ChatComposer slash menu parity).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSkillInfo {
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    /// "installed" | "builtin"
+    pub origin: String,
+}
+
+/// One chat-history search hit (desktop command-palette FTS parity).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSearchHit {
+    pub chat_session_id: String,
+    pub session_title: Option<String>,
+    pub message_id: Option<i64>,
+    pub snippet: Option<String>,
+    pub role: Option<String>,
+    pub created_at: i64,
+}
+
+/// One turn checkpoint (desktop TurnChangesRow Undo parity).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCheckpointInfo {
+    pub id: i64,
+    pub message_id: Option<i64>,
+    /// Files changed vs the previous checkpoint.
+    pub files: Vec<CheckpointFileInfo>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointFileInfo {
+    pub path: String,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DesktopMessage {
-    /// Provider list response.
-    AvailableProviders { providers: Vec<ProviderInfo> },
+    /// Provider list response, plus agent-harness families and the desktop's
+    /// auto-route default so the phone's composer mirrors the desktop picker.
+    AvailableProviders {
+        providers: Vec<ProviderInfo>,
+        #[serde(default)]
+        harnesses: Vec<HarnessInfo>,
+        #[serde(default)]
+        default_provider: Option<String>,
+        #[serde(default)]
+        default_model: Option<String>,
+    },
     /// Active CLI session list response.
     SessionList { sessions: Vec<SessionInfo> },
+    /// Artifact library response (desktop Sidebar → ArtifactLibrary parity).
+    ArtifactLibrary {
+        artifacts: Vec<ArtifactLibraryEntry>,
+    },
+    /// Cost rollups response — the same payload the desktop CostDashboard
+    /// renders (totals, byKind, perModel, perProject, daily). Held as a
+    /// pre-serialized value: CostRollups serializes but doesn't derive
+    /// Deserialize, and the enum requires both directions.
+    CostRollups {
+        rollups: serde_json::Value,
+    },
     /// One streamed token.
     ChatToken {
         chat_session_id: String,
@@ -280,9 +683,52 @@ pub enum DesktopMessage {
         session_id: String,
         provider_id: String,
         model: String,
+        #[serde(default)]
+        effort: Option<String>,
     },
     /// Ack for `DeleteChatSession`.
     SessionDeleted {
+        session_id: String,
+    },
+    /// Ack for `DeleteChatMessage` (a fresh `SessionMessages` follows).
+    SessionMessageDeleted {
+        session_id: String,
+        message_id: i64,
+    },
+    /// Response to `SearchChatMessages`.
+    ChatSearchResults {
+        query: String,
+        results: Vec<ChatSearchHit>,
+    },
+    /// Response to `ListChatCheckpoints` (newest last, like the desktop).
+    ChatCheckpoints {
+        session_id: String,
+        checkpoints: Vec<ChatCheckpointInfo>,
+    },
+    /// Ack for `RestoreChatCheckpoint`.
+    SessionCheckpointRestored {
+        session_id: String,
+        checkpoint_id: i64,
+        deleted_messages: i64,
+    },
+    /// A harness asked the user a question mid-turn (forwarded from the
+    /// desktop's `chat:question-request`).
+    SessionQuestionRequest {
+        session_id: String,
+        pending_id: String,
+        questions: serde_json::Value,
+    },
+    /// Ack for `ResolveSessionQuestion` (also clears the phone's card).
+    SessionQuestionResolved {
+        pending_id: String,
+    },
+    /// Ack for `SetSessionPermissionMode`.
+    SessionPermissionModeSet {
+        session_id: String,
+        mode: String,
+    },
+    /// Ack for `CompactSession`.
+    SessionCompacted {
         session_id: String,
     },
     /// Response to `GetSessionMeta` — header + model-sheet state for a chat.
@@ -292,12 +738,170 @@ pub enum DesktopMessage {
         model: String,
         #[serde(default)]
         title: Option<String>,
+        #[serde(default)]
+        effort: Option<String>,
+        /// Permission posture (plan | read_only | manual | auto_edit |
+        /// full_auto) so the phone's mode chip starts on the real value.
+        #[serde(default)]
+        permission_mode: Option<String>,
+        /// The chat's bound project, when one is bound — keys the diff peek
+        /// (file-edit activity rows fetch that project's git diff for path).
+        #[serde(default)]
+        project_id: Option<String>,
     },
     /// Ack for `RegisterPushToken`.
     PushAck {
         ok: bool,
         #[serde(default)]
         error: Option<String>,
+    },
+    /// Response to `ListConnectors` (composer @-menu).
+    ConnectorList {
+        connectors: Vec<ConnectorInfo>,
+    },
+    /// The session's attached connector ids.
+    SessionConnectors {
+        session_id: String,
+        connector_ids: Vec<String>,
+    },
+    /// Ack for `SetSessionConnectors`.
+    SessionConnectorsSet {
+        session_id: String,
+        connector_ids: Vec<String>,
+    },
+    /// Response to `ListMemoryRecords`.
+    MemoryList {
+        records: Vec<MemoryInfo>,
+    },
+    /// Acks for memory mutations.
+    MemoryUpdated {
+        memory_id: String,
+    },
+    MemoryDeleted {
+        memory_id: String,
+    },
+    MemoryPurged {
+        count: usize,
+    },
+    /// Response to `ListInstalledSkills`.
+    InstalledSkillList {
+        skills: Vec<InstalledSkillInfo>,
+    },
+    /// Response to `ReadInstalledSkill`.
+    InstalledSkillContent {
+        slug: String,
+        kind: String,
+        content: String,
+    },
+    /// Ack after save/create/delete/globalize.
+    InstalledSkillAck {
+        slug: String,
+        mirrored: usize,
+    },
+    /// Response to `GitStatus` (branch + ahead/behind + changed files, the
+    /// shape the desktop Git rail header shows).
+    GitStatusMsg {
+        is_repo: bool,
+        branch: Option<String>,
+        dirty: bool,
+        ahead: i64,
+        behind: i64,
+        remote_url: Option<String>,
+        changed_files: Vec<serde_json::Value>,
+    },
+    /// Unified text reply for diff / commit / push.
+    GitOutput {
+        output: String,
+    },
+    /// Response to `GitBranches` / `GitLog` (desktop GitLogEntry shape).
+    GitBranchesMsg {
+        branches: Vec<serde_json::Value>,
+    },
+    GitLogMsg {
+        entries: Vec<serde_json::Value>,
+    },
+    /// Response to `ListAcpAgents`.
+    AcpAgentList {
+        agents: Vec<AcpAgentInfo>,
+    },
+    /// Response to `ListBudgets` / `SetBudget` ack.
+    BudgetList {
+        budgets: Vec<BudgetInfo>,
+    },
+    /// Response to `ListHiddenCostProjects` / hide / unhide.
+    HiddenCostProjects {
+        project_ids: Vec<String>,
+    },
+    /// One project row (desktop Project parity).
+    ProjectList {
+        projects: Vec<ProjectInfo>,
+    },
+    /// Ack after add/rename.
+    ProjectUpserted {
+        project: ProjectInfo,
+    },
+    /// Ack after remove.
+    ProjectRemoved {
+        project_id: String,
+    },
+    /// Response to `ListAutomations`.
+    AutomationList {
+        automations: Vec<AutomationInfo>,
+    },
+    /// Ack for `CreateAutomation` / `UpdateAutomation` / `SetAutomationEnabled`
+    /// (the phone re-lists to converge).
+    AutomationUpdated {
+        automation_id: String,
+    },
+    /// Ack for `DeleteAutomation`.
+    AutomationDeleted {
+        automation_id: String,
+    },
+    /// Ack for `RunAutomationNow`.
+    AutomationRunStarted {
+        automation_id: String,
+    },
+    /// Ack for `StopAutomationRun` — `stopped` false means the run already
+    /// ended or belongs to the Task-Scheduler binary (desktop parity).
+    AutomationRunStopped {
+        automation_id: String,
+        stopped: bool,
+    },
+    /// Response to `ListAutomationRuns`.
+    AutomationRuns {
+        automation_id: String,
+        runs: Vec<AutomationRunInfo>,
+    },
+    /// Response to `ListChatSkills`.
+    ChatSkills {
+        skills: Vec<ChatSkillInfo>,
+    },
+    /// Response to `ReadArtifactPreview` — the desktop `ArtifactPreview`
+    /// shape (Serialize-only there, mirrored here for the phone enum).
+    ArtifactPreviewMsg {
+        path: String,
+        filename: String,
+        ext: String,
+        /// text | markdown | csv | json | html | diagram | code | image |
+        /// pdf | office | binary
+        kind: String,
+        text: Option<String>,
+        data_uri: Option<String>,
+        truncated: bool,
+    },
+    /// Response to `ListHarnessModels` — one CLI harness's own model catalog,
+    /// endpoint, and effort tiers (the desktop harness pane's payload).
+    HarnessModels {
+        harness_id: String,
+        models: Vec<HarnessModelRow>,
+        #[serde(default)]
+        default_model: Option<String>,
+        #[serde(default)]
+        endpoint: Option<String>,
+        #[serde(default)]
+        effort: Option<String>,
+        #[serde(default)]
+        effort_options: Vec<String>,
     },
     /// Response to `ListSessionArtifacts`.
     SessionArtifacts {
@@ -400,6 +1004,56 @@ pub struct ProviderInfo {
     pub gguf_path: Option<String>,
 }
 
+/// One model row of a harness's own catalog (desktop AgentModelPicker pane
+/// parity): `source` is "config" | "cli" | "builtin" — the badge the desktop
+/// shows next to the label.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HarnessModelRow {
+    pub id: String,
+    pub label: String,
+    pub source: String,
+    /// Per-model thinking tiers (empty → the harness-wide effort_options).
+    #[serde(default)]
+    pub thinking: Vec<String>,
+}
+
+/// An agent-harness family the desktop can drive (Claude Code, Kimi Code,
+/// OpenCode, …). Mirrors the desktop agent picker's entries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessInfo {
+    pub id: String,
+    pub display_name: String,
+    /// Whether the CLI is installed on the desktop (probed with a 30s cache;
+    /// may be false purely because the cache is cold).
+    pub installed: bool,
+    /// The CLI's own model catalog + endpoint + effort tiers — filled from
+    /// the warm probe cache when available; the phone fetches a cold pane's
+    /// catalog via ListHarnessModels (desktop fetches on picker open too).
+    #[serde(default)]
+    pub models: Vec<HarnessModelRow>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub effort_options: Vec<String>,
+}
+
+/// One entry of the artifact library — the same deduped, newest-first list
+/// the desktop's sidebar ArtifactLibrary renders. `chat_session_id` lets the
+/// phone open/read the artifact through the existing session-scoped read op.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactLibraryEntry {
+    pub chat_session_id: Option<String>,
+    pub filename: String,
+    pub path: String,
+    /// Lowercase extension: "docx" | "pptx" | "pdf" | "xlsx" | "html" | …
+    pub kind: String,
+    pub created_at: i64,
+}
+
 /// A local GGUF model that is available on disk but may not have a running
 /// sidecar. The mobile app can request on-demand warm-up before starting a
 /// chat turn.
@@ -426,6 +1080,15 @@ pub struct SessionInfo {
     pub last_active_at: i64,
     /// Whether this session currently has a live pane/pty on the desktop.
     pub is_live: bool,
+    /// Desktop sidebar parity: pinned chats sort first, unread show a dot.
+    #[serde(default)]
+    pub starred: bool,
+    #[serde(default)]
+    pub unread: bool,
+    /// Reasoning effort stored on the chat row (None = provider default) —
+    /// seeds the picker's effort slider.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

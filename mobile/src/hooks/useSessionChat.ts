@@ -45,11 +45,21 @@ import {
   onSessionApprovalRequest,
   onSessionApprovalResolved,
   onSessionPlanProposal,
+  onSessionQuestionRequest,
+  onSessionQuestionResolved,
   onSessionModelSet,
   onSessionDeleted,
+  onSessionMessageDeleted,
   onSessionMeta,
   onSessionArtifacts,
   onSessionArtifact,
+  onCheckpointRestored,
+  onPermissionModeSet,
+  onSessionCompacted,
+  onCheckpoints,
+  onConnected,
+  onDomainError,
+  type ChatCheckpointInfo,
   useRelay,
   type SessionMessageRecord,
   type SessionArtifact,
@@ -66,6 +76,11 @@ export interface PendingApproval {
   canAlwaysAllow: boolean;
 }
 
+export interface PendingQuestion {
+  pendingId: string;
+  questions: import('./useRelay').AgentQuestion[];
+}
+
 export interface PendingPlan {
   pendingId: string;
   title: string;
@@ -76,6 +91,12 @@ export interface SessionMetaInfo {
   provider: string;
   model: string;
   title?: string;
+  /** Reasoning effort on the chat row ('' = provider default). */
+  effort?: string | null;
+  /** Permission posture: plan | read_only | manual | auto_edit | full_auto. */
+  permissionMode?: string | null;
+  /** The chat's bound project — keys the diff peek on file-edit rows. */
+  projectId?: string | null;
 }
 
 /** Filesystem mutators the desktop approval-rules engine can auto-allow. */
@@ -98,6 +119,8 @@ export interface SessionChatState {
   pendingApprovals: PendingApproval[];
   /** Live plan-proposal card, when the agent is presenting a plan. */
   planProposal: PendingPlan | null;
+  /** A harness asked the user a question mid-turn (the turn is parked). */
+  questionRequest: PendingQuestion | null;
   /** Session meta (provider/model/title) for the header + model sheet. */
   meta: SessionMetaInfo | null;
   /** Artifacts produced in this session (timeline order). */
@@ -106,6 +129,11 @@ export interface SessionChatState {
   deleted: boolean;
   /** Older pages exist; call `loadMore` to fetch them. */
   hasMore: boolean;
+  /** Follow-ups typed while a turn is running; sent FIFO when it ends
+   *  (desktop composer queue parity). */
+  queued: string[];
+  /** Turn checkpoints (Undo) — newest last. */
+  checkpoints: ChatCheckpointInfo[];
   /** Last error surfaced from the chat pipeline. */
   error: string | null;
   /** Last finalized usage for the assistant's turn (for the cost chip). */
@@ -120,10 +148,13 @@ const INITIAL: SessionChatState = {
   status: null,
   pendingApprovals: [],
   planProposal: null,
+  questionRequest: null,
   meta: null,
   artifacts: [],
   deleted: false,
   hasMore: false,
+  queued: [],
+  checkpoints: [],
   error: null,
   lastUsage: null,
 };
@@ -133,6 +164,10 @@ export function useSessionChat(sessionId: string | null) {
   // Track which session this hook instance is "for" so streaming events
   // from a previous session (delivered after a navigation) don't leak in.
   const currentSessionId = useRef<string | null>(null);
+  // Latest meta for read-then-send actions — the effort commit rides the
+  // session's current provider/model.
+  const metaRef = useRef<SessionMetaInfo | null>(null);
+  metaRef.current = state.meta;
 
   // PERF (PERFORMANCE_AUDIT.md C6): token batching. A local model can emit
   // 30-80 tokens/sec and each token used to trigger a full setState +
@@ -148,6 +183,25 @@ export function useSessionChat(sessionId: string | null) {
   const stopFlushTimer = useCallback(() => {
     if (flushTimer.current) { clearInterval(flushTimer.current); flushTimer.current = null; }
   }, []);
+  // A turn is in flight from the moment we SEND (not from its first token) —
+  // otherwise a fast double-send started two concurrent desktop turns.
+  const turnInFlight = useRef(false);
+  const connectedRef = useRef(true);
+  useEffect(() => {
+    const c = (v: boolean) => { connectedRef.current = v; };
+    const off = onConnected.on((v) => {
+      connectedRef.current = v;
+      if (!v) {
+        // Disconnected mid-turn: the Done/Error events will never arrive.
+        setState((s) => ({ ...s, streaming: false }));
+        stopFlushTimer();
+        streamActive.current = false;
+        turnInFlight.current = false;
+      }
+    });
+    void c;
+    return off;
+  }, [stopFlushTimer]);
 
   const flushTokens = useCallback(() => {
     const pending = tokenBuf.current;
@@ -170,37 +224,112 @@ export function useSessionChat(sessionId: string | null) {
     resolveSessionApproval,
     renameSession,
     setSessionModel,
+    deleteChatMessage,
+    editUserMessage,
+    regenerateMessage,
+    listChatCheckpoints,
+    restoreChatCheckpoint,
+    setSessionPermissionMode,
+    resolveSessionQuestion,
+    compactSession,
     deleteSession,
     getSessionMeta,
     listSessionArtifacts,
     resolvePlanProposal,
   } = useRelay();
 
+  // Live-turn transcript sync. A turn started on the DESKTOP (or by an
+  // automation) persists its user row backend-side — the phone never ran its
+  // optimistic-send path, so without a fetch the reply streamed in with no
+  // prompt above it. Sync on the first token and on status banners (harness
+  // turns can sit in tool phases long before the first token), debounced so
+  // chatty status streams don't hammer the WS; the 2.5s poll below keeps
+  // covering the rest of the turn.
+  const lastTranscriptSync = useRef(0);
+  const syncTranscript = useCallback(
+    (sid: string) => {
+      const now = Date.now();
+      if (now - lastTranscriptSync.current < 1200) return;
+      lastTranscriptSync.current = now;
+      getSessionMessages(sid);
+    },
+    [getSessionMessages],
+  );
+
   // Subscribe to event buses exactly once for the lifetime of the hook.
   useEffect(() => {
-    const offMessages = onSessionMessages.on(({ sessionId: sid, messages, hasMore }) => {
+    const offMessages = onSessionMessages.on(({ sessionId: sid, messages, hasMore, append }) => {
       if (sid !== currentSessionId.current) return;
       setState((s) => {
-        // The first page replaces the list. Older pages (loadMore) prepend.
-        if (messages.length > 0 && (s.messages.length === 0 || messages[0].id < s.messages[s.messages.length - 1]!.id)) {
-          // Older page — prepend.
+        // The CALLER says which this is: a pagination reply prepends, a
+        // first-page reply replaces. Guessing from ids broke deletion — a
+        // shortened first page looked "older" and got prepended, so the
+        // deleted message never left the list.
+        if (append) {
           return { ...s, messages: [...messages, ...s.messages], hasMore, loading: false };
         }
-        return { ...s, messages, hasMore, loading: false };
+        // An empty page can be a STALE reply that raced a just-sent message
+        // (the optimistic bubble isn't persisted yet) — never blank the list
+        // for that. But when every local row came from the SERVER, an empty
+        // page is authoritative: it is how deleting the last remaining
+        // message converges. The old unconditional guard pinned that bubble
+        // on screen forever.
+        if (messages.length === 0 && s.messages.length > 0) {
+          const onlyOptimistic = s.messages.every((m) => m.id < 0);
+          if (onlyOptimistic) return { ...s, hasMore, loading: false };
+        }
+        // Convergence: tokens never arrived (the desktop's re-broadcast
+        // didn't reach us) but the server already holds the finished turn
+        // — clear the phantom streaming state instead of spinning forever.
+        if (s.streaming && !streamActive.current && messages[0]?.role === 'assistant') {
+          return { ...s, messages, hasMore, loading: false, streaming: false, streamingContent: '' };
+        }
+        // Keep optimistic bubbles the server hasn't persisted yet — a
+        // mid-turn poll must not make the user's sent message blink out of
+        // the list. Persisted rows inline attachment notes AFTER the typed
+        // text while the optimistic bubble is the typed text alone, so both
+        // sides match on the typed prefix (desktop mergeOptimistic's
+        // base-text rule) — otherwise an attachment send duplicated once
+        // the server row landed.
+        const baseText = (content: string): string => {
+          for (const marker of ['\n\n[Attached image:', '\n\nAttached file:', '\n\n[Attached file:']) {
+            const i = content.indexOf(marker);
+            if (i !== -1) return content.slice(0, i);
+          }
+          return content;
+        };
+        const serverContent = new Set(messages.map((m) => baseText(m.content)));
+        const pending = s.messages.filter((m) => m.id < 0 && !serverContent.has(baseText(m.content)));
+        return { ...s, messages: [...pending, ...messages], hasMore, loading: false };
       });
+    });    // Delete ack: drop the row immediately. The relay also sends a refreshed
+    // first page, but waiting on it left the deleted message on screen for
+    // the length of a round-trip (and forever if that page came back empty).
+    const offMessageDeleted = onSessionMessageDeleted.on(({ sessionId: sid, messageId }) => {
+      if (sid !== currentSessionId.current) return;
+      setState((s) => ({
+        ...s,
+        messages: s.messages.filter((m) => m.id !== messageId),
+      }));
     });
     const offToken = onSessionChatToken.on(({ sessionId: sid, token }) => {
       if (sid !== currentSessionId.current) return;
       tokenBuf.current += token;
       if (!streamActive.current) {
         // First token of a stream: flip streaming on, clear any status
-        // banner / stale error immediately, and start the 50ms flush.
+        // banner / stale error immediately, and start the 50ms flush. Also
+        // sync the transcript once — a desktop-started turn's user row only
+        // reaches this list through a fetch (the relay persists it before
+        // the first token, so it IS in this first reply).
         streamActive.current = true;
+        turnInFlight.current = true;
         setState((s) => ({ ...s, streaming: true, status: null, error: null }));
         flushTimer.current = setInterval(flushTokens, 50);
+        syncTranscript(sid);
       }
     });
     const offDone = onSessionChatDone.on(({ sessionId: sid, usage }) => {
+      turnInFlight.current = false;
       if (sid !== currentSessionId.current) return;
       // Flush BEFORE promoting so the unflushed tail isn't dropped.
       endStream();
@@ -240,13 +369,26 @@ export function useSessionChat(sessionId: string | null) {
       });
     });
     const offError = onSessionChatError.on(({ sessionId: sid, error }) => {
+      turnInFlight.current = false;
       if (sid !== currentSessionId.current) return;
       endStream();
       setState((s) => ({ ...s, streaming: false, error, status: null }));
     });
+    // Session-scoped relay ops (GetSessionMeta, ListSessionArtifacts, the
+    // permission/checkpoint arms) answer with a ChatError tagged
+    // "session-chat". Show it on the open chat instead of dropping it.
+    const offDomainError = onDomainError.on(({ domain, error }) => {
+      if (domain !== 'session-chat' && domain !== 'session-connectors') return;
+      if (currentSessionId.current === null) return;
+      setState((s) => ({ ...s, error }));
+    });
     const offStatus = onSessionChatStatus.on(({ sessionId: sid, message }) => {
       if (sid !== currentSessionId.current) return;
       setState((s) => ({ ...s, status: message }));
+      // Status banners can arrive long before the first token (harness tool
+      // phases) — sync the transcript so the prompt that started the live
+      // turn shows without waiting for tokens or the 2.5s poll.
+      syncTranscript(sid);
     });
     const offApproval = onSessionApprovalRequest.on(({ sessionId: sid, pendingId, tool, summary, args }) => {
       if (sid !== currentSessionId.current) return;
@@ -271,13 +413,40 @@ export function useSessionChat(sessionId: string | null) {
       if (sid !== currentSessionId.current) return;
       setState((s) => ({ ...s, planProposal: { pendingId, title, plan } }));
     });
-    const offModelSet = onSessionModelSet.on(({ sessionId: sid, providerId, model }) => {
+    const offQuestion = onSessionQuestionRequest.on(({ sessionId: sid, pendingId, questions }) => {
       if (sid !== currentSessionId.current) return;
-      setState((s) => ({ ...s, meta: { provider: providerId, model, title: s.meta?.title } }));
+      setState((s) => ({ ...s, questionRequest: { pendingId, questions } }));
     });
-    const offMeta = onSessionMeta.on(({ sessionId: sid, provider, model, title }) => {
+    const offQuestionResolved = onSessionQuestionResolved.on(({ pendingId }) => {
+      setState((s) =>
+        s.questionRequest?.pendingId === pendingId ? { ...s, questionRequest: null } : s,
+      );
+    });
+    const offModelSet = onSessionModelSet.on(({ sessionId: sid, providerId, model, effort }) => {
       if (sid !== currentSessionId.current) return;
-      setState((s) => ({ ...s, meta: { provider, model, title } }));
+      setState((s) => ({ ...s, meta: { provider: providerId, model, title: s.meta?.title, effort: effort ?? s.meta?.effort } }));
+    });
+    const offMeta = onSessionMeta.on(({ sessionId: sid, provider, model, title, effort, permission_mode, projectId }) => {
+      if (sid !== currentSessionId.current) return;
+      setState((s) => ({ ...s, meta: { provider, model, title, effort: effort ?? null, permissionMode: permission_mode ?? null, projectId: projectId ?? s.meta?.projectId ?? null } }));
+    });
+    const offCheckpoints = onCheckpoints.on(({ sessionId: sid, checkpoints }) => {
+      if (sid !== currentSessionId.current) return;
+      setState((s) => ({ ...s, checkpoints }));
+    });
+    const offRestored = onCheckpointRestored.on(({ sessionId: sid }) => {
+      if (sid !== currentSessionId.current) return;
+      // A restore rewrites files and may roll the conversation back — pull
+      // the fresh first page (the relay also pushes one after the ack).
+      getSessionMessages(sid);
+    });
+    const offPermission = onPermissionModeSet.on(({ sessionId: sid, mode }) => {
+      if (sid !== currentSessionId.current) return;
+      setState((s) => ({ ...s, meta: s.meta ? { ...s.meta, permissionMode: mode } : s.meta }));
+    });
+    const offCompacted = onSessionCompacted.on(({ sessionId: sid }) => {
+      if (sid !== currentSessionId.current) return;
+      getSessionMessages(sid);
     });
     const offArtifacts = onSessionArtifacts.on(({ sessionId: sid, artifacts }) => {
       if (sid !== currentSessionId.current) return;
@@ -304,14 +473,66 @@ export function useSessionChat(sessionId: string | null) {
       offApproval();
       offApprovalResolved();
       offPlan();
+      offQuestion();
+      offQuestionResolved();
       offModelSet();
       offMeta();
+      offCheckpoints();
+      offRestored();
+      offPermission();
+      offCompacted();
       offArtifacts();
       offArtifact();
       offDeleted();
+      offMessageDeleted();
+      offDomainError();
       stopFlushTimer();
     };
   }, [flushTokens, endStream, stopFlushTimer]);
+
+  // Queue flush: when a turn ends (Done, error, or cancel), dispatch the next
+  // queued follow-up. Kept as an effect so every end-path is covered.
+  const prevStreaming = useRef(false);
+  useEffect(() => {
+    const was = prevStreaming.current;
+    prevStreaming.current = state.streaming;
+    if (was && !state.streaming && state.queued.length > 0) {
+      const [next, ...rest] = state.queued;
+      setState((s) => ({ ...s, queued: rest }));
+      // Small gap so the desktop can finish persisting the finished turn.
+      setTimeout(() => {
+        // The relay may have dropped in the 350ms window — never lose a
+        // queued message silently.
+        const ok = sendSessionChat(sessionId!, next);
+        if (!ok) {
+          setState((s) => ({
+            ...s,
+            queued: [next, ...s.queued],
+            error: 'Queued message could not reach the desktop — it will resend when the connection returns.',
+          }));
+        }
+      }, 350);
+    }
+  }, [state.streaming, state.queued, sessionId, sendSessionChat]);
+
+  const cancelQueued = useCallback((text: string) => {
+    setState((s) => ({ ...s, queued: s.queued.filter((q) => q !== text) }));
+  }, []);
+
+  // PHONE-SIDE LIVE CONVERGENCE. Token/Done events for pane-backed (CLI
+  // harness) turns only reach the phone when the desktop FRONTEND re-broadcasts
+  // them; when it doesn't, the turn looked frozen until a manual refresh. While
+  // a turn is in flight, poll the transcript every 2.5s — the messages handler
+  // swaps in the server rows (replacing the optimistic ones) and clears the
+  // phantom streaming state when it sees the finished assistant turn. Instant
+  // token streaming still wins when the events DO arrive.
+  useEffect(() => {
+    if (!state.streaming || !sessionId) return;
+    const timer = setInterval(() => {
+      getSessionMessages(sessionId);
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [state.streaming, sessionId, getSessionMessages]);
 
   // Switch session: reset state and fetch the first page of the new session.
   useEffect(() => {
@@ -324,8 +545,14 @@ export function useSessionChat(sessionId: string | null) {
       setState(INITIAL);
       return;
     }
-    setState((s) => ({ ...INITIAL, loading: true }));
-    getSessionMessages(sessionId, undefined, 50);
+    // A disconnected phone can't fetch the page; leaving `loading: true`
+    // left the chat on its first-load spinner forever.
+    if (connectedRef.current !== false) {
+      setState((s) => ({ ...INITIAL, loading: true }));
+      getSessionMessages(sessionId, undefined, 50);
+    } else {
+      setState((s) => ({ ...INITIAL, loading: false }));
+    }
     // Header (model chip) + artifacts gallery state for this chat.
     getSessionMeta(sessionId);
     listSessionArtifacts(sessionId);
@@ -364,7 +591,16 @@ export function useSessionChat(sessionId: string | null) {
       // Send FIRST: if the relay socket isn't open the frame is dropped, and
       // we must not flip into the optimistic streaming state — no tokens or
       // Done/Error event would ever arrive to clear it (stuck streaming).
+      // Mid-turn sends would collide with the running turn on the desktop —
+      // queue them and flush in order when it completes. `turnInFlight` is set
+      // at SEND time, so a fast double-send queues instead of racing a
+      // second concurrent turn.
+      if (streamActive.current || turnInFlight.current) {
+        setState((s) => ({ ...s, queued: [...s.queued, text.trim()].slice(-10) }));
+        return;
+      }
       const sent = sendSessionChat(sessionId, text, attachments);
+      if (sent) turnInFlight.current = true;
       // Optimistically show the user message immediately so the UI feels
       // responsive before the desktop echoes it back via GetSessionMessages.
       const userMsg: SessionMessageRecord = {
@@ -388,11 +624,45 @@ export function useSessionChat(sessionId: string | null) {
     if (!sessionId) return;
     cancelSessionStream(sessionId);
     // Drop the unflushed tail too — a cancelled stream's tokens are moot.
+    // Clearing turnInFlight lets the very next send start a fresh turn
+    // immediately (steer) instead of being silently queued behind the
+    // dying one; the relay's SessionChatDone ack would clear it anyway.
     tokenBuf.current = '';
     stopFlushTimer();
     streamActive.current = false;
+    turnInFlight.current = false;
     setState((s) => ({ ...s, streaming: false, streamingContent: '' }));
   }, [sessionId, cancelSessionStream, stopFlushTimer]);
+
+  /** Steer (desktop composer parity): cancel the running turn and send this
+   *  queued message NOW, parking the rest of the queue until the steered
+   *  turn finishes (the queue-flush effect drains it in order). */
+  const steerQueued = useCallback(
+    (text: string) => {
+      if (!sessionId) return;
+      // Park the queue BEFORE cancel: the streaming true→false transition
+      // must not trigger the queue-flush effect and race this send.
+      const parked = state.queued.filter((q) => q !== text);
+      setState((s) => ({ ...s, queued: [] }));
+      cancel();
+      setTimeout(() => {
+        const ok = sendSessionChat(sessionId, text);
+        if (ok) {
+          // The steered turn streams; the parked follow-ups drain FIFO when
+          // it ends (queue-flush effect). Show the queued chip again so the
+          // user sees what's still pending.
+          setState((s) => ({ ...s, queued: [...s.queued, ...parked].slice(-10) }));
+        } else {
+          setState((s) => ({
+            ...s,
+            queued: [text, ...parked, ...s.queued].slice(-10),
+            error: 'Not connected to desktop — message not sent. Reconnect and try again.',
+          }));
+        }
+      }, 350);
+    },
+    [sessionId, state.queued, cancel, sendSessionChat],
+  );
 
   const approve = useCallback(
     (pendingId: string, alwaysAllow = false) => {
@@ -427,12 +697,95 @@ export function useSessionChat(sessionId: string | null) {
     [sessionId, resolvePlanProposal],
   );
 
+  /** Answer a parked harness question (desktop QuestionCard parity).
+   *  `answers` maps each question's text to the chosen label(s). */
+  const answerQuestion = useCallback(
+    (answers: Record<string, string | string[]>, response?: string) => {
+      if (!sessionId || !state.questionRequest) return;
+      resolveSessionQuestion(sessionId, state.questionRequest.pendingId, answers, response);
+      setState((s) => ({ ...s, questionRequest: null }));
+    },
+    [sessionId, state.questionRequest, resolveSessionQuestion],
+  );
+
+  // ---- Message actions (desktop MessageBubble parity) ----
+  const deleteMessage = useCallback(
+    (messageId: number) => {
+      if (!sessionId) return;
+      deleteChatMessage(sessionId, messageId);
+    },
+    [sessionId, deleteChatMessage],
+  );
+
+  const editMessage = useCallback(
+    (messageId: number, text: string) => {
+      if (!sessionId || !text.trim()) return;
+      editUserMessage(sessionId, messageId, text.trim());
+    },
+    [sessionId, editUserMessage],
+  );
+
+  const regenerate = useCallback(
+    (latestUserMessageId?: number) => {
+      if (!sessionId) return;
+      if (latestUserMessageId != null) {
+        setState((s) => ({ ...s, messages: s.messages.filter((m) => m.id < latestUserMessageId) }));
+      }
+      regenerateMessage(sessionId);
+    },
+    [sessionId, regenerateMessage],
+  );
+
+  const refreshCheckpoints = useCallback(
+    () => {
+      if (!sessionId) return;
+      listChatCheckpoints(sessionId);
+    },
+    [sessionId, listChatCheckpoints],
+  );
+
+  const restoreCheckpoint = useCallback(
+    (checkpointId: number, rollbackMessages = false) => {
+      if (!sessionId) return;
+      restoreChatCheckpoint(sessionId, checkpointId, rollbackMessages);
+    },
+    [sessionId, restoreChatCheckpoint],
+  );
+
+  const setPermissionMode = useCallback(
+    (mode: string) => {
+      if (!sessionId) return;
+      setSessionPermissionMode(sessionId, mode);
+      setState((s) => ({ ...s, meta: s.meta ? { ...s.meta, permissionMode: mode } : s.meta }));
+    },
+    [sessionId, setSessionPermissionMode],
+  );
+
+  const compact = useCallback(
+    () => {
+      if (!sessionId) return;
+      compactSession(sessionId);
+    },
+    [sessionId, compactSession],
+  );
+
   const setModel = useCallback(
     (providerId: string, model: string) => {
       if (!sessionId) return;
       setSessionModel(sessionId, providerId, model);
       // Optimistic header update; SessionModelSet confirms.
-      setState((s) => ({ ...s, meta: { provider: providerId, model, title: s.meta?.title } }));
+      setState((s) => ({ ...s, meta: { provider: providerId, model, title: s.meta?.title, effort: s.meta?.effort } }));
+    },
+    [sessionId, setSessionModel],
+  );
+
+  // Effort slider (desktop AgentModelPicker parity): commits to the chat row
+  // alongside the current provider/model, applied at the next spawn.
+  const setEffort = useCallback(
+    (effort: string) => {
+      if (!sessionId) return;
+      setSessionModel(sessionId, metaRef.current?.provider || 'auto', metaRef.current?.model || 'auto', effort);
+      setState((s) => ({ ...s, meta: s.meta ? { ...s.meta, effort } : s.meta }));
     },
     [sessionId, setSessionModel],
   );
@@ -479,10 +832,21 @@ export function useSessionChat(sessionId: string | null) {
     ...state,
     send,
     cancel,
+    cancelQueued,
+    steerQueued,
     approve,
     deny,
     resolvePlan,
+    answerQuestion,
     setModel,
+    setEffort,
+    deleteMessage,
+    editMessage,
+    regenerate,
+    refreshCheckpoints,
+    restoreCheckpoint,
+    setPermissionMode,
+    compact,
     remove,
     loadMore,
     refresh,

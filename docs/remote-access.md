@@ -12,11 +12,12 @@ There are two ways to bridge the phone to the relay:
 The relay generates a fresh **pairing token** (43-char base64) on each desktop app launch. The token rides in the connection URL's fragment:
 
 ```
-ws://localhost:54321/#<token>          # USB bridge
+ws://127.0.0.1:54321/#<token>          # USB bridge (what the desktop's QR encodes;
+                                       #  localhost works too over `adb reverse`)
 wss://laptop.tailnet-name.ts.net/#<token>  # Tailscale
 ```
 
-On connect, the phone pairs as the first WebSocket frame. Current builds use **E2E pairing (§3.2.11)**: the phone sends an HMAC-SHA256 *proof* of the token (`{ "type": "Pair", "proof": "<hex>" }`) — never the raw token — and both sides derive an XChaCha20-Poly1305 session key from the token via HKDF-SHA256. Every post-pair frame is then AEAD-encrypted (Binary WS frames, per-direction counter nonces), so a passive on-path observer sees ciphertext, not conversations. Pre-E2E desktops are auto-detected (pairing rejection) and the phone falls back to legacy raw-token pairing, which runs the connection in plaintext. Mismatch either way closes the connection within 30 seconds.
+On connect, the phone pairs as the first WebSocket frame. Pairing is **E2E-proof-only**: the phone sends an HMAC-SHA256 *proof* of the token (`{ "type": "Pair", "proof": "<hex>" }`) — never the raw token — and both sides derive an XChaCha20-Poly1305 session key from the token via HKDF-SHA256 (per-connection random salt, delivered in `PairOk`). Every post-pair frame is then AEAD-encrypted (Binary WS frames, per-direction counter nonces), so a passive on-path observer sees ciphertext, not conversations. There is no legacy raw-token / plaintext fallback: a `Pair` frame without a valid proof is rejected and the connection is dropped within the 30s pairing window, and the phone retries with capped exponential backoff (3s doubling to 60s per launch).
 
 ### Option A: USB bridge (adb)
 
@@ -25,7 +26,7 @@ On connect, the phone pairs as the first WebSocket frame. Current builds use **E
 3. Run `adb reverse tcp:54321 tcp:54321` from a terminal.
 4. On the phone, open **Settings → Desktop Connection**, enter `ws://localhost:54321/#<token>` (copy the token from the desktop's Remote panel), and tap **Connect**.
 
-Alternatively, scan the **local fallback QR** shown in the desktop Remote panel — it encodes the full `ws://localhost:<port>#<token>` URL.
+Alternatively, scan the **"Local URL (USB bridge)" QR** shown in the desktop Remote panel (it is the panel's primary QR whenever no tailnet/serve URL is available) — it encodes `ws://127.0.0.1:<port>/#<token>`.
 
 ### Option B: Tailscale Serve (recommended for remote)
 
@@ -38,16 +39,16 @@ Alternatively, scan the **local fallback QR** shown in the desktop Remote panel 
 1. On the desktop, open **Settings → Remote → Tailscale**.
 2. The panel shows the Tailscale status:
    - **Not installed** — download from [tailscale.com](https://tailscale.com/download).
-   - **Logged out** — click **Log in** in the panel (the app runs `tailscale up`, which opens the browser auth flow), or run `tailscale up` from a terminal.
-   - **Ready** — your machine's tailnet DNS name is shown (e.g. `laptop.tailnet-name.ts.net`).
-3. Tap **Enable Tailscale Serve**. The desktop runs `tailscale serve --bg --https=443 http://127.0.0.1:<port>` (background mode; TLS is terminated by tailscaled), and the resulting `wss://` URL is shown.
+   - **Not logged in** — click **Log in** in the panel (the app runs `tailscale up`, which opens the browser auth flow), or run `tailscale up` from a terminal.
+   - **Logged in** — your machine's tailnet DNS name is shown (e.g. `laptop.tailnet-name.ts.net`).
+3. Tap **Enable serve**. The desktop runs `tailscale serve --bg --https=443 http://127.0.0.1:<port>` (background mode; TLS is terminated by tailscaled), and the resulting `wss://` URL is shown.
 4. Scan the QR code (or manually enter the URL on the phone). The QR encodes `wss://<machine>.<tailnet>.ts.net/#<token>`.
 
 > Tip: if both devices are on the same tailnet, you can skip Serve entirely and scan the **direct tailnet QR** (primary QR in the Remote panel) — it encodes `ws://<tailnet-ip>:<port>/#<token>` and connects without the HTTPS proxy.
 5. On the phone, open **Settings → Desktop Connection → Scan QR**. Point the camera at the desktop's QR code.
 6. The phone connects automatically.
 
-**To disable:** tap **Disable Tailscale Serve** in the desktop Remote panel. This runs `tailscale serve off` and removes the public URL.
+**To disable:** tap **Disable serve** in the desktop Remote panel. This runs `tailscale serve off` and removes the public URL.
 
 ## Mobile attachments
 
@@ -58,6 +59,27 @@ The phone's ChatComposer has an attach button (📎) that opens the document pic
 - **Text files** — sent as UTF-8 inline text, up to 512 KB.
 
 The desktop processes mobile attachments through the same path as desktop-attached files: images go to the vision model, documents are text-extracted and inlined, text is appended to the message.
+
+## What the phone deliberately does NOT mirror
+
+The phone mirrors every *chat and project* surface of the desktop. The domains below are intentionally desktop-only. They are not gaps, not stubs, and not silently failing — no relay op exists for them, so nothing on the phone can half-work or appear broken.
+
+| Domain | Why it stays on the desktop |
+|---|---|
+| **Vault** (secrets, credentials, keychain) | The vault holds the API keys every proxied request uses. Exposing read/write over the relay would turn a paired phone into a key exfiltration surface for anyone who steals it. The phone never holds keys — all requests are proxied through the desktop, which is the whole point of the relay's security model. |
+| **Terminal pane** (interactive PTY, `Transcript` frames) | A live shell is a remote-code-execution primitive with no meaningful second factor. Harnesses run with their own approval cards on the phone instead, so every consequential action still passes through a reviewable prompt. |
+| **Browser pane** (Playwright/CDP control) | Same class as the terminal: driving a logged-in desktop browser from a paired phone is account takeover. |
+| **PR workflow** (PR list, create/review/merge) | Merging is irreversible from a phone and GitHub credentials live on the desktop. The phone gets the *read/write* Git surface (status, diff, per-file review, commit, push, branches, log) so review is possible anywhere; the merge decision stays deliberate and at a keyboard. |
+| **Settings administration** (provider keys, model config, appearance, hooks, updater) | Changing providers or hooks rewrites what the agent is allowed to do. The phone can pick a model and effort per chat and manage budgets, but cannot install capability or redirect credentials. |
+| **RAG / embedding index management** | Index rebuilds are long-running desktop jobs over the local corpus. The phone can search chat history (`SearchChatMessages`), which is the part that is useful away from the desk. |
+| **Image generation, TTS** | Desktop-only media jobs that write into desktop-managed artifact directories. Their *outputs* are fully visible on the phone through the artifact gallery and previews. |
+| **Updater** | Installing a desktop build from a phone would replace the binary executing the very relay serving the request. |
+
+The rule of thumb: if a surface can grant capability, hold a credential, or run a command, it stays on the desktop; if it reads or shapes work already in a chat, it ships to the phone.
+
+## Error handling on management surfaces
+
+Every non-chat relay arm (git, memory, skills, projects, budgets, sessions, artifacts, automations, connectors) answers a failure with an explicit `ChatError` tagged with its domain rather than an empty list. The phone routes those to a dismissible error bar on the affected screen, so a failed request reads as a failure instead of an empty page. A `GetSessionMeta` for a session that doesn't exist is likewise an error — the phone never renders a plausible header for a deleted chat.
 
 ## Security model
 

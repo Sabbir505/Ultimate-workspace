@@ -4,10 +4,23 @@
 
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
 use tauri::{AppHandle, Manager, State};
 
 use crate::agent_sessions::AgentSessionState;
 use crate::DbState;
+
+/// Warm results of the CLI harness model probes (`pi --list-models` etc.),
+/// keyed by harness id — 30s TTL, shared by the desktop picker command and
+/// the mobile relay (one probe serves both surfaces).
+type HarnessModelsCache =
+    std::sync::Mutex<HashMap<String, (Instant, crate::harness_config::HarnessModelConfig)>>;
+const HARNESS_MODELS_TTL: Duration = Duration::from_secs(30);
+static HARNESS_MODELS_CACHE: Lazy<HarnessModelsCache> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Send one user turn to the CLI backing this chat session. Spawns the
 /// headless process on first use (or on model change).
@@ -159,21 +172,18 @@ pub async fn list_harness_models(
     harness_id: String,
     force: Option<bool>,
 ) -> Result<crate::harness_config::HarnessModelConfig, String> {
-    use once_cell::sync::Lazy;
-    use std::collections::HashMap;
-    use std::time::{Duration, Instant};
+    harness_models_cached(harness_id, force.unwrap_or(false)).await
+}
 
-    const TTL: Duration = Duration::from_secs(30);
-    static CACHE: Lazy<std::sync::Mutex<HashMap<String, (Instant, crate::harness_config::HarnessModelConfig)>>> =
-        Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
-
-    if !force.unwrap_or(false) {
-        if let Ok(guard) = CACHE.lock() {
-            if let Some((at, cfg)) = guard.get(&harness_id) {
-                if at.elapsed() < TTL {
-                    return Ok(cfg.clone());
-                }
-            }
+/// The 30s-TTL probe cache behind `list_harness_models`, shared with the
+/// mobile relay's `ListHarnessModels` op so one probe serves both surfaces.
+pub(crate) async fn harness_models_cached(
+    harness_id: String,
+    force: bool,
+) -> Result<crate::harness_config::HarnessModelConfig, String> {
+    if !force {
+        if let Some(cfg) = harness_models_cache_get(&harness_id) {
+            return Ok(cfg);
         }
     }
     let id = harness_id.clone();
@@ -188,10 +198,25 @@ pub async fn list_harness_models(
     if cfg.models.is_empty() {
         return Ok(cfg);
     }
-    if let Ok(mut guard) = CACHE.lock() {
+    if let Ok(mut guard) = HARNESS_MODELS_CACHE.lock() {
         guard.insert(harness_id, (Instant::now(), cfg.clone()));
     }
     Ok(cfg)
+}
+
+/// Warm-cache read for surfaces that must never block (the mobile relay's
+/// AvailableProviders build runs on the WS task): `None` when the cache is
+/// cold or stale — the phone then fetches the pane's catalog on open instead.
+pub(crate) fn harness_models_cache_get(
+    harness_id: &str,
+) -> Option<crate::harness_config::HarnessModelConfig> {
+    let guard = HARNESS_MODELS_CACHE.lock().ok()?;
+    let (at, cfg) = guard.get(harness_id)?;
+    if at.elapsed() < HARNESS_MODELS_TTL {
+        Some(cfg.clone())
+    } else {
+        None
+    }
 }
 
 /// ACP agents (roadmap #20) for the composer's agent menu: the static

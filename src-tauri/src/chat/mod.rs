@@ -341,6 +341,16 @@ impl ChatManager {
         self.pending.lock().remove(id)
     }
 
+    /// Non-consuming peek: (chat_session_id, tool) for an id, without taking
+    /// the entry — lets a caller verify OWNERSHIP before resolving (the relay
+    /// must not let one phone answer another session's approval).
+    pub(crate) fn get_pending_approval_owner(&self, id: &str) -> Option<(String, String)> {
+        self.pending
+            .lock()
+            .get(id)
+            .map(|p| (p.chat_session_id.clone(), p.tool.clone()))
+    }
+
     /// Drop every pending approval for a session (used when its stream is
     /// cancelled/aborted — the senders drop, the receivers error, and the
     /// paused loops resume as "denied").

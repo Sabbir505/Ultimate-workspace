@@ -9,11 +9,18 @@
 #
 # After the job completes, the `release` job downloads the artifact, signs the
 # NSIS installer with the updater key, generates `latest.json`, and creates the
-# GitHub Release. The installer + `latest.json` are attached as release assets.
+# GitHub Release — in the PUBLIC releases-only repo (Sabbir505/relay-releases),
+# because the source repo is private and release assets must stay publicly
+# downloadable. The landing page download links and the Tauri updater endpoint
+# both point there.
 #
 # Required secrets (settings → Secrets and variables → Actions):
 #   TAURI_SIGNING_PRIVATE_KEY          - contents of .tauri/relay-update.key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD - empty string (signer is invoked -p "")
+#   RELEASES_TOKEN                     - fine-grained PAT with Contents: Read/write
+#                                        on Sabbir505/relay-releases only (the
+#                                        built-in GITHUB_TOKEN cannot publish to
+#                                        another repository)
 
 name: Build & Release
 
@@ -165,12 +172,22 @@ jobs:
           cp -r artifacts/windows/* src-tauri/target/release/bundle/nsis/ 2>/dev/null || true
           npm run release:latest-json -- --notes-file CHANGELOG.md
 
-      - name: Publish GitHub Release
+      - name: Extract release notes
+        # Cross-repo releases can't use generate_release_notes (the tag has no
+        # commit history in the releases repo), so the changelog text that the
+        # updater banner shows doubles as the release body.
+        run: |
+          set -euo pipefail
+          node -e "const fs=require('fs');const j=JSON.parse(fs.readFileSync('src-tauri/target/release/bundle/latest.json','utf8'));fs.writeFileSync('release-notes.md',j.notes||'')"
+
+      - name: Publish GitHub Release (public releases repo)
         uses: softprops/action-gh-release@v2
         with:
+          repository: Sabbir505/relay-releases
+          token: ${{ secrets.RELEASES_TOKEN }}
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: release-notes.md
           files: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/latest.json

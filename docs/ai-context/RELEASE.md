@@ -34,9 +34,21 @@ and CI handles the rest.
 - The **public key** is baked into `tauri.conf.json` (`plugins.updater.pubkey`)
   so every install can verify updates are genuinely from you.
 - The **update endpoint** is
-  `https://github.com/Sabbir505/Ultimate-workspace/releases/latest/download/latest.json`
-  — a file attached as a release asset to each GitHub Release. GitHub serves the
-  latest release's assets at that stable URL.
+  `https://github.com/Sabbir505/relay-releases/releases/latest/download/latest.json`
+  — a file attached as a release asset to each GitHub Release in the public
+  **releases-only repo** (`Sabbir505/relay-releases`). GitHub serves the latest
+  release's assets at that stable URL.
+
+## Distribution model: private source, public releases
+
+The source repo (`Ultimate-workspace`) is **private**; release assets must stay
+publicly downloadable, so releases are published to the separate public repo
+`Sabbir505/relay-releases`. That repo holds only installers, `latest.json`, and
+its README — never source. Both the landing page download links and the Tauri
+updater endpoint point at it. Publishing across repos requires the
+`RELEASES_TOKEN` secret (a fine-grained PAT with **Contents: Read/write** on
+`relay-releases` only — the built-in `GITHUB_TOKEN` cannot write to another
+repository).
 
 ## Platform
 
@@ -80,7 +92,8 @@ Pushing the tag triggers `.github/workflows/build.yml`, which:
    any cargo build, so skipping a staging step breaks the bundle.
 2. **Release (Ubuntu):** Downloads the installer, restores the signing key from
    GitHub Actions secrets, signs the `.exe` with `tauri signer sign`, generates
-   `latest.json`, and creates the GitHub Release with both files attached.
+   `latest.json`, and creates the GitHub Release — in the public
+   `Sabbir505/relay-releases` repo, with both files attached.
 
 Monitor the run at:
 `https://github.com/Sabbir505/Ultimate-workspace/actions`
@@ -91,8 +104,12 @@ The moment the release is live, every running Relay sees it within 4 hours
 ### Release notes
 
 The CI workflow uses `generate_release_notes: true`, so GitHub auto-generates
-release notes from merged PRs. The `latest.json` notes field carries a pointer
-to the full GitHub Release description.
+release notes from merged PRs. The `latest.json` notes field carries the
+released version's own section of `CHANGELOG.md` — CI invokes
+`npm run release:latest-json -- --notes-file CHANGELOG.md`, and the script
+extracts the current version's `## [x.y.z]` section body (`scripts/make-latest-json.mjs`).
+The default "See release notes on GitHub" pointer is only used for manual runs
+that pass neither `--notes` nor `--notes-file`.
 
 ---
 
@@ -122,15 +139,100 @@ npm run tauri build
 # 5. Sign + generate latest.json
 npm run release:latest-json -- --notes "Your release notes here"
 
-# 6. Create GitHub Release at:
-#    https://github.com/Sabbir505/Ultimate-workspace/releases/new
+# 6. Create the GitHub Release in the public releases repo:
+#    https://github.com/Sabbir505/relay-releases/releases/new
 #    Tag: v<version>
 #    Attach: the .exe from src-tauri/target/release/bundle/nsis/
 #             latest.json from src-tauri/target/release/bundle/
+#    (or: gh release create v<version> -R Sabbir505/relay-releases <files>)
 ```
 
 ---
 
+## Staging target (local)
+
+A second **local** channel for exercising the packaged app *and the update path* without going anywhere
+near the production feed. Windows-only, built on this machine, not in CI.
+
+What "staging" means here: the **same** app identity (`productName: Relay`, `identifier: dev.relay.app`)
+built from the same source, but with a prerelease version, its own updater endpoint
+(`Sabbir505/relay-releases-staging`) and its own signing keypair (`.tauri/relay-update-staging.key`). All of
+that lives in `src-tauri/tauri.staging.conf.json` â€” a **partial** config passed with `tauri build --config`.
+It is never auto-merged into a production build (Tauri only auto-merges `tauri.<platform>.conf.json`).
+
+Because the identity is deliberately shared, staging is *not* isolated from production on this machine:
+
+| Shared with prod | Consequence |
+|---|---|
+| NSIS install dir + uninstall entry | Installing staging **replaces** the prod install |
+| `%APPDATA%/dev.relay.app` (`relay.db`) | Staging runs against your real database â€” **back it up first** |
+| OS keychain service `dev.relay.app` | Same provider API keys and OAuth tokens |
+| `RelayAutomations` scheduled task | While on staging, automations execute the staging binary |
+
+Those constants are hardcoded in Rust (`user_dirs.rs`, `secrets.rs`, `automation_task.rs`, `os_toast.rs`),
+so a genuinely side-by-side staging build needs a compile-time channel const across those files â€” see
+"Promoting staging to a real channel".
+
+Also note the direction of travel: prod cannot pull a staging install back **down** (semver has no
+downgrade). A `0.6.1-staging.1` install ignores prod's `0.6.0`; recovery is reinstalling the prod installer
+from `relay-releases`, or letting a later prod release pass it.
+
+### Build + publish
+
+```powershell
+# 1. Bump the prerelease number in src-tauri/tauri.staging.conf.json
+#    ("0.6.1-staging.1" -> "0.6.1-staging.2"). Keep the numeric core ONE PATCH
+#    AHEAD of the last shipped prod release so a staging build is always newer
+#    than the installed prod copy. package.json and Cargo.toml stay at the prod
+#    version â€” a staging build is NOT a prod version bump.
+
+# 2. One shot: stage resources, build both sidecars, bundle, sign, write latest.json
+npm run release:staging
+
+# 3. Publish to the STAGING repo (never relay-releases)
+gh release create v0.6.1-staging.1 -R Sabbir505/relay-releases-staging `
+  src-tauri/target/release/bundle/nsis/Relay_0.6.1-staging.1_x64-setup.exe `
+  src-tauri/target/release/bundle/latest.json
+```
+
+Step 2's pieces are also available separately: `npm run tauri:build:staging` (bundle only) and
+`npm run release:latest-json:staging` (sign + `latest.json` only). Add `-- --dry-run` to the latter to print
+the resolved config / version / repo / key / tag without signing anything â€” the cheap way to confirm the
+channel before committing to a full bundle build.
+
+Do **not** mark the staging release as a prerelease: the endpoint resolves through
+`/releases/latest/download/latest.json`, which skips the newest prerelease.
+
+The staging signer never uses `TAURI_SIGNING_PRIVATE_KEY*`; like the prod flow it builds unsigned and signs
+afterwards with `tauri signer sign -p ""` (see Troubleshooting). `release:staging` refuses to run when those
+env vars are set, because that is exactly the documented hang.
+
+### Verifying a staging build
+
+1. The sidebar header shows the running version beside the wordmark (`v0.6.1-staging.1`). Nothing else in
+   the app displays the *current* version â€” `UpdateButton` / `UpdateBanner` only ever render the version of
+   an update that is *available* â€” so that label is how the two channels are told apart.
+2. The update path: bump the conf to `-staging.2`, run `npm run release:staging`, publish, and the installed
+   staging copy should show the green Update button within 4h (or on next launch), download, verify against
+   the staging pubkey, and install passively.
+3. Prod is untouched:
+   `curl -L https://github.com/Sabbir505/relay-releases/releases/latest/download/latest.json` must still
+   report the prod version.
+
+### Promoting staging to a real channel
+
+Two upgrade paths, both deliberately out of scope today:
+
+- **Dual identity** â€” a staging install that coexists with prod with its own DB, keychain and scheduled
+  task: parameterize `APP_IDENTIFIER`, `SERVICE_NAME`, `TASK_NAME` and the toast AUMID behind a compile-time
+  channel, add `productName` + `identifier` overrides to `tauri.staging.conf.json`, and add a
+  `staging*`-tag-triggered CI workflow. The staging feed repo and keypair carry over unchanged.
+- **Runtime channel toggle** â€” a prod install opting into staging from Settings: `check_for_update` and
+  `download_and_install_update` call `app.updater()`, which reads the endpoints baked in at compile time;
+  `app.updater_builder().endpoints(...)` could read them from a setting instead. Caveat: no downgrade, so a
+  prod install that switches to staging cannot switch back until prod ships a higher version.
+
+---
 ## Required GitHub Secrets
 
 Configured in Settings → Secrets and variables → Actions:
@@ -139,6 +241,7 @@ Configured in Settings → Secrets and variables → Actions:
 |--------|-------------|
 | `TAURI_SIGNING_PRIVATE_KEY` | Contents of `.tauri/relay-update.key` |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Empty string (signer is invoked `-p ""`) |
+| `RELEASES_TOKEN` | Fine-grained PAT with **Contents: Read/write** on `Sabbir505/relay-releases` only — CI publishes releases to that public repo from this private one |
 | `NOTION_CLIENT_ID` | Notion integration client ID |
 | `NOTION_CLIENT_SECRET` | Notion integration secret |
 | `GOOGLE_CLIENT_ID` | Google Cloud Console "Desktop app" client ID |

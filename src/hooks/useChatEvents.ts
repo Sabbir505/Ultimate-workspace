@@ -20,6 +20,7 @@ import {
   listenChatOpenBrowser,
   listenChatOpenPreview,
   listenChatOwner,
+  listenChatSessionUpdated,
   listenChatStatus,
   listenChatTaskProgress,
   listenChatToken,
@@ -74,6 +75,14 @@ function sessionName(chatSessionId: string): string {
 export function useChatEvents(): void {
   useEffect(() => {
     const unlistens: Array<Promise<() => void>> = [];
+
+    // A phone-side model pick updates the session row behind the desktop's
+    // back; without this the desktop picker keeps showing its stale model.
+    unlistens.push(
+      listenChatSessionUpdated(() => {
+        void useChatStore.getState().loadSessions();
+      }),
+    );
 
     unlistens.push(
       listenChatToken(({ chatSessionId, token }) => {

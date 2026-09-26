@@ -72,8 +72,12 @@ pub fn browser_push_state(
         return Err("javascript: URLs are not allowed in pushState".to_string());
     }
     browser.0.remember_tab_url(&crate::browser::browser_label(&pane_id, &tab_id), &url);
+    // `browser:url-changed`, NOT `browser:navigated`: a pushState only rewrites
+    // the address bar, it does not load a document, so there is no load-end
+    // event to follow. Reporting it as a navigation armed the frontend's
+    // loading spinner on every SPA route change, where nothing ever clears it.
     let _ = app.emit(
-        "browser:navigated",
+        "browser:url-changed",
         BrowserNavigatedEvent {
             pane_id,
             tab_id,

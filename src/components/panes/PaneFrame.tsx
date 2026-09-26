@@ -10,6 +10,7 @@
 // stay out of the initial bundle and are only downloaded the first time
 // the user opens a terminal or browser pane.
 import { lazy, memo, Suspense } from "react";
+import { Minimize2 } from "lucide-react";
 import { usePanesStore, type Pane } from "../../state/panes";
 import { harnessShortName } from "../../types";
 const BrowserPane = lazy(() => import("./BrowserPane").then((m) => ({ default: m.BrowserPane })));
@@ -70,10 +71,12 @@ export const PaneFrame = memo(function PaneFrame({
   // Dev-only live memory reading for this pane (bytes). Selected per-pane so a
   // single header re-renders when its value changes, not the whole grid.
   const memBytes = usePanesStore((s) => s.paneMemory[pane.paneId] ?? 0);
+  const setBrowserFullscreen = usePanesStore((s) => s.setBrowserFullscreen);
 
   const isTerminal = pane.data.kind === "terminal";
   const isBrowser = pane.data.kind === "browser";
-  const browserCollapsed = pane.data.kind === "browser" ? pane.data.collapsed : false;
+  const browserCollapsed = pane.data.kind === "browser" ? !!pane.data.collapsed : false;
+  const browserFullscreen = pane.data.kind === "browser" ? !!pane.data.fullscreen : false;
 
   const title =
     pane.data.kind === "browser" ? "Browser" : pane.data.label || (isTerminal ? "Terminal" : "Pane");
@@ -82,9 +85,13 @@ export const PaneFrame = memo(function PaneFrame({
 
   return (
     <div
-      className={`pane${focused ? " focused" : ""}${browserCollapsed ? " collapsed" : ""}`}
+      className={`pane${focused ? " focused" : ""}${browserCollapsed ? " collapsed" : ""}${browserFullscreen ? " pane-fullscreen" : ""}`}
       data-state={pane.state}
-      style={hidden ? { display: "none" } : undefined}
+      // A full-screen pane IGNORES `hidden`. display:none wins over
+      // position:fixed — the whole overlay (and the webview anchored to it)
+      // would simply not paint. The tool panel relies on this when the user
+      // full-screens a pane that isn't the one holding the visible slot.
+      style={hidden && !browserFullscreen ? { display: "none" } : undefined}
       onPointerDown={() => focusPane(pane.paneId)}
     >
       <div className="pane-header">
@@ -112,6 +119,23 @@ export const PaneFrame = memo(function PaneFrame({
           >
             {(memBytes / (1024 * 1024)).toFixed(memBytes >= 10 * 1024 * 1024 ? 0 : 1)} MB
           </span>
+        )}
+        {browserFullscreen && (
+          /* Second way out of full screen, next to the pane title — the
+             address bar has one too, but this stays put when the page (the
+             native webview) has keyboard focus and the global shortcuts can no
+             longer hear the user. */
+          <button
+            className="ghost pane-action pane-fs-exit"
+            title="Exit full screen (Esc)"
+            aria-label="Exit full screen"
+            onClick={(e) => {
+              e.stopPropagation();
+              setBrowserFullscreen(pane.paneId, false);
+            }}
+          >
+            <Minimize2 size={13} aria-hidden />
+          </button>
         )}
         <button
           className="ghost pane-action pane-close"

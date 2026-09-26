@@ -16,9 +16,15 @@
 //
 // IFRAME FALLBACK (Linux, or any browser_create failure): render one iframe
 // per tab, only active visible via CSS display toggle.
+//
+// FULL SCREEN: the pane can be expanded over the whole window
+// (pane.data.fullscreen → `.pane-fullscreen`, a `position: fixed` overlay).
+// Nothing webview-specific changes: the body div just grows to the viewport,
+// and the ResizeObserver above pushes the matching rect via
+// browser_set_bounds — the same path the tool-panel splitter drag uses.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Eraser, History, Pause, Play, Square } from "lucide-react";
+import { Eraser, History, Maximize2, Minimize2, Pause, Play, Square } from "lucide-react";
 import {
   createHistory,
   currentUrl,
@@ -42,11 +48,13 @@ import {
   browserSetVisibleTab,
   browserClosePane,
   listenBrowserNavigatedTab,
+  listenBrowserUrlChangedTab,
   listenBrowserTitle,
   listenBrowserLoadCompleted,
   tauriRuntimeAvailable,
   type BrowserRect,
   type BrowserNavigatedPayload,
+  type BrowserLoadCompletedPayload,
 } from "../../lib/ipc";
 import {
   usePanesStore,
@@ -55,6 +63,7 @@ import {
   type Pane,
   type BrowserTabData,
 } from "../../state/panes";
+import { toggleBrowserFullscreen } from "../../lib/sessionLauncher";
 import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import { useBrowserTrustStore } from "../../state/browserTrust";
@@ -69,6 +78,11 @@ import {
 } from "../../lib/ipc";
 
 const LOAD_TIMEOUT_MS = 8000;
+/** Upper bound on how long the loading indicator may stay up when the native
+ *  load-end event is lost (listener-registration race). Deliberately far above
+ *  any real page: a wrong "still loading" is a lie the user acts on, a missing
+ *  spinner on a pathological page is not. */
+const NATIVE_LOAD_SAFETY_MS = 45000;
 
 interface Props {
   pane: Pane;
@@ -125,6 +139,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
   const paneId = pane.paneId;
   const projectId = pane.data.kind === "browser" ? pane.data.projectId : null;
   const collapsed = pane.data.kind === "browser" ? !!pane.data.collapsed : false;
+  const fullscreen = pane.data.kind === "browser" ? !!pane.data.fullscreen : false;
   const tabs = pane.data.kind === "browser" ? pane.data.tabs : [];
   const activeTabIndex = pane.data.kind === "browser" ? pane.data.activeTabIndex : 0;
   const lastBrowserUrl = useSettingsStore((s) => s.lastBrowserUrl);
@@ -188,7 +203,29 @@ export function BrowserPane({ pane, visible = true }: Props) {
   // painted on top of whatever the user is now looking at.
   const toolPanelTab = useUiStore((s) => s.toolPanelTab);
   const toolPanelCollapsed = useUiStore((s) => s.toolPanelCollapsed);
-  const inActiveBrowserTab = toolPanelTab === "browser" && !toolPanelCollapsed;
+  // A full-screen pane is an overlay, not a tab of the panel: it stays visible
+  // even if the panel is collapsed or another tool-panel tab is on top (the
+  // panel drops full screen in that case, but the store can update one tick
+  // ahead of that effect — occluding here would blank the page for a frame).
+  const inActiveBrowserTab = fullscreen || (toolPanelTab === "browser" && !toolPanelCollapsed);
+  const setBrowserFullscreen = usePanesStore((s) => s.setBrowserFullscreen);
+
+  // Escape leaves full screen. Handled here instead of as a global "Escape"
+  // accelerator because the keybinding dispatcher preventDefaults on the FIRST
+  // match and returns — a bare Escape binding would swallow every Escape in the
+  // app (closing modals, the palette, the hotkey sheet). This listener only
+  // exists, and only claims the key, while the pane is actually expanded.
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowserFullscreen(paneId, false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [fullscreen, paneId, setBrowserFullscreen]);
 
   // Per-tab state: Map<tabId, TabState>. Lazily populated.
   const [tabStates, setTabStates] = useState<Map<string, TabState>>(() => {
@@ -497,9 +534,19 @@ export function BrowserPane({ pane, visible = true }: Props) {
 
   // --- Native navigation events: keep the address bar + history truthful
   // for in-page navigations (link clicks, redirects). ---
-  useEventSubscription<BrowserNavigatedPayload>(
-    listenBrowserNavigatedTab,
-    (payload) => {
+  //
+  // `browser:navigated` fires at navigation START (WebView2 NavigationStarting
+  // / wry on_navigation), so it ARMS the spinner — it used to clear it, which
+  // inverted the whole thing: the dot showed for the ~10ms IPC round-trip and
+  // then vanished for the entire real page load. Only
+  // `browser:load-completed` (or the safety net below) ends the load.
+  //
+  // Same-document URL changes (SPA pushState, hashchange) arrive on
+  // `browser:url-changed` instead: they change the address bar but never
+  // trigger a document load, so they must not arm a spinner that nothing
+  // would ever clear.
+  const applyNavigatedUrl = useCallback(
+    (payload: BrowserNavigatedPayload, armsLoad: boolean) => {
       if (payload.paneId !== paneId) return;
       const tabId = payload.tabId;
       const url = payload.url;
@@ -527,7 +574,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
             ...existing,
             history: h,
             address: url,
-            loading: false,
+            loading: armsLoad ? true : existing.loading,
             loadFailed: false,
           });
         }
@@ -537,8 +584,18 @@ export function BrowserPane({ pane, visible = true }: Props) {
       // Persist per-project URL.
       useSettingsStore.getState().rememberBrowserUrl(projectId, url);
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [paneId, projectId],
+    [paneId, projectId, setBrowserTabUrl],
+  );
+
+  useEventSubscription<BrowserNavigatedPayload>(
+    listenBrowserNavigatedTab,
+    (payload) => applyNavigatedUrl(payload, true),
+    [applyNavigatedUrl],
+  );
+  useEventSubscription<BrowserNavigatedPayload>(
+    listenBrowserUrlChangedTab,
+    (payload) => applyNavigatedUrl(payload, false),
+    [applyNavigatedUrl],
   );
 
   // --- Injected-bridge title reports: label the tab + derive a favicon. ---
@@ -580,16 +637,14 @@ export function BrowserPane({ pane, visible = true }: Props) {
     [paneId, setBrowserTabTitle, setBrowserTabFavicon],
   );
 
-  // --- WebView2 NavigationCompleted (ground truth) — clear the loading flag
-  // when a load REALLY finished, even if the navigation-start event never
-  // surfaced (the stuck-loading bug: spinner forever, black pane). ---
-  useEventSubscription<string>(
+  // --- WebView2 / wry load-end (ground truth) — clear the loading flag when
+  // a load REALLY finished. Emitted for SUCCESS AND FAILURE now (a DNS error
+  // or refused connection used to emit nothing, so the spinner ran forever on
+  // exactly the pages a user most needs to be told about). ---
+  useEventSubscription<BrowserLoadCompletedPayload>(
     listenBrowserLoadCompleted,
-    (label) => {
-      // label = "browser-{paneId}-tab-{tabId}" (browser_label format).
-      const m = /^browser-(.+)-tab-(.+)$/.exec(label);
-      if (!m || m[1] !== paneId) return;
-      const tabId = m[2];
+    ({ paneId: eventPaneId, tabId }) => {
+      if (eventPaneId !== paneId) return;
       setTabStates((prev) => {
         const existing = prev.get(tabId);
         if (!existing || (!existing.loading && !existing.loadFailed)) return prev;
@@ -600,6 +655,29 @@ export function BrowserPane({ pane, visible = true }: Props) {
     },
     [paneId],
   );
+
+  // --- Safety net: the load-end event can be MISSED entirely. `listen()` is
+  // async, so on first mount the navigation-start and load-complete
+  // subscriptions are still registering when the create path fires the very
+  // first `core.Navigate` — WebView2 wins that race, neither event is ever
+  // seen, and with no timeout the spinner ran forever over a loaded page
+   // (the "black pane / spinner forever" report). A generous cap is strictly
+  // better than a permanently wrong indicator: a slow page that genuinely
+  // exceeds it just loses its spinner.
+  useEffect(() => {
+    if (activeTabState?.loading !== true) return;
+    const tabId = activeTabId;
+    const timer = window.setTimeout(() => {
+      setTabStates((prev) => {
+        const existing = prev.get(tabId);
+        if (!existing?.loading) return prev;
+        const next = new Map(prev);
+        next.set(tabId, { ...existing, loading: false });
+        return next;
+      });
+    }, NATIVE_LOAD_SAFETY_MS);
+    return () => window.clearTimeout(timer);
+  }, [activeTabId, activeTabState?.loading, tabStates]);
 
   // Trust layer: hydrate the timeline snapshot once per pane (live entries
   // stream in via browser:timeline-entry -> store).
@@ -647,7 +725,10 @@ export function BrowserPane({ pane, visible = true }: Props) {
           const next = new Map(prev);
           const existing = next.get(tabId);
           if (existing && existing.loading) {
-            next.set(tabId, { ...existing, loadFailed: true });
+            // Clear `loading` too. It used to be left true, so a hung iframe
+            // showed the spinner AND the "didn't respond" card at once, and
+            // nothing would ever reconcile them.
+            next.set(tabId, { ...existing, loading: false, loadFailed: true });
           }
           return next;
         });
@@ -691,7 +772,11 @@ export function BrowserPane({ pane, visible = true }: Props) {
         ...existing,
         address: url,
         history: urlChanged ? pushUrl(existing.history, url) : existing.history,
-        loading: urlChanged ? existing.nativeOk !== true : existing.loading,
+        // An agent- or chat-driven URL change is a real navigation, so the
+        // native path must show the spinner too. It used to compute
+        // `nativeOk !== true` — i.e. `false` on the native path — so "open this
+        // link from chat" silently loaded with no indicator at all.
+        loading: urlChanged ? true : existing.loading,
         loadFailed: urlChanged ? false : existing.loadFailed,
       });
       return next;
@@ -747,8 +832,22 @@ export function BrowserPane({ pane, visible = true }: Props) {
     }
   };
 
+  /** Arm the spinner for a navigation WE initiate, so Back/Forward/Reload get
+   *  the same feedback as typing a URL. (Both of these used to fire the IPC
+   *  and set nothing, so the page just blinked with no indicator at all.) */
+  const armLoading = useCallback((tabId: string) => {
+    setTabStates((prev) => {
+      const existing = prev.get(tabId);
+      if (!existing || existing.loading) return prev;
+      const next = new Map(prev);
+      next.set(tabId, { ...existing, loading: true, loadFailed: false });
+      return next;
+    });
+  }, []);
+
   const back = () => {
     if (activeTabState?.nativeOk === true) {
+      armLoading(activeTabId);
       void browserGoBackTab(paneId, activeTabId).catch(() => {});
       return;
     }
@@ -761,6 +860,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
 
   const forward = () => {
     if (activeTabState?.nativeOk === true) {
+      armLoading(activeTabId);
       void browserGoForwardTab(paneId, activeTabId).catch(() => {});
       return;
     }
@@ -773,22 +873,12 @@ export function BrowserPane({ pane, visible = true }: Props) {
 
   const refresh = () => {
     if (activeTabState?.nativeOk === true) {
-      setTabStates((prev) => {
-        const next = new Map(prev);
-        const existing = next.get(activeTabId);
-        if (existing) next.set(activeTabId, { ...existing, loading: true });
-        return next;
-      });
-      void browserReloadTab(paneId, activeTabId)
-        .catch(() => {})
-        .finally(() => {
-          setTabStates((prev) => {
-            const next = new Map(prev);
-            const existing = next.get(activeTabId);
-            if (existing) next.set(activeTabId, { ...existing, loading: false });
-            return next;
-          });
-        });
+      armLoading(activeTabId);
+      // No `.finally(clear)` here: that resolved when the IPC returned, i.e.
+      // the instant `Navigate` was CALLED, not when the page finished — so
+      // the spinner lasted one frame. The load-end event (or the safety net)
+      // owns the transition back.
+      void browserReloadTab(paneId, activeTabId).catch(() => {});
       return;
     }
     setTabStates((prev) => {
@@ -961,13 +1051,33 @@ export function BrowserPane({ pane, visible = true }: Props) {
           onClick={(e) => e.currentTarget.select()}
           spellCheck={false}
         />
-        {activeTabState?.loading && <span className="browser-spinner" title="Loading…" />}
+        {activeTabState?.loading && (
+          <span className="browser-spinner" role="status" aria-label="Page loading" />
+        )}
         <button className="ghost" title="Copy URL" onClick={copyUrl}>
           {copied ? "✓" : "⧉"}
         </button>
         <button className="ghost" title="Open in external browser" onClick={openExternal}>
           ↗
         </button>
+        <button
+          className={`ghost browser-fs-btn${fullscreen ? " active" : ""}`}
+          title={fullscreen ? "Exit full screen (Esc)" : "Full screen"}
+          aria-label={fullscreen ? "Exit full screen" : "Enter full screen"}
+          aria-pressed={fullscreen}
+          onClick={() => toggleBrowserFullscreen(paneId)}
+        >
+          {fullscreen ? <Minimize2 size={13} aria-hidden /> : <Maximize2 size={13} aria-hidden />}
+        </button>
+      </div>
+
+      {/* Indeterminate load bar. It lives in the DOM chrome directly BELOW the
+          URL bar, never over the body: the page is a native webview (an OS
+          child window above all DOM), so anything painted here would be
+          invisible behind it. A 12px dot in the URL bar is easy to miss on a
+          slow page — this is the "something is happening" signal. */}
+      <div className={`browser-loadbar${activeTabState?.loading ? " active" : ""}`} aria-hidden="true">
+        <span className="browser-loadbar-fill" />
       </div>
 
       {/* Trust layer: gate confirmation bar. Lives in the DOM chrome ABOVE

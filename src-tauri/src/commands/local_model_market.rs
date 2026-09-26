@@ -590,6 +590,51 @@ impl FetchCatalogArgs {
     }
 }
 
+/// Map the UI's sort key to the property name HF's `GET /api/models?sort=`
+/// actually accepts.
+///
+/// The accepted set is camelCase and narrow: `lastModified | downloads |
+/// likes | createdAt | trendingScore`. Anything else is a hard HTTP 400 —
+/// which is why this is a closed mapping rather than a pass-through of the UI
+/// key. In particular the UI's "trending" is HF's `trendingScore`; sending
+/// `trending` (or aliasing it to `likes`, which an earlier revision did) makes
+/// the "Trending" and "Most liked" options produce byte-identical result sets.
+fn hf_sort_param(sort: &str) -> &'static str {
+    match sort {
+        "likes" => "likes",
+        "trending" => "trendingScore",
+        // The UI's key is "modified"; HF's property is camelCase.
+        "modified" => "lastModified",
+        "created" => "createdAt",
+        _ => "downloads",
+    }
+}
+
+/// Build the HF catalog URL for one (query, sort, limit).
+///
+/// `sort` + `direction` are applied to BOTH the search and the browse branch.
+/// They used to be added only when the search box was empty, so searching and
+/// then changing the sort fired a fresh request whose URL was identical to the
+/// previous one — the dropdown changed, the spinner flashed, the order never
+/// moved, and each flip burned its own cache slot holding duplicate data.
+/// `search` and `sort` compose fine on this endpoint.
+///
+/// `full=true` is required to get each model's `siblings` file list (the GGUF
+/// filenames/sizes), and `filter=gguf` keeps the catalog to local-model repos.
+fn build_catalog_url(query: &str, sort: &str, limit: u32) -> String {
+    let sort_param = hf_sort_param(sort);
+    if query.trim().is_empty() {
+        format!(
+            "https://huggingface.co/api/models?filter=gguf&sort={sort_param}&direction=-1&full=true&limit={limit}"
+        )
+    } else {
+        format!(
+            "https://huggingface.co/api/models?search={}&filter=gguf&sort={sort_param}&direction=-1&full=true&limit={limit}",
+            urlencoding_lite(query)
+        )
+    }
+}
+
 #[tauri::command]
 pub async fn fetch_model_catalog(
     db: State<'_, DbState>,
@@ -624,28 +669,7 @@ pub async fn fetch_model_catalog(
 
     let client = http_client();
 
-    // full=true is required to get the `siblings` file list for each model
-    let url = if !query.trim().is_empty() {
-        format!(
-            "https://huggingface.co/api/models?search={}&filter=gguf&full=true&limit={limit}",
-            urlencoding_lite(&query)
-        )
-    } else {
-        let sort_param = match sort.as_str() {
-            "likes" => "likes",
-            // "trending": HF /api/models rejects sort=trending (HTTP 400).
-            // Likes are the best available proxy for recent momentum, and the
-            // GGUF filter keeps the catalog relevant.
-            "trending" => "likes",
-            // "modified": HF rejects "modified" (HTTP 400); the REST value is
-            // camelCase "lastModified".
-            "modified" => "lastModified",
-            _ => "downloads",
-        };
-        format!(
-            "https://huggingface.co/api/models?filter=gguf&sort={sort_param}&direction=-1&full=true&limit={limit}"
-        )
-    };
+    let url = build_catalog_url(&query, &sort, limit);
 
     let mut entries: Vec<CatalogEntry> = Vec::new();
     let resp = match build_hf_request(&client, &url, token.as_deref()).send().await {
@@ -1769,6 +1793,93 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+
+    // ---- catalog URL / sort mapping (the "sorting does nothing" bug) ----
+    //
+    // Two separate defects lived here and neither had a test, which is why
+    // they survived: the search branch dropped `sort`/`direction` entirely, and
+    // "trending" was aliased to `likes` so Trending and Most liked were the
+    // same query. HF 400s on any sort value outside its camelCase set.
+
+    #[test]
+    fn hf_sort_param_maps_ui_keys_to_hf_properties() {
+        assert_eq!(hf_sort_param("trending"), "trendingScore");
+        assert_eq!(hf_sort_param("downloads"), "downloads");
+        assert_eq!(hf_sort_param("likes"), "likes");
+        assert_eq!(hf_sort_param("modified"), "lastModified");
+        assert_eq!(hf_sort_param("created"), "createdAt");
+    }
+
+    #[test]
+    fn hf_sort_param_falls_back_to_downloads() {
+        // Anything unrecognized must not be passed through — an unknown value
+        // is an HTTP 400 from HF, which the UI would render as a dead banner.
+        assert_eq!(hf_sort_param("trendingScore"), "downloads");
+        assert_eq!(hf_sort_param(""), "downloads");
+        assert_eq!(hf_sort_param("'; drop table"), "downloads");
+    }
+
+    #[test]
+    fn trending_and_likes_are_distinct_queries() {
+        // Regression: these used to be the same string, so the two dropdown
+        // options returned identical orderings.
+        assert_ne!(hf_sort_param("trending"), hf_sort_param("likes"));
+    }
+
+    #[test]
+    fn browse_url_carries_sort_and_direction() {
+        let url = build_catalog_url("", "likes", 60);
+        assert!(url.contains("sort=likes"), "{url}");
+        assert!(url.contains("direction=-1"), "{url}");
+        assert!(url.contains("filter=gguf"), "{url}");
+        assert!(url.contains("full=true"), "{url}");
+        assert!(url.contains("limit=60"), "{url}");
+    }
+
+    #[test]
+    fn search_url_also_carries_sort_and_direction() {
+        // THE bug: the search branch used to omit both, so a sort change while
+        // a query was active refetched a byte-identical URL and the list order
+        // never moved.
+        let url = build_catalog_url("qwen", "downloads", 60);
+        assert!(url.contains("search=qwen"), "{url}");
+        assert!(url.contains("sort=downloads"), "{url}");
+        assert!(url.contains("direction=-1"), "{url}");
+    }
+
+    #[test]
+    fn every_sort_key_changes_the_search_url() {
+        // Guards the whole class of bug: no two sort keys may collide, with or
+        // without a query.
+        for query in ["", "llama"] {
+            let mut seen = std::collections::HashSet::new();
+            for key in ["trending", "downloads", "likes", "modified", "created"] {
+                let url = build_catalog_url(query, key, 60);
+                assert!(
+                    seen.insert(url.clone()),
+                    "sort={key} produced a duplicate URL for query={query:?}: {url}"
+                );
+                assert!(url.contains(&format!("sort={}", hf_sort_param(key))), "{url}");
+            }
+            assert_eq!(seen.len(), 5);
+        }
+    }
+
+    #[test]
+    fn search_query_is_url_encoded() {
+        let url = build_catalog_url("qwen 3/gguf", "trending", 10);
+        assert!(!url.contains(' '), "{url}");
+        assert!(url.contains("search=qwen%203%2Fgguf"), "{url}");
+    }
+
+    #[test]
+    fn whitespace_only_query_is_treated_as_browse() {
+        // A stray space in the search box must not produce a `search=%20%20`
+        // request that HF ranks as "no results" instead of the full catalog.
+        let url = build_catalog_url("   ", "trending", 60);
+        assert!(!url.contains("search="), "{url}");
+        assert!(url.contains("sort=trendingScore"), "{url}");
+    }
 
     // ---- repo-aware catalog truncation (the "only ~6 market cards" bug) ----
 

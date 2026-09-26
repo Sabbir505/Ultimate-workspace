@@ -364,7 +364,11 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
             <select
               value={uiSort}
               onChange={(e) => onSortChange(e.target.value as UiSortKey)}
-              disabled={loading}
+              /* NEVER disabled while a fetch is in flight. HF latency runs to
+                 seconds, and a dead dropdown reads as "sorting is broken" —
+                 the user has no way to retry a change that appeared to do
+                 nothing. doFetch's monotonic ticket drops out-of-order
+                 responses, so rapid flipping is safe. */
             >
               {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
                 <option key={k} value={k}>

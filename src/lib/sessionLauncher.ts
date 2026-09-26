@@ -4,6 +4,7 @@
 import { runHarnessLogin, spawnAgentSession, spawnShell, touchSession } from "./ipc";
 import {
   MAX_PANES,
+  fullscreenBrowserPane,
   isVisiblePane,
   selectLruPane,
   usePanesStore,
@@ -317,6 +318,36 @@ export function restoreMinimizedBrowser(): void {
   const target = minimized.reduce((a, b) => (a.lastUsedAt > b.lastUsedAt ? a : b));
   store.toggleBrowserCollapsed(target.paneId);
   surfaceBrowserTab(target.paneId);
+}
+
+/** Full-screen a browser pane — or drop whichever pane is expanded.
+ *
+ *  Without a `paneId` (the F11 shortcut / command palette, which have no pane
+ *  in hand) the target is the focused browser pane, else the most-recently
+ *  used visible one; pressing it again with something already expanded exits
+ *  full screen.
+ *
+ *  Surfacing the pane's Browser tab FIRST is not cosmetic: a pane that isn't
+ *  in the active tool-panel tab is rendered with `display: none`, and a
+ *  display:none element paints nothing at all — the `position: fixed` overlay
+ *  would be an invisible pane with a webview still floating behind it. */
+export function toggleBrowserFullscreen(paneId?: string | null): void {
+  const store = usePanesStore.getState();
+  const expanded = fullscreenBrowserPane(store.panes);
+  if (expanded && (paneId == null || expanded.paneId === paneId)) {
+    store.clearBrowserFullscreen();
+    return;
+  }
+  const browsers = store.panes.filter(
+    (p) => p.data.kind === "browser" && !p.data.collapsed,
+  );
+  const target = paneId
+    ? browsers.find((p) => p.paneId === paneId)
+    : (browsers.find((p) => p.paneId === store.focusedPaneId) ??
+      browsers.reduce<Pane | null>((a, b) => (!a || a.lastUsedAt < b.lastUsedAt ? b : a), null));
+  if (!target) return;
+  surfaceBrowserTab(target.paneId);
+  store.toggleBrowserFullscreen(target.paneId);
 }
 
 /** Open a plain interactive shell pane (no agent) — the Terminal tab's

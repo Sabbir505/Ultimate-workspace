@@ -225,6 +225,27 @@ pub struct BrowserNavigatedEvent {
     pub url: String,
 }
 
+/// A native webview's load finished — success OR failure. This is the event
+/// that ends the pane's loading indicator, so it carries `paneId`/`tabId`
+/// directly instead of the `browser-{pane}-tab-{tab}` webview LABEL.
+///
+/// The label form was ambiguous by construction: the separator `-tab-` is
+/// itself legal inside a uuid, so the frontend could only recover the ids by
+/// regex, and both the greedy and the lazy parse are wrong for some id. A
+/// silently mis-parsed payload meant the load never "ended" and the spinner ran
+/// forever over a page that had finished seconds earlier. The backend already
+/// knows both ids — there is no reason to make the frontend guess.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserLoadCompletedEvent {
+    pub pane_id: String,
+    pub tab_id: String,
+    /// False when the navigation itself failed (DNS, refused connection, TLS).
+    /// The pane still stops loading either way; this is for logging/telemetry,
+    /// not for gating the indicator.
+    pub success: bool,
+}
+
 /// Document title reported by the injected bridge after a page settles (and
 /// on every post-nav injection pass). Purely cosmetic — drives the tab label
 /// + favicon in the browser pane's tab bar.

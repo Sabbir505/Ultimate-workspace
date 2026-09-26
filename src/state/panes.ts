@@ -62,6 +62,13 @@ export interface BrowserPaneData {
    *  toolbar "Browser" button restores it. This is NOT the same as close (✕),
    *  which destroys the webview. */
   collapsed?: boolean;
+  /** Expanded over the whole window: the pane leaves the tool panel's flow and
+   *  pins itself with `position: fixed; inset: 0` (.pane-fullscreen), so the
+   *  tab bar + URL bar + page take the entire viewport. At most one browser
+   *  pane is expanded at a time — setBrowserFullscreen clears the flag on
+   *  every other browser pane. Mutually exclusive with `collapsed` (a
+   *  minimized pane has no chrome left to expand). */
+  fullscreen?: boolean;
 }
 
 export type PaneKindData = TerminalPaneData | BrowserPaneData;
@@ -127,6 +134,17 @@ interface PanesState {
   setBrowserUrl: (paneId: string, url: string, tabId?: string) => void;
   /** Collapse/expand a browser pane (minimize to header bar only). */
   toggleBrowserCollapsed: (paneId: string) => void;
+  /** Expand a browser pane over the whole window (`on` is explicit so callers
+   *  don't have to read state first). Expanding one pane collapses the flag on
+   *  all others — a second full-screen webview would paint over the first. */
+  setBrowserFullscreen: (paneId: string, on: boolean) => void;
+  /** Flip one browser pane's full-screen state. No-op for a minimized pane. */
+  toggleBrowserFullscreen: (paneId: string) => void;
+  /** Drop full screen on EVERY browser pane. Called when the surroundings
+   *  that host the overlay go away (tool panel collapsed, Browser tab
+   *  switched) — the pane would otherwise be stuck in a fixed overlay the
+   *  user can no longer see the way out of. */
+  clearBrowserFullscreen: () => void;
   /** Record that the user sent input into a terminal pane (typing/paste). */
   notePaneInput: (paneId: string) => void;
   /** Set a human-readable activity label for a pane (parsed from terminal output). */
@@ -167,6 +185,14 @@ export function isVisiblePane(p: Pane): boolean {
 /** Visible panes (the ones actually rendered in the grid/split). */
 export function visiblePanes(panes: Pane[]): Pane[] {
   return panes.filter(isVisiblePane);
+}
+
+/** The browser pane currently expanded over the whole window, if any. At most
+ *  one can be (setBrowserFullscreen clears the others), so the first hit is
+ *  the one. Exported as a pure selector so ToolPanel can route the single
+ *  visible-webview slot to it without a second source of truth. */
+export function fullscreenBrowserPane(panes: Pane[]): Pane | null {
+  return panes.find((p) => p.data.kind === "browser" && !!p.data.fullscreen) ?? null;
 }
 
 /** The pane to sacrifice when the grid is full: least-recently-used. Only
@@ -492,6 +518,35 @@ export const usePanesStore = create<PanesState>((set, get) => ({
       panes: s.panes.map((p) =>
         p.paneId === paneId && p.data.kind === "browser"
           ? { ...p, data: { ...p.data, collapsed: !p.data.collapsed } }
+          : p,
+      ),
+    })),
+
+  setBrowserFullscreen: (paneId, on) =>
+    set((s) => ({
+      panes: s.panes.map((p) => {
+        if (p.data.kind !== "browser") return p;
+        // Compare with the COERCED value so panes that never carried the flag
+        // (`undefined`) keep their object identity — every non-fullscreen
+        // sibling would otherwise get a new reference on each toggle and
+        // re-render their (memoized) panes for nothing.
+        const next = p.paneId === paneId ? on : false;
+        if (!!p.data.fullscreen === next) return p;
+        return { ...p, data: { ...p.data, fullscreen: next } };
+      }),
+    })),
+
+  toggleBrowserFullscreen: (paneId) => {
+    const pane = get().panes.find((p) => p.paneId === paneId);
+    if (!pane || pane.data.kind !== "browser" || pane.data.collapsed) return;
+    get().setBrowserFullscreen(paneId, !pane.data.fullscreen);
+  },
+
+  clearBrowserFullscreen: () =>
+    set((s) => ({
+      panes: s.panes.map((p) =>
+        p.data.kind === "browser" && p.data.fullscreen
+          ? { ...p, data: { ...p.data, fullscreen: false } }
           : p,
       ),
     })),

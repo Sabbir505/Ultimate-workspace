@@ -19,6 +19,11 @@ export type KeybindingAction =
   | "openSettings"
   | "spotlightNext"
   | "spotlightPrev"
+  // Expand/collapse the browser pane over the whole window. F11 is the
+  // platform's full-screen key and free across the map — Mod+Shift+F (the
+  // "obvious" pick) is already vaultSearch, and Mod+F is the page's own
+  // find-in-page once the webview has focus.
+  | "browserFullscreen"
   // Vault surface (only fire while activeView === "vault").
   | "vaultModeToggle"
   | "vaultQuickSwitcher"
@@ -54,6 +59,11 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
   openSettings: "Mod+,",
   spotlightNext: "Mod+Shift+]",
   spotlightPrev: "Mod+Shift+[",
+  // Unmodified, like every browser's full-screen key. Only fires while the
+  // DOM has focus — a focused native webview swallows its own key events, so
+  // this is a chrome-and-chat shortcut, and Escape (handled in BrowserPane,
+  // not here) is the way back out.
+  browserFullscreen: "F11",
   // Obsidian-flavoured vault defaults. Mod+P is the quick switcher (the
   // browser's print dialog doesn't exist inside Tauri); Mod+E toggles the
   // live/reading note surface like Obsidian's edit/preview toggle.

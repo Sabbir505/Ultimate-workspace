@@ -543,6 +543,28 @@
   border: 1.5px solid var(--border); border-top-color: #5aa7f0;
   animation: tool-spin 0.7s linear infinite;
 }
+/* Blinking caret at the end of a running subagent's output. The element has
+   been rendered by SubagentPanel for the whole life of that panel but had NO
+   rule anywhere in the stylesheet, so it drew nothing — the Agents pane showed
+   no sign of life at all while a subagent streamed. Same treatment as the chat
+   bubble's typewriter caret, sized down for the narrower column. */
+.streaming-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 13px;
+  margin-inline-start: 3px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: chat-stream-caret 1.05s step-end infinite;
+  user-select: none;
+  -webkit-user-select: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .streaming-cursor {
+    animation: none;
+  }
+}
 
 /* Git sidebar agent rows — "SubAgent <role> · <task>" chip per agent.
    Running agents carry a shimmer sweep; done agents are quiet. */

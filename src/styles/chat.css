@@ -785,6 +785,75 @@ div[data-index]:has(.chat-session-row.menu-open) {
   width: 100%;
 }
 
+/* ---------- Streaming typewriter caret ----------
+   A blinking block drawn after the LAST rendered block of the live assistant
+   bubble, so the user's eye has somewhere to rest while the answer grows.
+
+   Implemented as a ::after on the bubble's final block rather than a span
+   injected into the text: the bubble's body is arbitrary react-markdown
+   output, so the trailing character is a text node buried in whatever <p> /
+   <li> the parser happened to produce this token — and it MOVES as
+   mid-stream markdown reshuffles (an unterminated fence, a half-written
+   `**bold`). Anchoring to the last BLOCK is stable across all of that and
+   costs the markdown pipeline nothing.
+
+   Logical properties throughout (margin-inline-start): the bubble is
+   dir="auto", so an Arabic/Hebrew answer must put the caret on the correct
+   side without a [dir] override. `user-select: none` keeps a drag-select
+   across the bubble from swallowing the caret's glyph. */
+.chat-bubble.assistant.streaming .chat-bubble-inner > .chat-markdown:last-child
+  > *:last-child::after,
+.chat-bubble.assistant.streaming .chat-bubble-inner > .chat-markdown:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1.05em;
+  margin-inline-start: 0.12em;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  background: var(--accent);
+  box-shadow: 0 0 6px -1px var(--accent-glow);
+  animation: chat-stream-caret 1.05s step-end infinite;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* The caret is meaningless on block-level tails (a table, a fenced code block,
+   a heading): a ::after after those would render on its own line, reading as
+   stray content. The URL-bar-style pulse on the assistant header already
+   covers "still working" in that case. */
+.chat-bubble.assistant.streaming .chat-markdown:last-child > pre::after,
+.chat-bubble.assistant.streaming .chat-markdown:last-child > table::after,
+.chat-bubble.assistant.streaming .chat-markdown:last-child > .chat-code-block::after,
+.chat-bubble.assistant.streaming .chat-markdown:last-child > ol::after,
+.chat-bubble.assistant.streaming .chat-markdown:last-child > ul::after,
+.chat-bubble.assistant.streaming .chat-markdown:last-child > blockquote::after,
+.chat-bubble.assistant.streaming .chat-markdown:last-child > h1::after,
+.chat-bubble.assistant.streaming .chat-markdown:last-child > h2::after,
+.chat-bubble.assistant.streaming .chat-markdown:last-child > h3::after,
+.chat-bubble.assistant.streaming .chat-markdown:last-child > h4::after,
+.chat-bubble.assistant.streaming .chat-markdown:last-child > hr::after {
+  content: none;
+}
+@keyframes chat-stream-caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.15;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Hold the caret solid. A frozen block still says "output continues here";
+   * a fading one just looks like a rendering glitch. */
+  .chat-bubble.assistant.streaming .chat-bubble-inner > .chat-markdown:last-child
+    > *:last-child::after,
+  .chat-bubble.assistant.streaming .chat-bubble-inner > .chat-markdown:last-child::after {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 /* Keep interactive chrome inside a selectable bubble non-selectable, so a
    text-drag over a code block or tool card doesn't grab button labels. */
 .chat-bubble-inner button,

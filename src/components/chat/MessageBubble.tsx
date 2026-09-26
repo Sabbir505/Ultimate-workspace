@@ -217,6 +217,15 @@ function MessageBubbleInner({
   // Group the turn into ordered render blocks (text / think / activity / diff).
   const blocks = useMemo(() => (isUser ? null : groupSegments(segments)), [isUser, segments]);
 
+  // Typewriter caret: draw a blinking cursor at the live growth point.
+  //
+  // Only for the streaming ASSISTANT bubble, and only once there is actual
+  // prose to sit after — `live` is true from the moment the turn starts
+  // (the store pre-creates the buffer as ""), and until the first token
+  // arrives ChatView renders TypingIndicator in this bubble's place, so a
+  // caret here would be a second, redundant indicator.
+  const caret = !isUser && live === true && plainText.length > 0;
+
   // Citation sources for interactive [1] / (1,2) markers: parsed from this
   // message's own `## Sources` section when present; otherwise, research turns
   // cite from inside their generated .md artifact, so fall back to reading the
@@ -354,7 +363,7 @@ function MessageBubbleInner({
     <>
       {segmentStart && <div className="superseded-divider">— edited —</div>}
       <div
-        className={`chat-bubble${isUser ? " user" : " assistant"}${superseded ? " superseded" : ""}${editing ? " editing" : ""}${enter ? " enter" : ""}`}
+        className={`chat-bubble${isUser ? " user" : " assistant"}${superseded ? " superseded" : ""}${editing ? " editing" : ""}${enter ? " enter" : ""}${caret ? " streaming" : ""}`}
         data-msg-id={msgId}
       >
         {superseded && (

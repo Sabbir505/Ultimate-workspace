@@ -747,9 +747,17 @@ fn create_environment_async(
 
     let options = webview2_com::CoreWebView2EnvironmentOptions::default();
     // wry's defaults: drop the mini menu + smart screen popups.
+    //
+    // --disable-popup-blocking: the runtime's popup blocker is what makes
+    // "Sign in with Google" dead in this browser. Every major IdP's button
+    // (google.accounts.id, FedCM, MSAL) calls `window.open('')` to reserve a
+    // window synchronously (that's how it dodges *page* popup blockers) and
+    // only then assigns `popup.location`. With the runtime blocker on, that
+    // first call is denied. Allow it, and let the NewWindowRequested handler
+    // below decide what to do with the result.
     unsafe {
         options.set_additional_browser_arguments(String::from(
-            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-popup-blocking",
         ));
     }
     let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
@@ -914,8 +922,63 @@ fn create_controller_async(
 /// core (called with the pane's own core on the main thread - no dispatch).
 /// Logs every transition to logs/browser.log, emits `browser:navigated` on
 /// START (the frontend's address-bar/history feed) and
-/// `browser:load-completed` on success (the spinner's ground truth), and
-/// re-installs the pushState hook + visual overlay after every navigation.
+/// `browser:load-completed` when the load ends, success OR failure (the
+/// spinner's ground truth), and re-installs the pushState hook + visual overlay
+/// after every navigation.
+/// Turn on WebView2's autofill engine + saved-password storage for a pane.
+///
+/// The crate never touched `ICoreWebView2Settings` at all, which is why no
+/// password manager had anything to attach to: the autofill engine is OFF by
+/// default for a host-created WebView2, and with no credential store behind
+/// it a manager sees an inert browser no matter how real the user data folder
+/// looks.
+///
+/// This is a prerequisite, not the whole story. 1Password/Bitwarden/etc.
+/// inject through a WebView2 **extension** or a native-messaging host, neither
+/// of which exists here, and the per-project `SetProfileName` further up means
+/// each project browses in its OWN credential jar — a manager that indexes a
+/// single default profile will read those jars as empty. What this buys today
+/// is the runtime's own form autofill plus a credential store an
+/// extension-based manager can later reach.
+///
+/// The agent-facing credential policy is unaffected: `browser_mcp`'s credential
+/// gate still denies the agent every password/card field. Only the human typing
+/// into the pane benefits.
+#[cfg(windows)]
+fn enable_autofill(core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2) {
+    use windows::core::Interface as _;
+    let Ok(settings) = (unsafe { core.Settings() }) else {
+        return;
+    };
+    // Autofill engine for form fields. Same cast wry 0.55 uses; graceful no-op
+    // on a runtime older than Settings4.
+    if let Ok(settings4) = settings.cast::<
+        webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4,
+    >() {
+        let _ = unsafe { settings4.SetIsGeneralAutofillEnabled(true) };
+    }
+    // Credential storage lives on the PROFILE, not the settings, and only from
+    // Profile6 (WebView2 Runtime >= 1.0.1901). `ICoreWebView2_13::Profile()` is
+    // the accessor wry 0.55 uses for exactly this; the cast fails harmlessly on
+    // an older runtime.
+    let profile = core
+        .cast::<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_13>()
+        .ok()
+        .and_then(|core13| unsafe { core13.Profile() }.ok());
+    if let Some(profile) = profile {
+        if let Ok(profile6) =
+            profile.cast::<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Profile6>()
+        {
+            unsafe {
+                // Without a store there is nothing for a manager to read from
+                // or write to, so autofill alone would have nothing to offer.
+                let _ = profile6.SetIsPasswordAutosaveEnabled(true);
+                let _ = profile6.SetIsGeneralAutofillEnabled(true);
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 fn attach_core_listeners(
     app: &AppHandle,
@@ -1013,10 +1076,27 @@ fn attach_core_listeners(
     let mut start_token = 0i64;
     let _ = unsafe { core.add_NavigationStarting(&start_handler, &mut start_token) };
 
-    // target=_blank / window.open: WebView2's default is a SEPARATE popup
-    // window owned by the runtime — which reads as "the app spawned a
-    // window". Claim the request and navigate this pane instead (what an
-    // embedded browser should do).
+    // target=_blank / window.open.
+    //
+    // Two shapes arrive here and they need OPPOSITE treatment:
+    //
+    // 1. A URL is present (`<a target="_blank" href=...>`, `window.open(url)`).
+    //    Claim the request and navigate this pane instead — what an embedded
+    //    single-context browser should do, and what we did before.
+    //
+    // 2. The URL is EMPTY. This is the OAuth/IdP pattern: `google.accounts.id`,
+    //    FedCM and MSAL all call `window.open('')` to reserve a window
+    //    synchronously and only then assign `popup.location`. The old code set
+    //    `Handled(true)` FIRST and then guarded the navigate on
+    //    `!uri.is_empty()` — so this case was swallowed with no navigation, no
+    //    event, no error. Clicking "Sign in with Google" was a literal no-op:
+    //    the popup was killed and there was nothing on screen to show for it.
+    //    Even had it navigated in-place, the opener's `window.opener` /
+    //    `postMessage` receiver dies with the document, so the provider's
+    //    callback can never complete. The only correct handling is to let
+    //    WebView2 open the REAL popup, which preserves the opener relationship
+    //    and lets the flow finish. The runtime's own popup blocker is disabled
+    //    in the environment options for exactly this reason.
     use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2NewWindowRequestedEventArgs;
     use webview2_com::NewWindowRequestedEventHandler;
     let app_newwin = app.clone();
@@ -1031,12 +1111,27 @@ fn attach_core_listeners(
                 } else {
                     String::new()
                 };
+                // about:blank is what `window.open('')` normalises to; treat it
+                // as the blank-reservation case, not as a real destination.
+                let is_blank = uri.is_empty()
+                    || uri.eq_ignore_ascii_case("about:blank")
+                    || uri.eq_ignore_ascii_case("about:newtab");
+                if is_blank {
+                    // Handled = false → WebView2 opens a genuine popup window
+                    // owned by the runtime, with `window.opener` intact.
+                    let _ = unsafe { args.SetHandled(false) };
+                    browser_log(
+                        &app_newwin,
+                        &format!("new-window label={label_newwin} uri={uri} -> blank popup, opening real popup window (OAuth)"),
+                    );
+                    return Ok(());
+                }
                 let _ = unsafe { args.SetHandled(true) };
                 browser_log(
                     &app_newwin,
-                    &format!("new-window label={label_newwin} uri={uri} -> same-tab navigate"),
+                    &format!("new-window label={label_newwin} uri={uri} -> same-pane navigate"),
                 );
-                if let (Some(core), false) = (sender, uri.is_empty()) {
+                if let Some(core) = sender {
                     let _ = unsafe { core.Navigate(&windows::core::HSTRING::from(uri.as_str())) };
                 }
             }
@@ -1071,8 +1166,21 @@ fn attach_core_listeners(
                 if let Some(state) = app_complete.try_state::<crate::BrowserState>() {
                     state.0.mark_nav_end(&label_complete);
                 }
+                // Emit the load-end signal for FAILURES too. Gating this on
+                // `success` meant a DNS failure, refused connection or TLS
+                // error produced NO event at all, so the frontend's loading
+                // flag could only be cleared by a later successful navigation
+                // — the pane spun forever on exactly the pages the user most
+                // needs to be told failed.
+                let _ = app_complete.emit(
+                    "browser:load-completed",
+                    crate::types::BrowserLoadCompletedEvent {
+                        pane_id: pane_complete.clone(),
+                        tab_id: tab_complete.clone(),
+                        success: success.as_bool(),
+                    },
+                );
                 if success.as_bool() {
-                    let _ = app_complete.emit("browser:load-completed", label_complete.clone());
                     // Report the settled document title so the frontend can
                     // label the tab (the navigated event fires at nav START,
                     // before a title exists). Best-effort: the completion
@@ -1351,7 +1459,7 @@ fn attach_web_message_bridge(
                             );
                         }
                         let _ = app.emit(
-                            "browser:navigated",
+                            "browser:url-changed",
                             BrowserNavigatedEvent { pane_id, tab_id, url },
                         );
                     }
@@ -1802,6 +1910,7 @@ impl BrowserManager {
                         // B-3: page→host bridge for the raw pane (no Tauri IPC
                         // here) — action results + pushState reports.
                         attach_web_message_bridge(&app2, &core);
+                        enable_autofill(&core);
                         // Navigate straight to the target — no about:blank hop.
                         unsafe { core.Navigate(&HSTRING::from(url2)) }
                             .map_err(|e| format!("initial Navigate failed: {e}"))?;
@@ -1850,6 +1959,10 @@ impl BrowserManager {
             let event_pane_id2 = event_pane_id.clone();
             let event_tab_id2 = event_tab_id.clone();
             let label_for_nav = label.clone();
+            let app_for_load = self.app.clone();
+            let label_for_load = label.clone();
+            let pane_for_title = event_pane_id.clone();
+            let tab_for_title = event_tab_id.clone();
             let blank: tauri::Url = "about:blank".parse().expect("about:blank is a valid url");
             let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(blank))
                 // Visual-feedback overlay: install at DOCUMENT-START in every
@@ -1913,7 +2026,53 @@ impl BrowserManager {
                     });
                     true
                 })
+                .on_page_load_handler(move |page_load| {
+                    // wry's load-end signal. Without it the macOS/Linux panes
+                    // had NO way to learn a load finished (the WebView2-only
+                    // NavigationCompleted handler doesn't exist there), so
+                    // their loading flag was cleared by the navigation-START
+                    // event and the spinner could not work at all on those
+                    // platforms. Fires for failures too.
+                    use tauri::webview::PageLoadEvent;
+                    if matches!(page_load.event(), PageLoadEvent::Finished) {
+                        let _ = app_for_load.emit(
+                            "browser:load-completed",
+                            crate::types::BrowserLoadCompletedEvent {
+                                pane_id: pane_for_title.clone(),
+                                tab_id: tab_for_title.clone(),
+                                success: true,
+                            },
+                        );
+                        // Report the settled title here too, not only from the
+                        // escalating injection loop below. That loop can take
+                        // up to 5 s to reach a page whose DOM arrives late, so
+                        // a slow page sat there showing the raw URL as its tab
+                        // label even after it had finished loading — which
+                        // reads as "this site is still loading". Windows has
+                        // had this on NavigationCompleted all along.
+                        if let Some(w) = app_for_load.get_webview(&label_for_load) {
+                            let _ = w.eval(&title_report_js(
+                                &pane_for_title,
+                                &tab_for_title,
+                            ));
+                        }
+                    }
+                })
                 .on_new_window(move |new_url, _label| {
+                    use tauri::webview::NewWindowResponse;
+                    // Blank reservation (`window.open('')`) is the OAuth/IdP
+                    // handshake, not a navigation: the page will assign
+                    // `popup.location` next. Denying it — as this handler used
+                    // to, unconditionally, while logging "navigating in-place"
+                    // that it never did — made "Sign in with Google" a silent
+                    // no-op. Let a real popup open so `window.opener` survives
+                    // and the provider's postMessage callback can land.
+                    let blank = new_url.as_str().is_empty()
+                        || new_url.as_str().eq_ignore_ascii_case("about:blank");
+                    if blank {
+                        eprintln!("[relay:browser] new_window: blank popup — allowing real popup window (OAuth)");
+                        return NewWindowResponse::Allow;
+                    }
                     eprintln!("[relay:browser] new_window: {new_url} — navigating in-place");
                     let _ = app2.emit(
                         "browser:navigated",
@@ -1923,7 +2082,7 @@ impl BrowserManager {
                             url: new_url.to_string(),
                         },
                     );
-                    tauri::webview::NewWindowResponse::Deny
+                    NewWindowResponse::Deny
                 });
 
             eprintln!(

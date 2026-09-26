@@ -20,6 +20,7 @@ import { openBrowserPane, openShellTerminal, restoreMinimizedBrowser } from "../
 import { startPointerDrag } from "../../lib/pointerDrag";
 import {
   activeTerminalPair,
+  fullscreenBrowserPane,
   terminalPanes,
   usePanesStore,
   type Pane,
@@ -245,6 +246,25 @@ export function ToolPanel() {
   // forgets browser_close: the webview died (full reload on switch back) or,
   // if the IPC failed, floated over the UI as a ghost.
   const browserTabActive = activeInstance?.kind === "browser";
+
+  // Full-screen browser pane, if any. It leaves the panel's flow (its own
+  // `position: fixed` overlay), but it still lives in this panel's DOM, so
+  // three things have to keep working while it's up:
+  //  1. the slot below must not be display:none (an unrendered element can't
+  //     be a fixed overlay);
+  //  2. the ONE visible-webview slot routes to it — a native webview is an OS
+  //     child window, so hiding the DOM sibling that "used to" own the slot
+  //     does NOT cover it. Only browser_set_visible(false) does;
+  //  3. the surroundings that host it going away (panel collapsed, Browser
+  //     tab switched) drops full screen, rather than stranding the user in an
+  //     overlay whose exit affordances they can no longer reach.
+  const fullscreenPaneId = useMemo(() => fullscreenBrowserPane(panes)?.paneId ?? null, [panes]);
+  const clearBrowserFullscreen = usePanesStore((s) => s.clearBrowserFullscreen);
+  useEffect(() => {
+    if (fullscreenPaneId && (collapsed || !browserTabActive)) clearBrowserFullscreen();
+  }, [fullscreenPaneId, collapsed, browserTabActive, clearBrowserFullscreen]);
+  // The pane that owns the visible native webview this frame.
+  const shownBrowserId = fullscreenPaneId ?? activeBrowserId;
 
   // Auto-open BROWSER content when a tab is selected while empty — the
   // browser tab spawns its own pane instead of showing an "open" button (a
@@ -622,7 +642,7 @@ export function ToolPanel() {
             occlusion inputs (toolPanelTab / toolPanelCollapsed). */}
         <div
           className="tool-panel-pane-slot browser-pane-slot"
-          style={{ display: browserTabActive ? undefined : "none" }}
+          style={{ display: browserTabActive || fullscreenPaneId ? undefined : "none" }}
         >
           {browserTabActive && minimizedBrowsers.length > 0 && (
             <div className="tool-panel-switcher">
@@ -650,8 +670,11 @@ export function ToolPanel() {
               /* Hide the native webview while the pane picker is open,
                   otherwise the OS-level webview floats on top of the dropdown
                   (HTML z-index can't cover a native window). The webview is
-                  brought back the moment the picker closes. */
-              visible={!collapsed && !tabPickerOpen && b.paneId === activeBrowserId}
+                  brought back the moment the picker closes. A full-screen pane
+                  holds the slot even when it isn't the active one — PaneFrame
+                  still paints it (see its `hidden` override), so its webview
+                  must stay visible too. */
+              visible={!collapsed && !tabPickerOpen && b.paneId === shownBrowserId}
             />
           ))}
         </div>

@@ -53,6 +53,7 @@ const GROUPS: HotkeyGroup[] = [
       { label: "New session", keys: (k) => k.newSession ?? "" },
       { label: "Open settings", keys: (k) => k.openSettings ?? "" },
       { label: "Toggle broadcast", keys: (k) => k.toggleBroadcast ?? "" },
+      { label: "Browser full screen (Esc to exit)", keys: (k) => k.browserFullscreen ?? "" },
     ],
   },
   {

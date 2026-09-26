@@ -106,6 +106,54 @@ describe("ModelMarket redesign", () => {
     void container;
   });
 
+  // The sort dropdown looked dead: every option refetched, but the ORDER never
+  // changed. Two backend defects (the search branch dropped `sort`, and
+  // "trending" was aliased to `likes`) plus a dropdown disabled during the
+  // in-flight fetch. These assert the UI half actually forwards the key and
+  // stays usable; the URL half is covered by the Rust build_catalog_url tests.
+  it("forwards every sort option to the backend and stays enabled while loading", async () => {
+    fetchCatalogMock.mockResolvedValue(CATALOG);
+    render(<ModelMarket onDownloadComplete={() => {}} />);
+    await waitFor(() => expect(screen.getByText("whale")).toBeTruthy());
+    expect(fetchCatalogMock).toHaveBeenCalledWith(expect.objectContaining({ sort: "trending" }));
+
+    const select = screen.getByLabelText("Sort") as HTMLSelectElement;
+    for (const key of ["downloads", "likes", "modified", "trending"]) {
+      // A disabled dropdown is indistinguishable from a broken one: HF latency
+      // runs to seconds, so the control must stay live.
+      expect(select.disabled).toBe(false);
+      fetchCatalogMock.mockClear();
+      fireEvent.change(select, { target: { value: key } });
+      expect(select.value).toBe(key);
+      await waitFor(() =>
+        expect(fetchCatalogMock).toHaveBeenCalledWith(expect.objectContaining({ sort: key })),
+      );
+    }
+  });
+
+  it("keeps the active search query when the sort changes", async () => {
+    fetchCatalogMock.mockResolvedValue(CATALOG);
+    render(<ModelMarket onDownloadComplete={() => {}} />);
+    await waitFor(() => expect(screen.getByText("whale")).toBeTruthy());
+    const input = screen.getByPlaceholderText(/search/i) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "qwen" } });
+    fireEvent.click(screen.getByText("Search"));
+    await waitFor(() =>
+      expect(fetchCatalogMock).toHaveBeenCalledWith(
+        expect.objectContaining({ query: "qwen", sort: "trending" }),
+      ),
+    );
+    fetchCatalogMock.mockClear();
+    fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "likes" } });
+    // The query must survive the sort change, and the sort must be attached to
+    // it — dropping `sort` here is what made sorting look broken.
+    await waitFor(() =>
+      expect(fetchCatalogMock).toHaveBeenCalledWith(
+        expect.objectContaining({ query: "qwen", sort: "likes" }),
+      ),
+    );
+  });
+
   it("collapses download settings into a disclosure and shows quant fit rows in the modal", async () => {
     fetchCatalogMock.mockResolvedValue(CATALOG);
     const { container } = render(

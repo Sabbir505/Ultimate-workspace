@@ -8,7 +8,7 @@ import { fuzzyFilter } from "../../lib/fuzzy";
 import { searchChatMessages, toastError, type ChatSearchResult } from "../../lib/ipc";
 import { relativeTime } from "../../lib/relativeTime";
 import { sessionDisplayTitle } from "../../lib/sessionTitle";
-import { defaultHarness, newSessionFlow, openSession } from "../../lib/sessionLauncher";
+import { defaultHarness, newSessionFlow, openSession, toggleBrowserFullscreen } from "../../lib/sessionLauncher";
 import { useChatStore } from "../../state/chat";
 import { openOnboarding } from "../../state/onboarding";
 import { useProjectsStore } from "../../state/projects";
@@ -200,6 +200,16 @@ export function CommandPalette() {
         run: () => {
           close();
           ui.toggleHotkeyOverlay();
+        },
+      },
+      {
+        id: "action:browser-fullscreen",
+        section: "Actions",
+        label: "Browser: Toggle Full Screen",
+        hint: keybindings.browserFullscreen,
+        run: () => {
+          close();
+          toggleBrowserFullscreen();
         },
       },
       {

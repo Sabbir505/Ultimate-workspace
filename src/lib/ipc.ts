@@ -127,6 +127,14 @@ export const browserClosePane = (paneId: string) =>
   safeInvoke<void>("browser_close_pane", { paneId });
 export const listenBrowserNavigatedTab = (handler: (payload: BrowserNavigatedPayload) => void) =>
   safeListen<BrowserNavigatedPayload>("browser:navigated", handler);
+/** Same-document URL change: SPA pushState / replaceState / hashchange. The
+ *  address bar and history must follow it, but NO document load happens — so
+ *  it is deliberately a DIFFERENT event from `browser:navigated`. Sharing one
+ *  event is what made the loading spinner unusable: a pushState carries no
+ *  load-end signal, so treating it as a navigation armed a spinner that
+ *  nothing could ever clear. */
+export const listenBrowserUrlChangedTab = (handler: (payload: BrowserNavigatedPayload) => void) =>
+  safeListen<BrowserNavigatedPayload>("browser:url-changed", handler);
 /** Document title reported by the injected bridge once a page settles —
  *  drives the tab bar label + derived favicon. */
 export interface BrowserTitlePayload {
@@ -136,12 +144,24 @@ export interface BrowserTitlePayload {
 }
 export const listenBrowserTitle = (handler: (payload: BrowserTitlePayload) => void) =>
   safeListen<BrowserTitlePayload>("browser:title", handler);
-/** WebView2 NavigationCompleted (success only) — the label of the webview
- *  ("browser-{pane}-tab-{tab}"). The ground-truth "this page really finished
- *  loading" signal, used to clear the pane's loading flag even when the
- *  navigation-start event never surfaced. */
-export const listenBrowserLoadCompleted = (handler: (label: string) => void) =>
-  safeListen<string>("browser:load-completed", handler);
+/** A native webview's load finished — success AND failure. This is what ends
+ *  the pane's loading flag, and the only reason a failed navigation (DNS,
+ *  refused connection, TLS) doesn't spin forever: the backend used to emit
+ *  only on success. Emitted on every platform.
+ *
+ *  Carries paneId/tabId directly rather than the `browser-{pane}-tab-{tab}`
+ *  webview label: that format is ambiguous, because `-tab-` is itself legal
+ *  inside a uuid, so the ids could only be recovered by regex — and the
+ *  frontend silently mis-parsed some of them, stranding the spinner on a page
+ *  that had already finished. */
+export interface BrowserLoadCompletedPayload {
+  paneId: string;
+  tabId: string;
+  success: boolean;
+}
+export const listenBrowserLoadCompleted = (
+  handler: (payload: BrowserLoadCompletedPayload) => void,
+) => safeListen<BrowserLoadCompletedPayload>("browser:load-completed", handler);
 
 // --- Browser pane project registry + MCP roundtrip wrappers ---
 export const registerBrowserPaneProject = (paneId: string, projectId: string) =>

@@ -2,7 +2,7 @@
 // store (remappable in Settings); this hook just registers listeners from it.
 import { useEffect } from "react";
 import { matchesAccelerator, type KeybindingAction } from "../lib/keybindings";
-import { defaultHarness, newSessionFlow } from "../lib/sessionLauncher";
+import { defaultHarness, newSessionFlow, toggleBrowserFullscreen } from "../lib/sessionLauncher";
 import { activeTerminalPair, cycleTerminalPair, usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
 import { useVaultStore } from "../state/vault";
@@ -54,7 +54,10 @@ export function useKeybindings(): void {
         action === "vaultSaveNote" ||
         // The cheatsheet must open from inside the composer/terminals too —
         // it's the discoverability surface for every other shortcut.
-        action === "toggleHotkeyOverlay";
+        action === "toggleHotkeyOverlay" ||
+        // F11 while the cursor is in the browser's address bar (where it
+        // lands after clicking the full-screen button) must still work.
+        action === "browserFullscreen";
 
       const actions: Array<[KeybindingAction, () => void]> = [
         ["openPalette", () => useUiStore.getState().togglePalette()],
@@ -89,6 +92,7 @@ export function useKeybindings(): void {
           },
         ],
         ["openSettings", () => useUiStore.getState().setActiveView("settings")],
+        ["browserFullscreen", () => toggleBrowserFullscreen()],
         [
           "spotlightNext",
           () => {

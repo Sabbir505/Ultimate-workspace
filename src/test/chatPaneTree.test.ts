@@ -443,11 +443,13 @@ describe("pane store actions", () => {
     const pane2 = findPaneForSession(s.chatPaneTree, "fork-2")!;
     expect(s.paneBuffers[pane1]?.sessionId).toBe("fork-1");
     expect(s.paneBuffers[pane2]?.sessionId).toBe("fork-2");
-    // Equalized chain: outer split keeps 2/3 (main vs. the fork subtree),
-    // inner split 1/2 — so main and both forks each render 1/3 of the width.
+    // Equalized chain: ratio is child a's share (ChatPaneGrid flexGrow), and
+    // child a is the OLDER pane — outer split 1/3 (main) leaves 2/3 for the
+    // fork subtree, inner split 1/2 halves that. Main and both forks each
+    // render 1/3 of the width.
     const tree = s.chatPaneTree!;
     expect(tree.kind).toBe("split");
-    expect((tree as any).ratio).toBeCloseTo(2 / 3);
+    expect((tree as any).ratio).toBeCloseTo(1 / 3);
     const inner = (tree as any).b;
     expect(inner.ratio).toBeCloseTo(0.5);
     expect((inner.a as any).sessionId).toBe("fork-1");

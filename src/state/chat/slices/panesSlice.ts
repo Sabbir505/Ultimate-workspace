@@ -269,14 +269,15 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
         // has two chats writing the same tree.
         void maybeEnsureWorktree(get().sessions.find((s) => s.id === created!.id), set);
       }
-      // Equalize the chain of splits created above, outermost first: the
-      // chain shares only the width the target pane originally had, and each
-      // split keeps (remaining leaves)/(remaining leaves + 1) of it, so the
-      // forks — and the pane they split from — end the same width. Clamped
-      // ratios stay in range for any chain up to the 6-pane cap.
+      // Equalize the chain of splits created above, outermost first. ratio is
+      // child a's share (ChatPaneGrid renders a at flexGrow=ratio), and child
+      // a of every split in the chain is the OLDER pane (the target each fork
+      // split away from). Giving a 1/(remaining panes) of its split leaves
+      // every pane in the chain — the fork source included — the same width.
+      // k=2 → ratios 1/3 then 1/2: source 1/3, each fork 1/3 of the width.
       const k = splitIds.length;
       for (let j = 0; j < k; j += 1) {
-        get().setChatPaneRatio(splitIds[j], (k - j) / (k + 1 - j));
+        get().setChatPaneRatio(splitIds[j], 1 / (k + 1 - j));
       }
       return forked;
     },

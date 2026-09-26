@@ -120,9 +120,13 @@ export function HotkeyOverlay() {
       <div className="hotkey-card" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
         <header className="hotkey-head">
           <h3>Keyboard shortcuts</h3>
-          <span className="hotkey-head-hint">
-            Press <kbd>{formatAccelerator(toggleKeys)}</kbd> or Esc to close
-          </span>
+          {toggleKeys ? (
+            <span className="hotkey-head-hint">
+              Press <kbd>{formatAccelerator(toggleKeys)}</kbd> or Esc to close
+            </span>
+          ) : (
+            <span className="hotkey-head-hint">Press Esc to close</span>
+          )}
         </header>
         <div className="hotkey-columns">
           {GROUPS.map((group) => {

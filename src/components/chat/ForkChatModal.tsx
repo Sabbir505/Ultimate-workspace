@@ -50,7 +50,14 @@ export function ForkChatModal() {
   // Room under the pane cap: the main pane counts as one slot (it keeps
   // showing the original chat), every existing pinned pane consumes one.
   const room = Math.max(0, MAX_CHAT_PANES - countChatPanes(tree));
-  const options: number[] = FORK_OPTIONS.filter((n) => n <= room);
+  // One spare slot still fits a single fork (the bubble's fork-here does
+  // exactly this), so surface a 1-pane pick there instead of claiming no room.
+  const options: number[] =
+    room >= FORK_OPTIONS[0]
+      ? FORK_OPTIONS.filter((n) => n <= room)
+      : room >= 1
+        ? [1]
+        : [];
   // Clamped pick: a stale count (pane layout changed while open) falls back
   // to the largest offer that still fits.
   const chosen = options.includes(count)

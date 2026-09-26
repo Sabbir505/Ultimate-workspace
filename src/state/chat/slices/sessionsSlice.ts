@@ -53,6 +53,11 @@ import { findPaneForSession } from "../paneTree";
 import type { ChatStoreGet, ChatStoreSet } from "../types";
 
 export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
+  // Dedup concurrent relists: Sidebar, ProjectsSidebar and ChatView all fire
+  // loadSessions on mount when !loaded — three identical listChatSessions IPC
+  // calls on every boot without this. Only truly concurrent calls share the
+  // fetch (the promise clears on settle); sequential relists always refetch.
+  let loadSessionsInFlight: Promise<void> | null = null;
   return {
     setCwdOverride: (chatSessionId: string, path: string | null) => {
       // Persist the pick: the DB column is what survives an app restart — the
@@ -105,25 +110,30 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       await maybeEnsureWorktree(session, set);
     },
 
-    loadSessions: async () => {
-      const sessions = await listChatSessions();
-      const clean = withoutDeleted(sessions ?? []);
-      // Seed the in-memory binding cache from the persisted project_id so the
-      // sidebar nesting + composer notch survive an app restart. Same for the
-      // working-folder overrides — without the re-seed a restart dropped the
-      // picked folder and every later send ran in the artifacts dir.
-      const seeded: Record<string, string> = {};
-      const seededCwd: Record<string, string> = {};
-      for (const s of clean) {
-        if (s.projectId) seeded[s.id] = s.projectId;
-        if (s.cwdOverride) seededCwd[s.id] = s.cwdOverride;
-      }
-      set({
-        loaded: true,
-        sessions: clean,
-        sessionProjects: seeded,
-        cwdOverrides: seededCwd,
+    loadSessions: () => {
+      loadSessionsInFlight ??= (async () => {
+        const sessions = await listChatSessions();
+        const clean = withoutDeleted(sessions ?? []);
+        // Seed the in-memory binding cache from the persisted project_id so the
+        // sidebar nesting + composer notch survive an app restart. Same for the
+        // working-folder overrides — without the re-seed a restart dropped the
+        // picked folder and every later send ran in the artifacts dir.
+        const seeded: Record<string, string> = {};
+        const seededCwd: Record<string, string> = {};
+        for (const s of clean) {
+          if (s.projectId) seeded[s.id] = s.projectId;
+          if (s.cwdOverride) seededCwd[s.id] = s.cwdOverride;
+        }
+        set({
+          loaded: true,
+          sessions: clean,
+          sessionProjects: seeded,
+          cwdOverrides: seededCwd,
+        });
+      })().finally(() => {
+        loadSessionsInFlight = null;
       });
+      return loadSessionsInFlight;
     },
 
     selectSession: async (chatSessionId: string, opts?: { recordNav?: boolean }) => {

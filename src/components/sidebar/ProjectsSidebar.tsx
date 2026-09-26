@@ -225,9 +225,16 @@ export function ProjectsSidebar() {
             useProjectsStore.getState().selectProject(project.id);
           }}
           onKeyDown={(e) => {
+            // Only when the row itself is focused: the nested New-chat/Stash
+            // buttons' keydowns bubble here too, and preventDefault would
+            // swallow their Enter/Space activation — toggling the project
+            // instead of creating the chat / stashing it.
+            if (e.target !== e.currentTarget) return;
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
               toggleExpanded(project.id);
+              // Parity with the click path, which also selects the project.
+              useProjectsStore.getState().selectProject(project.id);
             }
           }}
           title={project.path}

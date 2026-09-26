@@ -165,6 +165,35 @@ describe("ProjectsSidebar", () => {
     expect(screen.getByText("Design review")).toBeTruthy();
   });
 
+  it("keeps Enter on the New-chat button from toggling the project row", () => {
+    render(<ProjectsSidebar />);
+    expandProject("Alpha");
+    expect(useProjectsStore.getState().expanded.p1).toBe(true);
+    // The action buttons sit INSIDE the role="button" row: their keydowns
+    // must not bubble into the row's Enter/Space handler, whose
+    // preventDefault would swallow the button's activation and toggle the
+    // project instead of running the action.
+    fireEvent.keyDown(screen.getByLabelText("New chat in Alpha"), { key: "Enter" });
+    expect(useProjectsStore.getState().expanded.p1).toBe(true);
+  });
+
+  it("keeps Space on the Stash button from toggling the project row", () => {
+    render(<ProjectsSidebar />);
+    expandProject("Alpha");
+    fireEvent.keyDown(screen.getByLabelText("Stash Alpha"), { key: " " });
+    expect(useProjectsStore.getState().expanded.p1).toBe(true);
+    // Stashing itself is unaffected (it never was — the click path works).
+    fireEvent.click(screen.getByLabelText("Stash Alpha"));
+    expect(useProjectsSidebarStore.getState().stashed).toEqual(["p1"]);
+  });
+
+  it("toggles the project from the keyboard when the row itself is focused", () => {
+    render(<ProjectsSidebar />);
+    const row = screen.getByText("Alpha").closest(".sidebar-project-row") as HTMLElement;
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(useProjectsStore.getState().expanded.p1).toBe(true);
+  });
+
   it("opens the clicked chat and switches to the chat view", () => {
     useChatStore.setState({
       sessions: [session("c1", { title: "Design review" })],

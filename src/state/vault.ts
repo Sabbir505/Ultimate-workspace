@@ -65,19 +65,15 @@ interface VaultLayout {
   leftCollapsed: boolean;
   assetSplitPct: number;
   openNotes: string[];
+  openAssets: string[];
   pinnedPaths: string[];
-  recentPaths: string[];
 }
 
 const LAYOUT_KEY = "relay.vault.layout";
 
-/** Cap on restored recent-note entries — the same `slice(0, 12)` openNote
- *  applies when it refreshes the list. */
-const RECENT_PATHS_CAP = 12;
-
 /** Validate a persisted path list: strings only, non-empty, optionally
  *  capped (a tampered/hand-edited layout blob must not feed non-strings
- *  into the tabs/pins/recents rails). */
+ *  into the tabs/pins rails). */
 function validPathList(v: unknown, cap?: number): string[] {
   if (!Array.isArray(v)) return [];
   const out = v.filter((p): p is string => typeof p === "string" && p.trim() !== "");
@@ -91,7 +87,7 @@ function clampPct(v: unknown, fallback: number): number {
 
 /** Survives restarts; guarded because tests (and odd embeds) may lack storage. */
 function loadLayout() {
-  const fallback = { leftRailWidth: VAULT_LEFT_RAIL.default, rightRailWidth: VAULT_RIGHT_RAIL.default, leftRailCollapsed: false, assetSplitPct: 58, openNotes: [] as string[], pinnedPaths: [] as string[], recentPaths: [] as string[] };
+  const fallback = { leftRailWidth: VAULT_LEFT_RAIL.default, rightRailWidth: VAULT_RIGHT_RAIL.default, leftRailCollapsed: false, assetSplitPct: 58, openNotes: [] as string[], openAssets: [] as string[], pinnedPaths: [] as string[] };
   try {
     const raw = localStorage.getItem(LAYOUT_KEY);
     if (!raw) return fallback;
@@ -102,8 +98,8 @@ function loadLayout() {
       leftRailCollapsed: p.leftCollapsed === true,
       assetSplitPct: clampPct(p.assetSplitPct, 58),
       openNotes: validPathList(p.openNotes),
+      openAssets: validPathList(p.openAssets),
       pinnedPaths: validPathList(p.pinnedPaths),
-      recentPaths: validPathList(p.recentPaths, RECENT_PATHS_CAP),
     };
   } catch {
     return fallback;
@@ -154,8 +150,13 @@ interface VaultStore {
   /** The open item: path + live editor text + last-saved text (dirty check). */
   activePath: string | null;
   /** The open non-note asset (pdf/image/…), independent of the note so both
-   *  can sit side by side — take notes while reading a pdf. */
+   *  can sit side by side — take notes while reading a pdf. This is the
+   *  ACTIVE asset of the asset pane's own tab strip; the full list is
+   *  `openAssets`. */
   assetPath: string | null;
+  /** Open non-note assets, in tab order (mirrors `openNotes` for the note
+   *  pane). `assetPath` is the active one. Persisted via the layout blob. */
+  openAssets: string[];
   /** Asset|note split (percent to the asset) — user-resizable, persisted. */
   assetSplitPct: number;
   content: string;
@@ -175,8 +176,6 @@ interface VaultStore {
   openNotes: string[];
   /** Pinned notes — float to the top of the files rail and the switcher. */
   pinnedPaths: string[];
-  /** Recently opened notes, most recent first (persisted, capped). */
-  recentPaths: string[];
   /** "Insert template" picker modal. */
   templatePickerOpen: boolean;
   meta: VaultNoteMeta | null;
@@ -201,6 +200,12 @@ interface VaultStore {
   openNote: (path: string, subpath?: string | null) => Promise<void>;
   openFile: (path: string) => void;
   closeAsset: () => void;
+  /** Switch the asset pane to another open asset (tab click). */
+  setActiveAsset: (path: string) => void;
+  /** Close one asset tab; when it is the active one the neighbor activates. */
+  closeAssetTab: (path: string) => void;
+  /** Drag-reorder the asset tab strip. */
+  reorderAssetTab: (path: string, toIndex: number) => void;
   setContent: (text: string) => void;
   scheduleSave: () => void;
   saveNow: () => Promise<void>;
@@ -242,6 +247,7 @@ interface VaultStore {
   restoreSnapshot: (snap: {
     graphOpen: boolean;
     assetPath: string | null;
+    openAssets: string[];
     activePath: string | null;
   }) => Promise<void>;
   /** Watcher event: paths were reindexed on disk. */
@@ -260,11 +266,13 @@ let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 function recordVaultNav(s: {
   graphOpen: boolean;
   assetPath: string | null;
+  openAssets: string[];
   activePath: string | null;
 }) {
   useUiStore.getState().recordVaultNav({
     graphOpen: s.graphOpen,
     assetPath: s.assetPath,
+    openAssets: s.openAssets,
     activePath: s.activePath,
   });
 }
@@ -285,6 +293,20 @@ function dispatchSubpathScroll(subpath?: string | null) {
   setTimeout(dispatch, 350);
   setTimeout(dispatch, 900);
 }
+
+/** A vault path that names an asset rather than a note: it ends in a short
+ *  alphanumeric extension that is NOT `.md`. Used by openNote to hand such
+ *  targets to the asset pane instead of resolving/creating a note.
+ *
+ *  This is deliberately extension-SHAPED rather than an allowlist of known
+ *  asset types: a vault can hold anything, and a type missing from an
+ *  allowlist would fall through to the create branch and write `<name>.<x>.md`
+ *  next to the original — the exact failure this guards. The cost is that a
+ *  note stem containing a dot (`Notes.v2`) routes to the asset pane rather
+ *  than auto-creating; that costs the user a click, while the other case
+ *  pollutes their vault with junk files. Extension length is capped so a
+ *  dotted FOLDER (`Archive.v2/Foo`, no trailing extension) is unaffected. */
+const ASSET_PATH_RE = /\.(?!md$)[a-z0-9]{1,8}$/i;
 
 /**
  * Resolve a link target to a concrete note path. Wikilink-style targets
@@ -336,8 +358,8 @@ export const useVaultStore = create<VaultStore>((set, get) => {
         leftCollapsed: s.leftRailCollapsed,
         assetSplitPct: s.assetSplitPct,
         openNotes: s.openNotes,
+        openAssets: s.openAssets,
         pinnedPaths: s.pinnedPaths,
-        recentPaths: s.recentPaths,
       });
     }, 250);
   };
@@ -356,8 +378,11 @@ export const useVaultStore = create<VaultStore>((set, get) => {
   noteModes: {},
   rail: "files",
   templatePickerOpen: false,
-  ...loadLayout(), // validated, includes openNotes/pinnedPaths/recentPaths
-  rightRailOpen: true,
+  ...loadLayout(), // validated, includes openNotes/openAssets/pinnedPaths
+  // Collapsed by default: on a fresh note every section reads "No links yet",
+  // so the rail is a column of empty chrome crowding out the note. The toggle
+  // is session-only (not in the layout blob) — opening it sticks for the run.
+  rightRailOpen: false,
   meta: null,
   loadingNote: false,
   searchQuery: "",
@@ -385,7 +410,7 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     // in the editor — the next autosave would write it into the NEW vault.
     // Tabs/pins/recents/modes are vault-scoped too: left as-is they would
     // resolve the previous vault's paths against the new one.
-    set({ root, activePath: null, assetPath: null, content: "", savedContent: "", meta: null, graph: null, tags: [], openNotes: [], pinnedPaths: [], recentPaths: [], noteModes: {} });
+    set({ root, activePath: null, assetPath: null, content: "", savedContent: "", meta: null, graph: null, tags: [], openNotes: [], openAssets: [], pinnedPaths: [], noteModes: {} });
     // The editor caches whole-note reads for `#subpath` completion keyed by
     // path — drop them so the new vault never resolves the old vault's
     // text. Dynamic import: the editor chunk (CodeMirror) stays lazy.
@@ -399,7 +424,7 @@ export const useVaultStore = create<VaultStore>((set, get) => {
 
   unbind: async () => {
     await vaultUnbind();
-    set({ root: null, stats: null, tree: [], activePath: null, assetPath: null, content: "", savedContent: "", meta: null, graph: null, tags: [] });
+    set({ root: null, stats: null, tree: [], activePath: null, assetPath: null, openAssets: [], content: "", savedContent: "", meta: null, graph: null, tags: [] });
   },
 
   rescan: async () => {
@@ -430,6 +455,22 @@ export const useVaultStore = create<VaultStore>((set, get) => {
       dispatchSubpathScroll(subpath);
       return;
     }
+    // A path carrying a non-markdown extension is an ASSET, never a note to
+    // create. This diverts BEFORE resolution, which matters twice over:
+    //   1. resolveNotePath matches by stem, so a stray `paper.pdf.md` already
+    //      in the index would answer a `paper.pdf` request and open the junk
+    //      note instead of the real PDF;
+    //   2. if nothing resolved, the create branch below used to run and
+    //      write `paper.pdf.md` into the user's vault — one junk file per
+    //      click, for a file that was sitting right there in the tree.
+    // Extensionless targets are unaffected, so `[[New Idea]]` and
+    // `[[Folder/Note]]` still create Obsidian-style.
+    const target = path.trim().replace(/^\.\//, "");
+    if (ASSET_PATH_RE.test(target)) {
+      set({ loadingNote: false });
+      get().openFile(target);
+      return;
+    }
     // Unsaved work first: flush whatever is pending so nothing is lost.
     if (saveTimer) {
       clearTimeout(saveTimer);
@@ -458,10 +499,9 @@ export const useVaultStore = create<VaultStore>((set, get) => {
       // Notes open in preview by default; a note the user last toggled to
       // edit keeps that choice (per-note, session-scoped).
       mode: s0.noteModes[resolved] ?? "preview",
-      // Tab strip: an opened note gets a tab (appended, no dupes). Recents
-      // dedupe to the front, capped — both persisted via the layout blob.
+      // Tab strip: an opened note gets a tab (appended, no dupes),
+      // persisted via the layout blob.
       openNotes: s0.openNotes.includes(resolved) ? s0.openNotes : [...s0.openNotes, resolved],
-      recentPaths: [resolved, ...s0.recentPaths.filter((p) => p !== resolved)].slice(0, 12),
     });
     persistLayout();
     recordVaultNav(get());
@@ -483,22 +523,65 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     dispatchSubpathScroll(subpath);
   },
 
-  /** Open a non-note asset (pdf/image/audio/…). Notes and assets share
-   *  activePath (the tree highlights either), but only openNote touches the
-   *  editor buffer — an asset must never leave text in it for the next
-   *  note's autosave to write. */
   /** Show a non-note asset (pdf/image/…) in its own pane. The open NOTE
    *  stays put — the two sit side by side so you can take notes while
-   *  reading. Touches none of the editor state. Closes the graph overlay. */
+   *  reading. Touches none of the editor state: an asset must never leave
+   *  text in the buffer for the next note's autosave to write. Closes the
+   *  graph overlay.
+   *
+   *  Assets keep their own tab strip (`openAssets`), mirroring the note
+   *  pane's `openNotes`: re-opening an already-open asset just focuses its
+   *  tab instead of resetting it, so a second PDF no longer throws the first
+   *  one away. `assetPath` is the ACTIVE tab. */
   openFile: (path) => {
     if (!path.trim()) return;
-    set({ assetPath: path, graphOpen: false });
+    const s = get();
+    set({
+      assetPath: path,
+      graphOpen: false,
+      openAssets: s.openAssets.includes(path) ? s.openAssets : [...s.openAssets, path],
+    });
+    persistLayout();
+    recordVaultNav(get());
+  },
+
+  setActiveAsset: (path) => {
+    if (!get().openAssets.includes(path)) return;
+    set({ assetPath: path });
     recordVaultNav(get());
   },
 
   closeAsset: () => {
-    set({ assetPath: null });
+    const s = get();
+    if (s.assetPath) get().closeAssetTab(s.assetPath);
+  },
+
+  closeAssetTab: (path) => {
+    const s = get();
+    const idx = s.openAssets.indexOf(path);
+    const next = s.openAssets.filter((p) => p !== path);
+    if (path !== s.assetPath) {
+      set({ openAssets: next });
+      persistLayout();
+      return;
+    }
+    // Active tab closing: activate the neighbor (previous tab preferred,
+    // like editors do). No tabs left → clear the asset pane.
+    const neighbor = next[Math.max(0, idx - 1)] ?? null;
+    set({ openAssets: next, assetPath: neighbor });
+    persistLayout();
     recordVaultNav(get());
+  },
+
+  reorderAssetTab: (path, toIndex) => {
+    const s = get();
+    const from = s.openAssets.indexOf(path);
+    if (from === -1) return;
+    const next = [...s.openAssets];
+    const [moved] = next.splice(from, 1);
+    next.splice(Math.max(0, Math.min(next.length, toIndex)), 0, moved);
+    set({ openAssets: next });
+    persistLayout();
   },
 
   setContent: (text) => set({ content: text }),
@@ -880,7 +963,6 @@ export const useVaultStore = create<VaultStore>((set, get) => {
           loadingNote: true,
           mode: s0.noteModes[snap.activePath] ?? "preview",
           openNotes: s0.openNotes.includes(snap.activePath!) ? s0.openNotes : [...s0.openNotes, snap.activePath!],
-          recentPaths: [snap.activePath!, ...s0.recentPaths.filter((p) => p !== snap.activePath)].slice(0, 12),
         });
         const content = await vaultReadNote(snap.activePath).catch(() => null);
         // The snapshot may have been superseded mid-load — only land the
@@ -897,7 +979,15 @@ export const useVaultStore = create<VaultStore>((set, get) => {
         }
       }
     }
-    set({ graphOpen: snap.graphOpen, assetPath: snap.assetPath });
+    set({
+      graphOpen: snap.graphOpen,
+      assetPath: snap.assetPath,
+      // Restore the strip too, but never lose tabs opened SINCE the snapshot:
+      // going back should revisit, not discard.
+      openAssets: snap.openAssets
+        ? [...new Set([...snap.openAssets, ...get().openAssets])]
+        : get().openAssets,
+    });
     if (snap.graphOpen && !get().graph) void get().loadGraph();
   },
   });

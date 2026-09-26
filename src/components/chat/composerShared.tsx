@@ -198,39 +198,9 @@ export function pathBasename(path: string): string {
   return trimmed.split(/[\\/]/).pop() || trimmed;
 }
 
-/** Live-partial cadence and segment limits. While the mic is open the
- *  un-committed segment is re-transcribed every 1.5s so dictated text lands
- *  in the textarea as you speak; a ~0.77s pause (3 audio chunks) commits the
- *  segment, and a segment with no pause at all is force-committed at 20s to
- *  bound each request's cost. */
-export const PARTIAL_TICK_MS = 1500;
-export const VOICE_SILENCE_CHUNKS = 3;
-export const SEGMENT_MAX_SECONDS = 20;
-
-/** Whisper was trained on subtitle-style transcripts and sprinkles newline
- *  tokens at segment boundaries — mid-flow, semi-random — plus bracketed
- *  non-speech markers ([BLANK_AUDIO], [MUSIC], …) for quiet tails. Flatten
- *  both away into one predictable paragraph; the composer soft-wraps. */
-export function flattenVoiceText(text: string): string {
-  return text
-    .replace(/\s*\[[^\]]*\]\s*/g, " ")
-    .replace(/\s*\n+\s*/g, " ")
-    .replace(/ {2,}/g, " ")
-    .trim();
-}
-
-/** Diagnostics helper: seconds of audio in a captured chunk list (the list's
- *  `.length` is the CHUNK count — chunks are 256ms each at 16 kHz — so sum
- *  the samples, never divide the count). */
-export function chunkSeconds(chunks: Float32Array[], rate: number): number {
-  return chunks.reduce((n, c) => n + c.length, 0) / rate;
-}
-
-/** Dictation diagnostics — dev builds only (these lines diagnosed the
- *  Alt-release menu-mode IPC stall; keep them for the next one). */
-export const voiceLog = (...args: unknown[]) => {
-  if (import.meta.env.DEV) console.info(...args);
-};
+/** Live-partial cadence, segment limits, the Whisper text normaliser and the
+ *  dev-only dictation log now live in lib/voiceDictationCore.ts — they belong
+ *  to the capture engine, which the vault note editor shares. */
 
 /** Stable empty list for the queue selector (a fresh [] per call would make
  *  every store change re-render the composer). */

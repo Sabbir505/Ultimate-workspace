@@ -33,7 +33,11 @@ import {
   PencilLine,
   Redo2,
   SquareCode,
+  Square,
   Star,
+  Volume2,
+  Headphones,
+  Mic,
   ListTodo,
   Table,
   Undo2,
@@ -62,12 +66,15 @@ import {
   VAULT_LEFT_RAIL,
   VAULT_RIGHT_RAIL,
 } from "../../state/vault";
+import { useUiStore } from "../../state/ui";
 import { VaultFileTree } from "./VaultFileTree";
+import { VaultTabStrip } from "./VaultTabStrip";
 import { VaultLinkHoverHost } from "./VaultLinkHover";
 import { VaultNoteRail, VaultSearchPanel, VaultTagsPanel, VaultQuickSwitcher } from "./VaultQuickSwitcher";
 import { VaultPreview } from "./VaultPreview";
 import { VaultAssetView } from "./VaultAssetView";
 import { stemOf } from "../../lib/vaultLinks";
+import { useVaultReadAloud, useVaultDictation, VAULT_TOGGLE_DICTATION } from "./vaultVoice";
 
 const VaultEditor = lazy(() => import("./VaultEditor").then((m) => ({ default: m.VaultEditor })));
 
@@ -295,45 +302,29 @@ function ModeSwitch() {
   );
 }
 
-/** Pinned + Recent shortcuts above the files tree — re-open a note without
- *  hunting through the tree. Rows reuse the outline-row scale; pinned rows
- *  carry a small unpin (✕). Both lists live in the store (persisted). */
-function VaultPinnedRecent() {
+/** Pinned shortcuts above the files tree — re-open a note without hunting
+ *  through the tree. Rows reuse the outline-row scale; pinned rows carry a
+ *  small unpin (✕). The list lives in the store (persisted). */
+function VaultPinned() {
   const pinnedPaths = useVaultStore((s) => s.pinnedPaths);
-  const recentPaths = useVaultStore((s) => s.recentPaths);
-  const activePath = useVaultStore((s) => s.activePath);
   const openNote = useVaultStore((s) => s.openNote);
   const pinNote = useVaultStore((s) => s.pinNote);
-  // The active note needs no "recent" shortcut — it is already open.
-  const recent = recentPaths.filter((p) => p !== activePath).slice(0, 6);
-  if (pinnedPaths.length === 0 && recent.length === 0) return null;
+  if (pinnedPaths.length === 0) return null;
   return (
     <div className="vault-rail-pinned">
-      {pinnedPaths.length > 0 && (
-        <div className="vault-rail-pin-section">
-          <div className="vault-rail-pin-label">Pinned</div>
-          {pinnedPaths.map((p) => (
-            <div key={p} className="vault-rail-pin-row">
-              <button className="vault-rail-pin-open" title={p} onClick={() => void openNote(p)}>
-                {stemOf(p)}
-              </button>
-              <button className="vault-rail-pin-unpin" title="Unpin note" onClick={() => pinNote(p)}>
-                <X size={10} />
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-      {recent.length > 0 && (
-        <div className="vault-rail-pin-section">
-          <div className="vault-rail-pin-label">Recent</div>
-          {recent.map((p) => (
-            <button key={p} className="vault-rail-pin-open" title={p} onClick={() => void openNote(p)}>
+      <div className="vault-rail-pin-section">
+        <div className="vault-rail-pin-label">Pinned</div>
+        {pinnedPaths.map((p) => (
+          <div key={p} className="vault-rail-pin-row">
+            <button className="vault-rail-pin-open" title={p} onClick={() => void openNote(p)}>
               {stemOf(p)}
             </button>
-          ))}
-        </div>
-      )}
+            <button className="vault-rail-pin-unpin" title="Unpin note" onClick={() => pinNote(p)}>
+              <X size={10} />
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -422,6 +413,9 @@ export function VaultView() {
   const toggleRightRail = useVaultStore((s) => s.toggleRightRail);
   const activePath = useVaultStore((s) => s.activePath);
   const assetPath = useVaultStore((s) => s.assetPath);
+  const openAssets = useVaultStore((s) => s.openAssets);
+  const closeAssetTab = useVaultStore((s) => s.closeAssetTab);
+  const reorderAssetTab = useVaultStore((s) => s.reorderAssetTab);
   const assetSplitPct = useVaultStore((s) => s.assetSplitPct);
   const setAssetSplitPct = useVaultStore((s) => s.setAssetSplitPct);
   const content = useVaultStore((s) => s.content);
@@ -445,12 +439,12 @@ export function VaultView() {
   );
   const saveNow = useVaultStore((s) => s.saveNow);
   const openNote = useVaultStore((s) => s.openNote);
+  const openFile = useVaultStore((s) => s.openFile);
   const closeNote = useVaultStore((s) => s.closeNote);
   const closeNoteTab = useVaultStore((s) => s.closeNoteTab);
   const openNotes = useVaultStore((s) => s.openNotes);
   const pinnedPaths = useVaultStore((s) => s.pinnedPaths);
   const pinNote = useVaultStore((s) => s.pinNote);
-  const recentPaths = useVaultStore((s) => s.recentPaths);
   const templatePickerOpen = useVaultStore((s) => s.templatePickerOpen);
   const setTemplatePickerOpen = useVaultStore((s) => s.setTemplatePickerOpen);
   const createNote = useVaultStore((s) => s.createNote);
@@ -483,103 +477,6 @@ export function VaultView() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Note-tab strip: wheel-scroll + drag-to-reorder, the same pattern as the
-  // tool panel's chip strip (native non-passive wheel for the vertical-wheel
-  // → horizontal scroll translation; pointer events + hit-testing for the
-  // reorder because WebView2's HTML5 drag-and-drop is unreliable).
-  const tabsRef = useRef<HTMLDivElement | null>(null);
-  const [tabsScrollable, setTabsScrollable] = useState(false);
-  useEffect(() => {
-    const el = tabsRef.current;
-    if (!el) return;
-    const update = () => setTabsScrollable(el.scrollWidth > el.clientWidth + 1);
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    window.addEventListener("resize", update);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", update);
-    };
-  }, [openNotes, activePath]);
-
-  useEffect(() => {
-    const el = tabsRef.current;
-    if (!el) return;
-    const onTabsWheel = (e: WheelEvent) => {
-      // Horizontal input goes straight through; map the vertical wheel.
-      const dx = e.deltaX !== 0 ? e.deltaX : e.deltaY;
-      if (dx === 0) return;
-      el.scrollLeft += dx;
-      // Swallow the event only while the strip can actually scroll — at the
-      // edges (or with everything visible) the page behind keeps it.
-      if (el.scrollLeft > 0 || el.scrollLeft + el.clientWidth < el.scrollWidth) {
-        e.preventDefault();
-      }
-    };
-    el.addEventListener("wheel", onTabsWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onTabsWheel);
-  }, [openNotes.length, activePath]);
-
-  // Keep the active tab inside the visible strip: opening a note from a
-  // link, the switcher or the tree reveals its tab instead of leaving it
-  // scrolled out of sight. Only el.scrollLeft is touched — no ancestor
-  // scroll chaining (scrollIntoView would nudge the whole page).
-  useEffect(() => {
-    const el = tabsRef.current;
-    if (!el) return;
-    const tab = el.querySelector<HTMLElement>(".vault-note-tab.active");
-    if (!tab) return;
-    if (tab.offsetLeft < el.scrollLeft) {
-      el.scrollLeft = tab.offsetLeft;
-    } else if (tab.offsetLeft + tab.offsetWidth > el.scrollLeft + el.clientWidth) {
-      el.scrollLeft = tab.offsetLeft + tab.offsetWidth - el.clientWidth;
-    }
-  }, [activePath, openNotes.length]);
-
-  const tabDragIndexRef = useRef<number | null>(null);
-  const tabDragOverRef = useRef<number | null>(null);
-  const [tabDragIndex, setTabDragIndex] = useState<number | null>(null);
-  const [tabDragOverIndex, setTabDragOverIndex] = useState<number | null>(null);
-
-  const onTabMouseDown = useCallback(
-    (index: number, e: React.MouseEvent) => {
-      // Don't start a drag from the close button.
-      if ((e.target as HTMLElement).closest(".vault-note-tab-close")) return;
-      e.preventDefault();
-      tabDragIndexRef.current = index;
-      setTabDragIndex(index);
-      setTabDragOverIndex(index);
-      const handleMove = (ev: MouseEvent) => {
-        const el = document.elementFromPoint(ev.clientX, ev.clientY);
-        const tab = el?.closest(".vault-note-tab") as HTMLElement | null;
-        if (!tab) return;
-        const newIndex = Number(tab.dataset.index);
-        if (!Number.isNaN(newIndex) && newIndex !== tabDragOverRef.current) {
-          tabDragOverRef.current = newIndex;
-          setTabDragOverIndex(newIndex);
-        }
-      };
-      const handleUp = () => {
-        const from = tabDragIndexRef.current;
-        const to = tabDragOverRef.current;
-        if (from !== null && to !== null && from !== to) {
-          const path = openNotes[from];
-          if (path) reorderNoteTab(path, to);
-        }
-        tabDragIndexRef.current = null;
-        tabDragOverRef.current = null;
-        setTabDragIndex(null);
-        setTabDragOverIndex(null);
-        window.removeEventListener("mousemove", handleMove);
-        window.removeEventListener("mouseup", handleUp);
-      };
-      window.addEventListener("mousemove", handleMove);
-      window.addEventListener("mouseup", handleUp);
-    },
-    [openNotes, reorderNoteTab],
-  );
 
   // Ctrl/Cmd+P quick switcher and Mod+S save are owned by the global
   // keybinding registry (vaultQuickSwitcher / vaultSaveNote — the save is
@@ -638,8 +535,26 @@ export function VaultView() {
     const w = centerRef.current?.getBoundingClientRect().width ?? 1;
     return (dx / Math.max(1, w)) * 100;
   }, []);
-  // The live CodeMirror view — the toolbar dispatches edits through it.
+  // The live CodeMirror view — the toolbar dispatches edits through it, and
+  // the voice hooks (read-aloud selection, dictation) write through it too.
   const editorViewRef = useRef<EditorView | null>(null);
+  const readAloud = useVaultReadAloud(editorViewRef);
+  const dictation = useVaultDictation(editorViewRef);
+
+  // The command palette and the Mod+Shift+V shortcut reach dictation through
+  // an event (they live outside this component's React tree, which owns the
+  // engine instance). Same escape hatch as `vault:insert-text`.
+  useEffect(() => {
+    const onToggle = () => {
+      if (!dictation.canDictate) {
+        useUiStore.getState().pushToast("info", "Switch to Edit mode to dictate");
+        return;
+      }
+      dictation.toggleRecording();
+    };
+    window.addEventListener(VAULT_TOGGLE_DICTATION, onToggle);
+    return () => window.removeEventListener(VAULT_TOGGLE_DICTATION, onToggle);
+  }, [dictation.canDictate, dictation.toggleRecording]);
 
   /** Read a Blob as base64 (no data: prefix). */
   const blobToBase64 = (blob: Blob) =>
@@ -806,7 +721,7 @@ export function VaultView() {
               </div>
               {rail === "files" && (
                 <>
-                  <VaultPinnedRecent />
+                  <VaultPinned />
                   <VaultFileTree tree={tree} />
                 </>
               )}
@@ -849,6 +764,19 @@ export function VaultView() {
                   className="vault-asset-pane"
                   style={activePath != null ? { flex: `0 1 ${assetSplitPct}%` } : undefined}
                 >
+                  {/* The asset pane keeps its OWN tab strip (same component as
+                      the note strip): the two panes are independent surfaces —
+                      read a pdf, take notes beside it — so a shared strip would
+                      fight that. Closing every asset tab hides the pane. */}
+                  <VaultTabStrip
+                    tabs={openAssets}
+                    active={assetPath}
+                    ariaLabel="Open files"
+                    labelFor={stemOf}
+                    onSelect={(p) => openFile(p)}
+                    onClose={closeAssetTab}
+                    onReorder={reorderAssetTab}
+                  />
                   <VaultAssetView path={assetPath} />
                 </div>
               )}
@@ -868,6 +796,60 @@ export function VaultView() {
                 <span className="vault-note-path" title={activePath}>{activePath}</span>
                 {dirty ? <span className="vault-dirty-dot" title="Unsaved changes (autosave on)" /> : null}
                 <ModeSwitch />
+                {/* Voice: read the whole note, read just the selection, and
+                    dictate into the caret. The transport for any read is the
+                    global TtsPlayerBar below the view switch, so these are
+                    just entry points. */}
+                <button
+                  className={`vault-rail-toggle${readAloud.readingNote ? " active" : ""}`}
+                  title={readAloud.readingNote ? "Stop reading" : "Read this note aloud"}
+                  aria-label={readAloud.readingNote ? "Stop reading this note aloud" : "Read this note aloud"}
+                  onClick={readAloud.readingNote ? readAloud.stop : readAloud.readNote}
+                >
+                  {readAloud.readingNote ? <Square size={13} /> : <Volume2 size={14} />}
+                </button>
+                <button
+                  className={`vault-rail-toggle${readAloud.readingSelection ? " active" : ""}`}
+                  disabled={!readAloud.hasSelection}
+                  title={
+                    readAloud.readingSelection
+                      ? "Stop reading"
+                      : readAloud.hasSelection
+                        ? "Read the selected text aloud"
+                        : "Select text in the editor to read it aloud"
+                  }
+                  aria-label="Read the selected text aloud"
+                  onClick={readAloud.readingSelection ? readAloud.stop : readAloud.readSelection}
+                >
+                  <Headphones size={14} />
+                </button>
+                <button
+                  className={`vault-rail-toggle${dictation.recording ? " active recording" : ""}`}
+                  disabled={!dictation.canDictate}
+                  title={
+                    dictation.canDictate
+                      ? dictation.recording
+                        ? "Stop dictating"
+                        : "Dictate into this note (or hold Alt)"
+                      : "Switch to Edit mode to dictate"
+                  }
+                  aria-label={dictation.recording ? "Stop dictating" : "Dictate into this note"}
+                  onClick={dictation.toggleRecording}
+                >
+                  <Mic size={14} />
+                </button>
+                {dictation.recording && (
+                  <span className="voice-wave vault-voice-wave" aria-hidden="true">
+                    {[0, 1, 2, 3, 4].map((i) => (
+                      <span
+                        key={i}
+                        ref={(el) => {
+                          dictation.waveBarsRef.current[i] = el;
+                        }}
+                      />
+                    ))}
+                  </span>
+                )}
                 <button
                   className={`vault-rail-toggle vault-note-pin${isPinned ? " pinned" : ""}`}
                   title={isPinned ? "Unpin note" : "Pin note"}
@@ -882,50 +864,19 @@ export function VaultView() {
                   <X size={14} />
                 </button>
               </div>
-              {/* Open-note tab strip: click activates, ✕ (or middle-click)
-                  closes just that tab; the wheel scrolls an overflowing
-                  strip and dragging a tab reorders it. The store owns
-                  ordering and the active-tab neighbor handoff. */}
-              {openNotes.length > 0 && (
-                <div
-                  className={`vault-note-tabs${tabsScrollable ? " scrollable" : ""}`}
-                  role="tablist"
-                  aria-label="Open notes"
-                  ref={tabsRef}
-                >
-                  {openNotes.map((p, index) => (
-                    <div
-                      key={p}
-                      role="tab"
-                      aria-selected={p === activePath}
-                      className={`vault-note-tab${p === activePath ? " active" : ""}${index === tabDragIndex ? " dragging" : ""}${index === tabDragOverIndex && tabDragIndex !== index ? " drag-over" : ""}`}
-                      title={p}
-                      data-index={index}
-                      onClick={() => void openNote(p)}
-                      onMouseDown={(e) => {
-                        if (e.button === 1) {
-                          e.preventDefault();
-                          closeNoteTab(p);
-                          return;
-                        }
-                        onTabMouseDown(index, e);
-                      }}
-                    >
-                      <span className="vault-note-tab-name">{stemOf(p)}</span>
-                      <button
-                        className="vault-note-tab-close"
-                        title="Close tab"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          closeNoteTab(p);
-                        }}
-                      >
-                        <X size={11} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
+              {/* Open-note tab strip (shared VaultTabStrip): click activates,
+                  ✕ (or middle-click) closes just that tab, the wheel scrolls
+                  an overflowing strip and dragging a tab reorders it. The
+                  store owns ordering and the active-tab neighbor handoff. */}
+              <VaultTabStrip
+                tabs={openNotes}
+                active={activePath}
+                ariaLabel="Open notes"
+                labelFor={stemOf}
+                onSelect={(p) => void openNote(p)}
+                onClose={closeNoteTab}
+                onReorder={reorderNoteTab}
+              />
               {/* key={mode}: each switch remounts the surface so the fade-in
                   below plays (the app's standard --ease motion). EDIT is the
                   live-preview editor (markdown source stays editable while

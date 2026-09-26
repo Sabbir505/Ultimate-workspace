@@ -86,6 +86,9 @@ export interface PendingReplace {
 export interface VaultNavSnapshot {
   graphOpen: boolean;
   assetPath: string | null;
+  /** Asset tab order — Back/Forward must restore the strip, not just the
+   *  active one, or going back would collapse every open PDF into one. */
+  openAssets: string[];
   activePath: string | null;
 }
 

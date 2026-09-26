@@ -6,6 +6,7 @@ import { defaultHarness, newSessionFlow } from "../lib/sessionLauncher";
 import { activeTerminalPair, cycleTerminalPair, usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
 import { useVaultStore } from "../state/vault";
+import { readVaultNoteAloud, toggleVaultDictation } from "../components/vault/vaultVoice";
 import { DEFAULT_APP_ZOOM, useSettingsStore } from "../state/settings";
 import { useUiStore } from "../state/ui";
 
@@ -167,6 +168,20 @@ export function useKeybindings(): void {
           () => {
             if (useUiStore.getState().activeView !== "vault") return;
             void useVaultStore.getState().saveNow();
+          },
+        ],
+        [
+          "vaultReadAloud",
+          () => {
+            if (useUiStore.getState().activeView !== "vault") return;
+            readVaultNoteAloud();
+          },
+        ],
+        [
+          "vaultDictate",
+          () => {
+            if (useUiStore.getState().activeView !== "vault") return;
+            toggleVaultDictation();
           },
         ],
       ];

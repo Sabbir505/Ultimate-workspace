@@ -56,3 +56,8 @@ src-tauri/fox_err.txt
 conduit_watch_probe.txt
 registered_cmds.txt
 scripts/__tmp_*
+
+# pdf.js WASM decoders, copied verbatim from node_modules by
+# scripts/copy-pdfjs-wasm.mjs (pdf.js fetches them by literal filename, so
+# they cannot be hashed ?url imports). Regenerated on postinstall/dev/build.
+public/pdfjs-wasm/

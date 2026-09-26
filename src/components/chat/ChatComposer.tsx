@@ -786,6 +786,7 @@ export const ChatComposer = memo(function ChatComposer({
     setContent,
     textareaRef,
     setCaret,
+    contentRef,
     effectiveSessionId,
   });
 
@@ -1463,8 +1464,14 @@ export const ChatComposer = memo(function ChatComposer({
             }
             value={content}
             onChange={(e) => {
+              // contentRef is the dictation target's authoritative mirror, so
+              // it has to see the keystroke NOW — a dictation splice landing
+              // in the same tick reads this to decide whether its span still
+              // validates, and a render-behind mirror would clobber the
+              // character typed above.
+              contentRef.current = e.target.value;
               setContent(e.target.value);
-              setCaret(e.target.selectionStart ?? e.target.value.length);
+              setCaret(e.currentTarget.selectionStart ?? e.target.value.length);
             }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
             onPaste={handlePaste}

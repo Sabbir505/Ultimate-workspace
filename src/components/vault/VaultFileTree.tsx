@@ -4,7 +4,7 @@
 // The tree is disk-driven (vault_tree), so external file managers stay in
 // sync through the watcher.
 
-import { memo, useCallback, useState, type DragEvent } from "react";
+import { memo, useCallback, useMemo, useState, type DragEvent } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -186,6 +186,15 @@ export function VaultFileTree({ tree }: { tree: VaultTreeNode[] }) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [newIn, setNewIn] = useState<{ folder: string; kind: "note" | "folder" } | null>(null);
   const activePath = useVaultStore((s) => s.activePath);
+  // Assets are tracked in `assetPath`, NOT `activePath` — openFile gives them
+  // their own pane and never touches the editor buffer. Comparing selection
+  // against `activePath` alone meant a PDF/image row could never light up,
+  // so clicking one looked like it did nothing.
+  const assetPath = useVaultStore((s) => s.assetPath);
+  const openPaths = useMemo(
+    () => new Set([activePath, assetPath].filter((p): p is string => p != null)),
+    [activePath, assetPath],
+  );
   const openNote = useVaultStore((s) => s.openNote);
   const openFile = useVaultStore((s) => s.openFile);
   const createNote = useVaultStore((s) => s.createNote);
@@ -268,7 +277,7 @@ export function VaultFileTree({ tree }: { tree: VaultTreeNode[] }) {
       depth={0}
       expandedSet={expanded}
       toggle={toggle}
-      selected={node.path === activePath}
+      selected={openPaths.has(node.path)}
       onOpen={(p) => {
         // Non-note assets go to the asset view — openNote would search the
         // NOTE index, miss, and toast "No note named …" for a file that is

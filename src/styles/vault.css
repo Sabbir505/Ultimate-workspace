@@ -151,6 +151,25 @@
   background: var(--accent-soft, var(--surface-3));
   color: var(--accent, var(--text));
 }
+/* Toggle states for the note-header voice buttons (read-aloud, read-selection,
+   dictate). A read in progress lights the same accent as an active mode; the
+   live mic reads as danger so the two are distinguishable at a glance. */
+.vault-rail-toggle.active {
+  background: var(--accent-soft, var(--surface-3));
+  color: var(--accent, var(--text));
+}
+.vault-rail-toggle.recording {
+  color: var(--danger, #d64545);
+  background: color-mix(in srgb, var(--danger, #d64545) 14%, transparent);
+}
+.vault-rail-toggle:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.vault-rail-toggle:disabled:hover {
+  background: transparent;
+  color: var(--text-dim);
+}
 
 /* ---- body: three columns ---- */
 .vault-body {
@@ -554,10 +573,11 @@
 }
 .vault-asset-pane {
   /* Default: fill the center when the asset is alone. When a note sits
-     beside it, VaultView pins this to `0 1 <pct>%` inline — the 1 lets the
-     asset YIELD under squeeze (down to a sliver): the note side is the
-     active editing surface and wins the center's floors; the asset is the
-     reference pane the user can re-widen or close. */
+     beside it, VaultView pins this to `0 1 <pct>%` inline: the 0 growth
+     keeps the asset at its share, the 1 lets it yield a little if the
+     window is too narrow for both floors. It must NOT yield to nothing —
+     .vault-note-split carries min-width: 0 so the note can't push this
+     pane out of existence (see the note there for the flexbox maths). */
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
@@ -565,15 +585,31 @@
   min-height: 0;
   overflow: hidden;
 }
+/* The asset pane's own tab strip (same VaultTabStrip as the note pane's).
+   Its content width must not propagate up as .vault-asset-pane's flex
+   minimum, or a wide strip would stop the pane from ever shrinking and the
+   strip would never overflow internally — same reasoning as the note strip's
+   `contain: inline-size` (vault-tabs.css). */
+.vault-asset-pane > .vault-note-tabs {
+  contain: inline-size;
+  min-width: 0;
+}
 .vault-note-split {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  /* NO min-width: 0 here — the automatic flex minimum is exactly what
-     protects the note under squeeze: it derives from the panes' own
-     min-widths (editor 220 + preview 260 in split mode), so the note side
-     keeps its floors while the asset pane yields (see .vault-asset-pane). */
+  /* min-width: 0 so the note honours its flex share instead of the
+     automatic, CONTENT-derived flex minimum. A note holding something with
+     a wide min-content box — a markdown table in reading view, a long
+     unbroken line or URL in the editor — pushed that minimum past the
+     note's share, and because both panes shrink proportional to
+     (flex-shrink × flex-basis) and the note's basis is 0, the note could
+     not absorb ANY of it: the asset pane took the entire overflow and
+     collapsed to a sliver, so opening a PDF appeared to do nothing.
+     The note is still floored from being crushed — that now comes from the
+     inner panes (editor 220 / preview 260 below) and the container clip. */
+  min-width: 0;
 }
 .vault-note-head {
   display: flex;
@@ -582,6 +618,16 @@
   padding: 5px 10px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+/* Dictation level meter, inlined in the note header. The base .voice-wave is
+   sized for the composer's floating pill (26px); the header row is much
+   shorter, so scale the bars down to fit without overflowing the row. */
+.vault-voice-wave {
+  height: 18px;
+  flex-shrink: 0;
+}
+.vault-voice-wave span {
+  width: 2.5px;
 }
 .vault-note-path {
   flex: 1;
@@ -1411,14 +1457,20 @@
 .pdf-text-layer ::selection {
   background: color-mix(in srgb, var(--accent, #5b8def) 40%, transparent);
 }
+/* Selection sentinel (matches pdf.js's official textLayer CSS). It sits BELOW
+   the page and is unselectable. The old rule pinned it over the whole page
+   with user-select left at the layer's `text`: being the LAST child of the
+   layer, a drag whose range ended on it swept in every text span before it —
+   selecting a sentence grabbed the entire page. `inset: 100% 0 0` keeps it out
+   of the page's selectable geometry entirely (overflow: clip hides it). */
 .pdf-text-layer .endOfContent {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  z-index: -1;
   display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .pdf-highlight {
   position: absolute;

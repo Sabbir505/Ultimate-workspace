@@ -5,8 +5,10 @@
   "description": "Relay — a local-first, multi-pane desktop shell for AI coding agents",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "postinstall": "node scripts/copy-pdfjs-wasm.mjs",
+    "assets:pdfjs": "node scripts/copy-pdfjs-wasm.mjs",
+    "dev": "node scripts/copy-pdfjs-wasm.mjs && vite",
+    "build": "node scripts/copy-pdfjs-wasm.mjs && vite build",
     "preview": "vite preview",
     "site:dev": "vite --config vite.site.config.ts",
     "site:build": "vite build --config vite.site.config.ts",

@@ -58,11 +58,11 @@ beforeEach(() => {
     searchQuery: "",
     searchHits: [],
     saveGeneration: 0,
-    // Tab/pin/recent state persists (via the layout blob) — reset it too so
+    // Tab/pin state persists (via the layout blob) — reset it too so
     // earlier tests' opens can't bleed into later assertions.
     openNotes: [],
+    openAssets: [],
     pinnedPaths: [],
-    recentPaths: [],
     templatePickerOpen: false,
   });
   useUiStore.setState({ toasts: [] });
@@ -184,6 +184,78 @@ describe("vault store — asset (non-note) opens", () => {
     expect(useVaultStore.getState().openNotes).toEqual([]);
   });
 
+  it("keeps a SECOND pdf instead of throwing the first one away", async () => {
+    // This was the whole point of asset tabs: openFile used to be a plain
+    // `assetPath` overwrite, so opening B silently discarded A.
+    useVaultStore.getState().openFile("a.pdf");
+    useVaultStore.getState().openFile("b.pdf");
+    const s = useVaultStore.getState();
+    expect(s.openAssets).toEqual(["a.pdf", "b.pdf"]);
+    expect(s.assetPath).toBe("b.pdf");
+  });
+
+  it("re-opening an already-open asset focuses its tab instead of duplicating it", async () => {
+    useVaultStore.getState().openFile("a.pdf");
+    useVaultStore.getState().openFile("b.pdf");
+    useVaultStore.getState().openFile("a.pdf");
+    expect(useVaultStore.getState().openAssets).toEqual(["a.pdf", "b.pdf"]);
+    expect(useVaultStore.getState().assetPath).toBe("a.pdf");
+  });
+
+  it("activates the neighbor when the active asset tab closes", () => {
+    for (const p of ["a.pdf", "b.pdf", "c.pdf"]) useVaultStore.getState().openFile(p);
+    useVaultStore.getState().setActiveAsset("b.pdf"); // make b the active tab
+    // Like editors (and like the note strip): the previous tab wins.
+    useVaultStore.getState().closeAssetTab("b.pdf");
+    expect(useVaultStore.getState().openAssets).toEqual(["a.pdf", "c.pdf"]);
+    expect(useVaultStore.getState().assetPath).toBe("a.pdf");
+    // Closing the FIRST tab falls forward to what is now first.
+    useVaultStore.getState().closeAssetTab("a.pdf");
+    expect(useVaultStore.getState().assetPath).toBe("c.pdf");
+    // The last tab clears the surface entirely.
+    useVaultStore.getState().closeAssetTab("c.pdf");
+    expect(useVaultStore.getState().assetPath).toBeNull();
+    expect(useVaultStore.getState().openAssets).toEqual([]);
+  });
+
+  it("closing a BACKGROUND asset tab leaves the active one alone", () => {
+    for (const p of ["a.pdf", "b.pdf", "c.pdf"]) useVaultStore.getState().openFile(p);
+    useVaultStore.getState().setActiveAsset("a.pdf"); // active is a, not the last opened
+    useVaultStore.getState().closeAssetTab("b.pdf");
+    expect(useVaultStore.getState().assetPath).toBe("a.pdf");
+    expect(useVaultStore.getState().openAssets).toEqual(["a.pdf", "c.pdf"]);
+  });
+
+  it("reorders asset tabs and keeps the active tab active", () => {
+    for (const p of ["a.pdf", "b.pdf", "c.pdf"]) useVaultStore.getState().openFile(p);
+    useVaultStore.getState().reorderAssetTab("c.pdf", 0);
+    expect(useVaultStore.getState().openAssets).toEqual(["c.pdf", "a.pdf", "b.pdf"]);
+    expect(useVaultStore.getState().assetPath).toBe("c.pdf");
+  });
+
+  it("ignores setActiveAsset for a path that is not open", () => {
+    useVaultStore.getState().openFile("a.pdf");
+    useVaultStore.getState().setActiveAsset("nope.pdf");
+    expect(useVaultStore.getState().assetPath).toBe("a.pdf");
+  });
+
+  it("restores the asset tab strip on navigation, keeping tabs opened since", async () => {
+    await useVaultStore.getState().openNote("A.md");
+    for (const p of ["a.pdf", "b.pdf"]) useVaultStore.getState().openFile(p);
+    // Simulate going back to a snapshot that only knew about a.pdf, taken
+    // while a note was open in between.
+    await useVaultStore.getState().restoreSnapshot({
+      graphOpen: false,
+      assetPath: "a.pdf",
+      openAssets: ["a.pdf"],
+      activePath: "A.md",
+    });
+    const s = useVaultStore.getState();
+    expect(s.assetPath).toBe("a.pdf");
+    // b.pdf was opened AFTER the snapshot — back must not discard it.
+    expect(s.openAssets).toEqual(["a.pdf", "b.pdf"]);
+  });
+
   it("renameNote refuses non-note paths instead of renaming to .pdf.md", async () => {
     await useVaultStore.getState().renameNote("Inference Engineering.pdf", "Renamed.pdf");
     expect(vaultRenameNoteMock).not.toHaveBeenCalled();
@@ -276,6 +348,42 @@ describe("vault store — wikilink resolution", () => {
     expect(vaultCreateNoteMock).toHaveBeenCalledWith("Missing.md", "");
     expect(useVaultStore.getState().activePath).toBe("Missing.md");
     expect(useVaultStore.getState().mode).toBe("edit");
+  });
+
+  it("never creates a note for a non-markdown target — it opens the asset", async () => {
+    // Clicking a PDF used to fall through the create branch and write
+    // `paper.pdf.md` into the vault, one junk file per click.
+    vaultSearchMock.mockResolvedValue([]);
+    vaultCreateNoteMock.mockResolvedValue("paper.pdf.md");
+    await useVaultStore.getState().openNote("paper.pdf");
+    expect(vaultCreateNoteMock).not.toHaveBeenCalled();
+    expect(useVaultStore.getState().assetPath).toBe("paper.pdf");
+    expect(useVaultStore.getState().activePath).toBeNull();
+  });
+
+  it("does not let a stray paper.pdf.md hijack a paper.pdf request", async () => {
+    // resolveNotePath matches by stem, so a leftover `paper.pdf.md` in the
+    // index would answer a `paper.pdf` request. The asset check runs first.
+    vaultSearchMock.mockResolvedValue([
+      { path: "paper.pdf.md", basename: "paper.pdf.md", line: 1, snippet: "", score: 1 },
+    ]);
+    await useVaultStore.getState().openNote("paper.pdf");
+    expect(useVaultStore.getState().assetPath).toBe("paper.pdf");
+    expect(useVaultStore.getState().activePath).toBeNull();
+    expect(vaultReadNoteMock).not.toHaveBeenCalled();
+  });
+
+  it("still auto-creates extensionless targets and dotted FOLDERS", async () => {
+    // The Obsidian click-to-create contract this guard must not break:
+    // `[[New Idea]]` and `[[Archive.v2/Foo]]` have no trailing extension, so
+    // they still create. (A note stem that itself ends in a dot-extension,
+    // `[[Notes.v2]]`, deliberately routes to the asset pane — see
+    // ASSET_PATH_RE for why data safety wins that trade.)
+    vaultSearchMock.mockResolvedValue([]);
+    vaultCreateNoteMock.mockResolvedValue("Archive.v2/Foo.md");
+    vaultReadNoteMock.mockResolvedValue("");
+    await useVaultStore.getState().openNote("Archive.v2/Foo");
+    expect(vaultCreateNoteMock).toHaveBeenCalledWith("Archive.v2/Foo.md", "");
   });
 
   it("a slow read for note A cannot clobber a fast open of note B", async () => {
@@ -381,6 +489,7 @@ describe("vault store — back/forward navigation", () => {
     await useVaultStore.getState().restoreSnapshot({
       graphOpen: false,
       assetPath: null,
+      openAssets: [],
       activePath: "A.md",
     });
     expect(useVaultStore.getState().activePath).toBe("A.md");
@@ -402,6 +511,7 @@ describe("vault store — back/forward navigation", () => {
     const pRestore = useVaultStore.getState().restoreSnapshot({
       graphOpen: false,
       assetPath: null,
+      openAssets: [],
       activePath: "Slow.md",
     });
     // A newer navigation supersedes the restore mid-load…
@@ -576,11 +686,11 @@ describe("vault store — bind flow", () => {
     expect(vaultTreeMock).toHaveBeenCalled();
   });
 
-  it("bind clears the previous vault's tabs, pins, recents and modes", async () => {
+  it("bind clears the previous vault's tabs, pins and modes", async () => {
     vaultReadNoteMock.mockResolvedValue("body");
     await useVaultStore.getState().openNote("Old.md");
     useVaultStore.getState().setMode("edit");
-    useVaultStore.setState({ pinnedPaths: ["Old.md"], recentPaths: ["Old.md"] });
+    useVaultStore.setState({ pinnedPaths: ["Old.md"] });
     vaultBindMock.mockResolvedValue("C:/other");
     await useVaultStore.getState().bind("C:/other");
     const s = useVaultStore.getState();
@@ -589,7 +699,6 @@ describe("vault store — bind flow", () => {
     // The previous vault's rails must not resolve against the new vault.
     expect(s.openNotes).toEqual([]);
     expect(s.pinnedPaths).toEqual([]);
-    expect(s.recentPaths).toEqual([]);
     expect(s.noteModes).toEqual({});
   });
 
@@ -611,7 +720,7 @@ describe("vault store — bind flow", () => {
 });
 
 describe("vault store — persisted layout restore", () => {
-  it("restores path lists, dropping invalid entries and capping recents", async () => {
+  it("restores path lists, dropping invalid entries", async () => {
     // Earlier tests schedule the store's debounced layout persist (250ms
     // real timer on the module instance this file imported). Under suite
     // load that timer can fire between our setItem below and the fresh
@@ -619,7 +728,6 @@ describe("vault store — persisted layout restore", () => {
     // (empty) state — a nondeterministic [] instead of the seeded lists.
     // Wait it out first: nothing can still be pending past 250ms + a tick.
     await new Promise((r) => setTimeout(r, 300));
-    const recents = Array.from({ length: 20 }, (_, i) => `R${i}.md`);
     localStorage.setItem(
       "relay.vault.layout",
       JSON.stringify({
@@ -629,7 +737,6 @@ describe("vault store — persisted layout restore", () => {
         assetSplitPct: 58,
         openNotes: ["A.md", 42, null, "", "B.md"],
         pinnedPaths: ["P.md", { nope: 1 }, 7],
-        recentPaths: recents,
       }),
     );
     // loadLayout runs at store creation — re-import the module to re-read it.
@@ -638,7 +745,5 @@ describe("vault store — persisted layout restore", () => {
     const s = fresh.getState();
     expect(s.openNotes).toEqual(["A.md", "B.md"]);
     expect(s.pinnedPaths).toEqual(["P.md"]);
-    // Recents keep the same 12-entry cap openNote applies on refresh.
-    expect(s.recentPaths).toEqual(recents.slice(0, 12));
   });
 });

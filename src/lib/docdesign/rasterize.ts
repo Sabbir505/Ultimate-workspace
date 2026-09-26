@@ -5,21 +5,21 @@
 //   - blank / near-empty pages (widow content, broken pagination)
 //   - page count (compared against expectations by the caller)
 import type { Issue } from "./ir";
+import { PDFJS_WASM_URL, PDFJS_WORKER_URL } from "../pdfjsAssets";
 
 // PERF (2026-09-06): pdf.js is ~830 KB of source and was a STATIC import here,
 // which pulled it through DocDesignRunner into the app ENTRY chunk (the single
 // biggest cause of the 459 KB -> 1,179 KB entry regression). It is now loaded
 // on first probe — the only consumer — and cached for the session.
+// The asset URLs (worker + wasm directory) stay a static import: they are
+// strings, not pdf.js, so they cost nothing in the entry chunk.
 type PdfJs = typeof import("pdfjs-dist");
 let pdfjsPromise: Promise<PdfJs> | null = null;
 
 async function loadPdfjs(): Promise<PdfJs> {
   if (!pdfjsPromise) {
-    pdfjsPromise = Promise.all([
-      import("pdfjs-dist"),
-      import("pdfjs-dist/build/pdf.worker.min.mjs?url"),
-    ]).then(([mod, worker]) => {
-      mod.GlobalWorkerOptions.workerSrc = worker.default;
+    pdfjsPromise = import("pdfjs-dist").then((mod) => {
+      mod.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
       return mod;
     });
   }
@@ -39,7 +39,11 @@ const OUTSIDE_TOLERANCE_PX = 4;
 export async function probePdf(data: Uint8Array, kind: "doc" | "deck"): Promise<ProbeResult> {
   try {
     const pdfjs = await loadPdfjs();
-    const pdf = await pdfjs.getDocument({ data: sliceCopy(data) }).promise;
+    // wasmUrl is REQUIRED for JBIG2 images (scanned PDFs): without it pdf.js
+    // tries to resolve "nulljbig2_nowasm_fallback.js" and scanned pages render
+    // with empty image boxes — which then reads as a "blank page" to the
+    // blank-page probe below.
+    const pdf = await pdfjs.getDocument({ data: sliceCopy(data), wasmUrl: PDFJS_WASM_URL }).promise;
     const issues: Issue[] = [];
     const pageCount = pdf.numPages;
     let blank = 0;

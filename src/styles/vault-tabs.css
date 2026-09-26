@@ -1,5 +1,5 @@
-/* Vault note tabs (open-note tab strip), the pin toggle, the Pinned/Recent
-   sections in the files rail, and the "insert template" picker. Palette and
+/* Vault note tabs (open-note tab strip), the pin toggle, the Pinned
+   section in the files rail, and the "insert template" picker. Palette and
    radii mirror vault.css (.vault-mode-switch / .vault-rail-tabs / rows) via
    the shared tokens, so both themes work unchanged. */
 

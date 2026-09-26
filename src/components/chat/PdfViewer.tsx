@@ -11,9 +11,9 @@
 // to the native <embed> so previews never regress.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjs from "pdfjs-dist";
-import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { PDFJS_WASM_URL, PDFJS_WORKER_URL } from "../../lib/pdfjsAssets";
 
-pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
 
 const ZOOM_MIN = 0.4;
 const ZOOM_MAX = 4;
@@ -181,7 +181,10 @@ export function PdfViewer({
   // Open the document once.
   useEffect(() => {
     let cancelled = false;
-    const task = pdfjs.getDocument({ data: dataUriToBytes(dataUri) });
+    // wasmUrl is REQUIRED for JBIG2 images (scanned PDFs): without it pdf.js
+    // tries to resolve "nulljbig2_nowasm_fallback.js" and every scanned page
+    // paints with empty image boxes.
+    const task = pdfjs.getDocument({ data: dataUriToBytes(dataUri), wasmUrl: PDFJS_WASM_URL });
     void task.promise
       .then((doc) => {
         if (!cancelled) setPdf(doc);

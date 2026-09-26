@@ -98,6 +98,24 @@ describe("VaultView", () => {
 });
 
 describe("VaultFileTree", () => {
+  it("highlights an ASSET row once it is opened in the asset pane", () => {
+    // Assets are tracked in `assetPath`, not `activePath`. Selection used to
+    // compare against `activePath` alone, so a clicked PDF row never lit up
+    // and opening one looked like a no-op.
+    const tree = [
+      { name: "spec.pdf", path: "Journal/spec.pdf", kind: "file" as const, children: [] },
+    ];
+    const row = () => document.querySelector(".vault-tree-row")!;
+    useVaultStore.setState({ activePath: null, assetPath: null });
+    const { unmount } = render(<VaultFileTree tree={tree as never} />);
+    expect(row().classList.contains("selected")).toBe(false);
+    unmount();
+
+    useVaultStore.setState({ activePath: null, assetPath: "Journal/spec.pdf" });
+    render(<VaultFileTree tree={tree as never} />);
+    expect(row().classList.contains("selected")).toBe(true);
+  });
+
   it("renders folders collapsed and expands on click", () => {
     render(<VaultFileTree tree={TREE as never} />);
     // Collapsed: the child is mounted (for the height animation) but its

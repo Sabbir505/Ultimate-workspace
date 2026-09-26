@@ -13,6 +13,7 @@ import { useChatStore } from "../../state/chat";
 import { openOnboarding } from "../../state/onboarding";
 import { useProjectsStore } from "../../state/projects";
 import { useVaultStore } from "../../state/vault";
+import { readVaultNoteAloud, toggleVaultDictation } from "../vault/vaultVoice";
 import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import type { SessionRecord } from "../../types";
@@ -114,6 +115,8 @@ export function CommandPalette() {
             ["action:vault-daily", "Open today's daily note", "vaultDailyNote"],
             ["action:vault-template", "Insert template…", "vaultInsertTemplate"],
             ["action:vault-copy-note", "Copy note as markdown", "vaultCopyNote"],
+            ["action:vault-read-aloud", "Read note aloud", "vaultReadAloud"],
+            ["action:vault-dictate", "Dictate into note", "vaultDictate"],
           ] as const).map(([id, label, action]) => ({
             id,
             section: "Actions" as const,
@@ -161,6 +164,8 @@ export function CommandPalette() {
                     useUiStore.getState().pushToast("error", "Clipboard unavailable");
                   }
                 },
+                vaultReadAloud: () => readVaultNoteAloud(),
+                vaultDictate: () => toggleVaultDictation(),
               };
               close();
               handlers[action]();

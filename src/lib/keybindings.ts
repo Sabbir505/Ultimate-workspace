@@ -26,7 +26,9 @@ export type KeybindingAction =
   | "vaultGraph"
   | "vaultDailyNote"
   | "vaultInsertTemplate"
-  | "vaultSaveNote";
+  | "vaultSaveNote"
+  | "vaultReadAloud"
+  | "vaultDictate";
 
 export type KeybindingMap = Record<KeybindingAction, string>;
 
@@ -57,6 +59,11 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
   vaultInsertTemplate: "Mod+T",
   // Save must work while typing in the note editor, like the palette.
   vaultSaveNote: "Mod+S",
+  // Voice for the active note. Both fire with the editor focused (the note
+  // body is a contenteditable div, which the editable-exemption check doesn't
+  // match, so every binding is already live there).
+  vaultReadAloud: "Mod+Shift+R",
+  vaultDictate: "Mod+Shift+V",
 };
 
 export interface ParsedAccelerator {

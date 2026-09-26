@@ -985,6 +985,11 @@ div[data-index]:has(.chat-session-row.menu-open) {
   letter-spacing: 0.01em;
   color: var(--text);
 }
+/* Once the thinking settles the label dims to the same quiet gray the
+   tool-call rows use — only the live shine should read as special. */
+.chat-thinking:not(.live) .chat-thinking-label {
+  color: var(--text-dim);
+}
 /* While streaming the label carries the same title shine as live tool-call
    rows (see .chat-step-label.is-live below) — the pulse was too quiet. */
 .chat-thinking.live .chat-thinking-label {
@@ -1383,13 +1388,32 @@ div[data-index]:has(.chat-session-row.menu-open) {
   background: transparent;
   border: none;
   border-radius: 0;
+  box-shadow: none;
   cursor: pointer;
   text-align: left;
   transition: color 0.15s var(--ease), background 0.15s var(--ease);
 }
-.chat-step-toggle:hover:not(:disabled) {
+/* tokens.css paints a glass pill skin on EVERY button — base box-shadow rim
+   plus a button:hover background/border (higher specificity than a single
+   class, so the hover state must be re-overridden explicitly). This row stays
+   flat chrome: no rim, no hover fill — only the text brightens. */
+.chat-step-toggle:hover:not(:disabled),
+.chat-step-toggle:active:not(:disabled),
+.chat-step-toggle:focus-visible {
   color: var(--text);
-  background: var(--surface-2);
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  transform: none;
+}
+/* Disabled rows (nothing to expand) sit under the cursor too — tokens.css's
+   button:hover carries no :not(:disabled) and would paint its glass fill
+   right through the rules above, so re-flatten that state explicitly. */
+.chat-step-toggle:disabled:hover {
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  box-shadow: none;
 }
 .chat-step-toggle:disabled {
   cursor: default;

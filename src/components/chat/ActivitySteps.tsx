@@ -16,7 +16,7 @@ import "katex/dist/katex.min.css";
 // references) arrives with this lazy chunk instead of eagerly at boot.
 // Vite dedupes the module across chunks (single emitted copy — C8 holds).
 import type { ChatMessage, ChatMessageRecord, ChatPerfPayload } from "../../lib/ipc";
-import { listCompactedMessages, readArtifactPreview } from "../../lib/ipc";
+import { getGitStatus, listCompactedMessages, readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { liveAttachmentsForMessage, useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
@@ -862,8 +862,22 @@ export function ActivityStepRow({
   chatSessionId?: string | null;
 }) {
   const [open, setOpen] = useState(false);
+  // The collapsed label already ends with the detail for ordinary tool rows
+  // (stepLabel embeds it log-style: "reading_file  <path>") — expanding and
+  // re-showing that same line conveys nothing new, so the detail only counts
+  // as expandable body when the label does NOT already carry it (shell rows
+  // whose label is the command, and code bodies too long for the label).
+  const detailInLabel = (() => {
+    const d = step.data;
+    const detail = d?.detail?.trim();
+    if (!detail) return false;
+    if (d?.kind === "code" && d.code) return false;
+    return !(d?.code && detail.length > 80);
+  })();
   const hasBody = Boolean(
-    step.data?.code || step.data?.detail || step.data?.result,
+    step.data?.code ||
+      step.data?.result ||
+      (step.data?.detail && !detailInLabel),
   );
   // Subagent Task steps render as the agent chip — same visual language as
   // the git sidebar's AGENTS rows: icon + SubAgent + blue role + task, a
@@ -986,7 +1000,7 @@ export function ActivityStepRow({
       </button>
       {open && hasBody && (
         <div className="chat-step-body">
-          {step.data?.detail && (
+          {step.data?.detail && !detailInLabel && (
             <div className="chat-step-detail">{step.data.detail}</div>
           )}
           {step.data?.code && (
@@ -1138,7 +1152,13 @@ export function renderProcessBlock(
         />
       );
     case "editrow":
-      return <EditFileRow key={`editrow:${b.step.data?.path ?? i}`} step={b.step} />;
+      return (
+        <EditFileRow
+          key={`editrow:${b.step.data?.path ?? i}`}
+          step={b.step}
+          chatSessionId={chatSessionId}
+        />
+      );
     case "think":
       return b.text.length > 0 ? (
         <ThinkingBlock key={`think:${i}`} thinking={b.text} done={b.done} sessionId={chatSessionId} />
@@ -1247,26 +1267,75 @@ export function FoldedStepGroup({
  *  Clicking the row expands the inline diff card; clicking the FILE NAME opens
  *  the file in the right-side diff overlay (same surface the git sidebar and
  *  turn-changes rows use). */
-export function EditFileRow({ step }: { step: ActivityStep }) {
+export function EditFileRow({
+  step,
+  chatSessionId,
+}: {
+  step: ActivityStep;
+  chatSessionId?: string | null;
+}) {
   const [open, setOpen] = useState(false);
   const path = step.data?.path ?? "";
   const edit = step.data?.edit;
   const fileName = path.split(/[\\/]/).pop() ?? path;
   const dir = path.slice(0, path.length - fileName.length).replace(/[\\/]$/, "");
   const stats = useMemo(() => (edit ? editLineStats(edit) : null), [edit]);
-  const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
-  const projectPath = useProjectsStore((s) =>
-    s.projects.find((p) => p.id === s.selectedProjectId)?.path,
-  );
 
-  const openDiffOverlay = () => {
-    // Same routing as the turn-changes rows: an open git repo diff goes to
-    // the DevDiffPanel overlay; anything else falls back to a file tab.
-    const status = selectedProjectId
-      ? useProjectsStore.getState().gitStatuses[selectedProjectId]
+  // Folder the file lives in, resolved the same way the send path
+  // (streamingSlice) and the Changes panel's chat-follow binding resolve a
+  // working directory: the chat's picked working folder, then its worktree,
+  // then its bound project. Deliberately NOT the sidebar-selected project —
+  // it can point somewhere else entirely, and the Changes panel follows the
+  // CHAT, so a cwd the chat itself doesn't have would only ever render the
+  // panel's "select a project" empty state.
+  const resolveEditCwd = (): string | null => {
+    const chat = useChatStore.getState();
+    const sid = chatSessionId ?? chat.focusedChatSessionId ?? chat.activeChatSessionId;
+    if (!sid) return null;
+    const session = chat.sessions.find((x) => x.id === sid);
+    const boundProjectId = chat.sessionProjects[sid];
+    const boundPath = boundProjectId
+      ? useProjectsStore.getState().projectById(boundProjectId)?.path
       : undefined;
-    useUiStore.getState().setDiffPanelFile(path, status && !status.isRepo ? null : (projectPath ?? null));
-    useUiStore.getState().addTab("files");
+    return chat.cwdOverrides[sid] || session?.worktreePath || boundPath || null;
+  };
+
+  // Same routing as the turn-changes rows: an open git repo diff goes to the
+  // DevDiffPanel overlay — openFilesTab activates the SINGLETON Changes tab
+  // and expands the panel (addTab stacked a duplicate tab per click) — while
+  // anything without a repo to diff against opens the file itself as a named
+  // tab instead of a Changes tab that can only render its empty state.
+  const openDiffOverlay = () => {
+    const openFileTab = () =>
+      useUiStore.getState().openArtifactTab({ path, filename: fileName });
+    const cwd = resolveEditCwd();
+    const openDiff = () => {
+      useUiStore.getState().setDiffPanelFile(path, cwd);
+      useUiStore.getState().openFilesTab();
+    };
+    if (!cwd) {
+      openFileTab();
+      return;
+    }
+    // Cached git status for the project that owns `cwd` routes instantly;
+    // an unknown folder asks the backend once (same as the turn-changes rows).
+    const ps = useProjectsStore.getState();
+    const owner = ps.projects.find((p) => p.path === cwd);
+    const status = owner ? ps.gitStatuses[owner.id] : undefined;
+    if (status && !status.isRepo) {
+      openFileTab();
+      return;
+    }
+    if (!status) {
+      void getGitStatus(cwd)
+        .then((info) => {
+          if (info && !info.isRepo) openFileTab();
+          else openDiff();
+        })
+        .catch(() => openFileTab());
+      return;
+    }
+    openDiff();
   };
 
   return (

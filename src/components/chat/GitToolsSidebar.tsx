@@ -226,8 +226,7 @@ export function GitToolsSidebar() {
   usePlanTracker();
 
   // Tool panel / UI store hooks — select individually to avoid churn.
-  const addTab = useUiStore((s) => s.addTab);
-  const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
+  const openFilesTab = useUiStore((s) => s.openFilesTab);
   const openPlanTab = useUiStore((s) => s.openPlanTab);
   const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
   // Click-to-open ONE agent in the right pane (reuses the pane, no tab spam).
@@ -405,9 +404,10 @@ export function GitToolsSidebar() {
   const completedPlanStepsNum = planSteps.filter((s) => s.status === "completed").length;
 
   // Open the ToolPanel Changes tab when the "changes" row is clicked.
+  // openFilesTab (not addTab) — it activates the singleton tab and expands
+  // the panel instead of stacking a duplicate "Changes" tab per click.
   const openChanges = () => {
-    addTab("files");
-    setToolPanelCollapsed(false);
+    openFilesTab();
   };
 
   // Open a plan in its own tab in the tool panel.

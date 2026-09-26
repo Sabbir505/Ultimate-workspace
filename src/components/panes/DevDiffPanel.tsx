@@ -171,6 +171,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   const activeChatSessionId = useChatStore(selectContextSessionId);
   const chatSessions = useChatStore((s) => s.sessions);
   const sessionProjects = useChatStore((s) => s.sessionProjects);
+  const cwdOverrides = useChatStore((s) => s.cwdOverrides);
   const activeChatSession = useMemo(
     () =>
       activeChatSessionId
@@ -188,13 +189,16 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   // A non-terminal focused pane (browser) doesn't bind — the panel ignores it.
   const boundPane = focusedPane && focusedPane.data.kind === "terminal" ? focusedPane : null;
   // Embedded (tool panel Files tab) fallback: with no focused terminal the
-  // user's context is the ACTIVE CHAT — diff against its worktree, or its
-  // bound project's root. An unbound chat resolves to "" (empty state)
-  // instead of diffing whatever project is selected in the sidebar.
+  // user's context is the ACTIVE CHAT — diff against its picked working
+  // folder, its worktree, or its bound project's root (the same resolution
+  // order the send path uses). An unbound chat with no working folder
+  // resolves to "" (empty state) instead of diffing whatever project is
+  // selected in the sidebar.
   const fallbackCwd =
     embedded && !boundPane
-      ? activeChatSession?.worktreePath ??
-        projects.find((p) => p.id === activeBoundProjectId)?.path ??
+      ? (activeChatSessionId ? cwdOverrides[activeChatSessionId] : undefined) ||
+        activeChatSession?.worktreePath ||
+        projects.find((p) => p.id === activeBoundProjectId)?.path ||
         ""
       : "";
   const cwd = useMemo(

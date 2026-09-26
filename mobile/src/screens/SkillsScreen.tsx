@@ -18,6 +18,7 @@ import {
   useRelay, onInstalledSkillList, onInstalledSkillContent, onInstalledSkillAck,
   type InstalledSkillInfo,
 } from '../hooks/useRelay';
+import { useRelayList } from '../hooks/useRelayList';
 import { tapLight } from '../lib/haptics';
 import DomainErrorBar from '../components/DomainErrorBar';
 
@@ -39,21 +40,27 @@ export default function SkillsScreen() {
   const [newName, setNewName] = useState('');
   const [message, setMessage] = useState<string | null>(null);
 
+  // Fetch on mount, on the kind toggle, and on every reconnect — a fetch
+  // fired before the socket pairs is silently dropped, so the reconnect
+  // refetch is what un-sticks the empty list.
+  useRelayList(() => listInstalledSkills(kind), [kind]);
+
   useEffect(() => {
-    listInstalledSkills(kind);
     const offList = onInstalledSkillList.on(({ skills: list }) => {
-      // A create reply carries just the new row — merge instead of replace.
-      setSkills((prev) =>
-        list.length === 1 && prev.some((p) => p.slug === list[0].slug)
+      // A create reply carries just the new row — merge it in (append when
+      // the slug is new, replace in place when it exists) instead of letting
+      // a single-row list wipe every other entry. Multi-row lists are full
+      // ListInstalledSkills refreshes and replace wholesale.
+      setSkills((prev) => {
+        if (list.length !== 1) return list;
+        return prev.some((p) => p.slug === list[0].slug)
           ? prev.map((p) => (p.slug === list[0].slug ? list[0] : p))
-          : list,
-      );
+          : [...prev, list[0]];
+      });
     });
-    const offContent = onInstalledSkillContent.on(({ slug, content }) => {
+    const offContent = onInstalledSkillContent.on(({ content }) => {
       setDraft(content);
-      setEditing((e) => (e ? { ...e } : e));
-      const match = skills.find((s) => s.slug === slug);
-      if (match) setEditing({ ...match, description: match.description });
+      setEditing((e) => (e ? { ...e, content } : e));
     });
     const offAck = onInstalledSkillAck.on(({ mirrored }) => {
       if (mirrored > 0) setMessage(`Mirrored ${mirrored} ${kind}${mirrored === 1 ? '' : 's'} to both harnesses`);

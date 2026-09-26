@@ -180,7 +180,6 @@ type MobileMessagePlain =
   | { type: 'ListChatSkills' }
   | { type: 'ListAutomations' }
   | { type: 'ListProjects' }
-  | { type: 'ListProjects' }
   | { type: 'ListAcpAgents' }
   | { type: 'ListMemoryRecords'; include_inactive?: boolean }
   | { type: 'UpdateMemoryRecord'; memory_id: string; content: string; importance?: number }
@@ -265,12 +264,32 @@ export interface CostDetails {
 }
 
 type Listener<T> = (data: T) => void;
-/** Sessions whose in-flight GetSessionMessages carried a before_id. */
-const paginating = new Set<string>();
-function appendQueue(sessionId: string): boolean {
-  const v = paginating.has(sessionId);
-  paginating.delete(sessionId);
-  return v;
+/**
+ * Per-session FIFO of the GetSessionMessages requests sent but not yet
+ * answered, in send order: `true` = pagination reply wanted (a before_id was
+ * sent), `false` = first page. The relay answers a connection's requests in
+ * order, so shifting the front routes each reply to the fetch that produced
+ * it. The old shared `paginating` set misrouted racing fetches: a first-page
+ * reply (2.5s poll / sync-on-first-token) arriving while "load older" was in
+ * flight PREPENDED the fresh page (duplicating the newest messages), and the
+ * pagination reply then REPLACED the whole list with only older messages.
+ */
+const pendingMessageFetches = new Map<string, boolean[]>();
+function queueMessageFetch(sessionId: string, older: boolean) {
+  const q = pendingMessageFetches.get(sessionId);
+  if (q) q.push(older);
+  else pendingMessageFetches.set(sessionId, [older]);
+}
+function routeMessageReply(sessionId: string): boolean {
+  const q = pendingMessageFetches.get(sessionId);
+  if (!q || q.length === 0) return false; // unsolicited push: replace
+  const older = q.shift();
+  if (q.length === 0) pendingMessageFetches.delete(sessionId);
+  return older ?? false;
+}
+/** In-flight fetch expectations die with the connection. */
+function clearMessageFetches() {
+  pendingMessageFetches.clear();
 }
 
 class EventBus<T> {
@@ -485,12 +504,26 @@ export interface SessionChatAttachment {
 // Artifact-preview cache (library grid + sheet): path -> preview, filled as
 // the relay streams them back. The preview sheet paints instantly from this
 // cache instead of re-fetching the whole file, which is what made opening
-// an artifact feel slow.
+// an artifact feel slow. Capped: entries carry full file text and base64
+// image payloads, so an uncapped map accumulated every browsed artifact in
+// JS memory for the app's lifetime. Eviction is insertion-oldest-first —
+// an evicted entry just re-fetches on next open.
+const PREVIEW_CACHE_MAX = 48;
 const _previewCache = new Map<string, ArtifactPreview>();
 const _previewInFlight = new Set<string>();
 
 export function getCachedArtifactPreview(path: string): ArtifactPreview | undefined {
   return _previewCache.get(path);
+}
+
+function cacheArtifactPreview(path: string, preview: ArtifactPreview) {
+  _previewCache.delete(path); // refresh insertion order on re-view
+  _previewCache.set(path, preview);
+  while (_previewCache.size > PREVIEW_CACHE_MAX) {
+    const oldest = _previewCache.keys().next().value;
+    if (oldest === undefined) break;
+    _previewCache.delete(oldest);
+  }
 }
 
 function requestArtifactPreviewFn(path: string) {
@@ -729,6 +762,10 @@ function _doConnect(target: string) {
               // and the offline layout came back: the cold-open flicker.
               nc(true);
               nconnecting(false);
+              // Requests in flight on the OLD connection are gone with it;
+              // keeping their routing entries would misroute the first
+              // replies of the new connection.
+              clearMessageFetches();
             }
             break;
           }
@@ -766,7 +803,7 @@ function _doConnect(target: string) {
           case 'LocalModelReady': onLocalModelReady.emit({ model: msg.model, baseUrl: msg.base_url }); break;
           case 'LocalModelError': onLocalModelError.emit({ model: msg.model, error: msg.error }); break;
           // Session-scoped chat events (Task 6). Route to the new event buses.
-          case 'SessionMessages': onSessionMessages.emit({ sessionId: msg.session_id, messages: msg.messages, hasMore: msg.has_more, append: appendQueue(msg.session_id) }); break;
+          case 'SessionMessages': onSessionMessages.emit({ sessionId: msg.session_id, messages: msg.messages, hasMore: msg.has_more, append: routeMessageReply(msg.session_id) }); break;
           case 'SessionChatToken': onSessionChatToken.emit({ sessionId: msg.session_id, token: msg.token }); break;
           case 'SessionChatDone':
             onSessionChatDone.emit({ sessionId: msg.session_id, usage: msg.usage });
@@ -800,7 +837,7 @@ function _doConnect(target: string) {
           case 'SessionQuestionRequest': onSessionQuestionRequest.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, questions: (msg.questions as AgentQuestion[]) || [] }); break;
           case 'SessionQuestionResolved': onSessionQuestionResolved.emit({ pendingId: msg.pending_id }); break;
           case 'SessionCompacted': onSessionCompacted.emit({ sessionId: msg.session_id }); break;
-          case 'ArtifactPreviewMsg': _previewCache.set(msg.path, {
+          case 'ArtifactPreviewMsg': cacheArtifactPreview(msg.path, {
               path: msg.path, filename: msg.filename, ext: msg.ext, kind: msg.kind,
               text: msg.text ?? null, data_uri: msg.data_uri ?? null, truncated: msg.truncated,
             });
@@ -986,8 +1023,7 @@ export function useRelay() {
   // owner map and persists messages on the chat_sessions table.
   const getSessionMessages = useCallback(
     (sessionId: string, beforeId?: number, limit = 50) => {
-      if (beforeId === undefined) paginating.delete(sessionId);
-      else paginating.add(sessionId);
+      queueMessageFetch(sessionId, beforeId !== undefined);
       _send({ type: 'GetSessionMessages', session_id: sessionId, before_id: beforeId, limit } as SessionChatMessage);
     },
     [],
@@ -1065,16 +1101,6 @@ export function useRelay() {
 // Stable sender identities — screens put these in effect dependency
 // arrays, so a fresh arrow on every render turns any such effect into an
 // infinite request loop (the Automations screen's flash was exactly this).
-
-
-// Stable sender identities — screens put these in effect dependency
-// arrays, so a fresh arrow on every render turns any such effect into an
-// infinite request loop (the Automations screen's flash was exactly this).
-
-
-// Stable sender identities — screens put these in effect dependency
-// arrays, so a fresh arrow on every render turns such an effect into an
-// infinite request loop (the Automations screen's flash was exactly this).
 const _setSessionStarred = (sid: string, starred: boolean) => { _send({ type: 'SetSessionStarred', session_id: sid, starred }); };
 const _listArtifacts = () => { _send({ type: 'ListArtifacts' }); };
 const _requestHarnessModels = (harnessId: string) => { _send({ type: 'ListHarnessModels', harness_id: harnessId }); };
@@ -1127,9 +1153,14 @@ const _searchChatMessages = (query: string, limit = 50) => { _send({ type: 'Sear
 const _resolveSessionQuestion = (sessionId: string, pendingId: string, answers: Record<string, string | string[]>, response?: string) => { _send({ type: 'ResolveSessionQuestion', session_id: sessionId, pending_id: pendingId, answers, response }); };
 const _setSessionPermissionMode = (sessionId: string, mode: string) => { _send({ type: 'SetSessionPermissionMode', session_id: sessionId, mode }); };
 const _compactSession = (sessionId: string) => { _send({ type: 'CompactSession', session_id: sessionId }); };
+const _cancelChatTurn = (id: string) => { _send({ type: 'CancelChatTurn', chat_session_id: id }); };
+const _createSession = (pid: string, h: string, provider?: string, model?: string, effort?: string, connectors?: string[]) =>
+  _send({ type: 'CreateSession', project_id: pid, harness: h, provider, model, effort, connectors });
+const _spawnSession = (sid: string) => { _send({ type: 'SpawnSession', session_id: sid }); };
+const _startLocalModel = (model: string, ggufPath: string) => { _send({ type: 'StartLocalModel', model, gguf_path: ggufPath }); };
 
   return { connected, desktopUnreachable: !connected, connecting, sessions, providers, harnesses, defaultModel, costSummary, costDetails, connect, applyPairingToken, disconnect, sendChatTurn, sendToSession, getTranscript,
-    cancelChatTurn: (id: string) => _send({ type: 'CancelChatTurn', chat_session_id: id }),
+    cancelChatTurn: _cancelChatTurn,
     setSessionStarred: _setSessionStarred,
     listArtifacts: _listArtifacts,
     requestHarnessModels: _requestHarnessModels,
@@ -1177,10 +1208,9 @@ const _compactSession = (sessionId: string) => { _send({ type: 'CompactSession',
     refreshProviders: refreshProvidersSend,
     refreshCost: refreshCostSend,
     refreshCostDetails: refreshCostDetailsSend,
-    createSession: (pid: string, h: string, provider?: string, model?: string, effort?: string, connectors?: string[]) =>
-      _send({ type: 'CreateSession', project_id: pid, harness: h, provider, model, effort, connectors }),
-    spawnSession: (sid: string) => _send({ type: 'SpawnSession', session_id: sid }),
-    startLocalModel: (model: string, ggufPath: string) => _send({ type: 'StartLocalModel', model, gguf_path: ggufPath }),
+    createSession: _createSession,
+    spawnSession: _spawnSession,
+    startLocalModel: _startLocalModel,
     // Session-scoped chat (Task 6).
     getSessionMessages,
     sendSessionChat,

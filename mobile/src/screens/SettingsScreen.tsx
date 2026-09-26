@@ -25,10 +25,6 @@ import { tapLight } from '../lib/haptics';
 import ConnectionIndicator from '../components/ConnectionIndicator';
 import QrScanModal from './QrScanModal';
 
-/** Local flag mirroring the push switch across restarts. The desktop keeps
- *  the last registered token after a disable — acceptable, captioned below. */
-const PUSH_FLAG_KEY = 'settings.pushEnabled';
-
 // Desktop SettingsView parity: the agent harness families, with install
 // state — the same registry the desktop Settings → Harnesses panel lists.
 function HarnessRow({ id, displayName, installed }: { id: string; displayName: string; installed: boolean }) {
@@ -217,9 +213,6 @@ export default function SettingsScreen() {
   const [showRest, setShowRest] = React.useState(false);
   useAfterPaint(() => setShowRest(true), [], 140);
 
-  // Restore persisted switch states once — after the first frame. Each of
-  // these three promises is its own setState; running them during the paint
-  // window re-rendered Settings ~60ms in and held the visible frame back.
   const handleConnect = useCallback((url?: string) => {
     connect(url ?? relayUrl.trim() ?? undefined);
   }, [connect, relayUrl]);
@@ -391,15 +384,13 @@ export default function SettingsScreen() {
         </Section>
       </ScrollView>
 
-      {/* QR scanner modal — live camera preview; calls onScanned when a
-          barcode/QR is detected. (Eager import: the old React.lazy wrapper
-          evaluated on Settings mount anyway, and device-side Metro segment
-          loading crashes on Android — see App.tsx.) */}
       {/* Mount the scanner ONLY while it is open. QrScanModal calls
           useCameraPermissions() at the top of its render, so keeping it in
           the tree made every Settings mount kick off an async camera
           permission query (and pull expo-camera's module graph in) for a
-          modal the user had not opened. */}
+          modal the user had not opened.
+          (The import itself stays eager — a static import at the top of the
+          file; the lazy-import rationale lives in App.tsx.) */}
       {qrScanning ? (
         <QrScanModal visible={qrScanning} onScanned={handleQrScan} onClose={() => setQrScanning(false)} />
       ) : null}

@@ -14,6 +14,9 @@
 // must exist before the first cargo build.
 //
 // Usage: npm run release:staging
+//        npm run release:latest-json:staging   (delegates here with
+//        --latest-json-only: runs ONLY step 7, the sign + latest.json pass, so
+//        the staging constants below stay defined in this one file)
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +31,19 @@ const STAGING_KEY = ".tauri/relay-update-staging.key";
 function run(cmd, cwd = root) {
   console.log(`\n$ ${cmd}`);
   execSync(cmd, { stdio: "inherit", cwd });
+}
+
+// --- --latest-json-only mode ---
+// Exactly what `npm run release:latest-json:staging` did when it inlined this
+// same make-latest-json invocation (same args, same fail-fast behavior —
+// make-latest-json itself errors if the config or key is missing). No build,
+// no guards: it only signs the existing bundle and rewrites latest.json.
+if (process.argv.includes("--latest-json-only")) {
+  run(
+    `node scripts/make-latest-json.mjs --config ${STAGING_CONFIG} ` +
+      `--repo ${STAGING_REPO} --key ${STAGING_KEY}`,
+  );
+  process.exit(0);
 }
 
 // Fail fast on the two things that make the (long) build wasteful or hang.

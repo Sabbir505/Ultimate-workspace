@@ -49,23 +49,39 @@ export default function DiffSheet({ visible, path, projectId, onClose }: DiffShe
 
   // One request per open; the reply lands on the shared GitOutput bus (no
   // correlation id on the relay protocol — the Git rail is the only other
-  // subscriber and lives on a different screen).
+  // subscriber and lives on a different screen). A deadline turns a dropped
+  // reply (desktop busy, repo lock, lost frame) into an error note instead
+  // of an eternal "Loading diff…" — same contract as ArtifactSheet.
+  const FETCH_TIMEOUT_MS = 12_000;
   useEffect(() => {
     if (!visible || !path || !projectId) return;
     setLoading(true);
     setOutput(null);
     setError(null);
     gitDiff(projectId, path);
+    let done = false;
+    const timeout = setTimeout(() => {
+      if (!done) {
+        done = true;
+        setLoading(false);
+        setError('The desktop didn’t respond — it may be busy. Try again.');
+      }
+    }, FETCH_TIMEOUT_MS);
     const offOut = onGitOutput.on(({ output: text }) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
       setOutput(text);
       setLoading(false);
     });
     const offErr = onDomainError.on(({ domain, error: e }) => {
-      if (domain !== 'git') return;
+      if (domain !== 'git' || done) return;
+      done = true;
+      clearTimeout(timeout);
       setError(e);
       setLoading(false);
     });
-    return () => { offOut(); offErr(); };
+    return () => { done = true; clearTimeout(timeout); offOut(); offErr(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, path, projectId]);
 

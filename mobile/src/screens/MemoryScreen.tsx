@@ -10,15 +10,15 @@ import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
 import {
   useRelay, onMemoryList, onMemoryMutated, type MemoryInfo,
 } from '../hooks/useRelay';
+import { useRelayList } from '../hooks/useRelayList';
 import { tapLight } from '../lib/haptics';
-import DomainErrorBar from '../components/DomainErrorBar';
+import ScreenHeader from '../components/ScreenHeader';
 
 const STATUS_DIM: Record<string, string> = {
   active: '',
@@ -29,7 +29,6 @@ const STATUS_DIM: Record<string, string> = {
 
 export default function MemoryScreen() {
   useScreenMountTiming('MemoryScreen');
-  const navigation = useNavigation<any>();
   const c = theme.colors;
   const { listMemoryRecords, updateMemoryRecord, deleteMemoryRecord, purgeMemories } = useRelay();
   const [records, setRecords] = useState<MemoryInfo[]>([]);
@@ -38,8 +37,10 @@ export default function MemoryScreen() {
   const [draft, setDraft] = useState('');
   const [includeInactive, setIncludeInactive] = useState(false);
 
+  // Refetch on mount, on the inactive toggle, and on reconnect — the mount
+  // send is dropped while the socket is still pairing.
+  useRelayList(() => listMemoryRecords(includeInactive), [includeInactive]);
   useEffect(() => {
-    listMemoryRecords(includeInactive);
     const offList = onMemoryList.on(({ records: list }) => setRecords(list));
     const offMut = onMemoryMutated.on(() => listMemoryRecords(includeInactive));
     return () => { offList(); offMut(); };
@@ -75,28 +76,22 @@ export default function MemoryScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.background }]} edges={['top']}>
-      <View style={[styles.header, { borderBottomColor: c.border }]}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-        >
-          <Ionicons name="arrow-back" size={22} color={c.text} />
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: c.text }]}>Memory</Text>
-        <TouchableOpacity
-          onPress={confirmPurge}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          accessibilityRole="button"
-          accessibilityLabel="Purge all memories"
-        >
-          <Ionicons name="trash-outline" size={19} color={c.error} />
-        </TouchableOpacity>
-      </View>
+      <ScreenHeader
+        title="Memory"
+        errorDomains={['memory']}
+        right={
+          <TouchableOpacity
+            onPress={confirmPurge}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityRole="button"
+            accessibilityLabel="Purge all memories"
+          >
+            <Ionicons name="trash-outline" size={19} color={c.error} />
+          </TouchableOpacity>
+        }
+      />
 
       <View style={styles.searchWrap}>
-      <DomainErrorBar domains={['memory']} />
         <View style={[styles.searchField, { backgroundColor: c.surface2, borderColor: c.border }]}>
           <Ionicons name="search" size={15} color={c.textSecondary} />
           <TextInput
@@ -214,12 +209,6 @@ export default function MemoryScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: theme.spacing.md, paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  headerTitle: { fontSize: 17, fontWeight: '700' },
   searchWrap: { paddingHorizontal: theme.spacing.md, paddingTop: theme.spacing.sm },
   searchField: {
     flexDirection: 'row', alignItems: 'center', gap: 8,

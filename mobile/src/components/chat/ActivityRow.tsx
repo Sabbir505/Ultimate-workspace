@@ -96,6 +96,10 @@ function renderEdit(edit: unknown, fallbackPath?: string): EditView | null {
   return { path, old: oldStr, new: newStr };
 }
 
+/** The tools whose rows may offer a git-diff peek (same set the desktop's
+ *  always-allow rules engine governs). */
+const FILE_MUTATING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'move_file', 'copy_file']);
+
 function PulsingDot({ color }: { color: string }) {
   const opacity = React.useRef(new Animated.Value(0.35)).current;
   React.useEffect(() => {
@@ -127,7 +131,13 @@ export default function ActivityRow({ data, raw, done, onPeekDiff }: ActivityRow
 
   const edit = useMemo(() => renderEdit(data?.edit, data?.path), [data]);
   // A file the agent created/edited/deleted on disk — the peek's target.
-  const peekPath = edit?.path ?? data?.path ?? null;
+  // Gated on the FILE-MUTATING tools: read-type tools (read_file, grep, …)
+  // also carry `data.path`, and their "Diff" button opened a guaranteed-empty
+  // "No git changes for this file" sheet.
+  const peekPath =
+    data?.kind != null && FILE_MUTATING_TOOLS.has(data.kind)
+      ? edit?.path ?? data?.path ?? null
+      : null;
   const argsText = useMemo(() => {
     if (data?.args == null) return null;
     try {

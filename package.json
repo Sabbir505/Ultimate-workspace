@@ -15,8 +15,9 @@
     "test": "vitest run",
     "release:latest-json": "node scripts/make-latest-json.mjs",
     "tauri:build:staging": "tauri build --config src-tauri/tauri.staging.conf.json",
-    "release:latest-json:staging": "node scripts/make-latest-json.mjs --config src-tauri/tauri.staging.conf.json --repo Sabbir505/relay-releases-staging --key .tauri/relay-update-staging.key",
-    "release:staging": "node scripts/release-staging.mjs"
+    "release:latest-json:staging": "node scripts/release-staging.mjs --latest-json-only",
+    "release:staging": "node scripts/release-staging.mjs",
+    "sync:releases": "node scripts/sync-releases-page.mjs"
   },
   "dependencies": {
     "@babel/standalone": "7.29.7",

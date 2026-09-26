@@ -1,12 +1,15 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View, TextInput, Modal } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
 import { onBudgetList, onCostRollups, useRelay, type BudgetInfo, type CostRollupsData } from '../hooks/useRelay';
-import DomainErrorBar from '../components/DomainErrorBar';
+import { useRelayList } from '../hooks/useRelayList';
+// Shared formatters — the hand-copied `usd`/`tokens` helpers used to drift
+// from the chat usage line's copy.
+import { formatUsd as usd, formatTokens as tokens } from '../lib/format';
+import ScreenHeader from '../components/ScreenHeader';
 
 /**
  * Mobile mirror of the desktop CostDashboard: range toggle (7/30/90),
@@ -20,12 +23,8 @@ const RANGES: { label: string; value: number }[] = [
   { label: '90d', value: 90 },
 ];
 
-const usd = (n: number) => `$${n.toFixed(n >= 10 ? 2 : 4)}`;
-const tokens = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
-
 export default function CostScreen() {
   useScreenMountTiming('CostScreen');
-  const navigation = useNavigation<any>();
   const { getCostRollups, connected, listBudgets, setBudget, removeBudget } = useRelay();
   const c = theme.colors;
   const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
@@ -36,11 +35,14 @@ export default function CostScreen() {
   const [editingBudget, setEditingBudget] = useState<BudgetInfo | 'new' | null>(null);
   const [budgetUsd, setBudgetUsd] = useState('');
   const [budgetPct, setBudgetPct] = useState('100');
+  // Both fetches refire on reconnect — the mount sends are dropped while the
+  // socket is still pairing, and a lost first fetch must not leave the
+  // screen on "Loading…" (or a false empty state) forever.
+  useRelayList(() => { listBudgets(); });
   useEffect(() => {
-    listBudgets();
     const offB = onBudgetList.on(({ budgets: list }) => setBudgets(list));
-    return () => { offB(); };
-  }, [listBudgets]);
+    return offB;
+  }, []);
   const saveBudget = (projectId: string) => {
     const usd = parseFloat(budgetUsd);
     const pct = parseFloat(budgetPct);
@@ -48,18 +50,13 @@ export default function CostScreen() {
     setEditingBudget(null);
   };
 
-  const fetchRollups = useCallback((days: number) => {
-    getCostRollups(days);
-  }, [getCostRollups]);
+  // Refetch on mount, on a range change, and on reconnect.
+  useRelayList(() => { getCostRollups(rangeDays); }, [rangeDays]);
+  useEffect(() => onCostRollups.on(({ rollups: r }) => setRollups(r)), []);
 
-  useEffect(() => {
-    fetchRollups(rangeDays);
-    const off = onCostRollups.on(({ rollups: r }) => setRollups(r));
-    return off;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rangeDays, fetchRollups]);
-
-  const daily = useMemo(() => (rollups?.daily ?? []).slice(-30), [rollups]);
+  // Cap the chart to the ACTIVE range, not a hardcoded 30 — the toggle
+  // offers up to 90d and the hero says "last {rollups.rangeDays}d".
+  const daily = useMemo(() => (rollups?.daily ?? []).slice(-(rollups?.rangeDays ?? 30)), [rollups]);
   const maxDaily = useMemo(() => Math.max(...daily.map((d) => d.costUsd), 0.0001), [daily]);
   const totals = rollups?.totals;
 
@@ -68,20 +65,7 @@ export default function CostScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.background }]} edges={['top']}>
-      <View style={[styles.header, { borderBottomColor: c.border }]}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="arrow-back" size={22} color={c.text} />
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: c.text }]}>Cost dashboard</Text>
-        <View style={{ width: 22 }} />
-      </View>
-
-      <DomainErrorBar domains={['budget', 'cost-rollups']} />
+      <ScreenHeader title="Cost dashboard" errorDomains={['budget', 'cost-rollups']} />
 
       <ScrollView contentContainerStyle={styles.body}>
         {/* Range toggle — desktop RangeToggle parity (7d/30d/90d). */}
@@ -346,15 +330,6 @@ export default function CostScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: theme.spacing.md,
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  headerTitle: { fontSize: 17, fontWeight: '700' },
   body: { padding: theme.spacing.md, paddingBottom: 40 },
   rangeRow: {
     flexDirection: 'row',

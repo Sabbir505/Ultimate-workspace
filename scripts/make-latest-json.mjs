@@ -180,7 +180,11 @@ for (const [key, spec] of Object.entries(PLATFORMS)) {
     console.log(`Signing ${fileName} …`);
     try {
       execSync(
-        `npx @tauri-apps/cli signer sign -f "${keyPath}" -p "" "${filePath}"`,
+        // Pinned to the repo's @tauri-apps/cli major (devDependencies: "^2"):
+        // the CI release job runs without `npm ci`, so an unpinned `npx
+        // @tauri-apps/cli` would silently pick up a future, possibly
+        // breaking major from the registry.
+        `npx @tauri-apps/cli@^2 signer sign -f "${keyPath}" -p "" "${filePath}"`,
         { stdio: "inherit", cwd: root },
       );
     } catch {
@@ -209,7 +213,7 @@ if (Object.keys(platforms).length === 0) {
     console.log(`  repo    : ${repo}`);
     console.log(`  tag     : ${tag}`);
     console.log(`  key     : ${keyPath}`);
-    console.log(`  expected: ${join(bundleDir, "nsis")}${"\\"}Relay_${version}_x64-setup.exe`);
+    console.log(`  expected: ${join(bundleDir, "nsis", `Relay_${version}_x64-setup.exe`)}`);
     console.log("\nNo artifacts present yet — build first, then re-run without --dry-run.");
     process.exit(0);
   }

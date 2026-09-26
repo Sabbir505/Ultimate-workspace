@@ -11,10 +11,12 @@ import { useNavigation } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
+import { timeAgo } from '../lib/format';
 import {
   loadJournal, subscribeJournal, markAllRead, clearJournal, type JournalEntry, type NotificationKind,
 } from '../lib/notificationJournal';
 import { tapLight } from '../lib/haptics';
+import ScreenHeader from '../components/ScreenHeader';
 
 const KIND_ICON: Record<NotificationKind, keyof typeof Ionicons.glyphMap> = {
   turn_done: 'checkmark-circle-outline',
@@ -24,14 +26,6 @@ const KIND_ICON: Record<NotificationKind, keyof typeof Ionicons.glyphMap> = {
   budget: 'wallet-outline',
   artifact: 'document-text-outline',
 };
-
-function ago(ts: number): string {
-  const s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 60) return 'now';
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
-}
 
 export default function NotificationsScreen() {
   useScreenMountTiming('NotificationsScreen');
@@ -48,41 +42,33 @@ export default function NotificationsScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.background }]} edges={['top']}>
-      <View style={[styles.header, { borderBottomColor: c.border }]}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-        >
-          <Ionicons name="arrow-back" size={22} color={c.text} />
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: c.text }]}>
-          Notifications{unread > 0 ? ` · ${unread}` : ''}
-        </Text>
-        <View style={styles.headerActions}>
-          {unread > 0 ? (
-            <TouchableOpacity
-              onPress={() => { tapLight(); void markAllRead(); }}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              accessibilityRole="button"
-              accessibilityLabel="Mark all read"
-            >
-              <Ionicons name="checkmark-done" size={19} color={c.textSecondary} />
-            </TouchableOpacity>
-          ) : null}
-          {entries.length > 0 ? (
-            <TouchableOpacity
-              onPress={() => { tapLight(); void clearJournal(); }}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              accessibilityRole="button"
-              accessibilityLabel="Clear notifications"
-            >
-              <Ionicons name="trash-outline" size={18} color={c.error} />
-            </TouchableOpacity>
-          ) : null}
-        </View>
-      </View>
+      <ScreenHeader
+        title={`Notifications${unread > 0 ? ` · ${unread}` : ''}`}
+        right={
+          <View style={styles.headerActions}>
+            {unread > 0 ? (
+              <TouchableOpacity
+                onPress={() => { tapLight(); void markAllRead(); }}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel="Mark all read"
+              >
+                <Ionicons name="checkmark-done" size={19} color={c.textSecondary} />
+              </TouchableOpacity>
+            ) : null}
+            {entries.length > 0 ? (
+              <TouchableOpacity
+                onPress={() => { tapLight(); void clearJournal(); }}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel="Clear notifications"
+              >
+                <Ionicons name="trash-outline" size={18} color={c.error} />
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        }
+      />
 
       <ScrollView style={styles.list}>
         {entries.length === 0 ? (
@@ -117,7 +103,7 @@ export default function NotificationsScreen() {
                 <Text style={[styles.body, { color: c.textSecondary }]} numberOfLines={2}>{e.body}</Text>
               ) : null}
             </View>
-            <Text style={[styles.time, { color: c.textSecondary }]}>{ago(e.at)}</Text>
+            <Text style={[styles.time, { color: c.textSecondary }]}>{timeAgo(e.at)}</Text>
             {!e.read ? <View style={[styles.dot, { backgroundColor: c.accent }]} /> : null}
           </TouchableOpacity>
         ))}
@@ -128,12 +114,6 @@ export default function NotificationsScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: theme.spacing.md, paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  headerTitle: { fontSize: 17, fontWeight: '700' },
   headerActions: { flexDirection: 'row', gap: 14, alignItems: 'center' },
   list: { padding: 12, gap: 8, paddingBottom: 40 },
   row: {

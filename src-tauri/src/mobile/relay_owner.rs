@@ -6,17 +6,16 @@
 
 use super::relay_ws::OwnerMap;
 use super::protocol::DesktopMessage;
-use serde::Deserialize;
 use tauri::{AppHandle, Listener, Manager};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Process-global guard for the `mobile:session_chat_event` listener. Every
-/// `start_relay` used to register ANOTHER listener, so after N relay restarts
-/// every chat event was forwarded N times and the phone saw every token
-/// duplicated. One registration for the process is correct: the OwnerMap is
-/// `Arc`-shared across restarts, so the original listener keeps routing to
-/// whatever connection currently owns each session.
-static SESSION_CHAT_EVENT_LISTENER_REGISTERED: AtomicBool = AtomicBool::new(false);
+/// Process-global guard for the `chat:*` → phone stream forwarder. Every
+/// `start_relay` used to register ANOTHER set of listeners, so after N relay
+/// restarts every chat event was forwarded N times and the phone saw every
+/// streamed token duplicated N times. One registration for the process is
+/// correct: the OwnerMap is `Arc`-shared across restarts, so the original
+/// listeners keep routing to whatever connection currently owns each session.
+static CHAT_STREAM_FORWARDER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 /// Claim the single listener slot. Returns false when it is already claimed.
 pub(crate) fn claim_listener_slot(flag: &AtomicBool) -> bool {
@@ -24,30 +23,30 @@ pub(crate) fn claim_listener_slot(flag: &AtomicBool) -> bool {
         .is_ok()
 }
 
-/// Payload structure for the `mobile:session_chat_event` Tauri event emitted by
-/// the React side. The relay listens for these and forwards them to the
-/// appropriate WebSocket connection.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SessionChatEventPayload {
-    pub session_id: String,
-    pub kind: String,
-    pub payload: serde_json::Value,
+/// One chat's owner mapping: which phone connection ids receive this chat's
+/// `chat:*` events, and whether the phone is WATCHING the chat (it opened it)
+/// or only started a turn in it. Watch entries survive turn boundaries —
+/// desktop-started turns in an open chat must keep streaming — and die with
+/// the phone's connection (OwnerCleanup); turn-scoped entries are removed by
+/// the chat:done / chat:error forwarders.
+#[derive(Default)]
+struct ChatOwnerEntry {
+    channels: Vec<String>,
+    watch: bool,
 }
 
-/// Payload structure for the `mobile:session_chat_owner` Tauri event emitted
-/// by the Rust side. The React side listens and stores the mapping.
-/// chat_session_id -> owner_session_id for relay-run turns. The owner's
+/// chat_session_id -> owner mapping for relay-run turns. The owner's
 /// WebSocket channel is looked up from the owner map at forward time; this
 /// only resolves which phone a backend `chat:*` event belongs to.
-static CHAT_OWNERS: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashMap<String, Vec<String>>>> =
+static CHAT_OWNERS: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashMap<String, ChatOwnerEntry>>> =
     once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
 /// Remember which phone started the turn on `chat_session_id`.
 pub fn record_chat_owner(chat_session_id: &str, owner_session_id: &str) {
     let mut map = CHAT_OWNERS.lock();
-    let owners = map.entry(chat_session_id.to_string()).or_default();
-    if !owners.iter().any(|o| o == owner_session_id) {
-        owners.push(owner_session_id.to_string());
+    let entry = map.entry(chat_session_id.to_string()).or_default();
+    if !entry.channels.iter().any(|o| o == owner_session_id) {
+        entry.channels.push(owner_session_id.to_string());
     }
 }
 
@@ -57,11 +56,46 @@ pub fn record_chat_owner(chat_session_id: &str, owner_session_id: &str) {
 /// desktop frontend's re-broadcast needs an owner mapping that only a
 /// phone-sent turn ever created (and it dies with the desktop store).
 pub fn watch_chat(chat_session_id: &str, owner_session_id: &str) {
-    record_chat_owner(chat_session_id, owner_session_id);
+    let mut map = CHAT_OWNERS.lock();
+    let entry = map.entry(chat_session_id.to_string()).or_default();
+    entry.watch = true;
+    if !entry.channels.iter().any(|o| o == owner_session_id) {
+        entry.channels.push(owner_session_id.to_string());
+    }
 }
 
 pub(crate) fn owners_for_chat(chat_session_id: &str) -> Vec<String> {
-    CHAT_OWNERS.lock().get(chat_session_id).cloned().unwrap_or_default()
+    CHAT_OWNERS
+        .lock()
+        .get(chat_session_id)
+        .map(|e| e.channels.clone())
+        .unwrap_or_default()
+}
+
+/// Remove a turn-scoped owner mapping (chat:done / chat:error exit). Watch
+/// entries survive: the phone still has the chat open, and dropping the
+/// mapping on the first done made every later desktop-started turn invisible
+/// until the phone happened to re-fetch.
+fn drop_turn_owner(chat_session_id: &str) {
+    let mut map = CHAT_OWNERS.lock();
+    let remove = map
+        .get(chat_session_id)
+        .map(|e| !e.watch)
+        .unwrap_or(false);
+    if remove {
+        map.remove(chat_session_id);
+    }
+}
+
+/// Drop CHAT_OWNERS entries whose every owner channel died with a
+/// disconnected connection (watch entries are bounded by the phone's
+/// connection lifetime; without this they accumulated forever). Called from
+/// OwnerCleanup after the dead channels are pruned from the owner map.
+pub(crate) fn prune_owners_without_channels(owner_map: &OwnerMap) {
+    let channels = owner_map.lock();
+    CHAT_OWNERS
+        .lock()
+        .retain(|_, entry| entry.channels.iter().any(|o| channels.contains_key(o)));
 }
 
 fn forward_to_owner(
@@ -76,18 +110,29 @@ fn forward_to_owner(
     }
 }
 
-/// TRUE streaming for relay-run (phone-originated) turns.
+/// TRUE streaming for relay-run turns — the single delivery path for every
+/// `chat:*` event a phone should see.
 ///
-/// The desktop frontend re-broadcasts `chat:*` events as
-/// `mobile:session_chat_event` ONLY for the chat it currently has open, so a
-/// turn the PHONE started streamed nowhere: not to the phone (it appeared
-/// only after a manual refresh) and not live on the desktop either. The
-/// backend already emits `chat:token` / `chat:status` / `chat:done` /
-/// `chat:error` / `chat:approval_request` / `chat:artifact` for every turn
-/// the relay runs — so the relay listens to them itself and ships frames to
-/// the owning phone. The frontend path stays for desktop-started turns.
+/// The backend emits `chat:token` / `chat:status` / `chat:done` /
+/// `chat:error` / `chat:approval_request` / `chat:question-request` /
+/// `chat:artifact` / `chat:approval-resolved` / `chat:plan-proposal` for
+/// every turn, no matter which surface started it — this forwarder listens
+/// to them and ships the matching frames to every phone connection that
+/// owns or is watching the chat (CHAT_OWNERS). The old frontend
+/// re-broadcast (`mobile:session_chat_event`) this replaced was removed: it
+/// only ever covered the chat open on the desktop, and its owner map was
+/// never populated once the `mobile:session_chat_owner` emit went away.
 pub fn start_chat_stream_forwarder(app: &AppHandle, owner_map: OwnerMap) {
     use serde_json::Value;
+    // One registration per process (same guard pattern as the push
+    // listeners): start_relay runs on every relay (re)start, and an
+    // unguarded re-registration made Tauri invoke every chat:* handler N
+    // times after N restarts — the phone saw every streamed token duplicated
+    // N times, and one pairing-token rotation already doubled the stream.
+    if !claim_listener_slot(&CHAT_STREAM_FORWARDER_REGISTERED) {
+        eprintln!("[mobile-relay] chat stream forwarder already registered; skipping");
+        return;
+    }
     // Owned clone: the listener closures are 'static and must not capture
     // the borrowed &AppHandle.
     let app_owned = app.clone();
@@ -151,7 +196,7 @@ pub fn start_chat_stream_forwarder(app: &AppHandle, owner_map: OwnerMap) {
                 .map(|s| s.0.has_pending_ask(cid))
                 .unwrap_or(false);
             if !awaiting_question {
-                CHAT_OWNERS.lock().remove(cid);
+                drop_turn_owner(cid);
             }
 
             // Relay-run turns never hit the desktop frontend's
@@ -197,6 +242,10 @@ pub fn start_chat_stream_forwarder(app: &AppHandle, owner_map: OwnerMap) {
                     error: err.to_string(),
                 }
             });
+            // A failed turn never emits chat:done, so the turn-scoped
+            // mapping would linger for the process lifetime — same cleanup
+            // as the done path (watch entries survive either way).
+            drop_turn_owner(cid);
         });
     }
     {
@@ -274,12 +323,60 @@ pub fn start_chat_stream_forwarder(app: &AppHandle, owner_map: OwnerMap) {
             });
         });
     }
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SessionChatOwnerPayload {
-    pub chat_session_id: String,
-    pub owner_session_id: String,
+    {
+        let owner_map = owner_map.clone();
+        // Desktop-resolved approvals must dismiss the phone's card: the
+        // turn resumes on the desktop while the phone still shows "waiting
+        // for approval" (tapping the stale card then errors with "unknown
+        // pending approval id"). This forwarder is the only delivery path —
+        // the frontend re-broadcast died with the mobile:session_chat_owner
+        // emit, and the legacy owner_session_id emit never fires for modern
+        // sessions (CreateSession doesn't set the column).
+        let _ = app.listen("chat:approval-resolved", move |event| {
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
+            let (Some(cid), Some(pending_id)) = (
+                v.get("chatSessionId").and_then(Value::as_str),
+                v.get("pendingId").and_then(Value::as_str),
+            ) else { return };
+            forward_to_owner(&owner_map, cid, |owner| {
+                super::protocol::DesktopMessage::SessionApprovalResolved {
+                    session_id: owner,
+                    pending_id: pending_id.to_string(),
+                }
+            });
+        });
+    }
+    {
+        let owner_map = owner_map.clone();
+        // present_plan cards: the phone gets the same Approve / Revise
+        // affordance the desktop card offers (it answers via
+        // ResolvePlanProposal).
+        let _ = app.listen("chat:plan-proposal", move |event| {
+            let Ok(v) = serde_json::from_str::<Value>(event.payload()) else { return };
+            let (Some(cid), Some(pending_id)) = (
+                v.get("chatSessionId").and_then(Value::as_str),
+                v.get("pendingId").and_then(Value::as_str),
+            ) else { return };
+            let title = v
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Plan proposal")
+                .to_string();
+            let plan = v
+                .get("plan")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            forward_to_owner(&owner_map, cid, |owner| {
+                super::protocol::DesktopMessage::SessionPlanProposal {
+                    session_id: owner,
+                    pending_id: pending_id.to_string(),
+                    title: title.clone(),
+                    plan: plan.clone(),
+                }
+            });
+        });
+    }
 }
 
 /// Register a mobile session in the owner map.
@@ -303,192 +400,4 @@ pub fn register_connection(
 #[allow(dead_code)] // Called on disconnect in Task 6.
 pub fn unregister_owner(owner: &OwnerMap, session_id: &str) {
     owner.lock().remove(session_id);
-}
-
-/// Forward a Tauri `mobile:session_chat_event` payload to the owner of the session.
-/// Maps the `kind` field to the corresponding `DesktopMessage` variant.
-pub fn forward_session_chat_event(
-    owner: &OwnerMap,
-    payload: SessionChatEventPayload,
-) -> Result<(), String> {
-    let sender = {
-        let map = owner.lock();
-        map.get(&payload.session_id).cloned()
-    };
-
-    let sender = match sender {
-        Some(s) => s,
-        None => {
-            // No owner for this session — silently drop.
-            // This can happen if the phone disconnected between event emission and delivery.
-            return Ok(());
-        }
-    };
-
-    let desktop_msg = match payload.kind.as_str() {
-        "token" => {
-            #[derive(Deserialize)]
-            struct TokenPayload {
-                token: String,
-            }
-            let p: TokenPayload = serde_json::from_value(payload.payload)
-                .map_err(|e| format!("invalid token payload: {e}"))?;
-            DesktopMessage::SessionChatToken {
-                session_id: payload.session_id,
-                token: p.token,
-            }
-        }
-        "status" => {
-            #[derive(Deserialize)]
-            struct StatusPayload {
-                reason: String,
-                message: String,
-            }
-            let p: StatusPayload = serde_json::from_value(payload.payload)
-                .map_err(|e| format!("invalid status payload: {e}"))?;
-            DesktopMessage::SessionChatStatus {
-                session_id: payload.session_id,
-                reason: p.reason,
-                message: p.message,
-            }
-        }
-        "done" => {
-            #[derive(Deserialize)]
-            struct DonePayload {
-                usage: Option<super::protocol::MobileChatUsage>,
-            }
-            let p: DonePayload = serde_json::from_value(payload.payload)
-                .map_err(|e| format!("invalid done payload: {e}"))?;
-            DesktopMessage::SessionChatDone {
-                session_id: payload.session_id,
-                usage: p.usage,
-            }
-        }
-        "error" => {
-            #[derive(Deserialize)]
-            struct ErrorPayload {
-                error: String,
-            }
-            let p: ErrorPayload = serde_json::from_value(payload.payload)
-                .map_err(|e| format!("invalid error payload: {e}"))?;
-            DesktopMessage::SessionChatError {
-                session_id: payload.session_id,
-                error: p.error,
-            }
-        }
-        "approval" => {
-            #[derive(Deserialize)]
-            struct ApprovalPayload {
-                pending_id: String,
-                tool: String,
-                summary: String,
-                args: serde_json::Value,
-            }
-            let p: ApprovalPayload = serde_json::from_value(payload.payload)
-                .map_err(|e| format!("invalid approval payload: {e}"))?;
-            DesktopMessage::SessionApprovalRequest {
-                session_id: payload.session_id,
-                pending_id: p.pending_id,
-                tool: p.tool,
-                summary: p.summary,
-                args: p.args,
-            }
-        }
-        // The approval was resolved on ANY surface (desktop card, another
-        // phone, the mobile resolve path itself) — dismiss matching cards.
-        "approval-resolved" => {
-            #[derive(Deserialize)]
-            struct ResolvedPayload {
-                #[serde(default)]
-                pendingId: Option<String>,
-                #[serde(default)]
-                pending_id: Option<String>,
-            }
-            let p: ResolvedPayload = serde_json::from_value(payload.payload)
-                .map_err(|e| format!("invalid approval-resolved payload: {e}"))?;
-            DesktopMessage::SessionApprovalResolved {
-                session_id: payload.session_id,
-                pending_id: p.pendingId.or(p.pending_id).unwrap_or_default(),
-            }
-        }
-        // Plan-proposal cards (present_plan): the phone gets the same
-        // Approve / Revise affordance the desktop card offers.
-        "plan-proposal" => {
-            #[derive(Deserialize)]
-            struct PlanPayload {
-                #[serde(default)]
-                pendingId: Option<String>,
-                #[serde(default)]
-                pending_id: Option<String>,
-                #[serde(default)]
-                title: Option<String>,
-                #[serde(default)]
-                plan: Option<String>,
-            }
-            let p: PlanPayload = serde_json::from_value(payload.payload)
-                .map_err(|e| format!("invalid plan-proposal payload: {e}"))?;
-            DesktopMessage::SessionPlanProposal {
-                session_id: payload.session_id,
-                pending_id: p.pendingId.or(p.pending_id).unwrap_or_default(),
-                title: p.title.unwrap_or_else(|| "Plan proposal".to_string()),
-                plan: p.plan.unwrap_or_default(),
-            }
-        }
-        "artifact" => {
-            #[derive(Deserialize)]
-            struct ArtifactPayload {
-                message_id: Option<i64>,
-                artifact: super::protocol::ChatArtifactPayload,
-            }
-            let p: ArtifactPayload = serde_json::from_value(payload.payload)
-                .map_err(|e| format!("invalid artifact payload: {e}"))?;
-            DesktopMessage::SessionArtifact {
-                session_id: payload.session_id,
-                message_id: p.message_id,
-                artifact: p.artifact,
-            }
-        }
-        other => {
-            return Err(format!("unknown session chat event kind: {other}"));
-        }
-    };
-
-    sender
-        .try_send(desktop_msg)
-        .map_err(|e| format!("failed to send to owner: {e}"))?;
-
-    Ok(())
-}
-
-/// Start listening for Tauri `mobile:session_chat_event` events and forward them
-/// to the appropriate WebSocket connection via the owner map. Idempotent: the
-/// listener is registered once per process (see the guard above) — repeat calls
-/// from relay restarts are no-ops, since the Arc-shared owner map means the
-/// original registration already routes to live connections.
-pub fn start_session_chat_event_listener(
-    app: &tauri::AppHandle,
-    owner: OwnerMap,
-) -> Result<(), String> {
-    if !claim_listener_slot(&SESSION_CHAT_EVENT_LISTENER_REGISTERED) {
-        eprintln!("[mobile-relay] session_chat_event listener already registered; skipping");
-        return Ok(());
-    }
-    let _app_clone = app.clone();
-    app.listen("mobile:session_chat_event", move |event| {
-        let payload_str = event.payload();
-        let payload: SessionChatEventPayload = match serde_json::from_str(payload_str) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[mobile-relay] malformed session_chat_event: {e}");
-                return;
-            }
-        };
-
-        if let Err(e) = forward_session_chat_event(&owner, payload) {
-            eprintln!("[mobile-relay] failed to forward session_chat_event: {e}");
-        }
-    });
-
-    eprintln!("[mobile-relay] session_chat_event listener registered");
-    Ok(())
 }

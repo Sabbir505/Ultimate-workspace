@@ -115,7 +115,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   meshMail: {},
   meshMailBySession: {},
   meshChildren: {},
-  ownerSessionByChatId: {},
   cwdOverrides: {},
   sessionProjects: {},
   messageQueue: {},

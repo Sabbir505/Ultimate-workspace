@@ -90,14 +90,7 @@ fn resolve_chat_session(
 /// keyed against the old `sessions` table) AND a direct `chat_sessions.id` —
 /// which is what the phone's session list has carried ever since it started
 /// reading chat_sessions, i.e. every desktop-created chat.
-pub(super) fn resolve_session_to_chat_id_pub(
-    conn: &Connection,
-    owner_session_id: &str,
-) -> Option<String> {
-    resolve_session_to_chat_id(conn, owner_session_id)
-}
-
-fn resolve_session_to_chat_id(conn: &Connection, sent_id: &str) -> Option<String> {
+pub(super) fn resolve_session_to_chat_id(conn: &Connection, sent_id: &str) -> Option<String> {
     if let Ok(id) = conn.query_row(
         "SELECT id FROM chat_sessions WHERE owner_session_id = ?1",
         rusqlite::params![sent_id],
@@ -111,6 +104,31 @@ fn resolve_session_to_chat_id(conn: &Connection, sent_id: &str) -> Option<String
         |r| r.get::<_, String>(0),
     )
     .ok()
+}
+
+/// Resolve a phone-supplied session id or fail with the canonical
+/// "session not found" error. One copy of the prologue ten handlers shared
+/// verbatim.
+fn require_chat_id(conn: &Connection, owner_session_id: &str) -> Result<String, String> {
+    resolve_session_to_chat_id(conn, owner_session_id)
+        .ok_or_else(|| format!("session not found: {owner_session_id}"))
+}
+
+/// Map the phone's attachment records onto the shape the shared chat
+/// pipeline takes. One copy of the loop `handle_send_chat_message` ran
+/// twice (once per turn kind).
+fn to_attachment_inputs(attachments: Vec<ChatAttachment>) -> Vec<crate::types::ChatAttachmentInput> {
+    attachments
+        .into_iter()
+        .map(|a| crate::types::ChatAttachmentInput {
+            name: a.name,
+            kind: a.kind,
+            text: a.text,
+            data: a.data,
+            media_type: a.media_type,
+            format: a.format,
+        })
+        .collect()
 }
 
 /// Fetch a page of session-scoped chat messages for history pagination.
@@ -193,17 +211,41 @@ pub fn fetch_page(
     // artifact_paths comes from the artifacts table's message attribution so
     // the phone can render per-message file chips (desktop MessageAttachments
     // parity). Tool-call transcript rides inside `content` (<tool> segments),
-    // which the phone's renderer already parses.
-    let mut stmt = db
-        .prepare("SELECT path FROM artifacts WHERE chat_message_id = ?1 ORDER BY created_at")
-        .map_err(|e| format!("artifact join prepare failed: {e}"))?;
+    // which the phone's renderer already parses. ONE grouped query feeds all
+    // rows — the per-row SELECT ran up to 200 times per page, and this page
+    // is fetched on every first token, status banner, and streaming poll.
+    let artifact_paths: std::collections::HashMap<i64, Vec<String>> = {
+        let ids: Vec<i64> = records.iter().map(|r| r.id).collect();
+        let mut map: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+        if !ids.is_empty() {
+            let placeholders = std::iter::repeat("?")
+                .take(ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT chat_message_id, path FROM artifacts
+                 WHERE chat_message_id IN ({placeholders})
+                 ORDER BY created_at"
+            );
+            let mut stmt = db
+                .prepare(&sql)
+                .map_err(|e| format!("artifact join prepare failed: {e}"))?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| format!("artifact join failed: {e}"))?;
+            for row in rows {
+                let (id, path) = row.map_err(|e| format!("artifact join failed: {e}"))?;
+                map.entry(id).or_default().push(path);
+            }
+        }
+        map
+    };
     let session_records: Vec<SessionMessageRecord> = records
         .into_iter()
         .map(|r| {
-            let paths: Vec<String> = stmt
-                .query_map(rusqlite::params![r.id], |row| row.get(0))
-                .map(|rows| rows.filter_map(Result::ok).collect())
-                .unwrap_or_default();
+            let paths = artifact_paths.get(&r.id).cloned().unwrap_or_default();
             SessionMessageRecord {
                 id: r.id,
                 role: r.role,
@@ -217,7 +259,6 @@ pub fn fetch_page(
             }
         })
         .collect();
-    drop(stmt);
 
     Ok((session_records, has_more))
 }
@@ -260,20 +301,27 @@ impl SessionChatManager {
                 always_allow,
             } => {
                 // Ownership: a phone that learns another session's pending id
-                // must not be able to answer its approval.
+                // must not be able to answer its approval. FAIL CLOSED — the
+                // old `if let` skipped the check entirely when the phone's
+                // session id didn't resolve, so sending any garbage id
+                // bypassed the guard.
+                let pending_chat = chat_mgr.get_pending_approval_owner(&pending_id);
                 let owner_chat = {
                     let conn = db.lock();
                     resolve_session_to_chat_id(&conn, &session_id)
                 };
-                if let (Some((pending_chat, _)), Some(owner)) =
-                    (chat_mgr.get_pending_approval_owner(&pending_id), owner_chat.as_deref())
-                {
-                    if pending_chat != owner {
-                        return Err("approval does not belong to this session".into());
+                match (pending_chat, owner_chat) {
+                    (Some((pending_chat, _)), Some(owner)) => {
+                        if pending_chat != owner {
+                            return Err("approval does not belong to this session".into());
+                        }
                     }
+                    (Some(_), None) => {
+                        return Err(format!("session not found: {session_id}"));
+                    }
+                    (None, _) => {}
                 }
                 handle_resolve_session_approval(
-                    &app,
                     &db,
                     &chat_mgr,
                     pending_id,
@@ -325,9 +373,22 @@ impl SessionChatManager {
             MobileMessage::ResolveSessionQuestion { session_id, pending_id, answers, response } => {
                 let chat_session_id = {
                     let conn = db.lock();
-                    resolve_session_to_chat_id(&conn, &session_id)
-                        .ok_or_else(|| format!("session not found: {session_id}"))?
+                    require_chat_id(&conn, &session_id)?
                 };
+                // Ownership: same threat model as ResolveSessionApproval — a
+                // phone that knows another chat's pending_id must not be able
+                // to answer it. The agent-ask registry is keyed by chat id
+                // (a mismatch is a stale no-op there), but the ChatState
+                // question registry is keyed by pending id alone, so the
+                // owning chat must be checked here.
+                if let Some(owner) = app
+                    .try_state::<crate::ChatState>()
+                    .and_then(|c| c.0.peek_pending_question_chat(&pending_id))
+                {
+                    if owner != chat_session_id {
+                        return Err("question does not belong to this session".into());
+                    }
+                }
                 crate::chat::commands::approval::resolve_agent_question(
                     chat_session_id,
                     pending_id.clone(),
@@ -413,8 +474,7 @@ fn handle_set_session_starred(
     starred: bool,
 ) -> Result<Vec<DesktopMessage>, String> {
     let conn = db.lock();
-    let chat_session_id = resolve_session_to_chat_id(&conn, &owner_session_id)
-        .ok_or_else(|| format!("session not found: {owner_session_id}"))?;
+    let chat_session_id = require_chat_id(&conn, &owner_session_id)?;
     db::set_chat_session_starred(&conn, &chat_session_id, starred)
         .map_err(|e| format!("failed to set starred: {e}"))?;
     Ok(vec![])
@@ -466,31 +526,39 @@ fn handle_send_chat_message(
     // the CLI owns. This branch hands the turn to the same command the
     // desktop harness composer calls; it emits the same chat:token/done/error
     // events, so the relay's stream forwarder covers it unchanged.
-    let harness_id: Option<String> =
-        agent.as_deref().and_then(|a| a.strip_prefix("harness:")).map(str::to_string);
-    if let Some(harness_id) = harness_id {
-        let attachments_input: Vec<crate::types::ChatAttachmentInput> = attachments
-            .into_iter()
-            .map(|a| crate::types::ChatAttachmentInput {
-                name: a.name,
-                kind: a.kind,
-                text: a.text,
-                data: a.data,
-                media_type: a.media_type,
-                format: a.format,
-            })
-            .collect();
+    // Same classifier the cancel path uses (harness: OR acp:): a phone-picked
+    // ACP agent used to fall through to the builtin provider path and hit a
+    // cloud model instead of the local agent process (AgentSessionManager::
+    // send dispatches `acp:<id>` ids to send_acp_turn, like the desktop).
+    let agent_id: Option<String> = match agent.as_deref() {
+        Some(a) if a.starts_with("harness:") => {
+            Some(a.strip_prefix("harness:").unwrap_or(a).to_string())
+        }
+        Some(a) if a.starts_with("acp:") => Some(a.to_string()),
+        _ => None,
+    };
+    let attachments_input = to_attachment_inputs(attachments);
+    if let Some(agent_id) = agent_id {
         {
             let conn = db.lock();
             db::touch_chat_session(&conn, &chat_session_id)
                 .map_err(|e| e.to_string())?;
         }
-        let project_id = {
+        let (project_id, cwd) = {
             let conn = db.lock();
-            db::get_chat_session(&conn, &chat_session_id)
+            let project_id = db::get_chat_session(&conn, &chat_session_id)
                 .ok()
                 .flatten()
-                .and_then(|s| s.project_id)
+                .and_then(|s| s.project_id);
+            // CLI turns must run in the project: the old cwd:None made the
+            // CLI spawn in the artifacts/Documents dir, where it read,
+            // wrote and git-diffed the wrong tree (and a later desktop turn
+            // dropped the CLI session id on the cwd change).
+            let cwd = project_id
+                .as_deref()
+                .and_then(|pid| db::get_project(&conn, pid).ok().flatten())
+                .map(|p| p.path);
+            (project_id, cwd)
         };
         // Same registration order as the builtin path: the forwarder needs
         // the mapping before the CLI's first token.
@@ -518,9 +586,9 @@ fn handle_send_chat_message(
                 state_db,
                 chat_session_id,
                 text,
-                harness_id,
+                agent_id,
                 Some(model).filter(|m| !m.trim().is_empty() && m != "auto"),
-                None,
+                cwd,
                 project_id,
                 Some(attachments_input),
                 None,
@@ -596,23 +664,14 @@ fn handle_send_chat_message(
             .flatten()
     };
 
-    // 2. Process attachments exactly like the desktop composer: images become
-    //    vision content on the live turn (+ a placeholder in the body text),
-    //    docs are base64-decoded and run through doc_to_text then inlined as
-    //    fenced blocks, text is inlined verbatim. The (extra_text, images)
-    //    pair mirrors the desktop send_chat_message path so the chat pipeline
-    //    receives the same shape regardless of which client sent the turn.
-    let attachments_input: Vec<crate::types::ChatAttachmentInput> = attachments
-        .into_iter()
-        .map(|a| crate::types::ChatAttachmentInput {
-            name: a.name,
-            kind: a.kind,
-            text: a.text,
-            data: a.data,
-            media_type: a.media_type,
-            format: a.format,
-        })
-        .collect();
+    // 2. Process attachments exactly like the desktop composer (the mapping
+    //    to ChatAttachmentInput ran once at the top of the fn, shared with
+    //    the agent branch): images become vision content on the live turn
+    //    (+ a placeholder in the body text), docs are base64-decoded and run
+    //    through doc_to_text then inlined as fenced blocks, text is inlined
+    //    verbatim. The (extra_text, images) pair mirrors the desktop
+    //    send_chat_message path so the chat pipeline receives the same shape
+    //    regardless of which client sent the turn.
     let (extra_text, images) = crate::chat::commands::process_attachments(&attachments_input);
     let content = format!("{text}{extra_text}");
 
@@ -791,7 +850,6 @@ const ALWAYS_ALLOWABLE_TOOLS: &[&str] = &[
 ];
 
 fn handle_resolve_session_approval(
-    app: &AppHandle,
     db: &Arc<Mutex<Connection>>,
     chat_mgr: &Arc<chat::ChatManager>,
     pending_id: String,
@@ -810,7 +868,6 @@ fn handle_resolve_session_approval(
         .take_pending_approval(&pending_id)
         .ok_or_else(|| format!("unknown pending approval id: {pending_id}"))?;
     let tool = pending.tool.clone();
-    let chat_session_id = pending.chat_session_id.clone();
 
     if approved && always_allow && ALWAYS_ALLOWABLE_TOOLS.contains(&tool.as_str()) {
         // Scope the persisted rule to the approved action's target directory.
@@ -852,34 +909,14 @@ fn handle_resolve_session_approval(
     }
 
     // Deliver the decision via the oneshot channel. A send error means the
-    // loop already ended (stream cancelled) — ignore it.
+    // loop already ended (stream cancelled) — ignore it. The approval gate
+    // emits `chat:approval-resolved` when the oneshot settles, and the
+    // relay's stream forwarder routes that event to every phone watching the
+    // chat — dismissing the card whether it was resolved here, on the
+    // desktop, or on another phone. (The old bespoke notify keyed on the
+    // row's owner_session_id column, which no modern phone session has, so
+    // it never fired.)
     let _ = pending.response_tx.send(approved);
-
-    // Notify the owning phone (if any) that the card is dead — the approval
-    // may have been resolved on the DESKTOP, or on a different phone
-    // connection, and a stale approval card would otherwise sit there
-    // forever. Rides the same `mobile:session_chat_event` channel the React
-    // re-broadcast uses; the relay's listener routes it by owner_session_id.
-    let owner_session_id: Option<String> = {
-        let conn = db.lock();
-        ensure_chat_session_owner_column(&conn).ok();
-        conn.query_row(
-            "SELECT owner_session_id FROM chat_sessions WHERE id = ?1 AND owner_session_id IS NOT NULL",
-            rusqlite::params![chat_session_id],
-            |r| r.get(0),
-        )
-        .ok()
-    };
-    if let Some(owner) = owner_session_id {
-        let _ = app.emit(
-            "mobile:session_chat_event",
-            serde_json::json!({
-                "session_id": owner,
-                "kind": "approval-resolved",
-                "payload": { "pendingId": pending_id },
-            }),
-        );
-    }
 
     Ok(vec![])
 }
@@ -891,8 +928,7 @@ fn handle_rename_session(
 ) -> Result<Vec<DesktopMessage>, String> {
     let chat_session_id = {
         let conn = db.lock();
-        resolve_session_to_chat_id(&conn, &owner_session_id)
-            .ok_or_else(|| format!("session not found: {owner_session_id}"))?
+        require_chat_id(&conn, &owner_session_id)?
     };
 
     let conn = db.lock();
@@ -950,8 +986,7 @@ fn handle_set_session_model(
     }
     let chat_session_id = {
         let conn = db.lock();
-        resolve_session_to_chat_id(&conn, &owner_session_id)
-            .ok_or_else(|| format!("session not found: {owner_session_id}"))?
+        require_chat_id(&conn, &owner_session_id)?
     };
     {
         let conn = db.lock();
@@ -968,6 +1003,11 @@ fn handle_set_session_model(
         } else {
             db::update_chat_session_provider(&conn, &chat_session_id, &provider_id)
                 .map_err(|e| format!("failed to set provider: {e}"))?;
+            // Switching BACK to a provider must clear the agent, or the row
+            // keeps routing every later turn (from the phone AND the
+            // desktop) through the CLI while the chip claims the provider.
+            db::update_chat_session_agent(&conn, &chat_session_id, None)
+                .map_err(|e| format!("failed to clear agent: {e}"))?;
         }
         db::update_chat_session_model(&conn, &chat_session_id, &model)
             .map_err(|e| format!("failed to set model: {e}"))?;
@@ -1001,8 +1041,7 @@ fn handle_delete_chat_session(
 ) -> Result<Vec<DesktopMessage>, String> {
     let chat_session_id = {
         let conn = db.lock();
-        resolve_session_to_chat_id(&conn, &owner_session_id)
-            .ok_or_else(|| format!("session not found: {owner_session_id}"))?
+        require_chat_id(&conn, &owner_session_id)?
     };
     {
         let conn = db.lock();
@@ -1259,8 +1298,7 @@ fn resolve_owned_message(
     owner_session_id: &str,
     message_id: i64,
 ) -> Result<(String, String), String> {
-    let chat_session_id = resolve_session_to_chat_id(conn, owner_session_id)
-        .ok_or_else(|| format!("session not found: {owner_session_id}"))?;
+    let chat_session_id = require_chat_id(conn, owner_session_id)?;
     let role: String = conn
         .query_row(
             "SELECT role FROM chat_messages WHERE id = ?1 AND chat_session_id = ?2",
@@ -1290,6 +1328,19 @@ fn handle_delete_chat_message(
     Ok(out)
 }
 
+/// True when the chat is mid-turn (a builtin provider stream OR a harness/
+/// ACP turn in the agent-session runtime). Shared by the checkpoint-restore,
+/// edit, and regenerate gates.
+fn chat_turn_busy(app: &AppHandle, chat_session_id: &str) -> bool {
+    app.try_state::<crate::ChatState>()
+        .map(|c| c.0.has_active_stream(chat_session_id))
+        .unwrap_or(false)
+        || app
+            .try_state::<crate::agent_sessions::AgentSessionState>()
+            .map(|a| a.0.is_turn_in_flight(chat_session_id))
+            .unwrap_or(false)
+}
+
 fn handle_edit_user_message(
     app: &AppHandle,
     db: &Arc<Mutex<Connection>>,
@@ -1302,20 +1353,37 @@ fn handle_edit_user_message(
     if trimmed.is_empty() {
         return Err("edited message must not be empty".to_string());
     }
+    let (chat_session_id, role) = {
+        let conn = db.lock();
+        resolve_owned_message(&conn, &owner_session_id, message_id)?
+    };
+    if role != "user" {
+        return Err("only user messages can be edited".to_string());
+    }
+    // Same turn-idle gate the desktop edit has (and the restore gate below):
+    // retiring the branch while a turn runs, then having the replacement
+    // turn rejected, would leave the transcript truncated with no turn.
+    if chat_turn_busy(app, &chat_session_id) {
+        return Err("cannot edit while this session is running a turn — wait for it to finish or cancel it first".into());
+    }
     {
         let conn = db.lock();
-        let (chat_session_id, role) =
-            resolve_owned_message(&conn, &owner_session_id, message_id)?;
-        if role != "user" {
-            return Err("only user messages can be edited".to_string());
-        }
         // Retire this message and every later row — the old branch stops
         // being model context (desktop edit-to-fork semantics).
         db::mark_branch_superseded(&conn, &chat_session_id, message_id)
             .map_err(|e| e.to_string())?;
     }
-    // The edited text continues as a fresh turn on the new branch.
-    handle_send_chat_message(app, db, chat_mgr, owner_session_id, trimmed, Vec::new())
+    // The edited text continues as a fresh turn on the new branch. If the
+    // send fails after the supersede, restore the branch — a rejected turn
+    // (missing key, no usable auto provider) must not strand the transcript.
+    let sent = handle_send_chat_message(app, db, chat_mgr, owner_session_id, trimmed, Vec::new());
+    if sent.is_err() {
+        let conn = db.lock();
+        if let Err(e) = db::un_mark_branch_superseded(&conn, &chat_session_id, message_id) {
+            eprintln!("[mobile-relay] failed to restore superseded branch after failed edit: {e}");
+        }
+    }
+    sent
 }
 
 fn handle_regenerate_message(
@@ -1324,10 +1392,13 @@ fn handle_regenerate_message(
     chat_mgr: &Arc<chat::ChatManager>,
     owner_session_id: String,
 ) -> Result<Vec<DesktopMessage>, String> {
-    let last_user = {
+    let (chat_session_id, last_user_id, last_user) = {
         let conn = db.lock();
-        let chat_session_id = resolve_session_to_chat_id(&conn, &owner_session_id)
-            .ok_or_else(|| format!("session not found: {owner_session_id}"))?;
+        let chat_session_id = require_chat_id(&conn, &owner_session_id)?;
+        // Same turn-idle gate as edit (above).
+        if chat_turn_busy(app, &chat_session_id) {
+            return Err("cannot regenerate while this session is running a turn — wait for it to finish or cancel it first".into());
+        }
         let row: Option<(i64, String)> = conn
             .query_row(
                 "SELECT id, content FROM chat_messages
@@ -1340,9 +1411,16 @@ fn handle_regenerate_message(
         let row = row.ok_or_else(|| "no user message to regenerate".to_string())?;
         db::mark_branch_superseded(&conn, &chat_session_id, row.0)
             .map_err(|e| e.to_string())?;
-        row.1
+        (chat_session_id, row.0, row.1)
     };
-    handle_send_chat_message(app, db, chat_mgr, owner_session_id, last_user, Vec::new())
+    let sent = handle_send_chat_message(app, db, chat_mgr, owner_session_id, last_user, Vec::new());
+    if sent.is_err() {
+        let conn = db.lock();
+        if let Err(e) = db::un_mark_branch_superseded(&conn, &chat_session_id, last_user_id) {
+            eprintln!("[mobile-relay] failed to restore superseded branch after failed regenerate: {e}");
+        }
+    }
+    sent
 }
 
 fn handle_list_chat_checkpoints(
@@ -1350,8 +1428,7 @@ fn handle_list_chat_checkpoints(
     owner_session_id: String,
 ) -> Result<Vec<DesktopMessage>, String> {
     let conn = db.lock();
-    let chat_session_id = resolve_session_to_chat_id(&conn, &owner_session_id)
-        .ok_or_else(|| format!("session not found: {owner_session_id}"))?;
+    let chat_session_id = require_chat_id(&conn, &owner_session_id)?;
     let checkpoints = db::list_chat_checkpoints(&conn, &chat_session_id)
         .map_err(|e| e.to_string())?
         .into_iter()
@@ -1386,8 +1463,7 @@ fn handle_restore_chat_checkpoint(
     // another session's snapshot from a guessed id).
     let chat_session_id = {
         let conn = db.lock();
-        resolve_session_to_chat_id(&conn, &owner_session_id)
-            .ok_or_else(|| format!("session not found: {owner_session_id}"))?
+        require_chat_id(&conn, &owner_session_id)?
     };
     {
         let conn = db.lock();
@@ -1402,18 +1478,11 @@ fn handle_restore_chat_checkpoint(
             return Err("checkpoint not found in this session".to_string());
         }
     }
-    // Same turn-idle gate the desktop restore has.
+    // Same turn-idle gate the desktop restore has (shared with edit /
+    // regenerate via chat_turn_busy).
     // The busy gate must key on the RESOLVED chat id — the owner id can be a
     // legacy mapping, and checking the wrong key let restores through a live turn.
-    let busy = app
-        .try_state::<crate::ChatState>()
-        .map(|c| c.0.has_active_stream(&chat_session_id))
-        .unwrap_or(false)
-        || app
-            .try_state::<crate::agent_sessions::AgentSessionState>()
-            .map(|a| a.0.is_turn_in_flight(&chat_session_id))
-            .unwrap_or(false);
-    if busy {
+    if chat_turn_busy(app, &chat_session_id) {
         return Err("cannot restore a checkpoint while this session is running a turn — wait for it to finish or cancel it first".into());
     }
     let db_handle = Arc::clone(db);
@@ -1447,8 +1516,7 @@ fn handle_set_session_permission_mode(
     }
     {
         let conn = db.lock();
-        let chat_session_id = resolve_session_to_chat_id(&conn, &owner_session_id)
-            .ok_or_else(|| format!("session not found: {owner_session_id}"))?;
+        let chat_session_id = require_chat_id(&conn, &owner_session_id)?;
         db::update_chat_session_permission_mode(&conn, &chat_session_id, &mode)
             .map_err(|e| e.to_string())?;
     }
@@ -1465,8 +1533,7 @@ pub(super) async fn handle_compact_session(
 ) -> Result<Vec<DesktopMessage>, String> {
     let chat_session_id = {
         let conn = db.lock();
-        resolve_session_to_chat_id(&conn, &owner_session_id)
-            .ok_or_else(|| format!("session not found: {owner_session_id}"))?
+        require_chat_id(&conn, &owner_session_id)?
     };
     // The desktop's own /compact command — same summarizer, same thresholds.
     crate::chat::commands::selection::chat_compact_now(

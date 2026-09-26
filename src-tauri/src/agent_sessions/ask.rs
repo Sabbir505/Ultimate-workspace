@@ -251,10 +251,16 @@ pub(super) fn register_relay_ask(
 
 /// Emit the question card for an id returned by `register_relay_ask`.
 pub(super) fn emit_relay_ask(app: &AppHandle, sid: &str, pending_id: String) {
-    let questions = app
+    // Skip when the ask vanished between registration and emit (the phone
+    // tapped Stop and cancel removed it, or a replacement question took the
+    // slot): emitting the fallback empty-questions card gave the phone an
+    // unanswerable card — every answer on it was a silent no-op.
+    let Some(questions) = app
         .try_state::<AgentSessionState>()
         .and_then(|s| s.0.peek_pending_ask_questions(sid, &pending_id))
-        .unwrap_or(serde_json::Value::Array(vec![]));
+    else {
+        return;
+    };
     let _ = app.emit(
         "chat:question-request",
         crate::types::ChatQuestionRequestPayload {

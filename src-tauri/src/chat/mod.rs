@@ -406,6 +406,16 @@ impl ChatManager {
         self.pending_questions.lock().remove(id)
     }
 
+    /// Which chat a pending question belongs to, without taking it — the
+    /// ownership check remote resolvers (mobile ResolveSessionQuestion) run
+    /// before answering, since this registry is keyed by pending id alone.
+    pub(crate) fn peek_pending_question_chat(&self, id: &str) -> Option<String> {
+        self.pending_questions
+            .lock()
+            .get(id)
+            .map(|q| q.chat_session_id.clone())
+    }
+
     /// Send a chat message. Spawns a tokio task that:
     /// 1. Builds the provider HTTP request
     /// 2. Reads SSE chunks, emitting `chat:token` events

@@ -1041,6 +1041,24 @@ pub fn mark_branch_superseded(
     Ok(n)
 }
 
+/// Undo [`mark_branch_superseded`]: restore exactly the rows that supersede
+/// marked (the marker is the `from_message_id` itself, so an older, unrelated
+/// supersede is never resurrected). The mobile edit/regenerate paths supersede
+/// BEFORE the replacement turn is known-good — a rejected send must not strand
+/// the transcript truncated with no replacement turn.
+pub fn un_mark_branch_superseded(
+    conn: &Connection,
+    chat_session_id: &str,
+    from_message_id: i64,
+) -> DbResult<usize> {
+    conn.execute(
+        "UPDATE chat_messages SET superseded_by = NULL
+          WHERE chat_session_id = ?1 AND superseded_by = ?2",
+        params![chat_session_id, from_message_id],
+    )
+    .map_err(Into::into)
+}
+
 // ---- full-text search ----
 
 /// Build a safe FTS5 MATCH expression from free-form user input. FTS5 has its

@@ -3,7 +3,9 @@
 // SessionQuestionRequest, answer it with ResolveSessionQuestion, and confirm
 // SessionQuestionResolved arrives and the turn keeps streaming afterward.
 //
-// Usage: node "Random Stuff/agent_question_e2e.mjs" <token>
+// Usage: node agent_question_e2e.mjs [--port <n>] <token>
+// The relay port can also come from the RELAY_PORT env var; it defaults to
+// 54257 (the desktop relay binds a random port on first run).
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { hmac } from '@noble/hashes/hmac.js';
@@ -54,10 +56,40 @@ function decryptFrame(key, counter, frame) {
   catch { return null; }
 }
 
-const token = process.argv[2];
-if (!token) { console.error('usage: node agent_question_e2e.mjs <token>'); process.exit(2); }
+// --port <n> / --port=<n> / RELAY_PORT env, falling back to 54257 — same
+// convention as relay_probe.mjs.
+function parseArgs(argv) {
+  const rest = [];
+  let port = null;
+  const badPort = () => { console.error('invalid --port value'); process.exit(2); };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--port' || a === '-p') {
+      port = Number(argv[++i]);
+      if (!Number.isInteger(port) || port <= 0) badPort();
+    } else if (a.startsWith('--port=')) {
+      port = Number(a.slice('--port='.length));
+      if (!Number.isInteger(port) || port <= 0) badPort();
+    } else {
+      rest.push(a);
+    }
+  }
+  if (port === null && process.env.RELAY_PORT) {
+    const v = Number(process.env.RELAY_PORT);
+    if (Number.isInteger(v) && v > 0) port = v;
+  }
+  return { port: port ?? 54257, rest };
+}
 
-const ws = new WebSocket('ws://127.0.0.1:54257');
+const { port, rest } = parseArgs(process.argv.slice(2));
+const token = rest[0];
+if (!token) {
+  console.error('usage: node agent_question_e2e.mjs [--port <n>] <token>');
+  console.error('       port also via RELAY_PORT env; defaults to 54257');
+  process.exit(2);
+}
+
+const ws = new WebSocket(`ws://127.0.0.1:${port}`);
 let key = null, inCounter = 0, outCounter = 0;
 const pending = [];
 let sessionId = null;

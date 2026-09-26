@@ -29,6 +29,10 @@ fn git_command(
     envs: &[(&str, &str)],
 ) -> std::io::Result<std::process::Output> {
     let mut cmd = Command::new("git");
+    // Raw UTF-8 paths in output (diff headers, porcelain status): the default
+    // quotes non-ASCII paths as octal escapes ("b/\303\251.txt"), which broke
+    // the mobile relay's per-file diff filter and any caller matching paths.
+    cmd.arg("-c").arg("core.quotepath=off");
     cmd.args(args).current_dir(cwd);
     // Extra environment (e.g. GIT_INDEX_FILE for checkpoint snapshots so the
     // user's real index is never touched).

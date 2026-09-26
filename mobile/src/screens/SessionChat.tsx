@@ -4,18 +4,22 @@
  * Layout (top to bottom):
  *   Header      back · centered title (long-press to rename) · model chip
  *               (opens ModelSheet) · drawer menu button (AppDrawer)
- *   Messages    INVERTED FlatList — newest turn at the bottom, older pages
- *               paginate in at the top (onEndReached → loadMore), pull to
- *               refresh. User turns render as right-aligned bubbles;
- *               assistant turns render full-width as plain text with
- *               think/tool segments (MessageBubble). The live streaming
- *               turn sits at the very bottom of the list.
+ *   Messages    NORMAL top-down FlatList — oldest first, newest at the
+ *               bottom, auto-scrolled to the newest content. Older pages
+ *               load ONLY through the "Load older messages" button at the
+ *               top of the list (listHeader → chat.loadMore); there is no
+ *               onEndReached auto-pagination. User turns render as
+ *               right-aligned bubbles; assistant turns render full-width
+ *               as plain text with think/tool segments (MessageBubble).
+ *               The live streaming turn renders in the footer at the bottom
+ *               of the list (listFooter), with the first-load spinner.
  *   Approvals   pending ApprovalCards between the list and the composer.
  *   Plan card   live plan proposal pinned above the composer.
  *   Status      transient status pill (StatusBanner) + error banner.
  *   Composer    ChatComposer pill (send / stop / voice / attachments).
  *
- * `deleted` flips to a full-screen "This conversation was cleared" state.
+ * `deleted` flips to a full-screen "This conversation was cleared" card
+ * with a "Go back" button.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -42,6 +46,9 @@ const ArrowLeft = ({ size, color }: { size?: number; color?: string }) => <Ionic
 const ChevronDown = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="chevron-down" size={size} color={color} />;
 import { theme as themeMod } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
+// Shared token abbreviation (12480 → "12.5k") — same formatter the cost
+// dashboard uses.
+import { formatTokens as tokens } from '../lib/format';
 import { useRelay, onConnectorList, onSessionConnectors, onSessionConnectorsSet, type ConnectorInfo, type SessionArtifact, type SessionChatAttachment, type SessionMessageRecord, onAcpAgentList, type AcpAgentInfo} from '../hooks/useRelay';
 import { useSessionChat } from '../hooks/useSessionChat';
 import MessageBubble from '../components/chat/MessageBubble';
@@ -124,8 +131,7 @@ export default function SessionChat() {
   }, [chat.meta?.projectId]);
 
   // Compact token/cost line for the last completed turn (desktop composer
-  // metrics parity). `tokens` abbreviates 12480 → 12.5k.
-  const tokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+  // metrics parity). `tokens` comes from the shared formatTokens formatter.
 
   // A first message handed over from the new-chat composer (home screen):
   // send it through the normal composer path once mounted so the optimistic
@@ -557,10 +563,6 @@ export default function SessionChat() {
           ListFooterComponent={listFooter}
           ListEmptyComponent={listEmpty}
           renderItem={renderItem}
-          onEndReachedThreshold={0.6}
-          onEndReached={() => {
-            if (chat.hasMore && !chat.loading) chat.loadMore();
-          }}
           refreshControl={
             <RefreshControl
               refreshing={chat.loading && chat.messages.length > 0}

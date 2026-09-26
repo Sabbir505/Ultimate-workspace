@@ -301,15 +301,6 @@ export interface ChatState {
   >;
   onSessionMail: (payload: SessionMailPayload) => void;
   onSessionSpawn: (payload: SessionSpawnPayload) => void;
-  /** Per-turn owner session id (mobile app's session identifier) keyed by
-   *  chatSessionId. Set by `sendMessage` when invoked from the mobile relay
-   *  so the chat:token / chat:done / chat:error / chat:status / chat:artifact
-   *  / chat:approval-request event listeners can re-broadcast a corresponding
-   *  `mobile:session_chat_event` Tauri event. The relay's `start_relay`
-   *  listener picks that event up and writes the matching `DesktopMessage`
-   *  variant onto the WS that originated the message. Cleared on the
-   *  terminal `chat:done` / `chat:error` for the session. */
-  ownerSessionByChatId: Record<string, string>;
   /** Custom working folder per chat session, chosen via the composer's "+"
    *  folder picker. Overrides the selected project's path as the harness
    *  send's cwd and is granted as an extra fs_root on the built-in path.
@@ -470,13 +461,6 @@ export interface ChatState {
   setStarred: (chatSessionId: string, starred: boolean) => Promise<void>;
   /** Mark a chat read/unread (shows an unread dot in the sidebar). */
   setUnread: (chatSessionId: string, unread: boolean) => Promise<void>;
-  /** Record the owner session id for a chat session, set when the mobile
-   *  relay invokes a session-scoped chat message. Used to re-broadcast chat
-   *  events back over the relay's per-session WebSocket. */
-  setOwnerSessionId: (chatSessionId: string, ownerSessionId: string) => void;
-  /** Look up the owner session id for a chat session (returns undefined if
-   *  no mobile relay turn is in flight for this chat session). */
-  getOwnerSessionId: (chatSessionId: string) => string | undefined;
   setSessionModel: (chatSessionId: string, model: string) => Promise<void>;
   /** Switch a session's provider (e.g. to "local_gguf" when a local model is
    *  picked from the selector in a cloud session, or back again). */

@@ -1,6 +1,6 @@
 // Extracted domain of lib/ipc.ts (see its header). Command names and
 // payload shapes are binding (CONTRACT.md).
-import { safeInvoke, safeListen, tauriRuntimeAvailable as tauriAvailable } from "../ipcCore";
+import { safeInvoke, safeListen } from "../ipcCore";
 import { ArtifactPreview, ChatPlanAcceptedPayload, ChatPlanModePayload, ChatPlanProposalPayload, ChatPlanUpdatedPayload, PlanStepProgressPayload, toastError } from "../ipc";
 
 // ---- Harness questions (Claude Code AskUserQuestion over the control protocol) ----
@@ -128,28 +128,10 @@ export const listenChatSubagentTokens = (handler: (payload: SubagentTokenPayload
 export const listenChatSubagentDone = (handler: (payload: SubagentDonePayload) => void) =>
   safeListen<SubagentDonePayload>("chat:subagent-done", handler);
 
-/** Re-broadcast a chat event to the mobile relay. Used from useChatEvents.ts to
- *  forward chat:token, chat:status, chat:done, chat:error,
- *  and chat:artifact events to the per-session mobile connection. */
-export const emitMobileSessionChatEvent = (
-  sessionId: string,
-  kind: string,
-  payload: unknown,
-) => {
-  if (!tauriAvailable()) return Promise.resolve();
-  return import("@tauri-apps/api/event")
-    .then(({ emit }) =>
-      emit("mobile:session_chat_event", { session_id: sessionId, kind, payload }),
-    )
-    .catch((err) => console.warn("[relay] emitMobileSessionChatEvent failed", err));
-};
-
-export interface ChatOwnerPayload {
-  chatSessionId: string;
-  ownerSessionId: string;
-}
-export const listenChatOwner = (handler: (payload: ChatOwnerPayload) => void) =>
-  safeListen<ChatOwnerPayload>("mobile:session_chat_owner", handler);
+// (The desktop-side mobile re-broadcast — emitMobileSessionChatEvent /
+// listenChatOwner — is gone: the backend's own `chat:*` stream forwarder in
+// relay_owner.rs delivers every event to the owning phone directly, and the
+// frontend owner map it keyed on was never populated.)
 
 /** A relay-side session mutation (e.g. the phone picked a model) landed —
  *  refresh the desktop's rows so its picker shows the current choice. */

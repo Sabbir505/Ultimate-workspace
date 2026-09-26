@@ -27,11 +27,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../theme';
+import { useScreenMountTiming } from '../lib/screenTiming';
 import { useRelay, onTranscript } from '../hooks/useRelay';
 
 const POLL_MS = 1500;
 
 export default function TerminalScreen() {
+  // Timing was missing here — every other screen records its mount mark.
+  useScreenMountTiming('TerminalScreen');
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const sessionId: string | null = route.params?.sessionId ?? null;

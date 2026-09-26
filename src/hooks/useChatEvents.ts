@@ -8,7 +8,6 @@
 // user switches to a different chat in the sidebar.
 import { useEffect } from "react";
 import {
-  emitMobileSessionChatEvent,
   listenChatApprovalRequest,
   listenChatApprovalResolved,
   listenChatQuestionRequest,
@@ -19,7 +18,6 @@ import {
   listenChatError,
   listenChatOpenBrowser,
   listenChatOpenPreview,
-  listenChatOwner,
   listenChatSessionUpdated,
   listenChatStatus,
   listenChatTaskProgress,
@@ -87,10 +85,6 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatToken(({ chatSessionId, token }) => {
         useChatStore.getState().onToken(chatSessionId, token);
-        const ownerSessionId = useChatStore.getState().getOwnerSessionId(chatSessionId);
-        if (ownerSessionId) {
-          void emitMobileSessionChatEvent(ownerSessionId, "token", { chatSessionId, token });
-        }
       }),
     );
 
@@ -109,10 +103,6 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatStatus(({ chatSessionId, reason, message }) => {
         useChatStore.getState().onStatus(chatSessionId, reason, message);
-        const ownerSessionId = useChatStore.getState().getOwnerSessionId(chatSessionId);
-        if (ownerSessionId) {
-          void emitMobileSessionChatEvent(ownerSessionId, "status", { chatSessionId, reason, message });
-        }
       }),
     );
 
@@ -142,10 +132,6 @@ export function useChatEvents(): void {
           // off `onDone` because the persisted row (and its id, which keys the
           // play button) only exists once the store has merged it.
           .then(() => autoReadFinishedTurn(chatSessionId));
-        const ownerSessionId = useChatStore.getState().getOwnerSessionId(chatSessionId);
-        if (ownerSessionId) {
-          void emitMobileSessionChatEvent(ownerSessionId, "done", payload);
-        }
         // Completion notification — works for BOTH the active chat and
         // background chats (streams are session-keyed, so a background turn
         // completing is indistinguishable from an active one). Nothing fires
@@ -204,10 +190,6 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatError(({ chatSessionId, message, code }) => {
         useChatStore.getState().onError(chatSessionId, message, code);
-        const ownerSessionId = useChatStore.getState().getOwnerSessionId(chatSessionId);
-        if (ownerSessionId) {
-          void emitMobileSessionChatEvent(ownerSessionId, "error", { chatSessionId, message, code });
-        }
         // Errors are always worth a record; the interrupting surfaces (OS
         // toast + alert chime) only fire when the user isn't looking at the
         // failing session.
@@ -230,10 +212,6 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatArtifact((payload) => {
         useChatStore.getState().onArtifact(payload);
-        const ownerSessionId = useChatStore.getState().getOwnerSessionId(payload.chatSessionId);
-        if (ownerSessionId) {
-          void emitMobileSessionChatEvent(ownerSessionId, "artifact", payload);
-        }
       }),
     );
 
@@ -287,10 +265,6 @@ export function useChatEvents(): void {
       // resumed the paused turn).
       listenChatApprovalRequest((payload) => {
         useChatStore.getState().onApprovalRequest(payload);
-        const ownerSessionId = useChatStore.getState().getOwnerSessionId(payload.chatSessionId);
-        if (ownerSessionId) {
-          void emitMobileSessionChatEvent(ownerSessionId, "approval", payload);
-        }
         // The agent is BLOCKED until the user approves — worth interrupting
         // for. Same visibility policy as completions: quiet when the user is
         // watching that session (the approval card is right there).
@@ -313,15 +287,6 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatApprovalResolved((payload) => {
         useChatStore.getState().onApprovalResolved(payload);
-        // Phone companion: dismiss the matching approval card there too —
-        // the approval may have been resolved on the desktop, and a stale
-        // card would block the phone UI forever.
-        const ownerSessionId = useChatStore.getState().getOwnerSessionId(payload.chatSessionId);
-        if (ownerSessionId) {
-          void emitMobileSessionChatEvent(ownerSessionId, "approval-resolved", {
-            pendingId: payload.pendingId,
-          });
-        }
       }),
     );
 
@@ -397,16 +362,6 @@ export function useChatEvents(): void {
     unlistens.push(
       listenPlanProposal((payload) => {
         useChatStore.getState().onPlanProposal(payload);
-        // Phone companion: the plan card renders there with Approve / Revise
-        // (resolution rides the shared approval oneshot via the relay).
-        const ownerSessionId = useChatStore.getState().getOwnerSessionId(payload.chatSessionId);
-        if (ownerSessionId) {
-          void emitMobileSessionChatEvent(ownerSessionId, "plan-proposal", {
-            pendingId: payload.pendingId,
-            title: payload.title,
-            plan: payload.plan,
-          });
-        }
       }),
     );
     unlistens.push(
@@ -446,12 +401,6 @@ export function useChatEvents(): void {
         useChatStore.getState().onSessionSpawn(payload);
       }),
     );
-
-    // Listen for mobile:session_chat_owner to set the owner-session mapping.
-    const unlistenOwner = listenChatOwner((payload) => {
-      useChatStore.getState().setOwnerSessionId(payload.chatSessionId, payload.ownerSessionId);
-    });
-    unlistens.push(unlistenOwner);
 
     return () => {
       for (const u of unlistens) void u.then((fn) => fn());

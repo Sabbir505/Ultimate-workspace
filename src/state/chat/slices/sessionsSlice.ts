@@ -519,7 +519,6 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         messageQueue: {},
         cwdOverrides: {},
         sessionProjects: {},
-        ownerSessionByChatId: {},
         loopState: {},
         subagents: {},
         meshMail: {},
@@ -741,12 +740,5 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
     },
 
     cancelFullAccessConfirm: () => set({ fullAccessConfirmingFor: null }),
-
-    setOwnerSessionId: (chatSessionId: string, ownerSessionId: string) =>
-      set((s) => ({
-        ownerSessionByChatId: { ...s.ownerSessionByChatId, [chatSessionId]: ownerSessionId },
-      })),
-
-    getOwnerSessionId: (chatSessionId: string) => get().ownerSessionByChatId[chatSessionId],
   };
 }

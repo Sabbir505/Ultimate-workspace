@@ -37,8 +37,11 @@ import {
   type AutomationInfo,
   type AutomationRunInfo,
 } from '../hooks/useRelay';
+import { useRelayList } from '../hooks/useRelayList';
+import { timeAgo } from '../lib/format';
+import { openChatById } from '../lib/navigation';
 import { tapLight } from '../lib/haptics';
-import DomainErrorBar from '../components/DomainErrorBar';
+import ScreenHeader from '../components/ScreenHeader';
 
 const TRIGGER_LABELS: Record<string, string> = {
   cron: 'Schedule',
@@ -54,20 +57,11 @@ function triggerLabel(a: AutomationInfo): string {
   return kind;
 }
 
-function timeAgo(ts?: number | null): string {
-  if (!ts) return 'never';
-  const s = Math.floor((Date.now() - ts * 1000) / 1000);
-  if (s < 3600) return `${Math.max(1, Math.floor(s / 60))}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
 export default function AutomationsScreen() {
   useScreenMountTiming('AutomationsScreen');
   const navigation = useNavigation<any>();
   const c = theme.colors;
   const {
-    connected,
     harnesses,
     listAutomations,
     createAutomation,
@@ -87,21 +81,24 @@ export default function AutomationsScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(() => listAutomations(), [listAutomations]);
-  // A flapping relay (the desktop busy-starves its accept loop) reconnects
-  // every few seconds. Re-blanking the list to a spinner on every flap IS
-  // the "flashing" the user saw — keep the data through short drops and only
-  // (re)fetch on the first load or a settled reconnect.
+  // Spinner only on the FIRST load — a reconnect refetch keeps the list on
+  // screen instead of re-blanking to a spinner on every relay flap.
   const fetchedOnce = React.useRef(false);
   const runsForRef = React.useRef<AutomationInfo | null>(null);
   runsForRef.current = runsFor;
 
-  useEffect(() => {
-    if (!connected) return;
+  // Fetch on mount and on every false→true connected transition: the mount
+  // send is silently dropped while the socket is still pairing, and without
+  // the reconnect refetch a lost first fetch leaves the spinner up forever.
+  useRelayList(() => {
     if (!fetchedOnce.current) {
       fetchedOnce.current = true;
       setLoading(true);
-      refresh();
     }
+    refresh();
+  });
+
+  useEffect(() => {
     const offList = onAutomationList.on(({ automations }) => { setItems(automations); setLoading(false); });
     const offUpdated = onAutomationUpdated.on(() => refresh());
     const offDeleted = onAutomationDeleted.on(({ automationId }) => {
@@ -120,7 +117,7 @@ export default function AutomationsScreen() {
     const offError = onAutomationError.on(({ error: e }) => setError(e));
     return () => { offList(); offUpdated(); offDeleted(); offStarted(); offStopped(); offRuns(); offError(); offFinished(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connected, refresh]);
+  }, [refresh, listAutomations]);
 
   const openRuns = useCallback((a: AutomationInfo) => {
     setRunsFor(a);
@@ -137,29 +134,24 @@ export default function AutomationsScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.background }]} edges={['top']}>
-      <View style={[styles.header, { borderBottomColor: c.border }]}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          style={styles.backBtn}
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="arrow-back" size={22} color={c.text} />
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: c.text }]}>Automations</Text>
-        <TouchableOpacity
-          onPress={() => { tapLight(); setEditing('new'); }}
-          style={styles.backBtn}
-          accessibilityRole="button"
-          accessibilityLabel="New automation"
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="add" size={24} color={c.accent} />
-        </TouchableOpacity>
-      </View>
-
-      <DomainErrorBar domains={['projects', 'automation']} />
+      {/* 'automation' errors never reach DomainErrorBar — useRelay routes
+          ChatErrors tagged chat_session_id='automation' to onAutomationError
+          (subscribed above), so only 'projects' is listed here. */}
+      <ScreenHeader
+        title="Automations"
+        errorDomains={['projects']}
+        right={
+          <TouchableOpacity
+            onPress={() => { tapLight(); setEditing('new'); }}
+            style={styles.backBtn}
+            accessibilityRole="button"
+            accessibilityLabel="New automation"
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons name="add" size={24} color={c.accent} />
+          </TouchableOpacity>
+        }
+      />
 
       {error ? (
         <View style={[styles.errorBar, { backgroundColor: c.surface2 }]}>
@@ -206,7 +198,7 @@ export default function AutomationsScreen() {
                 {a.prompt}
               </Text>
               <Text style={[styles.meta, { color: c.textSecondary }]}>
-                Last run {timeAgo(a.last_run_at)}
+                Last run {timeAgo(a.last_run_at, 'ago')}
                 {a.last_status ? ` · ${a.last_status}` : ''}
               </Text>
               <View style={styles.actions}>
@@ -284,24 +276,20 @@ export default function AutomationsScreen() {
                     accessibilityLabel={`Run ${r.status} — open log`}
                     onPress={() => {
                       if (!r.chat_session_id) return;
-                      const sid = r.chat_session_id;
+                      const title = `${runsFor?.name ?? 'Automation'} run`;
                       // A finished run's chat is INACTIVE on the desktop —
-                      // spawn it so the log is live and follow-up sends land.
-                      spawnSession(sid);
+                      // spawn it (inside openChatById) so the log is live
+                      // and follow-up sends land.
                       setRunsFor(null);
-                      navigation.navigate('SessionDetail', {
-                        sessionId: sid,
-                        session: {
-                          id: sid, projectId: '', projectName: '', title: `${runsFor?.name ?? 'Automation'} run`,
-                          status: 'idle', provider: '', model: '', lastActivity: r.started_at * 1000,
-                          isLive: false, starred: false, unread: false,
-                        },
+                      openChatById(navigation, spawnSession, r.chat_session_id, {
+                        title,
+                        lastActivity: r.started_at * 1000,
                       });
                     }}
                   >
                     <View style={{ flex: 1 }}>
                       <Text style={[styles.name, { color: c.text }]} numberOfLines={1}>
-                        {r.status} · {timeAgo(r.started_at)} {r.source ? `(${r.source})` : ''}
+                        {r.status} · {timeAgo(r.started_at, 'ago')} {r.source ? `(${r.source})` : ''}
                       </Text>
                       <Text style={[styles.meta, { color: c.textSecondary }]} numberOfLines={2}>
                         {r.summary || '—'}
@@ -462,16 +450,7 @@ function AutomationForm({
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: theme.spacing.md,
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
   backBtn: { padding: 4 },
-  headerTitle: { fontSize: 17, fontWeight: '700' },
   errorBar: {
     flexDirection: 'row',
     alignItems: 'center',

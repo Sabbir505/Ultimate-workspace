@@ -4,7 +4,7 @@
  * absolute path the desktop stores; the name defaults to the folder's last
  * segment. Rename and remove mirror the desktop row menus.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -17,41 +17,19 @@ import {
 } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../theme';
-import {
-  useRelay,
-  onProjectList,
-  onProjectUpserted,
-  onProjectRemoved,
-  type ProjectInfo,
-} from '../hooks/useRelay';
+import { useRelay, type ProjectInfo } from '../hooks/useRelay';
+import { useProjects } from '../hooks/useProjects';
 import { tapLight } from '../lib/haptics';
 
 export function ProjectManager({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const c = theme.colors;
-  const { listProjects, addProject, renameProject, removeProject } = useRelay();
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const { addProject, renameProject, removeProject } = useRelay();
+  // listProjects send + ProjectList/Upserted/Removed merge — the shared
+  // hook (same subscription the new-chat sheet uses).
+  const projects = useProjects(visible);
   const [newPath, setNewPath] = useState('');
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState('');
-
-  useEffect(() => {
-    if (!visible) return;
-    listProjects();
-    const offList = onProjectList.on(({ projects: list }) => setProjects(list));
-    const offUpsert = onProjectUpserted.on(({ project }) =>
-      setProjects((prev) => {
-        const idx = prev.findIndex((p) => p.id === project.id);
-        if (idx < 0) return [...prev, project];
-        const next = [...prev];
-        next[idx] = project;
-        return next;
-      }),
-    );
-    const offRemoved = onProjectRemoved.on(({ projectId }) =>
-      setProjects((prev) => prev.filter((p) => p.id !== projectId)),
-    );
-    return () => { offList(); offUpsert(); offRemoved(); };
-  }, [visible, listProjects]);
 
   const confirmRemove = (p: ProjectInfo) => {
     Alert.alert(

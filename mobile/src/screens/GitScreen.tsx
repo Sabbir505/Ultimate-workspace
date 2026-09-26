@@ -5,27 +5,26 @@
  * a REGISTERED project (the phone can only reach repos the desktop knows),
  * through the same git core the desktop panel uses.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, ActivityIndicator, Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
 import {
-  useRelay, onProjectList, onGitStatus, onGitOutput, onGitBranches, onGitLog,
+  useRelay, onDomainError, onProjectList, onGitStatus, onGitOutput, onGitBranches, onGitLog,
   type ProjectInfo,
 } from '../hooks/useRelay';
+import { useRelayList } from '../hooks/useRelayList';
 import { tapLight } from '../lib/haptics';
-import DomainErrorBar from '../components/DomainErrorBar';
+import ScreenHeader from '../components/ScreenHeader';
 
 type ChangedFile = { status: string; kind: string; path: string };
 
 export default function GitScreen() {
   useScreenMountTiming('GitScreen');
-  const navigation = useNavigation<any>();
   const c = theme.colors;
   const { gitStatus, gitDiff, gitCommit, gitPush, gitBranches, gitLog, listProjects } = useRelay();
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
@@ -41,18 +40,35 @@ export default function GitScreen() {
   const [branches, setBranches] = useState<Record<string, unknown>[]>([]);
   const [logEntries, setLogEntries] = useState<Record<string, unknown>[]>([]);
   const [showLog, setShowLog] = useState(false);
+  // GitOutput carries only text, never a title — remember what the in-flight
+  // request was for so the result sheet keeps the diff's file path instead of
+  // retitling every reply to 'Result'.
+  const pendingTitleRef = useRef('Result');
+
+  // The project list must survive a lost first fetch too: the mount send is
+  // dropped while the socket is still pairing, so refetch on reconnect.
+  useRelayList(() => { listProjects(); refresh(projectId); });
 
   useEffect(() => {
-    listProjects();
     const offP = onProjectList.on(({ projects: list }) => {
       setProjects(list);
       if (!projectId && list.length > 0) setProjectId(list[0].id);
     });
     const offS = onGitStatus.on(({ status: st }) => { setStatus(st); setBusy(false); });
-    const offO = onGitOutput.on(({ output: text }) => { setOutput({ title: 'Result', text }); setBusy(false); });
+    const offO = onGitOutput.on(({ output: text }) => {
+      // Only overwrite the text — the title stays whatever the pending
+      // request (diff path or a command result) set it to.
+      setOutput((prev) => ({ title: prev?.title ?? pendingTitleRef.current, text }));
+      setBusy(false);
+    });
     const offB = onGitBranches.on(({ branches: b }) => setBranches(b));
     const offL = onGitLog.on(({ entries }) => { setLogEntries(entries); setBusy(false); });
-    return () => { offP(); offS(); offO(); offB(); offL(); };
+    // A failed git op answers with a git-domain ChatError (routed to the
+    // DomainErrorBar below); busy must clear too, or the spinner never does.
+    const offErr = onDomainError.on(({ domain }) => {
+      if (domain === 'git') setBusy(false);
+    });
+    return () => { offP(); offS(); offO(); offB(); offL(); offErr(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
@@ -72,6 +88,7 @@ export default function GitScreen() {
 
   const openDiff = (f: ChangedFile) => {
     if (!projectId) return;
+    pendingTitleRef.current = f.path;
     setBusy(true);
     setOutput({ title: f.path, text: 'Loading diff…' });
     gitDiff(projectId, f.path);
@@ -79,27 +96,22 @@ export default function GitScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.background }]} edges={['top']}>
-      <View style={[styles.header, { borderBottomColor: c.border }]}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-        >
-          <Ionicons name="arrow-back" size={22} color={c.text} />
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: c.text }]}>Git</Text>
-        <TouchableOpacity
-          onPress={() => { refresh(projectId); gitBranches(projectId ?? ''); }}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          accessibilityRole="button"
-          accessibilityLabel="Refresh git"
-        >
-          <Ionicons name="refresh" size={20} color={c.textSecondary} />
-        </TouchableOpacity>
-      </View>
-
-      <DomainErrorBar domains={['git', 'projects']} />
+      <ScreenHeader
+        title="Git"
+        errorDomains={['git', 'projects']}
+        right={
+          <TouchableOpacity
+            // No project selected → nothing to refresh; gitBranches('') is
+            // rejected by the desktop, so no-op it exactly like refresh().
+            onPress={() => { refresh(projectId); if (projectId) gitBranches(projectId); }}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityRole="button"
+            accessibilityLabel="Refresh git"
+          >
+            <Ionicons name="refresh" size={20} color={c.textSecondary} />
+          </TouchableOpacity>
+        }
+      />
 
       {/* Project picker */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.projectRow} contentContainerStyle={styles.projectRowContent}>
@@ -192,6 +204,7 @@ export default function GitScreen() {
                   onPress={() => {
                     if (!projectId || !commitText.trim()) return;
                     tapLight();
+                    pendingTitleRef.current = 'Result';
                     setBusy(true);
                     gitCommit(projectId, commitText.trim());
                     setCommitText('');
@@ -205,6 +218,7 @@ export default function GitScreen() {
                   accessibilityLabel="Push"
                   onPress={() => {
                     if (!projectId) return;
+                    pendingTitleRef.current = 'Result';
                     setBusy(true);
                     gitPush(projectId);
                   }}
@@ -305,12 +319,6 @@ function kindColor(kind: string): string {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: theme.spacing.md, paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  headerTitle: { fontSize: 17, fontWeight: '700' },
   projectRow: { flexGrow: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'transparent' },
   projectRowContent: { padding: 10, gap: 8 },
   projectChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: theme.radius.pill, backgroundColor: 'transparent', borderWidth: StyleSheet.hairlineWidth, borderColor: '#8884' },

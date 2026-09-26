@@ -1555,7 +1555,7 @@ pub use chat::{
     set_chat_session_auto, set_chat_session_connectors, set_chat_session_cwd_override,
     set_chat_session_plan, set_chat_session_project, set_chat_session_starred,
     set_chat_session_unread, set_chat_session_worktree, touch_chat_session,
-    update_chat_message_content, update_chat_session_agent, update_chat_session_effort,
+    un_mark_branch_superseded, update_chat_message_content, update_chat_session_agent, update_chat_session_effort,
     update_chat_session_model, update_chat_session_permission_mode, update_chat_session_policies,
     update_chat_session_provider, update_chat_session_title, update_chat_session_watch_mode,
     NewChatMessage,

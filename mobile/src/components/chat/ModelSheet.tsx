@@ -209,10 +209,17 @@ export default function ModelSheet({
     });
     // A failed probe answers with a domain ChatError and NO HarnessModels
     // frame, so nothing cleared `pendingHarness` — the pane spun forever.
-    // Drop the pending flag on the failure so the empty-state copy shows.
+    // Drop the pending flag on the failure so the empty-state copy shows,
+    // and FORGET the request so the next pane visit re-probes: the id used
+    // to stay in `requestedRef` for the sheet's lifetime, so one transient
+    // failure permanently showed "No models configured" for an installed
+    // CLI (closing/reopening the sheet didn't help — the ref is ref-level).
     const offErr = onDomainError.on(({ domain }) => {
       if (domain !== 'harness-models') return;
-      setPendingHarness(null);
+      setPendingHarness((cur) => {
+        if (cur) requestedRef.current.delete(cur);
+        return null;
+      });
     });
     return () => { off(); offErr(); };
   }, [visible]);

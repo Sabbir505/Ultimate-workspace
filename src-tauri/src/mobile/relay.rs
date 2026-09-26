@@ -223,6 +223,12 @@ pub async fn start_relay(
         .and_then(|ts| ts.tailscale_ip);
 
     let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    // Register the shutdown handle BEFORE the accept loop can go live: the
+    // old registration sat after the port round-trip + keychain load + DB
+    // writes, so a stop_relay (or a second start_relay, which stops first)
+    // inside that window found `abort == None` and the loop kept accepting
+    // forever — an orphan runtime thread that no handle could kill.
+    *relay_state.abort.lock() = Some(abort_tx);
     let (port_tx, port_rx) = tokio::sync::oneshot::channel::<u16>();
 
     // DEDICATED RUNTIME. The accept loop used to be a task on the app's
@@ -361,30 +367,15 @@ loop {
         accept = listener.accept() => {
             match accept {
                 Ok((stream, peer)) => {
-                    let app = app.clone();
-                    let db = Arc::clone(&db);
-                    let chat_mgr = Arc::clone(&chat_mgr);
-                    let owner_map = relay_state.owner_map.clone();
-                    let conn_registry = Arc::clone(&relay_state.conns);
-                    let conns = Arc::clone(&relay_state);
-                    // Bounded (audit L-16): the permit is held for the
-                    // handler's whole life; when 64 connections are
-                    // live, new streams wait here instead of piling up
-                    // handler+pump tasks.
-                    let permit = match conns.accept_permits.clone().acquire_owned().await {
-                        Ok(p) => p,
-                        Err(_) => return, // semaphore closed: relay shutting down
-                    };
-                    let handler = tokio::spawn(async move {
-                        use std::sync::atomic::Ordering as AOrd;
-                        let _permit = permit;
-                        conns.active_connections.fetch_add(1, AOrd::Relaxed);
-                        if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map, conn_registry).await {
-                            eprintln!("[mobile-relay] connection error: {e}");
-                        }
-                        conns.active_connections.fetch_sub(1, AOrd::Relaxed);
-                    });
-                    relay_state.handler_aborts.lock().push(handler.abort_handle());
+                    spawn_connection_handler(
+                        &relay_state,
+                        stream,
+                        peer,
+                        app.clone(),
+                        Arc::clone(&db),
+                        Arc::clone(&chat_mgr),
+                    )
+                    .await;
                 }
                 Err(e) => {
                     eprintln!("[mobile-relay] accept error: {e}");
@@ -395,30 +386,15 @@ loop {
         incoming = tailnet_rx.recv() => {
             match incoming {
                 Some((stream, peer)) => {
-                    let app = app.clone();
-                    let db = Arc::clone(&db);
-                    let chat_mgr = Arc::clone(&chat_mgr);
-                    let owner_map = relay_state.owner_map.clone();
-                    let conn_registry = Arc::clone(&relay_state.conns);
-                    let conns = Arc::clone(&relay_state);
-                    // Bounded (audit L-16): the permit is held for the
-                    // handler's whole life; when 64 connections are
-                    // live, new streams wait here instead of piling up
-                    // handler+pump tasks.
-                    let permit = match conns.accept_permits.clone().acquire_owned().await {
-                        Ok(p) => p,
-                        Err(_) => return, // semaphore closed: relay shutting down
-                    };
-                    let handler = tokio::spawn(async move {
-                        use std::sync::atomic::Ordering as AOrd;
-                        let _permit = permit;
-                        conns.active_connections.fetch_add(1, AOrd::Relaxed);
-                        if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map, conn_registry).await {
-                            eprintln!("[mobile-relay] connection error: {e}");
-                        }
-                        conns.active_connections.fetch_sub(1, AOrd::Relaxed);
-                    });
-                    relay_state.handler_aborts.lock().push(handler.abort_handle());
+                    spawn_connection_handler(
+                        &relay_state,
+                        stream,
+                        peer,
+                        app.clone(),
+                        Arc::clone(&db),
+                        Arc::clone(&chat_mgr),
+                    )
+                    .await;
                 }
                 None => {
                     // Tailnet task exited; keep serving loopback.
@@ -480,23 +456,11 @@ loop {
     *relay_state.pairing_token.lock() = Some(pairing_token.clone());
     let _ = app.emit("mobile:pairing-token", pairing_token.clone());
 
-    *relay_state.abort.lock() = Some(abort_tx);
-
-    // Start the Tauri event listener that forwards `mobile:session_chat_event`
-    // payloads to the right WebSocket connection via the owner map.
-    let owner_map = relay_state.owner_map.clone();
-    let app_handle = app.clone();
     // Relay-side stream forwarder: phone-started turns stream straight from
-    // the backend `chat:*` events to the owning phone (the frontend only
-    // re-broadcasts for the chat it has open).
-    super::relay_owner::start_chat_stream_forwarder(&app, owner_map.clone());
-    tokio::spawn(async move {
-        if let Err(e) =
-            super::relay_owner::start_session_chat_event_listener(&app_handle, owner_map)
-        {
-            eprintln!("[mobile-relay] failed to start session_chat_event listener: {e}");
-        }
-    });
+    // the backend `chat:*` events to the owning phone. Registered once per
+    // process (guarded inside): repeat calls from relay restarts are no-ops.
+    let owner_map = relay_state.owner_map.clone();
+    super::relay_owner::start_chat_stream_forwarder(&app, owner_map);
 
     // Background push (Expo push service): when no phone socket is connected,
     // approval requests and completed turns on MOBILE-originated sessions
@@ -546,6 +510,53 @@ loop {
 }
 
 
+/// Spawn one connection handler: bounded permit (audit L-16), active-connection
+/// accounting, abort-handle registration, and a reaper. Shared by the loopback
+/// and tailnet accept arms, which were two verbatim copies. The reaper removes
+/// the handler's abort handle (and any other finished ones) once the handler
+/// ends — the registry used to grow by one dead handle per accepted connection
+/// for the whole process lifetime.
+async fn spawn_connection_handler(
+    relay_state: &Arc<MobileRelayState>,
+    stream: TcpStream,
+    peer: SocketAddr,
+    app: AppHandle,
+    db: Arc<Mutex<Connection>>,
+    chat_mgr: Arc<ChatManager>,
+) {
+    // Bounded (audit L-16): the permit is held for the handler's whole
+    // life; when 64 connections are live, new streams wait here instead of
+    // piling up handler+pump tasks.
+    let permit = match relay_state.accept_permits.clone().acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => return, // semaphore closed: relay shutting down
+    };
+    let counters = Arc::clone(relay_state);
+    let registry = Arc::clone(&relay_state.conns);
+    let owner_map = relay_state.owner_map.clone();
+    let handler = tokio::spawn(async move {
+        use std::sync::atomic::Ordering as AOrd;
+        let _permit = permit;
+        counters.active_connections.fetch_add(1, AOrd::Relaxed);
+        if let Err(e) =
+            handle_connection(stream, peer, app, db, chat_mgr, owner_map, registry).await
+        {
+            eprintln!("[mobile-relay] connection error: {e}");
+        }
+        counters.active_connections.fetch_sub(1, AOrd::Relaxed);
+    });
+    let abort_handle = handler.abort_handle();
+    relay_state.handler_aborts.lock().push(abort_handle);
+    let reaper_state = Arc::clone(relay_state);
+    tokio::spawn(async move {
+        let _ = handler.await;
+        reaper_state
+            .handler_aborts
+            .lock()
+            .retain(|h| !h.is_finished());
+    });
+}
+
 /// Stop the relay server.
 pub fn stop_relay(relay_state: &MobileRelayState) {
     if let Some(tx) = relay_state.abort.lock().take() {
@@ -586,6 +597,10 @@ impl Drop for OwnerCleanup {
         self.map
             .lock()
             .retain(|_, sender| !sender.same_channel(&self.tx));
+        // Watch-scoped CHAT_OWNERS entries die with their last channel —
+        // without this, every chat a phone ever opened accumulated in the
+        // map for the whole process lifetime.
+        super::relay_owner::prune_owners_without_channels(&self.map);
     }
 }
 
@@ -649,6 +664,96 @@ const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(25);
 /// Any inbound frame (message or pong) resets this; exceeding it means the
 /// TCP connection is half-open and the handler tears down.
 const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
+
+/// One copy of the dispatch-and-reply block that a dozen op arms shared
+/// verbatim (`match dispatch_mobile(...) { Ok(msgs) => send each,
+/// Err(e) => ChatError("session-chat") }`). Arms that must register the
+/// owner map first (SendChatMessage, GetSessionMessages) do that themselves
+/// and then call this.
+async fn dispatch_and_send(
+    req: MobileMessage,
+    app: &AppHandle,
+    db: &Arc<Mutex<Connection>>,
+    chat_mgr: &Arc<ChatManager>,
+    owner_map: &super::relay_ws::OwnerMap,
+    write: &super::relay_ws::SharedWsWrite,
+) {
+    match dispatch_mobile(req, app, Arc::clone(db), Arc::clone(chat_mgr), owner_map.clone()) {
+        Ok(msgs) => {
+            for m in msgs {
+                let _ = send_msg(write, &m).await;
+            }
+        }
+        Err(e) => {
+            let _ = send_msg(
+                write,
+                &DesktopMessage::ChatError {
+                    chat_session_id: "session-chat".to_string(),
+                    error: e,
+                },
+            )
+            .await;
+        }
+    }
+}
+
+/// Assemble the phone's `AvailableProviders` reply (providers + harness list +
+/// the current sync-default pick). Shared by the live reply and the post-warm
+/// push so the two assemblies can't drift.
+async fn build_available_providers_msg(
+    db: &Arc<Mutex<Connection>>,
+    app: &AppHandle,
+) -> DesktopMessage {
+    let providers = build_available_providers(db, app).await;
+    let harnesses = build_harness_list();
+    let (default_provider, default_model) = {
+        let conn = db.lock();
+        match crate::chat::auto_router::resolve_sync_default(&conn, db::now_ts()) {
+            Some((p, m)) => (Some(p), Some(m)),
+            None => (None, None),
+        }
+    };
+    DesktopMessage::AvailableProviders {
+        providers,
+        harnesses,
+        default_provider,
+        default_model,
+    }
+}
+
+/// Resolve project ids → display names with one deduplicated `IN` query,
+/// under the caller's short lock. Shared by the session-list and cost-details
+/// builders (the block used to be duplicated verbatim in both).
+fn resolve_project_names(
+    conn: &Connection,
+    ids: impl IntoIterator<Item = String>,
+) -> std::collections::HashMap<String, String> {
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<String> = ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+    if unique.is_empty() {
+        return names;
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(unique.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("SELECT id, name FROM projects WHERE id IN ({placeholders})");
+    if let Ok(mut stmt) = conn.prepare(&sql) {
+        let params = rusqlite::params_from_iter(unique.iter());
+        if let Ok(rows) = stmt.query_map(params, |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        }) {
+            for row in rows.flatten() {
+                names.insert(row.0, row.1);
+            }
+        }
+    }
+    names
+}
 
 async fn handle_connection(
     stream: TcpStream,
@@ -844,51 +949,26 @@ async fn handle_connection(
 
         match req {
             MobileMessage::ListAvailableProviders => {
-                let providers = build_available_providers(&db, &app).await;
-                let harnesses = build_harness_list();
-                let (default_provider, default_model) = {
-                    let conn = db.lock();
-                    match crate::chat::auto_router::resolve_sync_default(&conn, db::now_ts()) {
-                        Some((p, m)) => (Some(p), Some(m)),
-                        None => (None, None),
-                    }
-                };
-                let resp = DesktopMessage::AvailableProviders {
-                    providers,
-                    harnesses,
-                    default_provider,
-                    default_model,
-                };
+                let resp = build_available_providers_msg(&db, &app).await;
                 let _ = send_msg(&write, &resp).await;
                 // A freshly started relay has COLD harness caches — the rail
                 // would tell the user every CLI is "not installed" with no
                 // models (they read warm caches only, never probe inline).
                 // Probe once in the background, then PUSH the warmed list so
                 // the already-connected phone repaints without reconnecting.
-                if !HARNESS_WARMING.load(std::sync::atomic::Ordering::Relaxed) {
-                    HARNESS_WARMING.store(true, std::sync::atomic::Ordering::Relaxed);
+                if !HARNESS_WARMING.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     let warm_write = Arc::clone(&write);
                     let warm_db = Arc::clone(&db);
                     let warm_app = app.clone();
                     tauri::async_runtime::spawn(async move {
+                        // Clear the latch on EVERY exit path — the plain
+                        // trailing store stayed true forever if the warm task
+                        // panicked, and harness caches were never warmed again
+                        // for the rest of the process.
+                        let _reset = ResetHarnessWarming;
                         warm_harness_caches().await;
-                        let providers = build_available_providers(&warm_db, &warm_app).await;
-                        let harnesses = build_harness_list();
-                        let (default_provider, default_model) = {
-                            let conn = warm_db.lock();
-                            match crate::chat::auto_router::resolve_sync_default(&conn, db::now_ts()) {
-                                Some((p, m)) => (Some(p), Some(m)),
-                                None => (None, None),
-                            }
-                        };
-                        let resp = DesktopMessage::AvailableProviders {
-                            providers,
-                            harnesses,
-                            default_provider,
-                            default_model,
-                        };
+                        let resp = build_available_providers_msg(&warm_db, &warm_app).await;
                         let _ = send_msg(&warm_write, &resp).await;
-                        HARNESS_WARMING.store(false, std::sync::atomic::Ordering::Relaxed);
                     });
                 }
             }
@@ -905,30 +985,8 @@ async fn handle_connection(
                     Err(e) => domain_error(&write, "sessions", e).await,
                 }
             }
-            MobileMessage::SetSessionStarred { session_id, starred } => {
-                match dispatch_mobile(
-                    MobileMessage::SetSessionStarred { session_id, starred },
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
+            MobileMessage::SetSessionStarred { .. } => {
+                dispatch_and_send(req, &app, &db, &chat_mgr, &owner_map, &write).await;
             }
             MobileMessage::ListArtifacts => {
                 let rows = {
@@ -1158,7 +1216,7 @@ async fn handle_connection(
                 // connection future non-Send.
                 let resolved = {
                     let conn = db.lock();
-                    super::session_chat::resolve_session_to_chat_id_pub(&conn, &session_id)
+                    super::session_chat::resolve_session_to_chat_id(&conn, &session_id)
                 };
                 let chat_session_id = match resolved {
                     Some(id) => id,
@@ -1200,7 +1258,7 @@ async fn handle_connection(
             MobileMessage::GetSessionConnectors { session_id } => {
                 let chat_session_id = {
                     let conn = db.lock();
-                    super::session_chat::resolve_session_to_chat_id_pub(&conn, &session_id)
+                    super::session_chat::resolve_session_to_chat_id(&conn, &session_id)
                 };
                 let id = match chat_session_id {
                     Some(id) => id,
@@ -2140,33 +2198,25 @@ async fn handle_connection(
                 before_id,
                 limit,
             } => {
-                match dispatch_mobile(
+                // Opening a chat registers this connection's channel for the
+                // chat id: watch entries stream desktop-started turns through
+                // forward_to_owner, which resolves via the owner map — a chat
+                // the phone opened but never turned on had no channel to
+                // deliver to. Same registration order as SendChatMessage.
+                super::relay_owner::register_owner(&owner_map, session_id.clone(), conn_tx.clone());
+                dispatch_and_send(
                     MobileMessage::GetSessionMessages {
                         session_id,
                         before_id,
                         limit,
                     },
                     &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
+                    &db,
+                    &chat_mgr,
+                    &owner_map,
+                    &write,
+                )
+                .await;
             }
             MobileMessage::SendChatMessage {
                 session_id,
@@ -2174,321 +2224,36 @@ async fn handle_connection(
                 attachments,
             } => {
                 // Register this session in the owner map BEFORE dispatching,
-                // so streaming events (re-broadcast by the React side as
-                // `mobile:session_chat_event` and forwarded by the listener in
-                // relay_owner.rs) have a destination. The sender is THIS
-                // connection's channel; the per-connection pump task (spawned
-                // at connect time) writes whatever lands on it to the socket,
-                // and the OwnerCleanup guard removes the registration when
-                // this connection drops.
+                // so streaming events have a destination: the per-connection
+                // pump task (spawned at connect time) writes whatever lands
+                // on this channel to the socket, and the OwnerCleanup guard
+                // removes the registration when this connection drops.
                 super::relay_owner::register_owner(&owner_map, session_id.clone(), conn_tx.clone());
-                match dispatch_mobile(
+                dispatch_and_send(
                     MobileMessage::SendChatMessage {
                         session_id,
                         text,
                         attachments,
                     },
                     &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
+                    &db,
+                    &chat_mgr,
+                    &owner_map,
+                    &write,
+                )
+                .await;
             }
-            MobileMessage::CancelSessionStream { session_id } => {
-                match dispatch_mobile(
-                    MobileMessage::CancelSessionStream { session_id },
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
-            MobileMessage::ResolveSessionApproval {
-                session_id,
-                pending_id,
-                decision,
-                always_allow,
-            } => {
-                match dispatch_mobile(
-                    MobileMessage::ResolveSessionApproval {
-                        session_id,
-                        pending_id,
-                        decision,
-                        always_allow,
-                    },
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
-            MobileMessage::RenameSession { session_id, title } => {
-                match dispatch_mobile(
-                    MobileMessage::RenameSession { session_id, title },
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
-            MobileMessage::SetSessionModel {
-                session_id,
-                provider_id,
-                model,
-                effort,
-            } => {
-                match dispatch_mobile(
-                    MobileMessage::SetSessionModel {
-                        session_id,
-                        provider_id,
-                        model,
-                        effort,
-                    },
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
-            MobileMessage::DeleteChatSession { session_id } => {
-                match dispatch_mobile(
-                    MobileMessage::DeleteChatSession { session_id },
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
-            MobileMessage::GetSessionMeta { session_id } => {
-                match dispatch_mobile(
-                    MobileMessage::GetSessionMeta { session_id },
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
-            MobileMessage::RegisterPushToken { token, platform } => {
-                match dispatch_mobile(
-                    MobileMessage::RegisterPushToken { token, platform },
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
-            MobileMessage::ListSessionArtifacts { session_id } => {
-                match dispatch_mobile(
-                    MobileMessage::ListSessionArtifacts { session_id },
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
-            MobileMessage::ReadArtifact { session_id, path } => {
-                match dispatch_mobile(
-                    MobileMessage::ReadArtifact { session_id, path },
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
-            MobileMessage::ResolvePlanProposal {
-                session_id,
-                pending_id,
-                approved,
-                feedback,
-            } => {
-                match dispatch_mobile(
-                    MobileMessage::ResolvePlanProposal {
-                        session_id,
-                        pending_id,
-                        approved,
-                        feedback,
-                    },
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
+            MobileMessage::CancelSessionStream { .. }
+            | MobileMessage::ResolveSessionApproval { .. }
+            | MobileMessage::RenameSession { .. }
+            | MobileMessage::SetSessionModel { .. }
+            | MobileMessage::DeleteChatSession { .. }
+            | MobileMessage::GetSessionMeta { .. }
+            | MobileMessage::RegisterPushToken { .. }
+            | MobileMessage::ListSessionArtifacts { .. }
+            | MobileMessage::ReadArtifact { .. }
+            | MobileMessage::ResolvePlanProposal { .. } => {
+                dispatch_and_send(req, &app, &db, &chat_mgr, &owner_map, &write).await;
             }
             MobileMessage::TranscribeAudio {
                 data_base64,
@@ -2516,23 +2281,35 @@ async fn handle_connection(
                 }
             }
             MobileMessage::CompactSession { session_id } => {
-                match super::session_chat::handle_compact_session(&app, &db, session_id).await {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
+                // Compaction is a full LLM summarization turn (seconds to
+                // minutes). Awaiting it inline left every other phone op —
+                // including CancelSessionStream and the terminal screen's
+                // transcript polls — unread in the socket until the 75s idle
+                // timeout tore the connection down. Run it on its own task:
+                // replies carry no request id, so late delivery is fine, and
+                // the pump keeps streaming while it runs.
+                let compact_app = app.clone();
+                let compact_db = Arc::clone(&db);
+                let compact_write = Arc::clone(&write);
+                tauri::async_runtime::spawn(async move {
+                    match super::session_chat::handle_compact_session(&compact_app, &compact_db, session_id).await {
+                        Ok(msgs) => {
+                            for m in msgs {
+                                let _ = send_msg(&compact_write, &m).await;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = send_msg(
+                                &compact_write,
+                                &DesktopMessage::ChatError {
+                                    chat_session_id: "compact".to_string(),
+                                    error: e,
+                                },
+                            )
+                            .await;
                         }
                     }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "compact".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
+                });
             }
             MobileMessage::DeleteChatMessage { .. }
             | MobileMessage::EditUserMessage { .. }
@@ -2541,29 +2318,7 @@ async fn handle_connection(
             | MobileMessage::RestoreChatCheckpoint { .. }
             | MobileMessage::SetSessionPermissionMode { .. }
             | MobileMessage::ResolveSessionQuestion { .. } => {
-                match dispatch_mobile(
-                    req,
-                    &app,
-                    Arc::clone(&db),
-                    Arc::clone(&chat_mgr),
-                    owner_map.clone(),
-                ) {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            let _ = send_msg(&write, &m).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_msg(
-                            &write,
-                            &DesktopMessage::ChatError {
-                                chat_session_id: "session-chat".to_string(),
-                                error: e,
-                            },
-                        )
-                        .await;
-                    }
-                }
+                dispatch_and_send(req, &app, &db, &chat_mgr, &owner_map, &write).await;
             }
             // A second Pair frame after a successful pairing is a protocol
             // violation — already handled above before this match.
@@ -2597,20 +2352,28 @@ fn project_path(
 }
 
 /// Keep only the file-diff sections a single file's diff should show.
+/// Returns an empty string when the diff has no section for `path` — the
+/// caller must NOT fall back to the whole-repo diff, or a per-file peek
+/// would render every file's change (and a quoted/escaped path git emits
+/// would silently miss). Matching anchors on the `b/` side of the
+/// `diff --git` header (`diff --git a/P b/P`, or its quoted form) so asking
+/// for `src/foo` no longer also matches `src/foo-bar`.
 fn filter_diff_to_path(diff: &str, path: &str) -> String {
-    let header = format!("+++ b/{}", path.trim_start_matches("./"));
+    let target = path.trim_start_matches("./").trim_start_matches('/');
+    let b_unquoted = format!(" b/{target}");
+    let b_quoted = format!(" b/{target}\"");
     let mut out = String::new();
     let mut keep = false;
     for line in diff.lines() {
-        if line.starts_with("diff --git ") {
-            keep = line.contains(path.trim_start_matches("./")) || line.contains(&header);
+        if let Some(head) = line.strip_prefix("diff --git ") {
+            keep = head.ends_with(&b_unquoted) || head.ends_with(&b_quoted);
         }
         if keep {
             out.push_str(line);
             out.push('\n');
         }
     }
-    if out.is_empty() { diff.to_string() } else { out }
+    out
 }
 
 fn to_project_info(p: crate::types::Project) -> super::protocol::ProjectInfo {
@@ -3125,37 +2888,7 @@ fn build_session_list(
     // under one short lock — the previous code held the lock per row).
     let project_names: std::collections::HashMap<String, String> = {
         let conn = db.lock();
-        let mut names = std::collections::HashMap::new();
-        // Deduplicate project IDs so the IN clause stays small.
-        let mut seen = std::collections::HashSet::new();
-        let mut ids: Vec<&str> = Vec::new();
-        for s in &sessions {
-            let Some(pid) = s.project_id.as_deref() else { continue };
-            if seen.insert(pid.to_string()) {
-                ids.push(pid);
-            }
-        }
-        if ids.is_empty() {
-            names
-        } else {
-            // Build "?,?,?,..." placeholders.
-            let placeholders = std::iter::repeat("?")
-                .take(ids.len())
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!("SELECT id, name FROM projects WHERE id IN ({placeholders})");
-            if let Ok(mut stmt) = conn.prepare(&sql) {
-                let params = rusqlite::params_from_iter(ids.iter());
-                if let Ok(rows) = stmt.query_map(params, |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                }) {
-                    for row in rows.flatten() {
-                        names.insert(row.0, row.1);
-                    }
-                }
-            }
-            names
-        }
+        resolve_project_names(&conn, sessions.iter().filter_map(|s| s.project_id.clone()))
     };
     let pty_state = app.try_state::<crate::PtyState>();
     let list = sessions
@@ -3214,6 +2947,17 @@ fn build_session_list(
 /// on the relay's async path, so a cold cache simply reports not-installed.
 /// Set while the background harness-cache warm-up runs — at most one.
 static HARNESS_WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Clears HARNESS_WARMING on drop, so the warm latch can't stick `true` if
+/// the warm task panics (which permanently froze harness-cache warm-up until
+/// the next app restart).
+struct ResetHarnessWarming;
+
+impl Drop for ResetHarnessWarming {
+    fn drop(&mut self) {
+        HARNESS_WARMING.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// One background pass over the harness probe caches (install status via
 /// `list_harnesses`, then each harness's model catalog). Probes spawn one
@@ -3362,31 +3106,10 @@ fn build_cost_details(
     // Phase 2: bulk-resolve project names via a single IN-clause query.
     let per_project: Vec<ProjectCostEntry> = {
         let conn = db.lock();
-        let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut ids: Vec<&str> = Vec::new();
-        for p in &per_project_ids {
-            if seen.insert(p.project_id.clone()) {
-                ids.push(&p.project_id);
-            }
-        }
-        if !ids.is_empty() {
-            let placeholders = std::iter::repeat("?")
-                .take(ids.len())
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!("SELECT id, name FROM projects WHERE id IN ({placeholders})");
-            if let Ok(mut stmt) = conn.prepare(&sql) {
-                let params = rusqlite::params_from_iter(ids.iter());
-                if let Ok(rows) = stmt.query_map(params, |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                }) {
-                    for row in rows.flatten() {
-                        names.insert(row.0, row.1);
-                    }
-                }
-            }
-        }
+        let names = resolve_project_names(
+            &conn,
+            per_project_ids.iter().map(|p| p.project_id.clone()),
+        );
         per_project_ids
             .into_iter()
             .map(|p| {
@@ -3586,10 +3309,13 @@ pub async fn build_available_providers(
     // Reuse a single reqwest::Client (PERF M9): constructing one per call
     // forced a fresh connection pool + DNS resolver + TLS config each time.
     // Cheap to share across providers; they all share a process-wide pool.
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    static PROBE_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = PROBE_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
 
     // Gather (id, display_name, fallback, base_url, key) for providers that
     // have a stored API key. ONE db lock acquisition to fetch all of them,
@@ -3630,7 +3356,7 @@ pub async fn build_available_providers(
                 .unwrap_or(&[]);
             let base_str = base_url.clone();
             let key_str = key.clone();
-            let client_ref = &client;
+            let client_ref = client;
             async move {
                 let models =
                     probe_api_provider(client_ref, &id, fallback, base_str.as_deref(), &key_str)
@@ -3673,7 +3399,7 @@ pub async fn build_available_providers(
     let local_probes = local_endpoints.iter().map(|(kind, _display, base)| {
         let kind = kind.to_string();
         let base = base.to_string();
-        let client_ref = &client;
+        let client_ref = client;
         async move {
             let (models, is_running) = probe_local_endpoint(client_ref, &kind, &base).await;
             (kind, models, is_running)
@@ -3706,29 +3432,12 @@ pub async fn build_available_providers(
         // Currently running model (if any).
         let running_id = registry.status().map(|a| a.model_id.clone());
 
-        // Scanned GGUF files: default locations + user-added folders.
-        let mut scanned = crate::chat::local_models::scan_default_locations();
-
-        // Also scan user-added folders from Settings (same logic as desktop UI).
-        {
-            let conn = db.lock();
-            if let Ok(Some(json)) = db::get_setting(&conn, "localModels.folders") {
-                if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
-                    let seen: std::collections::HashSet<String> =
-                        scanned.iter().map(|f| f.id.clone()).collect();
-                    for folder in list.into_iter().filter(|s| !s.trim().is_empty()) {
-                        for file in crate::chat::local_models::scan_folder(
-                            std::path::Path::new(&folder),
-                            "user",
-                        ) {
-                            if !seen.contains(&file.id) {
-                                scanned.push(file);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Scanned GGUF files: default locations + user-added folders,
+        // through the shared 60s TTL cache (same source is_known_model_path
+        // uses). The inline walk here used to re-read every GGUF header on
+        // every ListAvailableProviders request AND on every post-warm push,
+        // on the WS connection task.
+        let scanned = known_models_cached(db);
 
         let mut seen = std::collections::HashSet::new();
 

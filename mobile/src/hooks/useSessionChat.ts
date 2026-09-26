@@ -186,9 +186,20 @@ export function useSessionChat(sessionId: string | null) {
   // A turn is in flight from the moment we SEND (not from its first token) —
   // otherwise a fast double-send started two concurrent desktop turns.
   const turnInFlight = useRef(false);
+  // Set by cancel(): the relay still broadcasts the cancelled turn's
+  // Done/Error ack after our optimistic teardown. Without this, the stale
+  // ack promoted the STEERED turn's partial tokens into a finalized bubble
+  // and split its reply in two whenever it outran the 350ms steer delay.
+  // Consumed by the first Done/Error; cleared on session switch/disconnect.
+  const cancelledTurn = useRef(false);
+  // Set by cancel(): the streaming true→false transition must not auto-send
+  // the next queued follow-up — the user explicitly STOPPED; a queued chip
+  // drains on the next real turn boundary (or "send now").
+  const suppressNextFlush = useRef(false);
   const connectedRef = useRef(true);
+  // (The `connected` mirror lives just below, after the useRelay()
+  // destructure declares it.)
   useEffect(() => {
-    const c = (v: boolean) => { connectedRef.current = v; };
     const off = onConnected.on((v) => {
       connectedRef.current = v;
       if (!v) {
@@ -197,9 +208,9 @@ export function useSessionChat(sessionId: string | null) {
         stopFlushTimer();
         streamActive.current = false;
         turnInFlight.current = false;
+        cancelledTurn.current = false;
       }
     });
-    void c;
     return off;
   }, [stopFlushTimer]);
 
@@ -237,6 +248,14 @@ export function useSessionChat(sessionId: string | null) {
     listSessionArtifacts,
     resolvePlanProposal,
   } = useRelay();
+
+  // Mirror the hook's `connected` value into the ref: the onConnected-event
+  // subscription only fires on TRANSITIONS, so mounting the chat while
+  // already offline left the ref `true` and the first fetch took the
+  // loading-forever branch (the frame was silently dropped by _send).
+  useEffect(() => {
+    connectedRef.current = connected;
+  }, [connected]);
 
   // Live-turn transcript sync. A turn started on the DESKTOP (or by an
   // automation) persists its user row backend-side — the phone never ran its
@@ -329,8 +348,17 @@ export function useSessionChat(sessionId: string | null) {
       }
     });
     const offDone = onSessionChatDone.on(({ sessionId: sid, usage }) => {
-      turnInFlight.current = false;
       if (sid !== currentSessionId.current) return;
+      // AFTER the session guard: the relay broadcasts Done for every session,
+      // and clearing the flag for another conversation's turn let send()
+      // start a second concurrent turn mid-stream.
+      turnInFlight.current = false;
+      // The ack of a locally-cancelled turn: tear nothing down (cancel()
+      // already did) and promote nothing — consume the flag and move on.
+      if (cancelledTurn.current) {
+        cancelledTurn.current = false;
+        return;
+      }
       // Flush BEFORE promoting so the unflushed tail isn't dropped.
       endStream();
       setState((s) => {
@@ -369,8 +397,14 @@ export function useSessionChat(sessionId: string | null) {
       });
     });
     const offError = onSessionChatError.on(({ sessionId: sid, error }) => {
-      turnInFlight.current = false;
       if (sid !== currentSessionId.current) return;
+      turnInFlight.current = false;
+      // A cancelled turn can still surface its death as an error frame —
+      // same swallow as the Done path (cancel already cleaned up).
+      if (cancelledTurn.current) {
+        cancelledTurn.current = false;
+        return;
+      }
       endStream();
       setState((s) => ({ ...s, streaming: false, error, status: null }));
     });
@@ -424,7 +458,10 @@ export function useSessionChat(sessionId: string | null) {
     });
     const offModelSet = onSessionModelSet.on(({ sessionId: sid, providerId, model, effort }) => {
       if (sid !== currentSessionId.current) return;
-      setState((s) => ({ ...s, meta: { provider: providerId, model, title: s.meta?.title, effort: effort ?? s.meta?.effort } }));
+      // Spread the existing meta: rebuilding it used to drop permissionMode
+      // and projectId, killing the diff peek and showing the wrong
+      // permission mode until the next SessionMeta round-trip.
+      setState((s) => ({ ...s, meta: { ...s.meta, provider: providerId, model, effort: effort ?? s.meta?.effort } }));
     });
     const offMeta = onSessionMeta.on(({ sessionId: sid, provider, model, title, effort, permission_mode, projectId }) => {
       if (sid !== currentSessionId.current) return;
@@ -490,30 +527,63 @@ export function useSessionChat(sessionId: string | null) {
     };
   }, [flushTokens, endStream, stopFlushTimer]);
 
+  // --- turn dispatch (shared by send / queue flush / steer) ---
+  // One copy of the dispatch sequence: send + in-flight guard + optimistic
+  // user bubble. The flush and steer paths used to send blind — no
+  // turnInFlight guard (a fast follow-up send raced a second concurrent
+  // desktop turn) and no bubble (the message was invisible until the first
+  // token, and vanished entirely if the turn never started).
+  const dispatchTurn = useCallback(
+    (text: string, attachments: SessionChatAttachment[] = []): boolean => {
+      if (!sessionId) return false;
+      const sent = sendSessionChat(sessionId, text, attachments);
+      if (sent) turnInFlight.current = true;
+      const userMsg: SessionMessageRecord = {
+        id: nextOptimisticId(),
+        role: 'user',
+        content: text,
+        created_at: Math.floor(Date.now() / 1000),
+      };
+      setState((s) => ({
+        ...s,
+        messages: [userMsg, ...s.messages],
+        streaming: sent,
+        streamingContent: '',
+        error: sent ? s.error : 'Not connected to desktop — message not sent. Reconnect and try again.',
+      }));
+      return sent;
+    },
+    [sessionId, sendSessionChat],
+  );
+
   // Queue flush: when a turn ends (Done, error, or cancel), dispatch the next
   // queued follow-up. Kept as an effect so every end-path is covered.
   const prevStreaming = useRef(false);
   useEffect(() => {
     const was = prevStreaming.current;
     prevStreaming.current = state.streaming;
+    if (suppressNextFlush.current) {
+      suppressNextFlush.current = false;
+      return;
+    }
     if (was && !state.streaming && state.queued.length > 0) {
       const [next, ...rest] = state.queued;
+      const sid = sessionId;
       setState((s) => ({ ...s, queued: rest }));
       // Small gap so the desktop can finish persisting the finished turn.
       setTimeout(() => {
-        // The relay may have dropped in the 350ms window — never lose a
-        // queued message silently.
-        const ok = sendSessionChat(sessionId!, next);
+        // The user may have switched chats during the gap — the message must
+        // go to the chat it was typed in, never the newly-opened one.
+        if (sid === null || sid !== currentSessionId.current) return;
+        // dispatchTurn surfaces the not-connected error itself; on failure
+        // the message goes back to the queue HEAD (its original place).
+        const ok = dispatchTurn(next);
         if (!ok) {
-          setState((s) => ({
-            ...s,
-            queued: [next, ...s.queued],
-            error: 'Queued message could not reach the desktop — it will resend when the connection returns.',
-          }));
+          setState((s) => ({ ...s, queued: [next, ...s.queued] }));
         }
       }, 350);
     }
-  }, [state.streaming, state.queued, sessionId, sendSessionChat]);
+  }, [state.streaming, state.queued, sessionId, dispatchTurn]);
 
   const cancelQueued = useCallback((text: string) => {
     setState((s) => ({ ...s, queued: s.queued.filter((q) => q !== text) }));
@@ -540,6 +610,9 @@ export function useSessionChat(sessionId: string | null) {
     tokenBuf.current = '';
     stopFlushTimer();
     streamActive.current = false;
+    turnInFlight.current = false;
+    cancelledTurn.current = false;
+    suppressNextFlush.current = false;
     currentSessionId.current = sessionId;
     if (!sessionId) {
       setState(INITIAL);
@@ -577,47 +650,42 @@ export function useSessionChat(sessionId: string | null) {
   // socket and is silently dropped while offline, so this effect is what
   // actually populates history when the WS comes up later — and after a
   // mid-stream reconnect it converges the list with whatever the desktop
-  // persisted for the interrupted turn.
+  // persisted for the interrupted turn. Also dispatches a STRANDED queue
+  // head: a queued message whose flush send failed just sat there (the
+  // flush effect only fires on a streaming transition, which never happens
+  // offline — the "will resend when the connection returns" promise used to
+  // be empty).
+  const queuedRef = useRef(state.queued);
+  queuedRef.current = state.queued;
   useEffect(() => {
     if (!connected || !sessionId) return;
     getSessionMessages(sessionId, undefined, 50);
-  }, [connected, sessionId, getSessionMessages]);
+    const queued = queuedRef.current;
+    if (queued.length > 0 && !streamActive.current && !turnInFlight.current) {
+      const [next, ...rest] = queued;
+      setState((s) => ({ ...s, queued: rest }));
+      dispatchTurn(next);
+    }
+  }, [connected, sessionId, getSessionMessages, dispatchTurn]);
 
   // --- actions ---
 
   const send = useCallback(
     (text: string, attachments: SessionChatAttachment[] = []) => {
       if (!sessionId) return;
-      // Send FIRST: if the relay socket isn't open the frame is dropped, and
-      // we must not flip into the optimistic streaming state — no tokens or
-      // Done/Error event would ever arrive to clear it (stuck streaming).
       // Mid-turn sends would collide with the running turn on the desktop —
       // queue them and flush in order when it completes. `turnInFlight` is set
       // at SEND time, so a fast double-send queues instead of racing a
-      // second concurrent turn.
+      // second concurrent turn. No cap: the desktop queue is unbounded, and
+      // `.slice(-10)` silently discarded the OLDEST queued messages with no
+      // error or indication.
       if (streamActive.current || turnInFlight.current) {
-        setState((s) => ({ ...s, queued: [...s.queued, text.trim()].slice(-10) }));
+        setState((s) => ({ ...s, queued: [...s.queued, text.trim()] }));
         return;
       }
-      const sent = sendSessionChat(sessionId, text, attachments);
-      if (sent) turnInFlight.current = true;
-      // Optimistically show the user message immediately so the UI feels
-      // responsive before the desktop echoes it back via GetSessionMessages.
-      const userMsg: SessionMessageRecord = {
-        id: nextOptimisticId(),
-        role: 'user',
-        content: text,
-        created_at: Math.floor(Date.now() / 1000),
-      };
-      setState((s) => ({
-        ...s,
-        messages: [userMsg, ...s.messages],
-        streaming: sent,
-        streamingContent: '',
-        error: sent ? s.error : 'Not connected to desktop — message not sent. Reconnect and try again.',
-      }));
+      dispatchTurn(text, attachments);
     },
-    [sessionId, sendSessionChat],
+    [sessionId, dispatchTurn],
   );
 
   const cancel = useCallback(() => {
@@ -626,11 +694,15 @@ export function useSessionChat(sessionId: string | null) {
     // Drop the unflushed tail too — a cancelled stream's tokens are moot.
     // Clearing turnInFlight lets the very next send start a fresh turn
     // immediately (steer) instead of being silently queued behind the
-    // dying one; the relay's SessionChatDone ack would clear it anyway.
+    // dying one.
     tokenBuf.current = '';
     stopFlushTimer();
     streamActive.current = false;
     turnInFlight.current = false;
+    // The relay's Done/Error ack for this turn is now stale — swallow it
+    // (and never auto-flush the queue because of it: the user STOPPED).
+    cancelledTurn.current = true;
+    suppressNextFlush.current = true;
     setState((s) => ({ ...s, streaming: false, streamingContent: '' }));
   }, [sessionId, cancelSessionStream, stopFlushTimer]);
 
@@ -641,27 +713,27 @@ export function useSessionChat(sessionId: string | null) {
     (text: string) => {
       if (!sessionId) return;
       // Park the queue BEFORE cancel: the streaming true→false transition
-      // must not trigger the queue-flush effect and race this send.
+      // must not trigger the queue-flush effect and race this send
+      // (cancel() also arms suppressNextFlush as a second guard).
       const parked = state.queued.filter((q) => q !== text);
       setState((s) => ({ ...s, queued: [] }));
       cancel();
+      const sid = sessionId;
       setTimeout(() => {
-        const ok = sendSessionChat(sessionId, text);
-        if (ok) {
-          // The steered turn streams; the parked follow-ups drain FIFO when
-          // it ends (queue-flush effect). Show the queued chip again so the
-          // user sees what's still pending.
-          setState((s) => ({ ...s, queued: [...s.queued, ...parked].slice(-10) }));
+        // The user may have switched chats during the gap — never steer the
+        // newly-opened conversation.
+        if (sid !== currentSessionId.current) return;
+        // The steered turn streams; the parked follow-ups drain FIFO when
+        // it ends (queue-flush effect). Show them again so the user sees
+        // what's still pending.
+        if (dispatchTurn(text)) {
+          setState((s) => ({ ...s, queued: [...s.queued, ...parked] }));
         } else {
-          setState((s) => ({
-            ...s,
-            queued: [text, ...parked, ...s.queued].slice(-10),
-            error: 'Not connected to desktop — message not sent. Reconnect and try again.',
-          }));
+          setState((s) => ({ ...s, queued: [text, ...parked, ...s.queued] }));
         }
       }, 350);
     },
-    [sessionId, state.queued, cancel, sendSessionChat],
+    [sessionId, state.queued, cancel, dispatchTurn],
   );
 
   const approve = useCallback(
@@ -729,7 +801,14 @@ export function useSessionChat(sessionId: string | null) {
     (latestUserMessageId?: number) => {
       if (!sessionId) return;
       if (latestUserMessageId != null) {
-        setState((s) => ({ ...s, messages: s.messages.filter((m) => m.id < latestUserMessageId) }));
+        setState((s) => ({
+          ...s,
+          // Persisted rows older than the fork point survive; EVERY ephemeral
+          // row dies with them. The old `m.id < latestUserMessageId` filter
+          // kept the just-streamed reply: finalized ephemeral rows carry
+          // NEGATIVE ids, and -N < any positive id is always true.
+          messages: s.messages.filter((m) => m.id > 0 && m.id < latestUserMessageId),
+        }));
       }
       regenerateMessage(sessionId);
     },
@@ -773,8 +852,9 @@ export function useSessionChat(sessionId: string | null) {
     (providerId: string, model: string) => {
       if (!sessionId) return;
       setSessionModel(sessionId, providerId, model);
-      // Optimistic header update; SessionModelSet confirms.
-      setState((s) => ({ ...s, meta: { provider: providerId, model, title: s.meta?.title, effort: s.meta?.effort } }));
+      // Optimistic header update; SessionModelSet confirms. Spread the
+      // existing meta (permissionMode/projectId must survive a model pick).
+      setState((s) => ({ ...s, meta: s.meta ? { ...s.meta, provider: providerId, model } : s.meta }));
     },
     [sessionId, setSessionModel],
   );

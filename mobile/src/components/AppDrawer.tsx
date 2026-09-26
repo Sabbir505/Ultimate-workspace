@@ -15,8 +15,11 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 // app. This wrapper preserves the lucide call-site's (size, color) props.
 const PencilSquare = ({ size, color }: { size?: number; color?: string }) =>
   <Ionicons name="create-outline" size={size} color={color} />;
-import { getRelayUrl, onProjectList, onProjectRemoved, onProjectUpserted, onSearchResults, onSessionCreated, useRelay, type ChatSearchHit, type ProjectInfo, type Session } from '../hooks/useRelay';
+import { getRelayUrl, onSearchResults, onSessionCreated, useRelay, type ChatSearchHit, type Session } from '../hooks/useRelay';
+import { useProjects } from '../hooks/useProjects';
 import { theme, useTheme } from '../theme';
+import { timeAgo } from '../lib/format';
+import { openChatById } from '../lib/navigation';
 import ConnectionIndicator from './ConnectionIndicator';
 import { tapLight, tapMedium } from '../lib/haptics';
 import { beginScreenTiming } from '../lib/screenTiming';
@@ -140,14 +143,6 @@ export function collectProjects(sessions: Session[]): ProjectSummary[] {
     .map(({ id, name, provider }) => ({ id, name, provider }));
 }
 
-function timeAgo(timestamp: number): string {
-  const s = Math.floor((Date.now() - timestamp) / 1000);
-  if (s < 60) return 'now';
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
-}
-
 function statusDotColor(status: Session['status']): string {
   const c = theme.colors;
   return status === 'working' ? c.success
@@ -256,29 +251,10 @@ function NewChatModal({ visible, onClose }: { visible: boolean; onClose: () => v
   const start = useCreateSessionFlow();
   // Real project list from the desktop (ListProjects) — the session-derived
   // list missed projects that have no chats yet. Session-derived entries
-  // still fill in the default agent per project.
-  const [serverProjects, setServerProjects] = useState<ProjectInfo[]>([]);
-  const { listProjects } = useRelay();
-  useEffect(() => {
-    if (!visible) return;
-    listProjects();
-    const offList = onProjectList.on(({ projects: list }) => setServerProjects(list));
-    const offUpsert = onProjectUpserted.on(({ project }) =>
-      setServerProjects((prev) =>
-        prev.some((p) => p.id === project.id)
-          ? prev.map((p) => (p.id === project.id ? project : p))
-          : [...prev, project],
-      ),
-    );
-    const offRemoved = onProjectRemoved.on(({ projectId }) =>
-      setServerProjects((prev) => prev.filter((p) => p.id !== projectId)),
-    );
-    // NOTE: a `useRef` used to be created HERE, inside the effect body. That
-    // is a hook call outside a component render, so opening this sheet threw
-    // "Invalid hook call" and the new-chat picker never appeared at all. The
-    // ref was never read, so it is simply gone.
-    return () => { offList(); offUpsert(); offRemoved(); };
-  }, [visible, listProjects]);
+  // still fill in the default agent per project. The listProjects send +
+  // ProjectList/Upserted/Removed merge live in the shared useProjects hook
+  // (same subscription ProjectManager uses).
+  const serverProjects = useProjects(visible);
 
   const projects = useMemo(() => {
     const fromSessions = collectProjects(sessions);
@@ -714,7 +690,9 @@ export default function AppDrawer() {
           />
           {query.length > 0 && (
             <TouchableOpacity
-              onPress={() => setQuery('')}
+              // Route through onSearchChange, not setQuery('') — the handler
+              // also clears the debounced hit list and the pending timer.
+              onPress={() => onSearchChange('')}
               accessibilityRole="button"
               accessibilityLabel="Clear search"
             >
@@ -739,25 +717,15 @@ export default function AppDrawer() {
                 onPress={() => {
                   tapLight();
                   const sid = h.chat_session_id;
+                  if (!sid) return;
                   setHits([]);
                   setQuery('');
                   close();
-                  spawnSession(sid);
-                  navigation.navigate('SessionDetail', {
-                    sessionId: sid,
-                    session: {
-                      id: sid,
-                      projectId: '',
-                      projectName: '',
-                      title: h.session_title || 'Chat',
-                      status: 'idle',
-                      provider: '',
-                      model: '',
-                      lastActivity: h.created_at * 1000,
-                      isLive: false,
-                      starred: false,
-                      unread: false,
-                    } as Session,
+                  // The hit's chat is INACTIVE on the desktop — spawn it so
+                  // the chat opens live and follow-up sends land.
+                  openChatById(navigation, spawnSession, sid, {
+                    title: h.session_title || 'Chat',
+                    lastActivity: h.created_at * 1000,
                   });
                 }}
               >

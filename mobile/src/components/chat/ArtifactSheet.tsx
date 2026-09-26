@@ -180,8 +180,13 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
       setLoading(false);
       return;
     }
-    // Keep any seeded preview on screen while the full read streams in.
-    if (!initialPreview) setContent(null);
+    // Keep a seeded preview on screen ONLY while it is the preview of the
+    // artifact still selected: `initialPreview` stays truthy for the whole
+    // sheet session, so gating on the prop alone kept the PREVIOUS
+    // artifact's content (no spinner, mis-rendered under the new header)
+    // when the user tapped a second pill.
+    const seeded = initialPreview != null && initialPreview.path === selKey;
+    if (!seeded) setContent(null);
     setError(null);
     if (!sessionId) {
       setError('No session context — reopen this artifact from the chat.');
@@ -192,7 +197,7 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
       return;
     }
     let done = false;
-    if (!initialPreview) setLoading(true);
+    if (!seeded) setLoading(true);
     const targetPath = selKey as string;
     const timeout = setTimeout(() => {
       if (!done) {

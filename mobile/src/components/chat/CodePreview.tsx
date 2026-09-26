@@ -121,7 +121,7 @@ export function extToLang(filename: string): Lang {
   return map[ext] ?? 'txt';
 }
 
-export default function CodePreview({
+export default React.memo(function CodePreview({
   code,
   filename,
   startLine = 1,
@@ -135,9 +135,16 @@ export default function CodePreview({
   const c = theme.colors;
   const lang = useMemo(() => extToLang(filename), [filename]);
   const lines = useMemo(() => code.replace(/\r\n/g, '\n').split('\n'), [code]);
+  // Tokenize ONCE per (code, lang), not per render: a large artifact
+  // re-tokenized its every line — rebuilding the whole nested Text tree —
+  // on every parent re-render (poll tick, webLoading toggle, theme change).
+  const tokenized = useMemo(
+    () => lines.map((line) => tokenizeLine(line, lang)),
+    [lines, lang],
+  );
   return (
     <View style={styles.wrap}>
-      {lines.map((line, idx) => (
+      {tokenized.map((tokens, idx) => (
         <View key={idx} style={styles.line}>
           {showLineNumbers ? (
             <Text style={[styles.ln, { color: c.textSecondary }]}>
@@ -145,18 +152,18 @@ export default function CodePreview({
             </Text>
           ) : null}
           <Text style={styles.code} selectable>
-            {tokenizeLine(line, lang).map((t, j) => (
+            {tokens.map((t, j) => (
               <Text key={j} style={{ color: t.color }}>
                 {t.text}
               </Text>
             ))}
-            {line.length === 0 ? ' ' : ''}
+            {lines[idx]!.length === 0 ? ' ' : ''}
           </Text>
         </View>
       ))}
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   wrap: { paddingVertical: 6 },

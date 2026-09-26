@@ -3,9 +3,12 @@
 // the SAME crypto as the app (mirrors mobile/src/lib/relayCrypto.ts), so op
 // tests don't depend on flaky UI automation.
 //
-// Usage: node Random Stuff/relay_probe.mjs <token> <op-json> [...]
+// Usage: node relay_probe.mjs [--port <n>] <token> <op-json> [...]
 //   node relay_probe.mjs <token> '{"type":"ListChatSkills"}' \
 //     '{"type":"SearchChatMessages","query":"hello","limit":5}'
+// The relay port can also come from the RELAY_PORT env var; it defaults to
+// 54257 (the desktop relay binds a random port on first run, so pass the
+// port the desktop actually printed).
 // Prints every DesktopMessage received (decrypted) as JSON lines.
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
@@ -57,14 +60,42 @@ function decryptFrame(key, counter, frame) {
   catch { return null; }
 }
 
-const token = process.argv[2];
-const ops = process.argv.slice(3).map((a) => JSON.parse(a));
+// --port <n> / --port=<n> / RELAY_PORT env, falling back to 54257. The
+// desktop relay binds a random port on first run, so the old hardcoded URL
+// only worked when the port happened to match the persisted one.
+function parseArgs(argv) {
+  const rest = [];
+  let port = null;
+  const badPort = () => { console.error('invalid --port value'); process.exit(2); };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--port' || a === '-p') {
+      port = Number(argv[++i]);
+      if (!Number.isInteger(port) || port <= 0) badPort();
+    } else if (a.startsWith('--port=')) {
+      port = Number(a.slice('--port='.length));
+      if (!Number.isInteger(port) || port <= 0) badPort();
+    } else {
+      rest.push(a);
+    }
+  }
+  if (port === null && process.env.RELAY_PORT) {
+    const v = Number(process.env.RELAY_PORT);
+    if (Number.isInteger(v) && v > 0) port = v;
+  }
+  return { port: port ?? 54257, rest };
+}
+
+const { port, rest } = parseArgs(process.argv.slice(2));
+const token = rest[0];
+const ops = rest.slice(1).map((a) => JSON.parse(a));
 if (!token || ops.length === 0) {
-  console.error('usage: node relay_probe.mjs <token> <op-json> [...]');
+  console.error('usage: node relay_probe.mjs [--port <n>] <token> <op-json> [...]');
+  console.error('       port also via RELAY_PORT env; defaults to 54257');
   process.exit(2);
 }
 
-const ws = new WebSocket('ws://127.0.0.1:54257');
+const ws = new WebSocket(`ws://127.0.0.1:${port}`);
 let key = null;
 let inCounter = 0;
 let outCounter = 0;
@@ -140,7 +171,6 @@ function msgMatches(msg, op) {
     case 'ListHiddenCostProjects': return msg.type === 'HiddenCostProjects' || msg.type === 'ChatError';
     case 'ListArtifacts': return msg.type === 'ArtifactLibrary' || msg.type === 'ChatError';
     case 'ListAcpAgents': return msg.type === 'AcpAgentList' || msg.type === 'ChatError';
-    case 'ListChatSkills': return msg.type === 'ChatSkills';
     case 'GitDiff': return msg.type === 'GitOutput' || msg.type === 'ChatError';
     case 'GitBranches': return msg.type === 'GitBranchesMsg' || msg.type === 'ChatError';
     case 'GitLog': return msg.type === 'GitLogMsg' || msg.type === 'ChatError';

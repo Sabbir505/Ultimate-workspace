@@ -3,15 +3,16 @@ import {
   FlatList, StyleSheet, Text, TextInput, TouchableOpacity, View, Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
 import { onArtifactLibrary, onArtifactPreview, getCachedArtifactPreview, useRelay, type ArtifactLibraryEntry, type ArtifactPreview, type SessionArtifact } from '../hooks/useRelay';
+import { useRelayList } from '../hooks/useRelayList';
+import { timeAgo } from '../lib/format';
 import ArtifactSheet, { extOf } from '../components/chat/ArtifactSheet';
 import MarkdownText from '../components/chat/MarkdownText';
+import ScreenHeader from '../components/ScreenHeader';
 import { tapLight } from '../lib/haptics';
-import DomainErrorBar from '../components/DomainErrorBar';
 
 /**
  * Artifact library — the phone mirror of the desktop ArtifactLibrary: a GRID
@@ -56,28 +57,21 @@ function useArtifactPreview(path: string | null) {
   return preview;
 }
 
-function timeAgo(ts: number): string {
-  const s = Math.floor((Date.now() - ts * 1000) / 1000);
-  if (s < 60) return 'now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
 export default function ArtifactsScreen() {
   useScreenMountTiming('ArtifactsScreen');
-  const navigation = useNavigation<any>();
   const { listArtifacts, connected } = useRelay();
   const c = theme.colors;
   const [entries, setEntries] = useState<ArtifactLibraryEntry[]>([]);
   const [query, setQuery] = useState('');
 
-  useEffect(() => {
-    listArtifacts();
-    const off = onArtifactLibrary.on(({ artifacts }) => setEntries(artifacts));
-    return off;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Refetch on mount and on reconnect — the mount send is dropped while the
+  // socket is still pairing, and a lost first fetch must not leave a false
+  // "No artifacts yet." on screen.
+  useRelayList(() => listArtifacts());
+  useEffect(
+    () => onArtifactLibrary.on(({ artifacts }) => setEntries(artifacts)),
+    [],
+  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -102,30 +96,23 @@ export default function ArtifactsScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.background }]} edges={['top']}>
-      <View style={[styles.header, { borderBottomColor: c.border }]}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          style={styles.backBtn}
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="arrow-back" size={22} color={c.text} />
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: c.text }]}>Artifacts</Text>
-        <TouchableOpacity
-          onPress={() => listArtifacts()}
-          style={styles.backBtn}
-          accessibilityRole="button"
-          accessibilityLabel="Refresh artifacts"
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="refresh" size={20} color={c.textSecondary} />
-        </TouchableOpacity>
-      </View>
+      <ScreenHeader
+        title="Artifacts"
+        errorDomains={['artifacts', 'preview']}
+        right={
+          <TouchableOpacity
+            onPress={() => listArtifacts()}
+            style={styles.backBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Refresh artifacts"
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons name="refresh" size={20} color={c.textSecondary} />
+          </TouchableOpacity>
+        }
+      />
 
       <View style={styles.searchWrap}>
-      <DomainErrorBar domains={['artifacts', 'preview']} />
         <View style={[styles.searchField, { backgroundColor: c.surface2, borderColor: c.border }]}>
           <Ionicons name="search" size={15} color={c.textSecondary} />
           <TextInput
@@ -220,7 +207,7 @@ function ArtifactTile({ entry, onPress }: { entry: ArtifactLibraryEntry; onPress
         <Text style={[styles.tileName, { color: c.text }]} numberOfLines={1}>
           {entry.filename}
         </Text>
-        <Text style={[styles.tileMeta, { color: c.textSecondary }]}>{timeAgo(entry.created_at)}</Text>
+        <Text style={[styles.tileMeta, { color: c.textSecondary }]}>{timeAgo(entry.created_at, 'ago')}</Text>
       </View>
     </TouchableOpacity>
   );
@@ -228,16 +215,7 @@ function ArtifactTile({ entry, onPress }: { entry: ArtifactLibraryEntry; onPress
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: theme.spacing.md,
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
   backBtn: { padding: 4 },
-  headerTitle: { fontSize: 17, fontWeight: '700' },
   searchWrap: { paddingHorizontal: theme.spacing.md, paddingVertical: theme.spacing.sm },
   searchField: {
     flexDirection: 'row',

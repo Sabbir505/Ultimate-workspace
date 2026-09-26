@@ -438,8 +438,6 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
   delete sessionMetrics[chatSessionId];
   const cwdOverrides = { ...s.cwdOverrides };
   delete cwdOverrides[chatSessionId];
-  const ownerSessionByChatId = { ...s.ownerSessionByChatId };
-  delete ownerSessionByChatId[chatSessionId];
   const artifactProposals = { ...s.artifactProposals };
   delete artifactProposals[chatSessionId];
   const lastTurnPerf = { ...s.lastTurnPerf };
@@ -497,7 +495,6 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
     livePerf,
     sessionMetrics,
     cwdOverrides,
-    ownerSessionByChatId,
     artifactProposals,
     lastTurnPerf,
     stoppedPartial,

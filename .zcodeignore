@@ -14,6 +14,11 @@ src-tauri/.env
 # If it leaks, anyone can ship signed updates to your users.
 .tauri/relay-update.key
 .tauri/relay-update.key.pub
+# Staging channel: a SEPARATE keypair, so a staging artifact can never verify as
+# a production update even if it somehow reached the production feed. Generated
+# with `npx @tauri-apps/cli signer generate -w .tauri/relay-update-staging.key --ci`.
+.tauri/relay-update-staging.key
+.tauri/relay-update-staging.key.pub
 # Bundled Python runtime (~70 MB of binaries) staged by
 # scripts/fetch-bundled-python.mjs into the installer. Regenerated, not
 # committed — never check in the python-build-standalone tree.
@@ -30,6 +35,27 @@ src-tauri/resources/libreoffice/
 # Playwright MCP automation scratch output (screenshots/session artifacts).
 .playwright-mcp/
 
+# Local Netlify folder
+.netlify
+
+# Local automation captures, generated media, and machine-local scratch —
+# never committed. (Files already tracked inside an ignored dir stay tracked;
+# these only stop NEW scratch from showing up in git status.)
+logs/
+video/
+Thesis Diagrams/
+__pycache__/
+.commandcode/
+# Scratch dir (QA screenshots, patch probes, a live pairing token — never ship it)
+Random Stuff/
+.zcode/plans/
+# Local image-generation outputs and one-off probe dumps
+fox_uri.txt
+src-tauri/fox_uri.txt
+src-tauri/fox_err.txt
+conduit_watch_probe.txt
+registered_cmds.txt
+scripts/__tmp_*
 # ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
 .git/
 .hg/

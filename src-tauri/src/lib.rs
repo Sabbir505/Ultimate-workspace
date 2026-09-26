@@ -712,6 +712,7 @@ pub fn run() {
             commands::chat_cmds::list_chat_checkpoints,
             commands::chat_cmds::restore_chat_checkpoint,
             commands::chat_cmds::create_chat_session,
+            commands::chat_cmds::fork_chat_session,
             commands::chat_cmds::delete_chat_session,
             commands::chat_cmds::delete_all_chat_sessions,
             commands::chat_cmds::delete_empty_chat_sessions,

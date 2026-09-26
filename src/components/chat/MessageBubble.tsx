@@ -510,6 +510,16 @@ function MessageBubbleInner({
           onEdit={isUser ? openEditor : undefined}
           onRepeat={onRepeat}
           onDelete={onDelete}
+          // "Fork here": branch the conversation at THIS message into a
+          // side-by-side pane (the fork copies everything up to and including
+          // this row, then continues independently). Persisted rows only —
+          // the optimistic just-sent bubble has a negative id and nothing to
+          // copy yet. The store action owns toasts + pane placement.
+          onFork={
+            msgId != null && msgId > 0 && chatSessionId
+              ? () => void useChatStore.getState().forkChatToPanes(chatSessionId, 1, msgId)
+              : undefined
+          }
           timestamp={formatMessageTimestamp(message.createdAt)}
           timestampTitle={
             message.createdAt != null

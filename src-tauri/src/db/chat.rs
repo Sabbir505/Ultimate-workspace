@@ -172,6 +172,80 @@ pub fn create_chat_session(
     )
 }
 
+/// Fork a chat session: a new session copying the source's config
+/// (provider/model/agent/project/policies) plus a copy of its LIVE message
+/// history. The fork starts from what the model would SEE — superseded rows
+/// (edit-to-fork retirements, compaction folds) are skipped — and continues
+/// independently from there. Powers the "fork chat to side-by-side panes"
+/// action (one IPC call per forked pane).
+///
+/// Deliberately NOT copied: `worktree_path` (a worktree belongs to exactly
+/// one session, branch `relay/<id>` — the fork starts on its project's main
+/// tree and can be isolated like any other new chat) and the id row identity
+/// itself. `origin` records provenance (`fork_of:<id>`) without joining the
+/// `spawned_by:` chain session_fabric walks. The title gains a `· fork N`
+/// suffix (N counts the source's LIVE forks, so numbering survives across
+/// batches) to keep the sibling rows distinguishable in the sidebar.
+///
+/// `upto_message_id` (message-bubble "fork here") cuts the copy at that row
+/// INCLUSIVE — the fork resumes from the conversation as it stood right at
+/// that message. Rows after it (and superseded rows anywhere) are left out.
+pub fn fork_chat_session(
+    conn: &Connection,
+    source: &ChatSession,
+    upto_message_id: Option<i64>,
+) -> DbResult<ChatSession> {
+    let now = now_ts();
+    let id = new_id();
+    let origin = format!("fork_of:{}", source.id);
+    let fork_n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM chat_sessions WHERE origin = ?1",
+        params![origin],
+        |r| r.get::<_, i64>(0),
+    )? + 1;
+    conn.execute(
+        "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode, agent, project_id, cwd_override, permission_mode, sandbox_policy, approval_policy, auto_model, effort_level, origin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            id,
+            source.title.as_ref().map(|t| format!("{t} · fork {fork_n}")),
+            source.provider,
+            source.model,
+            now,
+            source.watch_mode,
+            source.agent,
+            source.project_id,
+            source.cwd_override,
+            source.permission_mode,
+            source.sandbox_policy,
+            source.approval_policy,
+            source.auto_model as i64,
+            source.effort_level,
+            origin,
+        ],
+    )?;
+    // INSERT..SELECT copies the rows in place (the FTS triggers fire row by
+    // row, so the copies stay searchable); new autoincrement ids keep the
+    // timeline order via ORDER BY id. `kind` carries command-only rows
+    // (artifact_command) so the fork's transcript matches the source's.
+    // `upto_message_id` truncates the tail (bubble fork-at-message).
+    conn.execute(
+        "INSERT INTO chat_messages (chat_session_id, role, content, input_tokens, output_tokens, cost_usd, created_at, cache_creation_input_tokens, cache_read_input_tokens, reasoning_output_tokens, provider, model_key, pricing_estimated_usd, started_at, completed_at, llm_time_ms, tool_time_ms, ttft_ms, tokens_per_second, kind)
+         SELECT ?1, role, content, input_tokens, output_tokens, cost_usd, created_at, cache_creation_input_tokens, cache_read_input_tokens, reasoning_output_tokens, provider, model_key, pricing_estimated_usd, started_at, completed_at, llm_time_ms, tool_time_ms, ttft_ms, tokens_per_second, kind
+           FROM chat_messages
+          WHERE chat_session_id = ?2
+            AND superseded_by IS NULL
+            AND (?3 IS NULL OR id <= ?3)
+          ORDER BY id",
+        params![id, source.id, upto_message_id],
+    )?;
+    conn.query_row(
+        "SELECT * FROM chat_sessions WHERE id = ?1",
+        params![id],
+        map_chat_session,
+    )
+}
+
 /// Bind (or unbind with `None`) a chat session to a project. Drives the chat's
 /// nesting under the project's expandable sidebar row.
 pub fn set_chat_session_project(
@@ -1909,6 +1983,91 @@ mod tests {
         let hits = search_chat_messages(&conn, "flux", 10).unwrap();
         assert_eq!(hits.len(), 1, "backfill should index pre-existing rows");
         assert_eq!(hits[0].chat_session_id, cs.id);
+    }
+
+    #[test]
+    fn fork_copies_live_history_and_skips_superseded_rows() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        update_chat_session_title(&conn, &cs.id, "API redesign").unwrap();
+        // Re-read: fork_chat_session takes the ROW, not the create-time struct
+        // (the command layer re-reads before forking).
+        let cs = get_chat_session(&conn, &cs.id).unwrap().unwrap();
+        let m1 = add_msg(&conn, &cs.id, "user", "first question");
+        let m2 = add_msg(&conn, &cs.id, "assistant", "first answer");
+        let m3 = add_msg(&conn, &cs.id, "user", "second question");
+        let m4 = add_msg(&conn, &cs.id, "assistant", "second answer");
+        // Retire the tail (edit-to-fork): the fork must NOT carry it.
+        mark_branch_superseded(&conn, &cs.id, m3.id).unwrap();
+
+        let fork = fork_chat_session(&conn, &cs, None).unwrap();
+        assert_ne!(fork.id, cs.id);
+        assert_eq!(fork.origin.as_deref(), Some(format!("fork_of:{}", cs.id).as_str()));
+        // Config carried over.
+        assert_eq!(fork.provider, cs.provider);
+        assert_eq!(fork.model, cs.model);
+        assert_eq!(fork.project_id, cs.project_id);
+        // Title gains a numbered suffix; the original keeps its own.
+        assert_eq!(fork.title.as_deref(), Some("API redesign · fork 1"));
+
+        // Only the live rows copied (m1, m2) — not the retired tail (m3, m4).
+        let copied = list_chat_messages(&conn, &fork.id).unwrap();
+        assert_eq!(copied.len(), 2);
+        assert_eq!(copied[0].content, m1.content);
+        assert_eq!(copied[1].content, m2.content);
+        assert!(copied.iter().all(|m| m.superseded_by.is_none()));
+        // New row ids in timeline order; the source is untouched.
+        assert!(copied[0].id != m1.id && copied[1].id != m2.id);
+        assert_eq!(list_chat_messages(&conn, &cs.id).unwrap().len(), 4);
+
+        // A second fork of the same source numbers itself 2 (counting live
+        // forks via origin), and its search index works (FTS triggers fired).
+        let fork2 = fork_chat_session(&conn, &cs, None).unwrap();
+        assert_eq!(fork2.title.as_deref(), Some("API redesign · fork 2"));
+        let hits = search_chat_messages(&conn, "first question", 10).unwrap();
+        assert!(hits.iter().any(|h| h.chat_session_id == fork.id));
+        assert!(hits.iter().any(|h| h.chat_session_id == fork2.id));
+    }
+
+    #[test]
+    fn fork_at_message_truncates_the_copy_inclusive() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "openai", "gpt-5", None).unwrap();
+        let m1 = add_msg(&conn, &cs.id, "user", "first question");
+        let m2 = add_msg(&conn, &cs.id, "assistant", "first answer");
+        let m3 = add_msg(&conn, &cs.id, "user", "second question");
+        let _m4 = add_msg(&conn, &cs.id, "assistant", "second answer");
+
+        // Bubble "fork here" on the SECOND user message: the copy carries
+        // m1..m3 (inclusive), so the fork can continue differently from
+        // exactly that point.
+        let fork = fork_chat_session(&conn, &cs, Some(m3.id)).unwrap();
+        let copied = list_chat_messages(&conn, &fork.id).unwrap();
+        assert_eq!(copied.len(), 3);
+        assert_eq!(copied[2].content, m3.content);
+
+        // Forking at the FIRST message copies just that row.
+        let fork1 = fork_chat_session(&conn, &cs, Some(m1.id)).unwrap();
+        assert_eq!(list_chat_messages(&conn, &fork1.id).unwrap().len(), 1);
+
+        // An unknown/foreign id copies nothing (id <= tiny matches no rows)
+        // rather than failing the whole fork.
+        let fork0 = fork_chat_session(&conn, &cs, Some(0)).unwrap();
+        assert_eq!(list_chat_messages(&conn, &fork0.id).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn fork_of_unbound_titleless_session_stays_titleless_and_searchable() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "openai", "gpt-5", None).unwrap();
+        add_msg(&conn, &cs.id, "user", "a message about gyroscopes");
+        let fork = fork_chat_session(&conn, &cs, None).unwrap();
+        // NULL title stays NULL (the first send in the fork auto-titles it);
+        // config/provenance still carried.
+        assert!(fork.title.is_none());
+        assert_eq!(fork.origin.as_deref(), Some(format!("fork_of:{}", cs.id).as_str()));
+        assert_eq!(fork.provider, "openai");
+        assert_eq!(list_chat_messages(&conn, &fork.id).unwrap().len(), 1);
     }
 
     #[test]

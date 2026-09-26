@@ -184,6 +184,25 @@ export function CommandPalette() {
         },
       },
       {
+        id: "action:fork-chat",
+        section: "Actions",
+        label: "Fork Chat to Side-by-Side Panes…",
+        run: () => {
+          close();
+          ui.openForkChatModal(null);
+        },
+      },
+      {
+        id: "action:hotkey-overlay",
+        section: "Actions",
+        label: "Show Keyboard Shortcuts",
+        hint: keybindings.toggleHotkeyOverlay,
+        run: () => {
+          close();
+          ui.toggleHotkeyOverlay();
+        },
+      },
+      {
         id: "action:add-project",
         section: "Actions",
         label: "Add Project",

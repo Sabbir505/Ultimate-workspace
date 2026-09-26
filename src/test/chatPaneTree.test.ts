@@ -19,6 +19,8 @@ vi.mock("../lib/ipc", () => ({
   listChatCheckpoints: vi.fn().mockResolvedValue([]),
   touchChatSession: vi.fn().mockResolvedValue(undefined),
   createChatSession: vi.fn(),
+  forkChatSession: vi.fn(),
+  toastError: vi.fn(),
   generateChatTitle: vi.fn().mockResolvedValue(null),
   getChatConfig: vi.fn(),
   getChatSessionMetrics: vi.fn().mockResolvedValue(null),
@@ -45,6 +47,7 @@ import {
   countChatPanes,
   findPaneForSession,
   insertChatPaneSplit,
+  owningSplitId,
   removeChatPane,
   setChatPaneRatio,
 } from "../state/chat/paneTree";
@@ -164,6 +167,31 @@ describe("paneTree pure ops", () => {
     expect((squeezed as any).ratio).toBe(0.15);
     const blown = setChatPaneRatio(tree, "split-1", 2);
     expect((blown as any).ratio).toBe(0.85);
+  });
+
+  it("owningSplitId finds the split directly owning a leaf pane", () => {
+    const tree = insertChatPaneSplit(null, {
+      targetPaneId: "main",
+      edge: "right",
+      newPaneId: "pane-2",
+      sessionId: "s2",
+      splitId: "split-1",
+    })!;
+    expect(owningSplitId(tree, "pane-2")).toBe("split-1");
+    // The main leaf sits in the same (only) split.
+    expect(owningSplitId(tree, "main")).toBe("split-1");
+    // Tree-less main: no split owns it.
+    expect(owningSplitId(null, "main")).toBeNull();
+    const deeper = insertChatPaneSplit(tree, {
+      targetPaneId: "pane-2",
+      edge: "right",
+      newPaneId: "pane-3",
+      sessionId: "s3",
+      splitId: "split-2",
+    })!;
+    // pane-2 moved INTO split-2 (it split around the new pane).
+    expect(owningSplitId(deeper, "pane-2")).toBe("split-2");
+    expect(owningSplitId(deeper, "pane-3")).toBe("split-2");
   });
 });
 
@@ -389,6 +417,91 @@ describe("pane store actions", () => {
     // unchanged, and crucially s1 is NOT duplicated into a new pane.
     expect(s.chatPaneTree).toBe(before);
     expect(s.activeChatSessionId).toBe("s1");
+  });
+
+  it("forkChatToPanes forks N copies and pins them side by side with equal widths", async () => {
+    const { forkChatSession } = await import("../lib/ipc");
+    const created: string[] = [];
+    vi.mocked(forkChatSession).mockImplementation(async () => {
+      const id = `fork-${created.length + 1}`;
+      created.push(id);
+      return session(id) as never;
+    });
+    const n = await useChatStore.getState().forkChatToPanes("s1", 2);
+    expect(n).toBe(2);
+    const s = useChatStore.getState();
+    // Two new sessions registered in the sidebar list...
+    expect(s.sessions.some((x) => x.id === "fork-1")).toBe(true);
+    expect(s.sessions.some((x) => x.id === "fork-2")).toBe(true);
+    // ...each pinned in its own pane beside the main (which keeps s1).
+    expect(countChatPanes(s.chatPaneTree)).toBe(3);
+    expect(findPaneForSession(s.chatPaneTree, "fork-1")).not.toBeNull();
+    expect(findPaneForSession(s.chatPaneTree, "fork-2")).not.toBeNull();
+    expect(s.activeChatSessionId).toBe("s1");
+    // Pane buffers exist for both forks (the pane loads its history page).
+    const pane1 = findPaneForSession(s.chatPaneTree, "fork-1")!;
+    const pane2 = findPaneForSession(s.chatPaneTree, "fork-2")!;
+    expect(s.paneBuffers[pane1]?.sessionId).toBe("fork-1");
+    expect(s.paneBuffers[pane2]?.sessionId).toBe("fork-2");
+    // Equalized chain: outer split keeps 2/3 (main vs. the fork subtree),
+    // inner split 1/2 — so main and both forks each render 1/3 of the width.
+    const tree = s.chatPaneTree!;
+    expect(tree.kind).toBe("split");
+    expect((tree as any).ratio).toBeCloseTo(2 / 3);
+    const inner = (tree as any).b;
+    expect(inner.ratio).toBeCloseTo(0.5);
+    expect((inner.a as any).sessionId).toBe("fork-1");
+    expect((inner.b as any).sessionId).toBe("fork-2");
+  });
+
+  it("forkChatToPanes clamps the fork count to the remaining pane room", async () => {
+    // Build a 5-pane layout (main + 4 pinned) directly — room for 1 more.
+    let tree = null as null | ReturnType<typeof insertChatPaneSplit>;
+    const buffers: Record<string, { sessionId: string; messages: never[]; hasMoreHistory: boolean }> = {};
+    for (let i = 2; i <= 5; i++) {
+      tree = insertChatPaneSplit(tree, {
+        targetPaneId: "main",
+        edge: "right",
+        newPaneId: `pane-${i}`,
+        sessionId: `s${i}`,
+        splitId: `split-${i}`,
+      });
+      buffers[`pane-${i}`] = { sessionId: `s${i}`, messages: [], hasMoreHistory: false };
+    }
+    useChatStore.setState((s) => ({
+      sessions: [...s.sessions, session("s4"), session("s5")],
+      chatPaneTree: tree,
+      paneBuffers: buffers,
+    }));
+    expect(countChatPanes(useChatStore.getState().chatPaneTree)).toBe(5);
+
+    const n = await useChatStore.getState().forkChatToPanes("s1", 3);
+    expect(n).toBe(1);
+    expect(countChatPanes(useChatStore.getState().chatPaneTree)).toBe(6);
+    // Asking for 3 again (room 0) forks nothing and toasts the cap.
+    const again = await useChatStore.getState().forkChatToPanes("s1", 3);
+    expect(again).toBe(0);
+    expect(countChatPanes(useChatStore.getState().chatPaneTree)).toBe(6);
+  });
+
+  it("forkChatToPanes refuses an empty active chat", async () => {
+    const { forkChatSession } = await import("../lib/ipc");
+    useChatStore.setState({ messages: [], messagesSessionId: "s1" });
+    const n = await useChatStore.getState().forkChatToPanes("s1", 2);
+    expect(n).toBe(0);
+    expect(forkChatSession).not.toHaveBeenCalled();
+    expect(useChatStore.getState().chatPaneTree).toBeNull();
+  });
+
+  it("forkChatToPanes passes the bubble's fork-at-message id through to the IPC", async () => {
+    const { forkChatSession } = await import("../lib/ipc");
+    vi.mocked(forkChatSession).mockResolvedValue(null);
+    const n = await useChatStore.getState().forkChatToPanes("s1", 1, 42);
+    expect(n).toBe(0); // mock returns null → nothing pinned
+    expect(forkChatSession).toHaveBeenCalledWith("s1", 42);
+    // Whole-chat forks (toolbar/dialog) pass no cutoff.
+    await useChatStore.getState().forkChatToPanes("s1", 1);
+    expect(forkChatSession).toHaveBeenLastCalledWith("s1", undefined);
   });
 
   // LAST: deleteChat tombstones the session id for the whole app run (the

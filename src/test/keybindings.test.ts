@@ -78,6 +78,17 @@ describe("matchesAccelerator", () => {
     expect(matchesAccelerator(DEFAULT_KEYBINDINGS.newSession, ev("n", { ctrl: true }))).toBe(true);
     expect(matchesAccelerator(DEFAULT_KEYBINDINGS.focusPane4, ev("4", { meta: true }))).toBe(true);
   });
+
+  it("matches the Mod+/ cheatsheet binding", () => {
+    // Mod accepts ctrl OR meta; the event key is the plain slash.
+    expect(matchesAccelerator(DEFAULT_KEYBINDINGS.toggleHotkeyOverlay, ev("/", { ctrl: true }))).toBe(true);
+    expect(matchesAccelerator(DEFAULT_KEYBINDINGS.toggleHotkeyOverlay, ev("/", { meta: true }))).toBe(true);
+    // Plain "/" while typing must NOT open the overlay, and neither must
+    // modifier mismatches (Shift+/ produces "?" — a different combo).
+    expect(matchesAccelerator(DEFAULT_KEYBINDINGS.toggleHotkeyOverlay, ev("/"))).toBe(false);
+    expect(matchesAccelerator(DEFAULT_KEYBINDINGS.toggleHotkeyOverlay, ev("?", { shift: true }))).toBe(false);
+    expect(matchesAccelerator(DEFAULT_KEYBINDINGS.toggleHotkeyOverlay, ev("/", { ctrl: true, alt: true }))).toBe(false);
+  });
 });
 
 describe("acceleratorFromEvent", () => {

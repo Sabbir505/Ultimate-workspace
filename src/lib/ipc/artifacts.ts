@@ -477,6 +477,16 @@ export const restoreChatCheckpoint = (checkpointId: number, rollbackMessages?: b
   });
 export const createChatSession = (provider: string, model: string, projectId?: string | null) =>
   safeInvoke<ChatSession | null>("create_chat_session", { provider, model, projectId: projectId ?? null });
+/** Fork a chat session (the "fork to side-by-side panes" action): a new
+ *  session with the source's config and a copy of its live (non-superseded)
+ *  message history, continuing independently. `uptoMessageId` (message-bubble
+ *  "fork here") truncates the copy at that row inclusive. Returns the fork's
+ *  row. */
+export const forkChatSession = (chatSessionId: string, uptoMessageId?: number) =>
+  safeInvoke<ChatSession | null>("fork_chat_session", {
+    chatSessionId,
+    uptoMessageId: uptoMessageId ?? null,
+  });
 /** Bind (or unbind with null) a chat session to a project, so it nests under
  *  that project's expandable sidebar row. */
 export const setChatSessionProject = (chatSessionId: string, projectId?: string | null) =>

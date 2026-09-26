@@ -395,6 +395,16 @@ export interface ChatState {
   /** Open `chatSessionId` in a new pane (⋮ menu): toggles the pane closed
    *  when the session is already pinned in one. */
   openChatSplit: (chatSessionId: string) => Promise<void>;
+  /** Fork `chatSessionId` into `count` NEW sessions — each a copy of the
+   *  source's config and live (non-superseded) history — and open them side
+   *  by side to the right of the focused pane. `uptoMessageId` (message-bubble
+   *  "fork here") truncates each copy at that row inclusive. Returns how many
+   *  forks were created (clamped by the MAX_CHAT_PANES cap). */
+  forkChatToPanes: (
+    chatSessionId: string,
+    count: number,
+    uptoMessageId?: number,
+  ) => Promise<number>;
   /** Close one pinned pane (its header ✕). The main pane can't close. */
   closeChatPane: (paneId: string) => void;
   /** Close every pinned pane and drop the tree (back to the single view). */

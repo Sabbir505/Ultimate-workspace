@@ -139,6 +139,20 @@ export function RepeatIcon() {
   );
 }
 
+/** Git-fork glyph for the bubble "fork here" action (fork the conversation at
+ *  this message into a side-by-side pane). */
+export function ForkIcon() {
+  return (
+    <svg {...iconProps} aria-hidden="true">
+      <circle cx="12" cy="18" r="3" />
+      <circle cx="6" cy="6" r="3" />
+      <circle cx="18" cy="6" r="3" />
+      <path d="M18 9v1a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V9" />
+      <path d="M12 12v3" />
+    </svg>
+  );
+}
+
 export function TrashIcon() {
   return (
     <svg {...iconProps} aria-hidden="true">
@@ -243,14 +257,16 @@ export function MessageArtifacts({
 
 /** Per-message action bar (Claude-style icons): copy for every message, edit
  *  for user messages, regenerate for assistant messages, delete for any
- *  persisted message. Appears on hover under the bubble. The message's
- *  end-of-turn timestamp rides INSIDE the bar (leading slot) so it uses the
- *  same hover reveal as the buttons. */
+ *  persisted message, fork (side-by-side branch from here) when the caller
+ *  offers it. Appears on hover under the bubble. The message's end-of-turn
+ *  timestamp rides INSIDE the bar (leading slot) so it uses the same hover
+ *  reveal as the buttons. */
 export function MessageActions({
   content,
   onEdit,
   onRepeat,
   onDelete,
+  onFork,
   timestamp,
   timestampTitle,
   speakKey,
@@ -260,6 +276,10 @@ export function MessageActions({
   onEdit?: (content: string) => void;
   onRepeat?: () => void;
   onDelete?: () => void;
+  /** Fork the conversation AT this message into a side-by-side pane (the new
+   *  chat copies everything up to and including this row). Omitted for rows
+   *  that have no persisted id yet (optimistic bubbles). */
+  onFork?: () => void;
   /** Preformatted end-of-turn time ("14:32") — rendered beside the buttons. */
   timestamp?: string | null;
   timestampTitle?: string;
@@ -342,6 +362,19 @@ export function MessageActions({
           aria-label="Edit message"
         >
           <EditIcon />
+        </button>
+      )}
+      {onFork && (
+        <button
+          className="chat-msg-action"
+          onClick={(e) => {
+            e.currentTarget.blur();
+            onFork();
+          }}
+          title="Fork chat from here to a side-by-side pane"
+          aria-label="Fork chat from here to a side-by-side pane"
+        >
+          <ForkIcon />
         </button>
       )}
       {onDelete && (

@@ -513,6 +513,103 @@
   from { opacity: 0; transform: translateY(-8px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+/* ---------- Hotkey overlay (Mod+/ cheatsheet) ---------- */
+/* Centered like .modal-overlay (which bumps to z-index 60) so it can stack
+   above the palette that may have opened it. */
+.hotkey-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+  animation: overlay-in 0.18s var(--ease);
+}
+.hotkey-card {
+  width: min(780px, 92vw);
+  max-height: 78vh;
+  overflow-y: auto;
+  /* Same liquid-glass recipe as the palette. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  box-shadow: var(--glass-rim), var(--glass-drop);
+  padding: 18px 22px 20px;
+  animation: palette-in 0.22s var(--ease);
+}
+:root[data-theme="light"] .hotkey-card {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
+}
+.hotkey-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.hotkey-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.hotkey-head-hint {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.hotkey-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px 26px;
+}
+.hotkey-group h4 {
+  margin: 10px 0 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.hotkey-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  font-size: 12.5px;
+}
+.hotkey-row:last-child {
+  border-bottom: none;
+}
+.hotkey-row-label {
+  color: var(--text);
+  min-width: 0;
+}
+.hotkey-card kbd,
+.hotkey-head-hint kbd {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  color: var(--text);
+  white-space: nowrap;
+}
 .palette input {
   width: 100%;
   border: none;

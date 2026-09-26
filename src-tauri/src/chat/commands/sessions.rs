@@ -148,6 +148,25 @@ pub fn create_chat_session(
         .map_err(|e| e.to_string())
 }
 
+/// Fork a chat session (the "fork chat to side-by-side panes" action): a new
+/// session with the source's provider/model/agent/project/policies and a copy
+/// of its live (non-superseded) message history, continuing independently.
+/// The frontend calls this once per forked pane and pins each result into its
+/// own split pane. `upto_message_id` (message-bubble fork) truncates the copy
+/// at that row inclusive — fork-from-here semantics.
+#[tauri::command(async)]
+pub fn fork_chat_session(
+    chat_session_id: String,
+    upto_message_id: Option<i64>,
+    db: State<'_, DbState>,
+) -> CmdResult<ChatSession> {
+    let conn = db.0.lock();
+    let source = db::get_chat_session(&conn, &chat_session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("unknown chat session: {chat_session_id}"))?;
+    db::fork_chat_session(&conn, &source, upto_message_id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn delete_chat_session(
     chat_session_id: String,

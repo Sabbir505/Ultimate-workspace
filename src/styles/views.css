@@ -35,6 +35,68 @@
   justify-content: flex-end;
   gap: 8px;
 }
+/* ---------- Fork-chat dialog ---------- */
+.fork-chat-modal .fork-chat-source {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+}
+.fork-chat-source svg {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.fork-chat-source-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fork-chat-copy {
+  font-size: 12.5px;
+}
+.fork-chat-note {
+  font-size: 12px;
+  font-style: italic;
+}
+.fork-count-row {
+  display: flex;
+  gap: 8px;
+}
+.fork-count-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 10px 8px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.fork-count-btn strong {
+  font-size: 17px;
+  line-height: 1.1;
+}
+.fork-count-btn span {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.fork-count-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+.fork-count-btn.selected {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+.fork-count-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
 /* Wide variant used by the Artifacts library. Same liquid-glass recipe as
    the composer card: translucent gradient + heavy frost, so the dimmed app
    behind the gallery reads as blurred shapes. The doc cards carry their own

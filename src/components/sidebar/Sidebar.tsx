@@ -307,6 +307,12 @@ export function Sidebar() {
     void useChatStore.getState().openChatSplit(id);
   }, []);
 
+  // Fork the chat into N side-by-side panes — the dialog picks the count,
+  // the store action does the copying + pinning.
+  const handleForkChat = useCallback((id: string) => {
+    useUiStore.getState().openForkChatModal(id);
+  }, []);
+
   useEffect(() => {
     if (!chatLoaded) {
       void loadSessions();
@@ -481,6 +487,7 @@ export function Sidebar() {
                     onSetUnread={handleSetUnread}
                     onExport={handleExportChat}
                     onOpenSplit={handleOpenSplitChat}
+                    onFork={handleForkChat}
                   />
                 </div>
               );

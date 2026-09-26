@@ -6,7 +6,7 @@
 // .project-row patterns.
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Folder, GitBranch, Pin } from "lucide-react";
+import { Folder, GitBranch, GitFork, Pin } from "lucide-react";
 import { relativeTime } from "../../lib/relativeTime";
 import { sessionModelIcon } from "./agentIcons";
 import {
@@ -47,6 +47,8 @@ interface Props {
   onExport: (id: string) => void;
   /** Open this chat in the split pane beside the main chat view. */
   onOpenSplit?: (id: string) => void;
+  /** Open the "fork to side-by-side panes" dialog for this chat. */
+  onFork?: (id: string) => void;
 }
 
 export function ChatSessionRow({
@@ -60,6 +62,7 @@ export function ChatSessionRow({
   onSetUnread,
   onExport,
   onOpenSplit,
+  onFork,
 }: Props) {
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -328,6 +331,14 @@ export function ChatSessionRow({
               <button role="menuitem" onClick={(e) => menuAction(e, () => onOpenSplit(session.id))}>
                 <span className="chat-menu-icon">⧉</span>
                 Open in new pane
+              </button>
+            )}
+            {onFork && (
+              <button role="menuitem" onClick={(e) => menuAction(e, () => onFork(session.id))}>
+                <span className="chat-menu-icon">
+                  <GitFork size={12} strokeWidth={1.8} aria-hidden="true" />
+                </span>
+                Fork to side-by-side panes…
               </button>
             )}
             <button

@@ -176,6 +176,11 @@ export function ProjectsSidebar() {
     void useChatStore.getState().openChatSplit(id);
   }, []);
 
+  // Fork the chat into N side-by-side panes — same dialog as the sidebar's.
+  const handleForkChat = useCallback((id: string) => {
+    useUiStore.getState().openForkChatModal(id);
+  }, []);
+
   // New chat bound to THIS project — same composer seeding as the sidebar's
   // global "+" (last committed pick, falling back to the provider defaults),
   // the only difference being the explicit project binding.
@@ -302,6 +307,7 @@ export function ProjectsSidebar() {
                     onSetUnread={handleSetUnread}
                     onExport={handleExportChat}
                     onOpenSplit={handleOpenSplitChat}
+                    onFork={handleForkChat}
                   />
                 ))}
                 {(hasMore || visibleCount > PAGE_SIZE) && (

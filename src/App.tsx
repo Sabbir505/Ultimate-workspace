@@ -43,6 +43,8 @@ import { ChatSelectionToolbar } from "./components/chat/ChatSelectionToolbar";
 const DocCodeRunner = lazy(() => import("./components/chat/DocCodeRunner").then((m) => ({ default: m.DocCodeRunner })));
 const DocDesignRunner = lazy(() => import("./components/chat/DocDesignRunner").then((m) => ({ default: m.DocDesignRunner })));
 import { FolderNotch, GitHubNotch } from "./components/chat/ChatComposer";
+import { ForkChatModal } from "./components/chat/ForkChatModal";
+import { HotkeyOverlay } from "./components/hotkey-overlay/HotkeyOverlay";
 import { useChatStore } from "./state/chat";
 import { GitToolsSidebar } from "./components/chat/GitToolsSidebar";
 const CommandPalette = lazy(() => import("./components/command-palette/CommandPalette").then((m) => ({ default: m.CommandPalette })));
@@ -532,6 +534,8 @@ export default function App() {
       <Suspense fallback={null}>
         <CommandPalette />
       </Suspense>
+      <ForkChatModal />
+      <HotkeyOverlay />
 
       {pendingReplace && (
         <Modal

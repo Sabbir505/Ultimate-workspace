@@ -50,10 +50,15 @@ export function useKeybindings(): void {
         (target.tagName === "INPUT" || target.tagName === "TEXTAREA") &&
         !target.classList.contains("xterm-helper-textarea");
       const editableExempt = (action: KeybindingAction) =>
-        action === "openPalette" || action === "vaultSaveNote";
+        action === "openPalette" ||
+        action === "vaultSaveNote" ||
+        // The cheatsheet must open from inside the composer/terminals too —
+        // it's the discoverability surface for every other shortcut.
+        action === "toggleHotkeyOverlay";
 
       const actions: Array<[KeybindingAction, () => void]> = [
         ["openPalette", () => useUiStore.getState().togglePalette()],
+        ["toggleHotkeyOverlay", () => useUiStore.getState().toggleHotkeyOverlay()],
         ["focusPane1", () => usePanesStore.getState().focusPaneByIndex(0)],
         ["focusPane2", () => usePanesStore.getState().focusPaneByIndex(1)],
         ["focusPane3", () => usePanesStore.getState().focusPaneByIndex(2)],

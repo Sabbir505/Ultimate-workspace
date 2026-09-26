@@ -12,6 +12,7 @@
 // falling the main pane back to another chat when the dragged/opened
 // session IS the active one.
 import { useUiStore } from "../../ui";
+import { forkChatSession, toastError, type ChatSession } from "../../../lib/ipc";
 import {
   CHAT_MAIN_PANE_ID,
   MAX_CHAT_PANES,
@@ -22,11 +23,17 @@ import {
   insertChatPaneSplit,
   nextChatPaneId,
   nextChatSplitId,
+  owningSplitId,
   removeChatPane,
   removeChatPanePromote,
   setChatPaneRatio as applyPaneRatio,
 } from "../paneTree";
-import { isDeletedSession, omitKey } from "../moduleState";
+import {
+  isDeletedSession,
+  maybeEnsureWorktree,
+  omitKey,
+  sortSessions,
+} from "../moduleState";
 import type { ChatPaneNode } from "../paneTree";
 import type { ChatStoreGet, ChatStoreSet } from "../types";
 
@@ -44,29 +51,29 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
 
   const toast = (message: string) => useUiStore.getState().pushToast("info", message);
 
-  /** Shared engine behind openChatSplit (⋮ menu) and moveChatSessionToPane
-   *  (drag-and-drop): put `chatSessionId` on one edge of `targetPaneId`,
-   *  creating the first split when the tree doesn't exist yet. Returns
-   *  whether the layout changed. */
+  /** Shared engine behind openChatSplit (⋮ menu), moveChatSessionToPane
+   *  (drag-and-drop) and forkChatToPanes: put `chatSessionId` on one edge of
+   *  `targetPaneId`, creating the first split when the tree doesn't exist
+   *  yet. Returns the NEW pane's id, or null when the layout didn't change. */
   const openSessionOnPaneEdge = async (
     chatSessionId: string,
     targetPaneId: string,
     edge: ChatPaneEdge,
-  ): Promise<boolean> => {
+  ): Promise<string | null> => {
     const st = get();
     // Stale source (row deleted mid-drag, tombstoned id): silently no-op.
     if (isDeletedSession(chatSessionId) || !st.sessions.some((x) => x.id === chatSessionId)) {
-      return false;
+      return null;
     }
     const tree = st.chatPaneTree;
     const shownInPinned = findPaneForSession(tree, chatSessionId);
     const isActive = st.activeChatSessionId === chatSessionId;
-    if (shownInPinned && shownInPinned === targetPaneId) return false; // dropped on its own pane
+    if (shownInPinned && shownInPinned === targetPaneId) return null; // dropped on its own pane
 
     // Capacity: a MOVE frees its old pane first, so it doesn't consume a slot.
     if (tree && countChatPanes(tree) >= MAX_CHAT_PANES && !shownInPinned && !isActive) {
       toast(`Up to ${MAX_CHAT_PANES} chats can be open at once`);
-      return false;
+      return null;
     }
 
     let workTree: ChatPaneNode | null = tree;
@@ -91,7 +98,7 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
         st.messagesSessionId === chatSessionId && st.messages.length === 0;
       if (activeEmpty) {
         toast("Send a message in this chat before opening it in a second pane");
-        return false;
+        return null;
       }
       // The session lives in the MAIN pane. Pinning it elsewhere would mirror
       // the active chat into two views — pin the new pane to it and let main
@@ -106,7 +113,7 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
       );
       if (!fallback) {
         toast("Open a second chat to split the view");
-        return false;
+        return null;
       }
       // selectSession's first set() is synchronous, so `active` has moved off
       // the session before the tree patch below commits.
@@ -115,7 +122,7 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
 
     if (workTree && countChatPanes(workTree) >= MAX_CHAT_PANES) {
       toast(`Up to ${MAX_CHAT_PANES} chats can be open at once`);
-      return false;
+      return null;
     }
 
     // Allocate a pane id no existing leaf carries (guards against any manual
@@ -129,7 +136,7 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
       sessionId: chatSessionId,
       splitId: nextChatSplitId(),
     });
-    if (!next) return false;
+    if (!next) return null;
 
     set((s) => {
       let paneBuffers = s.paneBuffers;
@@ -148,7 +155,7 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
       };
     });
     void get().loadPaneMessages(newPaneId, chatSessionId);
-    return true;
+    return newPaneId;
   };
 
   return {
@@ -192,6 +199,86 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
         return;
       }
       await openSessionOnPaneEdge(chatSessionId, resolvePaneTarget(), "right");
+    },
+
+    // Fork-to-panes: create `count` copies of one chat (backend copies the
+    // live history; each fork keeps its own timeline from there) and pin
+    // each into its own pane, right of the focused one. The chain of fresh
+    // splits is then re-ratioed so every pane involved ends the same width.
+    forkChatToPanes: async (
+      chatSessionId: string,
+      count: number,
+      uptoMessageId?: number,
+    ): Promise<number> => {
+      const st = get();
+      if (isDeletedSession(chatSessionId) || !st.sessions.some((x) => x.id === chatSessionId)) {
+        return 0;
+      }
+      // An empty ACTIVE chat has nothing to fork yet (same buffer-ownership
+      // shape openSessionOnPaneEdge applies to pinning the active session).
+      if (
+        st.activeChatSessionId === chatSessionId &&
+        st.messagesSessionId === chatSessionId &&
+        st.messages.length === 0
+      ) {
+        toast("Send a message before forking this chat");
+        return 0;
+      }
+      const room = MAX_CHAT_PANES - countChatPanes(st.chatPaneTree);
+      const n = Math.max(0, Math.min(count, room));
+      if (n <= 0) {
+        toast(`Up to ${MAX_CHAT_PANES} chats can be open at once`);
+        return 0;
+      }
+      const splitIds: string[] = [];
+      // First fork splits the focused pane; each next one splits the pane
+      // the previous fork landed in (focus follows the insert), so the forks
+      // read left→right in creation order.
+      let target = resolvePaneTarget();
+      let forked = 0;
+      for (let i = 0; i < n; i += 1) {
+        let created: ChatSession | null = null;
+        try {
+          created = await forkChatSession(chatSessionId, uptoMessageId);
+        } catch (err) {
+          toastError("Couldn't fork the chat", err);
+          break;
+        }
+        if (!created) {
+          toastError("Couldn't fork the chat", "backend returned no session row");
+          break;
+        }
+        // Register the row BEFORE the pane insert — openSessionOnPaneEdge
+        // only opens sessions live in `sessions`. Same-id filter keeps a
+        // raced background relist from double-inserting (newChat's guard).
+        set((s) => ({
+          sessions: sortSessions([created!, ...s.sessions.filter((x) => x.id !== created!.id)]),
+          sessionProjects:
+            created!.projectId != null
+              ? { ...s.sessionProjects, [created!.id]: created!.projectId }
+              : s.sessionProjects,
+        }));
+        const paneId = await openSessionOnPaneEdge(created.id, target, "right");
+        if (!paneId) break;
+        const splitId = owningSplitId(get().chatPaneTree, paneId);
+        if (splitId) splitIds.push(splitId);
+        target = paneId;
+        forked += 1;
+        // Worktree-per-session default, fire-and-forget — same as newChat.
+        // Each fork isolates its own worktree so parallel exploration never
+        // has two chats writing the same tree.
+        void maybeEnsureWorktree(get().sessions.find((s) => s.id === created!.id), set);
+      }
+      // Equalize the chain of splits created above, outermost first: the
+      // chain shares only the width the target pane originally had, and each
+      // split keeps (remaining leaves)/(remaining leaves + 1) of it, so the
+      // forks — and the pane they split from — end the same width. Clamped
+      // ratios stay in range for any chain up to the 6-pane cap.
+      const k = splitIds.length;
+      for (let j = 0; j < k; j += 1) {
+        get().setChatPaneRatio(splitIds[j], (k - j) / (k + 1 - j));
+      }
+      return forked;
     },
 
     closeChatPane: (paneId: string) => {

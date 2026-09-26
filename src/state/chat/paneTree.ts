@@ -112,6 +112,20 @@ export function chatPaneIds(node: ChatPaneNode | null): string[] {
   return [...chatPaneIds(node.a), ...chatPaneIds(node.b)];
 }
 
+/** The split node whose DIRECT child leaf is `paneId` — the split a pane
+ *  insert just created around it. Null when the pane isn't in the tree (a
+ *  tree-less main leaf has no owning split). Used to re-ratio a chain of
+ *  fresh splits (fork-to-panes equalization). */
+export function owningSplitId(
+  node: ChatPaneNode | null,
+  paneId: string,
+): string | null {
+  if (!node || node.kind === "leaf") return null;
+  if (node.a.kind === "leaf" && node.a.paneId === paneId) return node.id;
+  if (node.b.kind === "leaf" && node.b.paneId === paneId) return node.id;
+  return owningSplitId(node.a, paneId) ?? owningSplitId(node.b, paneId);
+}
+
 /** The first leaf in visual order — the promotion candidate when the main
  *  pane closes. */
 export function firstChatLeaf(node: ChatPaneNode): ChatPaneLeaf {

@@ -119,6 +119,13 @@ export interface UiState {
   viewHistory: ViewNavEntry[];
   viewIndex: number;
   paletteOpen: boolean;
+  /** Keyboard-shortcuts cheatsheet (Alt+Space, or the command palette). */
+  hotkeyOverlayOpen: boolean;
+  /** "Fork chat to side-by-side panes" dialog. `forkChatModalSourceId` pins
+   *  the chat to fork (sidebar row menu); null resolves the focused/active
+   *  chat at confirm time (toolbar button, command palette). */
+  forkChatModalOpen: boolean;
+  forkChatModalSourceId: string | null;
   peek: PeekState;
   pendingReplace: PendingReplace | null;
   projectSettingsFor: string | null; // projectId with an open Project Settings panel
@@ -238,6 +245,12 @@ export interface UiState {
   } | null) => void;
   setPaletteOpen: (open: boolean) => void;
   togglePalette: () => void;
+  setHotkeyOverlayOpen: (open: boolean) => void;
+  toggleHotkeyOverlay: () => void;
+  /** Open the fork dialog. `sourceId` pins the chat to fork; null = the
+   *  focused/active chat (resolved when the dialog confirms). */
+  openForkChatModal: (sourceId?: string | null) => void;
+  closeForkChatModal: () => void;
   openPeek: (peek: Omit<PeekState, "open">) => void;
   closePeek: () => void;
   setPendingReplace: (pending: PendingReplace | null) => void;
@@ -338,6 +351,9 @@ export const useUiStore = create<UiState>((set, get) => ({
   viewIndex: 0,
   pendingArtifactFormData: null,
   paletteOpen: false,
+  hotkeyOverlayOpen: false,
+  forkChatModalOpen: false,
+  forkChatModalSourceId: null,
   peek: { open: false, mode: "file", projectId: null, filePath: null, cwd: null },
   pendingReplace: null,
   projectSettingsFor: null,
@@ -520,6 +536,12 @@ export const useUiStore = create<UiState>((set, get) => ({
   setPendingArtifactFormData: (pendingArtifactFormData) => set({ pendingArtifactFormData }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
   togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),
+  setHotkeyOverlayOpen: (hotkeyOverlayOpen) => set({ hotkeyOverlayOpen }),
+  toggleHotkeyOverlay: () => set((s) => ({ hotkeyOverlayOpen: !s.hotkeyOverlayOpen })),
+  openForkChatModal: (sourceId) =>
+    set({ forkChatModalOpen: true, forkChatModalSourceId: sourceId ?? null }),
+  closeForkChatModal: () =>
+    set({ forkChatModalOpen: false, forkChatModalSourceId: null }),
   openPeek: (peek) => set({ peek: { ...peek, open: true } }),
   closePeek: () => set((s) => ({ peek: { ...s.peek, open: false } })),
   setPendingReplace: (pendingReplace) => set({ pendingReplace }),

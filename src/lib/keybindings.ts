@@ -5,6 +5,7 @@
 
 export type KeybindingAction =
   | "openPalette"
+  | "toggleHotkeyOverlay"
   | "focusPane1"
   | "focusPane2"
   | "focusPane3"
@@ -34,6 +35,12 @@ export type KeybindingMap = Record<KeybindingAction, string>;
 
 export const DEFAULT_KEYBINDINGS: KeybindingMap = {
   openPalette: "Mod+K",
+  // The shortcuts cheatsheet. Mod+/ is the Slack/Gmail-style "show keyboard
+  // shortcuts" slot and is free across the map. Alt is deliberately NOT used:
+  // solo Alt is the push-to-talk modifier for voice dictation
+  // (voiceDictationCore), and Alt+Space also collides with the Win32 system
+  // menu the WebView would otherwise have to suppress.
+  toggleHotkeyOverlay: "Mod+/",
   focusPane1: "Mod+1",
   focusPane2: "Mod+2",
   focusPane3: "Mod+3",

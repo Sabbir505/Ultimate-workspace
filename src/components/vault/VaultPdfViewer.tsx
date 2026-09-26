@@ -45,6 +45,10 @@ function rememberView(path: string, next: { zoom: number; page: number }) {
 function isRenderCancelled(e: unknown): boolean {
   const err = e as { name?: string; message?: string } | null;
   if (err?.name === "RenderingCancelledException") return true;
+  // pdf.js's generic abort: TextLayer#cancel() rejects with
+  // AbortException("TextLayer task cancelled."), as do other deliberate
+  // teardowns. By definition an expected abort, not a fault.
+  if (err?.name === "AbortException") return true;
   return typeof err?.message === "string" && err.message.includes("Worker task was terminated");
 }
 
@@ -82,6 +86,18 @@ export function VaultPdfViewer({ path }: { path: string }) {
    *  holding the task lets the supersede cancel it deliberately (and lets
    *  unmount cancel everything) instead of leaving it to reject on its own. */
   const renderTasksRef = useRef(new Map<number, { cancel: () => void }>());
+  /** Pages with a render in flight, task registered or not (the gap between
+   *  `getPage` and `page.render` has no task to observe). The Intersection-
+   *  Observer's initial callback and `renderVisible` can both fire for the
+   *  same page after every zoom/width change; without this, each starts its
+   *  own render and the loser's work is cancelled mid-draw — every zoom did
+   *  each visible page roughly twice. */
+  const renderingRef = useRef(new Set<number>());
+  /** In-flight text-layer build per page. A superseding render must cancel
+   *  the old one: both append spans into the SAME .pdf-text-layer div, and a
+   *  layer still rendering while the new render clears the container would
+   *  interleave duplicate text into the finished page. */
+  const textTasksRef = useRef(new Map<number, { cancel: () => void }>());
   const highlightsRef = useRef<PdfHighlight[]>([]);
   const [numPages, setNumPages] = useState(0);
   const [ready, setReady] = useState(false);
@@ -144,6 +160,8 @@ export function VaultPdfViewer({ path }: { path: string }) {
       // tasks would otherwise reject with RenderingCancelledException.
       for (const t of renderTasksRef.current.values()) t.cancel();
       renderTasksRef.current.clear();
+      for (const t of textTasksRef.current.values()) t.cancel();
+      textTasksRef.current.clear();
       void taskRef.current?.destroy();
       taskRef.current = null;
     };
@@ -187,6 +205,8 @@ export function VaultPdfViewer({ path }: { path: string }) {
     renderedRef.current = new Set();
     for (const t of renderTasksRef.current.values()) t.cancel();
     renderTasksRef.current.clear();
+    for (const t of textTasksRef.current.values()) t.cancel();
+    textTasksRef.current.clear();
     const io = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -248,92 +268,109 @@ export function VaultPdfViewer({ path }: { path: string }) {
     const doc = docRef.current;
     const host = pageRefs.current.get(n);
     if (!doc || !host || renderedRef.current.has(n)) return;
-    // Page elements are keyed on zoom + pane width, so any zoom or split
-    // resize REMOUNTS them mid-render and leaves `host` detached. Everything
-    // below is async, so by the time we reach the text layer this closure can
-    // be holding a dead subtree — building a TextLayer into it wastes work and
-    // trips pdf.js ("Node cannot be found in the current page"). Re-check
-    // liveness after every await and bail if this page is no longer the live
-    // element; the re-render that replaced it is already under way.
-    const stillLive = () => pageRefs.current.get(n) === host && host.isConnected;
-    // A render of this page may still be in flight (the pages remount on
-    // zoom/width change). Cancel it explicitly rather than letting pdf.js
-    // cancel it implicitly from under us.
-    renderTasksRef.current.get(n)?.cancel();
-    renderTasksRef.current.delete(n);
-    const page = await doc.getPage(n);
-    // The document can be destroyed (note closed, another file opened) while
-    // getPage was in flight — drawing into it now would throw.
-    if (docRef.current !== doc || !stillLive()) return;
-    const base = page.getViewport({ scale: 1 });
-    const dpr = window.devicePixelRatio || 1;
-    const fitScale = Math.max(0.2, (wrapRef.current?.clientWidth ?? 800) - 32) / base.width;
-    const scale = fitScale * zoom;
-    const viewport = page.getViewport({ scale: scale * dpr });
-    const canvas = document.createElement("canvas");
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    canvas.style.width = `${Math.round(viewport.width / dpr)}px`;
-    canvas.style.height = `${Math.round(viewport.height / dpr)}px`;
-    canvas.style.display = "block";
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const task = page.render({ canvas, viewport });
-    renderTasksRef.current.set(n, task);
+    // One render per page at a time. A second caller (the observer and
+    // renderVisible can both fire for the same page after a zoom/width
+    // change) used to CANCEL the in-flight render and restart the same work —
+    // wasted rasterization, and a visible hiccup on slow machines. The zoom/
+    // width effect has already cancelled everything it wants redone before
+    // re-invoking, so whatever is running here is work to keep.
+    if (renderingRef.current.has(n)) return;
+    renderingRef.current.add(n);
     try {
-      await task.promise;
-    } catch (e) {
-      // A cancelled render is the NORMAL outcome of a supersede or a
-      // destroyed document, not a fault. Un-mark the page so it can be drawn
-      // again — but ONLY if no newer render has taken over the slot: a
-      // superseded render must not un-mark the page its successor just
-      // painted (that un-mark was a re-render feedback loop waiting to
-      // happen).
-      if (renderTasksRef.current.get(n) === task) renderedRef.current.delete(n);
-      if (!isRenderCancelled(e)) throw e;
-      return;
-    } finally {
-      // Only clear our own entry: a superseding render may already have
-      // stored its task under this page number.
-      if (renderTasksRef.current.get(n) === task) renderTasksRef.current.delete(n);
-    }
-    if (!stillLive()) return;
-    // Swap the painted canvas in atomically. Painting offscreen first means
-    // the previous image stays on screen for the whole redraw — replacing the
-    // canvas BEFORE the await is what made every zoom/resize flash blank.
-    host.querySelector(".pdf-canvas-slot")?.replaceChildren(canvas);
-    // Marked only once the canvas is actually painted.
-    renderedRef.current.add(n);
-    // Text layer at CSS-px scale (NOT dpr-scaled) so spans align with the
-    // canvas box and the browser can offer native text selection.
-    const cssViewport = page.getViewport({ scale });
-    const text = await page.getTextContent().catch((e) => {
-      // A worker torn down under us (note closed, file switched) is an abort,
-      // not a failure; the canvas above is already painted.
-      if (isRenderCancelled(e)) return null;
-      throw e;
-    });
-    if (!text || !stillLive()) return;
-    const layer = host.querySelector(".pdf-text-layer") as HTMLElement | null;
-    if (layer) {
-      layer.replaceChildren();
-      layer.style.setProperty("--scale-factor", String(scale));
-      const tl = new pdfjs.TextLayer({ textContentSource: text, container: layer, viewport: cssViewport });
-      // TextLayer walks up from `container` to find its page, so it throws if
-      // the layer was detached between the liveness check above and here (a
-      // zoom landing mid-render). The canvas is already painted, so a failed
-      // text layer costs selection on that page, not the page itself — and
-      // the re-render that replaced it will rebuild both.
-      await tl.render().catch((e) => {
-        if (!isRenderCancelled(e)) console.warn(`[vault-pdf] text layer for page ${n} failed`, e);
-      });
+      // Everything below is async, so by the time we reach the text layer
+      // this closure could be holding a dead subtree — re-check liveness
+      // after every await and bail if this page is no longer the live
+      // element; the render that replaced it is already under way.
+      const stillLive = () => pageRefs.current.get(n) === host && host.isConnected;
+      // A superseding render also kills the previous text layer for this
+      // page: both write into the same .pdf-text-layer div, and an old layer
+      // still appending spans while the new render clears the container
+      // would interleave duplicate text into the finished page.
+      textTasksRef.current.get(n)?.cancel();
+      textTasksRef.current.delete(n);
+      const page = await doc.getPage(n);
+      // The document can be destroyed (note closed, another file opened)
+      // while getPage was in flight — drawing into it now would throw.
+      if (docRef.current !== doc || !stillLive()) return;
+      const base = page.getViewport({ scale: 1 });
+      const dpr = window.devicePixelRatio || 1;
+      const fitScale = Math.max(0.2, (wrapRef.current?.clientWidth ?? 800) - 32) / base.width;
+      const scale = fitScale * zoom;
+      const viewport = page.getViewport({ scale: scale * dpr });
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      canvas.style.width = `${Math.round(viewport.width / dpr)}px`;
+      canvas.style.height = `${Math.round(viewport.height / dpr)}px`;
+      canvas.style.display = "block";
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const task = page.render({ canvas, viewport });
+      renderTasksRef.current.set(n, task);
+      try {
+        await task.promise;
+      } catch (e) {
+        // A cancelled render is the NORMAL outcome of a supersede or a
+        // destroyed document, not a fault. Un-mark the page so it can be
+        // drawn again — but ONLY if no newer render has taken over the slot:
+        // a superseded render must not un-mark the page its successor just
+        // painted (that un-mark was a re-render feedback loop waiting to
+        // happen).
+        if (renderTasksRef.current.get(n) === task) renderedRef.current.delete(n);
+        if (!isRenderCancelled(e)) throw e;
+        return;
+      } finally {
+        // Only clear our own entry: a superseding render may already have
+        // stored its task under this page number.
+        if (renderTasksRef.current.get(n) === task) renderTasksRef.current.delete(n);
+      }
       if (!stillLive()) return;
-      // The official viewer's selection sentinel: without it a drag that
-      // touches the layer's empty edge selects the whole page (the classic
-      // "I picked two words and got the entire document" bug).
-      const eoc = document.createElement("div");
-      eoc.className = "endOfContent";
-      layer.appendChild(eoc);
+      // Swap the painted canvas in atomically. Painting offscreen first means
+      // the previous image stays on screen for the whole redraw — replacing
+      // the canvas BEFORE the await is what made every zoom/resize flash
+      // blank.
+      host.querySelector(".pdf-canvas-slot")?.replaceChildren(canvas);
+      // Marked only once the canvas is actually painted.
+      renderedRef.current.add(n);
+      // Text layer at CSS-px scale (NOT dpr-scaled) so spans align with the
+      // canvas box and the browser can offer native text selection.
+      const cssViewport = page.getViewport({ scale });
+      const text = await page.getTextContent().catch((e) => {
+        // A worker torn down under us (note closed, file switched) is an
+        // abort, not a failure; the canvas above is already painted.
+        if (isRenderCancelled(e)) return null;
+        throw e;
+      });
+      if (!text || !stillLive()) return;
+      const layer = host.querySelector(".pdf-text-layer") as HTMLElement | null;
+      if (layer) {
+        layer.replaceChildren();
+        layer.style.setProperty("--scale-factor", String(scale));
+        const tl = new pdfjs.TextLayer({ textContentSource: text, container: layer, viewport: cssViewport });
+        textTasksRef.current.set(n, tl);
+        // TextLayer walks up from `container` to find its page, so it throws
+        // if the layer was detached between the liveness check above and here
+        // (a zoom landing mid-render). The canvas is already painted, so a
+        // failed text layer costs selection on that page, not the page
+        // itself — and the re-render that replaced it will rebuild both.
+        await tl.render().catch((e) => {
+          if (!isRenderCancelled(e)) console.warn(`[vault-pdf] text layer for page ${n} failed`, e);
+        });
+        // Superseded while rendering: the render that replaced us owns the
+        // layer now — appending the sentinel here would resurrect our spans
+        // on top of its text.
+        if (textTasksRef.current.get(n) !== tl) return;
+        textTasksRef.current.delete(n);
+        if (!stillLive()) return;
+        // The official viewer's selection sentinel: without it a drag that
+        // touches the layer's empty edge selects the whole page (the classic
+        // "I picked two words and got the entire document" bug).
+        const eoc = document.createElement("div");
+        eoc.className = "endOfContent";
+        layer.appendChild(eoc);
+      }
+    } finally {
+      renderingRef.current.delete(n);
     }
   };
 
@@ -389,26 +426,40 @@ export function VaultPdfViewer({ path }: { path: string }) {
     forceRender((n) => n + 1);
   };
 
-  // Track the page nearest the viewport top while scrolling.
+  // Track the page nearest the viewport top while scrolling. Every event
+  // measures ALL pages (getBoundingClientRect forces layout each call), so on
+  // a long PDF this thrashed layout for every scroll tick — coalesce to one
+  // measurement pass per animation frame.
+  const scrollRafRef = useRef(0);
   const onPagesScroll = () => {
-    const wrap = wrapRef.current;
-    if (!wrap) return;
-    const wrapTop = wrap.getBoundingClientRect().top;
-    let current = 1;
-    for (const [n, el] of pageRefs.current) {
-      if (el.getBoundingClientRect().top - wrapTop <= 60) current = Math.max(current, n);
-    }
-    setPage((p) => {
-      if (p !== current) rememberView(path, { zoom, page: current });
-      return current;
+    if (scrollRafRef.current) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = 0;
+      const wrap = wrapRef.current;
+      if (!wrap) return;
+      const wrapTop = wrap.getBoundingClientRect().top;
+      let current = 1;
+      for (const [n, el] of pageRefs.current) {
+        if (el.getBoundingClientRect().top - wrapTop <= 60) current = Math.max(current, n);
+      }
+      setPage((p) => {
+        if (p !== current) rememberView(path, { zoom, page: current });
+        return current;
+      });
     });
   };
+  useEffect(() => () => cancelAnimationFrame(scrollRafRef.current), []);
 
   // Ctrl/Cmd + wheel zooms (pinch on trackpads sends the same event). Plain
   // wheel keeps scrolling pages. A native non-passive listener is required:
   // React's onWheel is passive and couldn't preventDefault the webview's
-  // own page-zoom.
+  // own page-zoom. The listener is registered once, so the current page is
+  // read through a ref — capturing `page` in the effect would record the
+  // mount-time page into viewState on EVERY zoom, and returning to the tab
+  // would then restore page 1.
   const pagesRef = useRef<HTMLDivElement | null>(null);
+  const pageRef = useRef(page);
+  pageRef.current = page;
   useEffect(() => {
     const el = pagesRef.current;
     if (!el) return;
@@ -417,13 +468,13 @@ export function VaultPdfViewer({ path }: { path: string }) {
       e.preventDefault();
       setZoom((z) => {
         const next = Math.min(3, Math.max(0.4, Number((z * (e.deltaY < 0 ? 1.1 : 0.9)).toFixed(2))));
-        rememberView(path, { zoom: next, page });
+        rememberView(path, { zoom: next, page: pageRef.current });
         return next;
       });
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [path]);
 
   const goToPage = (n: number) => {
     const clamped = Math.min(numPages || 1, Math.max(1, n));
@@ -431,6 +482,14 @@ export function VaultPdfViewer({ path }: { path: string }) {
     if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
     setPage(clamped);
     rememberView(path, { zoom, page: clamped });
+  };
+
+  /** Toolbar zoom (−/label/+): clamp, then remember — every zoom path must
+   *  record, or a tab switch silently reverts to the last remembered zoom. */
+  const applyToolbarZoom = (z: number) => {
+    const next = Math.min(3, Math.max(0.4, z));
+    setZoom(next);
+    rememberView(path, { zoom: next, page: pageRef.current });
   };
 
   const pages = Array.from({ length: numPages }, (_, i) => i + 1);
@@ -483,20 +542,17 @@ export function VaultPdfViewer({ path }: { path: string }) {
         </button>
         {/* Zoom + page navigation. */}
         <span className="pdf-toolbar-sep" />
-        <button className="pdf-tool-btn" title="Zoom out" onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.15).toFixed(2)))}>
+        <button className="pdf-tool-btn" title="Zoom out" onClick={() => applyToolbarZoom(+(zoom - 0.15).toFixed(2))}>
           −
         </button>
         <button
           className="pdf-tool-btn pdf-zoom-label"
           title="Reset zoom"
-          onClick={() => {
-            setZoom(1);
-            rememberView(path, { zoom: 1, page });
-          }}
+          onClick={() => applyToolbarZoom(1)}
         >
           {Math.round(zoom * 100)}%
         </button>
-        <button className="pdf-tool-btn" title="Zoom in" onClick={() => setZoom((z) => Math.min(3, +(z + 0.15).toFixed(2)))}>
+        <button className="pdf-tool-btn" title="Zoom in" onClick={() => applyToolbarZoom(+(zoom + 0.15).toFixed(2))}>
           +
         </button>
         <span className="pdf-toolbar-sep" />

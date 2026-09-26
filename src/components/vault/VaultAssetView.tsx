@@ -80,7 +80,13 @@ function AssetPdf({ path }: { path: string }) {
     };
   }, []);
   if (!Viewer) return <Loader2 className="spin" size={16} />;
-  return <Viewer path={path} />;
+  // key={path}: switching PDF tabs must REMOUNT the viewer. Without it the
+  // instance survives the path change — zoom/page state (initialized once at
+  // mount from viewState) carry over from the previous document, the
+  // restore-to-saved-page effect latches off after its first run, and
+  // scrolling the new document then records the old document's zoom under
+  // the new path.
+  return <Viewer key={path} path={path} />;
 }
 
 function AssetMedia({ path, kind }: { path: string; kind: "audio" | "video" }) {

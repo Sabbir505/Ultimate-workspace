@@ -48,6 +48,27 @@ export function VaultTabStrip({
     return () => ro.disconnect();
   }, [tabs.length]);
 
+  // Vertical wheel scrolls an overflowing strip horizontally. A native
+  // non-passive listener is REQUIRED here: React registers `wheel` passively
+  // at the root, so a preventDefault inside an onWheel prop is a no-op (and
+  // logs a warning) — the strip would scroll AND the page behind it too.
+  useEffect(() => {
+    const el = tabsRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      // Horizontal input (trackpad swipe) goes straight through.
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      el.scrollLeft += e.deltaY;
+      // Swallow the event only while the strip can actually scroll — at the
+      // edges (or with everything visible) the page behind keeps it.
+      if (el.scrollLeft > 0 || el.scrollLeft + el.clientWidth < el.scrollWidth) {
+        e.preventDefault();
+      }
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [tabs.length, scrollable]);
+
   // Keep the active tab in view when it changes (or when the strip resizes).
   useEffect(() => {
     const el = tabsRef.current;
@@ -107,13 +128,6 @@ export function VaultTabStrip({
       role="tablist"
       aria-label={ariaLabel}
       ref={tabsRef}
-      onWheel={(e) => {
-        // Vertical wheel scrolls an overflowing strip horizontally.
-        if (!scrollable) return;
-        if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
-        e.preventDefault();
-        tabsRef.current?.scrollBy({ left: e.deltaY });
-      }}
     >
       {tabs.map((p, index) => (
         <div
@@ -130,6 +144,9 @@ export function VaultTabStrip({
               onClose(p);
               return;
             }
+            // Only the LEFT button starts a drag — a right-press would
+            // otherwise open the context menu with a drag armed.
+            if (e.button !== 0) return;
             onTabMouseDown(index, e);
           }}
         >

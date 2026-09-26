@@ -424,7 +424,9 @@ export const useVaultStore = create<VaultStore>((set, get) => {
 
   unbind: async () => {
     await vaultUnbind();
-    set({ root: null, stats: null, tree: [], activePath: null, assetPath: null, openAssets: [], content: "", savedContent: "", meta: null, graph: null, tags: [] });
+    // Tabs are vault-scoped paths in BOTH panes — leave either strip intact
+    // and a re-bind would briefly render the previous vault's paths.
+    set({ root: null, stats: null, tree: [], activePath: null, assetPath: null, openNotes: [], openAssets: [], content: "", savedContent: "", meta: null, graph: null, tags: [] });
   },
 
   rescan: async () => {
@@ -983,10 +985,15 @@ export const useVaultStore = create<VaultStore>((set, get) => {
       graphOpen: snap.graphOpen,
       assetPath: snap.assetPath,
       // Restore the strip too, but never lose tabs opened SINCE the snapshot:
-      // going back should revisit, not discard.
-      openAssets: snap.openAssets
-        ? [...new Set([...snap.openAssets, ...get().openAssets])]
-        : get().openAssets,
+      // going back should revisit, not discard. The active asset always gets
+      // a tab, even from a pre-tabs snapshot that recorded only assetPath.
+      openAssets: [
+        ...new Set([
+          ...(snap.openAssets ?? []),
+          ...(snap.assetPath ? [snap.assetPath] : []),
+          ...get().openAssets,
+        ]),
+      ],
     });
     if (snap.graphOpen && !get().graph) void get().loadGraph();
   },

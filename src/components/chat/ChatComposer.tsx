@@ -244,8 +244,17 @@ export const ChatComposer = memo(function ChatComposer({
   const content = effectiveSessionId ? composerDraft : noSessionDraft;
   const setContent = useCallback(
     (value: string | ((prev: string) => string)) => {
-      if (effectiveSessionId) setComposerDraft(effectiveSessionId, value);
-      else setNoSessionDraft(value);
+      // contentRef (the dictation target's SYNCHRONOUSLY-authoritative
+      // mirror, declared below) must see every write the moment it happens,
+      // not a render later: a dictation splice landing between a programmatic
+      // write (paste, pill apply, draft prefill) and its re-render would
+      // otherwise compute from — and overwrite state with — stale text,
+      // silently dropping that write. Functional updates resolve against the
+      // mirror, which is exact because this is the only writer.
+      const next = typeof value === "function" ? value(contentRef.current) : value;
+      contentRef.current = next;
+      if (effectiveSessionId) setComposerDraft(effectiveSessionId, next);
+      else setNoSessionDraft(next);
     },
     [effectiveSessionId, setComposerDraft],
   );
@@ -1464,12 +1473,9 @@ export const ChatComposer = memo(function ChatComposer({
             }
             value={content}
             onChange={(e) => {
-              // contentRef is the dictation target's authoritative mirror, so
-              // it has to see the keystroke NOW — a dictation splice landing
-              // in the same tick reads this to decide whether its span still
-              // validates, and a render-behind mirror would clobber the
-              // character typed above.
-              contentRef.current = e.target.value;
+              // setContent keeps the dictation mirror (contentRef) exact to
+              // the keystroke — a dictation splice landing in the same tick
+              // reads it to decide whether its span still validates.
               setContent(e.target.value);
               setCaret(e.currentTarget.selectionStart ?? e.target.value.length);
             }}

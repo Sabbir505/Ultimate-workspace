@@ -36,6 +36,7 @@ import {
   omitKey,
   optimisticMsgIdCounter,
   patchSessions,
+  persistPartialAndClearStream,
   queueIdCounter,
   rememberLiveAttachments,
   sortSessions,
@@ -388,34 +389,15 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
       if (activeChatSessionId && activeChatSessionId in get().streaming) {
         const streamingChatSessionId = activeChatSessionId;
         const session = get().sessions.find((s) => s.id === streamingChatSessionId);
-        // Persist the partial reply BEFORE cancelling: the backend's abort path
-        // discards its accumulated buffer, and the streaming buffer here holds
-        // exactly the text the user already saw. Best-effort — a cancel with no
-        // streamed tokens writes nothing (the backend no-ops on empty).
-        const partial = get().streaming[streamingChatSessionId] ?? "";
-        // Tear down the per-session streaming state SYNCHRONOUSLY, before any
-        // await (audit A2): the harness cancel emits a terminal chat:error while
-        // the persist/cancel round-trips below are still in flight, and with the
-        // entry still present onError passed its "still streaming" guard and
-        // persisted the SAME partial again — duplicate assistant rows after
-        // every reload. With the keys already gone, the late chat:error no-ops
-        // the persist (same straggler guard shape as onToken/onPerf). This is
-        // also the builtin path's ONLY cleanup: its cancel is handle.abort(), so
-        // no terminal chat:done/chat:error ever arrives to clear these keys.
-        set((s) => ({
-          // Also clear livePerf so the next turn starts its timer from 0, not
-          // the cancelled turn's elapsed time (regression: stale timer).
-          ...clearStreamState(s, streamingChatSessionId),
-          livePerf: omitKey(s.livePerf, streamingChatSessionId),
-          streamingChatSessionId: null,
-        }));
-        if (partial.trim().length > 0) {
-          try {
-            await persistPartialChatMessage(streamingChatSessionId, partial);
-          } catch {
-            /* best-effort: the cancel itself still proceeds */
-          }
-        }
+        // Persist the partial reply BEFORE cancelling and clear the live keys:
+        // the backend's abort path discards its accumulated buffer, and the
+        // streaming buffer here holds exactly the text the user already saw.
+        // Shared with the question card's Skip, which stops a turn the same way.
+        const partial = await persistPartialAndClearStream(
+          get,
+          set,
+          streamingChatSessionId,
+        );
         // Best-effort (audit H2): every other call site wraps these cancels in
         // try/catch. An IPC rejection here used to abort cancelStream BEFORE
         // the stoppedPartial re-assert + drainQueue below — steerQueuedMessage

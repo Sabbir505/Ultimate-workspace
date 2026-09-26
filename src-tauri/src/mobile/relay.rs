@@ -1383,11 +1383,12 @@ async fn handle_connection(
             }
             MobileMessage::ListInstalledSkills { kind } => {
                 let kind_key = if kind.trim_end_matches('s') == "loop" { "loop" } else { "skill" };
-                let result = if kind_key == "loop" {
-                    crate::commands::skills_cmds::list_installed_loops().await
-                } else {
-                    crate::commands::skills_cmds::list_installed_skills().await
-                };
+                let result: Result<Vec<crate::installed_skills::InstalledSkill>, String> =
+                    if kind_key == "loop" {
+                        Ok(crate::installed_skills::list_installed("loops"))
+                    } else {
+                        Ok(crate::installed_skills::list_installed("skills"))
+                    };
                 match result {
                     Ok(list) => {
                         let skills = list
@@ -1408,7 +1409,7 @@ async fn handle_connection(
             MobileMessage::ReadInstalledSkill { slug, kind } => {
                 let (slug2, kind2) = (slug.clone(), kind.clone());
                 let result = tauri::async_runtime::spawn_blocking(move || {
-                    crate::commands::skills_cmds::read_installed_skill(slug2, kind2)
+                    Ok(crate::installed_skills::read_installed(&slug2, &skill_kind_dir(&kind2)))
                 })
                 .await
                 .unwrap_or_else(|e| Err(format!("skill read worker failed: {e}")));
@@ -1429,7 +1430,7 @@ async fn handle_connection(
             MobileMessage::SaveInstalledSkill { slug, kind, content } => {
                 let (slug2, kind2, content2) = (slug.clone(), kind.clone(), content);
                 let result = tauri::async_runtime::spawn_blocking(move || {
-                    crate::commands::skills_cmds::save_installed_skill(slug2, kind2, content2)
+                    crate::installed_skills::save_installed(&slug2, &skill_kind_dir(&kind2), &content2)
                 })
                 .await
                 .unwrap_or_else(|e| Err(format!("join failed: {e}")));
@@ -1469,7 +1470,7 @@ async fn handle_connection(
             MobileMessage::DeleteInstalledSkill { slug, kind } => {
                 let (slug2, kind2) = (slug.clone(), kind.clone());
                 let result = tauri::async_runtime::spawn_blocking(move || {
-                    crate::commands::skills_cmds::delete_installed_skill(slug2, kind2)
+                    crate::installed_skills::delete_installed(&slug2, &skill_kind_dir(&kind2))
                 })
                 .await
                 .unwrap_or_else(|e| Err(format!("join failed: {e}")));
@@ -2384,6 +2385,16 @@ fn to_project_info(p: crate::types::Project) -> super::protocol::ProjectInfo {
         is_git_repo: p.is_git_repo,
         created_at: p.created_at,
         last_opened_at: p.last_opened_at,
+    }
+}
+
+/// The mobile protocol speaks "skill"/"loop"; the scanner works in on-disk
+/// directory names ("skills"/"loops").
+fn skill_kind_dir(kind: &str) -> &'static str {
+    if kind.trim_end_matches('s') == "loop" {
+        "loops"
+    } else {
+        "skills"
     }
 }
 

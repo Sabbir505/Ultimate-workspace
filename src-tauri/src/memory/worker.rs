@@ -97,23 +97,43 @@ fn maybe_apply_extract_override(
     };
     if override_provider.is_empty() || override_provider == provider {
         // Same provider (or legacy bare id): swap the model only.
+        if provider == "local_gguf" {
+            // A `local_gguf::<name>` pick (the panel stores the GGUF display
+            // name) still has to go on the wire as the model llama-server was
+            // started with — the display name earns an HTTP 400.
+            let conn = db.0.lock();
+            let live_local = app
+                .try_state::<crate::chat::local_models::LocalModelState>()
+                .and_then(|s| s.0.status());
+            let model = crate::chat::local_models::resolve_request_model(
+                &conn,
+                &provider,
+                Some(override_model),
+                live_local.as_ref(),
+            )
+            .unwrap_or_default();
+            return (provider, model, api_key, base_url);
+        }
         return (provider, override_model, api_key, base_url);
     }
     if override_provider == "local_gguf" {
+        // "Use my local model" — llama-server serves exactly one model, so the
+        // running sidecar IS the answer. Matching the pick against
+        // `model_id` (the .gguf path) instead could never succeed: the panel
+        // persists the model's display name, so the branch below always fell
+        // through to the session resolution.
         if let Some(state) = app.try_state::<crate::chat::local_models::LocalModelState>() {
             if let Some(active) = state.0.status() {
-                if active.model_id == override_model {
-                    return (
-                        override_provider,
-                        override_model,
-                        String::new(),
-                        Some(active.base_url),
-                    );
-                }
+                return (
+                    override_provider,
+                    active.model_id,
+                    String::new(),
+                    Some(active.base_url),
+                );
             }
         }
         eprintln!(
-            "[memory] extract-model override local_gguf::{override_model} ignored — sidecar not running it"
+            "[memory] extract-model override local_gguf::{override_model} ignored — no local model is running"
         );
         return (provider, model, api_key, base_url);
     }
@@ -243,6 +263,12 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         return Ok(());
     }
 
+    // The running local sidecar, read once here: it is the ground truth for
+    // which model llama-server has loaded and which port serves it.
+    let live_local = app
+        .try_state::<crate::chat::local_models::LocalModelState>()
+        .and_then(|s| s.0.status());
+
     // LLM resolution: same provider/model/key plumbing as generate_chat_title.
     let (provider_str, model, api_key, base_url) = {
         let conn = db.0.lock();
@@ -259,12 +285,45 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         } else {
             Some(cs.model.clone())
         };
+        // local_gguf: the chat's `model` column is the GGUF DISPLAY name, which
+        // llama-server rejects with HTTP 400 (it only serves the model it was
+        // started with) — the send path has always swapped it for the wire
+        // model, the memory worker did not, so extraction on a local chat
+        // failed every call and its chunk retried forever. The sidecar is also
+        // the endpoint, so take its live port rather than the persisted one.
+        let (session_model, base) = if cs.provider == "local_gguf" {
+            (
+                crate::chat::local_models::resolve_request_model(
+                    &conn,
+                    &cs.provider,
+                    session_model,
+                    live_local.as_ref(),
+                ),
+                crate::chat::local_models::local_base_url(&conn, live_local.as_ref()),
+            )
+        } else {
+            (session_model, base)
+        };
         let model = resolve_memory_model(&conn, session_model);
         (cs.provider, model, key, base)
     };
     let (provider_str, model, api_key, base_url) =
         maybe_apply_extract_override(app, provider_str, model, api_key, base_url);
     if model.trim().is_empty() || (api_key.is_empty() && provider_str != "local_gguf") {
+        return Ok(());
+    }
+    // A local chat whose sidecar isn't running: the persisted base_url can
+    // point at a dead port from a previous run, and the request would hang
+    // until it timed out. Skip the pass instead (the chunk stays uncommitted
+    // and retries once a local model is back).
+    if provider_str == "local_gguf"
+        && base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .is_none()
+    {
+        eprintln!("[memory] extraction skipped: no local model server is running");
         return Ok(());
     }
 
@@ -741,6 +800,9 @@ pub async fn save_memory(
         );
     };
 
+    let live_local = app
+        .try_state::<crate::chat::local_models::LocalModelState>()
+        .and_then(|s| s.0.status());
     let (provider_str, model, api_key, base_url, project_id) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, chat_session_id)
@@ -755,6 +817,21 @@ pub async fn save_memory(
             db::get_setting(&conn, &format!("chat.{}.model", cs.provider)).unwrap_or(None)
         } else {
             Some(cs.model.clone())
+        };
+        // local_gguf: wire model (llama-server rejects the display name) and
+        // the live sidecar's port — same rule as the extraction path above.
+        let (session_model, base) = if cs.provider == "local_gguf" {
+            (
+                crate::chat::local_models::resolve_request_model(
+                    &conn,
+                    &cs.provider,
+                    session_model,
+                    live_local.as_ref(),
+                ),
+                crate::chat::local_models::local_base_url(&conn, live_local.as_ref()),
+            )
+        } else {
+            (session_model, base)
         };
         let model = resolve_memory_model(&conn, session_model);
         (cs.provider, model, key, base, cs.project_id)

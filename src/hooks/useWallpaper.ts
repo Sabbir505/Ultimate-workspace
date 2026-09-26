@@ -5,13 +5,19 @@
 // apply-tokens-to-:root approach; called alongside it in App.tsx so both
 // app windows (main + pop-out chat) pick it up.
 import { useEffect } from "react";
-import { useAppearanceStore } from "../state/appearance";
+import { useAppearanceStore, wallpaperCanvasTint } from "../state/appearance";
+import { useObjectUrl } from "./useObjectUrl";
 
 export function useWallpaper(): void {
   const wallpaperData = useAppearanceStore((s) => s.wallpaperData);
   const wallpaperDim = useAppearanceStore((s) => s.wallpaperDim);
   const loaded = useAppearanceStore((s) => s.loaded);
   const refresh = useAppearanceStore((s) => s.refresh);
+  // Hand CSS a blob: URL, not the raw data: URL — a CSS custom property
+  // silently stops accepting values past ~1.3MB, so a real photo (megabytes
+  // of base64) was dropped on the floor and never appeared. The blob URL is
+  // ~50 chars at any size; CSP already allows blob: in img-src.
+  const wallpaperUrl = useObjectUrl(wallpaperData);
 
   // The appearance store is refreshed by the sidebar in the main window; in
   // any other window (pop-out chat) this hook is the only loader.
@@ -21,19 +27,25 @@ export function useWallpaper(): void {
 
   useEffect(() => {
     const root = document.documentElement;
-    if (wallpaperData) {
+    if (wallpaperUrl) {
       root.dataset.wallpaper = "on";
-      root.style.setProperty("--app-wallpaper", `url("${wallpaperData}")`);
+      root.style.setProperty("--app-wallpaper", `url("${wallpaperUrl}")`);
     } else {
       delete root.dataset.wallpaper;
       root.style.removeProperty("--app-wallpaper");
     }
-  }, [wallpaperData]);
+  }, [wallpaperUrl]);
 
   useEffect(() => {
-    document.documentElement.style.setProperty(
-      "--wallpaper-scrim-a",
-      (wallpaperDim / 100).toFixed(2),
+    const root = document.documentElement;
+    // The Dim slider drives BOTH layers: the scrim on the image AND the veil
+    // the content surfaces add over it. Driving only the scrim left the canvas
+    // tint pinned at 76%, so 0% dim still looked buried and the slider read as
+    // broken. See wallpaperCanvasTint for the range.
+    root.style.setProperty("--wallpaper-scrim-a", (wallpaperDim / 100).toFixed(2));
+    root.style.setProperty(
+      "--wallpaper-canvas-tint",
+      `${wallpaperCanvasTint(wallpaperDim)}%`,
     );
   }, [wallpaperDim]);
 }

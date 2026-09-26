@@ -1,6 +1,8 @@
 // Approvals slice: tool-approval + harness-question cards, background task
 // progress, and per-turn checkpoint chips.
 import {
+  cancelAgentChatMessage,
+  cancelChatMessage,
   resolveAgentQuestion,
   resolveToolAction,
 } from "../../../lib/ipc";
@@ -12,7 +14,9 @@ import type {
 import {
   appendUserBubble,
   bufferTargetFor,
+  isCliAgent,
   optimisticMsgIdCounter,
+  persistPartialAndClearStream,
   resolvePendingCard,
 } from "../moduleState";
 import type { ChatStoreGet, ChatStoreSet } from "../types";
@@ -124,6 +128,50 @@ export function createApprovalsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         completedAt: null,
       };
       set((st) => ({ ...appendUserBubble(st, chatSessionId, userMsg) }));
+    },
+
+    skipQuestion: async (chatSessionId: string) => {
+      // Skip DISMISSES the question and STOPS the turn — it does not answer.
+      // Answering an empty card used to resume the harness instead: the
+      // RELAY_ASK path dispatched a whole follow-up turn ("the user dismissed
+      // the question — continue with your best judgment"), the Claude Code
+      // control protocol resumed on stdin, and opencode got a reject that let
+      // the model proceed. The user asked for the run to end there.
+      //
+      // The cancel is what makes that true: agent_sessions' cancel drops the
+      // pending ask (so no follow-up turn is ever dispatched) and the pending
+      // question, and kills the paused CLI process. Unlike resolveQuestion it
+      // writes NO user bubble — nothing was said to the agent.
+      const session = get().sessions.find((s) => s.id === chatSessionId);
+      let stopped = "";
+      await resolvePendingCard(
+        get,
+        set,
+        "pendingQuestions",
+        chatSessionId,
+        "Couldn't dismiss the question",
+        async () => {
+          // Skip is Stop, and Stop's first half is persisting what the turn had
+          // already streamed: the paused harness's buffer dies with the
+          // process, so cancelling without this made the assistant bubble the
+          // user was reading disappear along with it.
+          stopped = await persistPartialAndClearStream(get, set, chatSessionId);
+          if (isCliAgent(session?.agent)) {
+            await cancelAgentChatMessage(chatSessionId);
+          } else {
+            await cancelChatMessage(chatSessionId);
+          }
+        },
+      );
+      // Keep the stopped turn's bubble showing what it produced, so the row
+      // keeps its process section expanded instead of collapsing to an empty
+      // "Worked" — same treatment the Stop button gives it. Queued messages are
+      // deliberately NOT drained: skip means the run ends here.
+      if (stopped) {
+        set((s) => ({
+          stoppedPartial: { ...s.stoppedPartial, [chatSessionId]: stopped },
+        }));
+      }
     },
 
     onCheckpointCreated: (payload: ChatCheckpoint) => {

@@ -245,7 +245,7 @@
 :root[data-wallpaper] .automations-view,
 :root[data-wallpaper] .vault-view,
 :root[data-wallpaper] .popout-chat-root {
-  background: color-mix(in srgb, var(--bg-tint) 76%, transparent);
+  background: color-mix(in srgb, var(--bg-tint) var(--wallpaper-canvas-tint, 76%), transparent);
 }
 
 .main {

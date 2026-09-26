@@ -4,9 +4,11 @@
 // via the RELAY_ASK marker and get the answer as a follow-up turn. Either
 // way it renders here — a lean notched glass card docked on the composer.
 // Single-select questions pick one option; multi-select questions toggle; a
-// free-text field sends the protocol's top-level `response`. Skip resolves
-// as "dismissed" so the model proceeds on its own. Option descriptions (the
-// protocol carries them) show as hover tooltips to keep the card lean.
+// free-text field sends the protocol's top-level `response`. Skip does NOT
+// answer — it stops the turn (the view cancels the session, which drops the
+// pending ask), because "dismissed" used to read back to the agent as
+// "continue with your best judgment". Option descriptions (the protocol
+// carries them) show as hover tooltips to keep the card lean.
 import { useMemo, useState } from "react";
 import type { ChatQuestionInput } from "../../lib/ipc";
 import type { PendingQuestion } from "../../state/chat";
@@ -16,8 +18,7 @@ export function QuestionCard({
   onResolve,
 }: {
   question: PendingQuestion;
-  /** `skipped` = no selections and no free text (the backend maps that to a
-   *  dismiss so the model continues without waiting). */
+  /** `skipped` = the Skip button: stop the turn instead of answering it. */
   onResolve: (
     answers: Record<string, string | string[]>,
     response: string | undefined,
@@ -62,7 +63,9 @@ export function QuestionCard({
       if (Array.isArray(v) ? v.length > 0 : v !== undefined) answers[k] = v;
     }
     const response = freeText.trim() || undefined;
-    onResolve(answers, response, Object.keys(answers).length === 0 && !response);
+    // `false` = an answer, always: the Answer button (and Enter) are gated on
+    // `canSubmit`, so only the Skip button reports a skip.
+    onResolve(answers, response, false);
   };
 
   return (
@@ -111,6 +114,7 @@ export function QuestionCard({
         <button
           type="button"
           className="question-btn"
+          title="Stop here — nothing is sent back to the agent"
           onClick={() => onResolve({}, undefined, true)}
         >
           Skip

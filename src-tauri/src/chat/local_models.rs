@@ -1705,6 +1705,60 @@ pub struct ActiveLocalModel {
     pub base_url: String,
 }
 
+/// The `model` string a request to `provider` must carry, given the model the
+/// UI stored for the chat (`stored_model` — for a local chat that is the GGUF
+/// file's metadata *name*, "DeepSeek R1 0528 Qwen3 8B", because that is what
+/// the picker shows).
+///
+/// SPECIAL CASE `local_gguf`: llama-server only accepts the model it was
+/// started with — its `model_id` (the `.gguf` path), also persisted as
+/// `chat.local_gguf.model` — and answers HTTP 400 for anything else, so a
+/// display name must never reach the wire. Mirrors the send path
+/// (`chat/commands/send.rs`) and the artifact-context LLM call. The memory
+/// worker had no such case, which made every extraction on a local-model chat
+/// fail with that 400 and the chunk retry forever.
+///
+/// `live` is `LocalModelRegistry::status()` — the running sidecar, when there
+/// is one. It is ground truth for both which model is loaded and which port
+/// serves it; the persisted setting is the fallback for a stopped sidecar.
+pub(crate) fn resolve_request_model(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    stored_model: Option<String>,
+    live: Option<&ActiveLocalModel>,
+) -> Option<String> {
+    let stored = || stored_model.clone().filter(|m| !m.trim().is_empty());
+    if provider != "local_gguf" {
+        return stored();
+    }
+    live.map(|a| a.model_id.clone())
+        .filter(|m| !m.trim().is_empty())
+        .or_else(|| {
+            crate::db::get_setting(conn, "chat.local_gguf.model")
+                .ok()
+                .flatten()
+                .filter(|m| !m.trim().is_empty())
+        })
+        .or_else(stored)
+}
+
+/// The base URL a `local_gguf` request should target: the live sidecar's when
+/// one is running, else the persisted `chat.local_gguf.base_url` (which can
+/// point at a port from a previous run — callers should treat `None` as "no
+/// local server to talk to" rather than firing a request that must time out).
+pub(crate) fn local_base_url(
+    conn: &rusqlite::Connection,
+    live: Option<&ActiveLocalModel>,
+) -> Option<String> {
+    live.map(|a| a.base_url.clone())
+        .or_else(|| {
+            crate::db::get_setting(conn, "chat.local_gguf.base_url")
+                .ok()
+                .flatten()
+        })
+        .filter(|b| !b.trim().is_empty())
+}
+
 // ---- Port / binary helpers ----
 
 /// Resolved llama-server binary plus the directory it lives in. The directory
@@ -2599,6 +2653,56 @@ mod scanner_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression that made memory extraction fail on every local chat: the
+    /// session's `model` column holds the GGUF DISPLAY name, and sending it to
+    /// llama-server earns an HTTP 400 — so the wire model must be the one the
+    /// sidecar actually loaded.
+    #[test]
+    fn local_gguf_wire_model_is_not_the_display_name() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let display = Some("DeepSeek R1 0528 Qwen3 8B".to_string());
+        let live = ActiveLocalModel {
+            model_id: "C:/models/DeepSeek-R1-Qwen3-8B-Q4_K_M.gguf".to_string(),
+            port: 55123,
+            n_ctx: 4096,
+            n_gpu_layers: 99,
+            base_url: "http://127.0.0.1:55123".to_string(),
+        };
+
+        // Running sidecar: its model_id wins over the display name.
+        let got = resolve_request_model(&conn, "local_gguf", display.clone(), Some(&live));
+        assert_eq!(got.as_deref(), Some(live.model_id.as_str()));
+
+        // Sidecar stopped: fall back to the persisted started-with model, and
+        // only then to the stored display name.
+        crate::db::set_setting(&conn, "chat.local_gguf.model", &live.model_id).unwrap();
+        assert_eq!(
+            resolve_request_model(&conn, "local_gguf", display.clone(), None).as_deref(),
+            Some(live.model_id.as_str())
+        );
+        crate::db::set_setting(&conn, "chat.local_gguf.model", "").unwrap();
+        assert_eq!(
+            resolve_request_model(&conn, "local_gguf", display.clone(), None).as_deref(),
+            display.as_deref()
+        );
+
+        // A cloud provider is untouched — its session model is what it wants.
+        assert_eq!(
+            resolve_request_model(&conn, "anthropic", display.clone(), Some(&live)).as_deref(),
+            display.as_deref()
+        );
+        assert_eq!(resolve_request_model(&conn, "anthropic", None, None), None);
+
+        // The base URL follows the LIVE sidecar (the persisted one can point at
+        // a port from a previous run).
+        assert_eq!(
+            local_base_url(&conn, Some(&live)).as_deref(),
+            Some("http://127.0.0.1:55123")
+        );
+        assert_eq!(local_base_url(&conn, None), None);
+    }
 
     #[test]
     fn ngl_ladder_dedupes_and_orders() {

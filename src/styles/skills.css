@@ -165,3 +165,8 @@
   color: #7fba6e;
   border-color: #7fba6e66;
 }
+/* A skill that lives in a project dir rather than a user harness dir. */
+.source-badge.project {
+  color: #b58bd4;
+  border-color: #b58bd466;
+}

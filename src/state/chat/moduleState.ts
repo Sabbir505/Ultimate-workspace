@@ -16,6 +16,7 @@ import {
   ensureChatSessionWorktree,
   getChatMessages,
   getSetting,
+  persistPartialChatMessage,
   toastError,
 } from "../../lib/ipc";
 import { useArtifactsStore } from "../artifacts";
@@ -808,6 +809,43 @@ export function clearStreamState(s: ChatState, id: string): Partial<ChatState> {
     supersededPartial: omitKey(s.supersededPartial, id),
     streamingChatSessionId: s.streamingChatSessionId === id ? null : s.streamingChatSessionId,
   };
+}
+
+/** The teardown half of a STOP, for callers that must kill a turn themselves:
+ *  persist whatever the turn had streamed so far, then clear its live keys.
+ *
+ *  The persist MUST happen before the cancel reaches the backend — the abort
+ *  path DISCARDS the server-side accumulated buffer, so a turn that is killed
+ *  with text already on screen loses that text unless the client ships it
+ *  first. (The question card's Skip is exactly this: it stops a turn that is
+ *  paused mid-question, and without the persist the assistant bubble the user
+ *  was reading vanished with the process.) No-op for a session that wasn't
+ *  streaming, which is the finished-RELAY_ASK case.
+ *
+ *  The state is cleared SYNCHRONOUSLY, before the await: a cancel emits a
+ *  terminal chat:error / chat:done while the persist round-trip is still in
+ *  flight, and with the streaming entry still present that handler passes its
+ *  "still streaming" guard and persists the SAME partial a second time —
+ *  duplicate assistant rows after every reload.
+ */
+export async function persistPartialAndClearStream(
+  get: () => ChatState,
+  set: ChatStoreSet,
+  id: string,
+): Promise<string> {
+  const partial = get().streaming[id] ?? "";
+  set((s) => ({
+    ...clearStreamState(s, id),
+    livePerf: omitKey(s.livePerf, id),
+    streamingChatSessionId: null,
+  }));
+  if (partial.trim().length === 0) return "";
+  try {
+    await persistPartialChatMessage(id, partial);
+  } catch {
+    /* best-effort: the cancel itself still proceeds */
+  }
+  return partial.trim();
 }
 
 /** Worktree-per-session default (roadmap P0 §3.1.1): give a fresh chat on a

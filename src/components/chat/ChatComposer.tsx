@@ -79,9 +79,15 @@ interface Props {
   onRemoveQuotedSelection?: (id: number) => void;
   /** Clear the whole quote stack — called after a successful send. */
   onClearQuotedSelections?: () => void;
-  /** Combined agent+model selector state — the chip is hidden when model is
-   *  undefined (no active session). */
+  /** The session's SELECTED model — what the agent picker shows as current
+   *  and what the next turn will run. */
   model?: string;
+  /** The model a harness session LAST actually ran (its own reported id,
+   *  which a remapped/custom setup makes differ from the catalog id). This is
+   *  the context meter's model — the answer's provenance — and it is NOT the
+   *  selection: feeding it to the picker made a freshly picked model read as
+   *  "still the previous one" until the next turn completed. */
+  actualModel?: string | null;
   /** Optional id → display-label overrides for the active harness's model
    *  catalog (CLI-agent labels). Passed through to AgentModelPicker. */
   modelLabels?: Record<string, string>;
@@ -179,6 +185,7 @@ export const ChatComposer = memo(function ChatComposer({
   onRemoveQuotedSelection,
   onClearQuotedSelections,
   model,
+  actualModel,
   modelLabels,
   agent,
   onAgentModelPick,
@@ -1277,7 +1284,9 @@ export const ChatComposer = memo(function ChatComposer({
   const contextMeterProps = useMemo(
     () => ({
       usedTokens: usedTokens ?? null,
-      model,
+      // The meter names the model that actually produced the usage — falling
+      // back to the selection when the harness hasn't reported one.
+      model: actualModel ?? model,
       provider,
       // Harness sessions derive their live context window from the CLI's
       // own model catalog — the meter needs the agent id to pick that path.
@@ -1291,7 +1300,7 @@ export const ChatComposer = memo(function ChatComposer({
       contextLimitOverride,
       pinnedWindow: pinnedWindow > 0 ? pinnedWindow : undefined,
     }),
-    [usedTokens, model, provider, agent, localCtx, liveMaxTokens, effectiveSessionId, contextLimitOverride, pinnedWindow],
+    [usedTokens, model, actualModel, provider, agent, localCtx, liveMaxTokens, effectiveSessionId, contextLimitOverride, pinnedWindow],
   );
   // The footer row only exists when something visible lives in it (research
   // chip, attach error, needs-model hint) — otherwise it's an empty strip

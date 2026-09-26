@@ -16,7 +16,8 @@ import {
   toastError,
   toastSuccess,
 } from "../../lib/ipc";
-import { useAppearanceStore } from "../../state/appearance";
+import { useAppearanceStore, wallpaperCanvasTint } from "../../state/appearance";
+import { useObjectUrl } from "../../hooks/useObjectUrl";
 
 export function WallpaperPanel() {
   const wallpaperData = useAppearanceStore((s) => s.wallpaperData);
@@ -24,6 +25,12 @@ export function WallpaperPanel() {
   const wallpaperDim = useAppearanceStore((s) => s.wallpaperDim);
   const setWallpaper = useAppearanceStore((s) => s.setWallpaper);
   const setWallpaperDim = useAppearanceStore((s) => s.setWallpaperDim);
+  // Both previews below paint `wallpaperData` straight into a CSS declaration,
+  // and a data: URL past ~1.3MB is silently dropped there — which is why a
+  // custom upload showed NO preview while the bundled presets (plain URLs)
+  // always did. The blob: URL is short at any size. The shell uses the same
+  // conversion via useWallpaper.
+  const wallpaperUrl = useObjectUrl(wallpaperData);
   const [busy, setBusy] = useState(false);
 
   const choosePreset = async (id: string) => {
@@ -48,9 +55,15 @@ export function WallpaperPanel() {
       const stored = await importAppWallpaper();
       if (stored) {
         // Read back the stored copy so the preview renders the exact bytes
-        // later launches will load.
+        // later launches will load. A null here means the copy didn't land
+        // (missing file, over the size cap) — say so instead of toasting a
+        // success for a wallpaper that will never show.
         const data = await readAppWallpaperData();
-        setWallpaper({ data: data ?? null, preset: null });
+        if (!data) {
+          toastError("Couldn't read the wallpaper back", "it was imported but the stored copy is unreadable");
+          return;
+        }
+        setWallpaper({ data, preset: null });
         toastSuccess("Wallpaper updated");
       }
     } catch (e) {
@@ -84,12 +97,22 @@ export function WallpaperPanel() {
 
       {/* Live preview — the wallpaper + scrim exactly as the shell paints it,
           with a hint of glass content on top so the layering reads. */}
-      <div className="wallpaper-preview" aria-hidden>
-        {wallpaperData && (
+      <div
+        className="wallpaper-preview"
+        aria-hidden
+        // Same mapping the shell uses, so the preview tracks the slider live
+        // rather than depending on the app hook's document-level variable.
+        style={
+          {
+            "--wallpaper-canvas-tint": `${wallpaperCanvasTint(wallpaperDim)}%`,
+          } as React.CSSProperties
+        }
+      >
+        {wallpaperUrl && (
           <div
             className="wallpaper-preview-layer"
             style={{
-              backgroundImage: `linear-gradient(rgba(var(--wallpaper-scrim-rgb), ${wallpaperDim / 100}), rgba(var(--wallpaper-scrim-rgb), ${wallpaperDim / 100})), url(${wallpaperData})`,
+              backgroundImage: `linear-gradient(rgba(var(--wallpaper-scrim-rgb), ${wallpaperDim / 100}), rgba(var(--wallpaper-scrim-rgb), ${wallpaperDim / 100})), url(${wallpaperUrl})`,
               filter: "blur(10px) saturate(115%)",
             }}
           />
@@ -140,7 +163,7 @@ export function WallpaperPanel() {
       <div className="sidebar-art-row">
         <div
           className="sidebar-art-preview"
-          style={wallpaperData && !wallpaperPreset ? { backgroundImage: `url(${wallpaperData})` } : undefined}
+          style={wallpaperData && !wallpaperPreset && wallpaperUrl ? { backgroundImage: `url(${wallpaperUrl})` } : undefined}
           title={wallpaperData && !wallpaperPreset ? "Your uploaded wallpaper" : "No custom wallpaper uploaded"}
         >
           {(!wallpaperData || wallpaperPreset) && (

@@ -8,6 +8,7 @@
 // covered by beginRemoteTurn (automationRunLog.test.ts) driven by the
 // chat:turn-started event the backend now emits before the spawn.
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cancelAgentChatMessage, persistPartialChatMessage } from "../lib/ipc";
 import { useChatStore } from "../state/chat";
 
 const resolveAgentQuestionMock = vi.fn().mockResolvedValue(undefined);
@@ -48,6 +49,7 @@ vi.mock("../lib/ipc", () => ({
   readArtifactPreview: vi.fn(),
   resolveAgentQuestion: (...a: unknown[]) => resolveAgentQuestionMock(...a),
   resolveToolAction: vi.fn().mockResolvedValue(undefined),
+  toastError: vi.fn(),
 }));
 
 function seedSession(id: string) {
@@ -125,5 +127,87 @@ describe("resolveQuestion answer bubble", () => {
     seedSession("s4");
     await useChatStore.getState().resolveQuestion("s4", { Q: "yes" }, undefined);
     expect(useChatStore.getState().pendingQuestions["s4"]).toBeUndefined();
+  });
+});
+
+describe("skipQuestion stops the turn", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resolveAgentQuestionMock.mockResolvedValue(undefined);
+  });
+
+  it("cancels the session instead of answering", async () => {
+    seedSession("s5");
+    await useChatStore.getState().skipQuestion("s5");
+    // The card's harness agent makes this the CLI cancel path — the one that
+    // kills the paused process AND drops the pending ask (so the backend
+    // never dispatches a "user dismissed it, continue" follow-up turn).
+    expect(cancelAgentChatMessage).toHaveBeenCalledWith("s5");
+    expect(resolveAgentQuestionMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves the transcript untouched — nothing is said to the agent", async () => {
+    seedSession("s6");
+    await useChatStore.getState().skipQuestion("s6");
+    expect(useChatStore.getState().messages).toHaveLength(0);
+  });
+
+  it("dismisses the card", async () => {
+    seedSession("s7");
+    await useChatStore.getState().skipQuestion("s7");
+    expect(useChatStore.getState().pendingQuestions["s7"]).toBeUndefined();
+  });
+
+  it("restores the card when the cancel fails", async () => {
+    seedSession("s8");
+    (cancelAgentChatMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("boom"),
+    );
+    await useChatStore.getState().skipQuestion("s8");
+    expect(useChatStore.getState().pendingQuestions["s8"]).toBeDefined();
+  });
+
+  it("persists the streamed reply BEFORE killing the turn", async () => {
+    // The regression: a turn paused mid-question is killed by Skip, and the
+    // backend's abort path DISCARDS its buffer — so without shipping the
+    // text the user was reading, the whole assistant bubble vanished.
+    seedSession("s9");
+    useChatStore.setState((s) => ({
+      streaming: { ...s.streaming, s9: "Here is what I found so far…" },
+    }));
+    const order: string[] = [];
+    (persistPartialChatMessage as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        order.push("persist");
+      },
+    );
+    (cancelAgentChatMessage as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        order.push("cancel");
+      },
+    );
+
+    await useChatStore.getState().skipQuestion("s9");
+
+    expect(persistPartialChatMessage).toHaveBeenCalledWith(
+      "s9",
+      "Here is what I found so far…",
+    );
+    expect(order).toEqual(["persist", "cancel"]);
+    // The live streaming entry is gone, and the stopped text is remembered so
+    // the bubble keeps its process section expanded.
+    expect(useChatStore.getState().streaming["s9"]).toBeUndefined();
+    expect(useChatStore.getState().stoppedPartial["s9"]).toBe(
+      "Here is what I found so far…",
+    );
+  });
+
+  it("does not persist anything for a turn that was already finished", async () => {
+    // The RELAY_ASK case: the turn already persisted and ended, so there is no
+    // stream to ship and no text to lose.
+    seedSession("s10");
+    await useChatStore.getState().skipQuestion("s10");
+    expect(persistPartialChatMessage).not.toHaveBeenCalled();
+    expect(cancelAgentChatMessage).toHaveBeenCalledWith("s10");
   });
 });

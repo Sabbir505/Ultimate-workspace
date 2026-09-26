@@ -135,6 +135,24 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
     void reload();
   }, [reload]);
 
+  // Skills are authored OUTSIDE this view — an agent writes them into a
+  // harness dir (or a project) while the panel sits open or closed, and there
+  // is no event for it. The list used to load on mount only, so a skill that
+  // appeared afterwards was invisible until the view was reopened. Re-scan
+  // whenever the window comes back to the foreground; the scan is a
+  // directory walk off the UI thread, and the backend keeps no cache.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void reload();
+    };
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [reload]);
+
   const flash = (msg: string) => {
     setNotice(msg);
     window.setTimeout(() => setNotice(null), 2000);
@@ -217,9 +235,13 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
   };
 
   // Whether the "make all global" button is actionable: only useful when at
-  // least one installed entry isn't already "both". Recomputed on every render
-  // from the loaded list (cheap; the list is the same scan the backend does).
-  const hasSingleSource = items.some((i) => i.source !== "both");
+  // least one installed entry lives in exactly ONE user harness dir.
+  // Recomputed on every render from the loaded list (cheap; the list is the
+  // same scan the backend does). A "project" entry is already reachable by
+  // every agent in that repo, so it neither counts nor gets mirrored.
+  const hasSingleSource = items.some(
+    (i) => i.source === "claude" || i.source === "kimi",
+  );
 
   const filtered = items.filter(
     (i) =>
@@ -238,6 +260,12 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
             onChange={(e) => setQuery(e.target.value)}
             placeholder={`Search ${kind}s…`}
           />
+          <button
+            title="Re-scan the skill directories on disk (agents write skills from outside this view)"
+            onClick={() => void reload()}
+          >
+            ⟳
+          </button>
           <button
             title="Copy every single-source skill into the other harness so any harness can use it"
             disabled={!hasSingleSource}

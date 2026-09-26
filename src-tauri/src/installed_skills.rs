@@ -120,16 +120,36 @@ fn roots(kind: &str) -> Vec<(&'static str, PathBuf)> {
                     }
                 }
                 "cache" => {
-                    // cache/<marketplace>/<plugin>/<version>/skills/<slug>/...
-                    // We push the `cache` root and let the scan walk into it
-                    // via `read_dir`; deeper enumeration is unnecessary
-                    // because the scan already recurses through directories
-                    // looking for SKILL.md / LOOP.md.
-                    v.push(("claude", child.join(kind)));
+                    // DELIBERATELY not scanned. `cache/<marketplace>/<plugin>/
+                    // <version>/<kind>/<slug>/` is the staging copy Claude Code
+                    // writes while installing a plugin, and the SAME skills are
+                    // already read from `marketplaces/<name>/<kind>/` above —
+                    // so walking it surfaced nothing new, while the injection
+                    // cache (which appends every skill body to every turn)
+                    // charged the user ~7.4k extra prompt chars per request
+                    // for the duplicates. A single `read_dir` can't reach
+                    // three levels down anyway, which is why the old code
+                    // pushed a `cache/skills` path that never existed.
                 }
                 _ => {}
             }
         }
+    }
+    v
+}
+
+/// Scan roots contributed by the OPEN PROJECTS: `<project>/.claude/<kind>` and
+/// `<project>/.agents/<kind>`.
+///
+/// Relay launches each CLI with the project's directory as its cwd, so an
+/// agent told to "create a skill" writes it THERE — and a home-only scan never
+/// sees those skills, not even after a restart. Entries found only here are
+/// reported with `source: "project"`.
+fn project_roots(kind: &str, projects: &[PathBuf]) -> Vec<(&'static str, PathBuf)> {
+    let mut v = vec![];
+    for p in projects {
+        v.push(("project", p.join(".claude").join(kind)));
+        v.push(("project", p.join(".agents").join(kind)));
     }
     v
 }
@@ -211,8 +231,21 @@ fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>) {
 }
 
 fn scan(kind: &str) -> Vec<InstalledSkill> {
+    scan_with_projects(kind, &[])
+}
+
+/// `scan` plus the open projects' own skill dirs. A skill that exists ONLY in a
+/// project gets `source: "project"`; one that also exists in a user-level
+/// harness dir keeps that source, and a user-level copy is the one the editor
+/// writes back to.
+fn scan_with_projects(kind: &str, projects: &[PathBuf]) -> Vec<InstalledSkill> {
     let mut by_slug: std::collections::BTreeMap<String, InstalledSkill> = Default::default();
-    for (harness, root) in roots(kind) {
+    // Slugs whose ONLY home is a project dir (no user-level harness copy).
+    let mut project_only: std::collections::BTreeSet<String> = Default::default();
+    let all_roots = roots(kind)
+        .into_iter()
+        .chain(project_roots(kind, projects));
+    for (harness, root) in all_roots {
         let Ok(entries) = fs::read_dir(&root) else { continue };
         for entry in entries.flatten() {
             let dir = entry.path();
@@ -225,6 +258,10 @@ fn scan(kind: &str) -> Vec<InstalledSkill> {
                 .map(|c| parse_frontmatter(&c))
                 .unwrap_or((None, None));
             let path_str = doc.to_string_lossy().into_owned();
+            let fresh = !by_slug.contains_key(&slug);
+            if fresh && harness == "project" {
+                project_only.insert(slug.clone());
+            }
             let e = by_slug.entry(slug.clone()).or_insert_with(|| InstalledSkill {
                 slug: slug.clone(),
                 name: name.clone().unwrap_or_else(|| slug.clone()),
@@ -234,18 +271,32 @@ fn scan(kind: &str) -> Vec<InstalledSkill> {
                 kimi_path: None,
                 kind: kind.trim_end_matches('s').to_string(),
             });
-            if harness == "claude" {
-                e.claude_path = Some(path_str);
-            } else {
+            match harness {
+                "claude" => e.claude_path = Some(path_str),
+                // A project copy is only a fallback for a slug the user-level
+                // scan didn't find — and it shares the claude slot on purpose,
+                // since putting it in `kimi_path` would make one skill look
+                // like it lives in two harnesses.
+                "project" => {
+                    e.claude_path.get_or_insert(path_str);
+                }
                 // Keep the first kimi path found (.agents preferred by order).
-                e.kimi_path.get_or_insert(path_str);
+                _ => {
+                    e.kimi_path.get_or_insert(path_str);
+                }
             }
         }
     }
     for e in by_slug.values_mut() {
         e.source = match (&e.claude_path, &e.kimi_path) {
             (Some(_), Some(_)) => "both",
-            (Some(_), None) => "claude",
+            (Some(_), None) => {
+                if project_only.contains(&e.slug) {
+                    "project"
+                } else {
+                    "claude"
+                }
+            }
             _ => "kimi",
         }
         .to_string();
@@ -257,9 +308,23 @@ pub fn list_installed(kind: &str) -> Vec<InstalledSkill> {
     scan(kind)
 }
 
+/// `list_installed` including the open projects' own skill dirs — the surface
+/// the Skills Library shows, so a skill an agent wrote inside a repo appears.
+pub fn list_installed_with_projects(kind: &str, projects: &[PathBuf]) -> Vec<InstalledSkill> {
+    scan_with_projects(kind, projects)
+}
+
 /// Content of a skill doc: prefer the Claude copy, else the Kimi one.
 pub fn read_installed(slug: &str, kind: &str) -> Option<String> {
-    let s = scan(kind).into_iter().find(|s| s.slug == slug)?;
+    read_installed_with(slug, kind, &[])
+}
+
+/// `read_installed` that can also resolve a project-scoped skill (the library
+/// lists those, so opening one for edit must find its file).
+pub fn read_installed_with(slug: &str, kind: &str, projects: &[PathBuf]) -> Option<String> {
+    let s = scan_with_projects(kind, projects)
+        .into_iter()
+        .find(|s| s.slug == slug)?;
     let path = s.claude_path.or(s.kimi_path)?;
     fs::read_to_string(path).ok()
 }
@@ -411,7 +476,17 @@ pub fn cached_skills() -> Vec<SkillSnapshot> {
 
 /// Write content back to every copy that exists (keeps mirrored skills in sync).
 pub fn save_installed(slug: &str, kind: &str, content: &str) -> Result<(), String> {
-    let s = scan(kind)
+    save_installed_with(slug, kind, content, &[])
+}
+
+/// `save_installed` that can also write a project-scoped skill in place.
+pub fn save_installed_with(
+    slug: &str,
+    kind: &str,
+    content: &str,
+    projects: &[PathBuf],
+) -> Result<(), String> {
+    let s = scan_with_projects(kind, projects)
         .into_iter()
         .find(|s| s.slug == slug)
         .ok_or_else(|| format!("no installed {kind} named {slug}"))?;
@@ -466,7 +541,16 @@ pub fn create_installed(name: &str, kind: &str, content: &str) -> Result<Install
 }
 
 pub fn delete_installed(slug: &str, kind: &str) -> Result<(), String> {
-    let s = scan(kind)
+    delete_installed_with(slug, kind, &[])
+}
+
+/// `delete_installed` that can also remove a project-scoped skill.
+pub fn delete_installed_with(
+    slug: &str,
+    kind: &str,
+    projects: &[PathBuf],
+) -> Result<(), String> {
+    let s = scan_with_projects(kind, projects)
         .into_iter()
         .find(|s| s.slug == slug)
         .ok_or_else(|| format!("no installed {kind} named {slug}"))?;
@@ -494,6 +578,12 @@ pub fn make_installed_global(kind: &str) -> Result<usize, String> {
     let mut copied = 0usize;
     for s in scan(kind) {
         if s.source == "both" {
+            continue;
+        }
+        // A project skill is already reachable by every agent working in that
+        // repo — this action mirrors between the two USER harness dirs, so
+        // copying one out would quietly promote it to the user's machine.
+        if s.source == "project" {
             continue;
         }
         // Choose the file to mirror: prefer whichever copy already exists
@@ -643,5 +733,39 @@ mod tests {
         delete_installed("test-thing", "skills").unwrap();
         assert!(list_installed("skills").iter().all(|s| s.slug != "test-thing"));
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The regression this guards: Relay launches each CLI with the project as
+    /// its cwd, so an agent told to "create a skill" writes it into the
+    /// REPO — and a home-only scan never showed it, not even after a restart.
+    #[test]
+    fn project_skills_are_discovered() {
+        let slug = format!("proj-skill-{}", uuid::Uuid::new_v4());
+        let root = std::env::temp_dir().join(format!("relay-proj-{}", uuid::Uuid::new_v4()));
+        let dir = root.join(".claude").join("skills").join(&slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = format!("---\nname: {slug}\ndescription: written by an agent\n---\n\nbody");
+        std::fs::write(dir.join("SKILL.md"), &body).unwrap();
+
+        let found = list_installed_with_projects("skills", &[root.clone()]);
+        let entry = found
+            .iter()
+            .find(|s| s.slug == slug)
+            .expect("project skill must be listed");
+        assert_eq!(entry.source, "project");
+        assert_eq!(entry.description, "written by an agent");
+        // Resolvable by slug for the editor, and written back in place.
+        assert_eq!(
+            read_installed_with(&slug, "skills", &[root.clone()]).as_deref(),
+            Some(body.as_str())
+        );
+        save_installed_with(&slug, "skills", "edited", &[root.clone()]).unwrap();
+        let edited = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
+        assert_eq!(edited, "edited");
+
+        // Invisible to the home-only scan the chat `/` menu uses — and no
+        // stray copy lands in the user's harness dirs.
+        assert!(list_installed("skills").iter().all(|s| s.slug != slug));
+        std::fs::remove_dir_all(&root).ok();
     }
 }

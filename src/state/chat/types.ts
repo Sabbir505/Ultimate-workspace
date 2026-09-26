@@ -639,13 +639,15 @@ export interface ChatState {
   /** Surface a harness question card (chat:question-request — Claude Code
    *  AskUserQuestion). The harness turn is paused until resolveQuestion. */
   onQuestionRequest: (payload: ChatQuestionRequestPayload) => void;
-  /** Answer the session's pending question card (or skip it with no
-   *  selections and no free text). */
+  /** Answer the session's pending question card. */
   resolveQuestion: (
     chatSessionId: string,
     answers: Record<string, string | string[]>,
     response?: string,
   ) => Promise<void>;
+  /** Dismiss the pending question card by STOPPING the turn instead of
+   *  answering it — nothing is sent back to the agent. */
+  skipQuestion: (chatSessionId: string) => Promise<void>;
   /** Track a background chat task's progress (downloads / shell runs). */
   onTaskProgress: (payload: ChatTaskProgressPayload) => void;
   /** Replace all plan steps for a session (called after parsing a new plan). */

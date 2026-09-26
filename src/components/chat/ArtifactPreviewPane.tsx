@@ -512,9 +512,15 @@ function ArtifactCodeBlock({ code, language }: { code: string; language: string 
         fontSize: "12px",
         fontFamily: "var(--font-mono)",
         lineHeight: 1.5,
-        overflowX: "auto",
+        // Wrap instead of scrolling sideways: a long line makes the code view
+        // taller, so the file is readable without dragging the pane's
+        // col-resize divider wider. Mirrors the chat code blocks.
+        whiteSpace: "pre-wrap",
+        overflowWrap: "anywhere",
       }}
-      codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
+      codeTagProps={{
+        style: { fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" },
+      }}
     >
       {code}
     </SyntaxHighlighter>

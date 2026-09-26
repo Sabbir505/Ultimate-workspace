@@ -812,9 +812,10 @@ const BROWSER_SCROLL_DESC: &str = "Scroll the page in the built-in browser pane 
 
 const BROWSER_SCREENSHOT_DESC: &str = "Screenshot the page currently open in the \
     built-in browser pane. Saves a PNG to the artifacts dir and returns its \
-    path — embed it as ![screenshot](path) so the user sees it. Use after \
-    open_url/browser_click for visual confirmation (layout, dialogs, error \
-    states), or whenever the user asks to see the page.";
+    path — embed it as ![screenshot](path) so the user sees it. The capture is \
+    the agent's own scratch: it is NOT added to the user's Artifacts library. \
+    Use after open_url/browser_click for visual confirmation (layout, dialogs, \
+    error states), or whenever the user asks to see the page.";
 
 const BROWSER_OBSERVE_DESC: &str = "List what is actionable on the page currently open in \
     the browser pane: one line per interactive element — ref, tag, label, and the \

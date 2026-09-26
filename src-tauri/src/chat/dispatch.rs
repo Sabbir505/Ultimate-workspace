@@ -2604,15 +2604,13 @@ async fn run_browser_tool(
             ));
         }
         let path_str = path.to_string_lossy().into_owned();
-        // Persist + surface like a generated artifact: the shot pops open in
-        // the canvas immediately and lands in the Artifacts sidebar.
-        {
-            let db = app.state::<crate::DbState>();
-            let conn = db.0.lock();
-            stream_events::insert_and_emit_artifact(Some(app), &conn, sid, &path_str, &filename);
-        }
+        // Deliberately NOT registered as an artifact (is_temp_like_artifact
+        // filters the browser-shot- prefix): the shot is the agent's own
+        // scaffolding, so it never enters the Artifacts library or pops open
+        // the canvas. Embedding it in the reply still works — the inline
+        // image reads the file by path.
         return Some(format!(
-            "Screenshot saved to {path_str}. It has been opened in the user's canvas. To show it inline, embed it in your reply as ![screenshot]({path_str})."
+            "Screenshot saved to {path_str}. To show it inline, embed it in your reply as ![screenshot]({path_str})."
         ));
     }
 

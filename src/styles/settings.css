@@ -3021,6 +3021,13 @@
   justify-content: flex-end;
   gap: 7px;
   padding: 12px;
+  /* The app ALWAYS paints its canvas tint over the wallpaper — shell.css
+     gives .chat-view (and the other full-window views) the same
+     `color-mix(bg-tint 76%)`. Without this layer the preview showed the raw
+     image at full brightness, so at 0% dim it read far brighter than the app
+     ever looks and the slider's real effect was invisible — the setting
+     appeared not to match the app. */
+  background: color-mix(in srgb, var(--bg-tint) var(--wallpaper-canvas-tint, 76%), transparent);
 }
 .wallpaper-preview-card {
   height: 26px;

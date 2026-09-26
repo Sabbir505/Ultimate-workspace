@@ -122,6 +122,14 @@ export function useTranscriptScroll({
   // off, and strand the viewport far from the content the turn ended with.
   const programmaticPinUntilRef = useRef(0);
   const PROGRAMMATIC_PIN_GUARD_MS = 120;
+  // The scrollTop the app last wrote itself. Paired with userIntentUntilRef it
+  // lets handleScroll tell "the user scrolled up" from "our own pin moved the
+  // viewport", even for an event the suppression window below would ignore.
+  const lastPinTopRef = useRef(0);
+  // Timestamp until which REAL input (wheel / touch / pointer) has landed on
+  // the transcript. While fresh, an upward scroll is the user's, not the app's.
+  const userIntentUntilRef = useRef(0);
+  const USER_INTENT_WINDOW_MS = 500;
   // Last observed distance-from-bottom, maintained by handleScroll. The
   // approval/question-card anchor restore consumes it as the PRE-mutation
   // position (the card effect runs after React already committed the card,
@@ -148,7 +156,24 @@ export function useTranscriptScroll({
     // the card, which made the restore a no-op).
     distFromBottomRef.current =
       container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (performance.now() < programmaticPinUntilRef.current) return;
+    if (performance.now() < programmaticPinUntilRef.current) {
+      // ROOT CAUSE (can't scroll up while streaming): during a stream the pin
+      // pass writes scrollTop on every token, so the 120ms suppression window
+      // above is almost always open when the user wheels up — their scroll
+      // event was discarded, the latch stayed set, and the next token yanked
+      // the view back to the live edge. A suppressed event is only trusted
+      // when real input just landed AND the viewport sits further up than the
+      // app's own last write, which the pin (and the virtualizer's
+      // measurement cascade) never produces.
+      if (
+        performance.now() < userIntentUntilRef.current &&
+        container.scrollTop < lastPinTopRef.current - 8
+      ) {
+        stickToBottomRef.current = false;
+        setAwayFromLive(true);
+      }
+      return;
+    }
     const threshold = 80; // px from bottom to still count as "at bottom"
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -199,6 +224,41 @@ export function useTranscriptScroll({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasMoreHistory, activeChatSessionId, loadOlder]);
+
+  // Mark REAL input on the transcript, and break the follow latch immediately
+  // when it points UP the transcript. The scroll event a wheel/trackpad
+  // gesture produces can land inside the programmatic-pin suppression window
+  // (the pin writes on every streamed token), so handleScroll alone can't
+  // always see the gesture — and an unseen gesture is a yanked view. Input
+  // listeners fire before that scroll event, so the latch is already off by
+  // the time the stream's next pin checks it. Scrolling DOWN never breaks the
+  // latch: returning to the live edge re-arms it (see handleScroll).
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const noteUpward = (deltaY: number) => {
+      userIntentUntilRef.current = performance.now() + USER_INTENT_WINDOW_MS;
+      if (deltaY >= 0) return;
+      stickToBottomRef.current = false;
+      setAwayFromLive(true);
+    };
+    const onWheel = (e: WheelEvent) => noteUpward(e.deltaY);
+    // touchmove reports no meaningful deltaY on every browser, so any touch
+    // drag counts as intent to leave the live edge.
+    const onTouchMove = () => noteUpward(-1);
+    // Scrollbar drags emit no wheel/touch — pointerdown is the only signal.
+    const onPointerDown = () => {
+      userIntentUntilRef.current = performance.now() + USER_INTENT_WINDOW_MS;
+    };
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    el.addEventListener("pointerdown", onPointerDown, { passive: true });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, []);
 
   /** The scrollTop that pins the viewport to the live edge, computed from
    *  MEASURED content — the last mounted virtual row plus the in-flow tail
@@ -281,6 +341,7 @@ export function useTranscriptScroll({
         done();
         return;
       }
+      lastPinTopRef.current = target;
       ownScroll();
       if (el.scrollTop !== lastTop) {
         stableFrames = 0;
@@ -430,6 +491,7 @@ export function useTranscriptScroll({
       // mid-stream (the swapped-in persisted row after a turn ends).
       if (Math.abs(el.scrollTop - target) > 1) {
         el.scrollTop = target;
+        lastPinTopRef.current = target;
         // The scroll event this write produces must not be read as user
         // intent (see handleScroll).
         programmaticPinUntilRef.current = performance.now() + PROGRAMMATIC_PIN_GUARD_MS;
@@ -542,6 +604,14 @@ export function useTranscriptScroll({
       const view = dock.closest(".chat-view")?.querySelector(".chat-messages");
       if (!view) return;
       const delta = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+      // The dock is a SIBLING of .chat-messages, so the transcript's own input
+      // listeners never see this gesture — carry the intent across by hand,
+      // or a wheel-up here is swallowed by the streaming pin like any other.
+      userIntentUntilRef.current = performance.now() + USER_INTENT_WINDOW_MS;
+      if (delta < 0) {
+        stickToBottomRef.current = false;
+        setAwayFromLive(true);
+      }
       view.scrollTop += delta;
       e.preventDefault();
     };
@@ -602,15 +672,44 @@ export function useTranscriptScroll({
     setChatScrollToMessage(activeChatSessionId, (msgId: number) => {
       stickToBottomRef.current = false;
       // PERF (F5): with the message list virtualized, off-screen bubbles
-      // aren't in the DOM — scroll the virtualizer to the message's index
-      // instead of querySelector'ing a possibly-unmounted element.
+      // aren't in the DOM — resolve the message to its row index instead of
+      // querySelector'ing a possibly-unmounted element.
       const idx = itemsRef.current.findIndex((i) => i.id === msgId);
-      if (idx >= 0) {
-        virtualizerRef.current?.scrollToIndex(idx, {
-          align: "start",
-          behavior: "smooth",
-        });
+      if (idx < 0) return;
+      const el = messagesContainerRef.current;
+      if (!el) return;
+      // Drive the scroll NATIVELY, not through the virtualizer's smooth
+      // scrollToIndex: that path is inert on this element — measured in the
+      // real ChatView, an instant `scrollToIndex(0, {align:'start'})` moved
+      // the transcript (scrollTop 168.8 → 0) while
+      // `scrollToIndex(0, {behavior:'smooth'})` left it at 168.8, so every
+      // turn-rail click landed nowhere. A native smooth scrollTo on the same
+      // element animates correctly (the jump-to-latest glide already relies
+      // on this). The row's own offset comes from the virtualizer's
+      // measurements, which are what scrollToIndex used internally.
+      const start = (
+        virtualizerImplRef.current as unknown as {
+          getMeasurements?: () => { start: number }[];
+        } | null
+      )
+        ?.getMeasurements?.()[idx]?.start;
+      if (start == null) {
+        // No measurements to read (first paint): the instant virtualizer
+        // scroll still lands correctly.
+        virtualizerRef.current?.scrollToIndex(idx, { align: "start" });
+        return;
       }
+      const max = Math.max(0, el.scrollHeight - el.clientHeight);
+      const target = Math.max(0, Math.min(start, max));
+      const reduced =
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      el.scrollTo({ top: target, behavior: reduced ? "auto" : "smooth" });
+      // This is our own write: arm the guard so the events it produces can't
+      // read as user intent, and record where we put it.
+      lastPinTopRef.current = target;
+      programmaticPinUntilRef.current = performance.now() + PROGRAMMATIC_PIN_GUARD_MS;
+      setAwayFromLive(false);
     });
     return () => setChatScrollToMessage(activeChatSessionId, null);
   }, [activeChatSessionId]);

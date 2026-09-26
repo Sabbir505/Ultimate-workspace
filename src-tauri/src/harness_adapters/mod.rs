@@ -608,6 +608,13 @@ fn turn_spec_windows(
 /// Spawning `--version` (rather than `where`/`which`) also confirms the binary
 /// actually executes on this machine, not just that a file exists on PATH.
 pub fn binary_on_path(binary: &str) -> bool {
+    use std::time::Duration;
+    binary_on_path_with_budget(binary, Duration::from_secs(5))
+}
+
+/// `binary_on_path` with an injectable poll budget — the 5s default is the
+/// production value; tests use a short one to reach the timeout branch.
+fn binary_on_path_with_budget(binary: &str, budget: std::time::Duration) -> bool {
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
@@ -631,7 +638,7 @@ pub fn binary_on_path(binary: &str) -> bool {
     };
     // Poll briefly instead of a blocking wait so a hung shim can't wedge the
     // caller. 5s is generous for `--version`.
-    for _ in 0..50 {
+    for _ in 0..(budget.as_millis() / 100).max(1) {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
@@ -642,7 +649,14 @@ pub fn binary_on_path(binary: &str) -> bool {
     // `cmd.exe /C` wrapper, and a surviving CLI grandchild would keep running
     // (same fix as installed_cli_version below).
     crate::agent_sessions::kill_child_tree(&mut child);
-    false
+    // The child was STILL RUNNING when the poll budget ran out — it spawned
+    // and launched, which is the only thing "is it installed?" asks. These are
+    // node/bun CLIs whose cold start can exceed 5s on a loaded machine, and
+    // reporting that as "not installed" made commandcode (and any other slow
+    // starter) vanish from the agent menu until the 30s probe cache expired —
+    // the "sometimes it isn't listed until I hard-refresh" report. A slow exit
+    // is still an install; only a failed SPAWN (handled above) is not.
+    true
 }
 
 /// Full path of the file the spawn machinery would execute for `binary`:
@@ -1207,5 +1221,41 @@ mod tests {
         for id in ["a&b", "x|y", "$(rm -rf)", "a>b", "100%^", "a!b", "a\nb"] {
             assert!(ensure_cmd_safe_model(id).is_err(), "{id} must be rejected");
         }
+    }
+
+    /// A harness whose `--version` outlives the probe budget used to be
+    /// reported as NOT installed (and the wrong answer cached for 30s), so
+    /// commandcode periodically vanished from the agent menu on a loaded
+    /// machine. A process that spawned and is still running is an install.
+    #[test]
+    #[cfg(windows)]
+    fn slow_exiting_binary_counts_as_installed() {
+        let dir = std::env::temp_dir().join(format!("relay-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("relay-slow-probe.cmd");
+        // ~1s of runtime against a 300ms budget: the poll gives up mid-run.
+        std::fs::write(&script, "@echo off\r\nping -n 2 127.0.0.1 > nul\r\nexit /b 0\r\n")
+            .unwrap();
+        assert!(binary_on_path_with_budget(
+            script.to_str().unwrap(),
+            std::time::Duration::from_millis(300)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The nonzero-exit gate is unchanged: a binary that spawns and fails
+    /// fast is still reported as not installed.
+    #[test]
+    #[cfg(windows)]
+    fn fast_nonzero_exit_is_still_not_installed() {
+        let dir = std::env::temp_dir().join(format!("relay-probe-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("relay-fail-probe.cmd");
+        std::fs::write(&script, "@echo off\r\nexit /b 3\r\n").unwrap();
+        assert!(!binary_on_path_with_budget(
+            script.to_str().unwrap(),
+            std::time::Duration::from_secs(5)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

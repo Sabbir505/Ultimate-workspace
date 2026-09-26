@@ -37,6 +37,21 @@ interface AppearanceState {
 const WALLPAPER_DIM_SETTING = "app.wallpaperDim";
 const DEFAULT_WALLPAPER_DIM = 50;
 
+/** Dim (0-100) → the app canvas's veil over the wallpaper, as a percentage
+ *  for `color-mix(--bg-tint N%, transparent)`.
+ *
+ *  The slider drives TWO layers: the scrim painted on the image, and this
+ *  canvas tint the content surfaces add on top. The tint used to be a fixed
+ *  76%, so 0% dim still buried the image under a permanent veil — the slider
+ *  appeared to do nothing and the app could never show the wallpaper clearly.
+ *  Now 0% leaves a light veil (image plainly visible) and 100% is a heavy one
+ *  (text comfortably readable). Kept here so the shell and the settings
+ *  preview cannot disagree about what a given dim looks like. */
+export function wallpaperCanvasTint(dim: number): number {
+  const clamped = Math.max(0, Math.min(100, Math.round(dim)));
+  return Math.round(20 + (clamped / 100) * 65);
+}
+
 export const useAppearanceStore = create<AppearanceState>((set) => ({
   artData: null,
   artPreset: null,
@@ -64,7 +79,14 @@ export const useAppearanceStore = create<AppearanceState>((set) => ({
         const data = await readAppWallpaperData();
         set({ wallpaperData: data ?? null, wallpaperPreset: null });
       }
-      const dimRaw = Number(await getSetting(WALLPAPER_DIM_SETTING));
+      // Only adopt a stored dim when one is actually there. `getSetting`
+      // returns null when unset, and `Number(null)` is 0 — so a fresh install
+      // (or any session before the slider is first touched) coerced the
+      // missing value to 0% and overwrote DEFAULT_WALLPAPER_DIM, leaving the
+      // wallpaper with NO scrim at all: bright, unreadable text over the
+      // image, and a slider sitting at 0 instead of 50.
+      const dimStored = await getSetting(WALLPAPER_DIM_SETTING);
+      const dimRaw = dimStored == null ? Number.NaN : Number(dimStored);
       if (Number.isFinite(dimRaw) && dimRaw >= 0 && dimRaw <= 100) {
         set({ wallpaperDim: dimRaw });
       }

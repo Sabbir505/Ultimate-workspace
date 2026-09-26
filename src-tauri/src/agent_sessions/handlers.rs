@@ -46,6 +46,31 @@ pub(super) fn emit_subagent_spawn(
     emit_token(app, sid, &marker);
 }
 
+/// Close a thinking block that is still open, so a tool marker never goes out
+/// nested inside one.
+///
+/// Everywhere else the TEXT delta owns the close, but a tool call can arrive
+/// between two text deltas — reasoning, then a call, then more prose. An
+/// unclosed `<think>` makes the frontend render the whole tail (tool markup
+/// included) as reasoning text: the call runs fine but appears stuck inside
+/// the thinking block, and only snaps into a proper tool row once a later
+/// delta emits the missing `</think>` and the parse re-runs. Mirrors
+/// `close_opencode_think` in opencode.rs, which had this guard and the other
+/// handlers did not.
+pub(super) fn close_open_think(
+    app: Option<&AppHandle>,
+    sid: &str,
+    full: &mut String,
+    in_think: &mut bool,
+) {
+    if !*in_think {
+        return;
+    }
+    full.push_str("</think>");
+    emit_token(app, sid, "</think>");
+    *in_think = false;
+}
+
 /// Shared usage-application tail for the harness event handlers: OR-merge
 /// the per-stream running totals into the turn accumulators and refresh the
 /// live IN/CACHE chips (harnesses report running totals — replace, never
@@ -162,6 +187,7 @@ pub(super) fn handle_kimi_event(
                             None => json!({}),
                         };
                         if is_subagent_tool_name(&name) {
+                            close_open_think(app, sid, full, in_think);
                             emit_subagent_spawn(
                                 tools,
                                 full,
@@ -172,6 +198,7 @@ pub(super) fn handle_kimi_event(
                                 &args,
                             );
                         } else {
+                            close_open_think(app, sid, full, in_think);
                             crate::hooks::harness_observation(app, sid, &name, &args);
                             let marker = tools.tool_use(&name, values);
                             full.push_str(&marker);
@@ -390,6 +417,10 @@ pub(super) fn handle_opencode_event(
             // "Updating task list" marker.
             emit_todowrite_steps(app, sid, name, &inp);
             let value = tool_meta_generic(name, &inp);
+            // Same contract as the other handlers: a call frame can arrive
+            // while reasoning is still open, and the marker must not go out
+            // nested inside <think>.
+            close_open_think(app, sid, full, in_think);
             if is_subagent_tool_name(name) {
                 // Subagent spawn (claude "Agent"/"Task"): extract
                 // role/task/prompt and emit a spawn event. Per-turn opencode
@@ -586,6 +617,10 @@ pub(super) fn handle_pi_event(
             let inp = v.get("args").cloned().unwrap_or(json!({}));
             emit_todowrite_steps(app, sid, name, &inp);
             let value = tool_meta_generic(name, &inp);
+            // A call can land between two text deltas, with reasoning still
+            // open — close it here or the marker goes out nested and the
+            // frontend paints the tool as reasoning text.
+            close_open_think(app, sid, full, in_think);
             if is_subagent_tool_name(name) {
                 emit_subagent_spawn(tools, full, app, sid, name, value, &inp);
             } else {
@@ -774,6 +809,11 @@ pub(super) fn handle_commandcode_event(
                             // H2: the hook gets the RAW arguments (`inp`),
                             // not the display card (`value`).
                             crate::hooks::harness_observation(app, sid, name, &inp);
+                            // Reasoning can still be open when the call frame
+                            // arrives (it usually follows a reasoning delta
+                            // with no text between) — close it before the
+                            // marker so it isn't nested inside <think>.
+                            close_open_think(app, sid, full, in_think);
                             let marker = if is_subagent_tool_name(name) {
                                 let role = inp
                                     .get("subagent_type")
@@ -911,5 +951,40 @@ pub(super) fn handle_commandcode_event(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The regression: a tool call arriving while reasoning is still open used
+    /// to emit its `<tool>` marker NESTED inside `<think>`. The frontend treats
+    /// an unclosed think as swallowing the rest of the buffer, so the call ran
+    /// normally but rendered as reasoning text — stuck in the thinking block
+    /// until a later text delta closed it and the parse re-ran.
+    #[test]
+    fn close_open_think_ends_the_block_before_a_tool_marker() {
+        let mut full = String::from("<think>weighing the options");
+        let mut in_think = true;
+        close_open_think(None, "test-close-think", &mut full, &mut in_think);
+        assert!(!in_think, "the block must be closed, not left open");
+        // Markers only ever land OUTSIDE the block now.
+        full.push_str("<tool>{\"kind\":\"tool\"}</tool>");
+        assert_eq!(
+            full,
+            "<think>weighing the options</think><tool>{\"kind\":\"tool\"}</tool>"
+        );
+        // And a text delta afterwards must not emit a SECOND close.
+        close_open_think(None, "test-close-think", &mut full, &mut in_think);
+        assert_eq!(full.matches("</think>").count(), 1);
+    }
+
+    #[test]
+    fn close_open_think_is_a_noop_when_nothing_is_open() {
+        let mut full = String::from("plain text");
+        let mut in_think = false;
+        close_open_think(None, "test-close-think-idle", &mut full, &mut in_think);
+        assert_eq!(full, "plain text");
     }
 }

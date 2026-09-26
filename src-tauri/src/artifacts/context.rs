@@ -6,7 +6,6 @@
 use crate::artifacts::proposal::ArtifactIntent;
 use crate::artifacts::schemas::ArtifactType;
 use crate::DbState;
-use crate::commands::skills_cmds::list_installed_skills;
 use crate::db::{list_skills, list_automations};
 use tauri::State;
 
@@ -153,10 +152,14 @@ async fn get_workspace_context(
     // Get existing skills (installed + DB-backed)
     let mut available_skills = Vec::new();
     
-    // Installed skills (harness skills) — takes no arguments
-    let installed = list_installed_skills()
-        .await
-        .map_err(|e| e.to_string())?;
+    // Installed skills (harness skills). No Tauri state in scope here, so this
+    // is the user-dir scan; the Skills LIBRARY additionally lists the open
+    // projects' own skill dirs.
+    let installed = tauri::async_runtime::spawn_blocking(|| {
+        crate::installed_skills::list_installed("skills")
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     for s in installed {
         available_skills.push(SkillSummary {
             name: s.name,

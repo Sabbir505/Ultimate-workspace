@@ -624,6 +624,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   // Harness questions (AskUserQuestion) — same composer slot as approvals.
   const pendingQuestions = useChatStore((s) => s.pendingQuestions);
   const resolveQuestionAction = useChatStore((s) => s.resolveQuestion);
+  const skipQuestionAction = useChatStore((s) => s.skipQuestion);
   // Plan mode + proposal cards (present_plan) + the authoritative todo list.
   const pendingPlanProposals = useChatStore((s) => s.pendingPlanProposals);
   // This session's pending present_plan proposal, if the model is paused on
@@ -1878,13 +1879,16 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         <div className="plan-preview">
           <QuestionCard
             question={pendingQuestions[activeChatSessionId]}
-            onResolve={(answers, response, skipped) =>
-              void resolveQuestionAction(
-                activeChatSessionId,
-                skipped ? {} : answers,
-                skipped ? undefined : response,
-              )
-            }
+            onResolve={(answers, response, skipped) => {
+              // Skip stops the run (skipQuestion cancels, which drops the
+              // pending ask so no follow-up turn is dispatched); Answer sends
+              // the selection back to the harness.
+              if (skipped) {
+                void skipQuestionAction(activeChatSessionId);
+                return;
+              }
+              void resolveQuestionAction(activeChatSessionId, answers, response);
+            }}
           />
         </div>
       )}
@@ -1936,11 +1940,17 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
               // model the user never picked for this chat — reading as stale
               // data from the previous chat. Mirror the chip: "—" until an
               // agent is picked.
+              //
+              // The SELECTION (resolvedModel), not meterModel: for a harness
+              // session meterModel prefers the model the CLI LAST actually
+              // ran, so a freshly picked model still displayed as the previous
+              // one until the next turn completed.
               activeSession?.agent != null
-                ? (meterModel ?? "")
+                ? (resolvedModel ?? "")
                 : ""
             : undefined
         }
+        actualModel={activeChatSessionId ? meterModel : undefined}
         modelLabels={modelLabels}
         agent={activeChatSessionId ? (activeSession?.agent ?? null) : undefined}
         onAgentModelPick={handleAgentModelPick}

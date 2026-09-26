@@ -94,6 +94,17 @@ export function maskRelayAsk(content: string): string {
 
 const RELAY_ASK_MARKER = "RELAY_ASK:";
 
+/** Index of a `<tool>` opener inside an unterminated `<think>` body that is
+ *  almost certainly a real tool marker rather than reasoning that mentions
+ *  one. The backend always wraps tool payloads in a JSON object, so requiring
+ *  a `{` right after the opener keeps prose ("the <tool> marker the harness
+ *  emits…") from being split mid-sentence. */
+function toolMarkerBoundary(s: string): number {
+  const i = s.indexOf("<tool>");
+  if (i === -1) return -1;
+  return s.slice(i + "<tool>".length).trimStart().startsWith("{") ? i : -1;
+}
+
 /** Split an assistant message into ordered segments: plain markdown text,
  *  `<think>` reasoning blocks, and `<tool>` process cards. A block whose
  *  closing tag hasn't streamed in yet is marked `done: false`. */
@@ -126,10 +137,32 @@ export function parseSegments(content: string): Segment[] {
     // parse fails and renders a phantom "working…" row. Tool-marker content
     // is sanitizer-escaped, so a real opener inside `inner` can't false-hit;
     // `<think>` never stacks, so the split stays tool-only.
-    const ni = tag === "tool" ? afterOpen.indexOf("<tool>") : -1;
-    const end = ci === -1 ? ni : ni === -1 ? ci : Math.min(ci, ni);
+    let end = ci;
+    // True when a tool marker — not this block's own close — ended the
+    // segment. The call that follows proves the reasoning is over, so the
+    // block reports done (it must not keep rendering as live "Thinking…"
+    // with a tool row sitting below it).
+    let splitByTool = false;
+    if (tag === "tool") {
+      const ni = afterOpen.indexOf("<tool>");
+      if (ni !== -1 && (end === -1 || ni < end)) end = ni;
+    } else {
+      // Defense in depth for a tool call that arrives while reasoning is
+      // still open: every backend handler now closes `<think>` before
+      // emitting a tool marker, but a marker nested in a think block renders
+      // as reasoning text — the call looks stuck in the thinking block until
+      // a later delta closes it and the parse re-runs. A `<tool>` opener
+      // that carries a JSON payload ends the think segment here (before any
+      // `</think>` that trails it); prose that merely mentions "<tool>" has
+      // no payload and does not split.
+      const ti = toolMarkerBoundary(afterOpen);
+      if (ti !== -1 && (end === -1 || ti < end)) {
+        end = ti;
+        splitByTool = true;
+      }
+    }
     const inner = end === -1 ? afterOpen : afterOpen.slice(0, end);
-    const done = end !== -1 && end === ci;
+    const done = end !== -1 && (end === ci || splitByTool);
 
     if (tag === "think") {
       segs.push({ type: "think", text: inner.trim(), done });
@@ -148,6 +181,12 @@ export function parseSegments(content: string): Segment[] {
       end === ci
         ? afterOpen.slice(ci + close.length)
         : afterOpen.slice(end);
+    // Repaired nesting (a tool marker split a think block open): that block's
+    // real `</think>` now trails the marker's own close, orphaned. Drop it so
+    // the internal channel never surfaces as literal text in the transcript.
+    if (rest.startsWith("</think>")) {
+      rest = rest.slice("</think>".length);
+    }
   }
   return segs;
 }

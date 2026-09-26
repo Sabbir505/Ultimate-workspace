@@ -35,7 +35,7 @@ vi.mock("../lib/ipc", () => ({
 
 import { WallpaperPanel } from "../components/settings/WallpaperPanel";
 import { useWallpaper } from "../hooks/useWallpaper";
-import { useAppearanceStore } from "../state/appearance";
+import { useAppearanceStore, wallpaperCanvasTint } from "../state/appearance";
 
 const DATA_URL = "data:image/png;base64,AAAA";
 
@@ -56,6 +56,10 @@ beforeEach(() => {
     wallpaperDim: 50,
     loaded: false,
   });
+  // jsdom implements no object URLs; the hook hands CSS a blob: URL.
+  let blobSeq = 0;
+  URL.createObjectURL = (() => `blob:test/${++blobSeq}`) as unknown as typeof URL.createObjectURL;
+  URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
   delete document.documentElement.dataset.wallpaper;
   document.documentElement.style.removeProperty("--app-wallpaper");
   document.documentElement.style.removeProperty("--wallpaper-scrim-a");
@@ -77,6 +81,28 @@ describe("appearance store wallpaper state", () => {
     await useAppearanceStore.getState().refresh();
     expect(useAppearanceStore.getState().wallpaperData).toBe(DATA_URL);
     expect(useAppearanceStore.getState().wallpaperPreset).toBeNull();
+  });
+
+  it("maps dim to the canvas veil: 0 clears the view, 100 buries it", () => {
+    // The canvas tint used to be a fixed 76%, so 0% dim still buried the image
+    // and the slider looked inert. Both layers now follow the slider.
+    expect(wallpaperCanvasTint(0)).toBe(20);
+    expect(wallpaperCanvasTint(100)).toBe(85);
+    expect(wallpaperCanvasTint(50)).toBeGreaterThan(20);
+    expect(wallpaperCanvasTint(50)).toBeLessThan(85);
+    // Monotonic, and clamped outside the slider's range.
+    expect(wallpaperCanvasTint(0)).toBeLessThan(wallpaperCanvasTint(100));
+    expect(wallpaperCanvasTint(-40)).toBe(20);
+    expect(wallpaperCanvasTint(400)).toBe(85);
+  });
+
+  it("keeps the default dim when none is stored (getSetting returns null)", async () => {
+    // `Number(null)` is 0, so coercing the missing setting produced 0% and
+    // wiped the 50% default — the wallpaper rendered with NO scrim and the
+    // slider opened at 0 on any install where it had never been touched.
+    getSettingMock.mockResolvedValue(null);
+    await useAppearanceStore.getState().refresh();
+    expect(useAppearanceStore.getState().wallpaperDim).toBe(50);
   });
 
   it("reads the stored dim level and clamps the setter's range", async () => {
@@ -126,6 +152,18 @@ describe("WallpaperPanel", () => {
     expect(screen.getByText("Remove")).toBeTruthy();
   });
 
+  it("previews a CUSTOM upload (a data: URL too big to inline is converted)", () => {
+    // A data: URL past ~1.3MB is silently dropped by a CSS declaration, which
+    // is why a custom upload showed no preview while bundled presets did.
+    useAppearanceStore.setState({ wallpaperData: DATA_URL, wallpaperPreset: null, loaded: true });
+    render(<WallpaperPanel />);
+    const layer = document.querySelector<HTMLElement>(".wallpaper-preview-layer");
+    const thumb = document.querySelector<HTMLElement>(".sidebar-art-preview");
+    expect(layer?.style.backgroundImage).toMatch(/url\(["']?blob:/);
+    expect(layer?.style.backgroundImage).not.toContain("data:image");
+    expect(thumb?.style.backgroundImage).toMatch(/url\(["']?blob:/);
+  });
+
   it("cancelling the backend dialog surfaces the error and imports nothing", async () => {
     importWallpaperMock.mockRejectedValue("no image picked");
     render(<WallpaperPanel />);
@@ -159,8 +197,35 @@ describe("useWallpaper hook", () => {
     render(<div />, { wrapper: HookHost });
     const root = document.documentElement;
     expect(root.dataset.wallpaper).toBe("on");
-    expect(root.style.getPropertyValue("--app-wallpaper")).toBe(`url("${DATA_URL}")`);
+    // A blob: URL, NOT the data: URL: a CSS custom property silently stops
+    // accepting values past ~1.3MB, which is why a real photo never appeared.
+    const value = root.style.getPropertyValue("--app-wallpaper");
+    expect(value).toMatch(/^url\("blob:/);
+    expect(value).not.toContain("data:image");
     expect(root.style.getPropertyValue("--wallpaper-scrim-a")).toBe("0.65");
+    // The canvas veil moves with the SAME slider, not a fixed 76%.
+    expect(root.style.getPropertyValue("--wallpaper-canvas-tint")).toBe(
+      `${wallpaperCanvasTint(65)}%`,
+    );
+  });
+
+  it("clears the canvas veil at dim 0 so the image is plainly visible", () => {
+    useAppearanceStore.setState({ wallpaperData: DATA_URL, wallpaperDim: 0, loaded: true });
+    render(<div />, { wrapper: HookHost });
+    const root = document.documentElement;
+    expect(root.style.getPropertyValue("--wallpaper-scrim-a")).toBe("0.00");
+    expect(root.style.getPropertyValue("--wallpaper-canvas-tint")).toBe("20%");
+  });
+
+  it("passes a preset URL through unchanged (no blob round-trip)", () => {
+    useAppearanceStore.setState({
+      wallpaperData: "/sideart/aurora.jpg",
+      wallpaperPreset: "aurora",
+      loaded: true,
+    });
+    render(<div />, { wrapper: HookHost });
+    const value = document.documentElement.style.getPropertyValue("--app-wallpaper");
+    expect(value).toBe('url("/sideart/aurora.jpg")');
   });
 
   it("clears the attribute + variable when the wallpaper is removed", () => {

@@ -139,16 +139,22 @@ export function RepeatIcon() {
   );
 }
 
-/** Git-fork glyph for the bubble "fork here" action (fork the conversation at
- *  this message into a side-by-side pane). */
+/** Fork = "continue this chat in a second pane beside this one" (fork the
+ *  conversation at this message). One stem splitting into two branches.
+ *
+ *  Deliberately node-free: the old three-circle git-branch mark was the same
+ *  picture as the `GitBranch` icon the session rows and the Git Graph pane
+ *  use, so one shape meant two unrelated things in a single window. Dropping
+ *  the circles (and staying out of the git icon family entirely) keeps "this
+ *  path splits here" readable without borrowing version control's vocabulary,
+ *  and it still says fork rather than split — the branch arms are the point.
+ */
 export function ForkIcon() {
   return (
     <svg {...iconProps} aria-hidden="true">
-      <circle cx="12" cy="18" r="3" />
-      <circle cx="6" cy="6" r="3" />
-      <circle cx="18" cy="6" r="3" />
-      <path d="M18 9v1a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V9" />
-      <path d="M12 12v3" />
+      <path d="M12 21v-6" />
+      <path d="M12 15 6.5 9.5" />
+      <path d="M12 15l5.5-5.5" />
     </svg>
   );
 }
@@ -802,7 +808,12 @@ export function StepCodeHighlighter({ code, language }: { code: string; language
           fontSize: "calc(12px * var(--chat-zoom, 1))",
           fontFamily: "var(--font-mono)",
           lineHeight: 1.5,
-          overflowX: "auto",
+          // Wrap instead of scrolling sideways: a long line grows the block
+          // TALLER, so the content is readable without widening the pane or
+          // dragging a horizontal scrollbar. `anywhere` also breaks tokens
+          // with no spaces (minified JSON, a long path).
+          whiteSpace: "pre-wrap",
+          overflowWrap: "anywhere",
         }}
       >
         <code>{code}</code>
@@ -830,9 +841,13 @@ export function StepCodeHighlighter({ code, language }: { code: string; language
         fontSize: "calc(12px * var(--chat-zoom, 1))",
         fontFamily: "var(--font-mono)",
         lineHeight: 1.5,
-        overflowX: "auto",
+        // Wrap rather than scroll sideways — see the fallback <pre> above.
+        whiteSpace: "pre-wrap",
+        overflowWrap: "anywhere",
       }}
-      codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
+      codeTagProps={{
+        style: { fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" },
+      }}
     >
       {code}
     </SyntaxHighlighter>

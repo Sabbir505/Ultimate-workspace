@@ -288,6 +288,15 @@ pub(crate) fn is_temp_like_artifact(path: &str) -> bool {
     {
         return true;
     }
+    // App-owned browser captures: the `browser_screenshot` tool and the
+    // browser MCP's screenshot/zoom ops write millisecond-stamped PNGs here
+    // (`browser-shot-<ms>.png`, `browser-zoom-<ms>.png`) purely so the agent
+    // can embed one in its own reply. They're the agent's scaffolding, not
+    // something the user made or asked to keep, so they stay out of the
+    // gallery — the inline embed reads the file by path and still works.
+    if name.starts_with("browser-shot-") || name.starts_with("browser-zoom-") {
+        return true;
+    }
     // The system temp dir itself (tempfile-style scripts write there). The
     // prefix must end at a segment boundary — `/tmp` must not swallow
     // `/tmpfoo.md`.
@@ -375,6 +384,10 @@ mod temp_filter_tests {
             "C:/proj/tmp/summary.md",
             "C:/proj/temp/out.json",
             "C:/proj/.tmp/render.svg",
+            // App-owned browser captures: the agent's own scaffolding, not
+            // gallery material (the inline embed reads the file by path).
+            "C:/out/browser-shot-169.png",
+            "C:/out/browser-zoom-169.png",
         ] {
             assert!(is_temp_like_artifact(path), "must filter: {path}");
         }
@@ -396,8 +409,8 @@ mod temp_filter_tests {
             "C:/out/temporary-notes.md",
             // "attempt" contains tmp? no — and even "atmp…" isn't tmp-prefixed.
             "C:/out/attempt.log",
-            // Browser screenshots and generated decks keep landing.
-            "C:/out/browser-shot-169.png",
+            // Generated decks keep landing (only the browser-* capture
+            // prefixes are filtered, not everything image-shaped).
             "C:/out/launch-deck.pptx",
         ] {
             assert!(!is_temp_like_artifact(path), "must keep: {path}");

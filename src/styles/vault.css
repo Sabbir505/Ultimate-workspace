@@ -846,6 +846,10 @@
   border-radius: 8px;
   padding: 10px 12px;
   overflow-x: auto;
+  /* Grow taller to fit the pasted code rather than scrolling sideways (and so
+     rather than needing the pane divider dragged wider to read it). */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   font-size: 12px;
 }
 .vault-preview code {

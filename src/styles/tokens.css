@@ -80,6 +80,13 @@
   --app-wallpaper: none;
   --wallpaper-scrim-rgb: 8, 10, 14;
   --wallpaper-scrim-a: 0.5;
+  /* How strongly the app's canvas veils the wallpaper where content sits
+     (shell.css .chat-view & friends). Driven by the SAME Dim slider as the
+     scrim above — it used to be a fixed 76%, so 0% dim still buried the
+     image under a permanent tint and the slider looked like it did nothing.
+     useWallpaper recomputes it from the stored dim; this is the pre-hook
+     default. */
+  --wallpaper-canvas-tint: 76%;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -252,6 +259,7 @@
      theme airy (alpha still follows the user's dim slider). */
   --wallpaper-scrim-rgb: 255, 255, 255;
   --wallpaper-scrim-a: 0.6;
+  --wallpaper-canvas-tint: 76%;
   --surface: #ffffff;
   --surface-2: #f3f3f3;
   --surface-solid: #fafafa;

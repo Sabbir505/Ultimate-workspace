@@ -8,7 +8,10 @@ use crate::artifacts::{
 use crate::artifacts::adapter::AdaptedArtifact;
 use crate::artifacts::proposal::ArtifactAction;
 use crate::DbState;
-use crate::commands::skills_cmds::{create_installed_skill, save_installed_skill};
+// `save_installed_skill` (the Tauri command) is project-aware; these artifact
+// flows write into the USER harness dirs `create_installed_skill` just
+// created, so the home-only variant is the right one here.
+use crate::commands::skills_cmds::create_installed_skill;
 use crate::db::{create_skill, create_automation, update_skill, update_automation, list_skills, list_automations, get_automation};
 use tauri::State;
 
@@ -141,10 +144,10 @@ pub async fn create_artifact_cmd(
             )?;
             
             // Also save with metadata (the save command handles frontmatter)
-            save_installed_skill(
-                installed.slug.clone(),
-                input.kind.clone(),
-                input.content.clone(),
+            crate::installed_skills::save_installed(
+                &installed.slug,
+                &input.kind,
+                &input.content,
             )?;
             
             (installed.slug, input.name)
@@ -272,10 +275,10 @@ pub async fn save_artifact_cmd(
                 input.kind.clone(),
                 input.content.clone(),
             )?;
-            save_installed_skill(
-                installed.slug.clone(),
-                input.kind.clone(),
-                input.content.clone(),
+            crate::installed_skills::save_installed(
+                &installed.slug,
+                &input.kind,
+                &input.content,
             )?;
             (installed.slug, input.name)
         }
@@ -518,7 +521,8 @@ pub async fn update_artifact_cmd(
 
     // Also update the installed skill on disk — outside the DB lock.
     if let Some((slug, kind, content, stale_slug)) = skill_fs_write {
-        save_installed_skill(slug.clone(), kind.clone(), content).map_err(|e| e.to_string())?;
+        crate::installed_skills::save_installed(&slug, &kind, &content)
+            .map_err(|e| e.to_string())?;
         if let Some(old) = stale_slug {
             let _ = crate::installed_skills::delete_installed(&old, &kind);
         }

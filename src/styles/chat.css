@@ -713,11 +713,19 @@ div[data-index]:has(.chat-session-row.menu-open) {
   background: transparent;
   border: none;
   box-shadow: none;
-  padding: 3px 7px;
+  padding: 3px 5px;
   border-radius: var(--radius-xs);
   font-size: 11px;
   color: var(--text-dim);
   cursor: pointer;
+}
+/* The bar's icons carry 15px attributes (iconProps, shared with the code-block
+   header) — at hover-bar density that read as oversized, so shrink them here
+   rather than at the icon source, which every other surface shares. */
+.chat-msg-action svg,
+.chat-img-overlay-actions .chat-msg-action svg {
+  width: 12px;
+  height: 12px;
 }
 .chat-msg-action:hover {
   color: var(--text);
@@ -962,6 +970,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
   min-width: 0;
   background: transparent;
   border: none;
+  box-shadow: none;
   padding: 2px 0;
   font-size: 12.5px;
   color: var(--text);
@@ -971,9 +980,13 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-thinking-toggle:hover {
   color: var(--text);
   /* Never inherit the global button:hover skin (tokens.css paints a glass
-     pill + strong border on every button) — this is a bare text toggle. */
+     pill + strong border on every button) — this is a bare text toggle. The
+     box-shadow has to be cleared too: --glass-rim-soft is a 1px inset
+     highlight, and on a full-width row it reads as a border above the label
+     (the one this override used to leave behind). */
   background: transparent;
   border: none;
+  box-shadow: none;
 }
 .chat-thinking-toggle svg {
   flex: none;
@@ -1037,8 +1050,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
 }
 .chat-thinking-body {
   margin-top: 4px;
-  padding: 6px 10px;
-  border-left: 2px solid var(--border);
+  padding: 2px 0 2px 2px;
   color: var(--text-dim);
   font-size: 12px;
   font-style: italic;
@@ -1104,6 +1116,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
   color: var(--text-dim);
   background: transparent;
   border: none;
+  /* Same as the thinking toggle: the global button skin's --glass-rim-soft
+     is a 1px inset highlight that reads as a border on this bare text row. */
+  box-shadow: none;
   border-radius: 0;
   cursor: pointer;
   text-align: left;
@@ -1113,6 +1128,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
   color: var(--text);
   background: transparent;
   border: none;
+  box-shadow: none;
 }
 .chat-process.live .chat-process-toggle {
   color: var(--text);
@@ -1723,6 +1739,19 @@ div[data-index]:has(.chat-session-row.menu-open) {
   direction: ltr;
   text-align: left;
 }
+/* Code blocks grow TALLER to fit their content instead of scrolling sideways.
+   Without this a long line gives the block a horizontal scrollbar, and the
+   only way to read past it is to widen the pane — dragging a slider to see
+   code that was already there. `anywhere` also breaks unspaced runs
+   (minified JSON, a long path); the step highlighter sets the same pair
+   inline on its own <pre>. */
+.chat-code-block pre,
+.chat-code-block code,
+.chat-markdown pre,
+.chat-markdown pre code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 /* Markdown links: --link is a dedicated high-contrast token (the gray
    --accent nearly disappears on the dark surface). */
@@ -2088,7 +2117,10 @@ div[data-index]:has(.chat-session-row.menu-open) {
 }
 .chat-jsx-block.pane .chat-jsx-code pre,
 .chat-jsx-block.pane .chat-jsx-code code {
-  white-space: pre;
+  /* Wrap like the chat code blocks: the code view grows taller to fit the
+     file rather than demanding a wider pane to reveal the right-hand side. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 /* Preview/Code tab buttons — icon-only, square. */
 .chat-jsx-tab,
@@ -2588,7 +2620,8 @@ button.chat-mermaid-open {
   font-size: 12px;
   line-height: 1.5;
   overflow-x: auto;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   color: var(--text-dim);
 }
 .chat-mermaid-fallback-actions {

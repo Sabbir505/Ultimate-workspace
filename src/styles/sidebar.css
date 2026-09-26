@@ -847,3 +847,159 @@ button.sidebar-section-label:hover {
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
 }
 
+/* ── Projects sidebar (second panel, beside the main sidebar) ──────────
+   Same liquid-glass recipe and slide-collapse animation as .sidebar: the
+   wrapper carries the glass + width transition and stays mounted; the inner
+   aside keeps a fixed width so content never reflows mid-slide. */
+.projects-sidebar {
+  width: var(--projects-sidebar-width, 284px);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow:
+    var(--glass-rim),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  position: relative;
+  z-index: 3;
+  overflow: hidden;
+  transition: width 0.28s var(--ease, ease), opacity 0.2s ease;
+}
+:root[data-theme="light"] .projects-sidebar {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
+}
+.projects-sidebar.collapsed {
+  width: 0;
+  opacity: 0;
+  border-right-color: transparent;
+  pointer-events: none;
+  visibility: hidden;
+  transition: width 0.28s var(--ease, ease), opacity 0.18s ease,
+    visibility 0s linear 0.28s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .projects-sidebar,
+  .projects-sidebar.collapsed {
+    transition: none;
+  }
+}
+.projects-sidebar > aside {
+  width: var(--projects-sidebar-width, 284px);
+  flex-shrink: 0;
+}
+.projects-sidebar-inner {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.projects-sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 8px 6px;
+  flex-shrink: 0;
+}
+.projects-sidebar-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+}
+/* Expand caret: rotates to "open" like a file-tree disclosure. */
+.projects-sidebar-caret {
+  flex: none;
+  color: var(--text-dim);
+  transition: transform 0.18s var(--ease);
+}
+.projects-sidebar-caret.open {
+  transform: rotate(90deg);
+}
+/* Project repo branch — a quiet chip at the row's right (before the hover
+   actions), matching the nested chat rows' second-line branch text. */
+.projects-sidebar-branch {
+  flex: none;
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+/* Nested chats under an expanded project — indented under the row, each a
+   full .chat-session-row (same pin/rename/menu interactions as Chat
+   History). */
+.projects-sidebar-chats {
+  margin: 1px 0 2px 0;
+  padding-left: 14px;
+}
+.projects-sidebar-chats .chat-session-row {
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+.projects-sidebar-nochats {
+  display: block;
+  padding: 2px 8px 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+/* Stashed project: sinks to the bottom (ordering is component logic) and
+   reads slightly quieter; its stash button stays lit so the state is
+   discoverable. */
+.sidebar-project-node.is-stashed .sidebar-project-name {
+  color: var(--text-dim);
+}
+.sidebar-project-action-btn.is-stashed {
+  color: var(--accent);
+}
+/* Divider between the live list and the stashed tail. */
+.projects-sidebar-stash-divider {
+  height: 1px;
+  margin: 6px 8px;
+  background: var(--border);
+  opacity: 0.6;
+}
+.projects-sidebar-scroll {
+  padding-bottom: 8px;
+}
+.projects-sidebar-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 28px 14px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.projects-sidebar-empty-icon {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.projects-sidebar-empty-add {
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+.projects-sidebar-empty-add:hover {
+  background: var(--surface-3, var(--surface-2));
+}
+

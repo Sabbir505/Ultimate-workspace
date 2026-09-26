@@ -26,6 +26,7 @@ import { initOnboarding, useOnboardingStore } from "./state/onboarding";
 const ToolPanel = lazy(() => import("./components/panes/ToolPanel").then((m) => ({ default: m.ToolPanel })));
 import { PeekPanel } from "./components/peek/PeekPanel";
 import { ProjectSettingsPanel } from "./components/sidebar/ProjectSettingsPanel";
+import { ProjectsSidebar } from "./components/sidebar/ProjectsSidebar";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { AppLogo } from "./components/common/AppLogo";
 import { NotificationBell } from "./components/common/NotificationBell";
@@ -70,6 +71,7 @@ import { initWorkspacePersistence } from "./lib/workspaceRestore";
 import { initAppFocusTracking } from "./lib/appFocus";
 import { monoFontStack, uiFontStack } from "./lib/fonts";
 import { useProjectsStore } from "./state/projects";
+import { useProjectsSidebarStore } from "./state/projectsSidebar";
 import { useSettingsStore } from "./state/settings";
 import { useSkillsStore } from "./state/skills";
 import { useUiStore } from "./state/ui";
@@ -108,6 +110,10 @@ export default function App() {
   const projectSettingsFor = useUiStore((s) => s.projectSettingsFor);
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  // Second sidebar: the Projects panel beside the main sidebar. Kept mounted
+  // (like .sidebar) so open/close animates as a width slide and the panel's
+  // expansion/paging state survives closing it.
+  const projectsSidebarOpen = useProjectsSidebarStore((s) => s.open);
   // View + chat back/forward, exposed in the collapsed rail (and expanded
   // sidebar header) — restores both the view and the chat that was open.
   const { back: navBack, forward: navForward, canBack, canForward } = useViewNav();
@@ -317,6 +323,12 @@ export default function App() {
           transition (visibility) so it can't be interacted with. */}
       <div className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`} aria-hidden={sidebarCollapsed}>
         <Sidebar />
+      </div>
+
+      {/* Projects panel: the nested project/chat tree, right of the main
+          sidebar. Same slide-collapse recipe as .sidebar (kept mounted). */}
+      <div className={`projects-sidebar${projectsSidebarOpen ? "" : " collapsed"}`} aria-hidden={!projectsSidebarOpen}>
+        <ProjectsSidebar />
       </div>
 
       <div className="main">

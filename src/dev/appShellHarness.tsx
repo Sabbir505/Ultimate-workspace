@@ -2,8 +2,10 @@
 // the Tauri IPC stub so view/overlay navigation (chat ↔ vault ↔ settings)
 // can be driven and screenshotted without the Rust backend. Serve `npx vite`,
 // open http://localhost:1500/app-shell-harness.html and drive the stores via
-// window.__ui (ui store: setActiveView / closeOverlay) and window.__vault
-// (vault store: mode / content).
+// window.__ui (ui store: setActiveView / closeOverlay), window.__vault
+// (vault store: mode / content), window.__projects / window.__chat /
+// window.__projectsSidebar (seed projects + nested chats for the Projects
+// panel).
 import "./tauriStub";
 import React from "react";
 import { createRoot } from "react-dom/client";
@@ -12,6 +14,9 @@ import App from "../App";
 import "../styles/global.css";
 import { useUiStore } from "../state/ui";
 import { useVaultStore } from "../state/vault";
+import { useProjectsStore } from "../state/projects";
+import { useChatStore } from "../state/chat";
+import { useProjectsSidebarStore } from "../state/projectsSidebar";
 
 createRoot(document.getElementById("root")!).render(
   <ErrorBoundary>
@@ -21,6 +26,10 @@ createRoot(document.getElementById("root")!).render(
 
 (window as unknown as Record<string, unknown>).__ui = useUiStore;
 (window as unknown as Record<string, unknown>).__vault = useVaultStore;
+(window as unknown as Record<string, unknown>).__projects = useProjectsStore;
+(window as unknown as Record<string, unknown>).__chat = useChatStore;
+(window as unknown as Record<string, unknown>).__projectsSidebar =
+  useProjectsSidebarStore;
 
 // Seed a bound vault + an open note so the live editor / reading view render
 // without the Rust backend (state-only; IPC calls resolve to null).

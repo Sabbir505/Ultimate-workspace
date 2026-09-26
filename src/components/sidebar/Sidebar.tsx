@@ -29,11 +29,13 @@ import {
   Search,
   Settings,
   CalendarClock,
+  Folders,
   X,
   QrCode,
 } from "lucide-react";
 import { VaultIcon } from "../../lib/icons";
 import { useProjectsStore } from "../../state/projects";
+import { useProjectsSidebarStore } from "../../state/projectsSidebar";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { useArtifactsStore } from "../../state/artifacts";
@@ -153,6 +155,9 @@ export function Sidebar() {
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
   const setGitPromptProjectId = useUiStore((s) => s.setGitPromptProjectId);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  // Projects panel (second sidebar) — open state + toggle, persisted.
+  const projectsPanelOpen = useProjectsSidebarStore((s) => s.open);
+  const toggleProjectsSidebar = useProjectsSidebarStore((s) => s.toggleOpen);
   // Browser-style back/forward over views AND visited chats (shared with
   // the collapsed rail so both clusters behave identically).
   const { back: navBack, forward: navForward, canBack, canForward } = useViewNav();
@@ -399,6 +404,19 @@ export function Sidebar() {
             >
               <VaultIcon size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
               <span className="artifact-lib-title-label">Vault</span>
+            </button>
+            {/* Projects — toggles the nested projects panel that opens beside
+                this sidebar (state in useProjectsSidebarStore, persisted). */}
+            <button
+              type="button"
+              onClick={toggleProjectsSidebar}
+              className={`artifact-lib-title ${projectsPanelOpen ? "is-active" : ""}`}
+              style={{ width: "100%" }}
+              title="Open projects"
+              aria-label="Open projects"
+            >
+              <Folders size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
+              <span className="artifact-lib-title-label">Projects</span>
             </button>
           </div>
         </div>

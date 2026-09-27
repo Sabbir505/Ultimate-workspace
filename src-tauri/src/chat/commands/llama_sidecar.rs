@@ -189,12 +189,26 @@ pub async fn start_local_model(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub async fn stop_local_model(
     model_id: String,
     local: State<'_, local_models::LocalModelState>,
+    db: tauri::State<'_, crate::DbState>,
 ) -> CmdResult<()> {
     local.0.stop(&model_id).await;
+    // Clear the persisted endpoint too. `local_base_url` falls back to this
+    // setting when no sidecar is live, and it used to outlive the process — so
+    // every "no local model is running" check downstream (memory extraction,
+    // the memory_save tool) read a DEAD port instead of None, sailed past its
+    // skip, and fired real HTTP requests at it: one extraction call plus one
+    // judge call per candidate, each logging a transport failure. Stopped is
+    // the normal state between sessions, so the skip the commit added almost
+    // never fired.
+    {
+        let conn = db.0.lock();
+        let _ = db::delete_setting(&conn, "chat.local_gguf.base_url");
+        let _ = db::delete_setting(&conn, "chat.local_gguf.model");
+    }
     Ok(())
 }
 

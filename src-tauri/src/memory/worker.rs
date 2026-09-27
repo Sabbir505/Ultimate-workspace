@@ -841,6 +841,20 @@ pub async fn save_memory(
     if model.trim().is_empty() || (api_key.is_empty() && provider_str != "local_gguf") {
         return Err("no chat model configured — cannot judge the memory write".to_string());
     }
+    // Same sidecar guard as the extraction path, for the same reason: without
+    // it this tool fired at a dead port and surfaced a raw connect error to the
+    // model instead of the clean "no local model running" the extraction pass
+    // reports. `local_base_url` returns None only when nothing is live AND the
+    // persisted endpoint is gone (stop_local_model now clears it).
+    if provider_str == "local_gguf"
+        && base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .is_none()
+    {
+        return Err("no local model server is running — cannot judge the memory write".to_string());
+    }
 
     let emb = match embedding_base_url(app) {
         Some(base) => crate::chat::local_models::embed_texts(&base, &[cand.content.clone()])

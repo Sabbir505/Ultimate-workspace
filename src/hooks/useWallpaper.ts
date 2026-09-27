@@ -34,6 +34,15 @@ export function useWallpaper(): void {
       delete root.dataset.wallpaper;
       root.style.removeProperty("--app-wallpaper");
     }
+    // Clear on unmount. `useObjectUrl` revokes the blob when the last holder
+    // releases it, and a revoked blob: URL still sitting in the custom
+    // property paints as NO image — so a window that unmounted this hook (or
+    // a wallpaper that was cleared while a stale URL remained) would blank the
+    // background while the store still claimed a wallpaper was set.
+    return () => {
+      delete root.dataset.wallpaper;
+      root.style.removeProperty("--app-wallpaper");
+    };
   }, [wallpaperUrl]);
 
   useEffect(() => {

@@ -25,10 +25,20 @@ pub struct InstalledSkill {
     pub slug: String,
     pub name: String,
     pub description: String,
-    /// "claude" | "kimi" | "both"
+    /// "claude" | "kimi" | "both" | "project"
     pub source: String,
     pub claude_path: Option<String>,
     pub kimi_path: Option<String>,
+    /// A repo-local copy (`<project>/.claude|agents/<kind>/<slug>`), tracked
+    /// SEPARATELY from the user-level slots. It used to share `claude_path`
+    /// with the user copy, so a single row could hold a project path AND a
+    /// user path at once — and save/delete, which write every populated slot,
+    /// then overwrote the user's GLOBAL skill with an edit made against the
+    /// repo copy, and `remove_dir_all`'d the repo directory along with the
+    /// agent-authored `scripts/` beside the doc. A skill the agent wrote into
+    /// a repo must never be able to reach into `~/.claude` or `~/.agents`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
     /// "skill" | "loop"
     pub kind: String,
 }
@@ -240,8 +250,6 @@ fn scan(kind: &str) -> Vec<InstalledSkill> {
 /// writes back to.
 fn scan_with_projects(kind: &str, projects: &[PathBuf]) -> Vec<InstalledSkill> {
     let mut by_slug: std::collections::BTreeMap<String, InstalledSkill> = Default::default();
-    // Slugs whose ONLY home is a project dir (no user-level harness copy).
-    let mut project_only: std::collections::BTreeSet<String> = Default::default();
     let all_roots = roots(kind)
         .into_iter()
         .chain(project_roots(kind, projects));
@@ -258,10 +266,6 @@ fn scan_with_projects(kind: &str, projects: &[PathBuf]) -> Vec<InstalledSkill> {
                 .map(|c| parse_frontmatter(&c))
                 .unwrap_or((None, None));
             let path_str = doc.to_string_lossy().into_owned();
-            let fresh = !by_slug.contains_key(&slug);
-            if fresh && harness == "project" {
-                project_only.insert(slug.clone());
-            }
             let e = by_slug.entry(slug.clone()).or_insert_with(|| InstalledSkill {
                 slug: slug.clone(),
                 name: name.clone().unwrap_or_else(|| slug.clone()),
@@ -269,16 +273,25 @@ fn scan_with_projects(kind: &str, projects: &[PathBuf]) -> Vec<InstalledSkill> {
                 source: String::new(),
                 claude_path: None,
                 kimi_path: None,
+                project_path: None,
                 kind: kind.trim_end_matches('s').to_string(),
             });
             match harness {
-                "claude" => e.claude_path = Some(path_str),
-                // A project copy is only a fallback for a slug the user-level
-                // scan didn't find — and it shares the claude slot on purpose,
-                // since putting it in `kimi_path` would make one skill look
-                // like it lives in two harnesses.
-                "project" => {
+                // `get_or_insert`, not `= Some(..)`: `name`/`description` come
+                // from the FIRST root scanned (the user's own `~/.claude`),
+                // so a plain overwrite here let a MARKETPLACE copy of the same
+                // slug take over the path — the row then showed the user's name
+                // and description while opening/saving edited a plugin's file,
+                // which the next plugin reinstall silently reverts. First root
+                // wins for every slot, so the row and its paths agree.
+                "claude" => {
                     e.claude_path.get_or_insert(path_str);
+                }
+                // Repo-local copies get their own slot (see `project_path`),
+                // not the claude slot: sharing it is what let a project skill
+                // overwrite the user's global one on save.
+                "project" => {
+                    e.project_path.get_or_insert(path_str);
                 }
                 // Keep the first kimi path found (.agents preferred by order).
                 _ => {
@@ -288,16 +301,15 @@ fn scan_with_projects(kind: &str, projects: &[PathBuf]) -> Vec<InstalledSkill> {
         }
     }
     for e in by_slug.values_mut() {
+        // A row with no user-level home at all is repo-local, and is labelled
+        // as such. When a user-level copy ALSO exists, the row is that user's
+        // skill (the library edits the user copy; see `writable_paths`) and
+        // the project copy is left alone.
         e.source = match (&e.claude_path, &e.kimi_path) {
             (Some(_), Some(_)) => "both",
-            (Some(_), None) => {
-                if project_only.contains(&e.slug) {
-                    "project"
-                } else {
-                    "claude"
-                }
-            }
-            _ => "kimi",
+            (Some(_), None) => "claude",
+            (None, Some(_)) => "kimi",
+            (None, None) => "project",
         }
         .to_string();
     }
@@ -325,8 +337,35 @@ pub fn read_installed_with(slug: &str, kind: &str, projects: &[PathBuf]) -> Opti
     let s = scan_with_projects(kind, projects)
         .into_iter()
         .find(|s| s.slug == slug)?;
-    let path = s.claude_path.or(s.kimi_path)?;
-    fs::read_to_string(path).ok()
+    fs::read_to_string(primary_path(&s)?).ok()
+}
+
+/// The file the library opens for this entry: the user's own copy when there
+/// is one, else the repo-local copy. A row is a user-level skill as soon as
+/// the user has a copy — the library shows that skill's name and description,
+/// so it must read and write the same file the row was built from.
+fn primary_path(s: &InstalledSkill) -> Option<&str> {
+    s.claude_path
+        .as_deref()
+        .or(s.kimi_path.as_deref())
+        .or(s.project_path.as_deref())
+}
+
+/// The files a save may write, and a delete may remove. Deliberately NOT
+/// "every populated slot": when a project copy and a user copy share a slug,
+/// only the USER copies are touched. The library row is the user's skill (its
+/// name/description come from the user file), so saving must not push repo
+/// content into `~/.claude`/`~/.agents` — that silently rewrote the global
+/// skill for every other project — and deleting must not reach into a repo
+/// directory. A project-only skill (no user copy) still round-trips through
+/// its own path.
+fn writable_paths(s: &InstalledSkill) -> Vec<&str> {
+    let user: Vec<&str> = s.claude_path.iter().chain(s.kimi_path.iter()).map(String::as_str).collect();
+    if user.is_empty() {
+        s.project_path.iter().map(String::as_str).collect()
+    } else {
+        user
+    }
 }
 
 /// The built-in skills, embedded at compile time. Bodies are the raw
@@ -491,8 +530,8 @@ pub fn save_installed_with(
         .find(|s| s.slug == slug)
         .ok_or_else(|| format!("no installed {kind} named {slug}"))?;
     let mut wrote = false;
-    for path in [s.claude_path, s.kimi_path].into_iter().flatten() {
-        fs::write(&path, content).map_err(|e| format!("write {path}: {e}"))?;
+    for path in writable_paths(&s) {
+        fs::write(path, content).map_err(|e| format!("write {path}: {e}"))?;
         wrote = true;
     }
     if wrote {
@@ -536,6 +575,9 @@ pub fn create_installed(name: &str, kind: &str, content: &str) -> Result<Install
         source: "both".into(),
         claude_path,
         kimi_path,
+        // Always created in the two USER harness roots; the next scan fills
+        // this in if the slug also exists inside a project.
+        project_path: None,
         kind: kind.trim_end_matches('s').to_string(),
     })
 }
@@ -554,10 +596,19 @@ pub fn delete_installed_with(
         .into_iter()
         .find(|s| s.slug == slug)
         .ok_or_else(|| format!("no installed {kind} named {slug}"))?;
-    for path in [s.claude_path, s.kimi_path].into_iter().flatten() {
-        if let Some(dir) = PathBuf::from(&path).parent().map(|p| p.to_path_buf()) {
-            // Only remove the directory we just identified as a skill dir.
-            if dir.join("SKILL.md").exists() || dir.join("LOOP.md").exists() || path.ends_with(".md") {
+    for path in writable_paths(&s) {
+        if let Some(dir) = PathBuf::from(path).parent().map(|p| p.to_path_buf()) {
+            // Only remove a directory this scan positively identified as a
+            // skill dir — i.e. one whose own canonical doc is SKILL.md/LOOP.md.
+            // The old guard also accepted `path.ends_with(".md")`, which is
+            // vacuous: `doc_file` only ever returns a `.md`, so it always
+            // passed. That let `doc_file`'s "first .md" fallback turn a Delete
+            // into a recursive wipe of a directory whose real contents were
+            // `scripts/` and `references/`. Before project roots were scanned
+            // the blast radius was one harness dir; now it reached into the
+            // user's repos.
+            let canonical = dir.join("SKILL.md").is_file() || dir.join("LOOP.md").is_file();
+            if canonical {
                 let _ = fs::remove_dir_all(&dir);
             }
         }
@@ -644,6 +695,31 @@ pub fn slugify(name: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The scan roots are derived from `HOME`/`USERPROFILE` at call time, and
+    /// `cargo test` runs these in parallel threads of ONE process — so a test
+    /// that repoints HOME at its fixture silently breaks every other test
+    /// reading the same variable. Every test that touches those env vars holds
+    /// this for its whole body.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Point HOME/USERPROFILE at `dir` and hand back a restore closure.
+    fn use_home(dir: &std::path::Path) -> impl Fn() {
+        let prev_home = std::env::var("HOME").ok();
+        let prev_profile = std::env::var("USERPROFILE").ok();
+        std::env::set_var("USERPROFILE", dir);
+        std::env::set_var("HOME", dir);
+        invalidate_skill_cache();
+        move || {
+            if let Some(v) = prev_home.clone() {
+                std::env::set_var("HOME", v);
+            }
+            if let Some(v) = prev_profile.clone() {
+                std::env::set_var("USERPROFILE", v);
+            }
+            invalidate_skill_cache();
+        }
+    }
+
     #[test]
     fn slugify_basics() {
         assert_eq!(slugify("Audit AI Slop"), "audit-ai-slop");
@@ -709,11 +785,11 @@ mod tests {
 
     #[test]
     fn create_writes_both_roots() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Point HOME/USERPROFILE at a temp dir for hermetic roots.
         let tmp = std::env::temp_dir().join(format!("relay-skills-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
-        std::env::set_var("USERPROFILE", &tmp);
-        std::env::set_var("HOME", &tmp);
+        let restore = use_home(&tmp);
         let created = create_installed("Test Thing", "skills", "do the thing").unwrap();
         assert_eq!(created.slug, "test-thing");
         assert_eq!(created.source, "both");
@@ -732,6 +808,7 @@ mod tests {
         assert_eq!(read_installed("test-thing", "skills").unwrap(), "new body");
         delete_installed("test-thing", "skills").unwrap();
         assert!(list_installed("skills").iter().all(|s| s.slug != "test-thing"));
+        drop(restore);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -766,6 +843,91 @@ mod tests {
         // Invisible to the home-only scan the chat `/` menu uses — and no
         // stray copy lands in the user's harness dirs.
         assert!(list_installed("skills").iter().all(|s| s.slug != slug));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A slug that exists BOTH in the user's harness dir and inside a project
+    /// must not let a repo-local edit reach into the user's global skill.
+    ///
+    /// The project copy used to share the `claude_path` slot, so one row held a
+    /// project path AND a user path, and save/delete — which write every
+    /// populated slot — rewrote `~/.claude/skills/<slug>/SKILL.md` from an edit
+    /// made against the repo copy (silently changing the skill for every other
+    /// project), and `remove_dir_all`'d the repo directory on Delete.
+    #[test]
+    fn project_copy_never_overwrites_the_users_global_skill() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let slug = format!("collide-{}", uuid::Uuid::new_v4());
+        let home = std::env::temp_dir().join(format!("relay-home-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("relay-proj-{}", uuid::Uuid::new_v4()));
+        let user_dir = home.join(".claude").join("skills").join(&slug);
+        let proj_dir = root.join(".agents").join("skills").join(&slug);
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        let user_body = format!("---\nname: {slug}\ndescription: the user's copy\n---\n\nUSER");
+        let proj_body = format!("---\nname: {slug}\ndescription: the repo copy\n---\n\nREPO");
+        std::fs::write(user_dir.join("SKILL.md"), &user_body).unwrap();
+        std::fs::write(proj_dir.join("SKILL.md"), &proj_body).unwrap();
+
+        let restore = use_home(&home);
+
+        let found = list_installed_with_projects("skills", &[root.clone()]);
+        let entry = found
+            .iter()
+            .find(|s| s.slug == slug)
+            .expect("colliding skill must be listed");
+        // The row is the USER's skill — that is where its name/description
+        // come from — and the two copies are tracked in separate slots.
+        assert_eq!(entry.source, "claude");
+        assert_eq!(entry.claude_path.as_deref(), Some(user_dir.join("SKILL.md").to_str().unwrap()));
+        assert_eq!(entry.project_path.as_deref(), Some(proj_dir.join("SKILL.md").to_str().unwrap()));
+
+        // Reading returns the user's copy, matching the row's metadata.
+        assert_eq!(
+            read_installed_with(&slug, "skills", &[root.clone()]).as_deref(),
+            Some(user_body.as_str())
+        );
+
+        // Saving rewrites ONLY the user's copy.
+        save_installed_with(&slug, "skills", "EDITED", &[root.clone()]).unwrap();
+        assert_eq!(std::fs::read_to_string(user_dir.join("SKILL.md")).unwrap(), "EDITED");
+        assert_eq!(
+            std::fs::read_to_string(proj_dir.join("SKILL.md")).unwrap(),
+            proj_body,
+            "a repo-local skill must not be rewritten by an edit aimed at the user's copy"
+        );
+
+        drop(restore);
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A project skill dir with no canonical `SKILL.md` (only supporting
+    /// files) must not be `remove_dir_all`'d: `doc_file`'s "first .md" fallback
+    /// used to satisfy a guard that was therefore vacuous, so one Delete click
+    /// wiped the directory including the agent-authored `scripts/` beside it.
+    #[test]
+    fn delete_leaves_a_directory_without_a_canonical_skill_doc() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let slug = format!("noskillmd-{}", uuid::Uuid::new_v4());
+        let root = std::env::temp_dir().join(format!("relay-proj-{}", uuid::Uuid::new_v4()));
+        let dir = root.join(".claude").join("skills").join(&slug);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("README.md"), "notes").unwrap();
+        std::fs::write(dir.join("scripts").join("deploy.sh"), "echo hi").unwrap();
+
+        let home = std::env::temp_dir().join(format!("relay-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let restore = use_home(&home);
+
+        delete_installed_with(&slug, "skills", &[root.clone()]).unwrap();
+        assert!(
+            dir.join("scripts").join("deploy.sh").is_file(),
+            "a directory with no SKILL.md/LOOP.md must be left alone, not wiped"
+        );
+
+        drop(restore);
+        std::fs::remove_dir_all(&home).ok();
         std::fs::remove_dir_all(&root).ok();
     }
 }

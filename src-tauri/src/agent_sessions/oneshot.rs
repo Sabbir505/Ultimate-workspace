@@ -940,10 +940,18 @@ pub(super) fn one_shot_spec(
 
 // ---------------------------------------------------------------- tool markers
 
-/// A tool's own content must never contain the closing tag or it would
-/// truncate the marker on the client (same defense as chat/proto.rs).
+/// A tool's own content must never contain the structural tags or it would
+/// corrupt the block on the client (same defense as chat/proto.rs). This used
+/// to escape only `</tool>`, but the client parser's invariant is that marker
+/// content carries NO live opener in EITHER direction: a literal `<tool>` in a
+/// write_file body (an HTML fixture using a custom `<tool>` element, or a
+/// saved sample of the marker format) starts a new segment inside the real
+/// one, and a literal `<think>` opens a phantom thinking block. Either one
+/// truncates the real payload and silently drops it from the turn — a diff
+/// card that never renders, shell output that vanishes. Delegates to the one
+/// shared escaper so the two paths can't drift again.
 pub(super) fn sanitize(v: String) -> String {
-    v.replace("</tool>", "<\\/tool>")
+    crate::chat::streaming::neutralize_markers(&v)
 }
 
 /// Claude Code tool_use block → `<tool>{json}</tool>` marker (same shapes as

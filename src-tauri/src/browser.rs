@@ -1961,6 +1961,8 @@ impl BrowserManager {
             let label_for_nav = label.clone();
             let app_for_load = self.app.clone();
             let label_for_load = label.clone();
+            let label_for_popup = label.clone();
+            let app_for_popup = self.app.clone();
             let pane_for_title = event_pane_id.clone();
             let tab_for_title = event_tab_id.clone();
             let blank: tauri::Url = "about:blank".parse().expect("about:blank is a valid url");
@@ -2073,15 +2075,36 @@ impl BrowserManager {
                         eprintln!("[relay:browser] new_window: blank popup — allowing real popup window (OAuth)");
                         return NewWindowResponse::Allow;
                     }
-                    eprintln!("[relay:browser] new_window: {new_url} — navigating in-place");
-                    let _ = app2.emit(
-                        "browser:navigated",
-                        BrowserNavigatedEvent {
-                            pane_id: event_pane_id2.clone(),
-                            tab_id: event_tab_id2.clone(),
-                            url: new_url.to_string(),
-                        },
-                    );
+                    // A real destination: open it IN THIS PANE, like the
+                    // Windows path does with `core.Navigate`. Returning Deny
+                    // without navigating, while announcing
+                    // `browser:navigated` first, left the two halves
+                    // disagreeing: that event now ARMS the spinner and rewrites
+                    // the address bar, so every `<a target="_blank">` click and
+                    // `window.open(url)` left the bar showing the new URL over
+                    // the OLD page, with the spinner running until the 45s
+                    // safety net. Navigating for real makes both true — the
+                    // pane's own nav/load events then drive the spinner to a
+                    // correct end state. If the webview is gone (tab closed
+                    // mid-click) there is nothing to navigate, so stay silent
+                    // rather than announce a navigation that cannot happen.
+                    let navigated = match app_for_popup.get_webview(&label_for_popup) {
+                        Some(w) => w.navigate(new_url.clone()).is_ok(),
+                        None => false,
+                    };
+                    if navigated {
+                        eprintln!("[relay:browser] new_window: {new_url} — navigating in-place");
+                        let _ = app2.emit(
+                            "browser:navigated",
+                            BrowserNavigatedEvent {
+                                pane_id: event_pane_id2.clone(),
+                                tab_id: event_tab_id2.clone(),
+                                url: new_url.to_string(),
+                            },
+                        );
+                    } else {
+                        eprintln!("[relay:browser] new_window: {new_url} — pane gone, ignoring");
+                    }
                     NewWindowResponse::Deny
                 });
 

@@ -94,15 +94,47 @@ export function maskRelayAsk(content: string): string {
 
 const RELAY_ASK_MARKER = "RELAY_ASK:";
 
-/** Index of a `<tool>` opener inside an unterminated `<think>` body that is
- *  almost certainly a real tool marker rather than reasoning that mentions
- *  one. The backend always wraps tool payloads in a JSON object, so requiring
- *  a `{` right after the opener keeps prose ("the <tool> marker the harness
- *  emits…") from being split mid-sentence. */
+/** True when `s` is a complete JSON object literal — the shape every tool
+ *  payload has. `JSON.parse` on a *prefix* of a real payload fails, so a
+ *  partial marker correctly reads as "not a marker yet". */
+function isJsonObject(s: string): boolean {
+  try {
+    const v = JSON.parse(s) as unknown;
+    return v !== null && typeof v === "object" && !Array.isArray(v);
+  } catch {
+    return false;
+  }
+}
+
+/** Index of a `<tool>` opener inside an unterminated `<think>` body that is a
+ *  REAL tool marker rather than reasoning that merely mentions one.
+ *
+ *  Requiring only a `{` after the opener was not enough: a model reasoning
+ *  *about* the marker format writes `<tool>{"kind":"tool"}` in prose, which
+ *  passed that test and cut the sentence in half. Everything after the cut
+ *  was then re-parsed as a tool body with no `</tool>` anywhere ahead of it,
+ *  so the loop hit `end === -1` and DROPPED every remaining token of the
+ *  reply — replaced by a phantom tool row that spins forever, in the live
+ *  stream and in every later read of the persisted message.
+ *
+ *  So a split is only taken on a marker that is complete AND parses as a JSON
+ *  object. That keeps the important invariant: any split this function
+ *  authorizes produces a well-formed tool segment, so the parse always makes
+ *  progress and can never discard the tail. Markers are emitted atomically by
+ *  the backend (the whole `<tool>{json}</tool>` string at once), so waiting
+ *  for the close costs nothing. */
 function toolMarkerBoundary(s: string): number {
-  const i = s.indexOf("<tool>");
-  if (i === -1) return -1;
-  return s.slice(i + "<tool>".length).trimStart().startsWith("{") ? i : -1;
+  let from = 0;
+  for (;;) {
+    const i = s.indexOf("<tool>", from);
+    if (i === -1) return -1;
+    from = i + "<tool>".length;
+    const afterOpen = s.slice(from);
+    if (!afterOpen.trimStart().startsWith("{")) continue;
+    const close = afterOpen.indexOf("</tool>");
+    if (close === -1) continue;
+    if (isJsonObject(afterOpen.slice(0, close))) return i;
+  }
 }
 
 /** Split an assistant message into ordered segments: plain markdown text,
@@ -184,8 +216,12 @@ export function parseSegments(content: string): Segment[] {
     // Repaired nesting (a tool marker split a think block open): that block's
     // real `</think>` now trails the marker's own close, orphaned. Drop it so
     // the internal channel never surfaces as literal text in the transcript.
-    if (rest.startsWith("</think>")) {
-      rest = rest.slice("</think>".length);
+    // Tolerates leading whitespace — a marker quoted in prose is often
+    // followed by a space ("`<tool>{…}</tool>` exactly"), and a strict
+    // startsWith leaked the literal tag into the rendered message.
+    const orphan = rest.match(/^\s*<\/think>/);
+    if (orphan) {
+      rest = rest.slice(orphan[0].length);
     }
   }
   return segs;

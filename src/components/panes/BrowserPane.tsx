@@ -219,6 +219,17 @@ export function BrowserPane({ pane, visible = true }: Props) {
     if (!fullscreen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // Registered in the CAPTURE phase on `window`, so this runs BEFORE every
+      // other Escape handler in the app: the palette, Modal and the hotkey
+      // sheet all register on `document` (also capture, but further down the
+      // propagation path), and the rest bubble from the target. Claiming the
+      // key unconditionally therefore swallowed their Escape as well — pressing
+      // Escape to dismiss the palette dropped the pane out of full screen and
+      // left the palette open. Stand down whenever an overlay owns the key, and
+      // defer to anything that already claimed it.
+      if (e.defaultPrevented) return;
+      const ui = useUiStore.getState();
+      if (ui.modalOpen || ui.paletteOpen || ui.hotkeyOverlayOpen || ui.peek.open) return;
       e.preventDefault();
       e.stopPropagation();
       setBrowserFullscreen(paneId, false);
@@ -896,7 +907,10 @@ export function BrowserPane({ pane, visible = true }: Props) {
         setTabStates((prev) => {
           const next = new Map(prev);
           const existing = next.get(activeTabId);
-          if (existing) next.set(activeTabId, { ...existing, loadFailed: true });
+          // Clear `loading` too, like the navigate-timeout twin above: a
+          // reload on an XFO-blocked page left the spinner AND the "didn't
+          // respond" card on screen together, with nothing to reconcile them.
+          if (existing) next.set(activeTabId, { ...existing, loading: false, loadFailed: true });
           return next;
         });
       }, LOAD_TIMEOUT_MS),

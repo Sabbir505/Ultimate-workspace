@@ -604,6 +604,17 @@ pub(super) fn read_per_turn_stream(
     // frames never arrived — finalize the panel entries so they don't spin
     // forever (mirrors the claude reader's EOF drain).
     tools.fail_pending(app, sid, "The CLI exited before this agent reported completion.");
+    // Same at EOF for the block itself: the process can die mid-thought (killed
+    // by a provider error, an OOM, a crash), and the claude reader already
+    // closes here. Left open, the rest of the turn is parsed as reasoning — a
+    // "Thinking…" row that never resolves, with the tail of the reply sealed
+    // inside it. Must close BEFORE the RELAY_ASK scan and the persist below,
+    // or the closed-off tail is written to the transcript that way.
+    if in_think {
+        full.push_str("</think>");
+        emit_token(app, sid, "</think>");
+        in_think = false;
+    }
     // Process exit closes the turn. Persist any captured CLI session id so
     // the next turn (even after cancel or an app restart) resumes the same
     // conversation. If the turn was cancelled, discard the partial reply —

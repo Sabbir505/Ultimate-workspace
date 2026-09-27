@@ -38,7 +38,7 @@ function Harness() {
   useEffect(() => {
     api = scroll as unknown as ScrollApi;
   }, [scroll]);
-  return <div data-testid="transcript" ref={scroll.messagesContainerRef} />;
+  return <div data-testid="transcript" ref={scroll.messagesContainerCallbackRef} />;
 }
 
 beforeEach(() => {

@@ -598,8 +598,14 @@ pub(super) fn handle_pi_event(
                     }
                 }
                 // Stream-level failure: surface the provider's message inline
-                // so the turn doesn't close with an empty reply.
+                // so the turn doesn't close with an empty reply. Reasoning may
+                // still be open here (a rate-limit or provider failure often
+                // lands mid-thought), and an unclosed `<think>` swallows
+                // everything after it — the message would be trapped in a
+                // "Thinking…" block that never resolves, hiding the actual
+                // diagnosis. Close the block before appending.
                 Some("error") => {
+                    close_open_think(app, sid, full, in_think);
                     let msg = pi_message_text(ev.get("error"))
                         .unwrap_or_else(|| "the CLI reported an error".to_string());
                     full.push_str(&msg);
@@ -735,6 +741,9 @@ pub(super) fn handle_commandcode_event(
             let ty = inner.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match ty {
                 "run_error" => {
+                    // A run that fails mid-thought would otherwise strand the
+                    // error inside an unterminated thinking block.
+                    close_open_think(app, sid, full, in_think);
                     let msg = inner
                         .pointer("/error/message")
                         .and_then(|m| m.as_str())
@@ -917,6 +926,10 @@ pub(super) fn handle_commandcode_event(
             if v.get("subtype").and_then(|s| s.as_str()) == Some("error") {
                 if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
                     if !err.trim().is_empty() && !full.contains(err) {
+                        // Same trap as the other error arms: reasoning left
+                        // open at a terminal error hides the error text inside
+                        // a "Thinking…" block that never resolves.
+                        close_open_think(app, sid, full, in_think);
                         full.push_str(err);
                         emit_token(app, sid, err);
                     }
@@ -986,5 +999,68 @@ mod tests {
         let mut in_think = false;
         close_open_think(None, "test-close-think-idle", &mut full, &mut in_think);
         assert_eq!(full, "plain text");
+    }
+
+    /// A stream that dies MID-THOUGHT used to leave `<think>` open, so the error
+    /// text was appended inside it. The frontend parses an unterminated think
+    /// as swallowing the rest of the buffer: the turn rendered as a collapsed
+    /// "Thinking…" row that spins forever, with the actual diagnosis (a rate
+    /// limit, a provider failure) sealed inside it — and persisted that way.
+    #[test]
+    fn pi_error_after_thinking_closes_the_block_first() {
+        let mut full = String::new();
+        let mut in_think = false;
+        let session_cell = Arc::new(Mutex::new(None));
+        let mut input = None;
+        let mut output = None;
+        let mut cache_read = None;
+        let mut cache_creation = None;
+        let mut cost = None;
+        let mut tools = ToolTracker::new();
+
+        handle_pi_event(
+            None,
+            "test-pi-error",
+            &serde_json::json!({
+                "type": "message_update",
+                "assistantMessageEvent": { "type": "thinking_delta", "delta": "Checking the rate limit headers first." }
+            }),
+            &mut full,
+            &session_cell,
+            &mut input,
+            &mut output,
+            &mut cache_read,
+            &mut cache_creation,
+            &mut cost,
+            &mut in_think,
+            &mut tools,
+        );
+        assert!(in_think, "the thinking delta should have opened the block");
+        assert!(!full.contains("</think>"));
+
+        handle_pi_event(
+            None,
+            "test-pi-error",
+            &serde_json::json!({
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "error",
+                    "error": { "content": [{ "type": "text", "text": "429 rate limit exceeded" }] }
+                }
+            }),
+            &mut full,
+            &session_cell,
+            &mut input,
+            &mut output,
+            &mut cache_read,
+            &mut cache_creation,
+            &mut cost,
+            &mut in_think,
+            &mut tools,
+        );
+
+        assert!(!in_think, "the error must close the reasoning block");
+        // The diagnosis lands OUTSIDE the block, so the transcript can render it.
+        assert!(full.contains("</think>429 rate limit exceeded"), "got: {full}");
     }
 }

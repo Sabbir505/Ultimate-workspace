@@ -8,12 +8,12 @@
 // in NEITHER the shell nor the previews: the custom upload showed no preview at
 // all while the bundled presets (small, referenced by URL) always did.
 //
-// Converting per call site would also build three separate Blobs and leak two
-// of them, so the conversion is memoized on the data URL and revoked when it
-// changes.
+// The conversion is refcounted and shared: every holder of the same data URL
+// gets the same blob URL, and the blob is revoked only when the last one lets
+// go (see lib/objectUrl.ts).
 import { useEffect, useState } from "react";
 
-import { dataUrlToObjectUrl } from "../lib/objectUrl";
+import { acquireObjectUrl, releaseObjectUrl } from "../lib/objectUrl";
 
 /** `dataUrl` → a `blob:` URL the browser accepts anywhere, or `null` when
  *  there is nothing to show. Non-data input (a bundled preset path) passes
@@ -31,9 +31,9 @@ export function useObjectUrl(dataUrl: string | null | undefined): string | null 
       setObjectUrl(dataUrl);
       return;
     }
-    const url = dataUrlToObjectUrl(dataUrl);
+    const url = acquireObjectUrl(dataUrl);
     setObjectUrl(url);
-    return () => URL.revokeObjectURL(url);
+    return () => releaseObjectUrl(dataUrl);
   }, [dataUrl]);
 
   return objectUrl;

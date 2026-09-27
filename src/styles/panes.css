@@ -212,6 +212,15 @@
   flex: 1 1 auto;
   min-height: 0;
 }
+/* A full-screen browser pane is the whole window, not a tab of the tool panel,
+   so the panel's "the tab bar replaces the headers" rule must not apply — it
+   hid the header carrying the Exit button, leaving the pane with no visible
+   way out once the native webview held keyboard focus (the app window sees no
+   keydown then, so neither Escape nor F11 arrives either). Needs the extra
+   specificity to beat `.tool-panel .pane-header { display: none }`. */
+.tool-panel .pane.pane-fullscreen > .pane-header {
+  display: flex;
+}
 
 .pane-header {
   display: flex;

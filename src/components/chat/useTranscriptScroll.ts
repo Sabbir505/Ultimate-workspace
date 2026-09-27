@@ -24,6 +24,31 @@ function visualScale(el: HTMLElement): number {
   return rect.width > 0 && el.offsetWidth > 0 ? rect.width / el.offsetWidth : 1;
 }
 
+/** True when a scrollable element between `target` and the transcript root can
+ *  consume a gesture of `deltaY`, i.e. the transcript itself will not move.
+ *  Walks up from the event target and stops at `el`, so a scroller OUTSIDE the
+ *  transcript (the composer dock, the page) never matches.
+ *
+ *  Direction matters: a scroller that is already at its end in the gesture's
+ *  direction chains the overflow to its parent, which IS the transcript, so it
+ *  must not be treated as having consumed the gesture. */
+function innerScrollerCanScroll(el: HTMLElement, target: EventTarget | null, deltaY: number): boolean {
+  if (!(target instanceof Node)) return false;
+  const up = deltaY < 0;
+  for (
+    let n: Element | null = target instanceof Element ? target : target.parentElement;
+    n && n !== el;
+    n = n.parentElement
+  ) {
+    if (!(n instanceof HTMLElement)) continue;
+    const overflowY = getComputedStyle(n).overflowY;
+    if (overflowY !== "auto" && overflowY !== "scroll") continue;
+    if (n.scrollHeight <= n.clientHeight) continue;
+    if (up ? n.scrollTop > 0 : n.scrollTop < n.scrollHeight - n.clientHeight) return true;
+  }
+  return false;
+}
+
 export function useTranscriptScroll({
   activeChatSessionId,
   hasMoreHistory,
@@ -53,7 +78,26 @@ export function useTranscriptScroll({
   followNonce?: number;
 }) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  // Mutable (not `useRef<HTMLDivElement>(null)`, whose `current` is readonly
+  // under React 19 types) because the callback ref below writes to it.
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  // The transcript element as STATE, not just a ref. ChatView renders it
+  // CONDITIONALLY (`!activeChatSessionId || hasItems ? <div …/> : <ChatWelcome/>`),
+  // and on ChatView's first commit the buffer is always empty — so the div does
+  // not exist yet and `messagesContainerRef.current` is null. Any effect with
+  // `[]` deps that reads the ref therefore bails and NEVER re-runs, so its
+  // listeners stayed unbound for the rest of the ChatView's life: wheel-up
+  // mid-stream was swallowed by the pin-suppression window and the view was
+  // yanked back — exactly the bug the input listeners were added to fix. Every
+  // such effect now depends on this and re-arms when the div mounts.
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
+  /** Callback ref for the transcript div: keeps the plain ref (for
+   *  `getScrollElement` and the many `.current` reads) AND mirrors the element
+   *  into state so mount/unmount re-runs the effects that attach to it. */
+  const messagesContainerCallbackRef = useCallback((el: HTMLDivElement | null) => {
+    messagesContainerRef.current = el;
+    setContainerEl(el);
+  }, []);
   // The composer dock FLOATS over the transcript, so the message list must
   // reserve the dock's real height as bottom padding — a hardcoded constant
   // goes stale the moment the composer grows a line or a queue/approval/
@@ -234,7 +278,7 @@ export function useTranscriptScroll({
   // the time the stream's next pin checks it. Scrolling DOWN never breaks the
   // latch: returning to the live edge re-arms it (see handleScroll).
   useEffect(() => {
-    const el = messagesContainerRef.current;
+    const el = containerEl;
     if (!el) return;
     const noteUpward = (deltaY: number) => {
       userIntentUntilRef.current = performance.now() + USER_INTENT_WINDOW_MS;
@@ -242,23 +286,55 @@ export function useTranscriptScroll({
       stickToBottomRef.current = false;
       setAwayFromLive(true);
     };
-    const onWheel = (e: WheelEvent) => noteUpward(e.deltaY);
-    // touchmove reports no meaningful deltaY on every browser, so any touch
-    // drag counts as intent to leave the live edge.
-    const onTouchMove = () => noteUpward(-1);
+    const onWheel = (e: WheelEvent) => {
+      // The transcript embeds its own scrollers — the expanded thinking body
+      // (max-height 250px) and the compacted-turns list (320px). A wheel
+      // gesture consumed by one of those doesn't move the transcript at all,
+      // yet it used to break follow anyway: the live edge stopped tracking and
+      // the "Jump to latest" pill appeared while the viewport was still parked
+      // on the newest message. Ignore gestures an inner scroller can consume.
+      if (innerScrollerCanScroll(el, e.target, e.deltaY)) return;
+      noteUpward(e.deltaY);
+    };
+    // touchmove reports no meaningful deltaY on every browser, so the gesture
+    // has to be classified by tracking the start point. Horizontal swipes and
+    // text-selection drags don't scroll the transcript and must not count.
+    let touchStart: { x: number; y: number } | null = null;
+    const onTouchStart = (e: TouchEvent) => {
+      const t = e.touches[0];
+      touchStart = t ? { x: t.clientX, y: t.clientY } : null;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      const t = e.touches[0];
+      if (!t || !touchStart) return;
+      const dy = t.clientY - touchStart.y;
+      const dx = t.clientX - touchStart.x;
+      touchStart = { x: t.clientX, y: t.clientY };
+      // Only a predominantly VERTICAL drag is a scroll of the live edge; a
+      // horizontal swipe (carousel, code block) leaves the transcript alone.
+      if (Math.abs(dy) <= Math.abs(dx)) return;
+      if (innerScrollerCanScroll(el, e.target, dy)) return;
+      noteUpward(dy);
+    };
     // Scrollbar drags emit no wheel/touch — pointerdown is the only signal.
     const onPointerDown = () => {
       userIntentUntilRef.current = performance.now() + USER_INTENT_WINDOW_MS;
     };
     el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
     el.addEventListener("touchmove", onTouchMove, { passive: true });
     el.addEventListener("pointerdown", onPointerDown, { passive: true });
     return () => {
       el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchstart", onTouchStart);
       el.removeEventListener("touchmove", onTouchMove);
       el.removeEventListener("pointerdown", onPointerDown);
     };
-  }, []);
+    // `containerEl`, not `[]`: the transcript div mounts AFTER this hook's
+    // first effect on a fresh ChatView (the buffer starts empty, so the
+    // welcome screen renders first). With `[]` these listeners never attached
+    // at all, leaving the yank this effect exists to prevent.
+  }, [containerEl]);
 
   /** The scrollTop that pins the viewport to the live edge, computed from
    *  MEASURED content — the last mounted virtual row plus the in-flow tail
@@ -543,7 +619,7 @@ export function useTranscriptScroll({
   // across the reflow (deferred a frame so measurements land post-layout;
   // the pin's own writes are programmatic-guarded, so they can't unstick).
   useEffect(() => {
-    const el = messagesContainerRef.current;
+    const el = containerEl;
     if (!el || typeof ResizeObserver === "undefined") return;
     let raf = 0;
     let frame = 0;
@@ -563,7 +639,10 @@ export function useTranscriptScroll({
       ro.disconnect();
       cancelAnimationFrame(raf);
     };
-  }, []);
+    // `containerEl` for the same reason as the input listeners: with `[]`
+    // this bailed on the fresh-ChatView mount (div not yet rendered) and
+    // never observed anything, so resizes silently unstuck the transcript.
+  }, [containerEl]);
 
   // Switching sessions resets to the bottom of the new conversation — and
   // resets the measurement mirrors with it: `liveTotal` is a height from the
@@ -717,6 +796,9 @@ export function useTranscriptScroll({
   return {
     messagesEndRef,
     messagesContainerRef,
+    /** Callback ref for the transcript div — ChatView must use THIS (not the
+     *  plain ref) so the mount is reported to the effects that attach to it. */
+    messagesContainerCallbackRef,
     composerDockRef,
     composerDockHeight,
     liveTotal,

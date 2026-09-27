@@ -15,6 +15,14 @@ fn project_paths(db: &crate::DbState) -> Vec<PathBuf> {
     crate::db::list_projects(&conn)
         .unwrap_or_default()
         .into_iter()
+        // A project on an unmounted volume (ejected USB, offline share) costs
+        // a filesystem timeout on every scan, and adding project roots made
+        // the scan run on every skill command. `is_dir()` is a cheap stat on
+        // a local path and drops the unreachable roots before `read_dir`
+        // touches them. UNC paths are a remote round-trip by nature; those
+        // stay, bounded by the `spawn_blocking` hops below rather than
+        // stalling the UI thread.
+        .filter(|p| !p.path.is_empty() && PathBuf::from(&p.path).is_dir())
         .map(|p| PathBuf::from(p.path))
         .collect()
 }
@@ -44,12 +52,17 @@ pub async fn list_installed_loops(db: tauri::State<'_, crate::DbState>) -> CmdRe
 
 /// Every skill the chat `/` menu can offer: on-disk harness skills merged with
 /// the built-in doc/pptx/pdf/diagram skills (on-disk wins on slug collision).
-#[tauri::command]
+///
+/// `async` = run the body on a worker thread. A plain `fn` command runs inline
+/// on the IPC/UI thread (see the rule in lib.rs), and this one walks the home
+/// harness dirs — on the hot path, since the composer's `/` menu calls it every
+/// time the picker opens.
+#[tauri::command(async)]
 pub fn list_chat_skills() -> CmdResult<Vec<AvailableSkill>> {
     Ok(installed_skills::list_all_skills())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_installed_skill(
     slug: String,
     kind: String,
@@ -62,7 +75,7 @@ pub fn read_installed_skill(
     ))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_installed_skill(
     slug: String,
     kind: String,
@@ -72,12 +85,12 @@ pub fn save_installed_skill(
     installed_skills::save_installed_with(&slug, &kind_key(&kind), &content, &project_paths(&db))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_installed_skill(name: String, kind: String, content: String) -> CmdResult<InstalledSkill> {
     installed_skills::create_installed(&name, &kind_key(&kind), &content)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_installed_skill(
     slug: String,
     kind: String,
@@ -89,7 +102,7 @@ pub fn delete_installed_skill(
 /// Make every installed skill/loop global — copy any entry that currently
 /// lives in only one harness dir into the other so its source becomes "both"
 /// and any harness can invoke it. Returns the number of entries mirrored.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn make_installed_global(kind: String) -> CmdResult<usize> {
     installed_skills::make_installed_global(&kind_key(&kind))
 }

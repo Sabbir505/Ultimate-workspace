@@ -721,6 +721,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   const {
     messagesEndRef,
     messagesContainerRef,
+    messagesContainerCallbackRef,
     composerDockRef,
     composerDockHeight,
     liveTotal,
@@ -1607,7 +1608,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       {!activeChatSessionId || hasItems ? (
         <div
           className="chat-messages"
-          ref={messagesContainerRef}
+          ref={messagesContainerCallbackRef}
           onScroll={handleScroll}
         >
           <div

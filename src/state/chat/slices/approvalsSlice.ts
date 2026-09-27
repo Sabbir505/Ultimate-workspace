@@ -3,6 +3,9 @@
 import {
   cancelAgentChatMessage,
   cancelChatMessage,
+  finishArtifactRuns,
+  getChatMessages,
+  loopSessionFinish,
   resolveAgentQuestion,
   resolveToolAction,
 } from "../../../lib/ipc";
@@ -14,6 +17,7 @@ import type {
 import {
   appendUserBubble,
   bufferTargetFor,
+  bufferWriteBack,
   isCliAgent,
   optimisticMsgIdCounter,
   persistPartialAndClearStream,
@@ -144,6 +148,12 @@ export function createApprovalsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // writes NO user bubble — nothing was said to the agent.
       const session = get().sessions.find((s) => s.id === chatSessionId);
       let stopped = "";
+      // Set only once the cancel IPC resolved. `resolvePendingCard` swallows a
+      // failure (restoring the card and toasting), so this is what
+      // distinguishes "the turn really was stopped" from "the stop failed" —
+      // on failure the turn is still running backend-side and must keep its
+      // side effects.
+      let cancelled = false;
       await resolvePendingCard(
         get,
         set,
@@ -161,6 +171,7 @@ export function createApprovalsSlice(set: ChatStoreSet, get: ChatStoreGet) {
           } else {
             await cancelChatMessage(chatSessionId);
           }
+          cancelled = true;
         },
       );
       // Keep the stopped turn's bubble showing what it produced, so the row
@@ -171,6 +182,40 @@ export function createApprovalsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         set((s) => ({
           stoppedPartial: { ...s.stoppedPartial, [chatSessionId]: stopped },
         }));
+      }
+
+      // Skip ends a turn exactly the way Stop does, so it owes the same three
+      // side effects. The cancel path emits NO terminal event, so nothing else
+      // performs them:
+      //  - the loop stays armed, and the next ordinary turn's onDone would see
+      //    it and auto-dispatch the "/loop iteration N/M — continue" follow-up
+      //    the user just tried to stop;
+      //  - the turn's artifact runs stay open forever in the self-improving
+      //    artifacts ledger;
+      //  - and the persisted partial never re-enters the transcript buffer, so
+      //    the text the user was reading vanishes until the next send/reload
+      //    (the live bubble was torn down, and nothing else reads the backend
+      //    row back).
+      // All three are conditioned on the cancel SUCCEEDING, not on whether the
+      // turn had streamed anything: a /goal run that asks its question straight
+      // away still has to be disarmed.
+      if (!cancelled) return;
+      const loop = get().loopState[chatSessionId];
+      if (loop && loop.active) {
+        if (loop.backendId) void loopSessionFinish(loop.backendId, "stopped").catch(() => {});
+        set((s) => ({
+          loopState: { ...s.loopState, [chatSessionId]: { ...loop, active: false } },
+        }));
+      }
+      void finishArtifactRuns(chatSessionId, "abandoned").catch(() => {});
+      try {
+        // Same 200-row page cap and bufferWriteBack contract as cancelStream.
+        const messages = await getChatMessages(chatSessionId, undefined, 200);
+        if (messages) {
+          set((s) => bufferWriteBack(s, chatSessionId, messages, { merge: true }));
+        }
+      } catch {
+        /* best-effort refresh */
       }
     },
 

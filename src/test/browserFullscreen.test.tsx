@@ -249,6 +249,46 @@ describe("BrowserPane full-screen", () => {
     expect(isFullscreen(paneId)).toBe(false);
   });
 
+  it("leaves Escape alone while an overlay owns it", async () => {
+    // The pane registers its Escape handler in the CAPTURE phase on `window`,
+    // which runs BEFORE every other Escape handler in the app — the command
+    // palette, Modal and the hotkey sheet all listen on `document`, and the
+    // rest bubble from the target. Claiming the key unconditionally therefore
+    // swallowed THEIR Escape too: pressing Escape to dismiss the palette while
+    // a pane was full screen dropped the pane out of full screen and left the
+    // palette sitting there, with no way out but a second Escape.
+    const paneId = usePanesStore.getState().addPane(browserDesc);
+    const { container: container0 } = render(<StoreBrowserPane paneId={paneId} />);
+    await flushLayout();
+    await act(async () => {
+      fireEvent.click(container0.querySelector(".browser-fs-btn") as HTMLButtonElement);
+    });
+    expect(isFullscreen(paneId)).toBe(true);
+
+    for (const overlay of [
+      { paletteOpen: true },
+      { modalOpen: true },
+      { hotkeyOverlayOpen: true },
+      { peek: { ...useUiStore.getState().peek, open: true } },
+    ]) {
+      useUiStore.setState(overlay as never);
+      await act(async () => {
+        fireEvent.keyDown(window, { key: "Escape" });
+      });
+      expect(
+        isFullscreen(paneId),
+        `Escape must not be stolen while ${Object.keys(overlay)[0]} is set`,
+      ).toBe(true);
+      useUiStore.setState({ paletteOpen: false, modalOpen: false, hotkeyOverlayOpen: false, peek: { ...useUiStore.getState().peek, open: false } });
+    }
+
+    // With no overlay owning it, Escape exits full screen as before.
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+    expect(isFullscreen(paneId)).toBe(false);
+  });
+
   it("keeps the webview visible while full screen, even with the panel collapsed", async () => {
     const paneId = usePanesStore.getState().addPane(browserDesc);
     usePanesStore.getState().setBrowserFullscreen(paneId, true);

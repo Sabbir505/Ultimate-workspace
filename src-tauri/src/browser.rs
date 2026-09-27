@@ -41,9 +41,269 @@ use tauri::webview::WebviewWindowBuilder;
 use tauri::{
     AppHandle, Emitter, Manager,
 };
+use tauri::webview::{
+    NewWindowFeatures, NewWindowResponse, PageLoadEvent, PageLoadPayload, WebviewBuilder,
+    // Aliased so the un-gated `PaneBuilder` impl below can name it on every
+    // platform; the Linux path imports the plain name separately.
+    WebviewWindowBuilder as WebviewWindowBuilderT,
+};
+use tauri::Runtime;
 
 pub(crate) use crate::browser_js::*;
 use crate::types::BrowserNavigatedEvent;
+
+// ---------------------------------------------------------------- shared
+// per-pane webview wiring (macOS child webview + Linux WebviewWindow)
+//
+// The two platform builders are different types with near-identical handler
+// methods, and they had drifted: macOS registered `on_navigation` +
+// `on_page_load` + `on_new_window`, Linux registered NONE of them, so a Linux
+// pane never emitted `browser:navigated` (the spinner never armed, and
+// pushState history was never patched) and never emitted
+// `browser:load-completed` (nothing could disarm the spinner, so every
+// navigation sat "loading" until the frontend's 45s safety net).
+//
+// `PaneBuilder` erases the one real difference — tauri passes a `Webview<R>`
+// to `WebviewBuilder::on_page_load` but a `WebviewWindow<R>` to
+// `WebviewWindowBuilder::on_page_load`, and neither is used here — so both
+// platforms run the SAME handler code from one definition.
+//
+// The trait and its impls are deliberately NOT behind `#[cfg]`: both builder
+// types exist on every platform, so a `cargo check` on any host type-checks
+// the real method names, arities and bounds used on the platform-specific
+// paths. That is the only reason a platform-gated builder chain can be trusted
+// at all — it is what would have caught the macOS block calling a method that
+// does not exist, and what now guards the Linux one. See the note in `tests`.
+trait PaneBuilder<R: Runtime>: Sized {
+    fn pane_initialization_script(self, script: impl Into<String>) -> Self;
+    fn pane_on_navigation(
+        self,
+        f: impl Fn(&tauri::Url) -> bool + Send + 'static,
+    ) -> Self;
+    fn pane_on_page_load(
+        self,
+        f: impl Fn(PageLoadPayload<'_>) + Send + Sync + 'static,
+    ) -> Self;
+    fn pane_on_new_window(
+        self,
+        f: impl Fn(tauri::Url, NewWindowFeatures) -> NewWindowResponse<R> + Send + 'static,
+    ) -> Self;
+}
+
+impl<R: Runtime> PaneBuilder<R> for WebviewBuilder<R> {
+    fn pane_initialization_script(self, script: impl Into<String>) -> Self {
+        self.initialization_script(script)
+    }
+    fn pane_on_navigation(
+        self,
+        f: impl Fn(&tauri::Url) -> bool + Send + 'static,
+    ) -> Self {
+        self.on_navigation(f)
+    }
+    fn pane_on_page_load(
+        self,
+        f: impl Fn(PageLoadPayload<'_>) + Send + Sync + 'static,
+    ) -> Self {
+        // The `Webview<R>` argument is unused by our handler.
+        self.on_page_load(move |_webview, payload| f(payload))
+    }
+    fn pane_on_new_window(
+        self,
+        f: impl Fn(tauri::Url, NewWindowFeatures) -> NewWindowResponse<R> + Send + 'static,
+    ) -> Self {
+        self.on_new_window(f)
+    }
+}
+
+impl<'a, R: Runtime, M: Manager<R>> PaneBuilder<R> for WebviewWindowBuilderT<'a, R, M> {
+    fn pane_initialization_script(self, script: impl Into<String>) -> Self {
+        self.initialization_script(script)
+    }
+    fn pane_on_navigation(
+        self,
+        f: impl Fn(&tauri::Url) -> bool + Send + 'static,
+    ) -> Self {
+        self.on_navigation(f)
+    }
+    fn pane_on_page_load(
+        self,
+        f: impl Fn(PageLoadPayload<'_>) + Send + Sync + 'static,
+    ) -> Self {
+        // Same here, with a `WebviewWindow<R>` instead of a `Webview<R>`.
+        self.on_page_load(move |_window, payload| f(payload))
+    }
+    fn pane_on_new_window(
+        self,
+        f: impl Fn(tauri::Url, NewWindowFeatures) -> NewWindowResponse<R> + Send + 'static,
+    ) -> Self {
+        self.on_new_window(f)
+    }
+}
+
+/// Everything a pane's handlers need to identify themselves and reach the
+/// webview they are attached to.
+#[derive(Clone)]
+struct PaneCtx {
+    app: AppHandle,
+    label: String,
+    pane_id: String,
+    tab_id: String,
+}
+
+impl PaneCtx {
+    /// Navigation START: the frontend uses this to ARM the spinner, and it is
+    /// the only place the pushState patch is (re)installed.
+    fn on_nav_start(&self, nav_url: &tauri::Url) -> bool {
+        eprintln!("[relay:browser] navigation: {nav_url}");
+        browser_log(
+            &self.app,
+            &format!(
+                "wry on_navigation (nav START allowed) url={nav_url} label={}",
+                self.label
+            ),
+        );
+        if let Some(state) = self.app.try_state::<crate::BrowserState>() {
+            state.0.remember_tab_url(&self.label, nav_url.as_str());
+        }
+        let _ = self.app.emit(
+            "browser:navigated",
+            BrowserNavigatedEvent {
+                pane_id: self.pane_id.clone(),
+                tab_id: self.tab_id.clone(),
+                url: nav_url.to_string(),
+            },
+        );
+        self.schedule_injections();
+        true
+    }
+
+    /// The pushState patch and the diag/overlay scripts are installed at
+    /// DOCUMENT-START as initialization scripts, but a page that was already
+    /// loading when the pane was created (or any document-start race) misses
+    /// them, so re-inject on an escalating schedule. The patch is idempotent
+    /// (guarded by `window.__relay_pushstate_patched`), so each later eval
+    /// no-ops once installed: fast pages get the hook immediately, slow ones
+    /// within ~5s. A tokio task, not a detached OS thread per navigation.
+    fn schedule_injections(&self) {
+        let app = self.app.clone();
+        let label = self.label.clone();
+        let pane_id = self.pane_id.clone();
+        let tab_id = self.tab_id.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut waited = 0u64;
+            for target in [0u64, 150, 400, 900, 1800, 3500, 5000] {
+                if target > waited {
+                    tokio::time::sleep(Duration::from_millis(target - waited)).await;
+                    waited = target;
+                }
+                match app.get_webview(&label) {
+                    Some(w) => {
+                        let _ = w.eval(&pushstate_injection_js(&pane_id, &tab_id));
+                        let _ = w.eval(DIAG_INIT_JS);
+                        let _ = w.eval(BRIDGE_OVERLAY_JS);
+                    }
+                    // Webview gone (tab closed mid-load) — stop.
+                    None => break,
+                }
+            }
+        });
+    }
+
+    /// Load END — the only thing that disarms the spinner on macOS/Linux
+    /// (WebView2's NavigationCompleted has no wry equivalent). Reports the
+    /// settled title here too, not only from the escalating injection loop:
+    /// that loop can take up to 5s to reach a page whose DOM arrives late, so
+    /// a slow page sat showing its raw URL as the tab label even after it had
+    /// finished loading, which reads as "this site is still loading".
+    fn on_load_finished(&self) {
+        let _ = self.app.emit(
+            "browser:load-completed",
+            crate::types::BrowserLoadCompletedEvent {
+                pane_id: self.pane_id.clone(),
+                tab_id: self.tab_id.clone(),
+                success: true,
+            },
+        );
+        if let Some(w) = self.app.get_webview(&self.label) {
+            let _ = w.eval(&title_report_js(&self.pane_id, &self.tab_id));
+        }
+    }
+
+    /// `window.open` / `target="_blank"`.
+    ///
+    /// A blank reservation is the OAuth/IdP handshake, not a navigation: the
+    /// page assigns `popup.location` next. Denying it — as this handler used
+    /// to, unconditionally, while logging "navigating in-place" that it never
+    /// did — made "Sign in with Google" a silent no-op. Let a real popup open
+    /// so `window.opener` survives and the provider's postMessage lands.
+    ///
+    /// A real destination opens IN THIS PANE, like the Windows path's
+    /// `core.Navigate`. Announcing `browser:navigated` without navigating
+    /// leaves the two halves disagreeing — that event arms the spinner and
+    /// rewrites the address bar, so the bar showed the new URL over the OLD
+    /// page with the spinner running to the 45s safety net.
+    fn on_new_window<R: Runtime>(&self, new_url: tauri::Url) -> NewWindowResponse<R> {
+        let blank = new_url.as_str().is_empty()
+            || new_url.as_str().eq_ignore_ascii_case("about:blank");
+        if blank {
+            eprintln!("[relay:browser] new_window: blank popup — allowing real popup window (OAuth)");
+            return NewWindowResponse::Allow;
+        }
+        let navigated = match self.app.get_webview(&self.label) {
+            Some(w) => w.navigate(new_url.clone()).is_ok(),
+            None => false,
+        };
+        if navigated {
+            eprintln!("[relay:browser] new_window: {new_url} — navigating in-place");
+            let _ = self.app.emit(
+                "browser:navigated",
+                BrowserNavigatedEvent {
+                    pane_id: self.pane_id.clone(),
+                    tab_id: self.tab_id.clone(),
+                    url: new_url.to_string(),
+                },
+            );
+        } else {
+            eprintln!("[relay:browser] new_window: {new_url} — pane gone, ignoring");
+        }
+        NewWindowResponse::Deny
+    }
+}
+
+/// Attach the shared pane handlers to either builder shape. `popups` is false
+/// for platforms where a related-view popup is not wired up yet (Linux), which
+/// keeps their existing deny-by-default behaviour rather than half-doing OAuth.
+fn attach_pane_handlers<T, R>(builder: T, ctx: PaneCtx, popups: bool) -> T
+where
+    T: PaneBuilder<R>,
+    R: Runtime,
+{
+    let nav = ctx.clone();
+    let load = ctx.clone();
+    let builder = builder
+        // Visual-feedback overlay + diag layer, installed at DOCUMENT-START in
+        // every page the pane ever loads. Without this the overlay only existed
+        // on pages reached via an explicit navigate(): the FIRST click into a
+        // new page cleared it, and every agent action after that degraded
+        // silently to no-visual clicks (no cursor, no typing effect).
+        .pane_initialization_script(DIAG_INIT_JS)
+        .pane_initialization_script(BRIDGE_OVERLAY_JS)
+        .pane_on_navigation(move |url| nav.on_nav_start(url))
+        .pane_on_page_load(move |payload| {
+            // Only Finished disarms — Started is the nav-start signal the
+            // frontend uses to ARM the spinner, and handling it here would
+            // re-break the very thing load-completed was added to fix.
+            if matches!(payload.event(), PageLoadEvent::Finished) {
+                load.on_load_finished();
+            }
+        });
+    if popups {
+        let popup = ctx;
+        builder.pane_on_new_window(move |url, _f| popup.on_new_window(url))
+    } else {
+        builder
+    }
+}
 
 /// Logical-pixel rect measured by the frontend (getBoundingClientRect).
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1814,9 +2074,6 @@ impl BrowserManager {
         project_id: Option<&str>,
     ) -> Result<BrowserPane, String> {
         let label = browser_label(pane_id, tab_id);
-        let _event_pane_id = pane_id.to_string();
-        let _event_tab_id = tab_id.to_string();
-        let _app_for_emit = self.app.clone();
 
         // --- Windows: direct webview2-com controller (bypasses tauri) ---
         #[cfg(windows)]
@@ -1937,8 +2194,19 @@ impl BrowserManager {
         }
 
         // --- macOS: child webview (tauri path — dispatch unaffected there) ---
+        // Scoped imports: these names are used ONLY inside the platform
+        // blocks, so a top-level import would read as unused on Windows and
+        // the resolution would stay unverified everywhere else. They were in
+        // fact missing entirely — the macOS path had not compiled since the
+        // tauri child-webview rewrite.
         #[cfg(target_os = "macos")]
         {
+            // Scoped imports: these names are used ONLY inside this block, so
+            // a top-level import would read as unused on Windows and the
+            // resolution would stay unverified on every other platform. They
+            // were missing entirely — this path had not compiled since the
+            // tauri child-webview rewrite.
+            use tauri::{LogicalPosition, LogicalSize, Webview, WebviewUrl};
             let main_window = self
                 .app
                 .get_window("main")
@@ -1954,159 +2222,18 @@ impl BrowserManager {
                     msg
                 })?;
 
-            let app = self.app.clone();
-            let app2 = self.app.clone();
-            let event_pane_id2 = event_pane_id.clone();
-            let event_tab_id2 = event_tab_id.clone();
-            let label_for_nav = label.clone();
-            let app_for_load = self.app.clone();
-            let label_for_load = label.clone();
-            let label_for_popup = label.clone();
-            let app_for_popup = self.app.clone();
-            let pane_for_title = event_pane_id.clone();
-            let tab_for_title = event_tab_id.clone();
+            let ctx = PaneCtx {
+                app: self.app.clone(),
+                label: label.clone(),
+                pane_id: pane_id.to_string(),
+                tab_id: tab_id.to_string(),
+            };
             let blank: tauri::Url = "about:blank".parse().expect("about:blank is a valid url");
-            let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(blank))
-                // Visual-feedback overlay: install at DOCUMENT-START in every
-                // page the pane ever loads. This is the primary installation
-                // path — the post-navigation evals below are belt-and-braces.
-                // Without this, the overlay only existed on pages reached via
-                // an explicit navigate() call: the FIRST click into a new page
-                // cleared it, and every agent action after that degraded
-                // silently to no-visual clicks (no cursor, no typing effect).
-                .initialization_script(DIAG_INIT_JS)
-                .initialization_script(BRIDGE_OVERLAY_JS)
-                .on_navigation(move |nav_url| {
-                    eprintln!("[relay:browser] navigation: {nav_url}");
-                    browser_log(&app, &format!("wry on_navigation (nav START allowed) url={nav_url} label={label_for_nav}"));
-                    if let Some(state) = app.try_state::<crate::BrowserState>() {
-                        state.0.remember_tab_url(&label_for_nav, nav_url.as_str());
-                    }
-                    let _ = app.emit(
-                        "browser:navigated",
-                        BrowserNavigatedEvent {
-                            pane_id: event_pane_id.clone(),
-                            tab_id: event_tab_id.clone(),
-                            url: nav_url.to_string(),
-                        },
-                    );
-                    let lbl = label_for_nav.clone();
-                    let app_ref = app.clone();
-                    let pid = event_pane_id.clone();
-                    let tid = event_tab_id.clone();
-                    // P-2: tokio task, not a detached OS thread per nav (see
-                    // the site above).
-                    tauri::async_runtime::spawn(async move {
-                        // B9: no more blind 1.5 s sleep. The injection is
-                        // idempotent (guarded by
-                        // `window.__relay_pushstate_patched`), so inject on
-                        // an escalating schedule: fast pages get the hook
-                        // immediately, slow pages still get it within ~5 s,
-                        // and each later eval no-ops once installed.
-                        let mut waited = 0u64;
-                        for target in [0u64, 150, 400, 900, 1800, 3500, 5000] {
-                            if target > waited {
-                                tokio::time::sleep(std::time::Duration::from_millis(target - waited)).await;
-                                waited = target;
-                            }
-                            match app_ref.get_webview(&lbl) {
-                                Some(w) => {
-                                    let _ = w.eval(&pushstate_injection_js(&pid, &tid));
-                                    // Belt-and-braces: the overlay + diag layer
-                                    // are ALSO initialization scripts (install
-                                    // at document-start in every page), but keep
-                                    // the evals here so panes created before a
-                                    // bridge update and any document-start
-                                    // race still get them. Idempotent.
-                                    let _ = w.eval(DIAG_INIT_JS);
-                                    let _ = w.eval(BRIDGE_OVERLAY_JS);
-                                }
-                                // Webview gone (tab closed mid-load) — stop.
-                                None => break,
-                            }
-                        }
-                    });
-                    true
-                })
-                .on_page_load_handler(move |page_load| {
-                    // wry's load-end signal. Without it the macOS/Linux panes
-                    // had NO way to learn a load finished (the WebView2-only
-                    // NavigationCompleted handler doesn't exist there), so
-                    // their loading flag was cleared by the navigation-START
-                    // event and the spinner could not work at all on those
-                    // platforms. Fires for failures too.
-                    use tauri::webview::PageLoadEvent;
-                    if matches!(page_load.event(), PageLoadEvent::Finished) {
-                        let _ = app_for_load.emit(
-                            "browser:load-completed",
-                            crate::types::BrowserLoadCompletedEvent {
-                                pane_id: pane_for_title.clone(),
-                                tab_id: tab_for_title.clone(),
-                                success: true,
-                            },
-                        );
-                        // Report the settled title here too, not only from the
-                        // escalating injection loop below. That loop can take
-                        // up to 5 s to reach a page whose DOM arrives late, so
-                        // a slow page sat there showing the raw URL as its tab
-                        // label even after it had finished loading — which
-                        // reads as "this site is still loading". Windows has
-                        // had this on NavigationCompleted all along.
-                        if let Some(w) = app_for_load.get_webview(&label_for_load) {
-                            let _ = w.eval(&title_report_js(
-                                &pane_for_title,
-                                &tab_for_title,
-                            ));
-                        }
-                    }
-                })
-                .on_new_window(move |new_url, _label| {
-                    use tauri::webview::NewWindowResponse;
-                    // Blank reservation (`window.open('')`) is the OAuth/IdP
-                    // handshake, not a navigation: the page will assign
-                    // `popup.location` next. Denying it — as this handler used
-                    // to, unconditionally, while logging "navigating in-place"
-                    // that it never did — made "Sign in with Google" a silent
-                    // no-op. Let a real popup open so `window.opener` survives
-                    // and the provider's postMessage callback can land.
-                    let blank = new_url.as_str().is_empty()
-                        || new_url.as_str().eq_ignore_ascii_case("about:blank");
-                    if blank {
-                        eprintln!("[relay:browser] new_window: blank popup — allowing real popup window (OAuth)");
-                        return NewWindowResponse::Allow;
-                    }
-                    // A real destination: open it IN THIS PANE, like the
-                    // Windows path does with `core.Navigate`. Returning Deny
-                    // without navigating, while announcing
-                    // `browser:navigated` first, left the two halves
-                    // disagreeing: that event now ARMS the spinner and rewrites
-                    // the address bar, so every `<a target="_blank">` click and
-                    // `window.open(url)` left the bar showing the new URL over
-                    // the OLD page, with the spinner running until the 45s
-                    // safety net. Navigating for real makes both true — the
-                    // pane's own nav/load events then drive the spinner to a
-                    // correct end state. If the webview is gone (tab closed
-                    // mid-click) there is nothing to navigate, so stay silent
-                    // rather than announce a navigation that cannot happen.
-                    let navigated = match app_for_popup.get_webview(&label_for_popup) {
-                        Some(w) => w.navigate(new_url.clone()).is_ok(),
-                        None => false,
-                    };
-                    if navigated {
-                        eprintln!("[relay:browser] new_window: {new_url} — navigating in-place");
-                        let _ = app2.emit(
-                            "browser:navigated",
-                            BrowserNavigatedEvent {
-                                pane_id: event_pane_id2.clone(),
-                                tab_id: event_tab_id2.clone(),
-                                url: new_url.to_string(),
-                            },
-                        );
-                    } else {
-                        eprintln!("[relay:browser] new_window: {new_url} — pane gone, ignoring");
-                    }
-                    NewWindowResponse::Deny
-                });
+            let builder = attach_pane_handlers(
+                WebviewBuilder::new(label.clone(), WebviewUrl::External(blank)),
+                ctx,
+                true,
+            );
 
             eprintln!(
                 "[relay:browser] add_child at ({},{}) {}x{} (main-thread scheduled)",
@@ -2159,6 +2286,7 @@ impl BrowserManager {
         // --- Linux: standalone WebviewWindow per pane+tab ---
         #[cfg(target_os = "linux")]
         {
+            use tauri::{LogicalPosition, LogicalSize, WebviewUrl};
             // The frontend reports the pane's rect in viewport-relative
             // logical pixels. We need to convert that to absolute screen
             // coordinates by adding the main window's position. If the main
@@ -2177,6 +2305,20 @@ impl BrowserManager {
             let label_for_win = label.clone();
             let pos = LogicalPosition::new(abs_x, abs_y);
             let size = LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0));
+            // Same per-pane handlers macOS registers. Without them this pane
+            // emitted no lifecycle events at all: no `browser:navigated` (so
+            // the spinner never armed and the pushState patch was never
+            // installed) and no `browser:load-completed` (so nothing could
+            // disarm the spinner and every navigation sat "loading" until the
+            // frontend's 45s safety net). Popups stay off — a Linux popup must
+            // be related to the caller webview, which this path does not set up
+            // yet, so the existing deny-by-default behaviour is unchanged.
+            let ctx = PaneCtx {
+                app: self.app.clone(),
+                label: label.clone(),
+                pane_id: pane_id.to_string(),
+                tab_id: tab_id.to_string(),
+            };
             let _ = self.app.run_on_main_thread(move || {
                 // Re-resolve the main window position on the main thread so
                 // the value is current (the previous read may have raced with
@@ -2191,19 +2333,25 @@ impl BrowserManager {
                     pos
                 };
 
-                let res = WebviewWindowBuilder::new(
-                    &app,
-                    &label_for_win,
-                    WebviewUrl::External("about:blank".parse().expect("about:blank is a valid url")),
+                let res = attach_pane_handlers(
+                    WebviewWindowBuilder::new(
+                        &app,
+                        &label_for_win,
+                        WebviewUrl::External(
+                            "about:blank".parse().expect("about:blank is a valid url"),
+                        ),
+                    )
+                    .title(format!("Browser - {label_for_win}"))
+                    .decorations(false)
+                    .resizable(false)
+                    .skip_taskbar(true)
+                    .always_on_top(false)
+                    .focused(false)
+                    .inner_size(size.width, size.height)
+                    .position(final_pos.x, final_pos.y),
+                    ctx,
+                    false,
                 )
-                .title(format!("Browser - {label_for_win}"))
-                .decorations(false)
-                .resizable(false)
-                .skip_taskbar(true)
-                .always_on_top(false)
-                .focused(false)
-                .inner_size(size.width, size.height)
-                .position(final_pos.x, final_pos.y)
                 .build()
                 .map_err(|e| format!("failed to create browser webview window: {e}"));
                 match &res {
@@ -2225,9 +2373,6 @@ impl BrowserManager {
                 .app
                 .get_webview(&label)
                 .ok_or_else(|| format!("created webview window but could not resolve webview for label {label}"))?;
-
-            // Suppress the unused-emit capture on this code path.
-            let _ = app_for_emit;
 
             // Hide by default until the frontend calls set_visible(true).
             // On creation we treat the pane as visible — the frontend will
@@ -2294,6 +2439,24 @@ mod tabs;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // NOTE: there is deliberately no unit test for the pane-handler wiring,
+    // and that is the considered choice rather than a gap. The guarantee is
+    // compile-time: the `PaneBuilder` impls above are NOT `cfg`-gated, so
+    // every `cargo check` on every host compiles their bodies — which call
+    // `on_navigation` / `on_page_load` / `on_new_window` /
+    // `initialization_script` on BOTH `WebviewBuilder` and
+    // `WebviewWindowBuilder`. Verified by renaming one of those calls to the
+    // non-existent `on_page_load_handler` (the method the macOS block was
+    // calling): the Windows build fails with
+    //   error[E0599]: no method named `on_page_load_handler` found for
+    //   struct `WebviewWindowBuilder<'a, R, M>`
+    // which is exactly the rot that used to hide in a `#[cfg(target_os)]`
+    // block nobody compiles. A runtime test could not add to this — a unit
+    // test cannot build a real `AppHandle<Wry>` to hand `PaneCtx` — and a test
+    // that merely re-asserted "the impls exist" would still pass if the whole
+    // Linux call site were deleted, which is the failure that actually
+    // happened.
 
     #[test]
     fn action_wrapper_reports_via_command_with_req_id() {

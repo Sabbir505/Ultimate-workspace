@@ -1377,7 +1377,7 @@ async fn run_download(
     // suffix, so resuming never weakens the integrity check.
     let started = Instant::now();
     let mut hasher: Option<sha2::Sha256> = None;
-    for attempt in 1..=DOWNLOAD_ATTEMPTS {
+    'attempts: for attempt in 1..=DOWNLOAD_ATTEMPTS {
         let mut attempt_auth: Option<&str> =
             token.filter(|t| !t.is_empty() && token_allowed_for_url(url));
         let resp = loop {
@@ -1398,7 +1398,12 @@ async fn run_download(
                     if attempt < DOWNLOAD_ATTEMPTS {
                         backoff_before_retry(attempt).await;
                         resume_from = partial_size(partial_path).await;
-                        continue;
+                        // Next OUTER attempt — a plain `continue` here would
+                        // re-spin THIS inner auth loop without advancing
+                        // `attempt`, retrying an unreachable server forever
+                        // (and past every cancel, which is only polled in
+                        // the body pump).
+                        continue 'attempts;
                     }
                     return Err(DownloadAbort::Failed(format!("download request failed: {e}")));
                 }
@@ -1434,10 +1439,15 @@ async fn run_download(
 
         // 206 Partial Content confirms the server honored the Range and
         // resumed; 200 OK means the server is sending the full file from
-        // byte 0, so the existing partial is stale — discard it.
+        // byte 0, so the existing partial is stale — discard it. `resume_from`
+        // goes to zero WITH the file: it feeds the pump's `start` (the body
+        // now begins at byte 0) and every progress emit, so a stale value
+        // would report bytes that don't exist — the bar would jump straight
+        // to the old prefix's percent and the speed readout would inflate.
         let resuming = status == reqwest::StatusCode::PARTIAL_CONTENT && resume_from > 0;
         if !resuming && resume_from > 0 {
             let _ = fs::remove_file(partial_path).await;
+            resume_from = 0;
         }
 
         // The total size of the *remaining* payload. If the server gave a

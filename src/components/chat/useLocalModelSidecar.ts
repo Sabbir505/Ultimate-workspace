@@ -131,8 +131,15 @@ export function useLocalModelSidecar({
     if (!isLocal || !activeSessionModel) return 0;
     const override = localOverridesByName[activeSessionModel]?.ctx;
     if (override && override > 0) return override;
+    // The picker persists `name || filename` and older sessions store the
+    // registry id — match all three, or a filename-stored model (no display
+    // name) predicts 0 and the meter falls back to a flat 16k until the
+    // sidecar reports its real `-c`.
     const scanned = localModels.find(
-      (m) => m.id === activeSessionModel || m.name === activeSessionModel,
+      (m) =>
+        m.id === activeSessionModel ||
+        m.name === activeSessionModel ||
+        m.filename === activeSessionModel,
     );
     return scanned ? autoLocalContextWindow(scanned.sizeBytes) : 0;
   }, [activeLocalModelCtx, isLocal, activeSessionModel, localModels, localOverridesByName]);

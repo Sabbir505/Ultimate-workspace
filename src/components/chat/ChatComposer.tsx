@@ -1116,7 +1116,12 @@ export const ChatComposer = memo(function ChatComposer({
       const ta = textareaRef.current;
       if (ta) ta.style.height = "auto";
       if (!effectiveSessionId) return;
-      void compactNow(effectiveSessionId)
+      // The tool toggles go with the call so the backend reserves the
+      // send-time tool schema out of the manual pass's budget, exactly like
+      // the automatic path — otherwise "/compact" can succeed and still
+      // leave the next turn over the real request's window.
+      const { toolsEnabled, codeExecEnabled } = useChatStore.getState();
+      void compactNow(effectiveSessionId, toolsEnabled, codeExecEnabled)
         .then((msg) => toastSuccess(msg || "Context compacted"))
         .catch((e) => toastError("Compact failed", e));
       return;

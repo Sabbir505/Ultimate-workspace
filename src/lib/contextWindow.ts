@@ -1,9 +1,13 @@
 // Context-window sizing for the chat context meter.
 //
 // Three paths:
-//  - Local LLM (local_gguf): the cap is the context size the user picked on
-//    the composer's Context slider (`localCtx`). That's the sidecar's real -c
-//    ceiling. 0 means "Auto" — fall back to a sane default.
+//  - Local LLM (local_gguf): the cap is the sidecar's real `-c` ceiling, as
+//    reported by the running llama-server (`local_model_status` →
+//    `ActiveLocalModel.nCtx`). When no sidecar is up yet, the window the
+//    backend WOULD launch is predicted from the per-model override or the
+//    GGUF's size (`autoLocalContextWindow`, mirroring the backend's
+//    `auto_ctx_size`). This value is carried in `localCtx`; 0 means "unknown"
+//    and falls back to LOCAL_DEFAULT_CONTEXT.
 //  - API / cloud + CLI-harness models: resolved through the per-model
 //    REGISTRY below (same table the backend send path uses, mirrored in
 //    src-tauri/src/chat/context_windows.rs). Unknown ids fall back to the
@@ -25,8 +29,21 @@ import { fetchProviderModelWindows } from "./ipc/localModels";
  *  recognize. Mirrors the backend's DEFAULT_CLOUD_WINDOW. */
 export const API_CONTEXT_WINDOW = 500_000;
 
-/** Default context window for a local model when the slider is at "Auto" (0). */
+/** Last-resort local window, used only when the sidecar hasn't reported one
+ *  and the model isn't in the scanned list (so its size is unknown). */
 export const LOCAL_DEFAULT_CONTEXT = 16_384;
+
+/** The context window llama-server will be launched with, predicted from the
+ *  GGUF's on-disk size. Mirrors `auto_ctx_size` in
+ *  src-tauri/src/chat/local_models.rs — keep the tiers in step, or the meter
+ *  drifts from the window the backend actually opens. */
+export function autoLocalContextWindow(sizeBytes: number | undefined | null): number {
+  if (!sizeBytes || sizeBytes <= 0) return LOCAL_DEFAULT_CONTEXT;
+  const gb = sizeBytes / (1024 * 1024 * 1024);
+  if (gb < 8) return 32_768;
+  if (gb < 16) return 16_384;
+  return 8_192;
+}
 
 // ---- Per-model registry ----------------------------------------------------------
 //
@@ -96,16 +113,17 @@ export function debugContext(channel: string, msg: string): void {
 }
 
 /** Resolve the max context window (tokens) for the active model.
- *  - isLocal true, localCtx > 0: the slider value (the sidecar's real -c).
- *  - isLocal true, slider at Auto (0/undefined): LOCAL_DEFAULT_CONTEXT.
+ *  - isLocal true, localCtx > 0: the sidecar's real `-c` (published by
+ *    `local_model_status`, or predicted for a not-yet-loaded model).
+ *  - isLocal true, unknown (0/undefined): LOCAL_DEFAULT_CONTEXT.
  *  - isLocal false: the per-model registry, falling back to the flat
  *    API_CONTEXT_WINDOW for unknown ids, then capped by `overrideLimit`
  *    when set (a user cap only SHRINKS the window — it never raises a
  *    model above its real capacity). Mirrors the backend's
  *    `effective_cloud_window` so the meter and the compaction trigger can
  *    never disagree. A stale `localCtx` from a previous local session is
- *    intentionally ignored — the slider is global UI state, not
- *    per-session. */
+ *    intentionally ignored — it tracks the running sidecar, not the
+ *    session. */
 export function contextWindowFor(
   model: string | undefined | null,
   isLocal: boolean,
@@ -114,10 +132,10 @@ export function contextWindowFor(
 ): number {
   if (isLocal) {
     if (localCtx && localCtx > 0) {
-      debugContext("window", `local slider → ${localCtx} (model '${model ?? "—"}')`);
+      debugContext("window", `local sidecar -c → ${localCtx} (model '${model ?? "—"}')`);
       return localCtx;
     }
-    debugContext("window", `local auto → ${LOCAL_DEFAULT_CONTEXT} (model '${model ?? "—"}')`);
+    debugContext("window", `local unknown → ${LOCAL_DEFAULT_CONTEXT} (model '${model ?? "—"}')`);
     return LOCAL_DEFAULT_CONTEXT;
   }
   const registered = registryWindowFor(model) ?? API_CONTEXT_WINDOW;

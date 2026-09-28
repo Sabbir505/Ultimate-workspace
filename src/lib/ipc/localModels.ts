@@ -178,9 +178,21 @@ export const countContextBreakdown = (chatSessionId: string) =>
 
 /** Force a compaction pass for the session ("Compact now" in the context
  *  meter). Cloud sessions summarize via their own provider; local sessions
- *  via the running sidecar. Returns a short human-facing result line. */
-export const compactNow = (chatSessionId: string) =>
-  safeInvoke<string>("chat_compact_now", { chatSessionId });
+ *  via the running sidecar. The tool toggles ride along so the backend can
+ *  reserve the send-time tool schema out of the budget — the same
+ *  reservation the automatic path applies, so a manual pass can't leave the
+ *  session over the real request's window. Returns a short human-facing
+ *  result line. */
+export const compactNow = (
+  chatSessionId: string,
+  toolsEnabled?: boolean,
+  codeExecEnabled?: boolean,
+) =>
+  safeInvoke<string>("chat_compact_now", {
+    chatSessionId,
+    toolsEnabled,
+    codeExecEnabled,
+  });
 
 /** Context recovery: the raw turns a `[compacted context]` summary row
  *  folded away. They stay in the DB forever — the summary is lossy, the

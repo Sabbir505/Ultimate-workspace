@@ -1339,11 +1339,18 @@ pub fn research_citation_report(
 #[tauri::command]
 pub async fn chat_compact_now(
     chat_session_id: String,
+    tools_enabled: Option<bool>,
+    code_exec_enabled: Option<bool>,
     chat_state: State<'_, crate::ChatState>,
     local: State<'_, local_models::LocalModelState>,
     db: State<'_, DbState>,
     app: tauri::AppHandle,
 ) -> CmdResult<String> {
+    // The composer's tool toggles, so the manual pass budgets against the
+    // same request the next real send will make. Defaults preserve the
+    // historical behavior for callers that don't pass them.
+    let tools_on = tools_enabled.unwrap_or(true);
+    let code_exec_on = code_exec_enabled.unwrap_or(false);
     let (provider_str, model_str) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, &chat_session_id)
@@ -1400,7 +1407,7 @@ pub async fn chat_compact_now(
                 &model_str,
                 custom.as_deref(),
                 &[],
-                true,
+                tools_on,
                 false,
                 false,
                 manifest.as_deref(),
@@ -1438,6 +1445,24 @@ pub async fn chat_compact_now(
             }
             _ => crate::chat::compaction::SummarizerRoute::Sidecar,
         };
+        // Reserve the send-time tool schema exactly like the automatic path
+        // does. Budgeting against the FULL window (the old `0`) let manual
+        // compaction stop at a history that still doesn't fit once ~5-6k
+        // tokens of tool schema are added — and its "pinned tail already
+        // fills the window" bail-out was computed against that same
+        // over-generous window, so it under-reported the risk too.
+        let reserved_tokens: u32 = if tools_on {
+            crate::chat::compaction::count_json_tokens_cached(
+                &chat_state.0.client,
+                &status.base_url,
+                &builtin_tool_specs_json(&ChatProviderId::LocalGguf, &model_str, code_exec_on),
+            )
+            .await
+            .unwrap_or(0)
+        } else {
+            0
+        };
+        eprintln!("[compact-now] tool schema reserves {reserved_tokens} tokens");
         let outcome = crate::chat::compaction::maybe_compact(
             &chat_state.0.client,
             &status.base_url,
@@ -1446,7 +1471,7 @@ pub async fn chat_compact_now(
             &system,
             &entries,
             &cfg,
-            0,
+            reserved_tokens,
             None,
             &route,
         )
@@ -1500,7 +1525,7 @@ pub async fn chat_compact_now(
                 &model_str,
                 custom.as_deref(),
                 &[],
-                true,
+                tools_on,
                 false,
                 false,
                 manifest.as_deref(),

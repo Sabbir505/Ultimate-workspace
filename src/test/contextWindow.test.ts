@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   API_CONTEXT_WINDOW,
+  autoLocalContextWindow,
   contextWindowFor,
   contextWindowForModel,
   debugContext,
@@ -13,13 +14,39 @@ afterEach(() => {
   localStorage.clear();
 });
 
+const GB = 1024 * 1024 * 1024;
+
+describe("autoLocalContextWindow", () => {
+  // Mirrors auto_ctx_size in src-tauri/src/chat/local_models.rs — the meter
+  // and the sidecar have to agree on the window or the ring lies.
+  it("mirrors the backend's size tiers", () => {
+    expect(autoLocalContextWindow(4 * GB)).toBe(32_768);
+    expect(autoLocalContextWindow(7.9 * GB)).toBe(32_768);
+    expect(autoLocalContextWindow(8 * GB)).toBe(16_384);
+    expect(autoLocalContextWindow(15 * GB)).toBe(16_384);
+    expect(autoLocalContextWindow(16 * GB)).toBe(8_192);
+    expect(autoLocalContextWindow(70 * GB)).toBe(8_192);
+  });
+
+  it("falls back to the default when the size is unknown", () => {
+    expect(autoLocalContextWindow(undefined)).toBe(LOCAL_DEFAULT_CONTEXT);
+    expect(autoLocalContextWindow(0)).toBe(LOCAL_DEFAULT_CONTEXT);
+  });
+
+  it("beats the flat default for a big model (the bug it fixes)", () => {
+    // A 20 GB GGUF used to read as the 16k default — 50% while actually
+    // full, on a sidecar running an 8k window.
+    expect(autoLocalContextWindow(20 * GB)).not.toBe(LOCAL_DEFAULT_CONTEXT);
+  });
+});
+
 describe("contextWindowFor", () => {
-  it("uses the slider value for a local model when localCtx > 0", () => {
+  it("uses the sidecar's -c for a local model when localCtx > 0", () => {
     expect(contextWindowFor("Llama-3-8B-Instruct-Q4_K_M.gguf", true, 8192)).toBe(8192);
     expect(contextWindowFor("anything", true, 131072)).toBe(131072);
   });
 
-  it("falls back to LOCAL_DEFAULT_CONTEXT for a local model at Auto (0)", () => {
+  it("falls back to LOCAL_DEFAULT_CONTEXT when the sidecar window is unknown", () => {
     expect(contextWindowFor("Qwen2.5-7B-Instruct-Q4_K_M", true, 0)).toBe(LOCAL_DEFAULT_CONTEXT);
     expect(contextWindowFor("Qwen2.5-7B-Instruct-Q4_K_M", true, undefined)).toBe(
       LOCAL_DEFAULT_CONTEXT,

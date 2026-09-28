@@ -1536,8 +1536,12 @@ pub(super) async fn handle_compact_session(
         require_chat_id(&conn, &owner_session_id)?
     };
     // The desktop's own /compact command — same summarizer, same thresholds.
+    // No composer tool toggles on this surface: the defaults (tools on, code
+    // exec off) match the desktop's default tool posture.
     crate::chat::commands::selection::chat_compact_now(
         chat_session_id,
+        None,
+        None,
         app.state::<crate::ChatState>(),
         app.state::<crate::chat::local_models::LocalModelState>(),
         app.state::<crate::DbState>(),

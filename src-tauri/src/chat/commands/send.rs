@@ -1203,6 +1203,12 @@ pub async fn send_chat_message(
             // can show "Compacted 8.2k → 1.1k tokens" instead of a generic
             // "earlier context compacted".
             //
+            // The notice is emitted only once the trigger has actually fired
+            // (same predicate `maybe_compact` applies). It used to go out
+            // unconditionally, so every local turn flashed "Compacting
+            // earlier context…" — a promise the turn then didn't keep — and
+            // the paired clear wiped whatever status the turn had shown.
+            //
             // PERF (B1/B7): entry-based count (no ChatMessage/image clones),
             // and the successful count is handed to maybe_compact via
             // `pre_counted` so it isn't repeated there.
@@ -1214,12 +1220,20 @@ pub async fn send_chat_message(
             )
             .await;
             let pre_compact_tokens: u32 = pre_count_result.as_ref().copied().unwrap_or(0);
-            crate::chat::stream_events::emit_status_reason(
-                Some(&app),
-                &chat_session_id,
-                "context_compacting",
-                "Compacting earlier context…",
+            let will_compact = crate::chat::compaction::compaction_would_trigger(
+                status.n_ctx,
+                &cfg,
+                reserved_tokens,
+                pre_compact_tokens,
             );
+            if will_compact {
+                crate::chat::stream_events::emit_status_reason(
+                    Some(&app),
+                    &chat_session_id,
+                    "context_compacting",
+                    "Compacting earlier context…",
+                );
+            }
 
             // P4 summarizer override: `chat.local_gguf.compaction_summarizer =
             // "cloud"` routes the summary call through the first configured
@@ -1273,14 +1287,7 @@ pub async fn send_chat_message(
             // must never re-send superseded rows.
             let mut compact_entries = messages.clone();
             let mut injected_raw = false;
-            if cfg.rebuild_from_raw
-                && crate::chat::compaction::compaction_would_trigger(
-                    status.n_ctx,
-                    &cfg,
-                    reserved_tokens,
-                    pre_compact_tokens,
-                )
-            {
+            if cfg.rebuild_from_raw && will_compact {
                 let prior_id = messages
                     .iter()
                     .find(|e| crate::chat::compaction::is_compacted_summary(&e.message))
@@ -1414,23 +1421,26 @@ pub async fn send_chat_message(
                     compacted_system_notice = Some(("context_compacted".to_string(), notice));
                     o.messages
                 }
-                // Below threshold, nothing aged out, or compaction failed and
-                // fell back — maybe_compact already returned the original
-                // history (as ChatMessages) in its passthrough outcome. We
-                // also need to clear the "compacting…" spinner we emitted
-                // above, since the no-op case never gets a follow-up
-                // context_compacted event.
+                // Nothing aged out, or compaction failed and fell back —
+                // maybe_compact already returned the original history (as
+                // ChatMessages) in its passthrough outcome. When the trigger
+                // fired we showed the "compacting…" spinner, and the no-op
+                // path never gets a follow-up context_compacted event to
+                // replace it, so clear it here. Gated on `will_compact` so a
+                // turn that never compacted leaves the session's status alone.
                 Ok(_noop) => {
-                    // Clear the "compacting…" spinner (no follow-up
-                    // context_compacted event fires on the no-op path).
-                    crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
+                    if will_compact {
+                        crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
+                    }
                     _noop.messages
                 }
                 // Unreachable in practice (maybe_compact never returns Err),
                 // but rebuild from the caller's messages if it ever does.
                 Err(e) => {
                     eprintln!("[local-compaction] gave up, passing history through: {e}");
-                    crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
+                    if will_compact {
+                        crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
+                    }
                     messages.iter().map(|e| e.message.clone()).collect()
                 }
             }

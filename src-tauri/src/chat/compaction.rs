@@ -153,23 +153,49 @@ pub struct CompactionEntry {
 /// to be copy-pasted across the built-in send path, the compact-and-retry
 /// path, and compact-now.
 ///
+/// The prior compaction summary is hoisted to the FRONT. It is persisted with
+/// the newest row id (the send path folds turns into a row it inserts last),
+/// so plain id order would hand the model `[pinned turns…, summary]` — a
+/// preamble describing older context trailing the turns it summarizes, and a
+/// different order than the compaction turn itself sends. Every consumer
+/// (`split_for_compaction`, the token assembly, the wire list) is
+/// order-independent apart from the pin tail, which stays the most recent
+/// entries either way.
+///
 /// NOTE: `agent_sessions/primer.rs` deliberately does NOT use this — its
 /// primer transcript keeps raw content (no think-strip) by design.
 pub(crate) fn load_compaction_entries(
     conn: &Connection,
     chat_session_id: &str,
 ) -> rusqlite::Result<Vec<CompactionEntry>> {
-    Ok(crate::db::list_active_chat_messages(conn, chat_session_id)?
-        .into_iter()
-        .map(|r| CompactionEntry {
-            id: r.id,
-            message: ChatMessage {
-                role: r.role,
-                content: crate::chat::commands::strip_think_blocks(&r.content),
-                images: Vec::new(),
-            },
-        })
-        .collect())
+    let entries: Vec<CompactionEntry> =
+        crate::db::list_active_chat_messages(conn, chat_session_id)?
+            .into_iter()
+            .map(|r| CompactionEntry {
+                id: r.id,
+                message: ChatMessage {
+                    role: r.role,
+                    content: crate::chat::commands::strip_think_blocks(&r.content),
+                    images: Vec::new(),
+                },
+            })
+            .collect();
+    let mut prior = entries
+        .iter()
+        .filter(|e| is_compacted_summary(&e.message))
+        .cloned()
+        .collect::<Vec<_>>();
+    if prior.is_empty() {
+        return Ok(entries);
+    }
+    // Defensive: more than one summary row is a corrupt state (every
+    // compaction supersedes the previous one). Keep the newest — the oldest
+    // is stale text — and let the rest fall out of the pin ordering.
+    let keep = prior.pop().expect("non-empty");
+    let mut out = Vec::with_capacity(entries.len());
+    out.push(keep);
+    out.extend(entries.into_iter().filter(|e| !is_compacted_summary(&e.message)));
+    Ok(out)
 }
 
 /// Result of a compaction pass.
@@ -484,6 +510,45 @@ pub(crate) fn summarization_system_prompt() -> &'static str {
 /// middle as trimmed. ~3k tokens at the usual 4 chars/token.
 pub(crate) const SUMMARY_ENTRY_CHAR_CAP: usize = 12_000;
 
+/// Rough token cost of [`summarization_system_prompt`] — the instruction block
+/// every summarization request carries, held as a constant because the budget
+/// below has to leave room for it.
+const SUMMARIZER_PROMPT_TOKENS: u32 = 512;
+
+/// Output allowance the main summarization pass asks for.
+const MAIN_SUMMARY_MAX_TOKENS: u32 = 2048;
+
+/// Output allowance per map-reduce chunk — these are partials folded into the
+/// main call, so they stay short.
+const CHUNK_SUMMARY_MAX_TOKENS: u32 = 512;
+
+/// The summarization call's own input budget, in CHARS (≈ tokens × 4).
+///
+/// The call dumps the whole aged-out head into ONE user message, so the budget
+/// has to cover the request in full — the instruction block AND the
+/// `max_tokens` the call asks the model to produce, not just the window.
+/// Budgeting ¾ of `n_ctx` for the head alone (the old `n_ctx * 3`) put the
+/// request ~500 tokens over the window on the 8k tier `auto_ctx_size` picks
+/// for every GGUF ≥ 16 GB; llama-server answers that with a 400, which lands
+/// in the `Err` arm of the main pass — a silent passthrough, the exact failure
+/// this module exists to prevent. The send path's tool-schema reservation is
+/// taken out too, so the budget can't spend window the turn has already
+/// claimed.
+///
+/// `max_tokens` is what the caller passes to [`summarize`] for this call
+/// (2048 for the main pass, 512 per map-reduce chunk).
+pub(crate) fn summarizer_input_budget_chars(
+    n_ctx: u32,
+    reserved_tokens: u32,
+    max_tokens: u32,
+) -> usize {
+    let window = n_ctx
+        .saturating_sub(reserved_tokens)
+        .saturating_sub(max_tokens)
+        .saturating_sub(SUMMARIZER_PROMPT_TOKENS);
+    (window.saturating_mul(3)).max(1024) as usize
+}
+
 /// Trim one entry's content for the summarizer input, keeping the head and
 /// tail (both ends carry signal: the start says what it is, the end says
 /// where it landed) with a `…[trimmed N chars]` marker between. Pure; tests
@@ -761,19 +826,18 @@ pub async fn maybe_compact(
 
     // Truncate `to_compact` so the summarization request is always a
     // comfortable fit. The summarization call dumps the whole `to_compact`
-    // head into ONE user message, and llama-server 400s when that user
-    // content alone exceeds the model's context window. We cap the user
-    // content at ¾ of the window IN TOKENS, converted at the rough 4
-    // chars/token ratio → n_ctx * 3 CHARS. (E-2b: the old `n_ctx * 3 / 4`
-    // mixed the units and capped at ~19% of the intended budget, silently
-    // discarding most of the aged-out history on every re-compaction.)
+    // head into ONE user message, and llama-server 400s when the request
+    // exceeds the model's context window. The budget covers the request in
+    // full — instruction block + head + the `max_tokens` the call asks for
+    // (see `summarizer_input_budget_chars`); the old `n_ctx * 3` covered the
+    // head alone and overshot the window on small contexts.
     // Pin ordering already keeps the most recent tail verbatim, so
     // truncating from the OLD end of to_compact is the right direction — we
     // lose the oldest summarized detail, not the recent context.
     let mut to_compact_truncated: Vec<&CompactionEntry> = Vec::new();
     let mut chars: usize = 0;
     {
-        let max_chars = n_ctx.saturating_mul(3).max(1024) as usize;
+        let max_chars = summarizer_input_budget_chars(n_ctx, reserved_tokens, MAIN_SUMMARY_MAX_TOKENS);
         // Iterate from OLDEST → NEWEST, but we want to KEEP the NEWEST, so
         // reverse-walk and add while we have headroom.
         for e in to_compact.iter().rev() {
@@ -807,7 +871,8 @@ pub async fn maybe_compact(
     if to_compact_truncated.len() < to_compact.len() {
         let dropped_count = to_compact.len() - to_compact_truncated.len();
         let dropped = &to_compact[..dropped_count];
-        let max_chars = n_ctx.saturating_mul(3).max(1024) as usize;
+        let max_chars =
+            summarizer_input_budget_chars(n_ctx, reserved_tokens, CHUNK_SUMMARY_MAX_TOKENS);
         let mut chunks: Vec<Vec<&CompactionEntry>> = Vec::new();
         let mut cur: Vec<&CompactionEntry> = Vec::new();
         let mut cur_chars = 0usize;
@@ -829,7 +894,17 @@ pub async fn maybe_compact(
             chunks = chunks.split_off(chunks.len() - 8);
         }
         for (i, chunk) in chunks.iter().enumerate() {
-            match summarize(client, base_url, model, chunk, None, 512, route).await {
+            match summarize(
+                client,
+                base_url,
+                model,
+                chunk,
+                None,
+                CHUNK_SUMMARY_MAX_TOKENS,
+                route,
+            )
+            .await
+            {
                 Ok((partial, _, _)) => {
                     prior_parts.push(format!(
                         "[Earlier part {}]
@@ -866,7 +941,7 @@ pub async fn maybe_compact(
         model,
         &to_compact_truncated,
         prior_text.as_deref(),
-        2048,
+        MAIN_SUMMARY_MAX_TOKENS,
         route,
     )
     .await
@@ -1022,6 +1097,28 @@ mod tests {
     }
 
     #[test]
+    fn summarizer_budget_fits_the_request_not_just_the_head() {
+        // The 8k tier: n_ctx*3 chars ≈ ¾ of the window for the head ALONE,
+        // which left no room for the instruction block + max_tokens and put
+        // the request over the window (llama-server 400 → silent passthrough).
+        let budget = summarizer_input_budget_chars(8192, 0, MAIN_SUMMARY_MAX_TOKENS);
+        let head_tokens = (budget / 4) as u32; // 4 chars/token
+        let request_tokens = head_tokens + SUMMARIZER_PROMPT_TOKENS + MAIN_SUMMARY_MAX_TOKENS;
+        assert!(
+            request_tokens <= 8192,
+            "summarization request ({request_tokens}) overflows the 8192 window"
+        );
+        // The tool-schema reservation comes out of the same budget.
+        let with_tools = summarizer_input_budget_chars(8192, 4096, MAIN_SUMMARY_MAX_TOKENS);
+        assert!(with_tools < budget);
+        // Map-reduce chunks ask for less output, so they get more input.
+        assert!(summarizer_input_budget_chars(8192, 0, CHUNK_SUMMARY_MAX_TOKENS) > budget);
+        // Never returns zero — an empty budget would silently drop the head.
+        assert!(summarizer_input_budget_chars(1024, 0, MAIN_SUMMARY_MAX_TOKENS) >= 1024);
+        assert!(summarizer_input_budget_chars(0, 0, MAIN_SUMMARY_MAX_TOKENS) >= 1024);
+    }
+
+    #[test]
     fn structured_prompt_carries_the_schema_headings() {
         let p = summarization_system_prompt();
         for heading in [
@@ -1108,5 +1205,82 @@ mod tests {
         let cfg = load_compaction_config(&conn);
         assert_eq!(cfg.threshold, DEFAULT_THRESHOLD);
         assert_eq!(cfg.pin_exchanges, DEFAULT_PIN_EXCHANGES);
+    }
+
+    /// The send path folds turns into a summary row it inserts LAST, so plain
+    /// id order would hand the model `[pinned turns…, summary]` — a preamble
+    /// trailing the context it summarizes, and a different order than the
+    /// compaction turn itself sends.
+    #[test]
+    fn loaded_history_hoists_the_summary_row_to_the_front() {
+        let conn = crate::db::mem();
+        let sid = crate::db::create_chat_session(&conn, "local_gguf", "m", None)
+            .unwrap()
+            .id;
+        let mk = |role: &'static str, content: &'static str| crate::db::NewChatMessage {
+            chat_session_id: &sid,
+            role,
+            content,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            provider: None,
+            model_key: None,
+            pricing_estimated_usd: None,
+            started_at: None,
+            completed_at: None,
+            llm_time_ms: None,
+            tool_time_ms: None,
+            ttft_ms: None,
+            tokens_per_second: None,
+        };
+        // Row order as the send path actually produces it: the aged-out head,
+        // then the pinned tail that stays active, then the summary row the
+        // fold is written into (inserted last → the highest id), then the
+        // next turn.
+        let folded_user = crate::db::add_chat_message(&conn, mk("user", "aged-out turn")).unwrap();
+        let folded_asst =
+            crate::db::add_chat_message(&conn, mk("assistant", "aged-out reply")).unwrap();
+        let pinned_user = crate::db::add_chat_message(&conn, mk("user", "pinned turn")).unwrap();
+        let pinned_asst = crate::db::add_chat_message(&conn, mk("assistant", "pinned reply")).unwrap();
+        let summary = crate::db::add_chat_message(
+            &conn,
+            mk("system", "[compacted context]\n\nthe condensed history"),
+        )
+        .unwrap();
+        crate::db::mark_superseded(&conn, &[folded_user.id, folded_asst.id], summary.id).unwrap();
+        let after = crate::db::add_chat_message(&conn, mk("user", "turn after compaction")).unwrap();
+
+        // Plain id order really does trail the summary behind the turns it
+        // summarizes — that is what the hoist exists to correct.
+        let by_id: Vec<i64> = crate::db::list_active_chat_messages(&conn, &sid)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            by_id,
+            vec![pinned_user.id, pinned_asst.id, summary.id, after.id]
+        );
+
+        let entries = load_compaction_entries(&conn, &sid).unwrap();
+        let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![summary.id, pinned_user.id, pinned_asst.id, after.id]);
+        assert!(is_compacted_summary(&entries[0].message));
+        // Everything else keeps its chronological order.
+        assert_eq!(
+            entries[1..]
+                .iter()
+                .map(|e| e.message.role.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user", "assistant", "user"]
+        );
+        // The pin tail is still the most recent entries after the hoist.
+        let (_, _, pin) = split_for_compaction(&entries, 1).unwrap();
+        assert_eq!(pin.len(), 2);
+        assert_eq!(pin.last().unwrap().id, after.id);
     }
 }

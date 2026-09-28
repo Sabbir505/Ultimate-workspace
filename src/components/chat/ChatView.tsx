@@ -142,8 +142,9 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   // as chat.auto.bias and read by the backend resolver.
   const autoBias = useSettingsStore((s) => s.autoBias);
   const setAutoBias = useSettingsStore((s) => s.setAutoBias);
+  // The sidecar's real `-c`, published by useLocalModelSidecar — the meter
+  // draws its ring against this.
   const localCtx = useChatStore((s) => s.localCtx);
-  const setLocalCtx = useChatStore((s) => s.setLocalCtx);
   const thinking = useChatStore((s) => s.thinking);
   const setThinking = useChatStore((s) => s.setThinking);
   const config = useChatStore((s) => s.config);

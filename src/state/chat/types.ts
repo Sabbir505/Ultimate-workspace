@@ -228,8 +228,11 @@ export interface ChatState {
    *  GGUF (Qwen3, DeepSeek-R1); cloud OpenAI ignores it. `false` explicitly
    *  suppresses thinking; `null` falls back to the provider default. */
   thinking: boolean | null;
-  /** Context size (tokens) for local GGUF models; 0 = auto (picked from the
-   *  GGUF file size). Applied when the llama-server sidecar (re)starts. */
+  /** Context window (tokens) of the local GGUF sidecar — the `-c` it actually
+   *  runs with, published by useLocalModelSidecar from `local_model_status`
+   *  (or predicted from the per-model override / GGUF size before the sidecar
+   *  is up). 0 = unknown, and the meter falls back to a 16k default. Read by
+   *  the context meter; deliberately ignored for cloud/harness sessions. */
   localCtx: number;
   /** Monotonic counter bumped every time a `context_compacted` chat:status
    *  event lands for the active session. Drives an immediate context-meter

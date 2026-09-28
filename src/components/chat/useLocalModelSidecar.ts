@@ -17,6 +17,7 @@ import {
   type GgufModel,
   type LlamaOverrides,
 } from "../../lib/ipc";
+import { autoLocalContextWindow } from "../../lib/contextWindow";
 
 export function useLocalModelSidecar({
   activeChatSessionId,
@@ -41,6 +42,8 @@ export function useLocalModelSidecar({
   // the session's stored model, since the user may have killed the sidecar
   // manually between sessions).
   const [activeLocalModelId, setActiveLocalModelId] = useState<string | null>(null);
+  // The running sidecar's context window (`-c`), or 0 when none is live.
+  const [activeLocalModelCtx, setActiveLocalModelCtx] = useState(0);
   // Persisted per-model runtime overrides (`localModels.overrides` blob) —
   // the single source of truth the backend also reads at spawn time. Loaded
   // on mount and refreshed after every Apply; a ref mirror keeps the spawn
@@ -96,12 +99,20 @@ export function useLocalModelSidecar({
   // when a llama-server is actually live. Polled on mount, whenever the
   // active session changes, and whenever a local model finishes loading
   // (so the button appears the moment a pick completes).
+  //
+  // The probe also publishes the sidecar's real `-c` into the chat store's
+  // `localCtx`, which is what the context meter draws its ring against. The
+  // meter used to read a flat 16k for every local model, so a 16 GB+ GGUF
+  // (whose sidecar runs at 8k) read half-full while actually full — and
+  // compaction had already fired. `nCtx` is the window the request really
+  // gets, so it wins over any prediction.
   useEffect(() => {
     let stale = false;
     void localModelStatus()
       .then((status) => {
         if (stale) return;
         setActiveLocalModelId(status?.modelId ?? null);
+        setActiveLocalModelCtx(status?.nCtx ?? 0);
       })
       .catch(() => {
         /* status probe failure just means no live sidecar */
@@ -110,6 +121,29 @@ export function useLocalModelSidecar({
       stale = true;
     };
   }, [activeChatSessionId, localLoading, activeSessionModel]);
+
+  // With no sidecar up, predict the window the backend WOULD launch: the
+  // user's per-model override wins, else the size tier the backend picks.
+  // Covers the common "picked a model, haven't sent yet" state so the ring
+  // is right before the first turn rather than snapping on load.
+  const predictedLocalCtx = useMemo(() => {
+    if (activeLocalModelCtx > 0) return activeLocalModelCtx;
+    if (!isLocal || !activeSessionModel) return 0;
+    const override = localOverridesByName[activeSessionModel]?.ctx;
+    if (override && override > 0) return override;
+    const scanned = localModels.find(
+      (m) => m.id === activeSessionModel || m.name === activeSessionModel,
+    );
+    return scanned ? autoLocalContextWindow(scanned.sizeBytes) : 0;
+  }, [activeLocalModelCtx, isLocal, activeSessionModel, localModels, localOverridesByName]);
+
+  // Publish to the store the meter reads. `localCtx` is global UI state that
+  // tracks the running sidecar — the cloud branch of `contextWindowFor`
+  // ignores it, so a non-local session is unaffected.
+  const setLocalCtx = useChatStore((s) => s.setLocalCtx);
+  useEffect(() => {
+    setLocalCtx(predictedLocalCtx);
+  }, [predictedLocalCtx, setLocalCtx]);
 
   // Spawn/swap the local-model sidecar for a scanned GGUF record. Returns the
   // error text on failure (surfaced by the callers via the chat error banner)
@@ -217,6 +251,8 @@ export function useLocalModelSidecar({
     localLoading,
     activeLocalModelId,
     setActiveLocalModelId,
+    activeLocalModelCtx,
+    predictedLocalCtx,
     localOverridesMap,
     setLocalOverridesMap,
     localOverridesMapRef,

@@ -404,6 +404,12 @@ pub struct ChatSession {
     /// spawn-tree depth guard and the sidebar origin tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// The crew agent definition this session runs (`crew_agents.id`).
+    /// Deliberately NOT the `origin` column — that is a load-bearing
+    /// provenance vocabulary (`spawned_by:` is what the depth walk parses).
+    /// `ON DELETE SET NULL`: deleting the definition keeps the sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_def_id: Option<String>,
 }
 
 fn default_permission_mode() -> String {
@@ -659,14 +665,25 @@ pub struct SessionMailPayload {
     pub depth: i64,
 }
 
-/// An agent spawned a new first-class chat session (`chat:session-spawn`).
+/// A new first-class chat session was spawned (`chat:session-spawn`). Two
+/// producers share the event: Session Mesh children (`parent_session_id`
+/// set — the meshChildren map keys on it) and crew runs (`run_crew_agent` /
+/// mesh `agent:` spawns), which carry `agent_id` and either no parent
+/// (manual run) or the spawning parent.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSpawnPayload {
-    pub parent_session_id: String,
+    /// `None` = a human-initiated crew run (the frontend routes it to the
+    /// crew runs list, not the mesh-children tree).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub child_session_id: String,
     pub title: String,
     pub agent: String,
+    /// The crew agent definition behind the run (`agent:<id>` was resolved);
+    /// absent for plain mesh spawns and manual runs of non-crew sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     /// The model the child runs on (post subagent-model orchestration —
     /// explicit tool arg → `chat.subagentModel` setting → parent's model).
     pub model: String,
@@ -1215,6 +1232,13 @@ pub struct SubagentSpawnPayload {
     /// subagents, post subagent-model orchestration). `None` for CLI-native
     /// subagents, whose model the CLI owns.
     pub model: Option<String>,
+    /// The crew agent this run resolved, when the `Task` call named one (the
+    /// `agent` argument, or a `subagent_type` from the dynamic enum). The
+    /// Agents panel labels the row with that agent's name. `None` — and
+    /// omitted from the wire entirely — for a built-in role and for
+    /// CLI-native subagents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 }
 
 /// A single chunk of subagent output (token or line). Emitted repeatedly as

@@ -660,6 +660,19 @@ pub fn run() {
             commands::automation_cmds::count_automation_runs,
             commands::automation_cmds::automation_next_fire,
             commands::automation_cmds::automation_webhook_info,
+            // crew agents (declarative subagents) — CRUD over the persisted
+            // agent registry. The 7 builtin roles are seeded rows and are
+            // returned with the list; run/export/import land with the spawn
+            // phases.
+            commands::crew_cmds::list_crew_agents,
+            commands::crew_cmds::get_crew_agent,
+            commands::crew_cmds::create_crew_agent,
+            commands::crew_cmds::update_crew_agent,
+            commands::crew_cmds::delete_crew_agent,
+            commands::crew_cmds::run_crew_agent,
+            commands::crew_cmds::export_crew_agents,
+            commands::crew_cmds::import_crew_agent,
+            commands::crew_cmds::list_crew_runs,
             // artifact generation (conversational creation)
             commands::artifact_cmds::generate_artifact_cmd,
             commands::artifact_cmds::validate_artifact_cmd,

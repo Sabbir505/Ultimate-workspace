@@ -22,14 +22,26 @@ export interface SessionMailPayload {
   depth: number;
 }
 
-/** Mirrors crate::types::SessionSpawnPayload. */
+/** Mirrors crate::types::SessionSpawnPayload.
+ *
+ *  `parentSessionId` is OPTIONAL (research doc §F.5): a crew run spawned by
+ *  hand (Phase 2.5, `run_crew_agent`) emits this same event with no parent —
+ *  its `origin` stays NULL because `spawned_by:<id>` is the mesh's own
+ *  provenance vocabulary. `parentSessionId == null` therefore means "NOT a mesh
+ *  child", and meshSlice routes those to the crew runs list instead of keying
+ *  `meshChildren` under a phantom parent. `agentId` is the crew definition
+ *  that produced the session (absent for a plain mesh spawn). Both use
+ *  `skip_serializing_if = "Option::is_none"` on the Rust side, so an absent
+ *  field is `undefined` here rather than `null`. */
 export interface SessionSpawnPayload {
-  parentSessionId: string;
+  parentSessionId?: string;
   childSessionId: string;
   title: string;
   agent: string;
   /** Model the child runs on (post subagent-model orchestration). */
   model?: string;
+  /** The crew agent definition backing this session, when there is one. */
+  agentId?: string;
 }
 
 export const listenSessionMail = (handler: (payload: SessionMailPayload) => void) =>

@@ -28,6 +28,7 @@ import {
 import {
   automationNextFire,
   automationWebhookInfo,
+  isCrewAutomation,
   getRunWhileClosed,
   getSetting,
   installHarness,
@@ -48,6 +49,7 @@ import {
   type GgufModel,
 } from "../../lib/ipc";
 import { useAutomationsStore } from "../../state/automations";
+import { useCrewStore } from "../../state/crew";
 import { useProjectsStore } from "../../state/projects";
 import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
@@ -641,6 +643,9 @@ function AutomationDetail({
   const selectSession = useChatStore((s) => s.selectSession);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const harnesses = useProjectsStore((s) => s.harnesses);
+  // Crew-bound rows resolve their display name from the registry (a deleted
+  // agent falls back to the raw `agent:<id>` value).
+  const crewAgents = useCrewStore((s) => s.agents);
   const refreshHarnesses = useProjectsStore((s) => s.refreshHarnesses);
 
   const [runs, setRuns] = useState<AutomationRun[]>([]);
@@ -854,7 +859,10 @@ function AutomationDetail({
           );
         })()}
         <div className="automation-detail-meta">
-          <span>{AGENT_OPTIONS.find((a) => a.id === automation.harness)?.label ?? automation.harness}</span>
+          <span>{isCrewAutomation(automation.harness)
+            ? (crewAgents.find((c) => c.id === automation.harness.slice(6))?.name
+              ?? automation.harness)
+            : (AGENT_OPTIONS.find((a) => a.id === automation.harness)?.label ?? automation.harness)}</span>
           {automation.model && <><span>·</span><span>{automation.model}</span></>}
           {automation.cwd && <><span>·</span><span className="automation-detail-cwd" title={automation.cwd}>{automation.cwd.split(/[/\\]/).pop()}</span></>}
         </div>
@@ -1065,6 +1073,14 @@ function AutomationForm({
   const [name, setName] = useState(automation?.name ?? "");
   const [prompt, setPrompt] = useState(automation?.prompt ?? "");
   const [agentId, setAgentId] = useState(automation?.harness ?? "claude_code");
+  // Crew agents ride the same select as engines, as `agent:<id>` values —
+  // one code path end to end (validation, routing, history all accept it).
+  const crewAgents = useCrewStore((s) => s.agents);
+  const crewLoaded = useCrewStore((s) => s.loaded);
+  const loadCrew = useCrewStore((s) => s.load);
+  useEffect(() => {
+    if (!crewLoaded) void loadCrew();
+  }, [crewLoaded, loadCrew]);
   const [model, setModel] = useState(automation?.model ?? "");
   const [cwd, setCwd] = useState(automation?.cwd ?? "");
   // Trigger engine + its per-type fields, loaded from the stored row on edit.
@@ -1154,6 +1170,9 @@ function AutomationForm({
   const isHarness = agent?.group === "harness";
   const isApi = agent?.group === "api";
   const isLocal = agent?.group === "local";
+  // A crew binding leaves the Model field to the definition (the backend
+  // precedence is automation model > agent model), so no model fetch runs.
+  const isCrew = isCrewAutomation(agentId);
 
   // Fetch available models when the agent changes
   useEffect(() => {
@@ -1358,6 +1377,15 @@ function AutomationForm({
               value={agentId}
               onChange={(e) => { setAgentId(e.target.value); setModel(""); }}
             >
+              {crewAgents.length > 0 && (
+                <optgroup label="Crew">
+                  {crewAgents.map((c) => (
+                    <option key={c.id} value={`agent:${c.id}`}>
+                      {c.name}{c.builtin ? "" : " (crew)"}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
               <optgroup label="CLI Agents">
                 {AGENT_OPTIONS.filter((a) => a.group === "harness").map((a) => (
                   <option key={a.id} value={a.id}>{a.label}</option>
@@ -1376,8 +1404,11 @@ function AutomationForm({
             </select>
           </div>
           <div className="automation-form-field">
-            <label>Model <span className="automation-form-optional">(optional)</span></label>
-            {availableModels.length > 0 ? (
+            <label>Model <span className="automation-form-optional">{isCrew ? "(from crew agent)" : "(optional)"}</span></label>
+            {isCrew ? (
+              <input type="text" value={model} onChange={(e) => setModel(e.target.value)}
+                placeholder="Crew agent's model (leave empty to use it)" />
+            ) : availableModels.length > 0 ? (
               <select value={model} onChange={(e) => setModel(e.target.value)}>
                 <option value="">{isHarness ? "Harness default" : isLocal ? "Auto-detect" : "Provider default"}</option>
                 {availableModels.map((m) => (

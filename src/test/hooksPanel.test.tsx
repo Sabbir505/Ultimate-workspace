@@ -34,6 +34,7 @@ const hook: HookDef = {
   timeoutSecs: 30,
   onError: "closed",
   async: false,
+  origins: [],
   enabled: true,
 };
 

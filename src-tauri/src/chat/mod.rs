@@ -14,6 +14,7 @@ pub mod codeexec;
 pub mod commands;
 pub mod compaction;
 pub mod context_windows;
+pub mod crew;
 pub mod dispatch;
 pub mod docdesign;
 pub mod docs;
@@ -595,6 +596,9 @@ impl ChatManager {
                     .any(|f| f == tools::FAMILY_AUTOMATIONS),
                 totp: pre_unlocked_families.iter().any(|f| f == tools::FAMILY_TOTP),
                 unlockable_families: Arc::new(tools::unlockable_family_pairs()),
+                // No terminal tool allowlist: every main-loop surface renders the
+                // full registry. Only a subagent run pins a set (chat::crew).
+                allow: None,
             }
         };
         // Fresh late-attach slot for this turn (replaces any stale one).

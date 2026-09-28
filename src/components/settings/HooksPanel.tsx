@@ -8,6 +8,14 @@
 // command raises the native exec-gate dialog — the Test button triggers that
 // same trust prompt deliberately, so a confirmed test trusts the hook for live
 // turns. Config is stored as a JSON array under the `hooks` app_settings key.
+//
+// ORIGIN SCOPE: every tool call carries a dispatch origin (`chat` for the main
+// loop, `subagent` for the builtin Task roles, `agent:<id>` for a crew agent,
+// `harness` for a CLI harness, `relay_tools` for the MCP bridge). A hook with no
+// origins selected is global; otherwise it fires only for the selected ones.
+// This is the guardrail for the advisory tier — a crew agent running on a CLI
+// harness can call that CLI's own tools, which Relay cannot restrict, so a
+// `before` deny hook scoped to `agent:<id>` is what actually stops them.
 
 import { Plus, Trash2, Zap, FlaskConical, Webhook } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -17,6 +25,9 @@ import {
   testHook,
   importFromClaude,
   onHookRun,
+  isKnownOrigin,
+  KNOWN_HOOK_ORIGINS,
+  HOOK_ORIGIN_LABELS,
   type ClaudeImportReport,
   type HookDef,
   type HookEvent,
@@ -30,6 +41,13 @@ const TOOL_MATCHER_CHIPS = [
   { label: "shell", pattern: "run_shell" },
 ];
 
+/** Lifecycle events fire from the global turn-finalization listeners, which
+ *  know the session but not the dispatch origin — so the backend keeps them
+ *  global and the picker would be a lie here. */
+function isLifecycle(event: HookEvent): boolean {
+  return event === "turn_complete" || event === "session_start";
+}
+
 function emptyHook(event: HookEvent): HookDef {
   return {
     id: `hook-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
@@ -41,6 +59,7 @@ function emptyHook(event: HookEvent): HookDef {
     timeoutSecs: 30,
     onError: "open",
     async: false,
+    origins: [],
     enabled: true,
   };
 }
@@ -93,6 +112,9 @@ export function HooksPanel() {
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<HookDef>(() => emptyHook("pre_tool_use"));
   const [draftArgs, setDraftArgs] = useState("");
+  // Free text for the open-ended `agent:<id>` part of the scope — kept apart
+  // from `draft.origins` so a half-typed id never round-trips through the array.
+  const [draftAgentOrigins, setDraftAgentOrigins] = useState("");
   const [reports, setReports] = useState<Record<string, HookTestReport>>({});
   const [runs, setRuns] = useState<HookRunPayload[]>([]);
   const [importNote, setImportNote] = useState<string | null>(null);
@@ -164,12 +186,42 @@ export function HooksPanel() {
     }
     setBusy(true);
     try {
-      await persist([...hooks, { ...draft, args: draftArgs.split("\n").map((l) => l.trim()).filter(Boolean) }]);
+      await persist([
+        ...hooks,
+        { ...draft, args: draftArgs.split("\n").map((l) => l.trim()).filter(Boolean) },
+      ]);
       setDraft(emptyHook(draft.event));
       setDraftArgs("");
+      setDraftAgentOrigins("");
     } finally {
       setBusy(false);
     }
+  };
+
+  const toggleDraftOrigin = (origin: string) =>
+    setDraft((d) => ({
+      ...d,
+      origins: d.origins.includes(origin)
+        ? d.origins.filter((o) => o !== origin)
+        : [...d.origins, origin],
+    }));
+
+  /** Comma/space separated ids; a bare id gets the `agent:` prefix so the
+   *  field accepts what the crew panel shows. */
+  const setDraftAgentList = (raw: string) => {
+    setDraftAgentOrigins(raw);
+    const parsed = raw
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => (s.startsWith("agent:") ? s : `agent:${s}`));
+    setDraft((d) => ({
+      ...d,
+      // The text field owns the whole `agent:` list: drop the previous parse
+      // and take the new one, leaving the ticked fixed origins (and any
+      // unrecognized value the user hand-edited) untouched.
+      origins: [...d.origins.filter((o) => !o.startsWith("agent:")), ...parsed],
+    }));
   };
 
   const handleRemove = async (id: string) => {
@@ -231,7 +283,10 @@ export function HooksPanel() {
             arguments (<span className="mono">updatedInput</span>). An <span className="mono">after</span> hook can
             annotate the result (<span className="mono">additionalContext</span>). The command receives one JSON
             event on stdin and runs directly — never through a shell. The first run of each command asks via a
-            native dialog.
+            native dialog. Leave the origin checkboxes empty to run everywhere, or pick the origins a hook
+            should fire for — scoping a <span className="mono">before</span> hook to a crew agent
+            (<span className="mono">agent:&lt;id&gt;</span>) is the guardrail for agents Relay can't otherwise
+            restrain.
           </div>
         </div>
       </div>
@@ -240,7 +295,12 @@ export function HooksPanel() {
         <div className="perm-add-row">
           <select
             value={draft.event}
-            onChange={(e) => setDraft({ ...draft, event: e.target.value as HookEvent })}
+            onChange={(e) => {
+              const event = e.target.value as HookEvent;
+              // Lifecycle events are global in the backend (no dispatch origin
+              // at the fire site), so drop any scope the user had staged.
+              setDraft({ ...draft, event, origins: isLifecycle(event) ? [] : draft.origins });
+            }}
             aria-label="Hook event"
             className="perm-tool-select"
           >
@@ -315,6 +375,45 @@ export function HooksPanel() {
             </label>
           )}
         </div>
+        <div className="perm-add-row">
+          {isLifecycle(draft.event) ? (
+            <div className="settings-note" style={{ flex: 1 }}>
+              Fires for every turn, whoever started it — turn/session events carry no
+              origin, so they are always global.
+            </div>
+          ) : (
+            <>
+              <span className="settings-note" style={{ alignSelf: "center", whiteSpace: "nowrap" }}>
+                {draft.origins.length === 0 ? "Runs for:" : "Only for:"}
+              </span>
+              {KNOWN_HOOK_ORIGINS.map((o) => (
+                <label
+                  key={o}
+                  style={{ display: "flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={draft.origins.includes(o)}
+                    onChange={() => toggleDraftOrigin(o)}
+                    disabled={busy}
+                    aria-label={`Scope to ${HOOK_ORIGIN_LABELS[o] ?? o}`}
+                    title={HOOK_ORIGIN_LABELS[o] ?? o}
+                  />
+                  <span className="mono">{o}</span>
+                </label>
+              ))}
+              <input
+                type="text"
+                value={draftAgentOrigins}
+                placeholder="agent:<crew-id>, agent:other-id — blank = all origins"
+                onChange={(e) => setDraftAgentList(e.target.value)}
+                className="perm-pattern-input"
+                disabled={busy}
+                aria-label="Crew agent origins"
+              />
+            </>
+          )}
+        </div>
         <div className="perm-chips">
           {TOOL_MATCHER_CHIPS.map((c) => (
             <button
@@ -367,6 +466,25 @@ export function HooksPanel() {
                   {h.async && " · detached"}
                   {h.onError === "closed" && " · fail-closed"}
                 </span>
+                <div style={{ fontSize: 12, marginTop: 2, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <span style={{ opacity: 0.7 }}>
+                    {h.origins.length === 0 ? "all origins" : `only: ${h.origins.join(", ")}`}
+                  </span>
+                  {h.origins.filter((o) => !isKnownOrigin(o)).map((o) => (
+                    // Kept, not dropped: an unrecognized origin is inert (it
+                    // matches no dispatch origin) but the user must SEE it —
+                    // a stale id or a typo'd prefix silently narrowing a hook
+                    // is exactly the failure this warns about.
+                    <span
+                      key={o}
+                      className="perm-chip"
+                      style={{ color: "var(--warn, #d29922)" }}
+                      title={`Not an origin Relay dispatches ("${o}"). This hook will not fire for it.`}
+                    >
+                      unknown origin: {o}
+                    </span>
+                  ))}
+                </div>
                 {reports[h.id] && (
                   <div style={{ marginTop: 6 }}>
                     <TestReport report={reports[h.id]} />

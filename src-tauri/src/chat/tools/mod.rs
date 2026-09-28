@@ -468,6 +468,18 @@ pub struct ToolCaps {
     /// families are absent from the schema but never absent from the
     /// catalog — one call brings them back this turn (see `unlock_family`).
     pub unlockable_families: std::sync::Arc<Vec<(String, String)>>,
+    /// TERMINAL name allowlist for the whole rendered registry, applied after
+    /// every flag and sandbox filter in both spec builders. `None` (the
+    /// default, and every main-loop turn) leaves the output exactly as it was;
+    /// `Some(set)` is how a subagent run says "these names and nothing else".
+    ///
+    /// It is deliberately the LAST filter, not a gate on the builders'
+    /// internals: everything a builder could add later — a new family, a
+    /// connector's vendor tools, an MCP-gallery tool under its prefixed wire
+    /// name — is filtered too, so a stored allowlist can never be widened by
+    /// a registry change. `Arc` + `HashSet` because the set is shared with
+    /// the executor's name check and must stay cheap to clone per round.
+    pub allow: Option<std::sync::Arc<std::collections::HashSet<String>>>,
 }
 
 /// Built-in families hidden from the default schema and unlocked via
@@ -575,6 +587,7 @@ impl Default for ToolCaps {
             automations_write: false,
             totp: false,
             unlockable_families: std::sync::Arc::new(unlockable_family_pairs()),
+            allow: None,
         }
     }
 }

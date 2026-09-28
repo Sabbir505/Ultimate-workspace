@@ -27,6 +27,27 @@
 //! Config lives as a JSON array under the `hooks` app_settings key, edited in
 //! Settings → Hooks; the models never see the config, but denial text names
 //! the hook so the conversation stays recoverable.
+//!
+//! ORIGIN SCOPING (`HookDef.origins`, Phase 4 of the Crew feature): every tool
+//! call already carries a dispatch `origin` string — the main chat, a builtin
+//! `Task` role, a crew agent, a CLI harness, or the relay-tools bridge — and it
+//! rides on the hook payload. `origins` narrows a hook to some of those
+//! strings: a hook is GLOBAL when the list is empty (the default, so every
+//! config saved before this field existed keeps today's behavior) and fires
+//! only when the dispatched origin is IN the list otherwise. The vocabulary is
+//! `"chat"`, `"subagent"`, `"agent:<id>"` (crew agents, id not name, so a
+//! rename can't silently unscope a rule), `"harness"` and `"relay_tools"`.
+//! This is the advisory tier's only guardrail: for a crew agent on a CLI
+//! harness Relay cannot restrict the CLI's own tools, so a user writes one
+//! `before` deny hook per sensitive tool scoped to `agent:<id>`. The value is
+//! never validated against a closed list — crew ids are dynamic, and an
+//! unrecognized origin is preserved verbatim (Settings flags it) rather than
+//! dropping the user's hook.
+//!
+//! Lifecycle events (`turn_complete` / `session_start`) are deliberately NOT
+//! origin-scoped: they fire from the global `chat:done` / `chat:error`
+//! listeners and from the send path, neither of which knows the dispatch
+//! origin (see [`lifecycle_detached`]), so there is nothing to match against.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -104,6 +125,16 @@ pub struct HookDef {
     pub timeout_secs: u64,
     #[serde(default)]
     pub on_error: OnError,
+    /// Origin scope: EMPTY = global (the hook fires for every dispatch origin,
+    /// which is what every config written before this field means). Non-empty
+    /// = the hook fires only when the call's origin string is IN the list —
+    /// `"chat"`, `"subagent"`, `"agent:<crew-id>"`, `"harness"`,
+    /// `"relay_tools"` (see the module header). Compared verbatim, so an
+    /// unrecognized value simply never matches and is reported in Settings
+    /// rather than dropped: crew ids are dynamic, so the list is deliberately
+    /// not a closed vocabulary.
+    #[serde(default)]
+    pub origins: Vec<String>,
     /// Post-hooks only: run detached and ignore the outcome.
     #[serde(default, rename = "async")]
     pub run_async: bool,
@@ -138,7 +169,7 @@ impl HookDef {
 /// ([`save_config`], hence the Claude import too) calls
 /// [`invalidate_config_cache`]; the Settings panel's generic set_setting path
 /// relies on the TTL.
-pub fn load_config(app: &AppHandle) -> Vec<HookDef> {
+pub fn load_config<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<HookDef> {
     if let Ok(guard) = CONFIG_CACHE.read() {
         if let Some((at, defs)) = guard.as_ref() {
             if at.elapsed() < CONFIG_CACHE_TTL {
@@ -153,7 +184,7 @@ pub fn load_config(app: &AppHandle) -> Vec<HookDef> {
     defs.as_ref().clone()
 }
 
-fn load_config_from_db(app: &AppHandle) -> Vec<HookDef> {
+fn load_config_from_db<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<HookDef> {
     let db = app.state::<crate::DbState>();
     let raw = {
         let conn = db.0.lock();
@@ -187,7 +218,11 @@ pub fn invalidate_config_cache() {
 /// Per-entry parse of the hooks settings array: one bad entry is skipped (and
 /// logged) instead of disabling the whole system — the previous
 /// all-or-nothing `from_str::<Vec<HookDef>>` turned a single typo into "no
-/// hooks". Pure so it is unit-testable.
+/// hooks". That includes a malformed `origins` value (e.g. a string where the
+/// array belongs): the ONE entry is skipped, the rest of the array survives, and
+/// an origin string that is merely unrecognized is kept verbatim (crew ids are
+/// dynamic — a closed vocabulary would drop a user's hook).
+/// Pure so it is unit-testable.
 fn parse_config_entries(items: &[Value]) -> Vec<HookDef> {
     items
         .iter()
@@ -237,6 +272,17 @@ pub fn hook_matches(matcher: &str, tool: &str) -> bool {
             Err(_) => false,
         }
     }
+}
+
+/// Origin scope predicate: an empty `origins` list is GLOBAL (every dispatch
+/// origin matches — the pre-`origins` behavior, and what the Claude import
+/// produces), otherwise the call's `origin` must be listed verbatim. No
+/// normalization or validation happens here: the list is user-authored and
+/// crew ids (`agent:<id>`) are dynamic, so an unknown value is inert rather
+/// than rejected. Pure so the scoping matrix is unit-testable without a
+/// dispatch path.
+pub fn origin_matches(def: &HookDef, origin: &str) -> bool {
+    def.origins.is_empty() || def.origins.iter().any(|o| o == origin)
 }
 
 /// Replace `${tool_input.key}` tokens in one argument template with values
@@ -361,13 +407,18 @@ pub enum GateMode {
 /// Interactive-path spawn: the first run of a distinct command/template
 /// raises the native exec-gate dialog (remembered on Allow); a Deny or failed
 /// dialog counts as "did not run" and is subject to the hook's onError policy.
-async fn run_hook(app: &AppHandle, def: &HookDef, payload: &Value) -> HookOutcome {
+async fn run_hook<R: tauri::Runtime>(app: &AppHandle<R>, def: &HookDef, payload: &Value) -> HookOutcome {
     run_hook_gated(app, def, payload, GateMode::Dialog).await
 }
 
 /// Run one hook command for one event payload and classify the result.
 /// `gate_mode` controls the one-time trust dialog (see [`GateMode`]).
-async fn run_hook_gated(app: &AppHandle, def: &HookDef, payload: &Value, gate_mode: GateMode) -> HookOutcome {
+async fn run_hook_gated<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    def: &HookDef,
+    payload: &Value,
+    gate_mode: GateMode,
+) -> HookOutcome {
     // Exec-gate trust (native dialog, remembered per hash — outside the
     // webview so a compromised renderer can't answer it).
     let ident = def.gate_ident();
@@ -388,18 +439,29 @@ async fn run_hook_gated(app: &AppHandle, def: &HookDef, payload: &Value, gate_mo
                 def.command,
                 def.args.join(" ")
             );
-            match exec_gate::confirm_remembered(
-                &db.0,
-                app,
-                "hook",
-                &ident,
-                "Allow user hook?",
-                body,
-            )
-            .await
-            {
-                Ok(true) => true,
-                _ => false,
+            // The native trust dialog is raised through the dialog plugin,
+            // which only the real (Wry) app handle can do. A handle on any
+            // other runtime — the `MockRuntime` the unit tests build, which
+            // has no windows and therefore no dialog — is treated as "not
+            // trusted", i.e. the same skip `GateMode::PreTrusted` makes, so a
+            // test can never hang on (or accidentally answer) a dialog. In the
+            // shipping app R is always Wry, so this branch is a no-op there.
+            let owned = app.clone();
+            match (&owned as &dyn std::any::Any).downcast_ref::<AppHandle<tauri::Wry>>() {
+                None => false,
+                Some(wry) => match exec_gate::confirm_remembered(
+                    &db.0,
+                    wry,
+                    "hook",
+                    &ident,
+                    "Allow user hook?",
+                    body,
+                )
+                .await
+                {
+                    Ok(true) => true,
+                    _ => false,
+                },
             }
         }
     };
@@ -525,8 +587,18 @@ pub fn save_config(app: &AppHandle, defs: &[HookDef]) -> Result<(), String> {
 /// `PreTrusted` — they never raise the trust dialog mid-flight. There is no
 /// result text, so `decision`/`additionalContext` outputs are ignored; these
 /// hooks exist for notification/audit fan-out.
-pub fn lifecycle_detached(
-    app: &AppHandle,
+///
+/// NOT origin-scoped, and deliberately so: this signature has no origin
+/// parameter, because both call sites (the two global listeners in `lib.rs`
+/// and the send path in `chat/commands/send.rs`) fire for EVERY engine and have
+/// no dispatch origin in hand — the events carry a session id and a status, not
+/// the origin that produced the turn. Threading one would mean changing those
+/// call sites, so lifecycle hooks stay GLOBAL here and `origins` applies only
+/// to the two tool events, which do have a real origin at the gate. Settings
+/// says the same next to the picker (hidden for these two events) so nobody
+/// writes a scope that has no effect.
+pub fn lifecycle_detached<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     event: HookEvent,
     sid: &str,
     status: &str,
@@ -574,14 +646,24 @@ pub fn lifecycle_detached(
 /// it; Relay only sees the stream event). Fire-and-forget so the reader
 /// thread is never delayed; annotations are discarded (there is no Relay-side
 /// result to annotate — the CLI owns it).
-pub fn harness_observation(app: Option<&AppHandle>, sid: &str, tool: &str, tool_input: &Value) {
+pub fn harness_observation<R: tauri::Runtime>(
+    app: Option<&AppHandle<R>>,
+    sid: &str,
+    tool: &str,
+    tool_input: &Value,
+) {
     let Some(app) = app else {
         return;
     };
     // Cheap pre-check on the calling thread: avoids a task spawn per harness
-    // tool call when no post hooks are configured.
+    // tool call when no post hooks are configured. Origin scope included (the
+    // calls below are hard-wired to the `harness` origin) so an origins-scoped
+    // post hook for another origin doesn't pay for a pointless spawn.
     let any = load_config(app).into_iter().any(|d| {
-        d.enabled && d.event == HookEvent::PostToolUse && hook_matches(&d.matcher, tool)
+        d.enabled
+            && d.event == HookEvent::PostToolUse
+            && hook_matches(&d.matcher, tool)
+            && origin_matches(&d, "harness")
     });
     if !any {
         return;
@@ -763,6 +845,10 @@ pub fn parse_claude_hooks(raw: &str, existing: &[HookDef]) -> (Vec<HookDef>, Cla
                     timeout_secs,
                     on_error: OnError::Open,
                     run_async: false,
+                    // Claude has no origin concept — imports stay GLOBAL
+                    // (empty = every origin). The user narrows a hook in
+                    // Settings, where the origin vocabulary is documented.
+                    origins: Vec::new(),
                     enabled: true,
                 };
                 // Dedupe against current config AND earlier imports in this
@@ -812,8 +898,8 @@ fn hook_payload(
     payload
 }
 
-fn emit_hook_run(
-    app: &AppHandle,
+fn emit_hook_run<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     sid: Option<&str>,
     event: HookEvent,
     def: &HookDef,
@@ -842,6 +928,7 @@ fn emit_hook_run(
 // ---------------------------------------------------------------------------
 
 /// What the pre-hook pass decided about one tool call.
+#[derive(Debug)]
 pub enum PreVerdict {
     /// Run the tool; `note` (from a hook's `additionalContext`) is appended
     /// to the eventual tool result. Argument rewrites are applied in place.
@@ -856,8 +943,8 @@ pub enum PreVerdict {
 /// deterministic: the first Deny short-circuits; Deny beats Ask; argument
 /// rewrites cascade into later hooks' payloads. `sid` is `None` on paths with
 /// no session identity (the relay-tools MCP bridge).
-pub async fn run_pre_tool(
-    app: &AppHandle,
+pub async fn run_pre_tool<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     sid: Option<&str>,
     tool: &str,
     args: &mut Value,
@@ -867,6 +954,11 @@ pub async fn run_pre_tool(
     let defs: Vec<HookDef> = load_config(app)
         .into_iter()
         .filter(|d| d.enabled && d.event == HookEvent::PreToolUse && hook_matches(&d.matcher, tool))
+        // Origin scope (Phase 4): a global hook (empty `origins`) fires for
+        // every dispatch origin; a scoped one only for its listed origins —
+        // this is the advisory tier's guardrail for crew agents on a CLI
+        // harness, where Relay cannot restrict the CLI's own tools.
+        .filter(|d| origin_matches(d, origin))
         .collect();
     if defs.is_empty() {
         return PreVerdict::Proceed { note: None };
@@ -997,8 +1089,8 @@ fn post_flagged(ran: bool, exit_code: Option<i32>, decision: Option<&str>) -> bo
 /// return the (possibly annotated) result text. Sync hooks contribute context;
 /// async hooks run detached as pure observers. Post hooks can never fail the
 /// tool — worst case the annotation is skipped.
-pub async fn run_post_tool(
-    app: &AppHandle,
+pub async fn run_post_tool<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     sid: Option<&str>,
     tool: &str,
     tool_input: &Value,
@@ -1009,6 +1101,8 @@ pub async fn run_post_tool(
     let defs: Vec<HookDef> = load_config(app)
         .into_iter()
         .filter(|d| d.enabled && d.event == HookEvent::PostToolUse && hook_matches(&d.matcher, tool))
+        // Origin scope, same predicate as the pre pass (module header).
+        .filter(|d| origin_matches(d, origin))
         .collect();
     if defs.is_empty() {
         return result;
@@ -1119,7 +1213,7 @@ pub struct HookTestReport {
 /// write_file one) — the Settings panel's Test button. Goes through the same
 /// exec gate, so confirming the dialog here also trusts the hook for live
 /// turns.
-pub async fn test_hook(app: &AppHandle, def: &HookDef) -> HookTestReport {
+pub async fn test_hook<R: tauri::Runtime>(app: &AppHandle<R>, def: &HookDef) -> HookTestReport {
     let payload = match def.event {
         HookEvent::TurnComplete => json!({
             "hook_event_name": "turn_complete",
@@ -1399,5 +1493,206 @@ mod tests {
         assert_eq!(defs.len(), 1, "invalid entries are skipped individually");
         assert_eq!(defs[0].id, "h1");
         assert_eq!(defs[0].command, "node");
+    }
+
+    // -----------------------------------------------------------------------
+    // Origin scoping (Phase 4 — advisory tier for crew agents)
+    // -----------------------------------------------------------------------
+
+    /// A `pre_tool_use` hook that denies with the JSON `decision: "deny"`
+    /// contract, scoped to `origins`. The script lives in a temp FILE rather
+    /// than in the argv: a spawn re-escapes `"` as `\"` and `cmd`/`sh` never
+    /// unescape it, so JSON on a command line would arrive mangled. A file is
+    /// what a real user hook is anyway.
+    fn deny_def(dir: &tempfile::TempDir, id: &str, reason: &str, origins: Vec<String>) -> HookDef {
+        let (command, args) = if cfg!(windows) {
+            let path = dir.path().join(id).with_extension("cmd");
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\n@echo {{\"decision\":\"deny\",\"reason\":\"{reason}\"}}\r\n@exit /b 0\r\n"
+                ),
+            )
+            .unwrap();
+            ("cmd".to_string(), vec!["/C".to_string(), path.display().to_string()])
+        } else {
+            let path = dir.path().join(format!("{id}.sh"));
+            std::fs::write(
+                &path,
+                format!("printf '%s\\n' '{{\"decision\":\"deny\",\"reason\":\"{reason}\"}}'\nexit 0\n"),
+            )
+            .unwrap();
+            ("sh".to_string(), vec![path.display().to_string()])
+        };
+        HookDef {
+            id: id.to_string(),
+            event: HookEvent::PreToolUse,
+            name: id.to_string(),
+            matcher: "*".to_string(),
+            command,
+            args,
+            timeout_secs: 5,
+            on_error: OnError::Open,
+            run_async: false,
+            origins,
+            enabled: true,
+        }
+    }
+
+    /// A mock app whose in-memory settings DB holds `defs` as the hook config,
+    /// with every hook's exec-gate entry pre-remembered so the tests exercise
+    /// the FILTER, not the native trust dialog. The config cache is dropped
+    /// too, so the write is what the next `load_config` sees.
+    fn mock_app_with_hooks(defs: Vec<HookDef>) -> tauri::AppHandle<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_app();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        for d in &defs {
+            exec_gate::remember(&conn, "hook", &d.gate_ident());
+        }
+        crate::db::set_setting(&conn, SETTINGS_KEY, &serde_json::to_string(&defs).unwrap()).unwrap();
+        app.manage(crate::DbState(std::sync::Arc::new(parking_lot::Mutex::new(conn))));
+        invalidate_config_cache();
+        app.handle().clone()
+    }
+
+    /// The deny reason a `run_pre_tool` verdict carries, if it denied.
+    async fn deny_reason_for(
+        app: &tauri::AppHandle<tauri::test::MockRuntime>,
+        origin: &str,
+    ) -> Option<String> {
+        let mut args = json!({ "path": "notes.txt", "content": "x" });
+        match run_pre_tool(app, Some("s1"), "write_file", &mut args, origin, "workspace_write").await {
+            PreVerdict::Deny { reason } => Some(reason),
+            PreVerdict::Proceed { .. } | PreVerdict::Ask { .. } => None,
+        }
+    }
+
+    #[test]
+    fn global_hook_fires_for_every_origin_scoped_hook_only_for_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = deny_def(&dir, "g", "global", vec![]);
+        let crew = deny_def(&dir, "c", "crew", vec!["agent:crew-1".to_string()]);
+        // Empty `origins` is GLOBAL: it must match the main chat, a builtin
+        // Task role, a crew agent, a harness CLI and the relay bridge.
+        for origin in ["chat", "subagent", "agent:crew-1", "harness", "relay_tools"] {
+            assert!(origin_matches(&global, origin), "global hook must fire for {origin}");
+        }
+        // A scoped hook fires ONLY for its listed origins — including the
+        // prefix trap: `agent:crew-1` is not `agent:crew-10`.
+        assert!(origin_matches(&crew, "agent:crew-1"));
+        assert!(!origin_matches(&crew, "agent:crew-10"));
+        assert!(!origin_matches(&crew, "chat"));
+        assert!(!origin_matches(&crew, "subagent"));
+        assert!(!origin_matches(&crew, "harness"));
+        // An origin outside the vocabulary (stale or hand-edited) is inert,
+        // never an error: the user's hook is kept, it just doesn't match.
+        let odd = deny_def(&dir, "o", "odd", vec!["Agent:Crew-1".to_string(), "nonsense".to_string()]);
+        assert!(!origin_matches(&odd, "agent:crew-1"), "matching is case-sensitive");
+        assert!(!origin_matches(&odd, "chat"));
+    }
+
+    #[test]
+    fn origins_round_trip_and_default_to_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let scoped = deny_def(
+            &dir,
+            "c",
+            "c",
+            vec!["agent:crew-1".to_string(), "harness".to_string()],
+        );
+        let json = serde_json::to_string(&scoped).unwrap();
+        assert!(json.contains(r#""origins":["agent:crew-1","harness"]"#));
+        let back: HookDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.origins, scoped.origins);
+
+        // A config saved before the field existed deserializes to the global
+        // default instead of failing — every existing hook keeps today's
+        // behavior with no migration.
+        let legacy = r#"{"id":"h","event":"pre_tool_use","command":"node"}"#;
+        let old: HookDef = serde_json::from_str(legacy).unwrap();
+        assert!(old.origins.is_empty());
+        assert!(origin_matches(&old, "agent:whatever"));
+    }
+
+    #[test]
+    fn claude_import_defs_stay_global() {
+        let raw = r#"{"hooks":{
+            "PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"my-guard.js"}]}],
+            "PostToolUse":[{"matcher":"","hooks":[{"type":"command","command":"audit.js"}]}]
+        }}"#;
+        let (defs, _) = parse_claude_hooks(raw, &[]);
+        assert_eq!(defs.len(), 2);
+        for d in &defs {
+            assert!(
+                d.origins.is_empty(),
+                "Claude has no origin concept — imports must stay global"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_origins_value_skips_only_its_own_entry() {
+        let entries = vec![
+            // No `origins` at all -> global.
+            json!({ "id": "h1", "event": "pre_tool_use", "command": "node" }),
+            // A string where the array belongs -> THIS entry is skipped, the
+            // rest of the array survives (never a silent all-or-nothing drop).
+            json!({ "id": "h2", "event": "pre_tool_use", "command": "node", "origins": "chat" }),
+            // An UNRECOGNIZED but well-formed origin is preserved verbatim:
+            // crew ids are dynamic, so a closed vocabulary would eat hooks.
+            json!({ "id": "h3", "event": "pre_tool_use", "command": "node", "origins": ["agent:crew-9"] }),
+        ];
+        let defs = parse_config_entries(&entries);
+        assert_eq!(defs.len(), 2, "only the malformed entry is dropped");
+        let ids: Vec<&str> = defs.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, vec!["h1", "h3"]);
+        assert!(defs[0].origins.is_empty());
+        assert_eq!(defs[1].origins, vec!["agent:crew-9".to_string()]);
+        // And it round-trips back to the settings blob unchanged.
+        let saved = serde_json::to_string(&defs).unwrap();
+        assert!(saved.contains(r#""origins":["agent:crew-9"]"#));
+    }
+
+    #[tokio::test]
+    async fn origin_scoped_deny_blocks_only_its_own_origin() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Phase 1 — a GLOBAL deny (empty `origins`). It must block every
+        // origin, which is what "empty = all" has to mean in practice.
+        let app = mock_app_with_hooks(vec![deny_def(&dir, "global-guard", "global-guard", vec![])]);
+        for origin in ["chat", "subagent", "agent:crew-1", "harness", "relay_tools"] {
+            let reason = deny_reason_for(&app, origin).await;
+            assert!(
+                reason.as_deref().is_some_and(|r| r.contains("global-guard")),
+                "a global hook must fire for {origin}, got {reason:?}"
+            );
+        }
+
+        // Phase 2 — the advisory-tier case: the SAME kind of deny hook, scoped
+        // to one crew agent. This is the guardrail for an agent Relay cannot
+        // otherwise restrain (a CLI harness running its own tools), so it has
+        // to actually STOP the call there and stay out of everyone else's way.
+        let app = mock_app_with_hooks(vec![deny_def(
+            &dir,
+            "crew-guard",
+            "crew-guard-fired",
+            vec!["agent:crew-1".to_string()],
+        )]);
+        let reason = deny_reason_for(&app, "agent:crew-1").await;
+        assert!(
+            reason.as_deref().is_some_and(|r| r.contains("crew-guard-fired")),
+            "the origin-scoped deny must block agent:crew-1, got {reason:?}"
+        );
+        // …and NOT the main chat, a builtin role, another agent, or the CLI
+        // harness surface.
+        for other in ["chat", "subagent", "agent:crew-2", "harness", "relay_tools"] {
+            assert_eq!(
+                deny_reason_for(&app, other).await,
+                None,
+                "the agent:crew-1 deny must not fire for {other}"
+            );
+        }
     }
 }

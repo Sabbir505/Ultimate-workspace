@@ -80,14 +80,35 @@ pub async fn ensure_chat_session_worktree(
     let short = session_id.get(..8).unwrap_or(&session_id).to_string();
     let full = format!("relay/{session_id}");
     let project_root = project.path;
+    let path = ensure_worktree_with_branches(&app, &db, &session_id, project_root, short, full)
+        .await?;
+    Ok(Some(path))
+}
+
+/// The shared ensure-core behind every backend worktree provisioning: create
+/// a worktree for an EXISTING session row (branch `primary`, falling back to
+/// `fallback` on a collision), persist the pointer, install the watcher.
+/// The caller has already resolved the project and confirmed `is_git_repo`;
+/// the git work runs in `spawn_blocking` (a whole-tree checkout must never
+/// hold the DB mutex or ride the UI thread). Used by the composer's
+/// `ensure_chat_session_worktree` AND the crew spawn seam (branch
+/// `relay/<agent-slug>-<id8>`) so both share one implementation.
+pub(crate) async fn ensure_worktree_with_branches(
+    app: &AppHandle,
+    db: &State<'_, DbState>,
+    session_id: &str,
+    project_root: String,
+    branch_primary: String,
+    branch_fallback: String,
+) -> Result<String, String> {
     // `git worktree add` checks out a whole tree — seconds on a real repo. It
     // runs in `spawn_blocking` (never on the runtime worker, never on the UI
     // thread, and with no DB guard held: the lock above is scoped away).
     let path = tokio::task::spawn_blocking(move || -> Result<String, String> {
         let root = Path::new(&project_root);
-        match git::create_worktree(root, &format!("relay/{short}")) {
+        match git::create_worktree(root, &branch_primary) {
             Ok(p) => Ok(p),
-            Err(first_err) => match git::create_worktree(root, &full) {
+            Err(first_err) => match git::create_worktree(root, &branch_fallback) {
                 Ok(p) => Ok(p),
                 Err(_) => Err(first_err),
             },
@@ -97,14 +118,14 @@ pub async fn ensure_chat_session_worktree(
     .map_err(|e| e.to_string())??;
     {
         let conn = db.0.lock();
-        db::set_chat_session_worktree(&conn, &session_id, Some(&path))
+        db::set_chat_session_worktree(&conn, session_id, Some(&path))
             .map_err(|e| e.to_string())?;
     }
     // Watch the worktree so diff/status refresh when the agent edits there
     // (git_watcher installs per-path watchers; worktree siblings of a project
     // are not covered by the project-root watcher).
-    crate::git_watcher::install(&app, &db, Path::new(&path));
-    Ok(Some(path))
+    crate::git_watcher::install(app, db, Path::new(&path));
+    Ok(path)
 }
 
 /// Point a chat at a worktree path (rare direct-set) or — the common case,

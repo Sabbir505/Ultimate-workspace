@@ -13,6 +13,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useChatStore } from "../../state/chat";
+import { useCrewStore } from "../../state/crew";
 import { useUiStore } from "../../state/ui";
 import { ThinkingBlock } from "../chat/MessageBubble";
 import { parseSegments, type Segment as SubSegment } from "../../lib/segments";
@@ -97,10 +98,20 @@ interface ToolRow {
 function SubagentListItem({
   sub,
   selected,
+  agentLabel,
   onClick,
 }: {
-  sub: { id: string; role: string; task: string; status: "running" | "completed" | "error"; model?: string | null };
+  sub: {
+    id: string;
+    role: string;
+    task: string;
+    status: "running" | "completed" | "error";
+    model?: string | null;
+    agentId?: string | null;
+  };
   selected: boolean;
+  /** Display name of the crew agent this run resolved to, when known. */
+  agentLabel?: string | null;
   onClick: () => void;
 }) {
   const dotClass =
@@ -117,6 +128,15 @@ function SubagentListItem({
     >
       <span className={dotClass} />
       <span className="subagent-list-role">{sub.role}</span>
+      {sub.agentId && (
+        <span
+          className="subagent-list-role"
+          title={`Crew agent: ${agentLabel ?? sub.agentId}`}
+          style={{ opacity: 0.75 }}
+        >
+          {agentLabel ?? sub.agentId}
+        </span>
+      )}
       <span className="subagent-list-task">{sub.task}</span>
       {sub.model && (
         <span
@@ -141,8 +161,18 @@ export function SubagentPanel() {
   const subagentsBySession = useChatStore((s) => s.subagents);
   const activeSubagentId = useUiStore((s) => s.activeSubagentId);
   const setActiveSubagentId = useUiStore((s) => s.setActiveSubagentId);
+  const crewAgents = useCrewStore((s) => s.agents);
   const panelRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Crew agent id -> name, for the row chip. The panel must never trigger a
+  // registry load of its own; when the store is cold (the user never opened
+  // Settings -> Agents) the chip falls back to the raw id.
+  const crewNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of crewAgents) map.set(a.id, a.name);
+    return map;
+  }, [crewAgents]);
 
   // Resolve the selected subagent across ALL sessions' maps: a chip click in
   // a split pane targets THAT pane's session, which isn't necessarily the
@@ -231,6 +261,15 @@ export function SubagentPanel() {
           </button>
           <span className="subagent-panel-title">
             <span className="subagent-panel-role">{selectedSub.role}</span>
+            {selectedSub.agentId && (
+              <span
+                className="subagent-panel-role"
+                title="Crew agent this subagent ran as"
+                style={{ opacity: 0.75 }}
+              >
+                {crewNameById.get(selectedSub.agentId) ?? selectedSub.agentId}
+              </span>
+            )}
             {selectedSub.model && (
               <span
                 className="subagent-panel-role"
@@ -339,6 +378,9 @@ export function SubagentPanel() {
             key={sub.id}
             sub={sub}
             selected={activeSubagentId === sub.id}
+            agentLabel={
+              sub.agentId ? crewNameById.get(sub.agentId) ?? sub.agentId : null
+            }
             onClick={() => setActiveSubagentId(sub.id)}
           />
         ))}

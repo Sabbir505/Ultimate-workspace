@@ -9,6 +9,37 @@
 use super::super::permission;
 use super::*;
 
+/// The tool name a rendered spec advertises, in either wire envelope:
+/// OpenAI nests it at `/function/name`, Anthropic at the top-level `name`.
+///
+/// This is the one place that knows the quirk. Every name-level filter in
+/// the codebase (the subagent allowlist, the `ToolCaps::allow` terminal
+/// filter) reads a name through here, so a future envelope change is a
+/// one-line fix instead of a scavenger hunt.
+fn spec_tool_name(spec: &Value, anthropic: bool) -> Option<&str> {
+    if anthropic {
+        spec.get("name").and_then(Value::as_str)
+    } else {
+        spec.pointer("/function/name").and_then(Value::as_str)
+    }
+}
+
+/// TERMINAL allowlist filter, applied at the very end of a builder — after
+/// every flag gate, after the sandbox strip, after connector/MCP tool
+/// expansion. `allow = None` returns the list untouched (the main-loop
+/// default), so this cannot perturb any existing turn's schema.
+fn apply_allow_filter(specs: &mut Vec<Value>, caps: &ToolCaps, anthropic: bool) {
+    let Some(allow) = caps.allow.as_ref() else {
+        return;
+    };
+    specs.retain(|s| {
+        spec_tool_name(s, anthropic)
+            // A spec with no readable name is never advertised under an
+            // allowlist: an unnamed tool cannot be shown to be in the set.
+            .is_some_and(|n| allow.contains(n))
+    });
+}
+
 pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) -> Vec<Value> {
     let mut specs: Vec<Value> = vec![];
     if caps.web_search {
@@ -305,6 +336,10 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
     let desc_cap = if caps.local_model { 300 } else { 800 };
     append_connector_tools_openai(&caps.attached_connectors, sandbox, &mut specs, desc_cap);
     append_mcp_tools_openai(&caps.mcp_tools, sandbox, &mut specs, desc_cap);
+    // Terminal allowlist — last, so it also covers the vendor tools appended
+    // just above (an MCP wire name is only in the set if the definition
+    // spelled that exact name).
+    apply_allow_filter(&mut specs, caps, false);
     specs
 }
 
@@ -665,6 +700,8 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
     let desc_cap = if caps.local_model { 300 } else { 800 };
     append_connector_tools_anthropic(&caps.attached_connectors, sandbox, &mut specs, desc_cap);
     append_mcp_tools_anthropic(&caps.mcp_tools, sandbox, &mut specs, desc_cap);
+    // Terminal allowlist — mirror of the OpenAI builder's filter above.
+    apply_allow_filter(&mut specs, caps, true);
     specs
 }
 
@@ -1376,6 +1413,34 @@ fn run_shell_parameters() -> Value {
     })
 }
 
+/// `subagent_type` values: the 7 built-in roles, ALWAYS present, plus every
+/// crew agent name from the registry cache (F.5). Builtins come from
+/// `chat::crew::BUILTIN_ROLES` — the same table the registry seeds and the
+/// runtime prompt builder read, so the three cannot drift — and the crew
+/// names are deduped against them, so a row that somehow shares a role name
+/// does not produce a two-value enum.
+///
+/// Cached with a 30s TTL and invalidated on every registry write (see
+/// `chat::crew::cached_agent_names`), because this function is on the
+/// per-turn spec-build path and has no DB handle of its own.
+///
+/// Growth note (C.8.2): the enum is a fat-list design and is right while the
+/// crew is small. Past roughly twenty agents the right move is a `list_agents`
+/// / `run_agent(name, …)` meta-tool instead — this is the seam that would
+/// carry it, so the threshold is recorded here rather than rediscovered.
+fn subagent_type_values() -> Vec<String> {
+    let mut values: Vec<String> = crate::chat::crew::BUILTIN_ROLES
+        .iter()
+        .map(|r| r.name.to_string())
+        .collect();
+    for name in crate::chat::crew::cached_agent_names().iter() {
+        if !values.iter().any(|v| v.eq_ignore_ascii_case(name)) {
+            values.push(name.clone());
+        }
+    }
+    values
+}
+
 fn task_parameters() -> Value {
     json!({
         "type": "object",
@@ -1390,8 +1455,12 @@ fn task_parameters() -> Value {
             },
             "subagent_type": {
                 "type": "string",
-                "description": "Role label for the Agents panel.",
-                "enum": ["explore", "edit", "analyze", "research", "write", "test", "refactor"],
+                "description": "Role label for the Agents panel. The built-in roles are listed first; any further values are the user's own agents from Settings → Agents.",
+                "enum": subagent_type_values(),
+            },
+            "agent": {
+                "type": "string",
+                "description": "Crew agent id or name (overrides subagent_type). Use it when the caller names an agent that is not one of the built-in roles.",
             },
             "model": {
                 "type": "string",
@@ -1590,7 +1659,7 @@ fn spawn_session_parameters() -> Value {
             },
             "agent": {
                 "type": "string",
-                "description": "Engine for the new session, e.g. \"claude_code\",                     \"opencode\", \"builtin\", \"local\" (defaults to yours)."
+                "description": "Engine for the new session, e.g. \"claude_code\",                     \"opencode\", \"builtin\", \"local\" (defaults to yours). An                     \"agent:<id-or-name>\" value instead spawns a CREW agent — a                     user-defined subagent whose prompt, tool allowlist and permission                     scope apply to the child."
             },
             "model": {
                 "type": "string",
@@ -1619,6 +1688,9 @@ const AUTOMATION_AGENTS: [&str; 8] = [
 ];
 
 fn create_automation_parameters() -> Value {
+    // The engine list stays static, but `agent:...` values route through the
+    // crew registry — the enum can't enumerate user rows (they change between
+    // turns), so the description carries the contract.
     json!({
         "type": "object",
         "properties": {
@@ -1640,7 +1712,10 @@ fn create_automation_parameters() -> Value {
             "agent": {
                 "type": "string",
                 "enum": AUTOMATION_AGENTS,
-                "description": "Agent engine. Default claude_code.",
+                "description": "Agent engine. Default claude_code. An \
+                    \"agent:<id-or-name>\" value instead runs a CREW agent \
+                    (a user-defined subagent — get_capabilities lists them) \
+                    with that definition's engine, model and permission scope.",
             },
             "enabled": {
                 "type": "boolean",
@@ -2063,6 +2138,273 @@ pub(crate) fn append_mcp_tools_anthropic(
 mod tests {
     use super::*;
 
+    // ---- Task schema: the dynamic `subagent_type` enum ----
+
+    /// The registry name cache is a process-wide static shared with the
+    /// parallel test runner, so every test that reads the `Task` schema
+    /// brackets itself with an invalidate and asserts MEMBERSHIP, never an
+    /// exact length (a count would be a race, not a contract).
+    struct CacheGuard;
+
+    impl CacheGuard {
+        fn start() -> Self {
+            crate::chat::crew::invalidate_registry_cache();
+            Self
+        }
+    }
+
+    impl Drop for CacheGuard {
+        fn drop(&mut self) {
+            crate::chat::crew::invalidate_registry_cache();
+        }
+    }
+
+    fn enum_values(params: &Value) -> Vec<String> {
+        params["properties"]["subagent_type"]["enum"]
+            .as_array()
+            .expect("subagent_type must stay an enum")
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    fn crew_input(name: &str) -> crate::chat::crew::CrewAgentInput {
+        crate::chat::crew::CrewAgentInput {
+            name: name.into(),
+            description: String::new(),
+            prompt_md: String::new(),
+            tools: None,
+            engine: None,
+            model: None,
+            effort: None,
+            sandbox_policy: "read_only".into(),
+            approval_policy: "on_request".into(),
+            worktree_policy: "inherit".into(),
+            max_rounds: 10,
+            max_concurrent: 2,
+        }
+    }
+
+    #[test]
+    fn task_enum_carries_the_seven_builtin_roles_plus_the_crew() {
+        let _guard = CacheGuard::start();
+        let conn = crate::db::mem();
+        // A cold cache still advertises the 7 roles: they are a constant, not
+        // registry data.
+        for role in crate::chat::crew::BUILTIN_ROLES {
+            assert!(
+                enum_values(&task_parameters()).iter().any(|v| v == role.name),
+                "builtin role {} missing from the enum",
+                role.name
+            );
+        }
+
+        crate::chat::crew::create(&conn, &crew_input("doc-writer")).unwrap();
+        // Republish from THIS connection, then read. The cache is
+        // process-wide and a parallel test can invalidate it between the write
+        // and the read, so the contract under test ("a write is visible to
+        // the next read") is asserted against a re-read rather than fought
+        // for with a lock every other registry-touching test would also have
+        // to take. Bounded, so a genuine regression still fails.
+        let mut values = Vec::new();
+        for _ in 0..5 {
+            crate::chat::crew::refresh_registry_cache(&conn);
+            values = enum_values(&task_parameters());
+            if values.iter().any(|v| v == "doc-writer") {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            values.iter().any(|v| v == "doc-writer"),
+            "a created agent joins the enum: {values:?}"
+        );
+        // The roles keep their canonical order at the head of the enum.
+        let head: Vec<&str> = values
+            .iter()
+            .take(crate::chat::crew::BUILTIN_ROLES.len())
+            .map(String::as_str)
+            .collect();
+        let want: Vec<&str> = crate::chat::crew::BUILTIN_ROLES
+            .iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(head, want, "the 7 roles lead the enum, in order");
+
+        // No duplicates, case-insensitively (a hand-edited registry row that
+        // collides with a role name must not produce a two-value enum).
+        let mut seen: Vec<String> = values.clone();
+        seen.sort_by_key(|v| v.to_lowercase());
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "duplicate enum values: {values:?}");
+    }
+
+    #[test]
+    fn task_schema_exposes_the_agent_parameter() {
+        let params = task_parameters();
+        let agent = &params["properties"]["agent"];
+        assert_eq!(agent["type"], "string", "the agent param is a string");
+        assert!(
+            !params["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "agent"),
+            "`agent` is an optional override, never required"
+        );
+        let desc = agent["description"].as_str().unwrap_or_default();
+        assert!(desc.contains("id or name"), "doc must say id or name: {desc}");
+        // `subagent_type` stays required — the panel label still needs one.
+        assert!(params["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "subagent_type"));
+    }
+
+    #[test]
+    fn task_enum_picks_up_an_agent_created_after_a_cached_read() {
+        let _guard = CacheGuard::start();
+        let conn = crate::db::mem();
+        crate::chat::crew::refresh_registry_cache(&conn);
+        assert!(!enum_values(&task_parameters())
+            .iter()
+            .any(|v| v == "late-comer"));
+
+        let agent = crate::chat::crew::create(&conn, &crew_input("late-comer")).unwrap();
+        // `create` invalidates + refreshes, so the next build already has it.
+        assert!(enum_values(&task_parameters())
+            .iter()
+            .any(|v| v == "late-comer"));
+        crate::chat::crew::delete(&conn, &agent.id).unwrap();
+        assert!(!enum_values(&task_parameters())
+            .iter()
+            .any(|v| v == "late-comer"));
+    }
+
+    // ---- `ToolCaps::allow`: the terminal name filter ----
+
+    fn allow_caps(names: &[&str]) -> ToolCaps {
+        ToolCaps {
+            allow: Some(std::sync::Arc::new(
+                names.iter().map(|s| (*s).to_string()).collect(),
+            )),
+            ..ToolCaps::default()
+        }
+    }
+
+    #[test]
+    fn allow_none_is_byte_identical_to_never_having_the_field() {
+        // The default must not perturb a single byte of the registry, or
+        // every existing turn's cached prompt changes.
+        let plain = ToolCaps::default();
+        assert!(plain.allow.is_none());
+        let explicit_none = ToolCaps {
+            allow: None,
+            ..ToolCaps::default()
+        };
+        for sandbox in [
+            permission::SandboxPolicy::ReadOnly,
+            permission::SandboxPolicy::WorkspaceWrite,
+        ] {
+            assert_eq!(
+                openai_tool_specs(&plain, sandbox),
+                openai_tool_specs(&explicit_none, sandbox)
+            );
+            assert_eq!(
+                anthropic_tool_specs(&plain, sandbox),
+                anthropic_tool_specs(&explicit_none, sandbox)
+            );
+        }
+    }
+
+    #[test]
+    fn allow_set_yields_exactly_one_spec_in_both_wire_formats() {
+        let caps = allow_caps(&[READ_FILE]);
+        let oai = openai_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite);
+        assert_eq!(oai.len(), 1, "one allowed name, one OpenAI spec");
+        assert_eq!(oai[0]["function"]["name"], READ_FILE);
+        let ant = anthropic_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite);
+        assert_eq!(ant.len(), 1, "one allowed name, one Anthropic spec");
+        assert_eq!(ant[0]["name"], READ_FILE);
+        // The envelope is the whole point of doing this in the builders: the
+        // OpenAI name really is nested, the Anthropic one really is top-level.
+        assert!(oai[0].get("name").is_none());
+        assert!(ant[0].get("function").is_none());
+    }
+
+    #[test]
+    fn allow_runs_after_the_sandbox_strip_so_a_mutating_name_cannot_smuggle_in() {
+        // `write_file` IS in the allow set, but the sandbox strips it from
+        // the registry first — the terminal filter only ever removes.
+        let caps = allow_caps(&[READ_FILE, WRITE_FILE]);
+        let ro = openai_tool_specs(&caps, permission::SandboxPolicy::ReadOnly);
+        assert_eq!(ro.len(), 1);
+        assert_eq!(ro[0]["function"]["name"], READ_FILE);
+        let ro_ant = anthropic_tool_specs(&caps, permission::SandboxPolicy::ReadOnly);
+        assert_eq!(ro_ant.len(), 1);
+        assert_eq!(ro_ant[0]["name"], READ_FILE);
+        // Under the write sandbox it does come through — the policy, not the
+        // filter, is what grants it.
+        let rw = openai_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite);
+        assert_eq!(rw.len(), 2);
+    }
+
+    #[test]
+    fn allow_also_filters_connector_and_mcp_specs() {
+        use crate::chat::permission::ConnectorToolKind;
+        use crate::mcp_gallery::McpToolEntry;
+
+        // Connector + MCP wire names are ordinary strings at the filter, so a
+        // definition CAN name one — and one that does not is stripped even
+        // though it survived every flag gate.
+        let mcp = vec![McpToolEntry {
+            server_id: "memory".into(),
+            server_name: "Memory".into(),
+            wire_name: crate::mcp_gallery::wire_tool_name("memory", "search_nodes"),
+            raw_name: "search_nodes".into(),
+            kind: ConnectorToolKind::Read,
+            description: Some("Search the graph".into()),
+        }];
+        let mut caps = allow_caps(&[READ_FILE, "mcp_memory_search_nodes"]);
+        caps.mcp_tools = std::sync::Arc::new(mcp);
+        let specs = openai_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite);
+        let names: Vec<&str> = specs
+            .iter()
+            .filter_map(|s| s.pointer("/function/name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"mcp_memory_search_nodes"), "{names:?}");
+        assert!(!names.contains(&"memory_recall"), "unlisted tools: {names:?}");
+
+        // And the same set in the Anthropic envelope.
+        let ant = anthropic_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite);
+        let ant_names: Vec<&str> = ant
+            .iter()
+            .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(ant_names.contains(&"mcp_memory_search_nodes"), "{ant_names:?}");
+        assert_eq!(ant_names.len(), 2, "{ant_names:?}");
+    }
+
+    #[test]
+    fn allow_count_matches_the_unfiltered_registry_when_it_admits_everything() {
+        let all: std::collections::HashSet<String> = openai_tool_specs(
+            &ToolCaps::default(),
+            permission::SandboxPolicy::WorkspaceWrite,
+        )
+        .iter()
+        .filter_map(|s| s.pointer("/function/name").and_then(|n| n.as_str()))
+        .map(str::to_string)
+        .collect();
+        let caps = allow_caps(&all.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            openai_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite).len(),
+            all.len(),
+            "an allow-all set must not change the count"
+        );
+    }
+
     /// The two delegation tools used to steer models in OPPOSITE directions:
     /// spawn_session said "Prefer this over doing a big parallel task inside
     /// this conversation" while users expect a subagent to run in-session —
@@ -2104,6 +2446,11 @@ mod tests {
     /// 45.0k → 36.5k chars; every-tool-on 39.4k).
     #[test]
     fn no_single_tool_spec_blows_its_budget() {
+        // The `Task` enum is registry-driven, so a parallel test republishing
+        // its own crew would move this total for reasons that have nothing to
+        // do with the registry's size. Pin it: the budget guards the built-in
+        // surface.
+        crate::chat::crew::invalidate_registry_cache();
         let caps = ToolCaps::default();
         let specs = openai_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite);
         let mut sizes: Vec<(usize, String)> = specs
@@ -2172,6 +2519,13 @@ mod tests {
         // params (webhook / file-watch / git) — without them the model can
         // only schedule cron rows and must claim the other triggers are
         // impossible.
+        // 36_000 STANDS for the crew `Task` schema (Phase 2): `subagent_type`
+        // became a DYNAMIC enum (the 7 roles plus the user's crew names, from
+        // the 30s registry cache) and gained an optional `agent` override —
+        // ~0.25k on the `Task` spec, and it is the feature that makes the
+        // enum worth anything. With an empty crew the enum is exactly today's
+        // 7 values; a large crew grows this spec, and the meta-tool escape
+        // hatch is called out in `subagent_type_values`.
         // TIGHTENED 49_000→36_000 (2026-09-21, token-efficiency pass II):
         // the source ledger now rides `caps.research`, and Session Mesh /
         // automation writes / totp_code became family-locked attach-on-demand

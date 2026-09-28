@@ -26,6 +26,7 @@ import { ImprovementsPanel } from "./ImprovementsPanel";
 import { SttPanel } from "./SttPanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { HooksPanel } from "./HooksPanel";
+import { CrewPanel } from "../crew/CrewPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
 import { FontSettingsPanel } from "./FontSettingsPanel";
 import { SidebarArtPanel } from "./SidebarArtPanel";
@@ -110,6 +111,7 @@ import {
   Smartphone,
   Bell,
   Sparkles,
+  Users,
   ChevronRight,
 } from "lucide-react";
 
@@ -120,6 +122,7 @@ type Category =
   | "improvements"
   | "subagent"
   | "harnesses"
+  | "crew"
   | "localmodels"
   | "apikeys"
   | "websearch"
@@ -140,6 +143,7 @@ const CATEGORY_KEYS: Category[] = [
   "improvements",
   "subagent",
   "harnesses",
+  "crew",
   "localmodels",
   "apikeys",
   "websearch",
@@ -172,6 +176,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "websearch": return <Globe {...props} />;
     case "localmodels": return <Cpu {...props} />;
     case "harnesses": return <TerminalSquare {...props} />;
+    case "crew": return <Users {...props} />;
     case "connectors": return <Plug {...props} />;
     case "mcpgallery": return <Blocks {...props} />;
     case "knowledge": return <Library {...props} />;
@@ -218,6 +223,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
     title: "Agents",
     items: [
       { key: "harnesses", label: "Harnesses", sub: "CLI install & login" },
+      { key: "crew", label: "Crew", sub: "Declarative subagents" },
     ],
   },
   {
@@ -652,6 +658,8 @@ export function SettingsView() {
               {category === "localmodels" && <LocalModelsPanel />}
 
               {category === "subagent" && <SubagentModelPanel />}
+
+              {category === "crew" && <CrewPanel />}
 
               {category === "apikeys" && <ApiKeysPanel />}
 

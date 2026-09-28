@@ -1967,6 +1967,9 @@ pub(crate) async fn run_prompt_warmup(
         unlockable_families: std::sync::Arc::new(
             crate::chat::tools::unlockable_family_pairs(),
         ),
+        // No terminal tool allowlist: every main-loop surface renders the
+        // full registry. Only a subagent run pins a set (chat::crew).
+        allow: None,
     };
     let mut body = serde_json::json!({
         "model": model_id,

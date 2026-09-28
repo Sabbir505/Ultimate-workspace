@@ -58,6 +58,9 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
             .filter(|s| !s.is_empty()),
         // Session Mesh provenance; NULL = human-created.
         origin: row.get::<_, Option<String>>("origin")?,
+        // The crew agent definition this session runs; NULL = not a crew run
+        // (or the definition was deleted — ON DELETE SET NULL).
+        agent_def_id: row.get::<_, Option<String>>("agent_def_id")?,
     })
 }
 
@@ -445,6 +448,23 @@ pub fn update_chat_session_agent(
     conn.execute(
         "UPDATE chat_sessions SET agent = ?2 WHERE id = ?1",
         params![chat_session_id, agent],
+    )?;
+    Ok(())
+}
+
+/// Point a session at the crew agent definition it runs. `None` clears the
+/// link (the definition was deleted — the FK's `ON DELETE SET NULL` lands the
+/// same end state, this is for un-crewing a row directly). Deliberately NOT
+/// the `origin` column: `spawned_by:` there is the mesh depth walk's own
+/// vocabulary.
+pub fn set_chat_session_agent_def(
+    conn: &Connection,
+    chat_session_id: &str,
+    agent_def_id: Option<&str>,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET agent_def_id = ?2 WHERE id = ?1",
+        params![chat_session_id, agent_def_id],
     )?;
     Ok(())
 }

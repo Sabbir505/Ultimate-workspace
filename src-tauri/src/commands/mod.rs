@@ -10,6 +10,7 @@ pub mod browser_cmds;
 pub mod build_updates;
 pub mod chat_cmds;
 pub mod connectors_cmds;
+pub mod crew_cmds;
 pub mod data;
 pub mod git_cmds;
 pub mod hooks_cmds;

@@ -19,6 +19,7 @@ const mockUpdate = vi.fn();
 vi.mock("../lib/ipc", () => ({
   automationNextFire: (...a: unknown[]) => mockNextFire(...a),
   automationWebhookInfo: (id: string) => mockWebhookInfo(id),
+  isCrewAutomation: (harness: string) => /^agent:[^\s]+/.test(harness),
   listAutomationRuns: vi.fn().mockResolvedValue([]),
   listChatModels: vi.fn().mockResolvedValue([]),
   scanLocalModels: vi.fn().mockResolvedValue([]),

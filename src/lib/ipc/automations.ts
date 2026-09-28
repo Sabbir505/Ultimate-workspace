@@ -153,5 +153,11 @@ export const listenAutomationRunStarted = (
   handler: (payload: AutomationRunStartedPayload) => void,
 ) => safeListen<AutomationRunStartedPayload>("automation:run-started", handler);
 
+/** True when the automation is bound to a crew agent (``harness = "agent:<id>"``):
+ *  the run routes through the crew registry (the definition's engine, model,
+ *  prompt body and permission scope), not a raw engine id. */
+export const isCrewAutomation = (harness: string): boolean =>
+  /^agent:[^\s]+/.test(harness);
+
 /** Switch a chat session's provider (e.g. to/from "local_gguf" when picking a
  *  local model from the selector in a cloud session, or vice versa). */

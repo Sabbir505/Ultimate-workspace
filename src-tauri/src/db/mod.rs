@@ -14,6 +14,7 @@ mod checkpoints;
 mod connector_credentials;
 mod cost;
 mod cost_v2;
+pub(crate) mod crew;
 pub mod docs;
 #[cfg(test)]
 mod docs_eval;
@@ -324,10 +325,31 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_session_origin(conn)?;
     migrate_doc_chunks_heading(conn)?;
     migrate_doc_corpora_chunk_version(conn)?;
+    // Declarative subagents: the 7 builtin roles must exist in the registry
+    // before any spawn surface resolves a name against it.
+    migrate_crew_agents_seed(conn)?;
+    // And crew-run sessions point at their definition through a real column —
+    // NOT the `origin` vocabulary (spawned_by: drives the depth walk there).
+    migrate_chat_session_agent_def(conn)?;
     // Research caches grow without bound otherwise: drop rows past their TTL
     // on every open (research_cache.rs also purges on insert).
     research_cache::purge_expired(conn)?;
     migrate_unc_paths(conn)
+}
+
+/// Crew-run sessions point at their definition through a real column, not the
+/// `origin` vocabulary: `spawned_by:` there is load-bearing (the mesh depth
+/// walk parses it), so `agent_def_id` carries the identity instead. Nullable
+/// FK with ON DELETE SET NULL (mirrors `project_id`): deleting a definition
+/// never deletes the sessions that ran it.
+fn migrate_chat_session_agent_def(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN agent_def_id TEXT REFERENCES crew_agents(id) ON DELETE SET NULL";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 /// Add the `origin` column to `chat_sessions` (Session Mesh): NULL for
@@ -613,6 +635,37 @@ fn migrate_chat_messages_superseded(conn: &Connection) -> DbResult<()> {
             return Err(e);
         }
     }
+    Ok(())
+}
+
+/// `app_settings` marker written once the 7 builtin crew roles exist.
+/// Bump to `crew.seed.v2` if `BUILTIN_ROLES` ever changes shape — a fresh
+/// marker re-runs the (INSERT OR IGNORE, so still idempotent) seed.
+pub const CREW_SEED_MARKER: &str = "crew.seed.v1";
+/// Seed the 7 builtin crew roles (`explore`/`edit`/`analyze`/`research`/
+/// `write`/`test`/`refactor`) as `builtin=1` rows so the registry and the
+/// `Task` role enum can never disagree.
+///
+/// Two layers of idempotency, deliberately: the inserts are `INSERT OR
+/// IGNORE` (keyed on the stable `builtin-<role>` ids, so a re-run after a
+/// cleared marker is a no-op and never duplicates or clobbers a user's edits
+/// to a builtin row), and the whole pass is skipped once the
+/// `crew.seed.v1` marker is set. The marker is the B-30 one-shot-backfill
+/// pattern (`migrate_chat_session_agent` / `migrate_chat_fts`): it exists so
+/// startup doesn't pay 7 inserts forever, and `INSERT OR IGNORE` remains the
+/// correctness guarantee. Clear the marker to re-seed a drifted DB.
+pub(crate) fn migrate_crew_agents_seed(conn: &Connection) -> DbResult<()> {
+    ensure_settings_table(conn);
+    let done = settings::get_setting(conn, CREW_SEED_MARKER)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1");
+    if done {
+        return Ok(());
+    }
+    crew::seed_builtin_crew_agents(conn)?;
+    settings::set_setting(conn, CREW_SEED_MARKER, "1")?;
     Ok(())
 }
 
@@ -1311,6 +1364,59 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         CREATE INDEX IF NOT EXISTS idx_automation_runs_running
           ON automation_runs(status) WHERE finished_at IS NULL;
 
+        -- Declarative subagents ("crew") — the persisted registry every spawn
+        -- surface resolves against (see db/crew.rs + chat/crew.rs). The 7
+        -- builtin roles are seeded rows (builtin=1, id `builtin-<role>`) so
+        -- the `Task` role enum and the registry can never disagree; they carry
+        -- the role instruction only, which dispatch.rs still composes with the
+        -- cwd line + read-only boilerplate. `name` is the Task enum value and
+        -- is UNIQUE COLLATE NOCASE so "Doc Writer" and "doc writer" cannot
+        -- both exist. `tools` is a JSON array of tool names; NULL = inherit
+        -- the engine default. The 7 role names are reserved — see
+        -- chat::crew::validate_name.
+        CREATE TABLE IF NOT EXISTS crew_agents (
+          id              TEXT PRIMARY KEY,
+          name            TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          description     TEXT NOT NULL DEFAULT '',
+          prompt_md       TEXT NOT NULL DEFAULT '',
+          tools           TEXT,
+          engine          TEXT,
+          model           TEXT,
+          effort          TEXT,
+          sandbox_policy  TEXT NOT NULL DEFAULT 'read_only',
+          approval_policy TEXT NOT NULL DEFAULT 'on_request',
+          worktree_policy TEXT NOT NULL DEFAULT 'inherit',
+          max_rounds      INTEGER NOT NULL DEFAULT 100,
+          max_concurrent  INTEGER NOT NULL DEFAULT 2,
+          builtin         INTEGER NOT NULL DEFAULT 0,
+          created_at      INTEGER NOT NULL,
+          updated_at      INTEGER NOT NULL
+        );
+        -- Builtins first (the stable set the Task enum advertises), then user
+        -- rows by name.
+        CREATE INDEX IF NOT EXISTS idx_crew_agents_builtin
+          ON crew_agents(builtin, name);
+
+        -- One row per crew RUN (a spawned session's lifecycle), not per turn.
+        -- No FKs on purpose: history outlives a deleted agent or chat —
+        -- dangling ids render as "deleted agent" in the runs list.
+        CREATE TABLE IF NOT EXISTS crew_runs (
+          id           TEXT PRIMARY KEY,
+          agent_id     TEXT,
+          session_id   TEXT,
+          trigger      TEXT NOT NULL,
+          task         TEXT NOT NULL,
+          engine       TEXT NOT NULL,
+          model        TEXT NOT NULL,
+          worktree     TEXT,
+          started_at   INTEGER NOT NULL,
+          finished_at  INTEGER,
+          status       TEXT NOT NULL DEFAULT 'running',
+          summary      TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_crew_runs_agent
+          ON crew_runs(agent_id, started_at DESC);
+
         CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_artifacts_expires ON artifacts(expires_at);
 
@@ -1553,7 +1659,8 @@ pub use chat::{
     list_chat_messages_page, list_chat_session_connectors, list_chat_sessions,
     list_messages_superseded_by, mark_branch_superseded, mark_superseded,
     permission_label_from_policies, remove_chat_session_connector, search_chat_messages,
-    set_chat_session_auto, set_chat_session_connectors, set_chat_session_cwd_override,
+    set_chat_session_agent_def, set_chat_session_auto, set_chat_session_connectors,
+    set_chat_session_cwd_override,
     set_chat_session_plan, set_chat_session_project, set_chat_session_starred,
     set_chat_session_unread, set_chat_session_worktree, touch_chat_session,
     un_mark_branch_superseded, update_chat_message_content, update_chat_session_agent, update_chat_session_effort,
@@ -1615,6 +1722,13 @@ pub use automations::{
     Automation, AutomationInput, AutomationRun,
 };
 
+// crew (declarative subagents — the persisted agent registry)
+pub use crew::{
+    create_crew_agent, delete_crew_agent, find_crew_agent_by_name, finish_crew_run,
+    get_crew_agent, list_crew_agents, list_crew_runs, record_crew_run,
+    seed_builtin_crew_agents, update_crew_agent, CrewAgent, CrewAgentInput, CrewAgentRun,
+};
+
 // persistent user memory (MEMORY_DESIGN_ARCHITECTURE.md §9)
 pub use memory::{
     active_memories_for_scope, add_memory_evidence, bump_memory_access, count_active_memories,
@@ -1663,12 +1777,52 @@ pub(crate) fn mem() -> Connection {
     migrate_doc_corpora_chunk_version(&conn).unwrap();
     migrate_doc_chunks_fts(&conn).unwrap();
     migrate_unc_paths(&conn).unwrap();
+    // The 7 builtin crew roles are part of the production schema shape, so
+    // tests that resolve a name against the registry see them too.
+    migrate_crew_agents_seed(&conn).unwrap();
+    // Same for the crew-run link column: tests that crew-spawn (or assert the
+    // FK's ON DELETE SET NULL) need it present.
+    migrate_chat_session_agent_def(&conn).unwrap();
     conn
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Crew-run sessions link to their definition through `agent_def_id` with
+    /// ON DELETE SET NULL: deleting the definition must keep the sessions (a
+    /// crew run's transcript is the user's data) and only clear the pointer.
+    #[test]
+    fn agent_def_id_round_trips_and_survives_agent_deletion() {
+        let conn = mem();
+        let agent = crate::chat::crew::create(
+            &conn,
+            &crate::chat::crew::CrewAgentInput {
+                name: "test-runner".into(),
+                description: "test fixture".into(),
+                prompt_md: String::new(),
+                tools: None,
+                engine: Some("builtin".into()),
+                model: Some("openai::gpt-test".into()),
+                effort: None,
+                sandbox_policy: "read_only".into(),
+                approval_policy: "on_request".into(),
+                worktree_policy: "never".into(),
+                max_rounds: 100,
+                max_concurrent: 2,
+            },
+        )
+        .unwrap();
+        let sess = create_chat_session(&conn, "openai", "m", None).unwrap();
+        set_chat_session_agent_def(&conn, &sess.id, Some(&agent.id)).unwrap();
+        let row = get_chat_session(&conn, &sess.id).unwrap().unwrap();
+        assert_eq!(row.agent_def_id.as_deref(), Some(agent.id.as_str()));
+        // Delete the definition: the session survives, the pointer clears.
+        crate::chat::crew::delete(&conn, &agent.id).unwrap();
+        let after = get_chat_session(&conn, &sess.id).unwrap().unwrap();
+        assert_eq!(after.agent_def_id, None);
+    }
 
     #[test]
     fn db_file_prefers_new_name_and_falls_back_to_legacy() {

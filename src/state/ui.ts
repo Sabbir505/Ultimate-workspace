@@ -14,7 +14,17 @@ function stopArtifactReadIfPlaying(path: string | undefined): void {
   if (tts.key === `artifact:${path}`) ttsPlayer.stop();
 }
 
-export type ActiveView = "chat" | "settings" | "skills" | "cost" | "automations" | "vault";
+/** The real views (chat / automations / vault / crew) swap the main grid's
+ *  content — the first three are the original set, `crew` is the
+ *  declarative-subagents surface (Phase 2.5). Overlays float above. */
+export type ActiveView =
+  | "chat"
+  | "settings"
+  | "skills"
+  | "cost"
+  | "automations"
+  | "vault"
+  | "crew";
 
 /** Tabs in the right-side tool panel (mockups 01/03). */
 export type ToolPanelTab =

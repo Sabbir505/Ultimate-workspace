@@ -40,6 +40,7 @@ const ALLOWED_AGENTS: [&str; 10] = [
 /// stored row's secret — so both surfaces get one for free and a UI
 /// round-trip (which redacts it) never rotates it.
 pub(crate) fn validate_input(
+    conn: &rusqlite::Connection,
     input: &mut AutomationInput,
     existing: Option<&Automation>,
 ) -> Result<(), String> {
@@ -49,10 +50,11 @@ pub(crate) fn validate_input(
     if input.prompt.trim().is_empty() {
         return Err("prompt is required".into());
     }
-    if !is_allowed_automation_agent(&input.harness) {
+    if !is_allowed_automation_agent(conn, &input.harness) {
         return Err(format!(
             "agent '{}' cannot run automations (supported: claude_code, opencode, \
-             pi, omp, commandcode, cloud APIs, local GGUF)",
+             pi, omp, commandcode, cloud APIs, local GGUF, or \"agent:<id>\" for an \
+             existing crew agent)",
             input.harness,
         ));
     }
@@ -73,9 +75,15 @@ pub(crate) fn validate_input(
 
 /// Shared with the chat tool layer (chat/tools/automations.rs) so the model's
 /// `create_automation` / `update_automation` accept exactly the same agent set
-/// as the Automations form — one list, no drift.
-pub(crate) fn is_allowed_automation_agent(harness: &str) -> bool {
-    ALLOWED_AGENTS.contains(&harness) || harness == "local_gguf"
+/// as the Automations form — one list, no drift. An `agent:<id-or-name>`
+/// value routes the run through a crew agent definition and is valid iff the
+/// definition exists (the predicate, not the const, is what stays extensible).
+pub(crate) fn is_allowed_automation_agent(conn: &rusqlite::Connection, harness: &str) -> bool {
+    ALLOWED_AGENTS.contains(&harness)
+        || harness == "local_gguf"
+        || harness
+            .strip_prefix("agent:")
+            .is_some_and(|id| crate::chat::crew::resolve_by_id_or_name(conn, id).is_some())
 }
 
 /// list/get IPC surfaces never carry the webhook secret — the UI reads it
@@ -103,9 +111,9 @@ pub fn create_automation(
     db: State<'_, DbState>,
     mut input: AutomationInput,
 ) -> Result<Automation, String> {
-    validate_input(&mut input, None)?;
     let created = {
         let conn = db.0.lock();
+        validate_input(&conn, &mut input, None)?;
         db::create_automation(&conn, &input).map_err(|e| e.to_string())
     };
     // File triggers need their watcher installed; a removed/re-edited row
@@ -130,9 +138,9 @@ pub fn update_automation(
         let conn = db.0.lock();
         db::get_automation(&conn, &automation_id).map_err(|e| e.to_string())?
     };
-    validate_input(&mut input, existing.as_ref())?;
     let result = {
         let conn = db.0.lock();
+        validate_input(&conn, &mut input, existing.as_ref())?;
         db::update_automation(&conn, &automation_id, &input).map_err(|e| e.to_string())
     };
     // File triggers need their watcher installed; a removed/re-edited row

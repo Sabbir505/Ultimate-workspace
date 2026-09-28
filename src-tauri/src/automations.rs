@@ -656,16 +656,71 @@ fn execute(
     // Route based on agent type:
     // - CLI harnesses (claude_code, opencode, pi-lineage) → spawn CLI process
     // - API providers and local_gguf → chat HTTP API
+    // - `agent:<id>` → the crew definition's engine and model, then the SAME
+    //   two arms. The definition's prompt body rides the automation prompt as
+    //   a directive block (same composition as manual and mesh crew runs), so
+    //   the run-log transcript shows exactly what the agent was told. The
+    //   automation's own `model` wins over the definition's when set.
+    //   (Worktree policy is NOT honored here yet — the manual and mesh paths
+    //   provision via the session worktree seam; automations need a
+    //   sidecar-safe variant. See the research doc Part E q5.)
     let prompt = ensure_unattended_rules(&automation.prompt);
-    match automation.harness.as_str() {
+    let (harness, provider, model, prompt) = if let Some(rest) =
+        automation.harness.strip_prefix("agent:")
+    {
+        let (def_engine, def_provider, def_model, composed) = {
+            let conn = db.lock();
+            let def = crate::chat::crew::resolve_by_id_or_name(&conn, rest).ok_or_else(|| {
+                format!("crew agent \"{rest}\" not found — it may have been deleted")
+            })?;
+            // The automation's own model wins when set; otherwise the
+            // definition's. Builtin engines resolve provider/model through
+            // the shared helper — an engine label is NOT a provider, and
+            // `run_one_shot_chat`'s parameter is the PROVIDER (the live test
+            // caught both bugs at once: engine-as-provider and the unparsed
+            // `provider::model` riding through).
+            let model = if automation.model.is_empty() {
+                def.model.clone().unwrap_or_default()
+            } else {
+                automation.model.clone()
+            };
+            let engine = def.engine.clone().unwrap_or_else(|| "builtin".into());
+            let composed = crate::chat::crew::compose_first_message(&def, &prompt);
+            if let Some(cli) = engine.strip_prefix("harness:") {
+                // The engine rides as `harness:<id>` (the session vocabulary)
+                // but `run_one_shot` takes the BARE id — the live test caught
+                // `harness:commandcode` falling through to the chat arm.
+                (cli.to_string(), engine, model, composed)
+            } else if engine.starts_with("acp:") {
+                return Err(format!(
+                    "crew agent \"{}\" runs on an ACP engine, which has no unattended \
+                     one-shot path — bind the automation to a CLI-harness or builtin \
+                     agent instead",
+                    def.name
+                ));
+            } else {
+                let (provider, model) =
+                    crate::chat::crew::resolve_builtin_provider_model(&conn, Some(&model))?;
+                // The chat-HTTP arm dispatches on "not a CLI harness" but
+                // dials with the PROVIDER — "builtin" would fail the key
+                // lookup (the live test caught exactly that).
+                (engine, provider, model, composed)
+            }
+        };
+        (def_engine, def_provider, def_model, composed)
+    } else {
+        let h = automation.harness.clone();
+        (h.clone(), h, automation.model.clone(), prompt)
+    };
+    match harness.as_str() {
         "claude_code" | "opencode" | "pi" | "omp" | "commandcode" => {
             agent_sessions::run_one_shot(
                 app,
                 db,
                 &prepared.chat_session_id,
                 &prompt,
-                &automation.harness,
-                &automation.model,
+                &harness,
+                &model,
                 if automation.cwd.is_empty() { None } else { Some(automation.cwd.as_str()) },
                 Some(Duration::from_secs(MAX_RUN_SECS)),
                 Some(&prepared.cancel),
@@ -676,8 +731,8 @@ fn execute(
                 db,
                 &prepared.chat_session_id,
                 &prompt,
-                &automation.harness,
-                &automation.model,
+                &provider,
+                &model,
                 Some(&prepared.cancel),
             )
         }
@@ -1161,8 +1216,7 @@ mod tests {
         // that had been deleted, the run died on INSERT into chat_messages
         // with "FOREIGN KEY constraint failed". Prepare must detect the
         // dangling id, create a fresh session, and rebind it.
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::init_schema(&conn).unwrap();
+        let conn = crate::db::mem();
         let db = Arc::new(Mutex::new(conn));
 
         let automation = {

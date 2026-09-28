@@ -27,6 +27,14 @@ export interface HookDef {
   onError: "open" | "closed";
   /** Post-hooks only: run detached as a pure observer. */
   async: boolean;
+  /**
+   * Origin scope: EMPTY = global (fires for every dispatch origin — the
+   * default, and what every config saved before this field means). Otherwise
+   * the hook fires only when the call's origin is in the list. The backend
+   * compares verbatim and never rejects an unknown value, so crew ids stay
+   * expressible.
+   */
+  origins: string[];
   enabled: boolean;
 }
 
@@ -46,8 +54,43 @@ export interface HookTestReport {
 const HOOKS_KEY = "hooks";
 const jsonHooks = jsonSetting<HookDef>(HOOKS_KEY);
 
-/** Load the configured hooks (empty array when unset/invalid). */
-export const getHooks = jsonHooks.load;
+/** The origin strings the backend dispatches, minus the open-ended
+ *  `agent:<crew-id>` family (see {@link isKnownOrigin}). A hook whose
+ *  `origins` is empty is global and fires for all of them. */
+export const KNOWN_HOOK_ORIGINS: string[] = [
+  "chat",
+  "subagent",
+  "harness",
+  "relay_tools",
+];
+
+/** Human labels for the origin picker — the stored value is always the raw
+ *  string, these are display-only. */
+export const HOOK_ORIGIN_LABELS: Record<string, string> = {
+  chat: "main chat",
+  subagent: "builtin Task roles",
+  harness: "CLI harness (claude/kimi)",
+  relay_tools: "relay tools bridge",
+};
+
+/** True for a known origin, and for any `agent:<id>` — crew ids are dynamic,
+ *  so a closed vocabulary would flag every crew-scoped hook as unknown. */
+export function isKnownOrigin(o: string): boolean {
+  return KNOWN_HOOK_ORIGINS.includes(o) || /^agent:/.test(o);
+}
+
+/** Fill in the fields a hand-edited / pre-`origins` config may be missing, so
+ *  callers never have to guard for `undefined`. Only `origins` defaults
+ *  matter here; everything else is filled by the editor, not by the loader. */
+export function normalizeHookDef(def: HookDef): HookDef {
+  return { ...def, origins: Array.isArray(def.origins) ? def.origins : [] };
+}
+
+/** Load the configured hooks (empty array when unset/invalid). Each entry is
+ *  normalized, so a config written before `origins` existed reads back as the
+ *  global scope rather than `undefined`. */
+export const getHooks = async (): Promise<HookDef[]> =>
+  (await jsonHooks.load()).map(normalizeHookDef);
 
 /** Persist the full hooks list. */
 export const saveHooks = jsonHooks.save;

@@ -30,6 +30,7 @@ import {
   Settings,
   CalendarClock,
   Folders,
+  Users,
   X,
   QrCode,
 } from "lucide-react";
@@ -384,7 +385,7 @@ export function Sidebar() {
 
       {/* â”€â”€ Pinned upper block (non-scrolling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex-shrink-0">
-        {/* Global Views: Artifacts pill + Schedule button (automations) */}
+        {/* Global Views: Artifacts pill + Schedule button (automations) + Crew */}
         <div className="flex flex-col gap-1 px-2 pt-2 pb-0">
           <ArtifactLibrary />
           <div className="chat-new-btn-row">
@@ -398,6 +399,19 @@ export function Sidebar() {
             >
               <CalendarClock size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
               <span className="artifact-lib-title-label">Automations</span>
+            </button>
+            {/* Crew — declarative subagents: define an agent, run it by hand,
+                watch its run history. Same row/shape as Automations. */}
+            <button
+              type="button"
+              onClick={() => setActiveView("crew")}
+              className={`artifact-lib-title ${activeView === "crew" ? "is-active" : ""}`}
+              style={{ width: "100%" }}
+              title="Open crew"
+              aria-label="Open crew"
+            >
+              <Users size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
+              <span className="artifact-lib-title-label">Crew</span>
             </button>
             {/* Vault — the local markdown knowledge base (files on disk). */}
             <button

@@ -529,7 +529,8 @@ mod tests {
                starred INTEGER NOT NULL DEFAULT 0, unread INTEGER NOT NULL DEFAULT 0,
                watch_mode TEXT, agent TEXT, project_id TEXT, permission_mode TEXT,
                worktree_path TEXT, cwd_override TEXT, sandbox_policy TEXT, approval_policy TEXT,
-               auto_model INTEGER NOT NULL DEFAULT 0, effort_level TEXT, origin TEXT);",
+               auto_model INTEGER NOT NULL DEFAULT 0, effort_level TEXT, origin TEXT,
+               agent_def_id TEXT);",
         )
         .unwrap();
         c

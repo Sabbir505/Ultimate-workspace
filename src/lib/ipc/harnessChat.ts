@@ -94,6 +94,13 @@ export interface SubagentInfo {
   /** Model the subagent runs on (built-in Task subagents, post orchestration
    *  override); null for CLI-native subagents, whose model the CLI owns. */
   model?: string | null;
+  /** The Crew registry definition this subagent ran under, when it resolved to
+   *  one (research doc §C.2, Phase 2 — a `Task` call naming a crew agent).
+   *  null/absent for the 7 builtin `Task` roles and for a CLI's own native
+   *  subagents, which Relay only observes and cannot attribute. Mirrors
+   *  SubagentSpawnPayload.agentId, and kept on the record so the Agents panel
+   *  can still name the agent after the event is gone. */
+  agentId?: string | null;
 }
 
 export interface SubagentSpawnPayload {
@@ -104,6 +111,10 @@ export interface SubagentSpawnPayload {
   prompt: string;
   /** Mirrors crate::types::SubagentSpawnPayload::model. */
   model?: string | null;
+  /** Mirrors crate::types::SubagentSpawnPayload::agent_id — the crew agent id
+   *  this subagent resolved to. Omitted when absent (builtin Task roles,
+   *  CLI-native subagents). */
+  agentId?: string | null;
 }
 
 export interface SubagentTokenPayload {

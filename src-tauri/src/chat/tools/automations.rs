@@ -385,12 +385,12 @@ fn create_automation(app: &AppHandle, args: &Value) -> String {
     };
     // Same validation + webhook-secret settle the form command uses (one
     // code path, no drift). Cron rows still validate `schedule` here.
-    if let Err(e) = crate::commands::automation_cmds::validate_input(&mut input, None) {
-        return format!("Error: create_automation: {e}");
-    }
     let created = {
         let db = app.state::<crate::DbState>();
         let conn = db.0.lock();
+        if let Err(e) = crate::commands::automation_cmds::validate_input(&conn, &mut input, None) {
+            return format!("Error: create_automation: {e}");
+        }
         crate::db::create_automation(&conn, &input)
     };
     // File triggers need their watcher installed right away.
@@ -532,14 +532,14 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
     // Same validation + webhook-secret settle as the form command, WITH the
     // stored row so a switch to webhook (or a redacted config) carries the
     // existing secret instead of rotating it.
-    if let Err(e) =
-        crate::commands::automation_cmds::validate_input(&mut input, Some(&existing))
-    {
-        return format!("Error: update_automation: {e}");
-    }
     let result: Result<(), String> = {
         let db = app.state::<crate::DbState>();
         let conn = db.0.lock();
+        if let Err(e) =
+            crate::commands::automation_cmds::validate_input(&conn, &mut input, Some(&existing))
+        {
+            return format!("Error: update_automation: {e}");
+        }
         crate::db::update_automation(&conn, &id, &input)
             .map_err(|e| format!("update failed: {e}"))
             .and_then(|_| {

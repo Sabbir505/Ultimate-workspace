@@ -1771,7 +1771,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
             <div className="chat-tasks">
               {sessionTasks.map((t) => (
                 <Suspense key={t.taskId} fallback={null}>
-                  <TaskProgressCard task={t} />
+                  <TaskProgressCard task={t} chatSessionId={activeChatSessionId!} />
                 </Suspense>
               ))}
             </div>

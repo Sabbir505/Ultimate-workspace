@@ -241,5 +241,19 @@ export function createApprovalsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         return { tasks: { ...s.tasks, [chatSessionId]: sessionTasks } };
       });
     },
+
+    // Drop a finished task's card. The card calls this after its fade-out
+    // (auto-dismiss on success, click on a terminal card) — without it the
+    // task map only ever grows, so every download the agent ever ran stayed
+    // on screen for the life of the session.
+    removeTask: (chatSessionId: string, taskId: string) => {
+      set((s) => {
+        const sessionTasks = s.tasks[chatSessionId];
+        if (!sessionTasks || !(taskId in sessionTasks)) return {};
+        const next = { ...sessionTasks };
+        delete next[taskId];
+        return { tasks: { ...s.tasks, [chatSessionId]: next } };
+      });
+    },
   };
 }

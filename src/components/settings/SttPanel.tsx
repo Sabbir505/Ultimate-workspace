@@ -51,9 +51,11 @@ export function SttPanel() {
         toastSuccess("Speech model installed");
         refresh();
       }
-      if (p.state === "error" && p.error) {
-        toastError("Speech model download failed", p.error);
-      }
+      // `error` is reported by the global listener (useModelDownloadEvents →
+      // relayNotify), which already raises the bell record, the OS toast, the
+      // in-app toast and the alert chime for this same event. Toasting here
+      // too doubled every failure — the "excessive error messages" the user
+      // saw while a download was otherwise progressing fine.
     }).then((u) => {
       if (stale) u();
       else unlisten = u;

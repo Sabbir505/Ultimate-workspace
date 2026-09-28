@@ -130,9 +130,9 @@ export function TtsPanel() {
         void ttsPreload().catch(() => {});
         refresh();
       }
-      if (p.state === "error" && p.error) {
-        toastError("Voice model download failed", p.error);
-      }
+      // Failures are reported once, globally, by useModelDownloadEvents →
+      // relayNotify (bell + OS toast + in-app toast + chime). A second toast
+      // here made every failed download announce itself twice.
     }).then((u) => {
       if (stale) u();
       else unlisten = u;

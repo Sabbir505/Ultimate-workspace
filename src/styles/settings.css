@@ -523,6 +523,20 @@
   border-radius: var(--radius);
   background: var(--surface-glass);
   box-shadow: var(--glass-rim), var(--glass-drop-soft);
+  /* A finished card (auto-dismissed on success, clicked away on failure)
+     fades out instead of blinking out between frames. The duration matches
+     FADE_MS in TaskProgressCard.tsx, which waits this long before dropping
+     the card from the store. */
+  transition: opacity 320ms ease, transform 320ms ease;
+}
+.task-card-leaving {
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-card { transition: none; }
+  .task-card-leaving { transform: none; }
 }
 .task-card-download { --task-accent: #5aa7f0; }
 .task-card-shell    { --task-accent: #e3b341; }

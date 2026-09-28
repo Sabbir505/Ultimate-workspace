@@ -653,6 +653,8 @@ export interface ChatState {
   skipQuestion: (chatSessionId: string) => Promise<void>;
   /** Track a background chat task's progress (downloads / shell runs). */
   onTaskProgress: (payload: ChatTaskProgressPayload) => void;
+  /** Drop a finished task's card once it has faded out. */
+  removeTask: (chatSessionId: string, taskId: string) => void;
   /** Replace all plan steps for a session (called after parsing a new plan). */
   setPlanSteps: (chatSessionId: string, steps: PlanStep[]) => void;
   /** Update a single plan step's status from a backend event or text match. */

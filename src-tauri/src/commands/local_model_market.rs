@@ -1286,6 +1286,25 @@ async fn prime_hasher_from_file(path: &Path) -> Option<Sha256> {
     Some(hasher)
 }
 
+/// How many times a single model download may reconnect before the failure is
+/// the user's problem. Matches the tts-gpu installer's contract: transient
+/// stalls and dropped connections are retried with a Range resume, and only
+/// the final attempt's error surfaces.
+const DOWNLOAD_ATTEMPTS: u32 = 3;
+
+/// Pause before reconnecting — 2s, then 4s. Short enough that a user watching
+/// a resumed download doesn't think it hung, long enough not to hammer a CDN
+/// edge that just refused us.
+async fn backoff_before_retry(attempt: u32) {
+    let secs = 2u64.saturating_pow(attempt.min(2));
+    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+}
+
+/// Current on-disk size of the partial, or 0 when there is none / it vanished.
+async fn partial_size(partial_path: &Path) -> u64 {
+    fs::metadata(partial_path).await.map(|m| m.len()).unwrap_or(0)
+}
+
 async fn run_download(
     app: &AppHandle,
     id: &str,
@@ -1346,152 +1365,209 @@ async fn run_download(
     // message below.
     // SECURITY: never send the token to a non-huggingface.co host — the URL
     // is frontend-supplied (see token_allowed_for_url).
-    let mut attempt_auth: Option<&str> =
-        token.filter(|t| !t.is_empty() && token_allowed_for_url(url));
-    let resp = loop {
-        let mut req = client.get(url);
-        if let Some(t) = attempt_auth.as_deref() {
-            req = req.bearer_auth(t);
-        }
-        if resume_from > 0 {
-            req = req.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
-        }
-        let r = req
-            .send()
-            .await
-            .map_err(|e| format!("download request failed: {e}"))?;
-        let rejected = r.status().as_u16() == 401 || r.status().as_u16() == 403;
-        if rejected && attempt_auth.take().is_some() {
-            continue; // retry anonymously
-        }
-        break r;
-    };
-    let status = resp.status();
-    if status.as_u16() == 401 || status.as_u16() == 403 {
-        let _ = fs::remove_file(partial_path).await;
-        return Err(DownloadAbort::Failed(
-            "this model is gated — open it on huggingface.co to accept the license, \
-             or set a Hugging Face access token in Settings → Local Models."
-                .to_string(),
-        ));
-    }
-    if !status.is_success() {
-        return Err(DownloadAbort::Failed(format!("HTTP {status}")));
-    }
-
-    // 206 Partial Content confirms the server honored the Range and
-    // resumed; 200 OK means the server is sending the full file from
-    // byte 0, so the existing partial is stale — discard it.
-    let resuming = status == reqwest::StatusCode::PARTIAL_CONTENT && resume_from > 0;
-    if !resuming && resume_from > 0 {
-        let _ = fs::remove_file(partial_path).await;
-    }
-
-    // The total size of the *remaining* payload. If the server gave a
-    // full Content-Length, that's the bytes we'll receive; if it gave
-    // a Content-Range, we add the already-downloaded prefix.
-    let total = if resuming {
-        resp.content_length().map(|c| c + resume_from)
-    } else {
-        resp.content_length()
-    };
-
-    let downloaded: u64 = resume_from;
+    //
+    // Transient network trouble is NOT a user-facing error: a multi-GB
+    // transfer that pauses past the 60s stall watchdog (a CDN pause, wifi
+    // blip, a sleeping machine) used to kill the whole download and fire a
+    // burst of error notifications at a transfer that was otherwise fine.
+    // Retried with **resume** instead — same contract as the tts-gpu
+    // installer: the partial is kept, the next attempt asks for the rest with
+    // a Range header, and only the LAST attempt's failure reaches the user.
+    // The full-file SHA-256 still runs once, after the loop, over prefix +
+    // suffix, so resuming never weakens the integrity check.
     let started = Instant::now();
-    let mut last_emit = Instant::now();
-    // Tell the UI the transfer has STARTED (headers received) even before
-    // the first byte lands — a slow CDN first-byte used to leave the card on
-    // "Starting…" with no progress bar at all.
-    let _ = app.emit(
-        "local-model:download:progress",
-        &DownloadProgress {
-            id: id.to_string(),
-            downloaded_bytes: downloaded,
-            total_bytes: total,
-            state: DownloadState::Downloading,
-            bytes_per_second: 0.0,
-            final_path: None,
-            error: None,
-        },
-    );
-    // If we have an expected SHA, we need to verify the final blob.
-    // When resuming, the hasher is primed by re-reading the prefix
-    // from the partial file (identity-verified via the sidecar .meta
-    // file above). This ensures the SHA-256 covers the full file.
-    // E3: stream the prefix in 1 MiB chunks — `tokio::fs::read` pulled
-    // the WHOLE partial (GBs for model weights) into RAM just to hash it.
-    // If the prefix can't be hashed, the final blob could never be
-    // verified — fail the download (partial removed, so the retry starts
-    // fresh) instead of silently shipping an unchecked file.
-    let mut hasher = if expected_sha.is_some() {
-        if resuming {
-            match prime_hasher_from_file(partial_path).await {
-                Some(h) => Some(h),
-                None => {
-                    let _ = fs::remove_file(partial_path).await;
-                    return Err(DownloadAbort::Failed(
-                        "could not hash the existing partial to resume — download aborted; \
-                         retrying will start from zero"
-                            .to_string(),
-                    ));
+    let mut hasher: Option<sha2::Sha256> = None;
+    for attempt in 1..=DOWNLOAD_ATTEMPTS {
+        let mut attempt_auth: Option<&str> =
+            token.filter(|t| !t.is_empty() && token_allowed_for_url(url));
+        let resp = loop {
+            let mut req = client.get(url);
+            if let Some(t) = attempt_auth.as_deref() {
+                req = req.bearer_auth(t);
+            }
+            if resume_from > 0 {
+                req = req.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+            }
+            let r = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!(
+                        "[download] attempt {attempt}/{DOWNLOAD_ATTEMPTS} could not reach the \
+                         server ({e}); retrying"
+                    );
+                    if attempt < DOWNLOAD_ATTEMPTS {
+                        backoff_before_retry(attempt).await;
+                        resume_from = partial_size(partial_path).await;
+                        continue;
+                    }
+                    return Err(DownloadAbort::Failed(format!("download request failed: {e}")));
                 }
+            };
+            let rejected = r.status().as_u16() == 401 || r.status().as_u16() == 403;
+            if rejected && attempt_auth.take().is_some() {
+                continue; // retry anonymously
             }
-        } else {
-            Some(Sha256::new())
-        }
-    } else {
-        None
-    };
-
-    // Shared body pump (download.rs): write + hashing/progress callback +
-    // cancel/stall watchdogs. Error policies: cancel removes the partial;
-    // stall/read/write failures keep it (a later attempt may finish it).
-    let (outcome, _downloaded) = crate::download::pump_body_to_file(
-        resp,
-        partial_path,
-        resume_from,
-        resuming,
-        std::time::Duration::from_secs(60),
-        &mut cancel_rx,
-        &mut |chunk, downloaded, total| {
-            if let Some(h) = hasher.as_mut() {
-                h.update(chunk);
-            }
-            if last_emit.elapsed().as_millis() >= 150 {
-                let elapsed = started.elapsed().as_secs_f64().max(0.001);
-                let _ = app.emit(
-                    "local-model:download:progress",
-                    &DownloadProgress {
-                        id: id.to_string(),
-                        downloaded_bytes: downloaded,
-                        total_bytes: total,
-                        state: DownloadState::Downloading,
-                        bytes_per_second: downloaded as f64 / elapsed,
-                        final_path: None,
-                        error: None,
-                    },
-                );
-                last_emit = Instant::now();
-            }
-            Ok(())
-        },
-    )
-    .await;
-    match outcome {
-        crate::download::BodyPumpOutcome::Completed => {}
-        crate::download::BodyPumpOutcome::Cancelled => {
+            break r;
+        };
+        let status = resp.status();
+        if status.as_u16() == 401 || status.as_u16() == 403 {
             let _ = fs::remove_file(partial_path).await;
-            return Err(DownloadAbort::Cancelled);
-        }
-        crate::download::BodyPumpOutcome::Stalled => {
             return Err(DownloadAbort::Failed(
-                "download stalled — no data received for 60s".to_string(),
+                "this model is gated — open it on huggingface.co to accept the license, \
+             or set a Hugging Face access token in Settings → Local Models."
+                    .to_string(),
             ));
         }
-        crate::download::BodyPumpOutcome::ReadError(e) => {
-            return Err(DownloadAbort::Failed(format!("download stream error: {e}")));
+        if !status.is_success() {
+            // A 4xx/5xx on a retryable request is worth another go (the CDN
+            // edge can 5xx a Range request); only the last attempt reports.
+            if attempt < DOWNLOAD_ATTEMPTS {
+                eprintln!(
+                    "[download] attempt {attempt}/{DOWNLOAD_ATTEMPTS} got HTTP {status}; retrying"
+                );
+                backoff_before_retry(attempt).await;
+                resume_from = partial_size(partial_path).await;
+                continue;
+            }
+            return Err(DownloadAbort::Failed(format!("HTTP {status}")));
         }
-        crate::download::BodyPumpOutcome::WriteError(e) => return Err(DownloadAbort::Failed(e)),
+
+        // 206 Partial Content confirms the server honored the Range and
+        // resumed; 200 OK means the server is sending the full file from
+        // byte 0, so the existing partial is stale — discard it.
+        let resuming = status == reqwest::StatusCode::PARTIAL_CONTENT && resume_from > 0;
+        if !resuming && resume_from > 0 {
+            let _ = fs::remove_file(partial_path).await;
+        }
+
+        // The total size of the *remaining* payload. If the server gave a
+        // full Content-Length, that's the bytes we'll receive; if it gave
+        // a Content-Range, we add the already-downloaded prefix.
+        let total = if resuming {
+            resp.content_length().map(|c| c + resume_from)
+        } else {
+            resp.content_length()
+        };
+
+        let downloaded: u64 = resume_from;
+        let mut last_emit = Instant::now();
+        // Tell the UI the transfer has STARTED (headers received) even before
+        // the first byte lands — a slow CDN first-byte used to leave the card on
+        // "Starting…" with no progress bar at all. Re-emitted per attempt so a
+        // resumed transfer visibly picks back up rather than looking frozen.
+        let _ = app.emit(
+            "local-model:download:progress",
+            &DownloadProgress {
+                id: id.to_string(),
+                downloaded_bytes: downloaded,
+                total_bytes: total,
+                state: DownloadState::Downloading,
+                bytes_per_second: 0.0,
+                final_path: None,
+                error: None,
+            },
+        );
+        // If we have an expected SHA, we need to verify the final blob.
+        // When resuming, the hasher is primed by re-reading the prefix
+        // from the partial file (identity-verified via the sidecar .meta
+        // file above). This ensures the SHA-256 covers the full file.
+        // E3: stream the prefix in 1 MiB chunks — `tokio::fs::read` pulled
+        // the WHOLE partial (GBs for model weights) into RAM just to hash it.
+        // If the prefix can't be hashed, the final blob could never be
+        // verified — fail the download (partial removed, so the retry starts
+        // fresh) instead of silently shipping an unchecked file.
+        hasher = if expected_sha.is_some() {
+            if resuming {
+                match prime_hasher_from_file(partial_path).await {
+                    Some(h) => Some(h),
+                    None => {
+                        let _ = fs::remove_file(partial_path).await;
+                        return Err(DownloadAbort::Failed(
+                            "could not hash the existing partial to resume — download aborted; \
+                         retrying will start from zero"
+                                .to_string(),
+                        ));
+                    }
+                }
+            } else {
+                Some(Sha256::new())
+            }
+        } else {
+            None
+        };
+
+        // Shared body pump (download.rs): write + hashing/progress callback +
+        // cancel/stall watchdogs. Error policies: cancel removes the partial;
+        // stall/read/write failures keep it (a later attempt may finish it).
+        let (outcome, _downloaded) = crate::download::pump_body_to_file(
+            resp,
+            partial_path,
+            resume_from,
+            resuming,
+            std::time::Duration::from_secs(60),
+            &mut cancel_rx,
+            &mut |chunk, downloaded, total| {
+                if let Some(h) = hasher.as_mut() {
+                    h.update(chunk);
+                }
+                if last_emit.elapsed().as_millis() >= 150 {
+                    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+                    let _ = app.emit(
+                        "local-model:download:progress",
+                        &DownloadProgress {
+                            id: id.to_string(),
+                            downloaded_bytes: downloaded,
+                            total_bytes: total,
+                            state: DownloadState::Downloading,
+                            bytes_per_second: downloaded as f64 / elapsed,
+                            final_path: None,
+                            error: None,
+                        },
+                    );
+                    last_emit = Instant::now();
+                }
+                Ok(())
+            },
+        )
+        .await;
+        match outcome {
+            crate::download::BodyPumpOutcome::Completed => break,
+            crate::download::BodyPumpOutcome::Cancelled => {
+                let _ = fs::remove_file(partial_path).await;
+                return Err(DownloadAbort::Cancelled);
+            }
+            // Transient by nature — the bytes already on disk are kept and
+            // the next attempt resumes from them.
+            crate::download::BodyPumpOutcome::Stalled
+            | crate::download::BodyPumpOutcome::ReadError(_) => {
+                let why = match &outcome {
+                    crate::download::BodyPumpOutcome::Stalled => {
+                        "no data received for 60s".to_string()
+                    }
+                    crate::download::BodyPumpOutcome::ReadError(e) => format!("stream error: {e}"),
+                    _ => String::new(),
+                };
+                if attempt < DOWNLOAD_ATTEMPTS {
+                    eprintln!(
+                        "[download] attempt {attempt}/{DOWNLOAD_ATTEMPTS} hit {why}; \
+                         resuming from {} bytes",
+                        partial_size(partial_path).await
+                    );
+                    backoff_before_retry(attempt).await;
+                    resume_from = partial_size(partial_path).await;
+                    continue;
+                }
+                return Err(DownloadAbort::Failed(format!(
+                    "download interrupted ({why}) after {DOWNLOAD_ATTEMPTS} attempts — \
+                     the bytes already fetched are kept, so retrying resumes"
+                )));
+            }
+            // A local write failure (disk full, permissions) will not fix
+            // itself by reconnecting.
+            crate::download::BodyPumpOutcome::WriteError(e) => {
+                return Err(DownloadAbort::Failed(e))
+            }
+        }
     }
 
     if let (Some(expected), Some(h)) = (expected_sha, hasher) {

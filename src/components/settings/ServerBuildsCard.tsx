@@ -91,11 +91,20 @@ export function ServerBuildsCard({
   // build-install branches in their own listeners.
   const idsRef = useRef(ids);
   idsRef.current = ids;
+  // Ids whose failure the shared stream already reported. The global
+  // listener (useModelDownloadEvents) turns a stream `error` event into a
+  // bell record + OS toast + in-app toast + alert chime, and every installer
+  // here also rejects with the same message — so without this the user got
+  // the same failure announced two or three times over. A ref, not state: the
+  // catch below runs before React would have flushed a state update.
+  const reportedErrorsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     let stale = false;
     let unlisten: (() => void) | null = null;
     void onModelDownloadProgress((p) => {
       if (stale || !idsRef.current.includes(p.id)) return;
+      if (p.state === "error") reportedErrorsRef.current.add(p.id);
+      else if (p.state !== "done") reportedErrorsRef.current.delete(p.id);
       setProgress((prev) => ({
         ...prev,
         [p.id]: { state: p.state, downloaded: p.downloadedBytes, total: p.totalBytes ?? null },
@@ -115,6 +124,7 @@ export function ServerBuildsCard({
     if (!installer || busyId) return;
     const titleOf = buildUpdates[id]?.title ?? id;
     setBusyId(id);
+    reportedErrorsRef.current.delete(id);
     try {
       await installer(true);
       // Optimistic flip (mirrors markHarnessUpdated): the installer verified
@@ -123,7 +133,14 @@ export function ServerBuildsCard({
       toastSuccess(`${titleOf} is up to date`);
       onInstalled?.(id);
     } catch (err) {
-      toastError(`Could not update ${titleOf}`, err);
+      // Only speak up when the stream didn't: a handful of failures (temp
+      // file, marker write, path setting) reject without emitting an `error`
+      // progress event, and those would otherwise be silent.
+      if (reportedErrorsRef.current.has(id)) {
+        console.warn(`[builds] ${titleOf} install failed`, err);
+      } else {
+        toastError(`Could not update ${titleOf}`, err);
+      }
     } finally {
       setBusyId(null);
       void refreshBuildUpdates().catch(() => {});

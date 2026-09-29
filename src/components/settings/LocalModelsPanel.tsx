@@ -38,6 +38,7 @@ import { KnowledgePanel } from "./KnowledgePanel";
 import { GlassSelect } from "../common/GlassSelect";
 import { Modal } from "../common/Modal";
 import { ToggleSwitch } from "./ToggleSwitch";
+import { LogGatewayPanel } from "./LogGatewayPanel";
 import { formatBytes } from "../../lib/format";
 
 /** Settings → Local Models: on-disk GGUF list, Hugging Face market tab,
@@ -62,7 +63,7 @@ export function LocalModelsPanel() {
   // Panel tabs: "models" = on-disk GGUF list, "market" = Hugging Face browser,
   // "speech" = both directions of local speech (STT + TTS), "images" = local
   // image generation (sd-server sidecar + GGUF models).
-  const [tab, setTab] = useState<"models" | "market" | "speech" | "images">("models");
+  const [tab, setTab] = useState<"models" | "market" | "speech" | "images" | "log">("models");
   // Speech splits into sub-tabs rather than stacking two panels: STT and TTS
   // are independent setups (one may be configured and the other not at all),
   // and scrolling past a fully configured one to reach the other made both
@@ -328,7 +329,11 @@ export function LocalModelsPanel() {
         setActiveView("chat");
         return;
       }
-      const session = await newChat("local_gguf", modelName);
+      // Seed the agent too. Without it the session row's `agent` stays NULL,
+      // and every local affordance is gated on `agent === "local"` — the chip
+      // renders no name, the popup opens on the Auto pane instead of Local,
+      // and the ✓ never lands. Same reason handleLoadLocalModel sets it first.
+      const session = await newChat("local_gguf", modelName, undefined, "local");
       if (session) {
         setActiveView("chat");
       }
@@ -448,6 +453,12 @@ export function LocalModelsPanel() {
           onClick={() => setTab("market")}
         >
           Model Market
+        </button>
+        <button
+          className={`tab${tab === "log" ? " active" : ""}`}
+          onClick={() => setTab("log")}
+        >
+          Request Log
         </button>
       </div>
 
@@ -772,6 +783,7 @@ export function LocalModelsPanel() {
         </>
       )}
       {tab === "images" && <ImageGenPanel />}
+      {tab === "log" && <LogGatewayPanel />}
       {tab === "market" && (
         <ModelMarket
           onDownloadComplete={handleDownloadComplete}

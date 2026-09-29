@@ -447,6 +447,13 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
         // The next "New Chat" reads chat.local_gguf.model directly (not via
         // chatConfig), so this is also safe for the auto-start path.
         if (!isLocal) await setSessionProvider(activeChatSessionId, "local_gguf");
+        // Pointing the session at local_gguf isn't enough — the chip, the
+        // popup's rail and the ✓ all key off `agent === "local"`, so a cloud
+        // session that just picked a local model would still render as one
+        // with no name. Same ordering requirement as handleLoadLocalModel.
+        if ((activeSession?.agent ?? null) !== "local") {
+          await setSessionAgent(activeChatSessionId, "local");
+        }
       } else if (isLocal) {
         // Cloud model picked in a local session: switch the session back to
         // the configured cloud provider before setting the model.
@@ -1979,7 +1986,15 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           // A harness session's provider column is cosmetic (the CLI runs the
           // turn) — showing it made the picker/meter claim "openrouter" for a
           // commandcode model.
-          activeSession?.agent && activeSession.agent !== "builtin"
+          //
+          // `local` is NOT a harness: it's the built-in local path, and its
+          // `local_gguf` provider is load-bearing. Both the ContextMeter's
+          // `isLocal` (which decides whether the sidecar's real `-c` beats the
+          // 500k cloud fallback) and the picker's `isLocalSession` branch on
+          // it. Blanking it here is why a 64k local model reported 500k.
+          activeSession?.agent &&
+          activeSession.agent !== "builtin" &&
+          activeSession.agent !== "local"
             ? undefined
             : activeSession?.autoModel
               ? "auto"

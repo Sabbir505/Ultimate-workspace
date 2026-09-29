@@ -297,6 +297,14 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     // 5-second busy timeout so concurrent readers (cost dashboard, settings)
     // don't immediately fail when a write transaction is active.
     conn.pragma_update(None, "busy_timeout", 5000)?;
+    // The registry shipped as `crew_agents`/`crew_runs` and is `subagents`/
+    // `subagent_runs` now. This MUST run before init_schema: init_schema's
+    // `CREATE TABLE IF NOT EXISTS subagents` would otherwise create a fresh
+    // empty table beside a legacy `crew_agents`, and the rename below would
+    // die on the name collision (a real dead-on-start crash, 2026-09-30).
+    // SQLite rewrites REFERENCES clauses in other tables on rename, so
+    // chat_sessions.agent_def_id keeps pointing at the same rows.
+    migrate_crew_tables_rename(conn)?;
     init_schema(conn)?;
     migrate_chat_session_flags(conn)?;
     migrate_chat_session_watch_mode(conn)?;
@@ -327,12 +335,6 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_session_origin(conn)?;
     migrate_doc_chunks_heading(conn)?;
     migrate_doc_corpora_chunk_version(conn)?;
-    // The registry shipped as `crew_agents`/`crew_runs`; the feature is
-    // "subagents" now — the vocabulary every spawn surface and tool speaks.
-    // Runs before the seed so the builtins land in the renamed table. SQLite
-    // rewrites REFERENCES clauses in other tables on rename, so
-    // chat_sessions.agent_def_id keeps pointing at the same rows.
-    migrate_crew_tables_rename(conn)?;
     // Declarative subagents: the 7 builtin roles must exist in the registry
     // before any spawn surface resolves a name against it.
     migrate_subagents_seed(conn)?;
@@ -363,13 +365,38 @@ fn migrate_crew_tables_rename(conn: &Connection) -> DbResult<()> {
             )? > 0,
         )
     };
+    let row_count = |name: &str| -> DbResult<i64> {
+        Ok(conn.query_row(&format!("SELECT COUNT(*) FROM {name}"), [], |r| {
+            r.get::<_, i64>(0)
+        })?)
+    };
+    // A crashed first boot after the rename could leave BOTH tables on disk:
+    // init_schema created the fresh empty `subagents` before the old code
+    // reached the rename. The fresh table is empty by construction (the
+    // builtin seed runs after this migration), so drop it and rename the
+    // legacy table into place — the legacy table carries the user's rows AND
+    // the FK references from chat_sessions, which the rename rewrites.
     if table_exists("crew_agents")? {
-        conn.execute("ALTER TABLE crew_agents RENAME TO subagents", [])?;
-        conn.execute("DROP INDEX IF EXISTS idx_crew_agents_builtin", [])?;
+        if table_exists("subagents")? {
+            if row_count("subagents")? == 0 {
+                conn.execute("DROP TABLE subagents", [])?;
+            }
+        }
+        if !table_exists("subagents")? {
+            conn.execute("ALTER TABLE crew_agents RENAME TO subagents", [])?;
+            conn.execute("DROP INDEX IF EXISTS idx_crew_agents_builtin", [])?;
+        }
     }
     if table_exists("crew_runs")? {
-        conn.execute("ALTER TABLE crew_runs RENAME TO subagent_runs", [])?;
-        conn.execute("DROP INDEX IF EXISTS idx_crew_runs_agent", [])?;
+        if table_exists("subagent_runs")? {
+            if row_count("subagent_runs")? == 0 {
+                conn.execute("DROP TABLE subagent_runs", [])?;
+            }
+        }
+        if !table_exists("subagent_runs")? {
+            conn.execute("ALTER TABLE crew_runs RENAME TO subagent_runs", [])?;
+            conn.execute("DROP INDEX IF EXISTS idx_crew_runs_agent", [])?;
+        }
     }
     Ok(())
 }
@@ -1845,34 +1872,103 @@ mod tests {
     /// Subagent-run sessions link to their definition through `agent_def_id` with
     /// ON DELETE SET NULL: deleting the definition must keep the sessions (a
     /// subagent run's transcript is the user's data) and only clear the pointer.
-    /// Databases created before the subagent rename carry `crew_agents` /
-    /// `crew_runs`. The rename migration must carry the rows across (a user's
-    /// registry is their data) and leave the schema in the exact shape
-    /// `init_schema` produces, so the later `origin`/seed migrations find the
-    /// renamed tables.
+    /// A database from BEFORE the subagent rename (crew_agents/crew_runs with
+    /// rows) must survive a full `configure()` — this is the exact crash
+    /// reported dead-on-start: init_schema created a fresh empty `subagents`
+    /// beside the legacy table, and the rename died on the name collision.
     #[test]
-    fn crew_table_rename_carries_rows_and_yields_the_new_schema() {
+    fn configure_renames_a_legacy_crew_database_without_losing_rows() {
         let conn = Connection::open_in_memory().unwrap();
-        // The pre-rename shape (id + name is all the rename itself touches).
+        // The pre-rename registry shape (pre-origin-migration columns; the
+        // origin ALTER inside configure must tolerate the column existing).
         conn.execute(
-            "CREATE TABLE crew_agents (id TEXT PRIMARY KEY, name TEXT NOT NULL)",
+            "CREATE TABLE crew_agents (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,              description TEXT NOT NULL DEFAULT '', prompt_md TEXT NOT NULL DEFAULT '',              tools TEXT, engine TEXT, model TEXT, effort TEXT,              sandbox_policy TEXT NOT NULL DEFAULT 'read_only',              approval_policy TEXT NOT NULL DEFAULT 'on_request',              worktree_policy TEXT NOT NULL DEFAULT 'inherit',              max_rounds INTEGER NOT NULL DEFAULT 100,              max_concurrent INTEGER NOT NULL DEFAULT 2,              builtin INTEGER NOT NULL DEFAULT 0,              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
             [],
         )
         .unwrap();
         conn.execute(
-            "CREATE TABLE crew_runs (id TEXT PRIMARY KEY, agent_id TEXT)",
+            "CREATE TABLE crew_runs (id TEXT PRIMARY KEY, agent_id TEXT, session_id TEXT,              trigger TEXT NOT NULL, task TEXT NOT NULL DEFAULT '', engine TEXT NOT NULL DEFAULT '',              model TEXT NOT NULL DEFAULT '', worktree TEXT, started_at INTEGER NOT NULL DEFAULT 0,              finished_at INTEGER, status TEXT NOT NULL DEFAULT 'running', summary TEXT)",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO crew_agents (id, name) VALUES ('a-1', 'doc-writer')",
+            "INSERT INTO crew_agents (id, name, prompt_md, created_at, updated_at)              VALUES ('a-1', 'doc-writer', 'You write docs.', 1, 2)",
             [],
         )
         .unwrap();
-        conn.execute("INSERT INTO crew_runs (id, agent_id) VALUES ('r-1', 'a-1')", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO crew_runs (id, agent_id, trigger, task, started_at)              VALUES ('r-1', 'a-1', 'manual', 'test task', 0)",
+            [],
+        )
+        .unwrap();
 
-        migrate_crew_tables_rename(&conn).unwrap();
+        configure(&conn).unwrap();
+
+        // The user's row rode the rename; the fresh builtins are seeded
+        // alongside it; the run history is queryable under the new name.
+        let mine: String = conn
+            .query_row("SELECT prompt_md FROM subagents WHERE id = 'a-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(mine, "You write docs.");
+        let builtins: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subagents WHERE builtin = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(builtins >= 7);
+        let runs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subagent_runs WHERE agent_id = 'a-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(runs, 1);
+        // No legacy tables left, and FKs are consistent.
+        let legacy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'                  AND name IN ('crew_agents', 'crew_runs')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy, 0);
+        // Zero rows from foreign_key_check = no violations (query_row would
+        // error on the empty set, so count instead).
+        let fk_violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(fk_violations, 0);
+    }
+
+    /// The crashed first boot left BOTH tables on disk: init_schema's fresh
+    /// empty `subagents` beside the legacy `crew_agents`. configure() must
+    /// recover — drop the empty fresh table, rename the legacy one in.
+    #[test]
+    fn configure_recovers_from_a_half_renamed_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE crew_agents (id TEXT PRIMARY KEY, name TEXT NOT NULL,              description TEXT NOT NULL DEFAULT '', prompt_md TEXT NOT NULL DEFAULT '',              tools TEXT, engine TEXT, model TEXT, effort TEXT,              sandbox_policy TEXT NOT NULL DEFAULT 'read_only',              approval_policy TEXT NOT NULL DEFAULT 'on_request',              worktree_policy TEXT NOT NULL DEFAULT 'inherit',              max_rounds INTEGER NOT NULL DEFAULT 100,              max_concurrent INTEGER NOT NULL DEFAULT 2,              builtin INTEGER NOT NULL DEFAULT 0,              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO crew_agents (id, name, prompt_md, created_at, updated_at)              VALUES ('a-1', 'doc-writer', 'You write docs.', 1, 2)",
+            [],
+        )
+        .unwrap();
+        // What the crashed boot left behind: the new tables, created empty
+        // by init_schema with the FULL new DDL (that's why the recovery can
+        // drop them outright — they hold nothing and miss no migration).
+        conn.execute(
+            "CREATE TABLE subagents (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,              description TEXT NOT NULL DEFAULT '', prompt_md TEXT NOT NULL DEFAULT '',              tools TEXT, engine TEXT, model TEXT, effort TEXT,              sandbox_policy TEXT NOT NULL DEFAULT 'read_only',              approval_policy TEXT NOT NULL DEFAULT 'on_request',              worktree_policy TEXT NOT NULL DEFAULT 'inherit',              max_rounds INTEGER NOT NULL DEFAULT 100,              max_concurrent INTEGER NOT NULL DEFAULT 2,              builtin INTEGER NOT NULL DEFAULT 0,              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+            [],
+        )
+        .unwrap();
+
+        configure(&conn).unwrap();
 
         let name: String = conn
             .query_row("SELECT name FROM subagents WHERE id = 'a-1'", [], |r| {
@@ -1880,14 +1976,14 @@ mod tests {
             })
             .unwrap();
         assert_eq!(name, "doc-writer");
-        let runs: i64 = conn
-            .query_row("SELECT COUNT(*) FROM subagent_runs WHERE agent_id = 'a-1'", [], |r| {
-                r.get(0)
-            })
+        let legacy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'crew_agents'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(runs, 1);
-        // Idempotent: a second configure pass finds nothing to rename.
-        migrate_crew_tables_rename(&conn).unwrap();
+        assert_eq!(legacy, 0);
     }
 
     #[test]

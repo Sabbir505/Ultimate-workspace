@@ -22,6 +22,7 @@ pub mod improve;
 mod memory;
 mod projects;
 mod research_cache;
+pub mod llm_log;
 pub(crate) mod session_fabric;
 mod secrets;
 mod settings;
@@ -320,6 +321,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_automations_triggers(conn)?;
     migrate_chat_fts(conn)?;
     migrate_doc_chunks_fts(conn)?;
+    llm_log::ensure_schema(conn)?;
     migrate_memory_reflected(conn)?;
     migrate_chat_message_kind(conn)?;
     migrate_chat_session_origin(conn)?;
@@ -1800,6 +1802,7 @@ pub(crate) fn mem() -> Connection {
     // Same for the crew-run link column: tests that crew-spawn (or assert the
     // FK's ON DELETE SET NULL) need it present.
     migrate_chat_session_agent_def(&conn).unwrap();
+    llm_log::ensure_schema(&conn).unwrap();
     conn
 }
 

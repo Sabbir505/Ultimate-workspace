@@ -346,7 +346,8 @@
    toolbar already has one). */
 .toolbar .automations-header,
 .toolbar .crew-header,
-.toolbar .vault-header {
+.toolbar .vault-header,
+.toolbar .logs-header {
   flex: 1;
   min-width: 0;
   flex-wrap: nowrap;
@@ -366,7 +367,8 @@
    the caption and set the bar's height. The page rules are untouched; this
    only applies inside the toolbar. */
 .toolbar .automations-header-left h1,
-.toolbar .crew-header h1 {
+.toolbar .crew-header h1,
+.toolbar .logs-header h1 {
   font-size: 14px;
   font-weight: 650;
 }
@@ -376,7 +378,8 @@
   width: 16px;
   height: 16px;
 }
-.toolbar .crew-header-icon {
+.toolbar .crew-header-icon,
+.toolbar .logs-header-icon {
   width: 16px;
   height: 16px;
 }

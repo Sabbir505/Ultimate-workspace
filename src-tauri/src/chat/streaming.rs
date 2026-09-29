@@ -333,6 +333,12 @@ async fn openai_stream_round<R: tauri::Runtime>(
     // (B-9 moved stream reads onto stream_next_with_watchdog, which brings
     // its own StreamExt — no local import needed.)
 
+    // Request-log row for this model round. The body is already the exact
+    // wire payload reqwest is about to send, so this captures verbatim
+    // without a hook upstream. Disabled unless logging is on — the guard is
+    // a no-op struct otherwise, so the hot path is unaffected either way.
+    let mut cap = crate::llm_log::begin_round(app, url, "openai_compatible", &body.to_string());
+
     // B-10: bound time-to-headers (send() resolves at the header) WITHOUT a
     // total request timeout — reqwest's `.timeout()` covers the whole body
     // read, which would kill long streams. The stall watchdog below guards
@@ -356,8 +362,11 @@ async fn openai_stream_round<R: tauri::Runtime>(
     })?
     .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
+    cap.set_status(status.as_u16() as i64);
     if !status.is_success() {
         let b = resp.text().await.unwrap_or_default();
+        cap.set_error(format!("HTTP {status}"));
+        cap.tee(b.as_bytes());
         // The 400 body from llama-server names the exact rejected field
         // ("unknown field", "tool not supported", "content is empty", …) —
         // surface it in the dev log, not just the UI banner.
@@ -433,6 +442,8 @@ async fn openai_stream_round<R: tauri::Runtime>(
         }
     } {
         // (`stream_next_with_watchdog` already mapped the transport error.)
+        cap.note_first_byte();
+        cap.tee(&chunk);
         for line in pending.push(&chunk) {
             let line = line.trim_end();
             // Tolerate `data:[DONE]` (no space) and trailing `\r` from some
@@ -681,6 +692,9 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
     // (B-9 moved stream reads onto stream_next_with_watchdog, which brings
     // its own StreamExt — no local import needed.)
 
+    // Request-log row for this model round — see the OpenAI round.
+    let mut cap = crate::llm_log::begin_round(app, url, "anthropic", &body.to_string());
+
     // B-10: bound time-to-headers (see the OpenAI round for why there is no
     // total `.timeout()` on a streaming request).
     let resp = tokio::time::timeout(
@@ -742,6 +756,8 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
                 Ok(None) => break 'outer,
                 Err(e) => return Err(e),
             };
+        cap.note_first_byte();
+        cap.tee(&chunk);
         // B-14: byte-buffered line assembly — lossy-converting each raw chunk
         // independently corrupted multi-byte chars split across TCP reads.
         for line in pending.push(&chunk) {

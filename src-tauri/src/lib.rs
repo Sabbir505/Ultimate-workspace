@@ -123,6 +123,7 @@ mod harness_config;
 mod hooks;
 mod improve_engine;
 mod installed_skills;
+pub mod llm_log;
 pub mod memory;
 mod mcp_gallery;
 mod mcp_tools_bridge;
@@ -473,6 +474,46 @@ pub fn run() {
                 )));
             }
 
+            // Local-model request log + loopback gateway (src/llm_log/).
+            // Other apps point their base_url at the gateway so their traffic
+            // is captured too; Relay's own calls are captured in-process at the
+            // provider builders. Bind failure is non-fatal — logging stops, the
+            // app does not.
+            {
+                let app_handle = app.handle().clone();
+                // Its own connection, not `shared_db`. The gateway runs an
+                // async accept loop and needs a tokio mutex (a parking_lot
+                // guard is !Send, so it can't cross an await); opening a
+                // second handle to the same file is what WAL mode is for, and
+                // it keeps the gateway off the hot path's lock.
+                let gw_conn = db::open(&db_path).ok();
+                let handle = gw_conn.map(|c| {
+                    let db = Arc::new(tokio::sync::Mutex::new(c));
+                    tauri::async_runtime::spawn(async move {
+                        llm_log::gateway::serve(app_handle, db).await;
+                    })
+                });
+                if let Some(h) = handle {
+                    app.manage(llm_log::gateway::GatewayHandle(Mutex::new(Some(h))));
+                }
+            }
+
+            // Retention prune. Hourly rather than per-request so a chatty
+            // local model never pays a DELETE on the hot path.
+            {
+                let db_state = DbState(Arc::clone(&shared_db));
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
+                        let conn = db_state.0.lock();
+                        let cfg = llm_log::LogConfig::load(&conn);
+                        if cfg.enabled {
+                            llm_log::prune(&conn, &cfg);
+                        }
+                    }
+                });
+            }
+
             // Budget alert timer (commands/budget.rs): the frontend re-checks
             // after cost events, but a backend cadence keeps threshold alerts
             // firing when no chat window is open to drive the IPC call.
@@ -805,6 +846,18 @@ pub fn run() {
             commands::chat_cmds::detect_llama_server_path,
             commands::chat_cmds::count_context_tokens,
             commands::chat_cmds::count_context_breakdown,
+            llm_log::commands::llm_log_list,
+            llm_log::commands::llm_log_get,
+            llm_log::commands::llm_log_clear,
+            llm_log::commands::llm_log_stats,
+            llm_log::commands::llm_log_prune,
+            llm_log::commands::llm_log_config_get,
+            llm_log::commands::llm_log_config_set,
+            llm_log::commands::gateway_status,
+            llm_log::commands::gateway_set_require_auth,
+            llm_log::commands::gateway_set_default_target,
+            llm_log::commands::gateway_set_targets,
+            llm_log::commands::gateway_probe,
             commands::chat_cmds::chat_compact_now,
             commands::chat_cmds::list_compacted_messages,
             commands::chat_cmds::research_citation_report,
@@ -1090,6 +1143,13 @@ pub fn run() {
             mcp_gallery::kill_all(handle);
             // Abort the browser MCP server task (mi20).
             if let Some(state) = handle.try_state::<BrowserMcpHandle>() {
+                if let Some(h) = state.0.lock().take() {
+                    h.abort();
+                }
+            }
+            // Abort the local-model gateway listener too — same
+            // orphaned-accept-loop concern as the browser MCP server.
+            if let Some(state) = handle.try_state::<llm_log::gateway::GatewayHandle>() {
                 if let Some(h) = state.0.lock().take() {
                     h.abort();
                 }

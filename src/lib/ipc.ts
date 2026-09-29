@@ -475,3 +475,4 @@ export * from "./ipc/vault";
 export * from "./ipc/hooks";
 export * from "./ipc/pricing";
 export * from "./ipc/crew";
+export * from "./ipc/llmLogs";

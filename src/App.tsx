@@ -96,6 +96,9 @@ const VaultView = lazy(() => import("./components/vault/VaultView").then((m) => 
 // agent registry plus the manual "Run" surface and run history. Real-view-swap
 // like automations/vault, lazily loaded.
 const CrewView = lazy(() => import("./components/crew/CrewView").then((m) => ({ default: m.CrewView })));
+// Logs (local-model request log + gateway). Real-view-swap like crew/vault,
+// lazily loaded so the log table never rides in the entry chunk.
+const LogsView = lazy(() => import("./components/logs/LogsView").then((m) => ({ default: m.LogsView })));
 // Welcome wizard (PRD §9): lazy like the overlays — existing users never see
 // it, so its chunk shouldn't ride along with the entry bundle.
 const WelcomeWizard = lazy(() => import("./components/onboarding/WelcomeWizard").then((m) => ({ default: m.WelcomeWizard })));
@@ -487,8 +490,8 @@ export default function App() {
         )}
 
 {/* Settings/Skills/Cost are OVERLAYS mounted on top of the grid — the view
-    underneath stays MOUNTED (only automations/vault/crew are real view swaps
-    of the grid's content). Unmounting here blanked the whole app and killed
+    underneath stays MOUNTED (only automations/vault/crew/logs are real view
+    swaps of the grid's content). Unmounting here blanked the whole app and killed
     the terminal/browser panes every time a footer icon was clicked; the
     panes hide themselves via browserOcclusion (overlay views occlude)
     instead. The grid follows baseView, so opening Settings from the vault
@@ -500,7 +503,7 @@ export default function App() {
     on every chat↔vault↔automations switch — killing browser webviews (full
     page reload on the way back) and churning terminal ptys. */}
         <div className={`grid-wrap chat-grid-wrap${baseView === "chat" && chatPaneTree ? " split-active" : ""}`}>
-          {baseView !== "automations" && baseView !== "vault" && baseView !== "crew" ? (
+          {baseView !== "automations" && baseView !== "vault" && baseView !== "crew" && baseView !== "logs" ? (
             /* The split-chat pane tree (up to six full chat views, resizable
                 gutters, drag-a-session-onto-an-edge). With no splits open the
                 same renderer draws the single main pane — identical drop
@@ -514,6 +517,11 @@ export default function App() {
             /* Declarative subagents: registry + Run modal + run history. */
             <Suspense fallback={null}>
               <CrewView />
+            </Suspense>
+          ) : baseView === "logs" ? (
+            /* Local-model request log: captured bodies + telemetry. */
+            <Suspense fallback={null}>
+              <LogsView />
             </Suspense>
           ) : (
             <Suspense fallback={null}>

@@ -33,6 +33,7 @@ import {
   Users,
   X,
   QrCode,
+  ScrollText,
 } from "lucide-react";
 import { VaultIcon } from "../../lib/icons";
 import { useProjectsStore } from "../../state/projects";
@@ -547,6 +548,18 @@ export function Sidebar() {
           aria-label="Phone pairing QR"
         >
           <QrCode size={16} strokeWidth={1.8} />
+        </button>
+        <button
+          className={`sidebar-quiet-btn p-2 rounded-lg transition-all duration-150 active:scale-95 ${
+            activeView === "logs"
+              ? "bg-gray-200 dark:bg-white/15 text-gray-900 dark:text-white"
+              : "bg-transparent dark:bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
+          }`}
+          onClick={() => setActiveView(activeView === "logs" ? "chat" : "logs")}
+          title="Model request log"
+          aria-label="Model request log"
+        >
+          <ScrollText size={16} strokeWidth={1.8} />
         </button>
         <button
           className={`sidebar-quiet-btn p-2 rounded-lg transition-all duration-150 active:scale-95 ${

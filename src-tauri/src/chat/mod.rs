@@ -1828,9 +1828,35 @@ pub(crate) async fn run_chat_stream(
     // sidecars, whose serialized prefill legitimately delays headers.
     headers_timeout: std::time::Duration,
 ) -> Result<(String, Option<ChatUsage>), String> {
-    let request = provider
-        .build_request(client, req, api_key, base_url)
-        .map_err(|e| format!("failed to build request: {e}"))?;
+    // Request-log capture. Built request and DB handle are both available
+    // before the response exists, so the guard is armed here and writes the
+    // row on drop — every exit below (success, HTTP error, stream error)
+    // lands exactly one row without restructuring any of them.
+    let (request, captured_request) = crate::llm_log::capture_sync(|| {
+        provider.build_request(client, req, api_key, base_url)
+    });
+    let request = request.map_err(|e| format!("failed to build request: {e}"))?;
+    let mut capture = match crate::llm_log::db_from_app(app) {
+        Some(db) => {
+            let cfg = {
+                let conn = db.lock();
+                crate::llm_log::LogConfig::load(&conn)
+            };
+            if !cfg.enabled {
+                crate::llm_log::CaptureGuard::disabled()
+            } else {
+                let target = crate::llm_log::classify_target(base_url, provider.id().as_str());
+                crate::llm_log::CaptureGuard::new(
+                    crate::llm_log::Capture::new("relay", &target, "POST", "/v1/chat/completions", None),
+                    db,
+                    cfg,
+                )
+            }
+        }
+        // Headless tests have no app handle and therefore no DB.
+        None => crate::llm_log::CaptureGuard::disabled(),
+    };
+    capture.attach_request(captured_request);
 
     // Open the generation window BEFORE the request is issued, matching the
     // tool loops: TTFT (anchored at this instant) then covers connect +
@@ -1851,6 +1877,7 @@ pub(crate) async fn run_chat_stream(
         .map_err(|e| format!("request failed: {e}"))?;
 
     let status = response.status();
+    capture.set_status(status.as_u16() as i64);
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(format!("HTTP {status}: {body}"));
@@ -1930,6 +1957,12 @@ pub(crate) async fn run_chat_stream(
             Err(e) if draining && e.starts_with("stream stalled") => break,
             Err(e) => return Err(e),
         };
+
+        // Tee the raw bytes before the SSE parser gets them: the log stores
+        // what the server actually sent, so a normalizer fix can re-derive
+        // telemetry later without re-capturing.
+        capture.note_first_byte();
+        capture.tee(&chunk);
 
         let complete_lines = pending.push(&chunk);
 

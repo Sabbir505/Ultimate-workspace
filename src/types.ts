@@ -278,3 +278,61 @@ export interface DocsIndexProgressPayload {
   error?: string | null;
 }
 
+
+// ---- Local-model request log + gateway (src-tauri/llm_log) ----
+// Bodies are the bytes the runtime actually sent/received; telemetry is
+// best-effort and every field is nullable (see llm_log::normalize).
+
+export interface LlmLogSummary {
+  id: string;
+  createdAt: number;
+  origin: "relay" | "external";
+  target: string;
+  method: string;
+  path: string;
+  model?: string | null;
+  upstreamStatus?: number | null;
+  error?: string | null;
+  durationMs?: number | null;
+  ttftMs?: number | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  tokensPerSecond?: number | null;
+  requestBytes: number;
+  responseBytes: number;
+  truncated: boolean;
+}
+
+export interface LlmLogDetail extends LlmLogSummary {
+  requestBody?: string | null;
+  responseBody?: string | null;
+  timingsJson?: string | null;
+}
+
+export interface LlmLogStats {
+  total: number;
+  errorCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  avgTtftMs?: number | null;
+  avgTokensPerSecond?: number | null;
+  oldestAt?: number | null;
+  newestAt?: number | null;
+}
+
+export interface LogConfig {
+  enabled: boolean;
+  retentionDays: number;
+  maxRows: number;
+  maxBodyKb: number;
+}
+
+export interface GatewayStatus {
+  port: number;
+  running: boolean;
+  requireAuth: boolean;
+  /** Empty when auth is off, so the UI hides the copy button. */
+  token: string;
+  defaultTarget?: string | null;
+  knownTargets: string[];
+}

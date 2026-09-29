@@ -41,7 +41,10 @@ src-tauri/resources/libreoffice/
 # Local automation captures, generated media, and machine-local scratch —
 # never committed. (Files already tracked inside an ignored dir stay tracked;
 # these only stop NEW scratch from showing up in git status.)
-logs/
+# Anchored to the repo root: unanchored, this also swallowed any nested
+# `logs/` directory — which is how src/components/logs (the Logs view) was
+# excluded from the repo.
+/logs/
 video/
 Thesis Diagrams/
 __pycache__/

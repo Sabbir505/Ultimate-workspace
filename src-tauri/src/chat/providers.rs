@@ -415,12 +415,30 @@ fn anthropic_request(
             .map(crate::chat::cache::cached_system_block),
         thinking,
     };
+    capture_request("POST", &url, &body);
     client
         .post(&url)
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_API_VERSION)
         .header("content-type", "application/json")
         .json(&body)
+}
+
+/// Hand the verbatim wire body to the request-log capture sink, if one is
+/// installed for this task.
+///
+/// This is the single seam every provider's request passes through, so the
+/// log records exactly the bytes that went out rather than a reconstruction
+/// of them. Serialization is skipped entirely when no sink is listening,
+/// which is the case for every turn the user hasn't turned logging on for.
+fn capture_request<T: serde::Serialize>(method: &str, url: &str, body: &T) {
+    let listening = crate::llm_log::request_capture_active();
+    if !listening {
+        return;
+    }
+    if let Ok(json) = serde_json::to_string(body) {
+        crate::llm_log::record_request(method, url, &json);
+    }
 }
 
 /// Build the OpenAI `/v1/chat/completions` streaming request. Both
@@ -451,6 +469,7 @@ fn openai_request_marked(
     // `.json(&body)` (B12): lets reqwest serialize + set content-type itself;
     // the previous `.body(to_string(&body))` eagerly stringified the payload
     // even when the request never fired, and duplicated the header.
+    capture_request("POST", &url, &body);
     client
         .post(&url)
         .header("Authorization", format!("Bearer {api_key}"))

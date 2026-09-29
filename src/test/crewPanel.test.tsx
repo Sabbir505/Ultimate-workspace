@@ -80,7 +80,10 @@ describe("CrewPanel", () => {
     expect(await screen.findByText("doc-writer")).toBeTruthy();
     expect(screen.getByText(/Writes and polishes user documentation/)).toBeTruthy();
     expect(screen.getByText(/2 tools/)).toBeTruthy();
-    expect(screen.getByText(/read_only \/ on_request/)).toBeTruthy();
+    // Sandbox and approval are separate pills now, not one dot-joined string.
+    expect(screen.getByText("read_only")).toBeTruthy();
+    expect(screen.getByText("on_request")).toBeTruthy();
+    expect(screen.getByText(/40 rounds/)).toBeTruthy();
   });
 
   it("says \"engine default tools\" when the row has no explicit allowlist", async () => {

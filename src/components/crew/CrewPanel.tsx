@@ -21,7 +21,21 @@
 // Visual language is the Crew view's own (styles/crew.css): full-page rows,
 // crew-chip toggles, and the shared Modal for the editor and the Run dialog.
 
-import { Pencil, Play, Plus, ShieldCheck, Trash2, Users } from "lucide-react";
+import {
+  AlertTriangle,
+  Bell,
+  Bot,
+  Eye,
+  Pencil,
+  Play,
+  Plus,
+  Repeat,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  Users,
+  Wrench,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Modal } from "../common/Modal";
 import { CrewSelect } from "./CrewSelect";
@@ -216,12 +230,46 @@ function AgentRow({
         </span>
         <span className="crew-agent-meta">
           <TierBadge engine={agent.engine} />
-          {tier === "advisory" && " CLI tools not restrictible"}
-          {agent.builtin ? " · builtin" : " · " + (agent.engine || "inherits engine")}
-          {agent.origin === "agent" && " · made by agent"}
-          {toolCount === null ? " · engine default tools" : ` · ${toolCount} tool${toolCount === 1 ? "" : "s"}`}
-          {` · ${agent.sandboxPolicy} / ${agent.approvalPolicy}`}
-          {` · ${agent.maxRounds} rounds`}
+          {tier === "advisory" && (
+            <span
+              className="crew-meta-chip warn"
+              title="A harness runs its own native tools — only Relay's tools are gated"
+            >
+              <AlertTriangle size={11} strokeWidth={1.8} aria-hidden="true" />
+              CLI tools not restrictible
+            </span>
+          )}
+          <span className="crew-meta-chip" title="Engine this agent runs on">
+            <Bot size={11} strokeWidth={1.8} aria-hidden="true" />
+            {agent.builtin ? "builtin" : (agent.engine?.replace(/^harness:/, "") || "inherits engine")}
+          </span>
+          {agent.origin === "agent" && (
+            <span
+              className="crew-meta-chip origin"
+              title="A model created this agent through the crew tools"
+            >
+              <Sparkles size={11} strokeWidth={1.8} aria-hidden="true" />
+              made by agent
+            </span>
+          )}
+          <span className="crew-meta-chip" title="Tool allowlist">
+            <Wrench size={11} strokeWidth={1.8} aria-hidden="true" />
+            {toolCount === null
+              ? "engine default tools"
+              : `${toolCount} tool${toolCount === 1 ? "" : "s"}`}
+          </span>
+          <span className="crew-meta-chip" title="Sandbox policy">
+            <Eye size={11} strokeWidth={1.8} aria-hidden="true" />
+            {agent.sandboxPolicy}
+          </span>
+          <span className="crew-meta-chip" title="Approval policy">
+            <Bell size={11} strokeWidth={1.8} aria-hidden="true" />
+            {agent.approvalPolicy}
+          </span>
+          <span className="crew-meta-chip" title="Rounds per run">
+            <Repeat size={11} strokeWidth={1.8} aria-hidden="true" />
+            {agent.maxRounds} rounds
+          </span>
         </span>
       </span>
       <span className="crew-agent-actions">

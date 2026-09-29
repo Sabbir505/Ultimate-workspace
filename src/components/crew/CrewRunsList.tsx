@@ -12,7 +12,7 @@
 // `chat:session-spawn` event before (or without) a history refresh.
 
 import { useMemo } from "react";
-import { ExternalLink, History, RefreshCw } from "lucide-react";
+import { Bot, Clock, ExternalLink, History, RefreshCw, Zap } from "lucide-react";
 import { crewEngineTier, type CrewAgent, type CrewAgentRun } from "../../lib/ipc";
 import { relativeTime } from "../../lib/relativeTime";
 import { useCrewStore } from "../../state/crew";
@@ -43,7 +43,7 @@ function startedMs(run: CrewAgentRun): number {
 }
 
 function engineLabel(run: CrewAgentRun): string {
-  if (run.engine) return run.engine;
+  if (run.engine) return run.engine.replace(/^harness:/, "");
   return "inherited engine";
 }
 
@@ -134,12 +134,36 @@ export function CrewRunsList({
                   <span className="crew-run-meta">
                     {/* The trigger is the honest answer to "why did this run?":
                         manual = the Run button, task = an in-session Task call,
-                        mesh = a model's spawn_session. */}
-                    <span className="mono">{run.trigger}</span>
-                    <span> · {engineLabel(run)}</span>
-                    {run.model && <span> · {run.model}</span>}
-                    {agent && <span> · {crewEngineTier(agent.engine)}</span>}
-                    <span> · started {relativeTime(startedMs(run) / 1000)}</span>
+                        mesh = a model's spawn_session. Same pill vocabulary as
+                        the registry rows above. */}
+                    <span
+                      className="crew-meta-chip"
+                      title="manual = the Run button, task = a Task call, mesh = a spawned session"
+                    >
+                      <Zap size={11} strokeWidth={1.8} aria-hidden="true" />
+                      {run.trigger}
+                    </span>
+                    <span className="crew-meta-chip" title="Engine">
+                      <Bot size={11} strokeWidth={1.8} aria-hidden="true" />
+                      {engineLabel(run)}
+                    </span>
+                    {run.model && (
+                      <span className="crew-meta-chip mono" title="Model">
+                        {run.model}
+                      </span>
+                    )}
+                    {agent && (
+                      <span
+                        className={`crew-chip${crewEngineTier(agent.engine) === "enforced" ? " enforced" : ""}`}
+                        title="Enforcement tier of the agent that ran"
+                      >
+                        {crewEngineTier(agent.engine)}
+                      </span>
+                    )}
+                    <span className="crew-meta-chip" title="Started">
+                      <Clock size={11} strokeWidth={1.8} aria-hidden="true" />
+                      started {relativeTime(startedMs(run) / 1000)}
+                    </span>
                   </span>
                 </span>
                 <span className={`crew-chip status-${run.status || "unknown"}`} title={`Status: ${meta.label}`}>

@@ -136,10 +136,9 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px 6px;
-  margin-top: 4px;
-  font-size: 12px;
-  opacity: 0.7;
+  gap: 4px;
+  margin-top: 7px;
+  font-size: 11px;
 }
 .crew-agent-actions {
   display: flex;
@@ -221,10 +220,51 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px 6px;
-  margin-top: 4px;
-  font-size: 12px;
-  opacity: 0.7;
+  gap: 4px;
+  margin-top: 7px;
+  font-size: 11px;
+}
+
+/* ── Metadata pills (the second line of agent/run rows) ──
+   One fact per pill instead of a dim dot-joined sentence: each is scannable,
+   and the row keeps texture at full width. Colors stay quiet — text-dim on a
+   translucent fill — except where the fact is a warning (advisory tier) or
+   provenance (made by agent), which get their own tints. */
+.crew-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 100px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-glass-2, var(--surface-2)) 55%, transparent);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.crew-meta-chip svg {
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+.crew-meta-chip.warn {
+  color: var(--warning, #e8b33c);
+  border-color: color-mix(in srgb, var(--warning, #e8b33c) 40%, transparent);
+}
+.crew-meta-chip.warn svg {
+  opacity: 1;
+}
+.crew-meta-chip.origin {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  font-style: italic;
+}
+.crew-meta-chip.origin svg {
+  opacity: 1;
+}
+.crew-meta-chip.mono {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
 }
 .crew-run-actions {
   display: flex;

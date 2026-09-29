@@ -26,6 +26,9 @@ pub struct LogFilterArgs {
     pub target: Option<String>,
     pub search: Option<String>,
     pub limit: Option<i64>,
+    /// Keyset pagination cursor: the last row already on screen.
+    pub before_created_at: Option<i64>,
+    pub before_rowid: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,7 +66,8 @@ pub fn llm_log_list(db: State<'_, DbState>, filter: Option<LogFilterArgs>) -> Cm
             target: f.target,
             search: f.search,
             limit: f.limit,
-            before_created_at: None,
+            before_created_at: f.before_created_at,
+            before_rowid: f.before_rowid,
         },
     )
     .map_err(err)
@@ -154,7 +158,23 @@ pub fn gateway_status(db: State<'_, DbState>) -> CmdResult<GatewayStatus> {
         String::new()
     };
     let default_target = crate::db::get_setting(&conn, super::GATEWAY_DEFAULT_TARGET_KEY).ok().flatten();
-    let known_targets = vec!["llamacpp".to_string(), "ollama".to_string(), "lmstudio".to_string()];
+    // What the filter dropdown offers: the built-in trio, the runtimes the
+    // user registered as gateway targets, and everything that actually has
+    // rows — a custom target becomes filterable the moment it exists at all,
+    // not never (which is what the old hardcoded list gave).
+    let mut known: Vec<String> = vec!["llamacpp".into(), "ollama".into(), "lmstudio".into()];
+    if let Some(map) = crate::db::get_setting(&conn, "gateway.targets").ok().flatten() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&map) {
+            if let Some(obj) = v.as_object() {
+                for name in obj.keys() {
+                    known.push(name.clone());
+                }
+            }
+        }
+    }
+    known.extend(store::distinct_targets(&conn).unwrap_or_default());
+    known.sort();
+    known.dedup();
     let port = gateway::bound_port();
     Ok(GatewayStatus {
         port,
@@ -162,7 +182,7 @@ pub fn gateway_status(db: State<'_, DbState>) -> CmdResult<GatewayStatus> {
         require_auth,
         token,
         default_target: default_target.filter(|t| !t.trim().is_empty()),
-        known_targets,
+        known_targets: known,
     })
 }
 
@@ -200,7 +220,7 @@ pub async fn gateway_probe(db: State<'_, DbState>, name: String) -> CmdResult<bo
         gateway::resolve_target(&conn, name.trim())
     };
     match target {
-        Some(t) => Ok(gateway::probe_target(&t.base_url).await),
+        Some(t) => Ok(gateway::probe_target(&t.base_url, t.api_key.as_deref()).await),
         None => Ok(false),
     }
 }

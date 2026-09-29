@@ -18,6 +18,11 @@ vi.mock("../lib/ipc", async (importOriginal) => {
     ...actual,
     safeInvoke: vi.fn().mockRejectedValue(new Error("no backend in tests")),
     safeListen: vi.fn().mockResolvedValue(() => {}),
+    // The barrel re-exports this via `export *`, and names picked up that way
+    // don't reliably survive importOriginal's spread onto the mock — the
+    // hover handler then threw "no countContextBreakdown export is defined
+    // on the mock" as an uncaught error and flakily failed the file.
+    countContextBreakdown: vi.fn().mockResolvedValue(null),
   };
 });
 

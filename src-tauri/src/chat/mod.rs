@@ -1856,6 +1856,17 @@ pub(crate) async fn run_chat_stream(
         // Headless tests have no app handle and therefore no DB.
         None => crate::llm_log::CaptureGuard::disabled(),
     };
+    if capture.is_active() {
+        // Same refresh the gateway rows get: without this, only proxied
+        // traffic updated the Logs view live — Relay's own local-model turns
+        // (the view's primary source) never did.
+        if let Some(app) = app {
+            let app = app.clone();
+            capture = capture.with_notify(move || {
+                let _ = app.emit("llm-log:appended", ());
+            });
+        }
+    }
     capture.attach_request(captured_request);
 
     // Open the generation window BEFORE the request is issued, matching the
@@ -1880,6 +1891,11 @@ pub(crate) async fn run_chat_stream(
     capture.set_status(status.as_u16() as i64);
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        // Same record the tool-loop rounds keep: the row must say it failed
+        // and carry the error body (llama-server's 400s name the rejected
+        // field) — not just a status code.
+        capture.set_error(format!("HTTP {status}"));
+        capture.tee(body.as_bytes());
         return Err(format!("HTTP {status}: {body}"));
     }
 

@@ -8,6 +8,10 @@ export interface LlmLogFilter {
   target?: string | null;
   search?: string | null;
   limit?: number;
+  /** Keyset cursor: the last row already on screen (`rowId` breaks
+   *  ties between rows that share a whole-second createdAt). */
+  beforeCreatedAt?: number | null;
+  beforeRowId?: number | null;
 }
 
 /** Newest-first page of log rows, without bodies (the list can be long). */
@@ -18,6 +22,8 @@ export const llmLogList = (filter: LlmLogFilter = {}) =>
       target: filter.target ?? null,
       search: filter.search ?? null,
       limit: filter.limit ?? 200,
+      beforeCreatedAt: filter.beforeCreatedAt ?? null,
+      beforeRowId: filter.beforeRowId ?? null,
     },
   });
 

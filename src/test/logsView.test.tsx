@@ -5,64 +5,85 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { LogsView } from "../components/logs/LogsView";
+import { llmLogList } from "../lib/ipc";
+import type { LlmLogSummary } from "../types";
 
 // vi.mock is hoisted above module-level consts, so the fixtures have to be
 // hoisted with them or the factory sees them uninitialized.
-const { ROWS } = vi.hoisted(() => ({ ROWS: [
-  {
-    id: "r1",
-    createdAt: Date.now() - 5_000,
+//
+// `createdAt` is unix SECONDS — the Rust store writes now_ts(), and the row
+// renderer divides accordingly. (Fixtures in ms here once made every row read
+// "~20000d" while the tests stayed green.)
+const { ROWS, OLDER, NOW } = vi.hoisted(() => {
+  const NOW = Math.floor(Date.now() / 1000);
+  // The list pages at 200 rows, so a full page exercises "load older"; the
+  // first two rows are the ones the assertions read.
+  const rows: LlmLogSummary[] = Array.from({ length: 200 }, (_, i) => ({
+    id: `r${i}`,
+    rowId: 1000 - i,
+    createdAt: NOW - 5 - i,
+    origin: "relay",
+    target: "ollama",
+    method: "POST",
+    path: `/api/chat/${i}`,
+    model: "llama3.2",
+    upstreamStatus: null,
+    error: null,
+    durationMs: null,
+    ttftMs: null,
+    inputTokens: null,
+    outputTokens: null,
+    tokensPerSecond: null,
+    requestBytes: 120,
+    responseBytes: 2048,
+    truncated: false,
+  }));
+  rows[0] = {
+    ...rows[0],
     origin: "external",
     target: "llamacpp",
-    method: "POST",
     path: "/v1/chat/completions",
     model: "MiniCPM5-2B-Q8_0.gguf",
     upstreamStatus: 200,
-    error: null,
     durationMs: 812,
     ttftMs: 255,
     inputTokens: 17,
     outputTokens: 24,
     tokensPerSecond: 66.9,
-    requestBytes: 120,
-    responseBytes: 2048,
-    truncated: false,
-  },
-  {
-    id: "r2",
-    createdAt: Date.now() - 90_000,
-    origin: "relay",
-    target: "ollama",
-    method: "POST",
+  };
+  rows[1] = {
+    ...rows[1],
     path: "/api/chat",
-    model: "llama3.2",
     upstreamStatus: 500,
     error: "upstream error: model not loaded",
     durationMs: 40,
-    ttftMs: null,
-    inputTokens: null,
-    outputTokens: null,
-    tokensPerSecond: null,
-    requestBytes: 64,
-    responseBytes: 12,
-    truncated: false,
-  },
-] }));
+  };
+  const older = {
+    ...rows[199],
+    id: "older-row",
+    rowId: 1,
+    createdAt: NOW - 86_400 * 3,
+    path: "/api/chat/old",
+  };
+  return { ROWS: rows, OLDER: older, NOW };
+});
 
 vi.mock("../lib/ipc", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/ipc")>();
   return {
     ...actual,
-    llmLogList: vi.fn().mockResolvedValue(ROWS),
+    llmLogList: vi.fn().mockImplementation((filter: { beforeCreatedAt?: number | null }) =>
+      Promise.resolve(filter?.beforeCreatedAt != null ? [OLDER] : ROWS),
+    ),
     llmLogStats: vi.fn().mockResolvedValue({
-      total: 2,
+      total: 201,
       errorCount: 1,
       inputTokens: 17,
       outputTokens: 24,
       avgTtftMs: 255,
       avgTokensPerSecond: 66.9,
-      oldestAt: ROWS[1].createdAt,
-      newestAt: ROWS[0].createdAt,
+      oldestAt: OLDER.createdAt,
+      newestAt: NOW - 5,
     }),
     llmLogGet: vi.fn().mockImplementation((id: string) =>
       Promise.resolve({
@@ -72,7 +93,7 @@ vi.mock("../lib/ipc", async (importOriginal) => {
         timingsJson: '{"prompt_n":17,"predicted_n":24,"predicted_per_second":66.9}',
       }),
     ),
-    llmLogClear: vi.fn().mockResolvedValue(2),
+    llmLogClear: vi.fn().mockResolvedValue(200),
     llmLogPrune: vi.fn().mockResolvedValue(0),
     gatewayStatus: vi.fn().mockResolvedValue({
       port: 8791,
@@ -96,12 +117,19 @@ describe("LogsView", () => {
 
     // Both origins are shown — a relay call and a proxied one are different
     // things and the view must not conflate them.
-    expect(await screen.findByText("external")).toBeTruthy();
-    expect(await screen.findByText("relay")).toBeTruthy();
+    expect((await screen.findAllByText("external")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("relay")).length).toBeGreaterThan(0);
 
     // Token counts and throughput come from the normalizer.
-    expect(await screen.findByText("24 out")).toBeTruthy();
-    expect(await screen.findByText("66.9 tok/s")).toBeTruthy();
+    expect((await screen.findAllByText("24 out")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("66.9 tok/s")).length).toBeGreaterThan(0);
+
+    // Timestamps are unix seconds: every row is seconds-to-minutes old. A
+    // ms/ms mixup here would render each one as "~20000d".
+    const times = await screen.findAllByText(/^\d+[sm]$/);
+    expect(times.length).toBeGreaterThan(0);
+    expect(document.querySelector(".logs-row-time")?.textContent).toMatch(/^\d+[sm]$/);
+    expect(screen.queryByText(/d$/)).toBeNull();
   });
 
   it("surfaces a failed upstream call rather than hiding it", async () => {
@@ -124,5 +152,34 @@ describe("LogsView", () => {
   it("shows the real bound gateway port, not a placeholder", async () => {
     render(<LogsView />);
     expect(await screen.findByText("http://127.0.0.1:8791")).toBeTruthy();
+  });
+
+  it("loads the next-older page when a full page is shown", async () => {
+    render(<LogsView />);
+    const btn = await screen.findByText("Load older requests");
+    expect(screen.queryByText("/api/chat/old")).toBeNull();
+
+    fireEvent.click(btn);
+    expect(await screen.findByText("/api/chat/old")).toBeTruthy();
+    // The cursor must be the last on-screen row, not a fresh first page.
+    const calls = vi.mocked(llmLogList).mock.calls;
+    const lastCall = calls[calls.length - 1]?.[0];
+    expect(lastCall?.beforeCreatedAt).toBe(ROWS[199].createdAt);
+    expect(lastCall?.beforeRowId).toBe(ROWS[199].rowId);
+  });
+
+  it("refreshes the list after Clear so deleted rows disappear", async () => {
+    render(<LogsView />);
+    await screen.findByText("/v1/chat/completions");
+    const callsBefore = vi.mocked(llmLogList).mock.calls.length;
+
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(screen.getByText("Clear"));
+
+    // Clear deletes rows behind the list's back; refresh() must re-run the
+    // query rather than leaving ghosts until the next event.
+    await waitFor(() =>
+      expect(vi.mocked(llmLogList).mock.calls.length).toBeGreaterThan(callsBefore),
+    );
   });
 });

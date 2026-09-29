@@ -285,6 +285,9 @@ export interface DocsIndexProgressPayload {
 
 export interface LlmLogSummary {
   id: string;
+  /** Insert-order row id — the opaque cursor for "load more". */
+  rowId: number;
+  /** Unix SECONDS (the DB stores seconds; the gateway's own API matches). */
   createdAt: number;
   origin: "relay" | "external";
   target: string;

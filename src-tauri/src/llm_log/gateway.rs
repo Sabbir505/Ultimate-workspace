@@ -219,7 +219,11 @@ fn default_target(conn: &Connection) -> Option<ResolvedTarget> {
             }
         }
     }
-    resolve_target(conn, "ollama").or_else(|| resolve_target(conn, "llamacpp"))
+    // Prefer the live llama.cpp sidecar — the runtime Relay itself runs — and
+    // fall back to Ollama. Order matters: `resolve_target("ollama")` answers
+    // Some unconditionally (it's a built-in), so it must come LAST or the
+    // sidecar arm is dead code and a sidecar-only user gets a 502.
+    resolve_target(conn, "llamacpp").or_else(|| resolve_target(conn, "ollama"))
 }
 
 // ── server ─────────────────────────────────────────────────────────────────
@@ -260,12 +264,35 @@ pub async fn serve(app: AppHandle, db: Arc<AsyncMutex<Connection>>) {
 /// real socket, real HTTP parse, real chunked relay — against a real upstream
 /// without a window.
 pub async fn serve_with(db: Arc<AsyncMutex<Connection>>, on_logged: OnLogged) {
-    let listener = match TcpListener::bind("127.0.0.1:0").await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("[relay:llm-gateway] FAILED to bind 127.0.0.1:0: {e} — gateway unavailable");
-            return;
-        }
+    // Bind the port persisted on a previous run first, so an external app's
+    // `base_url` survives a restart (the whole reason the port is persisted).
+    // Fall back to an OS-assigned port when the old one is taken.
+    let persisted: Option<u16> = {
+        let conn = db.lock().await;
+        crate::db::get_setting(&conn, super::GATEWAY_PORT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse::<u16>().ok())
+            .filter(|p| *p != 0)
+    };
+    let listener = match match persisted {
+        Some(p) => match TcpListener::bind(("127.0.0.1", p)).await {
+            Ok(l) => Some(l),
+            Err(e) => {
+                eprintln!("[relay:llm-gateway] persisted port {p} unavailable ({e}); picking a new one");
+                None
+            }
+        },
+        None => None,
+    } {
+        Some(l) => l,
+        None => match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[relay:llm-gateway] FAILED to bind 127.0.0.1:0: {e} — gateway unavailable");
+                return;
+            }
+        },
     };
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     BOUND_PORT.store(port, Ordering::SeqCst);
@@ -300,26 +327,68 @@ pub async fn serve_with(db: Arc<AsyncMutex<Connection>>, on_logged: OnLogged) {
 }
 
 /// Read the head (bounded, timed), then exactly `Content-Length` more bytes.
-async fn read_request(stream: &mut TcpStream) -> Option<(Vec<u8>, Vec<u8>)> {
+///
+/// The body rarely arrives in the same TCP segment as the head: stopping at
+/// `\r\n\r\n` and treating whatever followed as the whole body silently
+/// truncates any request bigger than one read (~8 KiB) — routine for a real
+/// chat prompt. So the head's `Content-Length` drives a second bounded loop
+/// before the request is parsed or forwarded.
+async fn read_request<R: tokio::io::AsyncRead + Unpin>(
+    stream: &mut R,
+) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut buf = [0u8; 8192];
     let mut got: Vec<u8> = Vec::with_capacity(8192);
-    let head_end;
-    loop {
-        let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await.ok()?.ok()?;
-        if n == 0 {
-            return None;
-        }
-        got.extend_from_slice(&buf[..n]);
+    let head_end = loop {
         if let Some(i) = find_head_end(&got) {
-            head_end = i;
-            break;
+            break i;
         }
         if got.len() > MAX_HEAD_BYTES {
             return None;
         }
+        let n = read_some(stream, &mut buf).await?;
+        got.extend_from_slice(&buf[..n]);
+    };
+    // No `Content-Length` (a bodyless GET, or a POST with no body) means
+    // nothing to wait for — whatever follows the head is the NEXT request's
+    // bytes, which we never serve (`Connection: close`). The live tests
+    // caught this: llama-server's clients POST bodyless requests, and an
+    // earlier `?` here dropped the connection instead of forwarding.
+    let cl = head_content_length(&got[..head_end]).unwrap_or(0);
+    if cl > MAX_BODY_BYTES {
+        return None;
+    }
+    while got.len() < head_end + cl {
+        let n = read_some(stream, &mut buf).await?;
+        got.extend_from_slice(&buf[..n]);
     }
     let rest = got.split_off(head_end);
     Some((got, rest))
+}
+
+/// One bounded read: `None` on timeout, EOF, or transport error.
+async fn read_some<R: tokio::io::AsyncRead + Unpin>(stream: &mut R, buf: &mut [u8; 8192]) -> Option<usize> {
+    let n = tokio::time::timeout(Duration::from_secs(5), stream.read(buf))
+        .await
+        .ok()?
+        .ok()?;
+    if n == 0 {
+        return None;
+    }
+    Some(n)
+}
+
+/// `Content-Length` from an already-located head (bytes `[..head_end)`).
+/// `None` when the head names none — a bodyless GET.
+fn head_content_length(head: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(head);
+    for line in text.split("\r\n").skip(1) {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                return v.trim().parse().ok();
+            }
+        }
+    }
+    None
 }
 
 /// Index just past the `\r\n\r\n`, if present.
@@ -435,6 +504,9 @@ async fn forward(stream: &mut TcpStream, req: &ParsedRequest, db: &Arc<AsyncMute
     let url = format!("{}{}", target.base_url, req.target_for_upstream(&path));
     let client = reqwest::Client::builder()
         .no_proxy()
+        // A proxy must show the upstream's 3xx, not silently follow it to the
+        // destination and answer 200 — the client's redirect policy is its own.
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(60 * 30))
         .build()
         .unwrap_or_default();
@@ -444,7 +516,13 @@ async fn forward(stream: &mut TcpStream, req: &ParsedRequest, db: &Arc<AsyncMute
         // Authorization is consumed by OUR auth check above. Forwarding it
         // would hand the runtime Relay's gateway token: harmless when the
         // runtime is keyless, a guaranteed 401 when it isn't.
-        if !is_hop_by_hop(k) && !k.eq_ignore_ascii_case("authorization") {
+        // `x-relay-target` is this gateway's own routing header — it never
+        // belonged to the caller and must not leak into the runtime (or the
+        // logged upstream request).
+        if !is_hop_by_hop(k)
+            && !k.eq_ignore_ascii_case("authorization")
+            && !k.eq_ignore_ascii_case("x-relay-target")
+        {
             builder = builder.header(k.as_str(), v.as_str());
         }
     }
@@ -506,14 +584,24 @@ async fn forward(stream: &mut TcpStream, req: &ParsedRequest, db: &Arc<AsyncMute
 
     let mut upstream_body = upstream.bytes_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(RELAY_CHUNK);
+    // Set when the upstream stream breaks mid-body. The chunked terminator
+    // must then NOT be written: ending with `0\r\n\r\n` would hand the client
+    // (and the log row) a stream that looks normally complete but is short.
+    let mut stream_error: Option<String> = None;
     while let Some(next) = futures_util::StreamExt::next(&mut upstream_body).await {
-        let Ok(bytes) = next else { break };
+        let bytes = match next {
+            Ok(b) => b,
+            Err(e) => {
+                stream_error = Some(format!("upstream stream error: {e}"));
+                break;
+            }
+        };
         cap.note_first_byte();
         // Keep our own copy of what we relay. `buf` is flushed to the client
         // as it fills, so the log needs a separate accumulator — and it is
         // this verbatim copy that lets telemetry be re-derived later without
-        // re-capturing the request.
-        cap.response_buf.push_str(&String::from_utf8_lossy(&bytes));
+        // re-capturing anything. `tee` is byte-wise and bounded (see Capture).
+        cap.tee(&bytes);
         if content_length.is_some() {
             // A length-delimited body needs no framing and no buffering —
             // relay each piece straight through.
@@ -533,7 +621,10 @@ async fn forward(stream: &mut TcpStream, req: &ParsedRequest, db: &Arc<AsyncMute
             }
         }
     }
-    if content_length.is_none() {
+    if let Some(err) = stream_error.take() {
+        cap.error = Some(err);
+    }
+    if content_length.is_none() && stream_error.is_none() {
         if !buf.is_empty() && write_chunk(stream, &buf).await.is_err() {
             return;
         }
@@ -606,14 +697,15 @@ async fn handle_log_api(stream: &mut TcpStream, req: &ParsedRequest, db: &Arc<As
         ("GET", p) if p.starts_with("/_relay/logs/") => {
             let id = p.trim_start_matches("/_relay/logs/");
             let conn = db.lock().await;
-            let payload = match store::get(&conn, id) {
-                Ok(Some(d)) => json(serde_json::to_value(d).unwrap_or_default()),
-                Ok(None) => json(serde_json::json!({ "error": "not_found" })),
-                Err(e) => json(serde_json::json!({ "error": e.to_string() })),
+            // Decide on the Option/Result, not on the serialized payload — a
+            // found row whose *body* contains "not_found" is not a 404.
+            let (status, reason, payload) = match store::get(&conn, id) {
+                Ok(Some(d)) => (200u16, "OK", json(serde_json::to_value(d).unwrap_or_default())),
+                Ok(None) => (404, "Not Found", json(serde_json::json!({ "error": "not_found" }))),
+                Err(e) => (500, "Internal Server Error", json(serde_json::json!({ "error": e.to_string() }))),
             };
-            let status = if payload.contains("not_found") { 404 } else { 200 };
             drop(conn);
-            respond_json(stream, status, "OK", &payload).await;
+            respond_json(stream, status, reason, &payload).await;
         }
         ("DELETE", "/_relay/logs") => {
             let conn = db.lock().await;
@@ -628,7 +720,9 @@ async fn handle_log_api(stream: &mut TcpStream, req: &ParsedRequest, db: &Arc<As
 }
 
 /// Exposed for the settings panel: is a named target reachable right now?
-pub async fn probe_target(base_url: &str) -> bool {
+/// The target's own key rides along when it has one — a llama-server started
+/// with `--api-key` 401s a bare probe and would read as offline.
+pub async fn probe_target(base_url: &str, api_key: Option<&str>) -> bool {
     let Ok(client) = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(2))
@@ -639,7 +733,11 @@ pub async fn probe_target(base_url: &str) -> bool {
     // llama.cpp and LM Studio both answer /v1/models; Ollama does not, so try
     // its native tag list as a fallback.
     for path in ["/v1/models", "/api/tags"] {
-        if let Ok(r) = client.get(format!("{base_url}{path}")).send().await {
+        let mut req = client.get(format!("{base_url}{path}"));
+        if let Some(key) = api_key {
+            req = req.bearer_auth(key);
+        }
+        if let Ok(r) = req.send().await {
             if r.status().is_success() {
                 return true;
             }
@@ -731,5 +829,61 @@ mod tests {
     fn finds_the_head_boundary() {
         assert_eq!(find_head_end(b"GET / HTTP/1.1\r\n\r\nBODY"), Some(18));
         assert_eq!(find_head_end(b"no terminator here"), None);
+    }
+
+    #[test]
+    fn head_content_length_is_case_insensitive_and_whitespace_tolerant() {
+        let head = b"POST /x HTTP/1.1\r\nHost: a\r\nCONTENT-LENGTH:  42 \r\n\r\n";
+        assert_eq!(head_content_length(head), Some(42));
+        assert_eq!(head_content_length(b"GET / HTTP/1.1\r\nHost: a\r\n\r\n"), None);
+    }
+
+    #[tokio::test]
+    async fn reads_the_full_body_even_when_it_arrives_after_the_head() {
+        // Regression: read_request used to stop at `\r\n\r\n`, so any body
+        // that didn't fit in the reads that delivered the head (~8 KiB) was
+        // silently truncated before forwarding. A small duplex buffer forces
+        // the body to dribble through in many reads.
+        use tokio::io::AsyncWriteExt;
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let head = "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 20000\r\n\r\n";
+        let body: Vec<u8> = vec![b'x'; 20000];
+        tokio::spawn(async move {
+            client.write_all(head.as_bytes()).await.unwrap();
+            client.write_all(&body).await.unwrap();
+            client.flush().await.unwrap();
+        });
+        let (h, rest) = read_request(&mut server).await.expect("full request read");
+        let req = parse_request(&h, &rest).expect("parses");
+        assert_eq!(req.body.len(), 20000, "the declared Content-Length must arrive whole");
+    }
+
+    #[tokio::test]
+    async fn a_request_whose_body_never_comes_times_out_rather_than_hangs() {
+        // The head promises 10 bytes; nothing follows. The 5s per-read bound
+        // is long for a unit test, so this only proves EOF handling: a writer
+        // that closes without sending the body fails the read, not the task.
+        use tokio::io::AsyncWriteExt;
+        let (mut client, mut server) = tokio::io::duplex(64);
+        client.write_all(b"POST /x HTTP/1.1\r\nContent-Length: 10\r\n\r\n").await.unwrap();
+        client.shutdown().await.unwrap();
+        assert!(read_request(&mut server).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_bodyless_post_without_content_length_still_parses() {
+        // Regression (caught by the live tests): a POST with no body may
+        // carry no Content-Length at all — that must forward, not drop.
+        use tokio::io::AsyncWriteExt;
+        let (mut client, mut server) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            client.write_all(b"POST /v1/models HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+            client.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        let (h, rest) = read_request(&mut server).await.expect("bodyless request reads");
+        let req = parse_request(&h, &rest).expect("parses");
+        assert_eq!(req.method, "POST");
+        assert!(req.body.is_empty());
     }
 }

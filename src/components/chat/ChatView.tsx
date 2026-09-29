@@ -422,6 +422,13 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
     async (model: string) => {
       if (!activeChatSessionId) return;
       if (localLoading) return;
+      // Re-find the session HERE rather than closing over `activeSession`:
+      // the agent column can change without any of this callback's other
+      // dependencies changing (handleAgentSelect rewrites it), and a stale
+      // read would skip the setSessionAgent below — the exact chip/meter
+      // regression this guard exists to prevent. Same pattern as
+      // handleLoadLocalModel below.
+      const session = sessions.find((s) => s.id === activeChatSessionId);
       const localMatch = localModels.find((m) => (m.name || m.filename) === model);
       if (localMatch) {
         // Local model picked (in ANY session): spawn/swap the sidecar first
@@ -451,7 +458,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
         // popup's rail and the ✓ all key off `agent === "local"`, so a cloud
         // session that just picked a local model would still render as one
         // with no name. Same ordering requirement as handleLoadLocalModel.
-        if ((activeSession?.agent ?? null) !== "local") {
+        if ((session?.agent ?? null) !== "local") {
           await setSessionAgent(activeChatSessionId, "local");
         }
       } else if (isLocal) {
@@ -465,7 +472,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
       }
       void setSessionModel(activeChatSessionId, model);
     },
-    [activeChatSessionId, setSessionModel, setSessionProvider, isLocal, localModels, spawnLocalModel, config?.provider, localLoading],
+    [activeChatSessionId, sessions, setSessionModel, setSessionProvider, setSessionAgent, isLocal, localModels, spawnLocalModel, config?.provider, localLoading],
   );
 
   // "Load model" from the picker's per-model gear panel: persist the drafted

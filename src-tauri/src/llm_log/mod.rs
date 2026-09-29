@@ -36,6 +36,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use tauri::Emitter;
+
 use crate::db::llm_log::{self as store, NewLogEntry};
 
 // ── settings keys ──────────────────────────────────────────────────────────
@@ -45,7 +47,6 @@ pub const RETENTION_DAYS_KEY: &str = "logs.retentionDays";
 pub const MAX_ROWS_KEY: &str = "logs.maxRows";
 pub const MAX_BODY_KB_KEY: &str = "logs.maxBodyKb";
 
-pub const GATEWAY_ENABLED_KEY: &str = "gateway.enabled";
 pub const GATEWAY_REQUIRE_AUTH_KEY: &str = "gateway.requireAuth";
 pub const GATEWAY_PORT_KEY: &str = "gateway.port";
 pub const GATEWAY_DEFAULT_TARGET_KEY: &str = "gateway.defaultTarget";
@@ -232,11 +233,14 @@ pub fn db_from_app<R: tauri::Runtime>(
 /// exact-by-construction capture point. One row per model round: a 20-tool
 /// turn is 20 requests upstream and should read as 20 rows, not one summary
 /// that hides where the time went.
+///
+/// Takes the `Value`, not a pre-serialized string: the serialization happens
+/// only after the enabled check, so a turn with logging off never pays for it.
 pub fn begin_round<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     url: &str,
     provider_id: &str,
-    body: &str,
+    body: &serde_json::Value,
 ) -> CaptureGuard {
     let Some(db) = db_from_app(Some(app)) else {
         return CaptureGuard::disabled();
@@ -249,13 +253,18 @@ pub fn begin_round<R: tauri::Runtime>(
         return CaptureGuard::disabled();
     }
     let target = classify_target(Some(url), provider_id);
+    let body = body.to_string();
     // `Capture::new` pulls the model name out of the body, and attaches it as
     // the request body verbatim — which is all `attach_request` would do.
+    let app = app.clone();
     CaptureGuard::new(
-        Capture::new("relay", &target, "POST", path_of(url), Some(body)),
+        Capture::new("relay", &target, "POST", path_of(url), Some(&body)),
         db,
         cfg,
     )
+    .with_notify(move || {
+        let _ = app.emit("llm-log:appended", ());
+    })
 }
 
 /// Writes the row on drop, so every exit path — success, HTTP error, stream
@@ -265,13 +274,17 @@ pub struct CaptureGuard {
     cap: Option<Capture>,
     conn: Option<Arc<parking_lot::Mutex<rusqlite::Connection>>>,
     cfg: LogConfig,
+    /// Fired after the row lands, so the Logs view refreshes. Without this,
+    /// only gateway traffic was ever announced — Relay's own local-model
+    /// rounds (the primary source, per the view's own copy) never notified.
+    notify: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl CaptureGuard {
     /// The no-op guard used when logging is off or there is no app handle, so
     /// call sites need no conditionals.
     pub fn disabled() -> Self {
-        Self { cap: None, conn: None, cfg: LogConfig::default() }
+        Self { cap: None, conn: None, cfg: LogConfig::default(), notify: None }
     }
 
     pub fn new(
@@ -279,22 +292,24 @@ impl CaptureGuard {
         conn: Arc<parking_lot::Mutex<rusqlite::Connection>>,
         cfg: LogConfig,
     ) -> Self {
-        Self { cap: Some(cap), conn: Some(conn), cfg }
+        Self { cap: Some(cap), conn: Some(conn), cfg, notify: None }
+    }
+
+    /// Attach the "row landed" callback (e.g. a Tauri event emit).
+    pub fn with_notify<F: FnOnce() + Send + 'static>(mut self, f: F) -> Self {
+        self.notify = Some(Box::new(f));
+        self
     }
 
     pub fn is_active(&self) -> bool {
         self.cap.is_some()
     }
 
-    /// Tee raw response bytes into the captured copy. Bounded so a runaway
-    /// stream can't grow the row without limit; `Capture::finish` applies the
-    /// configured cap on top of this.
+    /// Tee raw response bytes into the captured copy. See [`Capture::tee`]
+    /// for why this is byte-wise and bounded.
     pub fn tee(&mut self, bytes: &[u8]) {
-        const TEE_CAP: usize = 512 * 1024;
         if let Some(cap) = self.cap.as_mut() {
-            if cap.response_buf.len() < TEE_CAP {
-                cap.response_buf.push_str(&String::from_utf8_lossy(bytes));
-            }
+            cap.tee(bytes);
         }
     }
 
@@ -337,6 +352,10 @@ impl Drop for CaptureGuard {
         };
         let guard = conn.lock();
         cap.finish(&guard, &self.cfg);
+        drop(guard);
+        if let Some(notify) = self.notify.take() {
+            notify();
+        }
     }
 }
 
@@ -355,6 +374,14 @@ fn path_of(url: &str) -> &str {
 
 /// An in-flight exchange. Dropping this without calling [`finish`] simply
 /// logs nothing — a cancelled turn should not leave a half-written row.
+/// Hard bound on the in-memory copy of a streamed response, for BOTH capture
+/// paths (the in-process tee and the gateway relay). Generous against the
+/// largest body anyone would read back in the UI, tight against a runaway
+/// stream; `Capture::finish` applies the user's configured cap on top.
+pub const TEE_CAP: usize = 512 * 1024;
+
+/// An in-flight exchange. Dropping this without calling [`finish`] simply
+/// logs nothing — a cancelled turn should not leave a half-written row.
 pub struct Capture {
     pub id: String,
     pub started: Instant,
@@ -364,8 +391,17 @@ pub struct Capture {
     pub path: String,
     pub request_body: Option<String>,
     pub model: Option<String>,
-    /// Bytes assembled so far, for streaming responses.
-    pub response_buf: String,
+    /// Raw response bytes assembled so far. Bytes, not a String, on purpose:
+    /// a multi-byte UTF-8 character split across TCP reads must survive
+    /// intact in the "verbatim" copy, so the one lossy conversion happens
+    /// once, over the whole buffer, in `finish` (the same lesson as the SSE
+    /// pumps' B-14 fix).
+    pub response_buf: Vec<u8>,
+    /// Total response bytes seen, even past [`TEE_CAP`] — the row's size
+    /// column reports what the server sent, not what we kept.
+    pub response_total: u64,
+    /// Set when [`TEE_CAP`] dropped bytes from `response_buf`.
+    pub tee_truncated: bool,
     pub ttft_ms: Option<i64>,
     pub upstream_status: Option<i64>,
     pub error: Option<String>,
@@ -391,7 +427,9 @@ impl Capture {
             path: path.to_string(),
             request_body: request_body.map(str::to_string),
             model,
-            response_buf: String::new(),
+            response_buf: Vec::new(),
+            response_total: 0,
+            tee_truncated: false,
             ttft_ms: None,
             upstream_status: None,
             error: None,
@@ -406,9 +444,20 @@ impl Capture {
         }
     }
 
-    /// Append a streamed delta to the reconstructed response body.
-    pub fn push_delta(&mut self, delta: &str) {
-        self.response_buf.push_str(delta);
+    /// Tee raw response bytes into the captured copy, bounded by [`TEE_CAP`].
+    pub fn tee(&mut self, bytes: &[u8]) {
+        self.response_total += bytes.len() as u64;
+        if self.response_buf.len() >= TEE_CAP {
+            self.tee_truncated = true;
+            return;
+        }
+        let room = TEE_CAP - self.response_buf.len();
+        if bytes.len() > room {
+            self.response_buf.extend_from_slice(&bytes[..room]);
+            self.tee_truncated = true;
+        } else {
+            self.response_buf.extend_from_slice(bytes);
+        }
     }
 
     /// Write the row. Cheap no-op when logging is off, so callers can invoke
@@ -418,8 +467,11 @@ impl Capture {
             return;
         }
         let duration_ms = self.started.elapsed().as_millis() as i64;
-        let framing = normalize::detect_framing(&self.response_buf);
-        let telem = normalize::extract(&self.response_buf, framing, self.ttft_ms);
+        // The single lossy conversion — see `response_buf` for why it must
+        // happen here and never per chunk.
+        let body = String::from_utf8_lossy(&self.response_buf).into_owned();
+        let framing = normalize::detect_framing(&body);
+        let telem = normalize::extract(&body, framing, self.ttft_ms);
 
         let entry = NewLogEntry {
             id: self.id,
@@ -436,10 +488,10 @@ impl Capture {
             output_tokens: telem.output_tokens,
             tokens_per_second: telem.tokens_per_second,
             request_bytes: self.request_body.as_ref().map(|b| b.len() as i64).unwrap_or(0),
-            response_bytes: self.response_buf.len() as i64,
-            truncated: false,
+            response_bytes: self.response_total as i64,
+            truncated: self.tee_truncated,
             request_body: self.request_body,
-            response_body: Some(self.response_buf),
+            response_body: Some(body),
             timings_json: telem.timings.map(|v| v.to_string()),
         };
         if let Err(e) = store::insert(conn, &entry, cfg.max_body_kb) {
@@ -534,5 +586,41 @@ mod tests {
         assert_eq!(c.model.as_deref(), Some("llama3.2"));
         let c2 = Capture::new("external", "ollama", "GET", "/api/tags", None);
         assert_eq!(c2.model, None);
+    }
+
+    #[test]
+    fn tee_assembles_split_multibyte_characters_intact() {
+        // A 3-byte char split across two chunks: converting each chunk
+        // independently (the old tee) wrote two U+FFFD replacement chars into
+        // the stored "verbatim" body.
+        let conn = crate::db::mem();
+        store::ensure_schema(&conn).unwrap();
+        let mut cap = Capture::new("relay", "llamacpp", "POST", "/v1/chat/completions", None);
+        let bytes = "あ".as_bytes();
+        cap.tee(&bytes[..1]);
+        cap.tee(&bytes[1..]);
+        cap.finish(&conn, &LogConfig::default());
+        let rows = store::list(&conn, &store::LogFilter::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        let d = store::get(&conn, &rows[0].id).unwrap().unwrap();
+        assert_eq!(d.response_body.as_deref(), Some("あ"), "no U+FFFD may appear");
+        assert_eq!(d.summary.response_bytes, 3);
+        assert!(!d.summary.truncated);
+    }
+
+    #[test]
+    fn tee_caps_the_stored_copy_but_reports_the_true_size() {
+        // A runaway stream must not grow the row without limit — but the size
+        // column still reports what the server actually sent.
+        let conn = crate::db::mem();
+        store::ensure_schema(&conn).unwrap();
+        let mut cap = Capture::new("relay", "llamacpp", "POST", "/v1/chat/completions", None);
+        cap.tee(&vec![b'x'; TEE_CAP + 100]);
+        cap.finish(&conn, &LogConfig { max_body_kb: 8192, ..LogConfig::default() });
+        let rows = store::list(&conn, &store::LogFilter::default()).unwrap();
+        let d = store::get(&conn, &rows[0].id).unwrap().unwrap();
+        assert!(d.summary.truncated);
+        assert_eq!(d.summary.response_bytes, (TEE_CAP + 100) as i64);
+        assert_eq!(d.response_body.unwrap().len(), TEE_CAP);
     }
 }

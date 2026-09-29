@@ -337,7 +337,7 @@ async fn openai_stream_round<R: tauri::Runtime>(
     // wire payload reqwest is about to send, so this captures verbatim
     // without a hook upstream. Disabled unless logging is on — the guard is
     // a no-op struct otherwise, so the hot path is unaffected either way.
-    let mut cap = crate::llm_log::begin_round(app, url, "openai_compatible", &body.to_string());
+    let mut cap = crate::llm_log::begin_round(app, url, "openai_compatible", body);
 
     // B-10: bound time-to-headers (send() resolves at the header) WITHOUT a
     // total request timeout — reqwest's `.timeout()` covers the whole body
@@ -693,7 +693,7 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
     // its own StreamExt — no local import needed.)
 
     // Request-log row for this model round — see the OpenAI round.
-    let mut cap = crate::llm_log::begin_round(app, url, "anthropic", &body.to_string());
+    let mut cap = crate::llm_log::begin_round(app, url, "anthropic", body);
 
     // B-10: bound time-to-headers (see the OpenAI round for why there is no
     // total `.timeout()` on a streaming request).
@@ -716,8 +716,13 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
     })?
     .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
+    cap.set_status(status.as_u16() as i64);
     if !status.is_success() {
         let b = resp.text().await.unwrap_or_default();
+        // Same record the OpenAI round keeps — without it this round's rows
+        // carried no status and no reason.
+        cap.set_error(format!("HTTP {status}"));
+        cap.tee(b.as_bytes());
         return Err(format!("HTTP {status}: {b}"));
     }
 

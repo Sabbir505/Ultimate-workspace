@@ -25,34 +25,52 @@ const ORIGINS = [
   { id: "external", label: "External" },
 ] as const;
 
+/** Fallback while `gatewayStatus` loads; the real list (which includes
+ *  user-registered targets and anything with rows) replaces it. */
 const TARGETS = ["llamacpp", "ollama", "lmstudio"] as const;
 
 /** "All runtimes" lives in the option list rather than as a separate control,
  *  matching how GitPanel's provider filter reads. */
-const RUNTIMES: SelectOption<string>[] = [
-  { value: "", label: "All runtimes" },
-  ...TARGETS.map((t) => ({ value: t as string, label: t })),
-];
+function runtimeOptions(known: readonly string[] | undefined): SelectOption<string>[] {
+  const list = (known && known.length > 0 ? known : TARGETS) as readonly string[];
+  return [
+    { value: "", label: "All runtimes" },
+    ...list.map((t) => ({ value: t as string, label: t })),
+  ];
+}
 
+/** `createdAt` is unix SECONDS (what `now_ts()` writes) — not the
+ *  milliseconds `Date.now()` returns. Mixing them printed every row as
+ *  "~20000d" old. */
 function relativeTime(ts: number): string {
-  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.round(s / 60)}m`;
   if (s < 86400) return `${Math.round(s / 3600)}h`;
   return `${Math.round(s / 86400)}d`;
 }
 
+/** Typing shouldn't fire the body LIKE scan (or re-subscribe the listener)
+ *  per keystroke — the input updates instantly, the filter follows a beat
+ *  behind. */
+const SEARCH_DEBOUNCE_MS = 250;
+
 export function LogsView() {
   const [origin, setOrigin] = useState<"relay" | "external" | null>(null);
   const [target, setTarget] = useState<string | null>(null);
   const [searchRaw, setSearchRaw] = useState("");
-  // Debounced so typing doesn't fire a LIKE scan per keystroke.
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const { rows, stats, loading, error } = useLlmLogs({ origin, target, search });
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchRaw), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [searchRaw]);
+
+  const { rows, stats, loading, loadingMore, error, refresh, loadMore, canLoadMore } =
+    useLlmLogs({ origin, target, search });
 
   // The gateway binds an ephemeral port and persists it, so the URL other apps
   // should use is never a constant — it has to come from the backend.
@@ -105,12 +123,13 @@ export function LogsView() {
         </div>
 
         {/* GlassSelect, not a native <select>: OS-drawn option lists can't be
-            themed to match the app, and this is the shared dropdown the rest
-            of the shell uses. `null` collapses to "" at the boundary, the same
-            shape GitPanel uses for an "all" entry. */}
+            themed to match the app, and this is the shared dropdown the rest of
+            the shell uses. `null` collapses to "" at the boundary, the same
+            shape GitPanel uses for an "all" entry. The options come from the
+            backend so a user-registered gateway target is filterable too. */}
         <GlassSelect<string>
           value={target ?? ""}
-          options={RUNTIMES}
+          options={runtimeOptions(gateway?.knownTargets)}
           onChange={(v) => setTarget(v || null)}
           title="Filter by runtime"
         />
@@ -121,10 +140,7 @@ export function LogsView() {
             type="search"
             placeholder="Search prompts and responses"
             value={searchRaw}
-            onChange={(e) => {
-              setSearchRaw(e.target.value);
-              setSearch(e.target.value);
-            }}
+            onChange={(e) => setSearchRaw(e.target.value)}
           />
         </div>
 
@@ -156,7 +172,10 @@ export function LogsView() {
             disabled={busy}
             onClick={() => {
               setBusy(true);
-              void llmLogPrune().finally(() => setBusy(false));
+              void llmLogPrune().finally(() => {
+                refresh();
+                setBusy(false);
+              });
             }}
           >
             <RefreshCw size={14} />
@@ -171,7 +190,10 @@ export function LogsView() {
               if (!confirm("Delete all logged requests? This cannot be undone.")) return;
               setBusy(true);
               setSelected(null);
-              void llmLogClear().finally(() => setBusy(false));
+              void llmLogClear().finally(() => {
+                refresh();
+                setBusy(false);
+              });
             }}
           >
             <Trash2 size={14} />
@@ -217,6 +239,16 @@ export function LogsView() {
               </span>
             </button>
           ))}
+          {canLoadMore && (
+            <button
+              type="button"
+              className="logs-load-more"
+              disabled={loadingMore}
+              onClick={() => void loadMore()}
+            >
+              {loadingMore ? "Loading…" : "Load older requests"}
+            </button>
+          )}
         </div>
 
         <aside className="logs-detail-pane">

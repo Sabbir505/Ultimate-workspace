@@ -59,6 +59,8 @@ pub struct NewLogEntry {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmLogSummary {
+    /// Insert-order row id — the opaque pagination cursor for "load more".
+    pub rowid: i64,
     pub id: String,
     pub created_at: i64,
     pub origin: String,
@@ -112,7 +114,12 @@ pub struct LogFilter {
     pub search: Option<String>,
     pub limit: Option<i64>,
     /// Keyset pagination: only rows strictly older than this id's created_at.
+    /// `created_at` has second resolution and tool loops fire several rounds
+    /// per second, so the cursor is the (created_at, rowid) pair — `rowid`
+    /// alone would already be unique, but the pair keeps the cursor stable
+    /// across restarts where insert order and wall clock can disagree.
     pub before_created_at: Option<i64>,
+    pub before_rowid: Option<i64>,
 }
 
 /// Bounded by default — an unbounded query would hand the UI every request
@@ -214,6 +221,7 @@ pub fn insert(conn: &Connection, e: &NewLogEntry, max_body_kb: i64) -> DbResult<
 
 fn map_summary(row: &rusqlite::Row) -> rusqlite::Result<LlmLogSummary> {
     Ok(LlmLogSummary {
+        rowid: row.get("rowid")?,
         id: row.get("id")?,
         created_at: row.get("created_at")?,
         origin: row.get("origin")?,
@@ -234,7 +242,7 @@ fn map_summary(row: &rusqlite::Row) -> rusqlite::Result<LlmLogSummary> {
     })
 }
 
-const SUMMARY_COLS: &str = "id, created_at, origin, target, method, path, model, \
+const SUMMARY_COLS: &str = "rowid, id, created_at, origin, target, method, path, model, \
     upstream_status, error, duration_ms, ttft_ms, input_tokens, output_tokens, \
     tokens_per_second, request_bytes, response_bytes, truncated";
 
@@ -252,8 +260,20 @@ pub fn list(conn: &Connection, f: &LogFilter) -> DbResult<Vec<LlmLogSummary>> {
         args.push(Box::new(t.clone()));
     }
     if let Some(before) = f.before_created_at {
-        sql.push_str(" AND created_at < ?");
-        args.push(Box::new(before));
+        match f.before_rowid {
+            // Same-second rows exist (created_at is whole seconds; tool loops
+            // fire several rounds per second), so the cursor is the pair.
+            Some(brow) => {
+                sql.push_str(" AND (created_at < ? OR (created_at = ? AND rowid < ?))");
+                args.push(Box::new(before));
+                args.push(Box::new(before));
+                args.push(Box::new(brow));
+            }
+            None => {
+                sql.push_str(" AND created_at < ?");
+                args.push(Box::new(before));
+            }
+        }
     }
     if let Some(s) = &f.search {
         let s = s.trim();
@@ -299,7 +319,9 @@ pub fn clear(conn: &Connection) -> DbResult<usize> {
 pub fn prune(conn: &Connection, retention_days: i64, max_rows: i64) -> DbResult<usize> {
     let mut removed = 0usize;
     if retention_days > 0 {
-        let cutoff = now_ts() - retention_days * 86_400_000;
+        // `created_at` is unix SECONDS (now_ts()); the multiplier must match,
+        // or the cutoff lands ~1000× too far back and nothing ever ages out.
+        let cutoff = now_ts() - retention_days * 86_400;
         removed += conn.execute("DELETE FROM llm_log WHERE created_at < ?1", params![cutoff])?;
     }
     if max_rows > 0 {
@@ -311,6 +333,14 @@ pub fn prune(conn: &Connection, retention_days: i64, max_rows: i64) -> DbResult<
         )?;
     }
     Ok(removed)
+}
+
+/// Distinct `target` values actually present in the log — feeds the runtime
+/// filter dropdown, so a custom gateway target appears once it has traffic.
+pub fn distinct_targets(conn: &Connection) -> DbResult<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT target FROM llm_log ORDER BY target")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.filter_map(Result::ok).collect())
 }
 
 pub fn stats(conn: &Connection) -> DbResult<LlmLogStats> {
@@ -438,17 +468,81 @@ mod tests {
         let conn = mem();
         ensure_schema(&conn).unwrap();
         insert(&conn, &entry("old"), DEFAULT_MAX_BODY_KB).unwrap();
-        // Backdate well past any retention window.
-        conn.execute("UPDATE llm_log SET created_at = 0 WHERE id = 'old'", []).unwrap();
+        insert(&conn, &entry("edge"), DEFAULT_MAX_BODY_KB).unwrap();
         for i in 0..5 {
             insert(&conn, &entry(&format!("n{i}")), DEFAULT_MAX_BODY_KB).unwrap();
         }
-        assert_eq!(list(&conn, &LogFilter::default()).unwrap().len(), 6);
+        assert_eq!(list(&conn, &LogFilter::default()).unwrap().len(), 7);
 
+        // Realistic backdates against the SECOND-resolution clock: 8 days is
+        // past a 7-day retention, 6 days is inside it. (An earlier version of
+        // this test backdated to 0, which passed even when the cutoff was
+        // computed in the wrong unit — 7 days as milliseconds — because 0 is
+        // below any cutoff.)
+        conn.execute(
+            "UPDATE llm_log SET created_at = ?1 WHERE id = 'old'",
+            params![now_ts() - 8 * 86_400],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE llm_log SET created_at = ?1 WHERE id = 'edge'",
+            params![now_ts() - 6 * 86_400],
+        )
+        .unwrap();
+
+        // Age only (no row cap): the 8-day row goes, the 6-day row stays.
+        assert_eq!(prune(&conn, 7, 0).unwrap(), 1, "age pruning must use seconds");
+        let left = list(&conn, &LogFilter { limit: Some(50), ..Default::default() }).unwrap();
+        assert!(left.iter().all(|r| r.id != "old"), "the 8-day-old row must be gone");
+        assert!(left.iter().any(|r| r.id == "edge"), "the 6-day-old row is inside retention");
+
+        // Row cap on top: keep exactly 3.
         prune(&conn, 7, 3).unwrap();
         let left = list(&conn, &LogFilter { limit: Some(50), ..Default::default() }).unwrap();
         assert_eq!(left.len(), 3, "row cap should keep exactly 3");
-        assert!(left.iter().all(|r| r.id != "old"), "the backdated row must be gone");
+    }
+
+    #[test]
+    fn keyset_pagination_skips_only_rows_before_the_cursor() {
+        let conn = mem();
+        ensure_schema(&conn).unwrap();
+        // Same created_at (seconds resolution) for several rows: the rowid
+        // half of the cursor is what tells them apart.
+        for i in 0..5 {
+            insert(&conn, &entry(&format!("n{i}")), DEFAULT_MAX_BODY_KB).unwrap();
+        }
+        conn.execute("UPDATE llm_log SET created_at = 1000", []).unwrap();
+
+        let page1 = list(&conn, &LogFilter { limit: Some(2), ..Default::default() }).unwrap();
+        assert_eq!(page1.len(), 2);
+        // Newest first → n4, n3.
+        assert_eq!(page1[0].id, "n4");
+        assert_eq!(page1[1].id, "n3");
+
+        let cursor = &page1[1];
+        let page2 = list(
+            &conn,
+            &LogFilter {
+                limit: Some(2),
+                before_created_at: Some(cursor.created_at),
+                before_rowid: Some(cursor.rowid),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page2.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), vec!["n2", "n1"]);
+
+        let page3 = list(
+            &conn,
+            &LogFilter {
+                limit: Some(2),
+                before_created_at: Some(page2[1].created_at),
+                before_rowid: Some(page2[1].rowid),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page3.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), vec!["n0"]);
     }
 
     #[test]

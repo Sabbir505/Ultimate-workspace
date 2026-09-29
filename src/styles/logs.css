@@ -136,6 +136,26 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* "Load older requests" — a full-width affordance pinned to the list's end,
+ * styled like a row so it reads as part of the list, not a toolbar action. */
+.logs-load-more {
+  width: 100%;
+  padding: 10px 0;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+.logs-load-more:hover:not(:disabled) {
+  color: var(--text);
+}
+.logs-load-more:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* ── Split: list + detail ── */
 .logs-split {
   flex: 1;

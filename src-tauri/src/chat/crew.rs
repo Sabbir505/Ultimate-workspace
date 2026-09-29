@@ -950,6 +950,7 @@ mod tests {
             max_rounds: def.max_rounds,
             max_concurrent: def.max_concurrent,
             builtin: false,
+            origin: None,
             created_at: 0,
             updated_at: 0,
         };

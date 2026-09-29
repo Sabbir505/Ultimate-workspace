@@ -674,6 +674,13 @@ mod tests {
         ("get_task_status", "Relay background-task engine is built-in-chat-only"),
         ("cancel_task", "Relay background-task engine is built-in-chat-only"),
         ("Task", "harness has its own subagent Task tool"),
+        // Crew AUTHORING is built-in-chat-only (consent card + origin badge
+        // live in the main loop); harness agents still RUN crew agents via
+        // spawn_session's agent: value, which IS bridged.
+        (tools::LIST_CREW_AGENTS, "crew authoring is built-in-chat-only; harness agents run crew agents via spawn_session agent:<id>"),
+        (tools::CREATE_CREW_AGENT, "crew authoring is built-in-chat-only; harness agents run crew agents via spawn_session agent:<id>"),
+        (tools::UPDATE_CREW_AGENT, "crew authoring is built-in-chat-only; harness agents run crew agents via spawn_session agent:<id>"),
+        (tools::DELETE_CREW_AGENT, "crew authoring is built-in-chat-only; harness agents run crew agents via spawn_session agent:<id>"),
         // Plan tracking drives the built-in chat's plan-mode UI state.
         ("todo_write", "plan tracking is a built-in-chat UI surface"),
         ("enter_plan_mode", "plan tracking is a built-in-chat UI surface"),

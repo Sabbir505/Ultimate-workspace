@@ -59,6 +59,11 @@ pub struct CrewAgent {
     pub max_concurrent: i64,
     /// Seeded role — cannot be deleted and its name is reserved.
     pub builtin: bool,
+    /// Who authored the row: NULL = the user (Crew panel), 'agent' = a model
+    /// created it through the crew chat tool. Display-only — the Crew panel
+    /// badges it so the user can always see what their agents made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -142,6 +147,7 @@ fn map_crew_agent(row: &Row) -> rusqlite::Result<CrewAgent> {
         max_rounds: row.get("max_rounds").unwrap_or(DEFAULT_MAX_ROUNDS),
         max_concurrent: row.get("max_concurrent").unwrap_or(DEFAULT_MAX_CONCURRENT),
         builtin: row.get::<_, i64>("builtin").unwrap_or(0) != 0,
+        origin: row.get::<_, Option<String>>("origin").unwrap_or(None),
         created_at,
         updated_at: row.get("updated_at").unwrap_or(created_at),
     })
@@ -149,7 +155,22 @@ fn map_crew_agent(row: &Row) -> rusqlite::Result<CrewAgent> {
 
 const COLUMNS: &str = "id, name, description, prompt_md, tools, engine, model, effort, \
      sandbox_policy, approval_policy, worktree_policy, max_rounds, max_concurrent, builtin, \
-     created_at, updated_at";
+     origin, created_at, updated_at";
+
+/// Mark who authored a definition: NULL = the user (Crew panel), "agent" = a
+/// model created it through the crew chat tool. Display-only — the Crew panel
+/// badges it so the user can always see what their agents made.
+pub fn set_crew_agent_origin(
+    conn: &Connection,
+    agent_id: &str,
+    origin: Option<&str>,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE crew_agents SET origin = ?2 WHERE id = ?1",
+        rusqlite::params![agent_id, origin],
+    )?;
+    Ok(())
+}
 
 /// Builtins first (the stable set the `Task` enum advertises), then user rows
 /// by name.
@@ -523,8 +544,10 @@ mod tests {
 
     #[test]
     fn crud_roundtrips_including_tools_json_and_none_preservation() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::init_schema(&conn).unwrap();
+        // mem() over bare init_schema: the mapper now reads the origin column
+        // (migration-added), and the tolerant SELECT must not silently break
+        // on a fixture that predates it.
+        let conn = crate::db::mem();
 
         let mut inp = input("Doc Writer");
         inp.tools = Some(r#"["read_file","write_file"]"#.into());
@@ -560,7 +583,11 @@ mod tests {
             .unwrap();
         assert!(cleared.tools.is_none(), "None must survive as SQL NULL");
 
-        assert_eq!(list_crew_agents(&conn).unwrap().len(), 1);
+        // The mem() fixture seeds the 7 builtins; exactly one user row exists.
+        assert_eq!(
+            list_crew_agents(&conn).unwrap().iter().filter(|r| !r.builtin).count(),
+            1
+        );
         assert_eq!(
             find_crew_agent_by_name(&conn, "DOC WRITER")
                 .unwrap()
@@ -571,7 +598,15 @@ mod tests {
         );
 
         delete_crew_agent(&conn, &created.id).unwrap();
-        assert!(list_crew_agents(&conn).unwrap().is_empty());
+        // The mem() fixture's 7 builtins remain; the user row is gone.
+        assert_eq!(
+            list_crew_agents(&conn)
+                .unwrap()
+                .iter()
+                .filter(|r| !r.builtin)
+                .count(),
+            0
+        );
         assert!(get_crew_agent(&conn, &created.id).unwrap().is_none());
         // Updating a gone row reloads to None instead of inventing one.
         assert!(update_crew_agent(&conn, &created.id, &edit)
@@ -581,8 +616,7 @@ mod tests {
 
     #[test]
     fn unique_name_is_case_insensitive_at_the_db_layer() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::init_schema(&conn).unwrap();
+        let conn = crate::db::mem();
         create_crew_agent(&conn, &input("Doc Writer")).unwrap();
         // The COLLATE NOCASE unique index is the backstop behind
         // chat::crew::validate_input's explicit check.

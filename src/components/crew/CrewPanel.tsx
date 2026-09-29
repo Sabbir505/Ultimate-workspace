@@ -233,6 +233,7 @@ function AgentRow({
           <TierBadge engine={agent.engine} />
           {tier === "advisory" && " CLI tools not restrictible"}
           {agent.builtin ? " · builtin" : " · " + (agent.engine || "inherits engine")}
+          {agent.origin === "agent" && " · made by agent"}
           {toolCount === null ? " · engine default tools" : ` · ${toolCount} tool${toolCount === 1 ? "" : "s"}`}
           {` · ${agent.sandboxPolicy} / ${agent.approvalPolicy}`}
           {` · ${agent.maxRounds} rounds`}

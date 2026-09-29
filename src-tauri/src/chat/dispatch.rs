@@ -2145,6 +2145,43 @@ async fn run_gated_automation_tool(
     tools::execute_automation_tool(app, name, args).await
 }
 
+/// One-line card summary for a gated crew call.
+fn crew_tool_summary(name: &str, args: &Value) -> String {
+    let id = args
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    match name {
+        tools::CREATE_CREW_AGENT => format!(
+            "Create crew agent \"{}\"",
+            args.get("name").and_then(|n| n.as_str()).unwrap_or(id)
+        ),
+        tools::UPDATE_CREW_AGENT => format!("Update crew agent \"{id}\""),
+        tools::DELETE_CREW_AGENT => format!("Delete crew agent \"{id}\""),
+        other => other.to_string(),
+    }
+}
+
+/// Approval-card wrapper for the crew write trio — mirrors
+/// `run_gated_automation_tool`: authoring or deleting an agent is the moment
+/// of consent, in every posture.
+async fn run_gated_crew_tool(
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+) -> String {
+    let summary = crew_tool_summary(name, args);
+    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
+        return format!(
+            "The user denied the {name} action. Do not retry it unless the user explicitly asks."
+        );
+    }
+
+    tools::execute_crew_tool(app, name, args).await
+}
+
 /// Approval-card wrapper for the mesh write pair (`message_session` /
 /// `spawn_session`) — mirrors `run_gated_automation_tool`: the card is the
 /// only guard on cross-session token spend, so it stays meaningful under
@@ -2629,6 +2666,30 @@ async fn run_tool_inner(
             return run_gated_automation_tool(mgr, app, sid, name, args).await;
         }
         return tools::execute_automation_tool(app, name, args).await;
+    }
+
+    // Crew tools (list/create/update/delete agent definitions) — same family
+    // shape as automations. The read list auto-runs; authoring/deleting is
+    // approval-carded in EVERY posture including full_auto — an agent must
+    // never exist (or vanish) that the user did not explicitly click yes on.
+    // Plan mode has already refused the mutating ones via is_mutating_tool.
+    if tools::is_crew_tool(name) {
+        let decision = if name == tools::LIST_CREW_AGENTS {
+            permission::PermissionDecision::AutoRun
+        } else if name == tools::DELETE_CREW_AGENT {
+            if matches!(approval, permission::ApprovalPolicy::FullAccess) {
+                permission::PermissionDecision::AutoRun
+            } else {
+                permission::PermissionDecision::NeedsApproval
+            }
+        } else {
+            // create/update: consent at authoring, no posture bypasses it.
+            permission::PermissionDecision::NeedsApproval
+        };
+        if matches!(decision, permission::PermissionDecision::NeedsApproval) {
+            return run_gated_crew_tool(mgr, app, sid, name, args).await;
+        }
+        return tools::execute_crew_tool(app, name, args).await;
     }
 
     // Vault tools (vault_list/read/search + write/move/delete) — crate::vault

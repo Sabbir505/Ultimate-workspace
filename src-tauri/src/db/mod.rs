@@ -328,6 +328,9 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     // Declarative subagents: the 7 builtin roles must exist in the registry
     // before any spawn surface resolves a name against it.
     migrate_crew_agents_seed(conn)?;
+    // Who authored each definition (NULL = user, "agent" = a model made it
+    // through the crew chat tool) — display-only, badge in the Crew panel.
+    migrate_crew_agents_origin(conn)?;
     // And crew-run sessions point at their definition through a real column —
     // NOT the `origin` vocabulary (spawned_by: drives the depth walk there).
     migrate_chat_session_agent_def(conn)?;
@@ -335,6 +338,18 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     // on every open (research_cache.rs also purges on insert).
     research_cache::purge_expired(conn)?;
     migrate_unc_paths(conn)
+}
+
+/// Authorship marker for crew definitions (NULL = user, "agent" = a model
+/// created it via the crew chat tool) — display-only, badged in the panel.
+fn migrate_crew_agents_origin(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE crew_agents ADD COLUMN origin TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 /// Crew-run sessions point at their definition through a real column, not the
@@ -1725,6 +1740,7 @@ pub use automations::{
 // crew (declarative subagents — the persisted agent registry)
 pub use crew::{
     create_crew_agent, delete_crew_agent, find_crew_agent_by_name, finish_crew_run,
+    set_crew_agent_origin,
     get_crew_agent, list_crew_agents, list_crew_runs, record_crew_run,
     seed_builtin_crew_agents, update_crew_agent, CrewAgent, CrewAgentInput, CrewAgentRun,
 };
@@ -1780,6 +1796,7 @@ pub(crate) fn mem() -> Connection {
     // The 7 builtin crew roles are part of the production schema shape, so
     // tests that resolve a name against the registry see them too.
     migrate_crew_agents_seed(&conn).unwrap();
+    migrate_crew_agents_origin(&conn).unwrap();
     // Same for the crew-run link column: tests that crew-spawn (or assert the
     // FK's ON DELETE SET NULL) need it present.
     migrate_chat_session_agent_def(&conn).unwrap();

@@ -442,6 +442,7 @@ pub(super) fn builtin_tool_specs_json(provider_id: &ChatProviderId, model: &str,
         research: false,
         session_mesh: false,
         automations_write: false,
+                crew_write: true,
         totp: false,
         unlockable_families: std::sync::Arc::new(
             crate::chat::tools::unlockable_family_pairs(),
@@ -778,6 +779,7 @@ pub async fn count_context_tokens(
                             research: false,
                             session_mesh: false,
                             automations_write: false,
+                crew_write: true,
                             totp: false,
                             unlockable_families: std::sync::Arc::new(
                                 crate::chat::tools::unlockable_family_pairs(),
@@ -1088,6 +1090,7 @@ pub async fn count_context_breakdown(
                 research: false,
                 session_mesh: false,
                 automations_write: false,
+                crew_write: true,
                 totp: false,
                 unlockable_families: std::sync::Arc::new(
                     crate::chat::tools::unlockable_family_pairs(),
@@ -1225,6 +1228,7 @@ pub async fn count_context_breakdown(
         research: false,
         session_mesh: false,
         automations_write: false,
+                crew_write: true,
         totp: false,
         unlockable_families: std::sync::Arc::new(
             crate::chat::tools::unlockable_family_pairs(),

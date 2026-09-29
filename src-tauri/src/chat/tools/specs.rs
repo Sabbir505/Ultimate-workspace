@@ -170,6 +170,10 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             GET_AUTOMATION_DESC,
             automation_id_parameters(),
         ),
+        // Crew — the read-only list is always on (mirrors automations); the
+        // CRUD trio rides the mutating gating + the crew_write family flag
+        // below. Lets the model author the crew, not just run it.
+        openai_fn(LIST_CREW_AGENTS, LIST_CREW_AGENTS_DESC, no_parameters()),
         // Session Mesh — sibling-session awareness + consultation. Locked
         // with the whole family: ~1.3k tokens of specs most turns never
         // touch; `attach_connector("session-mesh")` brings all five in for
@@ -307,6 +311,29 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             RUN_AUTOMATION_NOW,
             RUN_AUTOMATION_NOW_DESC,
             automation_id_parameters(),
+        ));
+    }
+    // Crew CRUD — the model authoring its own subagents. Gated on BOTH the
+    // mutating posture AND the crew_write family flag: the flag is false for
+    // every surface that builds ToolCaps::default() (the relay bridge, the
+    // subagent registries), so they never advertise tools they cannot
+    // dispatch. The consent posture at dispatch is stricter still — every
+    // authoring call is approval-carded in every posture (see dispatch.rs).
+    if caps.crew_write && sandbox.allows_mutating_tools() {
+        specs.push(openai_fn(
+            CREATE_CREW_AGENT,
+            CREATE_CREW_AGENT_DESC,
+            create_crew_agent_parameters(),
+        ));
+        specs.push(openai_fn(
+            UPDATE_CREW_AGENT,
+            UPDATE_CREW_AGENT_DESC,
+            update_crew_agent_parameters(),
+        ));
+        specs.push(openai_fn(
+            DELETE_CREW_AGENT,
+            DELETE_CREW_AGENT_DESC,
+            crew_agent_id_parameters(),
         ));
     }
     // download_progress is deliberately NOT advertised: get_task_status
@@ -544,6 +571,7 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             GET_AUTOMATION_DESC,
             automation_id_parameters(),
         ),
+        anthropic_fn(LIST_CREW_AGENTS, LIST_CREW_AGENTS_DESC, no_parameters()),
         // Session Mesh — mirror of the OpenAI block above: the whole family
         // rides caps.session_mesh (locked by default, attach-to-unlock).
     ]);
@@ -680,6 +708,24 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             RUN_AUTOMATION_NOW,
             RUN_AUTOMATION_NOW_DESC,
             automation_id_parameters(),
+        ));
+    }
+    // Crew CRUD — mirror of the OpenAI block above (flag + posture gating).
+    if caps.crew_write && sandbox.allows_mutating_tools() {
+        specs.push(anthropic_fn(
+            CREATE_CREW_AGENT,
+            CREATE_CREW_AGENT_DESC,
+            create_crew_agent_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            UPDATE_CREW_AGENT,
+            UPDATE_CREW_AGENT_DESC,
+            update_crew_agent_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            DELETE_CREW_AGENT,
+            DELETE_CREW_AGENT_DESC,
+            crew_agent_id_parameters(),
         ));
     }
     // download_progress not advertised here either (see the OpenAI builder).
@@ -1522,6 +1568,124 @@ const DELETE_AUTOMATION_DESC: &str = "Delete an automation by id, permanently an
 
 const RUN_AUTOMATION_NOW_DESC: &str = "Fire one run of an automation immediately; \
     it executes in the background and lands in the run history.";
+
+// ---- Crew (declarative subagents) tool descriptions + schemas ----
+
+const LIST_CREW_AGENTS_DESC: &str = "List the user's crew agents (named reusable \
+    subagents): id, name, prompt, allowlist, engine/model, scope. Call before \
+    create/update/delete for ids.";
+
+const CREATE_CREW_AGENT_DESC: &str = "Create a crew agent: a named reusable \
+    subagent spawnable via Task, spawn_session or an automation. name \
+    (lowercase-hyphen), description, prompt_md (standing instructions), \
+    optional tools allowlist (omit = read-only default), engine/model, \
+    sandbox_policy. User confirms before save.";
+
+const UPDATE_CREW_AGENT_DESC: &str = "Update a crew agent by id or name (from \
+    list_crew_agents). Only passed fields change.";
+
+const DELETE_CREW_AGENT_DESC: &str = "Delete a crew agent by id or name, \
+    permanently. Builtins and in-flight agents are refused.";
+
+fn crew_agent_id_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["agent_id"],
+        "properties": {
+            "agent_id": {
+                "type": "string",
+                "description": "Crew agent id or unique name - from \
+                    list_crew_agents."
+            }
+        }
+    })
+}
+
+fn create_crew_agent_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Unique lowercase-hyphen name (e.g. \
+                    \"pr-reviewer\"). Becomes the Task enum value."
+            },
+            "description": {
+                "type": "string",
+                "description": "One line on what it is for."
+            },
+            "prompt_md": {
+                "type": "string",
+                "description": "Standing instructions (markdown), prepended \
+                    to every run's task."
+            },
+            "tools": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Allowlist (vocabulary from list_crew_agents). \
+                    Omit = read-only default; disallowed tools are dropped, \
+                    never granted."
+            },
+            "engine": {
+                "type": "string",
+                "description": "\"builtin\" (default), \"local\", or \
+                    \"harness:<id>\". builtin = enforced; harness = advisory."
+            },
+            "model": {
+                "type": "string",
+                "description": "\"provider::model\" or bare id; omit for the \
+                    provider default."
+            },
+            "sandbox_policy": {
+                "type": "string",
+                "enum": ["read_only", "workspace_write"],
+                "description": "Default read_only."
+            },
+            "approval_policy": {
+                "type": "string",
+                "enum": ["on_request", "auto_edit", "full_access"],
+                "description": "Default on_request."
+            },
+            "worktree_policy": {
+                "type": "string",
+                "enum": ["inherit", "always", "never"],
+                "description": "\"always\" = isolated git worktree per run. \
+                    Default inherit."
+            }
+        }
+    })
+}
+
+fn update_crew_agent_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["agent_id"],
+        "properties": {
+            "agent_id": {
+                "type": "string",
+                "description": "Crew agent id or unique name."
+            },
+            "name": { "type": "string", "description": "New unique name." },
+            "description": { "type": "string" },
+            "prompt_md": { "type": "string", "description": "New standing \
+                instructions (replaces the body)." },
+            "tools": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "New allowlist; null clears to default."
+            },
+            "engine": { "type": "string" },
+            "model": { "type": "string" },
+            "sandbox_policy": { "type": "string",
+                "enum": ["read_only", "workspace_write"] },
+            "approval_policy": { "type": "string",
+                "enum": ["on_request", "auto_edit", "full_access"] },
+            "worktree_policy": { "type": "string",
+                "enum": ["inherit", "always", "never"] }
+        }
+    })
+}
 
 // ---- Session Mesh tool descriptions + schemas ----
 //
@@ -2564,9 +2728,16 @@ mod tests {
         // so it renders even with no connectors attachable). No single chat
         // turn carries this whole surface any more; the budget guards the
         // registry's aggregate size.
+        // Bumped 53_500→55_800 for the crew CRUD family (list/create/update/
+        // delete_crew_agent, ~2.3k): the model can AUTHOR the user's
+        // declarative subagents on request, not just run them — the same
+        // authoring surface create_automation already provides, with the
+        // identical always-carded consent posture. The default fresh-turn
+        // surface is unaffected: the CRUD trio rides `caps.crew_write` and is
+        // stripped from the bridge/subagent registries (ToolCaps::default()).
         assert!(
-            all_on < 53_500,
-            "all-on tool specs total {all_on} chars (budget 53_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 55_800,
+            "all-on tool specs total {all_on} chars (budget 55_800) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 
@@ -2849,7 +3020,12 @@ mod tests {
             // …and a full unlock admits exactly locked+14 (family tools),
             // with wire-format parity of the whole array.
             let u = names(&unlocked);
-            assert_eq!(l.len() + 14, u.len(), "{name}: unlock delta must be exactly the 14 family tools");
+            assert_eq!(
+                l.len() + 17,
+                u.len(),
+                "{name}: unlock delta must be exactly the 17 family tools (mesh 5 + 
+                 automations 6 + totp 1 + research 2 + crew CRUD 3)"
+            );
             for gone in [
                 crate::chat::tools::ADD_SOURCE_NOTE,
                 crate::chat::tools::LIST_SESSIONS,

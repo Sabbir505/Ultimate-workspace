@@ -137,6 +137,17 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
             } else {
                 "list_automations/get_automation only (the write tools are stripped in this read-only posture)"
             },
+            // Match the schema: the read list is always on; the CRUD trio is
+            // stripped under a read-only posture and absent from surfaces
+            // that build ToolCaps::default() (crew_write=false).
+            "crew_agents": if caps.crew_write && caps.allows_mutating {
+                "list_crew_agents + create/update/delete_crew_agent (full CRUD — you can author \
+                 the user's reusable subagents; authoring is approval-carded)"
+            } else if caps.allows_mutating {
+                "list_crew_agents only"
+            } else {
+                "list_crew_agents only (the write tools are stripped in this read-only posture)"
+            },
             // Family-locked built-ins (see UNLOCKABLE_FAMILIES): the schema
             // hides them until attach_connector("<id>") unlocks, which the
             // manifest lists every turn. The report must state the lock the
@@ -350,14 +361,17 @@ mod tests {
     /// is actually callable.
     #[test]
     fn report_matches_posture_for_gated_families() {
-        // "Full" = mutating posture AND the automations family unlocked —
-        // both gates the schema applies to the write half.
+        // "Full" = mutating posture AND the write families unlocked — the
+        // gates the schema applies to each write half (crew_write rides the
+        // main loop unconditionally; the bridge/subagent defaults lack it).
         let full = ToolCaps {
             automations_write: true,
+            crew_write: true,
             ..ToolCaps::default()
         };
         let mut read_only = ToolCaps {
             automations_write: true,
+            crew_write: true,
             ..ToolCaps::default()
         };
         read_only.allows_mutating = false;
@@ -377,6 +391,11 @@ mod tests {
 
         assert!(full["built_in"]["vault"].as_str().unwrap().contains("vault_write"));
         assert!(!ro["built_in"]["vault"].as_str().unwrap().contains("vault_write"));
+
+        // Crew: full CRUD only when both gates are open; the list always on.
+        assert!(full["built_in"]["crew_agents"].as_str().unwrap().contains("create"));
+        assert!(!ro["built_in"]["crew_agents"].as_str().unwrap().contains("create"));
+        assert!(ro["built_in"]["crew_agents"].as_str().unwrap().contains("list_crew_agents"));
     }
 
     /// Report/schema parity for the family-locked built-ins: a LOCKED family

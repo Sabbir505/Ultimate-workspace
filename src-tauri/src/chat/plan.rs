@@ -346,6 +346,11 @@ pub(crate) fn is_mutating_tool(name: &str) -> bool {
     if crate::chat::tools::is_mutating_automation_tool(name) {
         return true;
     }
+    // Crew authoring/deleting changes persisted state the user has to live
+    // with; the read-only list stays allowed during research.
+    if crate::chat::tools::is_mutating_crew_tool(name) {
+        return true;
+    }
     // Session Mesh writes: messaging consumes another session's tokens and
     // spawn_session creates a session. The read trio (list/read/search) stays
     // allowed during research — plan mode is about not CHANGING things.

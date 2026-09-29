@@ -2751,6 +2751,7 @@ mod tests {
             max_rounds: 100,
             max_concurrent: 2,
             builtin: false,
+            origin: None,
             created_at: 0,
             updated_at: 0,
         };

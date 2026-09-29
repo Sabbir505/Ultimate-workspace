@@ -47,6 +47,10 @@ export interface CrewAgent {
   maxConcurrent: number;
   /** Seeded roles can't be deleted or renamed. */
   builtin: boolean;
+  /** Who authored the row: null = the user (Crew panel), "agent" = a model
+   *  created it via the crew chat tool (badged so the user can always see
+   *  what their agents made). */
+  origin?: string | null;
   createdAt: number;
   updatedAt: number;
 }

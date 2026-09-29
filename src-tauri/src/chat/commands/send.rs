@@ -1963,6 +1963,7 @@ pub(crate) async fn run_prompt_warmup(
         research: false,
         session_mesh: false,
         automations_write: false,
+                crew_write: true,
         totp: false,
         unlockable_families: std::sync::Arc::new(
             crate::chat::tools::unlockable_family_pairs(),

@@ -591,6 +591,7 @@ impl ChatManager {
                 session_mesh: pre_unlocked_families
                     .iter()
                     .any(|f| f == tools::FAMILY_SESSION_MESH),
+                crew_write: true,
                 automations_write: pre_unlocked_families
                     .iter()
                     .any(|f| f == tools::FAMILY_AUTOMATIONS),

@@ -43,6 +43,22 @@ pub const MAX_DESCRIPTION_LEN: usize = 200;
 /// stays the authority the subagent loop enforces.
 pub const MAX_ROUNDS: i64 = 100;
 
+/// App-wide ceiling on crew runs in flight — every `agent:` spawn surface
+/// (the manual Run button, mesh `spawn_session agent:<id>`, and automation
+/// `agent:<id>` one-shots) counts against the one number, so a burst of
+/// scheduled runs cannot squeeze out interactive ones. Deliberately
+/// separate from the mesh's own spawn caps: those guard *model fan-out*,
+/// and counting human-initiated or automated crew runs against them would
+/// starve both. The per-agent `max_concurrent` on the definition is the
+/// finer-grained valve on top of this.
+pub const MAX_ACTIVE_CREW: i64 = 8;
+
+/// How long a `crew_runs` row may legitimately stay `running`: every spawn
+/// surface's release watcher gives up by this age, so at boot any older
+/// `running` row is a crash leftover and is settled as an error by
+/// `db::sweep_stale_crew_runs`.
+pub const STALE_RUNNING_SECS: i64 = 2 * 60 * 60;
+
 /// A built-in role: the `Task` `subagent_type` value and the instruction the
 /// subagent's system prompt is built around.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,6 +434,39 @@ pub fn live_runs(agent_id: &str) -> i64 {
     running_set().lock().get(agent_id).copied().unwrap_or(0)
 }
 
+/// Atomically check AND acquire one run slot: the app-wide crew ceiling and
+/// the per-agent `max_concurrent` are read and the count bumped under a
+/// single hold of the running-set lock, so two concurrent spawns (a
+/// double-clicked Run button racing a mesh/automation spawn of the same
+/// agent) can never both observe "room left" and both bump. The caller
+/// releases with `bump_running(agent_id, -1)` when the run settles (or
+/// immediately on a later failure path — every spawn site pairs the acquire
+/// with a compensating release before its first turn is dispatched).
+pub fn try_acquire_running(
+    agent_id: &str,
+    agent_name: &str,
+    per_agent_cap: i64,
+    app_cap: i64,
+) -> Result<(), String> {
+    let mut set = running_set().lock();
+    let active: i64 = set.values().sum();
+    if active >= app_cap {
+        return Err(format!(
+            "{active} crew runs are already active app-wide (cap {app_cap}) — \
+             wait for one to settle"
+        ));
+    }
+    let live = set.get(agent_id).copied().unwrap_or(0);
+    if live >= per_agent_cap {
+        return Err(format!(
+            "crew agent \"{agent_name}\" already has {live} run(s) in flight \
+             (max_concurrent {per_agent_cap})"
+        ));
+    }
+    set.insert(agent_id.to_string(), live + 1);
+    Ok(())
+}
+
 /// Adjust one agent's live-run count (+1 at spawn, −1 when the first turn's
 /// session goes idle). Saturates at zero so a double release (crashed
 /// watcher + fail-fast path) can never make the count negative and wedge a
@@ -464,6 +513,13 @@ pub fn validate_input(
             "description must be {} characters or fewer",
             MAX_DESCRIPTION_LEN
         ));
+    }
+    // The description is ONE line by contract — it renders as the Task
+    // enum's hint and, on export, as a single `description:` frontmatter
+    // line. A newline (the model-facing create tool can send one) would
+    // corrupt that round-trip, so refuse it at save time.
+    if input.description.contains(['\n', '\r']) {
+        return Err("description must be a single line".into());
     }
 
     // The allowlist is stored as the exact JSON string the caller sent, so
@@ -712,16 +768,44 @@ pub fn to_markdown(def: &CrewAgent) -> String {
 /// drop that changes what the agent will be allowed to do.
 pub fn from_markdown(markdown: &str) -> Result<CrewAgentInput, String> {
     let md = markdown.trim_start_matches('\u{feff}');
-    let rest = md.strip_prefix("---\n").ok_or(
-        "not a crew agent markdown doc — expected a `---` frontmatter fence at the top",
-    )?;
+    // Both fence line endings are accepted: a doc saved by a Windows editor
+    // (CRLF) is the same doc, and the interior-line `trim_end_matches('\r')`
+    // below already handles the rest of the file.
+    let rest = md
+        .strip_prefix("---\n")
+        .or_else(|| md.strip_prefix("---\r\n"))
+        .ok_or(
+            "not a crew agent markdown doc — expected a `---` frontmatter fence at the top",
+        )?;
     let (frontmatter, body) = rest
         .split_once("\n---")
         .ok_or("unterminated frontmatter — the closing `---` is missing")?;
-    let body = body
-        .strip_prefix("---\n")
-        .unwrap_or(body.strip_prefix("---\r\n").unwrap_or(body));
-    let body = body.strip_prefix('\n').unwrap_or(body);
+    // The split consumed "\n---"; drop the rest of the closing fence's line
+    // ending (LF or CRLF) so it cannot ride into `prompt_md` as leading
+    // blank lines.
+    let body = body.trim_start_matches(['\r', '\n']);
+    // STRICT: a multi-doc export (see `export_crew_agents`) must not be
+    // silently mangled — without this check the second doc's frontmatter
+    // would be swallowed into the first agent's prompt body. A closing fence
+    // at line start followed by a `name:` key is exactly the concatenation
+    // shape; a lone `---` horizontal rule in a prompt is not (its next line
+    // is prose).
+    {
+        let mut lines = body.lines().peekable();
+        while let Some(line) = lines.next() {
+            if line.trim_end_matches('\r') == "---" {
+                if let Some(next) = lines.peek() {
+                    if next.trim_end_matches('\r').starts_with("name:") {
+                        return Err(
+                            "this file holds more than one crew agent doc — import them \
+                             one at a time"
+                                .into(),
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     let mut name = String::new();
     let mut description = String::new();
@@ -984,6 +1068,93 @@ mod tests {
         assert!(from_markdown("---\nname: x\nbody").is_err());
         // Bare markdown body without frontmatter → hard error.
         assert!(from_markdown("# Just notes\n").is_err());
+    }
+
+    #[test]
+    fn markdown_import_refuses_a_concatenated_multi_doc_export() {
+        // Regression: `export_crew_agents` concatenates every requested doc
+        // with a blank line, and the first-fence parse used to swallow every
+        // later doc — frontmatter included — into the FIRST agent's
+        // `prompt_md`. That is exactly the silent drop STRICT import exists
+        // to refuse.
+        let agent = |name: &str| CrewAgent {
+            id: format!("crew-{name}"),
+            name: name.into(),
+            description: "d".into(),
+            prompt_md: format!("prompt for {name}"),
+            tools: None,
+            engine: None,
+            model: None,
+            effort: None,
+            sandbox_policy: "read_only".into(),
+            approval_policy: "on_request".into(),
+            worktree_policy: "inherit".into(),
+            max_rounds: MAX_ROUNDS,
+            max_concurrent: 2,
+            builtin: false,
+            origin: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let two_docs = format!("{}\n\n{}", to_markdown(&agent("one")), to_markdown(&agent("two")));
+        let err = from_markdown(&two_docs)
+            .expect_err("a concatenated export must not import as one agent");
+        assert!(err.contains("more than one"), "{err}");
+        // A horizontal rule in a prompt body is NOT a second doc (the next
+        // line is prose, not a `name:` key) — still one importable doc.
+        let rule = "---\nname: x\n---\nintro\n\n---\n\noutro\n";
+        assert!(from_markdown(rule).is_ok());
+    }
+
+    #[test]
+    fn markdown_import_accepts_a_crlf_saved_doc() {
+        // Regression: a doc saved by a Windows editor (CRLF) was rejected at
+        // the opening fence, and a CRLF closing fence leaked a leading
+        // blank line into `prompt_md`.
+        let md = "---\r\nname: doc-writer\r\ndescription: d\r\n---\r\nbody text\r\n";
+        let parsed = from_markdown(md).expect("a CRLF doc is the same doc");
+        assert_eq!(parsed.name, "doc-writer");
+        assert_eq!(parsed.description, "d");
+        assert_eq!(
+            parsed.prompt_md, "body text",
+            "no fence line-ending junk may ride into the prompt body"
+        );
+    }
+
+    #[test]
+    fn a_multi_line_description_is_refused_at_save_time() {
+        // The description lands on ONE `description:` frontmatter line on
+        // export; a newline would corrupt that round-trip, so it is refused
+        // where the user (or model) is looking at the field.
+        let mut bad = input("doc-writer");
+        bad.description = "line one\nline two".into();
+        let err = validate_input(&mut bad, None).unwrap_err();
+        assert!(err.contains("single line"), "{err}");
+    }
+
+    #[test]
+    fn try_acquire_enforces_both_caps_and_releases() {
+        // Regression: the budget check and the slot bump used to live in
+        // separate critical sections, so two racing spawns could both see
+        // "room left". try_acquire does check+bump under one lock hold.
+        bump_running("acq-x", 1);
+        // Per-agent cap already met.
+        let err = try_acquire_running("acq-x", "x", 1, MAX_ACTIVE_CREW).unwrap_err();
+        assert!(err.contains("in flight"), "{err}");
+        // App-wide cap met (any agent's live runs count).
+        let err = try_acquire_running("acq-y", "y", 5, 1).unwrap_err();
+        assert!(err.contains("app-wide"), "{err}");
+        // Room on both axes acquires exactly one slot…
+        try_acquire_running("acq-y", "y", 5, MAX_ACTIVE_CREW).expect("acquires");
+        assert_eq!(live_runs("acq-y"), 1);
+        // …and a same-budget racer is now refused.
+        assert!(try_acquire_running("acq-y", "y", 1, MAX_ACTIVE_CREW).is_err());
+        // Release is saturating: the count never goes negative.
+        bump_running("acq-y", -1);
+        bump_running("acq-y", -1);
+        bump_running("acq-x", -1);
+        assert_eq!(live_runs("acq-y"), 0);
+        assert_eq!(live_runs("acq-x"), 0);
     }
 
     /// Guard the live-run bookkeeping used by the delete refusal: tests that

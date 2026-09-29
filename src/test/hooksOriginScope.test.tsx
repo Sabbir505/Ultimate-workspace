@@ -192,6 +192,33 @@ describe("HooksPanel origin picker", () => {
     expect(screen.getByText(/Fires for every turn/)).toBeTruthy();
   });
 
+  it("clears the staged agent-origin text when the event toggles through a lifecycle type", async () => {
+    // Regression: switching pre → lifecycle cleared `draft.origins` but left
+    // the free-text mirror showing the ids the user typed, so a hook saved
+    // after switching BACK looked scoped in the editor while persisting as
+    // GLOBAL — a deny hook that silently widened to every origin.
+    render(<HooksPanel />);
+    await screen.findByText(/No hooks yet/);
+    fireEvent.change(screen.getByLabelText("Command"), { target: { value: "node" } });
+    fireEvent.change(screen.getByLabelText("Crew agent origins"), {
+      target: { value: "crew-7" },
+    });
+
+    // Round-trip through a lifecycle event (the scope is dropped)…
+    fireEvent.change(screen.getByLabelText("Hook event"), { target: { value: "turn_complete" } });
+    expect(screen.queryByLabelText("Crew agent origins")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Hook event"), { target: { value: "pre_tool_use" } });
+
+    // …and the mirror is empty with the parsed scope, not showing stale ids.
+    expect((screen.getByLabelText("Crew agent origins") as HTMLInputElement).value).toBe("");
+    expect(screen.getByText(/Runs for:/)).toBeTruthy();
+    fireEvent.click(screen.getByText("Add"));
+    await waitFor(() => expect(saveHooksMock).toHaveBeenCalledTimes(1));
+    const saved = saveHooksMock.mock.calls[0][0] as HookDef[];
+    expect(saved[0].event).toBe("pre_tool_use");
+    expect(saved[0].origins).toEqual([]);
+  });
+
   it("shows the stored scope and flags an unknown origin without hiding it", async () => {
     getHooksMock.mockResolvedValue([
       stored({ id: "everywhere", name: "everywhere" }),

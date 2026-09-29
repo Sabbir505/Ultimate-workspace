@@ -247,9 +247,11 @@ pub const RUN_AUTOMATION_NOW: &str = "run_automation_now";
 // panel always shows what the agents made. Dispatch lives in the family
 // ladder (dispatch.rs) like automations — DB via the AppHandle — and the
 // consent posture mirrors automations exactly: authoring/deleting are
-// approval-carded in EVERY posture. Built-in-chat only: the relay bridge and
-// subagent registries build ToolCaps::default() (crew_write=false), so they
-// never advertise a tool they cannot dispatch (the parity invariant).
+// approval-carded in EVERY posture. Built-in-chat only: the relay bridge
+// (unlocked_registry) and the subagent registries (ToolCaps::default()) both
+// end up crew_write=false — the bridge via its ALLOWED_RELAY_TOOLS filter,
+// the subagents via the default caps — so neither advertises a tool it
+// cannot dispatch (the parity invariant).
 pub const LIST_CREW_AGENTS: &str = "list_crew_agents";
 pub const CREATE_CREW_AGENT: &str = "create_crew_agent";
 pub const UPDATE_CREW_AGENT: &str = "update_crew_agent";

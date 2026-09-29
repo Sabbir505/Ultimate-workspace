@@ -33,7 +33,9 @@ export function CrewSelect({
   ) | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
 
-  const openMenu = () => {
+  /** Recompute the menu's anchored position from the button's current rect
+   *  — drop-down when there's room, flip above when there isn't. */
+  const updatePos = () => {
     const rect = btnRef.current?.getBoundingClientRect();
     if (!rect) return;
     const below = window.innerHeight - rect.bottom;
@@ -43,6 +45,10 @@ export function CrewSelect({
     } else {
       setPos({ left: rect.left, bottom: window.innerHeight - rect.top + 4, width });
     }
+  };
+
+  const openMenu = () => {
+    updatePos();
     setOpen(true);
   };
 
@@ -59,11 +65,19 @@ export function CrewSelect({
         setOpen(false);
       }
     };
+    // The menu is fixed-positioned, so anything that moves the button under
+    // it (scrolling the editor modal's own body, resizing the window) has to
+    // re-anchor it — capture-phase on window, because a scroll event fires
+    // on the scrolling element and does not bubble.
     window.addEventListener("pointerdown", onDown);
     window.addEventListener("keydown", onKey, true);
+    window.addEventListener("scroll", updatePos, true);
+    window.addEventListener("resize", updatePos);
     return () => {
       window.removeEventListener("pointerdown", onDown);
       window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("scroll", updatePos, true);
+      window.removeEventListener("resize", updatePos);
     };
   }, [open]);
 

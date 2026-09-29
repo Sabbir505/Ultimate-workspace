@@ -343,7 +343,8 @@ pub struct CrewAgentRun {
     pub worktree: Option<String>,
     pub started_at: i64,
     pub finished_at: Option<i64>,
-    /// `running` | `finished` | `error`.
+    /// `running` | `ok` | `error` | `cancelled` — the same vocabulary the
+    /// automations runs table and the frontend's status chips use.
     pub status: String,
     pub summary: Option<String>,
 }
@@ -391,6 +392,11 @@ pub fn record_crew_run(conn: &Connection, run: &CrewAgentRun) -> DbResult<()> {
 
 /// Settle a run row when its first turn ends (or fails). Best-effort by
 /// design — losing a history row's end timestamp must never fail a run.
+///
+/// The `status = 'running'` guard makes the FIRST settle final: the release
+/// watcher and the fail-fast path can both fire (with no ordering
+/// guarantee), and an unconditional UPDATE would let the watcher's late
+/// "ok" overwrite an "error" that was already recorded.
 pub fn finish_crew_run(
     conn: &Connection,
     run_id: &str,
@@ -399,9 +405,43 @@ pub fn finish_crew_run(
 ) {
     let _ = conn.execute(
         "UPDATE crew_runs SET finished_at = ?2, status = ?3, \
-         summary = COALESCE(?4, summary) WHERE id = ?1",
+         summary = COALESCE(?4, summary) WHERE id = ?1 AND status = 'running'",
         rusqlite::params![run_id, crate::db::now_ts(), status, summary],
     );
+}
+
+/// Fill a run row's worktree column once provisioning has settled. The row
+/// is written at spawn time, BEFORE the worktree exists (or before the
+/// provisioning fell back to the project root), so this is the only writer
+/// that ever sees a path. Best-effort, like every history write.
+pub fn set_crew_run_worktree(conn: &Connection, run_id: &str, worktree: Option<&str>) {
+    let _ = conn.execute(
+        "UPDATE crew_runs SET worktree = ?2 WHERE id = ?1",
+        rusqlite::params![run_id, worktree],
+    );
+}
+
+/// Settle `running` rows a dead process left behind. The live-run registry
+/// and the release watchers are per-process, so after a crash (or a kill
+/// mid-run) rows stay `running` forever — at BOOT this sweep settles any
+/// row older than the watchers' own release ceiling, an age no legitimately
+/// live run can still be at (the watcher gives up by then). Rows younger
+/// than the ceiling are left alone: a second concurrently-running instance
+/// of the app may own them.
+pub fn sweep_stale_crew_runs(conn: &Connection, max_age_secs: i64) {
+    let cutoff = crate::db::now_ts() - max_age_secs;
+    let settled = conn
+        .execute(
+            "UPDATE crew_runs SET finished_at = ?1, status = 'error', \
+             summary = COALESCE(summary, 'interrupted — the app exited mid-run') \
+             WHERE status = 'running' AND started_at <= ?2",
+            rusqlite::params![crate::db::now_ts(), cutoff],
+        )
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    if settled > 0 {
+        eprintln!("[crew] settled {settled} stale running row(s) left by a previous process");
+    }
 }
 
 /// Newest-first run history, optionally filtered to one agent.
@@ -477,6 +517,98 @@ mod tests {
         ];
         let seeded: Vec<&str> = BUILTIN_ROLES.iter().map(|r| r.name).collect();
         assert_eq!(seeded, TASK_ROLES.to_vec());
+    }
+
+    #[test]
+    fn finish_crew_run_first_settle_wins_and_worktree_backfills() {
+        // Regression (two defects, one row): (1) the idle watcher and the
+        // fail-fast path can both settle a run with no ordering guarantee,
+        // and an unconditional UPDATE let the watcher's late "ok" overwrite
+        // an "error" that was already recorded — the first settle must be
+        // final. (2) The worktree column is written at spawn (before
+        // provisioning exists) and must be backfillable afterwards.
+        let conn = super::super::mem();
+        let run = CrewAgentRun {
+            id: "run-1".into(),
+            agent_id: Some("crew-a".into()),
+            session_id: Some("s1".into()),
+            trigger: "manual".into(),
+            task: "t".into(),
+            engine: "builtin".into(),
+            model: "m".into(),
+            worktree: None,
+            started_at: 1,
+            finished_at: None,
+            status: "running".into(),
+            summary: None,
+        };
+        record_crew_run(&conn, &run).unwrap();
+        // The fail-fast path settles an error first…
+        finish_crew_run(&conn, "run-1", "error", Some("first turn failed"));
+        // …the late idle watcher then settles "ok" — must be a no-op.
+        finish_crew_run(&conn, "run-1", "ok", None);
+        let row = list_crew_runs(&conn, None, 10).unwrap().remove(0);
+        assert_eq!(row.status, "error");
+        assert_eq!(row.summary.as_deref(), Some("first turn failed"));
+        assert!(row.finished_at.is_some(), "the first settle stamped the end time");
+        // Provisioning finished after the row was written → backfill.
+        set_crew_run_worktree(&conn, "run-1", Some("D:/repo/.worktrees/relay-run-1"));
+        let row = list_crew_runs(&conn, None, 10).unwrap().remove(0);
+        assert_eq!(
+            row.worktree.as_deref(),
+            Some("D:/repo/.worktrees/relay-run-1")
+        );
+    }
+
+    #[test]
+    fn boot_sweep_settles_only_old_running_rows() {
+        // The live-run registry is per-process, so a `running` row that
+        // survives a restart is a crash leftover — but only rows older than
+        // the watchers' release ceiling: a younger one may belong to a
+        // concurrently running second instance of the app.
+        let conn = super::super::mem();
+        let mk = |id: &str, started: i64, status: &str| CrewAgentRun {
+            id: id.into(),
+            agent_id: Some("crew-a".into()),
+            session_id: None,
+            trigger: "manual".into(),
+            task: "t".into(),
+            engine: "builtin".into(),
+            model: "m".into(),
+            worktree: None,
+            started_at: started,
+            finished_at: None,
+            status: status.into(),
+            summary: None,
+        };
+        let now = crate::db::now_ts();
+        // A stale `running` row (older than the 2h ceiling), a fresh
+        // `running` row, and an already-settled row.
+        record_crew_run(&conn, &mk("stale", now - 3 * 3600, "running")).unwrap();
+        record_crew_run(&conn, &mk("fresh", now, "running")).unwrap();
+        record_crew_run(
+            &conn,
+            &mk("done", now - 3 * 3600, "ok"),
+        )
+        .unwrap();
+
+        super::sweep_stale_crew_runs(&conn, 2 * 3600);
+
+        let by_id = |id: &str| {
+            list_crew_runs(&conn, None, 50)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.id == id)
+                .unwrap()
+        };
+        let stale = by_id("stale");
+        assert_eq!(stale.status, "error", "a crash leftover settles as an error");
+        assert!(stale.finished_at.is_some());
+        assert!(stale.summary.unwrap().contains("interrupted"));
+        // The fresh row (possibly a second instance's live run) and the
+        // already-settled row are untouched.
+        assert_eq!(by_id("fresh").status, "running");
+        assert_eq!(by_id("done").status, "ok");
     }
 
     #[test]

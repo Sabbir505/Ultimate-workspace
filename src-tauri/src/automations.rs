@@ -573,9 +573,21 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
             // model current then — later edits to the automation never reached
             // it, so the run log kept showing (and any manual follow-up kept
             // spawning with) the stale model. Re-sync both on every launch.
-            let agent = format!("harness:{}", automation.harness);
-            let _ = update_chat_session_model(&conn, &cs_id, &automation.model);
+            // An `agent:` harness re-syncs through the crew vocabulary (see
+            // `crew_session_vocab`) so the row stays engine-addressable.
+            let vocab = crew_session_vocab(&conn, automation);
+            let (agent, model) = match &vocab {
+                Some((a, _, m, _)) => (a.clone(), m.clone()),
+                None => (
+                    format!("harness:{}", automation.harness),
+                    automation.model.clone(),
+                ),
+            };
+            let _ = update_chat_session_model(&conn, &cs_id, &model);
             let _ = update_chat_session_agent(&conn, &cs_id, Some(&agent));
+            if let Some((_, _, _, def_id)) = &vocab {
+                let _ = crate::db::set_chat_session_agent_def(&conn, &cs_id, Some(def_id));
+            }
             cs_id
         } else {
             if automation.chat_session_id.is_some() {
@@ -584,7 +596,12 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
                     automation.chat_session_id, automation.id
                 );
             }
-            let cs = match create_chat_session(&conn, &automation.harness, &automation.model, None) {
+            let vocab = crew_session_vocab(&conn, automation);
+            let (provider, model) = match &vocab {
+                Some((_, p, m, _)) => (p.clone(), m.clone()),
+                None => (automation.harness.clone(), automation.model.clone()),
+            };
+            let cs = match create_chat_session(&conn, &provider, &model, None) {
                 Ok(cs) => cs,
                 Err(e) => {
                     let msg = e.to_string();
@@ -593,9 +610,15 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
                     return Err(msg);
                 }
             };
-            let agent = format!("harness:{}", automation.harness);
+            let agent = vocab
+                .as_ref()
+                .map(|(a, _, _, _)| a.clone())
+                .unwrap_or_else(|| format!("harness:{}", automation.harness));
             let _ = update_chat_session_agent(&conn, &cs.id, Some(&agent));
             let _ = update_chat_session_title(&conn, &cs.id, &format!("⚙ {}", automation.name));
+            if let Some((_, _, _, def_id)) = &vocab {
+                let _ = crate::db::set_chat_session_agent_def(&conn, &cs.id, Some(def_id));
+            }
             // Rebind NOW rather than at finalize: a crash between here and
             // finalize must not leave the row pointing at the dead session.
             let _ = set_automation_chat_session(&conn, &automation.id, Some(&cs.id));
@@ -632,6 +655,44 @@ fn lock_file_path(conn: &Connection, automation_id: &str) -> Option<std::path::P
     )))
 }
 
+/// Session-column vocabulary for an `agent:<id>` automation's run-log row.
+///
+/// `automation.harness` holds the `agent:` reference, but the run-log
+/// session's `agent`/`provider`/`model` columns must hold ENGINE vocabulary
+/// — every `chat_sessions` consumer (approval/model lookups, provider
+/// labeling, the manual-follow-up path) resolves against `builtin |
+/// harness:<cli> | acp:<id>` and a real provider, and the raw
+/// `harness:agent:<id>` / provider `agent:<id>` this replaces fell dead in
+/// each of them. Mirrors what `session_fabric` writes for a crew child
+/// (engine as agent, resolved provider for builtin engines, `agent_def_id`
+/// link). Returns `(agent, provider, model, def_id)`.
+///
+/// `None` when the harness is not an `agent:` value — the plain paths keep
+/// their own vocabulary — or when the definition cannot be resolved (the
+/// run itself errors on that immediately after).
+fn crew_session_vocab(
+    conn: &Connection,
+    automation: &Automation,
+) -> Option<(String, String, String, String)> {
+    let rest = automation.harness.strip_prefix("agent:")?;
+    let def = crate::chat::crew::resolve_by_id_or_name(conn, rest)?;
+    let engine = def.engine.clone().unwrap_or_else(|| "builtin".to_string());
+    // Same precedence as the execute arm: the automation's own model wins
+    // when set, otherwise the definition's.
+    let model = if automation.model.is_empty() {
+        def.model.clone().unwrap_or_default()
+    } else {
+        automation.model.clone()
+    };
+    if engine.starts_with("harness:") || engine.starts_with("acp:") {
+        Some((engine.clone(), engine, model, def.id))
+    } else {
+        let (provider, model) =
+            crate::chat::crew::resolve_builtin_provider_model(conn, Some(&model)).ok()?;
+        Some((engine, provider, model, def.id))
+    }
+}
+
 /// The turn itself: one blocking headless shot at full-auto permission
 /// (unattended turns can't answer prompts).
 ///
@@ -665,10 +726,13 @@ fn execute(
     //   provision via the session worktree seam; automations need a
     //   sidecar-safe variant. See the research doc Part E q5.)
     let prompt = ensure_unattended_rules(&automation.prompt);
+    // The crew slot held for an `agent:` run: (agent id, engine vocabulary
+    // for the history row). Released after the one-shot returns.
+    let mut crew_slot: Option<(String, String)> = None;
     let (harness, provider, model, prompt) = if let Some(rest) =
         automation.harness.strip_prefix("agent:")
     {
-        let (def_engine, def_provider, def_model, composed) = {
+        let (def_engine, def_provider, def_model, composed, slot_info) = {
             let conn = db.lock();
             let def = crate::chat::crew::resolve_by_id_or_name(&conn, rest).ok_or_else(|| {
                 format!("crew agent \"{rest}\" not found — it may have been deleted")
@@ -686,11 +750,18 @@ fn execute(
             };
             let engine = def.engine.clone().unwrap_or_else(|| "builtin".into());
             let composed = crate::chat::crew::compose_first_message(&def, &prompt);
+            // (agent id, name, max_concurrent, engine vocabulary for the row)
+            let slot_info = (
+                def.id.clone(),
+                def.name.clone(),
+                def.max_concurrent,
+                engine.clone(),
+            );
             if let Some(cli) = engine.strip_prefix("harness:") {
                 // The engine rides as `harness:<id>` (the session vocabulary)
                 // but `run_one_shot` takes the BARE id — the live test caught
                 // `harness:commandcode` falling through to the chat arm.
-                (cli.to_string(), engine, model, composed)
+                (cli.to_string(), engine, model, composed, slot_info)
             } else if engine.starts_with("acp:") {
                 return Err(format!(
                     "crew agent \"{}\" runs on an ACP engine, which has no unattended \
@@ -704,15 +775,43 @@ fn execute(
                 // The chat-HTTP arm dispatches on "not a CLI harness" but
                 // dials with the PROVIDER — "builtin" would fail the key
                 // lookup (the live test caught exactly that).
-                (engine, provider, model, composed)
+                (engine, provider, model, composed, slot_info)
             }
         };
+        // Hold the agent's concurrency slot for the one-shot's lifetime —
+        // the same budget the Run button and mesh `agent:` spawns respect.
+        // Acquired after every fallible resolution above (an early error
+        // never strands a slot), released after the dispatch returns.
+        crate::chat::crew::try_acquire_running(
+            &slot_info.0,
+            &slot_info.1,
+            slot_info.2.max(1),
+            crate::chat::crew::MAX_ACTIVE_CREW,
+        )?;
+        crew_slot = Some((slot_info.0.clone(), slot_info.3.clone()));
         (def_engine, def_provider, def_model, composed)
     } else {
         let h = automation.harness.clone();
         (h.clone(), h, automation.model.clone(), prompt)
     };
-    match harness.as_str() {
+    // Run-history row for the automation trigger: the run-log session
+    // doubles as the row's session — its transcript IS the run. Written only
+    // once the slot is held (the run is committed); settled with the
+    // one-shot's real outcome right after it returns.
+    let crew_run_id = crew_slot.as_ref().and_then(|(agent_id, engine)| {
+        let conn = db.lock();
+        crate::session_fabric::record_crew_run_start(
+            &conn,
+            agent_id,
+            &prepared.chat_session_id,
+            "automation",
+            &automation.prompt,
+            engine,
+            &model,
+            None,
+        )
+    });
+    let result = match harness.as_str() {
         "claude_code" | "opencode" | "pi" | "omp" | "commandcode" => {
             agent_sessions::run_one_shot(
                 app,
@@ -736,7 +835,19 @@ fn execute(
                 Some(&prepared.cancel),
             )
         }
+    };
+    if let Some(run_id) = &crew_run_id {
+        let (status, summary) = match &result {
+            Ok(()) => ("ok", None),
+            Err(e) => ("error", Some(crate::util::truncate_chars(e, 240))),
+        };
+        let conn = db.lock();
+        crate::db::finish_crew_run(&conn, run_id, status, summary.as_deref());
     }
+    if let Some((agent_id, _)) = &crew_slot {
+        crate::chat::crew::bump_running(agent_id, -1);
+    }
+    result
 }
 
 /// Record the outcome and release both overlap guards.
@@ -1260,6 +1371,80 @@ mod tests {
                 reloaded.chat_session_id.as_deref(),
                 Some(prepared.chat_session_id.as_str()),
                 "row must be rebound immediately, not at finalize"
+            );
+        }
+        release_guards(&automation.id, &None);
+    }
+
+    #[test]
+    fn agent_automation_run_log_uses_engine_vocabulary() {
+        // Regression: for an `agent:<id>` harness, prepare used to write the
+        // agent column as `harness:agent:<id>` and the provider column as
+        // `agent:<id>` — strings no chat_sessions consumer resolves (approval
+        // lookups, provider labeling, manual follow-ups all dead-end). The
+        // row must carry the definition's ENGINE vocabulary + agent_def_id,
+        // exactly like a session_fabric crew child.
+        let conn = crate::db::mem();
+        let def = crate::chat::crew::create(
+            &conn,
+            &crate::chat::crew::CrewAgentInput {
+                name: "nightly-writer".into(),
+                description: "d".into(),
+                prompt_md: "p".into(),
+                tools: None,
+                engine: Some("builtin".into()),
+                model: Some("openrouter::x/test-model".into()),
+                effort: None,
+                sandbox_policy: "read_only".into(),
+                approval_policy: "on_request".into(),
+                worktree_policy: "inherit".into(),
+                max_rounds: 10,
+                max_concurrent: 2,
+            },
+        )
+        .expect("crew agent created");
+        let db = Arc::new(Mutex::new(conn));
+        let automation = {
+            let conn = db.lock();
+            let a = crate::db::create_automation(
+                &conn,
+                &crate::db::AutomationInput {
+                    name: "nightly".into(),
+                    prompt: "p".into(),
+                    harness: format!("agent:{}", def.id),
+                    model: None,
+                    cwd: None,
+                    schedule: "* * * * *".into(),
+                    enabled: Some(true),
+                    origin: None,
+                    trigger_type: None,
+                    trigger_config: None,
+                },
+            )
+            .unwrap();
+            crate::db::get_automation(&conn, &a.id).unwrap().unwrap()
+        };
+
+        let prepared =
+            prepare_run_inner(&db, &automation, RunSource::Manual, 0)
+            .expect("run prepared")
+            .expect("prepared run");
+        {
+            let conn = db.lock();
+            let cs = crate::db::get_chat_session(&conn, &prepared.chat_session_id)
+                .unwrap()
+                .expect("run-log session exists");
+            assert_eq!(
+                cs.agent.as_deref(),
+                Some("builtin"),
+                "the agent column carries the ENGINE, not the agent: reference"
+            );
+            assert_eq!(cs.provider, "openrouter", "a real provider, not agent:<id>");
+            assert_eq!(cs.model, "x/test-model");
+            assert_eq!(
+                cs.agent_def_id.as_deref(),
+                Some(def.id.as_str()),
+                "the run-log row links back to the definition"
             );
         }
         release_guards(&automation.id, &None);

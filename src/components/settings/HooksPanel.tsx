@@ -298,8 +298,16 @@ export function HooksPanel() {
             onChange={(e) => {
               const event = e.target.value as HookEvent;
               // Lifecycle events are global in the backend (no dispatch origin
-              // at the fire site), so drop any scope the user had staged.
-              setDraft({ ...draft, event, origins: isLifecycle(event) ? [] : draft.origins });
+              // at the fire site), so drop any scope the user had staged —
+              // BOTH the parsed origins and the free-text mirror, or the
+              // field would still show agent ids after a round-trip through
+              // a lifecycle event while the saved hook had gone global.
+              if (isLifecycle(event)) {
+                setDraft({ ...draft, event, origins: [] });
+                setDraftAgentOrigins("");
+              } else {
+                setDraft({ ...draft, event });
+              }
             }}
             aria-label="Hook event"
             className="perm-tool-select"

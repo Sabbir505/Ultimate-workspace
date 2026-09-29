@@ -1740,7 +1740,7 @@ pub use automations::{
 // crew (declarative subagents — the persisted agent registry)
 pub use crew::{
     create_crew_agent, delete_crew_agent, find_crew_agent_by_name, finish_crew_run,
-    set_crew_agent_origin,
+    set_crew_agent_origin, set_crew_run_worktree, sweep_stale_crew_runs,
     get_crew_agent, list_crew_agents, list_crew_runs, record_crew_run,
     seed_builtin_crew_agents, update_crew_agent, CrewAgent, CrewAgentInput, CrewAgentRun,
 };

@@ -138,7 +138,7 @@ export function CrewRunsList({
                         the registry rows above. */}
                     <span
                       className="crew-meta-chip"
-                      title="manual = the Run button, task = a Task call, mesh = a spawned session"
+                      title="manual = the Run button, task = a Task call, mesh = a spawned session, automation = a scheduled run"
                     >
                       <Zap size={11} strokeWidth={1.8} aria-hidden="true" />
                       {run.trigger}
@@ -166,7 +166,14 @@ export function CrewRunsList({
                     </span>
                   </span>
                 </span>
-                <span className={`crew-chip status-${run.status || "unknown"}`} title={`Status: ${meta.label}`}>
+                <span
+                  className={`crew-chip status-${run.status || "unknown"}`}
+                  title={
+                    run.summary
+                      ? `Status: ${meta.label} — ${run.summary}`
+                      : `Status: ${meta.label}`
+                  }
+                >
                   {meta.label}
                 </span>
                 <span className="crew-run-actions">

@@ -158,6 +158,3 @@ export const listenAutomationRunStarted = (
  *  prompt body and permission scope), not a raw engine id. */
 export const isCrewAutomation = (harness: string): boolean =>
   /^agent:[^\s]+/.test(harness);
-
-/** Switch a chat session's provider (e.g. to/from "local_gguf" when picking a
- *  local model from the selector in a cloud session, or vice versa). */

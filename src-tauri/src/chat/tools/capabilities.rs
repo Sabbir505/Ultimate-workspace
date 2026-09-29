@@ -139,10 +139,19 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
             },
             // Match the schema: the read list is always on; the CRUD trio is
             // stripped under a read-only posture and absent from surfaces
-            // that build ToolCaps::default() (crew_write=false).
+            // that build ToolCaps::default() (crew_write=false). A run with
+            // a PINNED allowlist (a subagent) may not even carry the read
+            // list — the ceiling never includes it — so the report must not
+            // claim a tool the run cannot call.
             "crew_agents": if caps.crew_write && caps.allows_mutating {
                 "list_crew_agents + create/update/delete_crew_agent (full CRUD — you can author \
                  the user's reusable subagents; authoring is approval-carded)"
+            } else if caps
+                .allow
+                .as_ref()
+                .is_some_and(|set| !set.contains(super::LIST_CREW_AGENTS))
+            {
+                "none (this run's pinned tool set does not include the crew tools)"
             } else if caps.allows_mutating {
                 "list_crew_agents only"
             } else {
@@ -396,6 +405,31 @@ mod tests {
         assert!(full["built_in"]["crew_agents"].as_str().unwrap().contains("create"));
         assert!(!ro["built_in"]["crew_agents"].as_str().unwrap().contains("create"));
         assert!(ro["built_in"]["crew_agents"].as_str().unwrap().contains("list_crew_agents"));
+    }
+
+    /// A run with a PINNED allowlist (a subagent) may not carry the crew
+    /// read tool at all — the ceiling never includes it, the schema filter
+    /// strips it, execution refuses it — so the report must not claim it
+    /// (the module contract: the report can never disagree with what the
+    /// model can actually call).
+    #[test]
+    fn report_claims_no_crew_tool_when_the_pinned_set_lacks_it() {
+        let pinned = ToolCaps {
+            allows_mutating: true,
+            allow: Some(std::sync::Arc::new(
+                ["read_file", "write_file"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            )),
+            ..ToolCaps::default()
+        };
+        let v: Value = serde_json::from_str(&capabilities_report(&pinned)).unwrap();
+        let line = v["built_in"]["crew_agents"].as_str().unwrap();
+        assert!(
+            !line.contains("list_crew_agents"),
+            "a pinned set without the tool must not be told it exists: {line}"
+        );
     }
 
     /// Report/schema parity for the family-locked built-ins: a LOCKED family

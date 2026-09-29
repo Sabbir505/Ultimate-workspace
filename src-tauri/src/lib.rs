@@ -296,6 +296,15 @@ pub fn run() {
             if let Err(e) = chat::pdfprint::ensure_print_window(app.handle()) {
                 eprintln!("[relay] hidden PDF print window unavailable: {e}");
             }
+            // Crew run-history boot sweep: the live-run registry and the
+            // release watchers are per-process, so a `running` row from a
+            // previous process is a crash leftover. Only rows older than the
+            // watchers' own release ceiling settle — a younger one may belong
+            // to a concurrently running second instance.
+            {
+                let conn = shared_db.lock();
+                crate::db::sweep_stale_crew_runs(&conn, crate::chat::crew::STALE_RUNNING_SECS);
+            }
             app.manage(DbState(Arc::clone(&shared_db)));
             app.manage(PtyState(PtyManager::new(app.handle().clone(), Arc::clone(&shared_db))));
             app.manage(BrowserState(Arc::new(browser::BrowserManager::new(

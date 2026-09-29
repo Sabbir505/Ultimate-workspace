@@ -1240,6 +1240,27 @@ async fn run_task_subagent(
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
+    // Run-history row for a CREW run (a definition resolved; the 7 built-in
+    // roles keep their pre-crew behavior and stay out of the history). The
+    // Task surface runs the in-process loop, so the row's engine is builtin
+    // and its "session" is the PARENT chat — that is where the transcript
+    // lives. Settled right after the loop returns: this surface has no idle
+    // watcher because the loop is synchronous inside the caller's turn.
+    let crew_run_id = crew_def.as_ref().and_then(|def| {
+        let db_state = app.state::<crate::DbState>();
+        let conn = db_state.0.lock();
+        crate::session_fabric::record_crew_run_start(
+            &conn,
+            &def.id,
+            sid,
+            "task",
+            prompt,
+            "builtin",
+            &model,
+            None,
+        )
+    });
+
     let result: Result<String, String> = if is_anthropic {
         let base = base_url
             .as_deref()
@@ -1282,6 +1303,18 @@ async fn run_task_subagent(
             }
         }
     };
+
+    // Settle the task-run history row with the loop's real outcome (the
+    // finish guard makes this the only settle).
+    if let Some(run_id) = &crew_run_id {
+        let (status, summary) = match &result {
+            Ok(_) => ("ok", None),
+            Err(e) => ("error", Some(crate::util::truncate_chars(e, 240))),
+        };
+        let db_state = app.state::<crate::DbState>();
+        let conn = db_state.0.lock();
+        crate::db::finish_crew_run(&conn, run_id, status, summary.as_deref());
+    }
 
     match result {
         Ok(output) => {

@@ -88,7 +88,12 @@ pub async fn run_crew_agent(
 }
 
 /// Export definitions as shareable markdown docs (Claude-Code-compatible
-/// frontmatter + relay extensions). All agents, or just the given ids.
+/// frontmatter + relay extensions). Omitting `agent_ids` exports every USER
+/// agent — the 7 builtin roles are deliberately left out of the default:
+/// they already exist in every install (the idempotent seed), and their
+/// reserved names make their docs unimportable by construction. Explicit ids
+/// (a user deliberately exporting a builtin to share its edited prompt) are
+/// honored verbatim.
 #[tauri::command(async)]
 pub fn export_crew_agents(
     db: State<'_, DbState>,
@@ -100,7 +105,7 @@ pub fn export_crew_agents(
             .iter()
             .filter_map(|id| crew::get(&conn, id))
             .collect::<Vec<_>>(),
-        None => crew::list(&conn),
+        None => crew::list(&conn).into_iter().filter(|a| !a.builtin).collect(),
     };
     if let Some(ids) = &agent_ids {
         for id in ids {

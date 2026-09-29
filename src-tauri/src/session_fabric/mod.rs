@@ -39,13 +39,12 @@ const MAX_SPAWN_DEPTH: i64 = 2;
 const MAX_CHILDREN_PER_PARENT: i64 = 3;
 const CHILDREN_WINDOW_SECS: i64 = 24 * 3600;
 const MAX_ACTIVE_SPAWNED: i64 = 8;
-/// App-wide ceiling on crew runs in flight (manual, mesh-`agent:`, and
-/// automation `agent:` runs all count). Deliberately separate from
-/// `MAX_ACTIVE_SPAWNED`: that cap guards *model fan-out* through the mesh
-/// tool, and counting human-initiated or automated crew runs against it
-/// would starve both. The per-agent `max_concurrent` on the definition is
-/// the finer-grained valve on top of this.
-const MAX_ACTIVE_CREW: i64 = 8;
+/// App-wide ceiling on crew runs in flight — `chat::crew::MAX_ACTIVE_CREW`
+/// (every `agent:` spawn surface shares the one number). Deliberately
+/// separate from `MAX_ACTIVE_SPAWNED`: that cap guards *model fan-out*
+/// through the mesh tool, and counting human-initiated or automated crew
+/// runs against it would starve both.
+use crate::chat::crew::MAX_ACTIVE_CREW;
 /// How long a crew run's first turn may hold its concurrency slot before
 /// the release watcher gives up counting it (matches the automation engine's
 /// own MAX_RUN_SECS scale — unattended work is allowed to be long).
@@ -1583,6 +1582,22 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
         })
         .unwrap_or_default();
 
+    // A crew-routed mesh child holds a real concurrency slot (C.5: crew
+    // spawns keep their own budget — the mesh's caps govern ON TOP, not
+    // instead). Acquired atomically with the check so a fan-out racing a
+    // manual Run of the same agent cannot both pass; released by the
+    // watcher below, or right here if the row never gets created.
+    if let Some(def) = &crew_def {
+        if let Err(e) = crate::chat::crew::try_acquire_running(
+            &def.id,
+            &def.name,
+            def.max_concurrent.max(1),
+            MAX_ACTIVE_CREW,
+        ) {
+            return format!("Error: spawn_session could not start a crew run: {e}");
+        }
+    }
+
     let child = {
         let conn = db.0.lock();
         // `create_chat_session` writes full-auto defaults, matching how the
@@ -1617,7 +1632,12 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
                 r.title = Some(title);
                 r
             }
-            Err(e) => return format!("Error: spawn_session could not create the session: {e}"),
+            Err(e) => {
+                if let Some(def) = &crew_def {
+                    crate::chat::crew::bump_running(&def.id, -1);
+                }
+                return format!("Error: spawn_session could not create the session: {e}")
+            }
         }
     };
 
@@ -1633,11 +1653,11 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
         },
     );
 
-    // A crew-routed mesh child also holds a concurrency slot and a history
-    // row — model fan-out through the mesh still counts against the
-    // definition's `max_concurrent` (the mesh's own caps govern on top).
+    // A crew-routed mesh child also gets a history row; the slot itself was
+    // already acquired above (before the row existed), so only the watcher —
+    // which releases the slot and settles the row when the child goes idle —
+    // is armed here.
     if let Some(def) = &crew_def {
-        crate::chat::crew::bump_running(&def.id, 1);
         let run_id = {
             let conn = db.0.lock();
             record_crew_run_start(
@@ -1651,6 +1671,9 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
                 child.worktree_path.as_deref(),
             )
         };
+        // Terminal-outcome tracking, registered before the watcher exists so
+        // a fast-failing first turn cannot slip in front of the listener.
+        let (outcome, listener_ids) = arm_crew_run_outcome(app, &child.id);
         let slot_agent = def.id.clone();
         let slot_run = run_id;
         let app_for_slot = app.clone();
@@ -1665,10 +1688,15 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             }
             crate::chat::crew::bump_running(&slot_agent, -1);
             if let Some(run_id) = slot_run {
+                // The turn's real outcome (chat:done/chat:error), not an
+                // assumed "ok" — a mid-stream failure used to settle as a
+                // successful run because the idle poll can't see it.
+                let (status, summary) = crew_run_settle_pair(&outcome.lock().unwrap());
                 let db = app_for_slot.state::<DbState>();
                 let conn = db.0.lock();
-                crate::db::finish_crew_run(&conn, &run_id, "finished", None);
+                crate::db::finish_crew_run(&conn, &run_id, status, summary.as_deref());
             }
+            release_outcome_listeners(&app_for_slot, listener_ids);
         });
     }
 
@@ -1873,8 +1901,10 @@ fn session_busy(app: &AppHandle, sid: &str) -> bool {
 
 /// Best-effort run-history row at spawn time (status `running`). Returns the
 /// row id so the finalizer can settle it; a history write failure never
-/// blocks a run.
-fn record_crew_run_start(
+/// blocks a run. Shared by every spawn surface that has no watcher of its
+/// own (the Task tool's in-process loop, the automations one-shot) — the
+/// manual and mesh paths call it right before arming their release watcher.
+pub(crate) fn record_crew_run_start(
     conn: &rusqlite::Connection,
     agent_id: &str,
     session_id: &str,
@@ -1904,6 +1934,110 @@ fn record_crew_run_start(
             eprintln!("[crew] run-history write failed (non-fatal): {e}");
             None
         }
+    }
+}
+
+/// The terminal outcome of one crew-run session's turn, as reported by the
+/// global `chat:done` / `chat:error` events every engine emits at turn end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CrewRunTerminal {
+    /// "ok" | "error" — the `crew_runs.status` vocabulary.
+    pub status: &'static str,
+    /// The error text (errors only); settles into the row's summary column.
+    pub message: String,
+}
+
+/// Pure payload half of [`arm_crew_run_outcome`]: which terminal outcome
+/// (if any) one `chat:done`/`chat:error` event carries for `sid`. The
+/// payloads are the typed `ChatDonePayload`/`ChatErrorPayload` — camelCase
+/// `chatSessionId` — parsed leniently because a missing/odd payload must
+/// never break outcome tracking (the watcher then just defaults to "ok").
+pub(crate) fn terminal_from_event(
+    event: &str,
+    payload: &str,
+    sid: &str,
+) -> Option<CrewRunTerminal> {
+    let v: Value = serde_json::from_str(payload).ok()?;
+    if v.get("chatSessionId").and_then(Value::as_str) != Some(sid) {
+        return None;
+    }
+    match event {
+        "chat:done" => Some(CrewRunTerminal {
+            status: "ok",
+            message: String::new(),
+        }),
+        "chat:error" => Some(CrewRunTerminal {
+            status: "error",
+            message: v
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("the run's turn failed")
+                .to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// Track the LAST terminal chat event for one crew-run session, so the
+/// release watcher can settle the history row with the turn's real outcome
+/// instead of assuming success: a first turn that errors mid-stream leaves
+/// the session idle with no other trace, and used to settle as "ok".
+///
+/// Listens on the same global `chat:done`/`chat:error` pair the hooks
+/// lifecycle rides (fired for every engine — built-in loop, harness, ACP),
+/// registered SYNCHRONOUSLY before the watcher task exists so a fast-failing
+/// first turn cannot slip in front of the listener. The caller moves the
+/// returned ids into the watcher, which unlistens when it settles. A session
+/// the user keeps chatting in simply updates the outcome — the row settles
+/// when the session finally goes quiet.
+pub(crate) fn arm_crew_run_outcome(
+    app: &AppHandle,
+    sid: &str,
+) -> (
+    Arc<Mutex<Option<CrewRunTerminal>>>,
+    Vec<tauri::EventId>,
+) {
+    use tauri::Listener;
+
+    let outcome: Arc<Mutex<Option<CrewRunTerminal>>> = Arc::new(Mutex::new(None));
+    let mut ids = Vec::with_capacity(2);
+    for event in ["chat:done", "chat:error"] {
+        let outcome = outcome.clone();
+        let sid = sid.to_string();
+        let name = event.to_string();
+        ids.push(app.listen_any(event, move |e| {
+            let payload = e.payload();
+            if let Some(terminal) = terminal_from_event(&name, payload, &sid) {
+                // Last-wins: the row settles when the session goes quiet, so
+                // the freshest terminal state is the truthful one.
+                *outcome.lock().unwrap() = Some(terminal);
+            }
+        }));
+    }
+    (outcome, ids)
+}
+
+/// The watcher's settle pass: map the tracked outcome (default "ok") onto
+/// the (status, summary) pair `finish_crew_run` takes.
+pub(crate) fn crew_run_settle_pair(
+    outcome: &Option<CrewRunTerminal>,
+) -> (&'static str, Option<String>) {
+    match outcome {
+        None => ("ok", None),
+        Some(t) if t.status == "error" => (
+            "error",
+            Some(crate::util::truncate_chars(&t.message, 240)),
+        ),
+        Some(_) => ("ok", None),
+    }
+}
+
+/// Drop the outcome listeners once the watcher has settled — after the
+/// settle pass they are pure noise on the global bus.
+fn release_outcome_listeners(app: &AppHandle, ids: Vec<tauri::EventId>) {
+    use tauri::Listener;
+    for id in ids {
+        app.unlisten(id);
     }
 }
 
@@ -1989,37 +2123,28 @@ pub async fn crew_spawn(
         }
     }
 
-    // Budgets: per-agent `max_concurrent`, then the app-wide crew ceiling.
-    // Counted from the live running set (see the slot release below).
-    let active_crew: i64 = crate::chat::crew::running_set()
-        .lock()
-        .values()
-        .sum();
-    if active_crew >= MAX_ACTIVE_CREW {
-        return Err(format!(
-            "{active_crew} crew runs are already active app-wide (cap {MAX_ACTIVE_CREW}) — \
-             wait for one to settle"
-        ));
-    }
-    {
-        let conn = db.0.lock();
-        let cap = if def.max_concurrent < 1 { 1 } else { def.max_concurrent };
-        let live = crate::chat::crew::live_runs(&def.id);
-        if live >= cap {
-            return Err(format!(
-                "crew agent \"{}\" already has {live} run(s) in flight (max_concurrent {cap})",
-                def.name
-            ));
-        }
-    }
+    // Budgets: per-agent `max_concurrent`, then the app-wide crew ceiling —
+    // checked AND acquired atomically (`try_acquire_running`), so two
+    // concurrent spawns can never both observe room left. Every failure path
+    // below the acquire releases the slot before returning.
+    crate::chat::crew::try_acquire_running(
+        &def.id,
+        &def.name,
+        def.max_concurrent.max(1),
+        MAX_ACTIVE_CREW,
+    )?;
 
     // Create the session row: the definition's engine/model/policies/effort,
     // linked by `agent_def_id`. `origin` stays NULL for a manual run (the
     // mesh caller sets `spawned_by:` itself after this core returns the row).
     let child = {
         let conn = db.0.lock();
-        let row = crate::db::create_chat_session(&conn, &provider, &model, project_id)
-            .map_err(|e| format!("could not create the crew run session: {e}"))?;
+        let row = crate::db::create_chat_session(&conn, &provider, &model, project_id).map_err(
+            |e| {
+                crate::chat::crew::bump_running(&def.id, -1);
+                format!("could not create the crew run session: {e}")
+            },
+        )?;
         let _ = crate::db::update_chat_session_agent(&conn, &row.id, Some(&engine));
         let title = crate::util::truncate_chars(
             task.split_whitespace().collect::<Vec<_>>().join(" ").as_str(),
@@ -2041,10 +2166,9 @@ pub async fn crew_spawn(
         row.id
     };
 
-    // Hold the concurrency slot for the first turn's lifetime; the release
-    // watcher drops it when the session goes idle (or at the ceiling), and
-    // settles the run-history row in the same pass.
-    crate::chat::crew::bump_running(&def.id, 1);
+    // The concurrency slot is already held (acquired above the row
+    // creation); the release watcher drops it when the session goes idle
+    // (or at the ceiling), and settles the run-history row in the same pass.
     let run_id = {
         let conn = db.0.lock();
         record_crew_run_start(
@@ -2058,6 +2182,9 @@ pub async fn crew_spawn(
             None,
         )
     };
+    // Terminal-outcome tracking, registered before the watcher exists so a
+    // fast-failing first turn cannot slip in front of the listener.
+    let (outcome, listener_ids) = arm_crew_run_outcome(app, &child);
     let slot_agent = def.id.clone();
     let slot_run = run_id.clone();
     let app_for_slot = app.clone();
@@ -2072,10 +2199,15 @@ pub async fn crew_spawn(
         }
         crate::chat::crew::bump_running(&slot_agent, -1);
         if let Some(run_id) = slot_run {
+            // The turn's real outcome (chat:done/chat:error), not an assumed
+            // "ok"; the guard inside finish_crew_run keeps the fail-fast
+            // path's already-recorded error final if it settled first.
+            let (status, summary) = crew_run_settle_pair(&outcome.lock().unwrap());
             let db = app_for_slot.state::<DbState>();
             let conn = db.0.lock();
-            crate::db::finish_crew_run(&conn, &run_id, "finished", None);
+            crate::db::finish_crew_run(&conn, &run_id, status, summary.as_deref());
         }
+        release_outcome_listeners(&app_for_slot, listener_ids);
     });
 
     // Worktree isolation when the definition asks for it. Non-git / unbound
@@ -2122,6 +2254,16 @@ pub async fn crew_spawn(
             .flatten()
             .and_then(|r| r.worktree_path)
     };
+    // The history row was written BEFORE provisioning existed to write a
+    // path — backfill it now that the outcome is known (Some = isolated,
+    // None = project root / provisioning refused), so the runs list's
+    // worktree column is not dead data.
+    if let Some(run_id) = &run_id {
+        if worktree_path.is_some() {
+            let conn = db.0.lock();
+            crate::db::set_crew_run_worktree(&conn, run_id, worktree_path.as_deref());
+        }
+    }
 
     let _ = app.emit(
         "chat:session-spawn",
@@ -2778,5 +2920,59 @@ mod tests {
         crate::chat::crew::bump_running("crew-sat-test", -1);
         crate::chat::crew::bump_running("crew-sat-test", -1);
         assert_eq!(crate::chat::crew::live_runs("crew-sat-test"), 0);
+    }
+
+    /// The outcome tracker rides the global `chat:done`/`chat:error` pair —
+    /// payload parsing must match those events' shapes exactly (camelCase
+    /// `chatSessionId`), ignore other sessions' events, and default sanely
+    /// on an odd payload (the watcher then settles "ok", never crashes).
+    #[test]
+    fn terminal_from_event_matches_only_the_runs_session() {
+        let done = r#"{"chatSessionId":"s1","usage":{"tokens":10}}"#;
+        let err = r#"{"chatSessionId":"s1","message":"provider exploded","code":null}"#;
+        // The run's own events resolve to their terminal statuses.
+        assert_eq!(
+            terminal_from_event("chat:done", done, "s1").map(|t| t.status),
+            Some("ok")
+        );
+        let terminal = terminal_from_event("chat:error", err, "s1").unwrap();
+        assert_eq!(terminal.status, "error");
+        assert_eq!(terminal.message, "provider exploded");
+        // Another session's events are ignored — last-wins must not leak
+        // across runs.
+        assert!(terminal_from_event("chat:done", done, "s2").is_none());
+        assert!(terminal_from_event("chat:error", err, "s2").is_none());
+        // Odd payloads degrade to no-signal (the watcher settles "ok"),
+        // never a panic: unparsable text, or an event without a session id.
+        assert!(terminal_from_event("chat:done", "not json", "s1").is_none());
+        assert!(terminal_from_event("chat:error", "{}", "s1").is_none());
+        // Unknown events carry no terminal meaning.
+        assert!(terminal_from_event("chat:status", done, "s1").is_none());
+    }
+
+    /// The watcher's settle mapping: no signal → "ok" (ordinary work), an
+    /// error terminal → "error" with the message as the row's summary, a
+    /// done terminal → "ok". This is what makes a mid-stream failure settle
+    /// as a failure instead of the assumed success the idle poll used to
+    /// write.
+    #[test]
+    fn crew_run_settle_pair_maps_terminal_outcomes() {
+        assert_eq!(crew_run_settle_pair(&None), ("ok", None));
+        assert_eq!(
+            crew_run_settle_pair(&Some(CrewRunTerminal {
+                status: "ok",
+                message: String::new(),
+            })),
+            ("ok", None)
+        );
+        let long = "x".repeat(600);
+        let (status, summary) = crew_run_settle_pair(&Some(CrewRunTerminal {
+            status: "error",
+            message: long.clone(),
+        }));
+        assert_eq!(status, "error");
+        let summary = summary.expect("errors carry their message as the summary");
+        assert!(summary.chars().count() <= 240, "summary is truncated");
+        assert!(long.starts_with(&summary), "truncation keeps the head");
     }
 }

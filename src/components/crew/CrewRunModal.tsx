@@ -17,6 +17,7 @@
 
 import { useEffect, useState } from "react";
 import { Modal } from "../common/Modal";
+import { CrewSelect } from "./CrewSelect";
 import { CREW_TIER_LABELS, crewEngineTier, type CrewAgent } from "../../lib/ipc";
 import { useCrewStore } from "../../state/crew";
 import { useProjectsStore } from "../../state/projects";
@@ -68,6 +69,7 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
 
   return (
     <Modal
+      className="crew-glass-modal"
       title={`Run ${agent.name}`}
       onClose={busy ? undefined : onClose}
       actions={
@@ -89,14 +91,13 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
       <div className="settings-section">
         <div className="settings-section-title">Task</div>
         <textarea
-          className="perm-pattern-input"
+          className="perm-pattern-input crew-modal-textarea"
           aria-label="Task"
           rows={6}
           value={task}
           disabled={busy}
           placeholder="Write the onboarding guide for the new settings panel."
           onChange={(e) => setTask(e.target.value)}
-          style={{ minWidth: 0, width: "100%" }}
         />
         <p className="settings-section-hint" style={{ marginTop: 6, marginBottom: 0 }}>
           The run opens as a normal chat — you can keep talking to it, and the
@@ -106,20 +107,16 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
 
       <div className="settings-section">
         <div className="settings-section-title">Project</div>
-        <select
-          className="perm-tool-select"
-          aria-label="Project"
+        <CrewSelect
+          ariaLabel="Project"
           value={projectId}
           disabled={busy}
-          onChange={(e) => setProjectId(e.target.value)}
-        >
-          <option value="">No project — run project-less</option>
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
+          options={[
+            { value: "", label: "No project — run project-less" },
+            ...projects.map((p) => ({ value: p.id, label: p.name })),
+          ]}
+          onChange={setProjectId}
+        />
         <p className="settings-section-hint" style={{ marginTop: 6, marginBottom: 0 }}>
           {agent.worktreePolicy === "always"
             ? "This agent always provisions its own git worktree, so the run won't touch your working tree."
@@ -129,10 +126,7 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
         </p>
       </div>
 
-      <label
-        className="settings-section"
-        style={{ display: "flex", alignItems: "center", gap: 8 }}
-      >
+      <label className="settings-section crew-modal-wait">
         <input
           type="checkbox"
           aria-label="Wait for the run to finish"
@@ -140,7 +134,7 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
           disabled={busy}
           onChange={(e) => setWait(e.target.checked)}
         />
-        <span className="settings-section-title" style={{ margin: 0 }}>
+        <span className="settings-section-title crew-modal-wait-title">
           Wait for the first turn to finish
         </span>
       </label>
@@ -149,11 +143,7 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
         land in the run when it starts.
       </p>
 
-      {error && (
-        <div className="settings-note" style={{ color: "var(--danger, #f85149)" }}>
-          {error}
-        </div>
-      )}
+      {error && <div className="settings-note crew-error">{error}</div>}
 
       <p className="settings-section-hint" style={{ marginBottom: 0 }}>
         {CREW_TIER_LABELS[tier].detail} Up to{" "}

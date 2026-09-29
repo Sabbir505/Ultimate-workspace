@@ -11,11 +11,10 @@
 //      `chat:session-spawn` already ingested (CrewRunsList).
 //
 // Layout note: the master-detail chrome Automations uses is scoped to that
-// view's own stylesheet and container queries, so this view brings its own
-// column with inline layout rather than borrowing class names that would
-// mis-trigger automations' responsive rules. Everything else — panel-head,
-// perm-card, perm-chip, empty-reserved — is the same vocabulary CrewPanel
-// already speaks, so no new CSS was needed.
+// view's own stylesheet and container queries, so this view has its own
+// stylesheet (styles/crew.css) with the same container contract — the
+// settings-panel classes this used to borrow are tuned to the narrow settings
+// column and broke at full width.
 
 import { useCallback, useEffect, useState } from "react";
 import { Users } from "lucide-react";
@@ -75,47 +74,27 @@ export function CrewView() {
   );
 
   return (
-    <div
-      className="crew-view"
-      style={{
-        flex: 1,
-        minHeight: 0,
-        minWidth: 0,
-        display: "flex",
-        flexDirection: "column",
-        gap: 18,
-        overflowY: "auto",
-        background: "var(--surface)",
-        color: "var(--text)",
-        // Clear the floating glass title bar, same as the automations view.
-        paddingTop: "var(--toolbar-h, 37px)",
-      }}
-    >
-      <div className="panel-head" style={{ padding: "14px 20px 0" }}>
-        <Users size={18} strokeWidth={1.8} aria-hidden="true" />
-        <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Crew</h1>
+    <div className="crew-view">
+      <div className="crew-header">
+        <Users size={18} strokeWidth={1.8} aria-hidden="true" className="crew-header-icon" />
+        <h1>Crew</h1>
         {agents.length > 0 && (
-          <span className="panel-count">
+          <span className="crew-header-badge">
             {agents.length} agent{agents.length === 1 ? "" : "s"}
           </span>
         )}
       </div>
 
-      {openError && (
-        <div
-          className="settings-note"
-          style={{ color: "var(--danger, #f85149)", padding: "0 20px" }}
-        >
-          {openError}
-        </div>
-      )}
+      <div className="crew-body">
+        {openError && <div className="crew-error settings-note">{openError}</div>}
 
-      <div style={{ padding: "0 20px" }}>
         <CrewPanel onRun={setRunTarget} />
-      </div>
 
-      <div style={{ padding: "0 20px 24px" }}>
-        <CrewRunsList agentName={agentName} onOpenSession={(id) => void openSession(id)} onRunAgent={setRunTarget} />
+        <CrewRunsList
+          agentName={agentName}
+          onOpenSession={(id) => void openSession(id)}
+          onRunAgent={setRunTarget}
+        />
       </div>
 
       {runTarget && (

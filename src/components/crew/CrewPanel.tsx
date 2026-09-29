@@ -18,16 +18,19 @@
 //    take effect under `workspace_write`, and spawn-capable tools are absent
 //    from `CREW_TOOL_OPTIONS` so depth stays 1.
 //
-// Visual language is HooksPanel's (settings-form / panel-head / perm-card /
-// perm-chip / perm-rule-row) and PermissionRulesPanel's chip picker — no new
-// stylesheet.
+// Visual language is the Crew view's own (styles/crew.css): full-page rows,
+// crew-chip toggles, and the shared Modal for the editor and the Run dialog.
 
 import { Pencil, Play, Plus, ShieldCheck, Trash2, Users } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { Modal } from "../common/Modal";
+import { CrewSelect } from "./CrewSelect";
 import {
   CREW_TIER_LABELS,
   CREW_TOOL_OPTIONS,
   crewEngineTier,
+  listHarnessModels,
+  scanLocalModels,
   type CrewAgent,
   type CrewAgentInput,
   type CrewToolOption,
@@ -154,15 +157,7 @@ function TierBadge({ engine }: { engine: string | null }) {
   const tier = crewEngineTier(engine);
   const copy = CREW_TIER_LABELS[tier];
   return (
-    <span
-      className="perm-chip"
-      title={copy.detail}
-      style={
-        tier === "enforced"
-          ? { color: "var(--accent)", borderColor: "var(--accent)", borderStyle: "solid" }
-          : undefined
-      }
-    >
+    <span className={`crew-chip${tier === "enforced" ? " enforced" : ""}`} title={copy.detail}>
       {copy.label}
     </span>
   );
@@ -185,20 +180,10 @@ function ToolChip({
   return (
     <button
       type="button"
-      className="perm-chip"
+      className="crew-chip"
       aria-pressed={on}
       disabled={disabled}
       title={`${tool.label} — ${tool.id}`}
-      style={
-        on
-          ? {
-              color: "var(--accent)",
-              background: "var(--accent-soft)",
-              borderColor: "var(--accent)",
-              borderStyle: "solid",
-            }
-          : undefined
-      }
       onClick={() => onToggle(tool.id)}
     >
       {tool.id}
@@ -223,13 +208,13 @@ function AgentRow({
   const tier = crewEngineTier(agent.engine);
   const toolCount = agent.tools === null ? null : agent.tools.length;
   return (
-    <div className="perm-rule-row" style={{ flexWrap: "wrap", alignItems: "flex-start" }}>
-      <span className="perm-rule-tool" style={{ minWidth: 0 }}>{agent.name}</span>
-      <span style={{ flex: 1, minWidth: 0 }}>
-        <span className="perm-rule-pattern">
+    <div className="crew-agent-row">
+      <span className="crew-agent-name">{agent.name}</span>
+      <span className="crew-agent-main">
+        <span className="crew-agent-desc">
           {agent.description || "(no description)"}
         </span>
-        <span style={{ display: "block", opacity: 0.7, marginTop: 4, fontSize: 12 }}>
+        <span className="crew-agent-meta">
           <TierBadge engine={agent.engine} />
           {tier === "advisory" && " CLI tools not restrictible"}
           {agent.builtin ? " · builtin" : " · " + (agent.engine || "inherits engine")}
@@ -239,6 +224,7 @@ function AgentRow({
           {` · ${agent.maxRounds} rounds`}
         </span>
       </span>
+      <span className="crew-agent-actions">
       {/* Run (Phase 2.5): the panel renders no run button until a caller
           passes `onRun`, so the settings surface stays registry-only. */}
       {onRun && (
@@ -265,8 +251,7 @@ function AgentRow({
       </button>
       <button
         type="button"
-        className="ghost"
-        style={{ color: "var(--danger, #f85149)" }}
+        className="ghost crew-danger"
         onClick={onDelete}
         disabled={busy || agent.builtin}
         title={agent.builtin ? BUILTIN_DELETE_HINT : "Delete this agent"}
@@ -274,6 +259,7 @@ function AgentRow({
       >
         <Trash2 size={16} />
       </button>
+      </span>
     </div>
   );
 }
@@ -310,6 +296,49 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
   const engineOptions = useMemo(() => {
     if (!form.engine || ENGINE_OPTIONS.some((o) => o.value === form.engine)) return ENGINE_OPTIONS;
     return [...ENGINE_OPTIONS, { value: form.engine, label: form.engine }];
+  }, [form.engine]);
+
+  // Model catalog for the chosen engine family — the same method the
+  // Subagent model panel uses: harnesses list their CLI's own catalog
+  // (listHarnessModels), local lists the sidecar folder (scanLocalModels).
+  // Inherit/builtin/ACP have no single catalog (builtin models are pinned
+  // per provider as `provider::model`), so those keep the free-text input.
+  const [modelOptions, setModelOptions] = useState<{ id: string; label: string }[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  useEffect(() => {
+    const fam = form.engine;
+    if (!fam || fam === "builtin" || fam.startsWith("acp:")) {
+      setModelOptions([]);
+      setModelsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setModelsLoading(true);
+    setModelOptions([]);
+    void (async () => {
+      try {
+        if (fam === "local") {
+          const list = await scanLocalModels();
+          if (!cancelled && list) {
+            setModelOptions(
+              [...new Set(list.map((m) => m.name || m.filename))].map((id) => ({ id, label: id })),
+            );
+          }
+        } else if (fam.startsWith("harness:")) {
+          const cfg = await listHarnessModels(fam.slice("harness:".length));
+          if (!cancelled && cfg) {
+            setModelOptions(cfg.models.map((m) => ({ id: m.id, label: m.label || m.id })));
+          }
+        }
+      } catch {
+        // Listing failed (CLI absent, probe raced) — the free-text input stays.
+      } finally {
+        if (!cancelled) setModelsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [form.engine]);
 
   const openCreate = () => {
@@ -361,14 +390,18 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
   };
 
   return (
-    <div className="settings-form">
-      <div className="panel-head">
-        <h3>Crew</h3>
+    <div className="crew-section">
+      <div className="crew-section-head">
+        <h3>Agents</h3>
+        <span className="crew-spacer" />
         {agents.length > 0 && (
           <span className="panel-count">
             {agents.length} agent{agents.length === 1 ? "" : "s"}
           </span>
         )}
+        <button className="primary" onClick={openCreate} type="button">
+          <Plus size={16} /> New agent
+        </button>
       </div>
 
       <div className="perm-card perm-info-card">
@@ -385,256 +418,247 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
         </div>
       </div>
 
-      {!editorOpen && (
-        <div className="perm-add-card">
-          <div className="perm-add-row">
-            <button className="primary" onClick={openCreate} type="button">
-              <Plus size={16} /> New agent
-            </button>
-          </div>
-        </div>
-      )}
-
-      {error && (
-        <div className="settings-note" style={{ color: "var(--danger, #f85149)" }}>
-          {error}
-        </div>
-      )}
+      {error && <div className="settings-note crew-error">{error}</div>}
 
       {editorOpen && (
-        <div className="perm-card">
-          <div className="settings-section-title" style={{ marginBottom: 8 }}>
-            {editingId ? `Edit ${editing?.name ?? "agent"}` : "New agent"}
-          </div>
-
-          <div className="settings-section">
-            <div className="settings-section-title">Name</div>
-            <input
-              className="perm-pattern-input"
-              type="text"
-              value={form.name}
-              aria-label="Agent name"
-              placeholder="doc-writer"
-              disabled={saving || !!editing?.builtin}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-            />
-            <p className="settings-section-hint" style={{ marginTop: 6, marginBottom: 0 }}>
-              {editing?.builtin
-                ? "Built-in roles keep their name — it's the Task tool's enum value."
-                : "Letters, digits and dashes. The Task tool refers to the agent by this name."}
-            </p>
-          </div>
-
-          <div className="settings-section">
-            <div className="settings-section-title">Description</div>
-            <input
-              className="perm-pattern-input"
-              type="text"
-              value={form.description}
-              aria-label="Agent description"
-              placeholder="Writes and polishes user documentation"
-              disabled={saving}
-              onChange={(e) => setForm({ ...form, description: e.target.value })}
-            />
-          </div>
-
-          <div className="settings-section">
-            <div className="settings-section-title">Prompt</div>
-            <textarea
-              className="perm-pattern-input mono"
-              rows={10}
-              value={form.promptMd}
-              aria-label="Agent prompt"
-              placeholder={"You are…\n\n- do this\n- never do that"}
-              disabled={saving}
-              onChange={(e) => setForm({ ...form, promptMd: e.target.value })}
-              style={{ minHeight: 180, minWidth: 0 }}
-            />
-            <p className="settings-section-hint" style={{ marginTop: 6, marginBottom: 0 }}>
-              The system prompt this agent runs under. Markdown is fine.
-            </p>
-          </div>
-
-          <div className="settings-section">
-            <div className="settings-section-title">
-              Tools{" "}
-              <span className="panel-count">
-                {inherited ? "engine default" : `${selected.length} selected`}
-              </span>
-            </div>
-            <div className="perm-chips" role="group" aria-label="Read-only tools">
-              {CREW_TOOL_OPTIONS.filter((t) => t.group === "read").map((t) => (
-                <ToolChip key={t.id} tool={t} selected={selected} disabled={saving} onToggle={toggleTool} />
-              ))}
-            </div>
-            <div className="settings-section-hint" style={{ margin: "8px 0 4px" }}>
-              Write tools — only granted under the workspace-write sandbox
-            </div>
-            <div className="perm-chips" role="group" aria-label="Write tools">
-              {CREW_TOOL_OPTIONS.filter((t) => t.group === "write").map((t) => (
-                <ToolChip key={t.id} tool={t} selected={selected} disabled={saving} onToggle={toggleTool} />
-              ))}
-            </div>
-            <div className="perm-chips">
-              <button
-                type="button"
-                className="perm-chip"
-                disabled={saving || inherited}
-                onClick={() => setForm({ ...form, tools: null })}
-              >
-                use engine default
+        <Modal
+          className="crew-editor-modal crew-glass-modal"
+          title={editingId ? `Edit ${editing?.name ?? "agent"}` : "New agent"}
+          onClose={saving ? undefined : closeEditor}
+          actions={
+            <>
+              <button className="ghost" onClick={closeEditor} disabled={saving} type="button">
+                Cancel
               </button>
               <button
-                type="button"
-                className="perm-chip"
-                disabled={saving || inherited || selected.length === 0}
-                onClick={() => setForm({ ...form, tools: [] })}
-              >
-                select none
-              </button>
-            </div>
-            <p className="settings-section-hint" style={{ marginTop: 6, marginBottom: 0 }}>
-              {inherited
-                ? "No explicit allowlist — the engine's own read-only default applies."
-                : "The allowlist is intersected with the engine's ceiling: write tools still need the workspace-write sandbox."}
-            </p>
-          </div>
-
-          <div className="settings-section">
-            <div className="settings-section-title">Engine &amp; model</div>
-            <div className="perm-add-row">
-              <select
-                className="perm-tool-select"
-                value={form.engine}
-                aria-label="Engine"
+                className="primary"
+                onClick={() => void handleSave()}
                 disabled={saving}
-                onChange={(e) => setForm({ ...form, engine: e.target.value })}
+                type="button"
               >
-                {engineOptions.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
+                {saving ? "Saving…" : "Save"}
+              </button>
+            </>
+          }
+        >
+          <div className="crew-editor-body">
+            <div className="settings-section">
+              <div className="settings-section-title">Name</div>
               <input
                 className="perm-pattern-input"
                 type="text"
-                value={form.model}
-                aria-label="Model"
-                placeholder="provider::model — e.g. openrouter::x-ai/grok-4"
+                value={form.name}
+                aria-label="Agent name"
+                placeholder="doc-writer"
+                disabled={saving || !!editing?.builtin}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+              />
+              <p className="settings-section-hint">
+                {editing?.builtin
+                  ? "Built-in roles keep their name — it's the Task tool's enum value."
+                  : "Letters, digits and dashes. The Task tool refers to the agent by this name."}
+              </p>
+            </div>
+
+            <div className="settings-section">
+              <div className="settings-section-title">Description</div>
+              <input
+                className="perm-pattern-input"
+                type="text"
+                value={form.description}
+                aria-label="Agent description"
+                placeholder="Writes and polishes user documentation"
                 disabled={saving}
-                onChange={(e) => setForm({ ...form, model: e.target.value })}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
               />
             </div>
-            <p className="settings-section-hint" style={{ marginTop: 6, marginBottom: 0 }}>
-              <TierBadge engine={form.engine || null} />{" "}
-              {CREW_TIER_LABELS[crewEngineTier(form.engine || null)].detail} Leave the model
-              blank to inherit, or write <span className="mono">provider::model</span> to pin one.
-            </p>
-          </div>
 
-          <div className="settings-section">
-            <div className="settings-section-title">Scope &amp; budget</div>
-            <div className="perm-add-row">
-              <select
-                className="perm-tool-select"
-                value={form.sandboxPolicy}
-                aria-label="Sandbox policy"
+            <div className="settings-section">
+              <div className="settings-section-title">Prompt</div>
+              <textarea
+                className="perm-pattern-input mono crew-editor-textarea"
+                rows={10}
+                value={form.promptMd}
+                aria-label="Agent prompt"
+                placeholder={"You are…\n\n- do this\n- never do that"}
                 disabled={saving}
-                onChange={(e) => setForm({ ...form, sandboxPolicy: e.target.value })}
-              >
-                {SANDBOX_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="perm-tool-select"
-                value={form.approvalPolicy}
-                aria-label="Approval policy"
-                disabled={saving}
-                onChange={(e) => setForm({ ...form, approvalPolicy: e.target.value })}
-              >
-                {APPROVAL_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="perm-tool-select"
-                value={form.worktreePolicy}
-                aria-label="Worktree policy"
-                disabled={saving}
-                onChange={(e) => setForm({ ...form, worktreePolicy: e.target.value })}
-              >
-                {WORKTREE_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(e) => setForm({ ...form, promptMd: e.target.value })}
+              />
+              <p className="settings-section-hint">
+                The system prompt this agent runs under. Markdown is fine.
+              </p>
             </div>
-            <div className="perm-add-row">
-              <label style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
-                <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={Number.isFinite(form.maxRounds) ? form.maxRounds : ""}
-                  aria-label="Max rounds"
+
+            <div className="settings-section">
+              <div className="settings-section-title">
+                Tools{" "}
+                <span className="panel-count">
+                  {inherited ? "engine default" : `${selected.length} selected`}
+                </span>
+              </div>
+              <div className="crew-chip-group" role="group" aria-label="Read-only tools">
+                {CREW_TOOL_OPTIONS.filter((t) => t.group === "read").map((t) => (
+                  <ToolChip key={t.id} tool={t} selected={selected} disabled={saving} onToggle={toggleTool} />
+                ))}
+              </div>
+            <div className="settings-section-hint">
+              Write tools — only granted under the workspace-write sandbox
+            </div>
+              <div className="crew-chip-group" role="group" aria-label="Write tools">
+                {CREW_TOOL_OPTIONS.filter((t) => t.group === "write").map((t) => (
+                  <ToolChip key={t.id} tool={t} selected={selected} disabled={saving} onToggle={toggleTool} />
+                ))}
+              </div>
+              <div className="crew-chip-group">
+                <button
+                  type="button"
+                  className="crew-chip"
+                  disabled={saving || inherited}
+                  onClick={() => setForm({ ...form, tools: null })}
+                >
+                  use engine default
+                </button>
+                <button
+                  type="button"
+                  className="crew-chip"
+                  disabled={saving || inherited || selected.length === 0}
+                  onClick={() => setForm({ ...form, tools: [] })}
+                >
+                  select none
+                </button>
+              </div>
+              <p className="settings-section-hint">
+                {inherited
+                  ? "No explicit allowlist — the engine's own read-only default applies."
+                  : "The allowlist is intersected with the engine's ceiling: write tools still need the workspace-write sandbox."}
+              </p>
+            </div>
+
+            <div className="settings-section">
+              <div className="settings-section-title">Engine &amp; model</div>
+            <div className="crew-editor-row">
+              <CrewSelect
+                ariaLabel="Engine"
+                value={form.engine}
+                options={engineOptions}
+                disabled={saving}
+                onChange={(v) => setForm((f) => ({ ...f, engine: v, model: "" }))}
+              />
+              {modelOptions.length > 0 && !modelsLoading ? (
+                <CrewSelect
+                  ariaLabel="Model"
+                  value={modelOptions.some((m) => m.id === form.model) ? form.model : ""}
+                  options={[
+                    { value: "", label: "Engine default model" },
+                    ...modelOptions.map((m) => ({ value: m.id, label: m.label })),
+                  ]}
                   disabled={saving}
-                  onChange={(e) => numField("maxRounds", e.target.value)}
+                  onChange={(v) => setForm((f) => ({ ...f, model: v }))}
                 />
-                rounds (1–100)
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+              ) : (
                 <input
-                  type="number"
-                  min={1}
-                  value={Number.isFinite(form.maxConcurrent) ? form.maxConcurrent : ""}
-                  aria-label="Max concurrent"
+                  className="perm-pattern-input"
+                  type="text"
+                  value={form.model}
+                  aria-label="Model"
+                  placeholder={
+                    modelsLoading
+                      ? "Loading models…"
+                      : "provider::model — e.g. openrouter::x-ai/grok-4"
+                  }
                   disabled={saving}
-                  onChange={(e) => numField("maxConcurrent", e.target.value)}
+                  onChange={(e) => setForm({ ...form, model: e.target.value })}
                 />
-                concurrent runs (1 or more)
-              </label>
+              )}
             </div>
-          </div>
-
-          {formError && (
-            <div className="settings-note" style={{ color: "var(--danger, #f85149)" }}>
-              {formError}
+              <p className="settings-section-hint">
+                <TierBadge engine={form.engine || null} />{" "}
+                {CREW_TIER_LABELS[crewEngineTier(form.engine || null)].detail} Leave the model
+                blank to inherit, or write <span className="mono">provider::model</span> to pin one.
+              </p>
             </div>
-          )}
 
-          <div className="perm-add-row">
-            <button className="primary" onClick={() => void handleSave()} disabled={saving} type="button">
-              {saving ? "Saving…" : "Save"}
-            </button>
-            <button className="ghost" onClick={closeEditor} disabled={saving} type="button">
-              Cancel
-            </button>
+            <div className="settings-section">
+              <div className="settings-section-title">Scope &amp; budget</div>
+              <div className="crew-editor-row">
+                <label className="crew-field">
+                  <span className="crew-field-label">Sandbox</span>
+                  <CrewSelect
+                    ariaLabel="Sandbox policy"
+                    value={form.sandboxPolicy}
+                    options={SANDBOX_OPTIONS}
+                    disabled={saving}
+                    onChange={(v) => setForm((f) => ({ ...f, sandboxPolicy: v }))}
+                  />
+                </label>
+                <label className="crew-field">
+                  <span className="crew-field-label">Approvals</span>
+                  <CrewSelect
+                    ariaLabel="Approval policy"
+                    value={form.approvalPolicy}
+                    options={APPROVAL_OPTIONS}
+                    disabled={saving}
+                    onChange={(v) => setForm((f) => ({ ...f, approvalPolicy: v }))}
+                  />
+                </label>
+                <label className="crew-field">
+                  <span className="crew-field-label">Worktree</span>
+                  <CrewSelect
+                    ariaLabel="Worktree policy"
+                    value={form.worktreePolicy}
+                    options={WORKTREE_OPTIONS}
+                    disabled={saving}
+                    onChange={(v) => setForm((f) => ({ ...f, worktreePolicy: v }))}
+                  />
+                </label>
+              </div>
+              <div className="crew-editor-row">
+                <label className="crew-field">
+                  <span className="crew-field-label">Max rounds (1–100)</span>
+                  <input
+                    className="crew-field-input"
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={Number.isFinite(form.maxRounds) ? form.maxRounds : ""}
+                    aria-label="Max rounds"
+                    disabled={saving}
+                    onChange={(e) => numField("maxRounds", e.target.value)}
+                  />
+                </label>
+                <label className="crew-field">
+                  <span className="crew-field-label">Concurrent runs (1 or more)</span>
+                  <input
+                    className="crew-field-input"
+                    type="number"
+                    min={1}
+                    value={Number.isFinite(form.maxConcurrent) ? form.maxConcurrent : ""}
+                    aria-label="Max concurrent"
+                    disabled={saving}
+                    onChange={(e) => numField("maxConcurrent", e.target.value)}
+                  />
+                </label>
+              </div>
+            </div>
+
+            {formError && <p className="crew-error">{formError}</p>}
           </div>
-        </div>
+        </Modal>
       )}
 
       {!loaded ? (
-        <div className="empty-reserved">
-          <div className="empty-text">Loading agents…</div>
-        </div>
+        <div className="crew-empty">Loading agents…</div>
       ) : agents.length === 0 ? (
-        <div className="empty-reserved">
-          <Users className="empty-icon" size={22} />
-          <div className="empty-text">
+        <div className="crew-empty">
+          <Users size={22} />
+          <div>
             No crew agents yet. Add one above — a named prompt with its own tool
             allowlist and permission scope, ready to hand to the Task tool or run on
             its own.
           </div>
         </div>
       ) : (
-        <div className="perm-rules-list">
+        <div className="crew-agent-list">
           {agents.map((a) => (
             <AgentRow
               key={a.id}

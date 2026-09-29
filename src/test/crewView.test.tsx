@@ -218,12 +218,11 @@ describe("CrewView run modal", () => {
   it("offers a project picker and a wait/background toggle", () => {
     render(<CrewView />);
     fireEvent.click(screen.getByLabelText("Run doc-writer"));
-    const project = screen.getByLabelText("Project") as HTMLSelectElement;
-    expect(within(project).getAllByRole("option").map((o) => o.textContent)).toEqual([
-      "No project — run project-less",
-      "Relay",
-      "Site",
-    ]);
+    // The project picker is a CrewSelect: the option list exists while open.
+    fireEvent.click(screen.getByLabelText("Project"));
+    expect(
+      screen.getAllByRole("option").map((o) => o.textContent?.replace("✓", "").trim()),
+    ).toEqual(["No project — run project-less", "Relay", "Site"]);
     expect(screen.getByLabelText("Wait for the first turn to finish")).toBeTruthy();
   });
 
@@ -231,7 +230,8 @@ describe("CrewView run modal", () => {
     render(<CrewView />);
     fireEvent.click(screen.getByLabelText("Run doc-writer"));
     fireEvent.change(screen.getByLabelText("Task"), { target: { value: "  Write the README  " } });
-    fireEvent.change(screen.getByLabelText("Project"), { target: { value: "proj-2" } });
+    fireEvent.click(screen.getByLabelText("Project"));
+    fireEvent.click(await screen.findByRole("option", { name: "Site" }));
     fireEvent.click(screen.getByLabelText("Wait for the first turn to finish"));
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
 

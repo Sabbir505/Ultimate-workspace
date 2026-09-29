@@ -119,9 +119,9 @@ describe("CrewPanel", () => {
       agent({ id: "agent-3", name: "local-runner", engine: "local" }),
     ];
     render(<CrewPanel />);
-    const builtinRow = (await screen.findByText("doc-writer")).closest(".perm-rule-row")!;
-    const harnessRow = (await screen.findByText("claude-runner")).closest(".perm-rule-row")!;
-    const localRow = (await screen.findByText("local-runner")).closest(".perm-rule-row")!;
+    const builtinRow = (await screen.findByText("doc-writer")).closest(".crew-agent-row")!;
+    const harnessRow = (await screen.findByText("claude-runner")).closest(".crew-agent-row")!;
+    const localRow = (await screen.findByText("local-runner")).closest(".crew-agent-row")!;
     expect(builtinRow.textContent).toContain("enforced");
     expect(harnessRow.textContent).toContain("advisory");
     expect(harnessRow.textContent).toContain("CLI tools not restrictible");
@@ -147,12 +147,22 @@ describe("CrewPanel", () => {
       target: { value: "You review code." },
     });
     fireEvent.click(screen.getByRole("button", { name: "read_file" }));
-    fireEvent.change(screen.getByLabelText("Engine"), { target: { value: "harness:claude_code" } });
-    fireEvent.change(screen.getByLabelText("Model"), {
+    // The Engine picker is the custom CrewSelect: open the menu, click the
+    // option (a change event can't drive a button).
+    fireEvent.click(screen.getByLabelText("Engine"));
+    fireEvent.click(await screen.findByRole("option", { name: "Claude Code (harness)" }));
+    // The harness model probe finds nothing under jsdom (no Tauri runtime), so
+    // the model control falls back to the free-text input once loading settles.
+    const modelField = await screen.findByLabelText("Model");
+    await waitFor(() => expect((modelField as HTMLInputElement).disabled).toBe(false));
+    fireEvent.change(modelField, {
       target: { value: "openrouter::x-ai/grok-4" },
     });
-    fireEvent.change(screen.getByLabelText("Approval policy"), { target: { value: "auto_edit" } });
-    fireEvent.change(screen.getByLabelText("Worktree policy"), { target: { value: "always" } });
+    // Scope & budget are CrewSelects too: open the menu, click the option.
+    fireEvent.click(screen.getByLabelText("Approval policy"));
+    fireEvent.click(await screen.findByRole("option", { name: "Auto-approve edits" }));
+    fireEvent.click(screen.getByLabelText("Worktree policy"));
+    fireEvent.click(await screen.findByRole("option", { name: "Always provision a worktree" }));
     fireEvent.change(screen.getByLabelText("Max rounds"), { target: { value: "12" } });
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));

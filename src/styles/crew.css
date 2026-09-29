@@ -1,0 +1,509 @@
+/* crew — Crew view (full-page: registry + runs + run modal), agent rows,
+   run rows, tier/status chips. Sits next to automations.css as a sibling
+   full-page view: same view container contract (toolbar-h clearance,
+   container queries so the tool side-panel shrinking is visible to the
+   responsive rules), same surface/border/text tokens, but its own class
+   namespace — the settings-panel classes the components borrowed
+   (perm-rule-row etc.) are tuned to the narrow settings column and broke
+   at full width. Split into its own stylesheet (2026-09-29). */
+
+/* ── View container (full-page swap, same slot as Automations/Vault) ── */
+.crew-view {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  color: var(--text);
+  /* Clear the floating glass title bar, same as the automations view. */
+  padding-top: var(--toolbar-h, 37px);
+  /* Container queries (not media queries): the tool side-panel shares a flex
+     row with this view, so the real width shrinks when it opens. */
+  container-type: inline-size;
+  container-name: crew-view;
+}
+
+.crew-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.crew-header h1 {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0;
+}
+.crew-header-icon {
+  color: var(--text-dim);
+}
+.crew-header-badge {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  padding: 2px 10px;
+}
+
+/* Scrollable content column: the registry panel, then run history. */
+.crew-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 16px 20px 24px;
+}
+
+.crew-error {
+  margin: 0;
+  color: var(--danger, #f85149);
+}
+
+/* ── Section shells (registry panel, runs list) ── */
+.crew-section {
+  background: var(--bg-elevated, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.crew-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.crew-section-head h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.crew-section-head .crew-spacer {
+  flex: 1;
+}
+.crew-section-head .panel-count {
+  margin-right: 4px;
+}
+
+/* ── Agent rows (registry list) ── */
+.crew-agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.crew-agent-row {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.crew-agent-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+.crew-agent-name {
+  font-weight: 600;
+  font-size: 13px;
+  min-width: 0;
+  word-break: break-word;
+}
+.crew-agent-main {
+  flex: 1;
+  min-width: 0;
+}
+.crew-agent-desc {
+  display: block;
+  font-size: 13px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.crew-agent-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+.crew-agent-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* ── Chips: tier, status, origin ── */
+.crew-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 100px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.crew-chip.enforced {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.crew-chip.status-ok {
+  color: var(--green, #4caf7d);
+  border-color: color-mix(in srgb, var(--green, #4caf7d) 45%, transparent);
+}
+.crew-chip.status-running {
+  color: var(--blue, #2196f3);
+  border-color: color-mix(in srgb, var(--blue, #2196f3) 45%, transparent);
+}
+.crew-chip.status-error {
+  color: var(--red, #ff6b6b);
+  border-color: color-mix(in srgb, var(--red, #ff6b6b) 45%, transparent);
+}
+.crew-chip.status-cancelled,
+.crew-chip.status-finished {
+  color: var(--text-dim);
+}
+.crew-chip.origin-agent {
+  font-style: italic;
+}
+
+/* ── Run rows (history list) ── */
+.crew-run-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.crew-run-row {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.crew-run-agent {
+  font-weight: 600;
+  font-size: 13px;
+  min-width: 0;
+  word-break: break-word;
+}
+.crew-run-main {
+  flex: 1;
+  min-width: 0;
+}
+.crew-run-task {
+  display: block;
+  font-size: 13px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.crew-run-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+.crew-run-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* ── Empty / loading states ── */
+.crew-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 16px;
+  color: var(--text-dim);
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.crew-empty svg {
+  opacity: 0.6;
+}
+
+/* ── Run modal ── */
+.crew-modal-wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.crew-modal-wait-title {
+  margin: 0;
+}
+.crew-modal-textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+}
+
+/* ── Editor modal (CrewPanel form) ── */
+/* The base <button> is an inline-block, so an SVG child sits on the text
+   baseline and sags next to its label ("+ New agent"). Flex every crew-view
+   button; the editor modal portals to <body> (outside .crew-view), so it
+   brings its own copy of the rule. */
+.crew-view button,
+.crew-glass-modal button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.crew-view .crew-danger,
+.crew-glass-modal .crew-danger {
+  color: var(--danger, #f85149);
+}
+.crew-view .crew-danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger, #f85149) 55%, transparent);
+  background: color-mix(in srgb, var(--danger, #f85149) 12%, transparent);
+}
+
+/* ── Glass modal chrome (the editor and the Run dialog) ──
+   Same liquid-glass recipe as .modal-artifacts (views.css): translucent
+   gradient + heavy frost, so the dimmed app — and the wallpaper — behind the
+   dialog reads as blurred shapes. The borrowed settings-section blocks get
+   card shells so the fields read against the frost; their 24px settings-page
+   margin dies here, the body gap owns the rhythm. */
+.modal.crew-glass-modal {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border-radius: 16px;
+  box-shadow: var(--glass-rim), var(--glass-drop);
+}
+:root[data-theme="light"] .modal.crew-glass-modal {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
+}
+.modal.crew-glass-modal h3 {
+  font-size: 15px;
+}
+.modal.crew-glass-modal .actions {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.modal.crew-glass-modal .settings-section {
+  margin-bottom: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-glass) 35%, transparent);
+}
+.modal.crew-glass-modal input,
+.modal.crew-glass-modal textarea,
+.modal.crew-glass-modal select {
+  background-color: color-mix(in srgb, var(--surface) 72%, transparent);
+}
+
+/* Wider than the default .modal (440px) — this form holds three selects side
+   by side and a tall prompt box. The body column scrolls so a long form never
+   overflows the viewport; the gap is the spacing between fields. */
+.modal.crew-editor-modal {
+  width: min(780px, 94vw);
+  max-height: min(86vh, 880px);
+}
+.crew-editor-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+/* Inside the editor every section is a flex column with an even gap — the
+   settings page's block flow stacked the chip rows and the scope rows flat
+   against each other. The title's own margin dies; the gap owns the rhythm. */
+.crew-editor-body .settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.crew-editor-body .settings-section .settings-section-title {
+  margin-bottom: 0;
+}
+
+/* ── CrewSelect (engine + model pickers) ──
+   Native <select> popups are OS-drawn and can't wear the app's skin, so these
+   two pickers are a button + portaled glass menu (styles below render the
+   menu; the component portals it above .modal-overlay's z-index). */
+.crew-select {
+  position: relative;
+  flex: 1;
+  min-width: 180px;
+}
+.crew-select .crew-select-btn {
+  width: 100%;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+}
+.crew-select-caret {
+  font-size: 10px;
+  opacity: 0.6;
+}
+.crew-select-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crew-select-menu {
+  position: fixed;
+  /* Above .modal-overlay (60) — the menu portals to <body> so the modal's
+     scroll body and backdrop root can't clip it. */
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-glass);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  box-shadow: var(--glass-rim), var(--glass-drop);
+  animation: modal-in 0.16s var(--ease);
+}
+.crew-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+}
+.crew-select-option:hover {
+  background: var(--surface-glass-2);
+}
+.crew-select-option.selected {
+  color: var(--accent);
+}
+.crew-select-option span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crew-select-check {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.crew-editor-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.crew-editor-row > * {
+  flex: 1;
+  min-width: 160px;
+}
+.crew-editor-textarea {
+  min-height: 180px;
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+}
+/* A labeled field: small caps caption over the control, so "Read only" says
+   WHAT it's read-only about and the number boxes read without trailing text. */
+.crew-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+  min-width: 170px;
+}
+.crew-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.crew-field .crew-field-input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+/* The native spinner ticker reads as OS chrome inside a styled form. Arrow
+   keys and typing still step the value — only the buttons are hidden. */
+.crew-field .crew-field-input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.crew-field .crew-field-input[type="number"]::-webkit-outer-spin-button,
+.crew-field .crew-field-input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.crew-chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.crew-chip-group .crew-chip {
+  cursor: pointer;
+}
+.crew-chip-group .crew-chip[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.crew-chip-group .crew-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Narrow containers: stack the row action groups under the content ── */
+@container crew-view (max-width: 560px) {
+  .crew-agent-actions,
+  .crew-run-actions {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-end;
+  }
+}

@@ -49,6 +49,7 @@ import {
   type GgufModel,
 } from "../../lib/ipc";
 import { useAutomationsStore } from "../../state/automations";
+import { ToolbarHeader } from "../common/ToolbarHeader";
 import { useCrewStore } from "../../state/crew";
 import { useProjectsStore } from "../../state/projects";
 import { useSettingsStore } from "../../state/settings";
@@ -293,42 +294,48 @@ export function AutomationsView() {
 
   return (
     <div className="automations-view">
-      {/* Header */}
-      <div className="automations-header">
-        <div className="automations-header-left">
-          <CalendarClock size={20} strokeWidth={1.8} />
-          <h1>Automations</h1>
-          {loaded && automations.length > 0 && (
-            <span className="automations-header-metrics">
-              <span className="automations-header-badge">
-                <strong>{automations.length}</strong> total
-              </span>
-              <span className="automations-header-badge">
-                <strong>{activeCount}</strong> active
-              </span>
-              <span className="automations-header-badge healthy">
-                <strong>{healthyCount}</strong> healthy
-              </span>
-              {failingCount > 0 && (
-                <span className="automations-header-badge failing">
-                  <strong>{failingCount}</strong> failing
+      {/* Header — rides in the window title bar, not above the page, so the
+          metrics sit beside the window controls instead of burning a second
+          bar (see common/ToolbarHeader). The left group is a drag region like
+          any other dead caption space; the right group's controls stay
+          clickable. */}
+      <ToolbarHeader>
+        <div className="automations-header">
+          <div className="automations-header-left" data-tauri-drag-region="">
+            <CalendarClock size={20} strokeWidth={1.8} />
+            <h1>Automations</h1>
+            {loaded && automations.length > 0 && (
+              <span className="automations-header-metrics">
+                <span className="automations-header-badge">
+                  <strong>{automations.length}</strong> total
                 </span>
-              )}
-            </span>
-          )}
+                <span className="automations-header-badge">
+                  <strong>{activeCount}</strong> active
+                </span>
+                <span className="automations-header-badge healthy">
+                  <strong>{healthyCount}</strong> healthy
+                </span>
+                {failingCount > 0 && (
+                  <span className="automations-header-badge failing">
+                    <strong>{failingCount}</strong> failing
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+          <div className="automations-header-right">
+            <RunWhileClosedToggle />
+            <NotifySettingsButton />
+            <button
+              className="automations-btn ghost"
+              onClick={() => { void load(); }}
+              title="Refresh"
+            >
+              <RefreshCw size={14} strokeWidth={2} />
+            </button>
+          </div>
         </div>
-        <div className="automations-header-right">
-          <RunWhileClosedToggle />
-          <NotifySettingsButton />
-          <button
-            className="automations-btn ghost"
-            onClick={() => { void load(); }}
-            title="Refresh"
-          >
-            <RefreshCw size={14} strokeWidth={2} />
-          </button>
-        </div>
-      </div>
+      </ToolbarHeader>
 
       {/* Body */}
       {loaded && automations.length === 0 && !showNewForm ? (

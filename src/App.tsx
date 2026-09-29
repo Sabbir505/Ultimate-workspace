@@ -30,6 +30,7 @@ import { ProjectsSidebar } from "./components/sidebar/ProjectsSidebar";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { AppLogo } from "./components/common/AppLogo";
 import { NotificationBell } from "./components/common/NotificationBell";
+import { TOOLBAR_SLOT_ID } from "./components/common/ToolbarHeader";
 import { ModelDownloadIndicator } from "./components/settings/ModelDownloadIndicator";
 import { ChatView } from "./components/chat/ChatView";
 import { TtsPlayerBar } from "./components/chat/TtsPlayerBar";
@@ -412,6 +413,15 @@ export default function App() {
           )}
           <ModelDownloadIndicator />
           <span className="spacer" data-tauri-drag-region="" />
+          {/* Landing pad for the full-page views' own header chrome —
+              Automations / Crew / Vault portal their header row in here (see
+              common/ToolbarHeader), so the caption IS their header instead of
+              a second bar stacked above one. It sits AFTER the spacer so a
+              portaled header's own left/right groups span the full caption and
+              its actions land just inside the window controls; the spacer
+              collapses while it's occupied (see shell.css). Empty on the chat
+              view, where the title above plays the same role. */}
+          <div className="toolbar-view-slot" id={TOOLBAR_SLOT_ID} data-tauri-drag-region="" />
           {/* Notification bell — the durable record behind the title bar.
               Sits just before the side-panel toggle (the rightmost icon). */}
           <NotificationBell />

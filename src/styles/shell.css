@@ -312,6 +312,95 @@
   flex: 1;
 }
 
+/* ---- Full-page view headers, portaled into the caption ----
+   Automations / Crew / Vault each used to spend a row of their own on a
+   header underneath the title bar. They now render that same markup into
+   .toolbar-view-slot (components/common/ToolbarHeader), so the window frame
+   owns where it sits and the view owns what it says.
+
+   Everything scoped to `.toolbar` here is a COMPACTION: the caption's
+   content box is 28px (the window-control buttons set its height, and
+   --toolbar-h is derived from it), so a portaled header that keeps its page
+   padding would grow the bar past --toolbar-h and the view content below it
+   would stop clearing the title bar. */
+.toolbar-view-slot {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+/* Nothing portaled (the chat view) — the slot must not eat a flex share or
+   leave a flex gap behind. */
+.toolbar-view-slot:empty {
+  display: none;
+}
+/* The portaled header brings its own left AND right groups and stretches
+   between them, so the chat spacer would split the free space down the middle
+   and indent the header off the caption's left edge. Give the width to the
+   header instead; the spacer returns when the slot goes empty. */
+.toolbar:has(.toolbar-view-slot > *) .spacer {
+  flex: 0 0 auto;
+}
+/* Page-header treatment → title-bar treatment: no vertical padding, no
+   wrapping (there is no second row to wrap onto), no bottom rule (the
+   toolbar already has one). */
+.toolbar .automations-header,
+.toolbar .crew-header,
+.toolbar .vault-header {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: nowrap;
+  padding: 0;
+  border-bottom: none;
+}
+.toolbar .automations-header-left,
+.toolbar .vault-header-left {
+  min-width: 0;
+}
+.toolbar .automations-header-left h1 {
+  white-space: nowrap;
+}
+/* Title-bar scale, not page scale. The vault's name is a 14px caption label
+   (.vault-title), so the other two headers match it instead of bringing their
+   page-size 18px h1 into a 28px bar — where it was also the tallest thing in
+   the caption and set the bar's height. The page rules are untouched; this
+   only applies inside the toolbar. */
+.toolbar .automations-header-left h1,
+.toolbar .crew-header h1 {
+  font-size: 14px;
+  font-weight: 650;
+}
+/* Icon follows the label down, so it reads as a mark next to the text rather
+   than a glyph that outweighs it. */
+.toolbar .automations-header-left > svg {
+  width: 16px;
+  height: 16px;
+}
+.toolbar .crew-header-icon {
+  width: 16px;
+  height: 16px;
+}
+/* The automations controls are sized for a page row (7px padding, 12.5px
+   text → ~31px). At title-bar scale they become plain icon buttons. */
+.toolbar .automations-btn {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+/* Metrics chips are a summary, and they're the first thing to cost more room
+   than the caption has. Below full width drop the informational counts and
+   keep only the one that asks for action; below that, the title and the
+   controls alone. */
+@media (max-width: 1200px) {
+  .toolbar .automations-header-metrics .automations-header-badge:not(.failing) {
+    display: none;
+  }
+}
+@media (max-width: 1040px) {
+  .toolbar .automations-header-metrics {
+    display: none;
+  }
+}
+
 /* ---- Title-bar integration (decorations:false) ---- */
 /* The toolbar doubles as the window title bar. The app-name label marks the
    title bar's origin like a native caption; drag regions live on the

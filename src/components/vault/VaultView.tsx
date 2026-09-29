@@ -45,6 +45,7 @@ import {
   X,
 } from "lucide-react";
 import { PanelIcon } from "../common/PanelIcon";
+import { ToolbarHeader } from "../common/ToolbarHeader";
 import { open as pickFolder, open as pickFile } from "@tauri-apps/plugin-dialog";
 import type { EditorView } from "@codemirror/view";
 import { redo, undo } from "@codemirror/commands";
@@ -653,42 +654,48 @@ export function VaultView() {
 
   return (
     <div className="vault-view">
-      <header className="vault-header">
-        <div className="vault-header-left">
-          <span className="vault-title" title={root}>{vaultName}</span>
-          {stats ? (
-            <span className="vault-stats-chip">
-              {stats.notes} notes · {stats.links} links{stats.unresolved > 0 ? ` · ${stats.unresolved} unresolved` : ""}
-            </span>
-          ) : null}
-        </div>
-        <div className="vault-header-actions">
-          <button title="New note (vault root)" onClick={() => void createNote("Untitled.md")}>
-            <FilePlus2 size={14} />
-          </button>
-          <button title="New folder (vault root)" onClick={() => void createFolder("New folder")}>
-            <FolderPlus size={14} />
-          </button>
-          <button title="Quick switcher (Ctrl+P)" onClick={() => setSwitcherOpen(true)}>
-            <Search size={14} />
-          </button>
-          <button
-            className={graphOpen ? "active" : ""}
-            title="Graph view"
-            onClick={() => setGraphOpen(!graphOpen)}
-          >
-            <Network size={14} />
-          </button>
-          <button title="Rebuild index" onClick={() => void rescan()}>
-            <RefreshCw size={14} />
-          </button>
-          {/* Change vault replaces unbind-and-rebind — one obvious action
-              for "this is the wrong folder". */}
-          <button title="Change vault folder…" onClick={() => void changeVault()}>
-            <FolderInput size={14} />
-          </button>
-        </div>
-      </header>
+      {/* Header — rides in the window title bar, not above the page (see
+          common/ToolbarHeader), so the vault name and the file actions sit
+          beside the window controls. The name is a drag region; the actions
+          stay clickable. */}
+      <ToolbarHeader>
+        <header className="vault-header">
+          <div className="vault-header-left" data-tauri-drag-region="">
+            <span className="vault-title" title={root}>{vaultName}</span>
+            {stats ? (
+              <span className="vault-stats-chip">
+                {stats.notes} notes · {stats.links} links{stats.unresolved > 0 ? ` · ${stats.unresolved} unresolved` : ""}
+              </span>
+            ) : null}
+          </div>
+          <div className="vault-header-actions">
+            <button title="New note (vault root)" onClick={() => void createNote("Untitled.md")}>
+              <FilePlus2 size={14} />
+            </button>
+            <button title="New folder (vault root)" onClick={() => void createFolder("New folder")}>
+              <FolderPlus size={14} />
+            </button>
+            <button title="Quick switcher (Ctrl+P)" onClick={() => setSwitcherOpen(true)}>
+              <Search size={14} />
+            </button>
+            <button
+              className={graphOpen ? "active" : ""}
+              title="Graph view"
+              onClick={() => setGraphOpen(!graphOpen)}
+            >
+              <Network size={14} />
+            </button>
+            <button title="Rebuild index" onClick={() => void rescan()}>
+              <RefreshCw size={14} />
+            </button>
+            {/* Change vault replaces unbind-and-rebind — one obvious action
+                for "this is the wrong folder". */}
+            <button title="Change vault folder…" onClick={() => void changeVault()}>
+              <FolderInput size={14} />
+            </button>
+          </div>
+        </header>
+      </ToolbarHeader>
 
       <div className={`vault-body${resizing ? " resizing" : ""}`}>
         <aside

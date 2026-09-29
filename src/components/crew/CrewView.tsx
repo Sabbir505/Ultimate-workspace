@@ -25,6 +25,7 @@ import { useChatStore } from "../../state/chat";
 import { CrewPanel } from "./CrewPanel";
 import { CrewRunModal } from "./CrewRunModal";
 import { CrewRunsList } from "./CrewRunsList";
+import { ToolbarHeader } from "../common/ToolbarHeader";
 
 export function CrewView() {
   const agents = useCrewStore((s) => s.agents);
@@ -75,15 +76,19 @@ export function CrewView() {
 
   return (
     <div className="crew-view">
-      <div className="crew-header">
-        <Users size={18} strokeWidth={1.8} aria-hidden="true" className="crew-header-icon" />
-        <h1>Crew</h1>
-        {agents.length > 0 && (
-          <span className="crew-header-badge">
-            {agents.length} agent{agents.length === 1 ? "" : "s"}
-          </span>
-        )}
-      </div>
+      {/* The header rides in the window title bar, not above the page — see
+          common/ToolbarHeader. The registry below keeps the full column. */}
+      <ToolbarHeader>
+        <div className="crew-header" data-tauri-drag-region="">
+          <Users size={18} strokeWidth={1.8} aria-hidden="true" className="crew-header-icon" />
+          <h1>Crew</h1>
+          {agents.length > 0 && (
+            <span className="crew-header-badge">
+              {agents.length} agent{agents.length === 1 ? "" : "s"}
+            </span>
+          )}
+        </div>
+      </ToolbarHeader>
 
       <div className="crew-body">
         {openError && <div className="crew-error settings-note">{openError}</div>}

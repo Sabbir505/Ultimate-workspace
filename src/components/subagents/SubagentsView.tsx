@@ -23,6 +23,7 @@ import { useSubagentStore } from "../../state/subagents";
 import { useUiStore } from "../../state/ui";
 import { useChatStore } from "../../state/chat";
 import { SubagentsPanel } from "./SubagentsPanel";
+import { NativeSubagents } from "./NativeSubagents";
 import { SubagentRunModal } from "./SubagentRunModal";
 import { SubagentRunsList } from "./SubagentRunsList";
 import { ToolbarHeader } from "../common/ToolbarHeader";
@@ -94,6 +95,11 @@ export function SubagentsView() {
         {openError && <div className="subagent-error settings-note">{openError}</div>}
 
         <SubagentsPanel onRun={setRunTarget} />
+
+        {/* The harnesses' own subagent stores, with one-click import into the
+            registry above. SubagentsView only — Settings keeps that panel
+            registry-only, the same way it omits `onRun`. */}
+        <NativeSubagents />
 
         <SubagentRunsList
           agentName={agentName}

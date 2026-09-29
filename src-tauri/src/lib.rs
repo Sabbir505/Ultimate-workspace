@@ -806,6 +806,7 @@ pub fn run() {
             commands::agent_cmds::cancel_agent_chat_message,
             commands::agent_cmds::reconcile_agent_sessions,
             commands::agent_cmds::list_harness_models,
+            commands::agent_cmds::list_harness_subagents,
             commands::agent_cmds::list_acp_agents,
             commands::agent_cmds::chat_token_subscribe,
             commands::chat_cmds::resolve_tool_action,

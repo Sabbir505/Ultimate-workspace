@@ -219,6 +219,63 @@ pub(crate) fn harness_models_cache_get(
     }
 }
 
+/// Warm results of the native-subagent store walks (see
+/// `list_harness_subagents`), keyed by "harness_id|project_root" — 30s TTL.
+type HarnessSubagentsCache = std::sync::Mutex<
+    HashMap<String, (Instant, Vec<crate::harness_config::HarnessSubagentInfo>)>,
+>;
+const HARNESS_SUBAGENTS_TTL: Duration = Duration::from_secs(30);
+static HARNESS_SUBAGENTS_CACHE: Lazy<HarnessSubagentsCache> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// The subagents defined in a CLI harness's OWN markdown store
+/// (`~/.claude/agents/*.md` etc. — the per-id directories live in
+/// harness_config.rs). The Subagents page lists these per harness and imports
+/// a row into Relay's registry with one click.
+///
+/// Same shape as `list_harness_models`: the walk is blocking filesystem I/O,
+/// so it runs on a worker thread (a sync command runs on the MAIN thread and
+/// would freeze the window mid-expand) behind a 30s TTL cache keyed by
+/// harness id + project_root. Empty results are NOT cached — most stores
+/// legitimately don't exist yet (omp only materializes its bundled agents on
+/// `omp agents unpack`), and caching that emptiness would hide the rows the
+/// moment after the user creates them.
+#[tauri::command]
+pub async fn list_harness_subagents(
+    harness_id: String,
+    project_root: Option<String>,
+) -> Result<Vec<crate::harness_config::HarnessSubagentInfo>, String> {
+    let key = format!("{harness_id}|{}", project_root.as_deref().unwrap_or(""));
+    if let Some(rows) = harness_subagents_cache_get(&key) {
+        return Ok(rows);
+    }
+    let id = harness_id.clone();
+    let rows = tauri::async_runtime::spawn_blocking(move || {
+        crate::harness_config::harness_subagents(&id, project_root.as_deref())
+    })
+    .await
+    .map_err(|e| format!("harness subagent listing join failed: {e}"))?;
+    if rows.is_empty() {
+        return Ok(rows);
+    }
+    if let Ok(mut guard) = HARNESS_SUBAGENTS_CACHE.lock() {
+        guard.insert(key, (Instant::now(), rows.clone()));
+    }
+    Ok(rows)
+}
+
+fn harness_subagents_cache_get(
+    key: &str,
+) -> Option<Vec<crate::harness_config::HarnessSubagentInfo>> {
+    let guard = HARNESS_SUBAGENTS_CACHE.lock().ok()?;
+    let (at, rows) = guard.get(key)?;
+    if at.elapsed() < HARNESS_SUBAGENTS_TTL {
+        Some(rows.clone())
+    } else {
+        None
+    }
+}
+
 /// ACP agents (roadmap #20) for the composer's agent menu: the static
 /// Zed/Devin registry plus user-defined entries from the `acp.agents`
 /// app_settings blob, each with an install probe. Mirrors `list_harnesses`.

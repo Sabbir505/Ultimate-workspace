@@ -538,6 +538,47 @@
   cursor: not-allowed;
 }
 
+/* ── Native subagents (the CLI harnesses' own stores, below the registry) ──
+   Same section card as the registry; each harness's store is a softer inner
+   block so the two levels read as list → group, not list → list. */
+.subagent-native-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.subagent-native-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.subagent-native-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+}
+.subagent-native-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.subagent-native-harness {
+  font-weight: 600;
+  font-size: 13px;
+}
+/* The registry's empty/loading state is tuned for the full-width panel
+   (24px padding, centered); inside a store block that reads as a cavern. */
+.subagent-native-block .subagent-empty {
+  padding: 10px 8px;
+  text-align: left;
+  align-items: flex-start;
+}
+
 /* ── Narrow containers: stack the row action groups under the content ── */
 @container subagent-view (max-width: 560px) {
   .subagent-agent-actions,

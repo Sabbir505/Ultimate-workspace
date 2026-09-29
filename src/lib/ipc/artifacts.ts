@@ -660,3 +660,34 @@ export interface HarnessModelConfig {
  *  (the picker's "↻ Refresh from CLI" affordance). */
 export const listHarnessModels = (harnessId: string, force = false) =>
   safeInvoke<HarnessModelConfig | null>("list_harness_models", { harnessId, force });
+
+/** One subagent defined in a CLI harness's OWN store (`~/.claude/agents/*.md`
+ *  etc.), mirrored from Rust `HarnessSubagentInfo` (camelCase). The Subagents
+ *  page lists these per harness; Import maps one onto a `SubagentInput`. */
+export interface HarnessSubagentInfo {
+  name: string;
+  description: string;
+  /** Tool names from the file's frontmatter — either frontmatter shape the
+   *  harnesses use (comma scalar / YAML list) arrives normalized. */
+  tools: string[];
+  /** Model pinned in the file, verbatim; absent = the file names none. */
+  model?: string | null;
+  /** opencode's own "primary" | "subagent" | "all"; absent for harnesses
+   *  without the concept. */
+  mode?: string | null;
+  /** Absolute path of the source .md — the import's dedupe key. */
+  sourcePath: string;
+  /** The body under the frontmatter — the native system prompt, ready to
+   *  become the imported row's promptMd (rides the listing because the file
+   *  can change between listing and import). */
+  promptMd: string;
+}
+/** The subagents in a harness's native markdown store (harness_config.rs).
+ *  `projectRoot` also walks the project-level store; omitted = user-level
+ *  stores only. Backend caches 30s and never caches empties, so a refetch
+ *  after `omp agents unpack` is always honest. */
+export const listHarnessSubagents = (harnessId: string, projectRoot?: string | null) =>
+  safeInvoke<HarnessSubagentInfo[] | null>("list_harness_subagents", {
+    harnessId,
+    projectRoot: projectRoot ?? null,
+  });

@@ -18,6 +18,10 @@
 //! empty result and the picker shows only what the CLI's live listing
 //! reported (no static fallback rows — a stale id the CLI rejects is worse
 //! than a short list).
+//!
+//! The same philosophy covers the harnesses' NATIVE subagent stores (the
+//! markdown definitions under `~/.claude/agents` etc.) — see the "Native
+//! subagents" section below.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -650,6 +654,249 @@ fn parse_omp_models_json(out: &str) -> Vec<HarnessModelInfo> {
         .collect()
 }
 
+// ---------------------------------------------------------------- Native subagents
+//
+// Each CLI keeps its OWN subagent definitions as markdown files with YAML
+// frontmatter (paths verified on a stock Windows install):
+// - claude_code: `~/.claude/agents/*.md` and `<project>/.claude/agents/*.md` —
+//   `name`, `description`, `tools` (comma-separated scalar), `model`
+// - opencode: `~/.config/opencode/agent/*.md` and `<project>/.opencode/agent/*.md`
+//   — `description`, `mode` ("primary" | "subagent" | "all"), `model`, `tools`
+//   (a per-tool on/off MAP — not an allowlist, so it reads as no tools here)
+// - kimi_code: `~/.kimi-code/agents/*.md` and `<project>/.kimi-code/agents/*.md`
+// - omp: `~/.omp/agent/agents/*.md` and `<project>/.omp/agents/*.md` — `tools`
+//   as a YAML list; the bundled agents only exist after `omp agents unpack`
+// - commandcode: `~/.commandcode/agents/*.md` (path not yet confirmed in the
+//   binary — an absent dir is simply an empty listing)
+// pi has no native subagent concept — its probe is empty by definition.
+//
+// This reader is deliberately TOLERANT, unlike chat::subagents::from_markdown
+// (strict for Relay's own interchange format): a native file carrying an
+// unknown key, a missing optional field, or a tool shape we only half
+// understand must still list — the worst outcome here is a slightly thin row,
+// never a rejected directory.
+
+/// One subagent found in a CLI harness's own store.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessSubagentInfo {
+    pub name: String,
+    pub description: String,
+    pub tools: Vec<String>,
+    /// Model pinned in the file, verbatim — the importing UI decides whether
+    /// the string is engine-appropriate (pass-through, no interpretation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// opencode's `mode`, passed through verbatim (the UI badges it — the
+    /// vocabulary is the CLI's). None for harnesses without the concept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Absolute path of the source .md — the importer's dedupe key and the
+    /// row's tooltip.
+    pub source_path: String,
+    /// The body under the frontmatter: the native system prompt, imported
+    /// verbatim as the registry row's promptMd. Rides the listing instead of
+    /// a second read because the file can change between listing and import.
+    pub prompt_md: String,
+}
+
+/// Store directories for a harness id: user-level always, project-level when
+/// `project_root` names a project. Order is cosmetic — the listing sorts rows
+/// by name after the walk.
+pub fn harness_subagent_dirs(
+    harness_id: &str,
+    project_root: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = crate::util::home_dir() {
+        let user_dir = match harness_id {
+            "claude_code" => Some(home.join(".claude").join("agents")),
+            "opencode" => Some(home.join(".config").join("opencode").join("agent")),
+            "kimi_code" => Some(home.join(".kimi-code").join("agents")),
+            "omp" => Some(home.join(".omp").join("agent").join("agents")),
+            "commandcode" => Some(home.join(".commandcode").join("agents")),
+            // pi (and anything unknown) has no native subagent store.
+            _ => None,
+        };
+        if let Some(d) = user_dir {
+            dirs.push(d);
+        }
+    }
+    if let Some(root) = project_root {
+        let root = std::path::PathBuf::from(root);
+        let project_dir = match harness_id {
+            "claude_code" => Some(root.join(".claude").join("agents")),
+            "opencode" => Some(root.join(".opencode").join("agent")),
+            "kimi_code" => Some(root.join(".kimi-code").join("agents")),
+            "omp" => Some(root.join(".omp").join("agents")),
+            "commandcode" => Some(root.join(".commandcode").join("agents")),
+            _ => None,
+        };
+        if let Some(d) = project_dir {
+            dirs.push(d);
+        }
+    }
+    dirs
+}
+
+/// Every subagent in the harness's native stores, sorted by name. Never
+/// errors: a missing directory is an empty listing and a bad file is skipped —
+/// one unparseable .md must not blank the rest of the store.
+pub fn harness_subagents(harness_id: &str, project_root: Option<&str>) -> Vec<HarnessSubagentInfo> {
+    harness_subagents_from_dirs(&harness_subagent_dirs(harness_id, project_root))
+}
+
+/// Pure core of [`harness_subagents`] over explicit dirs — unit-testable
+/// without touching the real home dir (same split as
+/// [`resolve_opencode_model_in`]).
+fn harness_subagents_from_dirs(dirs: &[std::path::PathBuf]) -> Vec<HarnessSubagentInfo> {
+    let mut rows = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if let Some(row) = parse_native_subagent_md(&text, &stem, &path.to_string_lossy()) {
+                rows.push(row);
+            }
+        }
+    }
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    rows
+}
+
+/// The frontmatter keys this reader keeps. Anything else is ignored.
+#[derive(Default)]
+struct NativeFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
+    model: Option<String>,
+    mode: Option<String>,
+    tools: Vec<String>,
+}
+
+fn parse_native_frontmatter(lines: &[&str]) -> NativeFrontmatter {
+    let mut fm = NativeFrontmatter::default();
+    // True directly after a bare `tools:` key: the "- item" lines that follow
+    // (omp's YAML list shape) feed the tool list.
+    let mut in_tools_list = false;
+    for raw in lines {
+        let line = raw.trim_end_matches('\r');
+        if in_tools_list {
+            if let Some(item) = line.trim().strip_prefix('-') {
+                push_native_tool(&mut fm.tools, item);
+                continue;
+            }
+            // Any other line ends the list — and is itself a regular key
+            // line (the `model:` right after omp's list), so fall through.
+            in_tools_list = false;
+        }
+        let Some((key, value)) = line.split_once(':') else { continue };
+        let value = native_scalar(value);
+        match key.trim() {
+            "name" => fm.name = native_non_empty(value),
+            "description" => fm.description = native_non_empty(value),
+            "model" => fm.model = native_non_empty(value),
+            "mode" => fm.mode = native_non_empty(value),
+            "tools" => {
+                // Two shapes in the wild: a comma-separated scalar
+                // (claude/kimi/commandcode) and a "- item" list directly
+                // below the key (omp). An empty value opens the list form;
+                // `[]` is an explicit none; a per-tool map (opencode's
+                // `tools: {write: false}`) is not an allowlist — read as
+                // none rather than inventing tool names out of it.
+                if value.is_empty() {
+                    in_tools_list = true;
+                } else if value != "[]" && !value.starts_with('{') {
+                    for tok in value.split(',') {
+                        push_native_tool(&mut fm.tools, &tok);
+                    }
+                }
+            }
+            // Unknown extra keys (permission overrides, hooks, …) are
+            // ignored: a file carrying settings we don't model must list.
+            _ => {}
+        }
+    }
+    fm
+}
+
+fn push_native_tool(tools: &mut Vec<String>, tok: &str) {
+    let tok = tok.trim();
+    if !tok.is_empty() && !tools.iter().any(|t| t == tok) {
+        tools.push(tok.to_string());
+    }
+}
+
+/// A frontmatter scalar: trimmed, minus one level of matching quotes.
+fn native_scalar(value: &str) -> String {
+    let v = value.trim();
+    if v.len() >= 2 {
+        let first = v.as_bytes()[0];
+        let last = v.as_bytes()[v.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return v[1..v.len() - 1].to_string();
+        }
+    }
+    v.to_string()
+}
+
+fn native_non_empty(v: String) -> Option<String> {
+    if v.is_empty() { None } else { Some(v) }
+}
+
+/// Tolerant parse of one native .md. Returns None for anything that isn't
+/// recognizably a subagent definition — no frontmatter fence at all, an
+/// unterminated fence, or a file carrying neither a name nor a description
+/// (a markdown note that happens to open with `---`). A missing `name` falls
+/// back to the file stem; a missing description lists as empty.
+fn parse_native_subagent_md(text: &str, stem: &str, source_path: &str) -> Option<HarnessSubagentInfo> {
+    let md = text.trim_start_matches('\u{feff}');
+    // Both fence line endings accepted (a Windows-editor CRLF file is the
+    // same doc); interior lines keep their '\r' and are trimmed per line.
+    let rest = md
+        .strip_prefix("---\r\n")
+        .or_else(|| md.strip_prefix("---\n"))?;
+    let mut fm_lines: Vec<&str> = Vec::new();
+    let mut body_lines: Vec<&str> = Vec::new();
+    let mut closed = false;
+    for line in rest.lines() {
+        if closed {
+            body_lines.push(line);
+        } else if line.trim_end_matches('\r') == "---" {
+            closed = true;
+        } else {
+            fm_lines.push(line);
+        }
+    }
+    if !closed {
+        return None; // unterminated fence — not a subagent doc
+    }
+    let fm = parse_native_frontmatter(&fm_lines);
+    if fm.name.is_none() && fm.description.is_none() {
+        return None;
+    }
+    Some(HarnessSubagentInfo {
+        name: fm.name.unwrap_or_else(|| stem.to_string()),
+        description: fm.description.unwrap_or_default(),
+        tools: fm.tools,
+        model: fm.model,
+        mode: fm.mode,
+        source_path: source_path.to_string(),
+        // Trimmed of the fence-adjacent blank lines — what the registry's
+        // prompt editor would show the user anyway.
+        prompt_md: body_lines.join("\n").trim().to_string(),
+    })
+}
+
 /// Spawn a harness CLI, drain stdout on a background thread (a full OS pipe
 /// buffer would otherwise deadlock the child — same pattern as git.rs's run_git
 /// drain threads), and return its output once it exits within `ticks` × 100ms.
@@ -1006,6 +1253,212 @@ mod tests {
         assert_eq!(resolve_opencode_model_in(&cfg, "claude-opus-4-8"), None);
         // No provider section at all.
         assert_eq!(resolve_opencode_model_in(&oc_cfg("{}"), "glm-5.2"), None);
+    }
+
+    // ---- Native subagent stores (tolerant frontmatter reader) ----
+
+    /// A fresh temp dir for one test's agent store, plus a writer helper.
+    /// The existing tests in this file are all pure-function based (no home
+    /// dir override machinery), so the native-store tests follow the same
+    /// split: real temp dirs against `harness_subagents_from_dirs`, the
+    /// home-resolving wrapper kept thin above them.
+    fn temp_agents_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "relay-harness-subagents-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_agent(dir: &std::path::Path, file: &str, contents: &str) {
+        std::fs::write(dir.join(file), contents).unwrap();
+    }
+
+    #[test]
+    fn native_claude_style_file_parses_comma_tools() {
+        // Claude Code's shape: `tools` as a comma-separated scalar, body =
+        // system prompt.
+        let dir = temp_agents_dir("claude");
+        write_agent(
+            &dir,
+            "code-reviewer.md",
+            "---\nname: code-reviewer\ndescription: \"Reviews diffs\"\ntools: Read, Grep,Edit\nmodel: sonnet\n---\n\nYou review code.\n",
+        );
+        let rows = harness_subagents_from_dirs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "code-reviewer");
+        assert_eq!(rows[0].description, "Reviews diffs");
+        assert_eq!(rows[0].tools, vec!["Read", "Grep", "Edit"]);
+        assert_eq!(rows[0].model.as_deref(), Some("sonnet"));
+        assert_eq!(rows[0].mode, None);
+        assert_eq!(rows[0].prompt_md, "You review code.");
+        assert!(rows[0].source_path.ends_with("code-reviewer.md"));
+    }
+
+    #[test]
+    fn native_omp_style_file_parses_yaml_tools_list() {
+        // omp's shape: `tools` as a "- item" list under the key; the bundled
+        // agents unpack exactly like this.
+        let dir = temp_agents_dir("omp");
+        write_agent(
+            &dir,
+            "explorer.md",
+            "---\nname: explorer\ndescription: Explores the repo\ntools:\n  - read\n  - grep\n  - read\nmodel: locally/glm-5.2\n---\nGo look around.\n",
+        );
+        let rows = harness_subagents_from_dirs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(rows.len(), 1);
+        // Duplicate entries collapse; order is the file's order.
+        assert_eq!(rows[0].tools, vec!["read", "grep"]);
+        assert_eq!(rows[0].model.as_deref(), Some("locally/glm-5.2"));
+        assert_eq!(rows[0].prompt_md, "Go look around.");
+    }
+
+    #[test]
+    fn native_mode_passes_through_verbatim() {
+        // opencode's `mode` is the CLI's own vocabulary ("primary" keeps the
+        // file as a top-level agent, "subagent" as a delegate, "all" as both)
+        // — passed through untouched so the UI can badge it.
+        let dir = temp_agents_dir("mode");
+        write_agent(
+            &dir,
+            "planner.md",
+            "---\ndescription: Plans tasks\nmode: subagent\n---\nPlan.\n",
+        );
+        write_agent(
+            &dir,
+            "planner-primary.md",
+            "---\ndescription: Also plans\nmode: primary\n---\nPlan.\n",
+        );
+        let rows = harness_subagents_from_dirs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].mode.as_deref(), Some("subagent"));
+        assert_eq!(rows[1].mode.as_deref(), Some("primary"));
+        // No name key → the file stem is the name.
+        assert_eq!(rows[0].name, "planner");
+        assert_eq!(rows[1].name, "planner-primary");
+    }
+
+    #[test]
+    fn native_opencode_tool_map_reads_as_no_tools() {
+        // opencode's `tools` is a per-tool on/off map, not an allowlist —
+        // never invented into tool names.
+        let dir = temp_agents_dir("ocmap");
+        write_agent(
+            &dir,
+            "writer.md",
+            "---\ndescription: Writes\ntools: {write: false, edit: false}\nmode: all\n---\nWrite.\n",
+        );
+        let rows = harness_subagents_from_dirs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].tools.is_empty());
+        assert_eq!(rows[0].mode.as_deref(), Some("all"));
+    }
+
+    #[test]
+    fn native_missing_frontmatter_and_garbage_are_skipped() {
+        let dir = temp_agents_dir("garbage");
+        // Plain prose (no fence at all).
+        write_agent(&dir, "notes.md", "just some notes\nnothing more\n");
+        // Unterminated fence.
+        write_agent(&dir, "broken.md", "---\nname: broken\ndescription: x\n");
+        // Frontmatter but neither a name nor a description — a markdown note
+        // that happens to open with `---`, not a subagent definition.
+        write_agent(&dir, "unrelated.md", "---\nmodel: sonnet\n---\nbody\n");
+        // Non-.md files never parse.
+        write_agent(&dir, "data.json", "{}");
+        let rows = harness_subagents_from_dirs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn native_description_only_file_falls_back_to_stem() {
+        // A name-less but described file still lists: the stem names it.
+        let dir = temp_agents_dir("stem");
+        write_agent(
+            &dir,
+            "doc-writer.md",
+            "---\ndescription: Writes docs\n---\nBody.\n",
+        );
+        let rows = harness_subagents_from_dirs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "doc-writer");
+    }
+
+    #[test]
+    fn native_listing_sorts_by_name_across_both_tool_shapes() {
+        // One store holding a claude-style (comma) and an omp-style (YAML
+        // list) file: both parse, and the rows come back name-sorted
+        // regardless of read_dir order.
+        let dir = temp_agents_dir("mixed");
+        write_agent(
+            &dir,
+            "zeta.md",
+            "---\nname: zeta\ndescription: last\ntools: Read\n---\nZ.\n",
+        );
+        write_agent(
+            &dir,
+            "alpha.md",
+            "---\nname: alpha\ndescription: first\ntools:\n  - grep\n---\nA.\n",
+        );
+        let rows = harness_subagents_from_dirs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "zeta"]);
+        assert_eq!(rows[0].tools, vec!["grep"]);
+        assert_eq!(rows[1].tools, vec!["Read"]);
+    }
+
+    #[test]
+    fn native_empty_and_absent_dirs_yield_empty_listing() {
+        // An existing-but-empty store and a never-created one both read as
+        // "no native subagents" — never an error.
+        let empty = temp_agents_dir("empty");
+        let rows = harness_subagents_from_dirs(&[
+            empty.clone(),
+            std::env::temp_dir().join("relay-harness-subagents-does-not-exist"),
+        ]);
+        let _ = std::fs::remove_dir_all(&empty);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn harness_subagent_dirs_follow_the_documented_layouts() {
+        let dirs = harness_subagent_dirs("claude_code", Some("P:\\proj"));
+        // User-level plus project-level when a root is given.
+        if let Some(home) = crate::util::home_dir() {
+            assert_eq!(dirs.len(), 2);
+            assert_eq!(dirs[0], home.join(".claude").join("agents"));
+        } else {
+            assert_eq!(dirs.len(), 1);
+        }
+        assert_eq!(
+            dirs[dirs.len() - 1],
+            std::path::PathBuf::from("P:\\proj").join(".claude").join("agents")
+        );
+        // omp's user store is nested under its agent dir; the project store
+        // is not (verified paths).
+        let omp = harness_subagent_dirs("omp", Some("P:\\proj"));
+        if let Some(home) = crate::util::home_dir() {
+            assert_eq!(omp.len(), 2);
+            assert_eq!(omp[0], home.join(".omp").join("agent").join("agents"));
+        } else {
+            assert_eq!(omp.len(), 1);
+        }
+        assert_eq!(
+            omp[omp.len() - 1],
+            std::path::PathBuf::from("P:\\proj").join(".omp").join("agents")
+        );
+        // pi has no native store; neither has an unknown id.
+        assert!(harness_subagent_dirs("pi", Some("P:\\proj")).is_empty());
+        assert!(harness_subagent_dirs("nonexistent", None).is_empty());
     }
 
     // ---- Grandchild-pipe hang regression tests (audit #82) ----

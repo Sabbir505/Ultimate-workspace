@@ -1,5 +1,5 @@
 // Logs — the local-model request log. A real view swap, same slot as
-// Automations/Vault/Crew (`baseView`), reached from the sidebar footer's log
+// Automations/Vault/Subagent (`baseView`), reached from the sidebar footer's log
 // icon (see Sidebar.tsx).
 //
 // A full page rather than an overlay because the content is a scrolling table

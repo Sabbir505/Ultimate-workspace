@@ -1,6 +1,6 @@
-// Settings → Agents → Crew: the declarative-subagent registry (Phase 1).
+// Settings → Agents → Subagent: the declarative-subagent registry (Phase 1).
 //
-// A crew agent is a persisted, named identity — prompt body, tool allowlist,
+// A subagent is a persisted, named identity — prompt body, tool allowlist,
 // permission scope, engine/model, worktree policy, spawn budget — that later
 // waves can spawn from the Run button (Phase 2.5), the `Task` tool (Phase 2),
 // the session mesh (Phase 3) and automations (Phase 5). This panel is the
@@ -12,14 +12,14 @@
 //    and the sandbox/approval policies genuinely gate every call. A
 //    `harness:<id>` CLI runs its own native toolset, which the app cannot
 //    restrict — only Relay's bridged tools are gated — so those rows carry an
-//    "advisory" badge and say why. `crewEngineTier` owns that vocabulary and is
+//    "advisory" badge and say why. `subagentEngineTier` owns that vocabulary and is
 //    shared with Phase 4.
 //  - The tool allowlist is advisory about the *engine ceiling*: write tools only
 //    take effect under `workspace_write`, and spawn-capable tools are absent
-//    from `CREW_TOOL_OPTIONS` so depth stays 1.
+//    from `SUBAGENT_TOOL_OPTIONS` so depth stays 1.
 //
-// Visual language is the Crew view's own (styles/crew.css): full-page rows,
-// crew-chip toggles, and the shared Modal for the editor and the Run dialog.
+// Visual language is the Subagent view's own (styles/subagent.css): full-page rows,
+// subagent-chip toggles, and the shared Modal for the editor and the Run dialog.
 
 import {
   AlertTriangle,
@@ -38,25 +38,25 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Modal } from "../common/Modal";
-import { CrewSelect } from "./CrewSelect";
+import { SubagentSelect } from "./SubagentSelect";
 import {
-  CREW_TIER_LABELS,
-  CREW_TOOL_OPTIONS,
-  crewEngineTier,
+  SUBAGENT_TIER_LABELS,
+  SUBAGENT_TOOL_OPTIONS,
+  subagentEngineTier,
   listHarnessModels,
   scanLocalModels,
-  type CrewAgent,
-  type CrewAgentInput,
-  type CrewToolOption,
+  type Subagent,
+  type SubagentInput,
+  type SubagentToolOption,
 } from "../../lib/ipc";
 import { AGENT_OPTIONS } from "../../lib/agents";
-import { CREW_NEW_KEY, useCrewStore } from "../../state/crew";
+import { SUBAGENT_NEW_KEY, useSubagentStore } from "../../state/subagents";
 
 /** The editor's local shape. Unlike the row it keeps "inherit" as an empty
  *  string (so the selects can use "" as a real option) and carries the
  *  allowlist as `string[] | null` — null meaning "inherit the engine default".
  *  `toInput` maps it onto the wire shape. */
-interface CrewForm {
+interface SubagentForm {
   name: string;
   description: string;
   promptMd: string;
@@ -71,7 +71,7 @@ interface CrewForm {
   maxConcurrent: number;
 }
 
-const EMPTY_FORM: CrewForm = {
+const EMPTY_FORM: SubagentForm = {
   name: "",
   description: "",
   promptMd: "",
@@ -86,7 +86,7 @@ const EMPTY_FORM: CrewForm = {
   maxConcurrent: 2,
 };
 
-function formOf(agent: CrewAgent): CrewForm {
+function formOf(agent: Subagent): SubagentForm {
   return {
     name: agent.name,
     description: agent.description,
@@ -108,7 +108,7 @@ function clampInt(value: number, min: number, max: number, fallback: number): nu
   return Math.min(max, Math.max(min, Math.round(value)));
 }
 
-function toInput(form: CrewForm): CrewAgentInput {
+function toInput(form: SubagentForm): SubagentInput {
   return {
     name: form.name.trim(),
     description: form.description.trim(),
@@ -128,7 +128,7 @@ function toInput(form: CrewForm): CrewAgentInput {
 }
 
 /** Engine choices. The ids come from the shared catalog in lib/agents.ts — no
- *  crew-only engine ids — composed into the same string grammar the rest of
+ *  subagent-only engine ids — composed into the same string grammar the rest of
  *  the app uses for `chat_sessions.agent` ("builtin" | "local" | "harness:<id>"),
  *  so a definition's engine is directly usable as a session's engine. The API
  *  providers collapse into the single `builtin` engine: which provider runs is
@@ -168,10 +168,10 @@ const BUILTIN_DELETE_HINT = "Built-in roles can't be deleted — edit their prom
 /** The enforcement badge. Advisory rows spell out the boundary in the title and
  *  in the row's meta line, so the badge is never read as a promise. */
 function TierBadge({ engine }: { engine: string | null }) {
-  const tier = crewEngineTier(engine);
-  const copy = CREW_TIER_LABELS[tier];
+  const tier = subagentEngineTier(engine);
+  const copy = SUBAGENT_TIER_LABELS[tier];
   return (
-    <span className={`crew-chip${tier === "enforced" ? " enforced" : ""}`} title={copy.detail}>
+    <span className={`subagent-chip${tier === "enforced" ? " enforced" : ""}`} title={copy.detail}>
       {copy.label}
     </span>
   );
@@ -185,7 +185,7 @@ function ToolChip({
   disabled,
   onToggle,
 }: {
-  tool: CrewToolOption;
+  tool: SubagentToolOption;
   selected: string[];
   disabled: boolean;
   onToggle: (id: string) => void;
@@ -194,7 +194,7 @@ function ToolChip({
   return (
     <button
       type="button"
-      className="crew-chip"
+      className="subagent-chip"
       aria-pressed={on}
       disabled={disabled}
       title={`${tool.label} — ${tool.id}`}
@@ -213,66 +213,66 @@ function AgentRow({
   onDelete,
   onRun,
 }: {
-  agent: CrewAgent;
+  agent: Subagent;
   busy: boolean;
   onEdit: () => void;
   onDelete: () => void;
-  onRun?: (agent: CrewAgent) => void;
+  onRun?: (agent: Subagent) => void;
 }) {
-  const tier = crewEngineTier(agent.engine);
+  const tier = subagentEngineTier(agent.engine);
   const toolCount = agent.tools === null ? null : agent.tools.length;
   return (
-    <div className="crew-agent-row">
-      <span className="crew-agent-name">{agent.name}</span>
-      <span className="crew-agent-main">
-        <span className="crew-agent-desc">
+    <div className="subagent-agent-row">
+      <span className="subagent-agent-name">{agent.name}</span>
+      <span className="subagent-agent-main">
+        <span className="subagent-agent-desc">
           {agent.description || "(no description)"}
         </span>
-        <span className="crew-agent-meta">
+        <span className="subagent-agent-meta">
           <TierBadge engine={agent.engine} />
           {tier === "advisory" && (
             <span
-              className="crew-meta-chip warn"
+              className="subagent-meta-chip warn"
               title="A harness runs its own native tools — only Relay's tools are gated"
             >
               <AlertTriangle size={11} strokeWidth={1.8} aria-hidden="true" />
               CLI tools not restrictible
             </span>
           )}
-          <span className="crew-meta-chip" title="Engine this agent runs on">
+          <span className="subagent-meta-chip" title="Engine this agent runs on">
             <Bot size={11} strokeWidth={1.8} aria-hidden="true" />
             {agent.builtin ? "builtin" : (agent.engine?.replace(/^harness:/, "") || "inherits engine")}
           </span>
           {agent.origin === "agent" && (
             <span
-              className="crew-meta-chip origin"
-              title="A model created this agent through the crew tools"
+              className="subagent-meta-chip origin"
+              title="A model created this agent through the subagent tools"
             >
               <Sparkles size={11} strokeWidth={1.8} aria-hidden="true" />
               made by agent
             </span>
           )}
-          <span className="crew-meta-chip" title="Tool allowlist">
+          <span className="subagent-meta-chip" title="Tool allowlist">
             <Wrench size={11} strokeWidth={1.8} aria-hidden="true" />
             {toolCount === null
               ? "engine default tools"
               : `${toolCount} tool${toolCount === 1 ? "" : "s"}`}
           </span>
-          <span className="crew-meta-chip" title="Sandbox policy">
+          <span className="subagent-meta-chip" title="Sandbox policy">
             <Eye size={11} strokeWidth={1.8} aria-hidden="true" />
             {agent.sandboxPolicy}
           </span>
-          <span className="crew-meta-chip" title="Approval policy">
+          <span className="subagent-meta-chip" title="Approval policy">
             <Bell size={11} strokeWidth={1.8} aria-hidden="true" />
             {agent.approvalPolicy}
           </span>
-          <span className="crew-meta-chip" title="Rounds per run">
+          <span className="subagent-meta-chip" title="Rounds per run">
             <Repeat size={11} strokeWidth={1.8} aria-hidden="true" />
             {agent.maxRounds} rounds
           </span>
         </span>
       </span>
-      <span className="crew-agent-actions">
+      <span className="subagent-agent-actions">
       {/* Run (Phase 2.5): the panel renders no run button until a caller
           passes `onRun`, so the settings surface stays registry-only. */}
       {onRun && (
@@ -299,7 +299,7 @@ function AgentRow({
       </button>
       <button
         type="button"
-        className="ghost crew-danger"
+        className="ghost subagent-danger"
         onClick={onDelete}
         disabled={busy || agent.builtin}
         title={agent.builtin ? BUILTIN_DELETE_HINT : "Delete this agent"}
@@ -312,20 +312,20 @@ function AgentRow({
   );
 }
 
-export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}) {
-  const agents = useCrewStore((s) => s.agents);
-  const loaded = useCrewStore((s) => s.loaded);
-  const error = useCrewStore((s) => s.error);
-  const busy = useCrewStore((s) => s.busy);
-  const load = useCrewStore((s) => s.load);
-  const create = useCrewStore((s) => s.create);
-  const update = useCrewStore((s) => s.update);
-  const remove = useCrewStore((s) => s.remove);
+export function SubagentsPanel({ onRun }: { onRun?: (agent: Subagent) => void } = {}) {
+  const agents = useSubagentStore((s) => s.agents);
+  const loaded = useSubagentStore((s) => s.loaded);
+  const error = useSubagentStore((s) => s.error);
+  const busy = useSubagentStore((s) => s.busy);
+  const load = useSubagentStore((s) => s.load);
+  const create = useSubagentStore((s) => s.create);
+  const update = useSubagentStore((s) => s.update);
+  const remove = useSubagentStore((s) => s.remove);
 
   /** id of the row being edited; null + an open editor = the create form. */
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
-  const [form, setForm] = useState<CrewForm>(EMPTY_FORM);
+  const [form, setForm] = useState<SubagentForm>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -333,7 +333,7 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
   }, [load]);
 
   const editing = editingId ? agents.find((a) => a.id === editingId) : undefined;
-  const saveKey = editingId ?? CREW_NEW_KEY;
+  const saveKey = editingId ?? SUBAGENT_NEW_KEY;
   const saving = busy[saveKey] === true;
   const inherited = form.tools === null;
   const selected = form.tools ?? [];
@@ -396,7 +396,7 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
     setEditorOpen(true);
   };
 
-  const openEdit = (agent: CrewAgent) => {
+  const openEdit = (agent: Subagent) => {
     setEditingId(agent.id);
     setForm(formOf(agent));
     setFormError(null);
@@ -438,10 +438,10 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
   };
 
   return (
-    <div className="crew-section">
-      <div className="crew-section-head">
+    <div className="subagent-section">
+      <div className="subagent-section-head">
         <h3>Agents</h3>
-        <span className="crew-spacer" />
+        <span className="subagent-spacer" />
         {agents.length > 0 && (
           <span className="panel-count">
             {agents.length} agent{agents.length === 1 ? "" : "s"}
@@ -457,7 +457,7 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
         <div>
           <div className="perm-info-title">Named subagents, defined as data</div>
           <div className="perm-info-body">
-            A crew agent is a saved identity — a prompt, a tool allowlist, a permission
+            A subagent is a saved identity — a prompt, a tool allowlist, a permission
             scope, a model and a spawn budget. Relay's own tool loop enforces all of it
             (<span className="mono">enforced</span>); a CLI harness runs its own tools that
             the app can only advise on (<span className="mono">advisory</span>). The badge on
@@ -466,11 +466,11 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
         </div>
       </div>
 
-      {error && <div className="settings-note crew-error">{error}</div>}
+      {error && <div className="settings-note subagent-error">{error}</div>}
 
       {editorOpen && (
         <Modal
-          className="crew-editor-modal crew-glass-modal"
+          className="subagent-editor-modal subagent-glass-modal"
           title={editingId ? `Edit ${editing?.name ?? "agent"}` : "New agent"}
           onClose={saving ? undefined : closeEditor}
           actions={
@@ -489,7 +489,7 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
             </>
           }
         >
-          <div className="crew-editor-body">
+          <div className="subagent-editor-body">
             <div className="settings-section">
               <div className="settings-section-title">Name</div>
               <input
@@ -524,7 +524,7 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
             <div className="settings-section">
               <div className="settings-section-title">Prompt</div>
               <textarea
-                className="perm-pattern-input mono crew-editor-textarea"
+                className="perm-pattern-input mono subagent-editor-textarea"
                 rows={10}
                 value={form.promptMd}
                 aria-label="Agent prompt"
@@ -544,23 +544,23 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
                   {inherited ? "engine default" : `${selected.length} selected`}
                 </span>
               </div>
-              <div className="crew-chip-group" role="group" aria-label="Read-only tools">
-                {CREW_TOOL_OPTIONS.filter((t) => t.group === "read").map((t) => (
+              <div className="subagent-chip-group" role="group" aria-label="Read-only tools">
+                {SUBAGENT_TOOL_OPTIONS.filter((t) => t.group === "read").map((t) => (
                   <ToolChip key={t.id} tool={t} selected={selected} disabled={saving} onToggle={toggleTool} />
                 ))}
               </div>
             <div className="settings-section-hint">
               Write tools — only granted under the workspace-write sandbox
             </div>
-              <div className="crew-chip-group" role="group" aria-label="Write tools">
-                {CREW_TOOL_OPTIONS.filter((t) => t.group === "write").map((t) => (
+              <div className="subagent-chip-group" role="group" aria-label="Write tools">
+                {SUBAGENT_TOOL_OPTIONS.filter((t) => t.group === "write").map((t) => (
                   <ToolChip key={t.id} tool={t} selected={selected} disabled={saving} onToggle={toggleTool} />
                 ))}
               </div>
-              <div className="crew-chip-group">
+              <div className="subagent-chip-group">
                 <button
                   type="button"
-                  className="crew-chip"
+                  className="subagent-chip"
                   disabled={saving || inherited}
                   onClick={() => setForm({ ...form, tools: null })}
                 >
@@ -568,7 +568,7 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
                 </button>
                 <button
                   type="button"
-                  className="crew-chip"
+                  className="subagent-chip"
                   disabled={saving || inherited || selected.length === 0}
                   onClick={() => setForm({ ...form, tools: [] })}
                 >
@@ -584,8 +584,8 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
 
             <div className="settings-section">
               <div className="settings-section-title">Engine &amp; model</div>
-            <div className="crew-editor-row">
-              <CrewSelect
+            <div className="subagent-editor-row">
+              <SubagentSelect
                 ariaLabel="Engine"
                 value={form.engine}
                 options={engineOptions}
@@ -593,7 +593,7 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
                 onChange={(v) => setForm((f) => ({ ...f, engine: v, model: "" }))}
               />
               {modelOptions.length > 0 && !modelsLoading ? (
-                <CrewSelect
+                <SubagentSelect
                   ariaLabel="Model"
                   value={modelOptions.some((m) => m.id === form.model) ? form.model : ""}
                   options={[
@@ -621,17 +621,17 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
             </div>
               <p className="settings-section-hint">
                 <TierBadge engine={form.engine || null} />{" "}
-                {CREW_TIER_LABELS[crewEngineTier(form.engine || null)].detail} Leave the model
+                {SUBAGENT_TIER_LABELS[subagentEngineTier(form.engine || null)].detail} Leave the model
                 blank to inherit, or write <span className="mono">provider::model</span> to pin one.
               </p>
             </div>
 
             <div className="settings-section">
               <div className="settings-section-title">Scope &amp; budget</div>
-              <div className="crew-editor-row">
-                <label className="crew-field">
-                  <span className="crew-field-label">Sandbox</span>
-                  <CrewSelect
+              <div className="subagent-editor-row">
+                <label className="subagent-field">
+                  <span className="subagent-field-label">Sandbox</span>
+                  <SubagentSelect
                     ariaLabel="Sandbox policy"
                     value={form.sandboxPolicy}
                     options={SANDBOX_OPTIONS}
@@ -639,9 +639,9 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
                     onChange={(v) => setForm((f) => ({ ...f, sandboxPolicy: v }))}
                   />
                 </label>
-                <label className="crew-field">
-                  <span className="crew-field-label">Approvals</span>
-                  <CrewSelect
+                <label className="subagent-field">
+                  <span className="subagent-field-label">Approvals</span>
+                  <SubagentSelect
                     ariaLabel="Approval policy"
                     value={form.approvalPolicy}
                     options={APPROVAL_OPTIONS}
@@ -649,9 +649,9 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
                     onChange={(v) => setForm((f) => ({ ...f, approvalPolicy: v }))}
                   />
                 </label>
-                <label className="crew-field">
-                  <span className="crew-field-label">Worktree</span>
-                  <CrewSelect
+                <label className="subagent-field">
+                  <span className="subagent-field-label">Worktree</span>
+                  <SubagentSelect
                     ariaLabel="Worktree policy"
                     value={form.worktreePolicy}
                     options={WORKTREE_OPTIONS}
@@ -660,11 +660,11 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
                   />
                 </label>
               </div>
-              <div className="crew-editor-row">
-                <label className="crew-field">
-                  <span className="crew-field-label">Max rounds (1–100)</span>
+              <div className="subagent-editor-row">
+                <label className="subagent-field">
+                  <span className="subagent-field-label">Max rounds (1–100)</span>
                   <input
-                    className="crew-field-input"
+                    className="subagent-field-input"
                     type="number"
                     min={1}
                     max={100}
@@ -674,10 +674,10 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
                     onChange={(e) => numField("maxRounds", e.target.value)}
                   />
                 </label>
-                <label className="crew-field">
-                  <span className="crew-field-label">Concurrent runs (1 or more)</span>
+                <label className="subagent-field">
+                  <span className="subagent-field-label">Concurrent runs (1 or more)</span>
                   <input
-                    className="crew-field-input"
+                    className="subagent-field-input"
                     type="number"
                     min={1}
                     value={Number.isFinite(form.maxConcurrent) ? form.maxConcurrent : ""}
@@ -689,24 +689,24 @@ export function CrewPanel({ onRun }: { onRun?: (agent: CrewAgent) => void } = {}
               </div>
             </div>
 
-            {formError && <p className="crew-error">{formError}</p>}
+            {formError && <p className="subagent-error">{formError}</p>}
           </div>
         </Modal>
       )}
 
       {!loaded ? (
-        <div className="crew-empty">Loading agents…</div>
+        <div className="subagent-empty">Loading agents…</div>
       ) : agents.length === 0 ? (
-        <div className="crew-empty">
+        <div className="subagent-empty">
           <Users size={22} />
           <div>
-            No crew agents yet. Add one above — a named prompt with its own tool
+            No subagents yet. Add one above — a named prompt with its own tool
             allowlist and permission scope, ready to hand to the Task tool or run on
             its own.
           </div>
         </div>
       ) : (
-        <div className="crew-agent-list">
+        <div className="subagent-agent-list">
           {agents.map((a) => (
             <AgentRow
               key={a.id}

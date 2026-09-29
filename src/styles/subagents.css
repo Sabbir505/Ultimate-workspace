@@ -1,4 +1,4 @@
-/* crew — Crew view (full-page: registry + runs + run modal), agent rows,
+/* subagent — Subagent view (full-page: registry + runs + run modal), agent rows,
    run rows, tier/status chips. Sits next to automations.css as a sibling
    full-page view: same view container contract (toolbar-h clearance,
    container queries so the tool side-panel shrinking is visible to the
@@ -8,7 +8,7 @@
    at full width. Split into its own stylesheet (2026-09-29). */
 
 /* ── View container (full-page swap, same slot as Automations/Vault) ── */
-.crew-view {
+.subagent-view {
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -21,10 +21,10 @@
   /* Container queries (not media queries): the tool side-panel shares a flex
      row with this view, so the real width shrinks when it opens. */
   container-type: inline-size;
-  container-name: crew-view;
+  container-name: subagent-view;
 }
 
-.crew-header {
+.subagent-header {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -33,15 +33,15 @@
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.crew-header h1 {
+.subagent-header h1 {
   font-size: 18px;
   font-weight: 700;
   margin: 0;
 }
-.crew-header-icon {
+.subagent-header-icon {
   color: var(--text-dim);
 }
-.crew-header-badge {
+.subagent-header-badge {
   font-size: 11px;
   color: var(--text-dim);
   background: var(--bg-elevated);
@@ -51,7 +51,7 @@
 }
 
 /* Scrollable content column: the registry panel, then run history. */
-.crew-body {
+.subagent-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -61,13 +61,13 @@
   padding: 16px 20px 24px;
 }
 
-.crew-error {
+.subagent-error {
   margin: 0;
   color: var(--danger, #f85149);
 }
 
 /* ── Section shells (registry panel, runs list) ── */
-.crew-section {
+.subagent-section {
   background: var(--bg-elevated, var(--surface));
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -76,13 +76,13 @@
   flex-direction: column;
   gap: 10px;
 }
-.crew-section-head {
+.subagent-section-head {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
-.crew-section-head h3 {
+.subagent-section-head h3 {
   font-size: 13px;
   font-weight: 600;
   margin: 0;
@@ -90,20 +90,20 @@
   letter-spacing: 0.04em;
   color: var(--text-dim);
 }
-.crew-section-head .crew-spacer {
+.subagent-section-head .subagent-spacer {
   flex: 1;
 }
-.crew-section-head .panel-count {
+.subagent-section-head .panel-count {
   margin-right: 4px;
 }
 
 /* ── Agent rows (registry list) ── */
-.crew-agent-list {
+.subagent-agent-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-.crew-agent-row {
+.subagent-agent-row {
   display: flex;
   align-items: flex-start;
   flex-wrap: wrap;
@@ -113,26 +113,26 @@
   border-radius: 8px;
   background: var(--surface);
 }
-.crew-agent-row:hover {
+.subagent-agent-row:hover {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
 }
-.crew-agent-name {
+.subagent-agent-name {
   font-weight: 600;
   font-size: 13px;
   min-width: 0;
   word-break: break-word;
 }
-.crew-agent-main {
+.subagent-agent-main {
   flex: 1;
   min-width: 0;
 }
-.crew-agent-desc {
+.subagent-agent-desc {
   display: block;
   font-size: 13px;
   color: var(--text);
   overflow-wrap: anywhere;
 }
-.crew-agent-meta {
+.subagent-agent-meta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -140,7 +140,7 @@
   margin-top: 7px;
   font-size: 11px;
 }
-.crew-agent-actions {
+.subagent-agent-actions {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -148,7 +148,7 @@
 }
 
 /* ── Chips: tier, status, origin ── */
-.crew-chip {
+.subagent-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -160,37 +160,37 @@
   color: var(--text-dim);
   white-space: nowrap;
 }
-.crew-chip.enforced {
+.subagent-chip.enforced {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
-.crew-chip.status-ok {
+.subagent-chip.status-ok {
   color: var(--green, #4caf7d);
   border-color: color-mix(in srgb, var(--green, #4caf7d) 45%, transparent);
 }
-.crew-chip.status-running {
+.subagent-chip.status-running {
   color: var(--blue, #2196f3);
   border-color: color-mix(in srgb, var(--blue, #2196f3) 45%, transparent);
 }
-.crew-chip.status-error {
+.subagent-chip.status-error {
   color: var(--red, #ff6b6b);
   border-color: color-mix(in srgb, var(--red, #ff6b6b) 45%, transparent);
 }
-.crew-chip.status-cancelled,
-.crew-chip.status-finished {
+.subagent-chip.status-cancelled,
+.subagent-chip.status-finished {
   color: var(--text-dim);
 }
-.crew-chip.origin-agent {
+.subagent-chip.origin-agent {
   font-style: italic;
 }
 
 /* ── Run rows (history list) ── */
-.crew-run-list {
+.subagent-run-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-.crew-run-row {
+.subagent-run-row {
   display: flex;
   align-items: flex-start;
   flex-wrap: wrap;
@@ -200,23 +200,23 @@
   border-radius: 8px;
   background: var(--surface);
 }
-.crew-run-agent {
+.subagent-run-agent {
   font-weight: 600;
   font-size: 13px;
   min-width: 0;
   word-break: break-word;
 }
-.crew-run-main {
+.subagent-run-main {
   flex: 1;
   min-width: 0;
 }
-.crew-run-task {
+.subagent-run-task {
   display: block;
   font-size: 13px;
   color: var(--text);
   overflow-wrap: anywhere;
 }
-.crew-run-meta {
+.subagent-run-meta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -230,7 +230,7 @@
    and the row keeps texture at full width. Colors stay quiet — text-dim on a
    translucent fill — except where the fact is a warning (advisory tier) or
    provenance (made by agent), which get their own tints. */
-.crew-meta-chip {
+.subagent-meta-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -243,30 +243,30 @@
   color: var(--text-dim);
   white-space: nowrap;
 }
-.crew-meta-chip svg {
+.subagent-meta-chip svg {
   flex-shrink: 0;
   opacity: 0.75;
 }
-.crew-meta-chip.warn {
+.subagent-meta-chip.warn {
   color: var(--warning, #e8b33c);
   border-color: color-mix(in srgb, var(--warning, #e8b33c) 40%, transparent);
 }
-.crew-meta-chip.warn svg {
+.subagent-meta-chip.warn svg {
   opacity: 1;
 }
-.crew-meta-chip.origin {
+.subagent-meta-chip.origin {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   font-style: italic;
 }
-.crew-meta-chip.origin svg {
+.subagent-meta-chip.origin svg {
   opacity: 1;
 }
-.crew-meta-chip.mono {
+.subagent-meta-chip.mono {
   font-family: var(--font-mono);
   font-size: 10.5px;
 }
-.crew-run-actions {
+.subagent-run-actions {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -274,7 +274,7 @@
 }
 
 /* ── Empty / loading states ── */
-.crew-empty {
+.subagent-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -285,43 +285,43 @@
   font-size: 13px;
   line-height: 1.5;
 }
-.crew-empty svg {
+.subagent-empty svg {
   opacity: 0.6;
 }
 
 /* ── Run modal ── */
-.crew-modal-wait {
+.subagent-modal-wait {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 0;
 }
-.crew-modal-wait-title {
+.subagent-modal-wait-title {
   margin: 0;
 }
-.crew-modal-textarea {
+.subagent-modal-textarea {
   width: 100%;
   min-width: 0;
   resize: vertical;
 }
 
-/* ── Editor modal (CrewPanel form) ── */
+/* ── Editor modal (SubagentsPanel form) ── */
 /* The base <button> is an inline-block, so an SVG child sits on the text
-   baseline and sags next to its label ("+ New agent"). Flex every crew-view
-   button; the editor modal portals to <body> (outside .crew-view), so it
+   baseline and sags next to its label ("+ New agent"). Flex every subagent-view
+   button; the editor modal portals to <body> (outside .subagent-view), so it
    brings its own copy of the rule. */
-.crew-view button,
-.crew-glass-modal button {
+.subagent-view button,
+.subagent-glass-modal button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
 }
-.crew-view .crew-danger,
-.crew-glass-modal .crew-danger {
+.subagent-view .subagent-danger,
+.subagent-glass-modal .subagent-danger {
   color: var(--danger, #f85149);
 }
-.crew-view .crew-danger:hover:not(:disabled) {
+.subagent-view .subagent-danger:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--danger, #f85149) 55%, transparent);
   background: color-mix(in srgb, var(--danger, #f85149) 12%, transparent);
 }
@@ -332,7 +332,7 @@
    dialog reads as blurred shapes. The borrowed settings-section blocks get
    card shells so the fields read against the frost; their 24px settings-page
    margin dies here, the body gap owns the rhythm. */
-.modal.crew-glass-modal {
+.modal.subagent-glass-modal {
   background: linear-gradient(
     180deg,
     color-mix(in srgb, var(--surface-glass) 45%, transparent),
@@ -343,41 +343,41 @@
   border-radius: 16px;
   box-shadow: var(--glass-rim), var(--glass-drop);
 }
-:root[data-theme="light"] .modal.crew-glass-modal {
+:root[data-theme="light"] .modal.subagent-glass-modal {
   background: linear-gradient(
     180deg,
     color-mix(in srgb, var(--surface-glass) 55%, transparent),
     color-mix(in srgb, var(--surface-glass) 38%, transparent)
   );
 }
-.modal.crew-glass-modal h3 {
+.modal.subagent-glass-modal h3 {
   font-size: 15px;
 }
-.modal.crew-glass-modal .actions {
+.modal.subagent-glass-modal .actions {
   border-top: 1px solid var(--border);
   padding-top: 12px;
 }
-.modal.crew-glass-modal .settings-section {
+.modal.subagent-glass-modal .settings-section {
   margin-bottom: 0;
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: color-mix(in srgb, var(--surface-glass) 35%, transparent);
 }
-.modal.crew-glass-modal input,
-.modal.crew-glass-modal textarea,
-.modal.crew-glass-modal select {
+.modal.subagent-glass-modal input,
+.modal.subagent-glass-modal textarea,
+.modal.subagent-glass-modal select {
   background-color: color-mix(in srgb, var(--surface) 72%, transparent);
 }
 
 /* Wider than the default .modal (440px) — this form holds three selects side
    by side and a tall prompt box. The body column scrolls so a long form never
    overflows the viewport; the gap is the spacing between fields. */
-.modal.crew-editor-modal {
+.modal.subagent-editor-modal {
   width: min(780px, 94vw);
   max-height: min(86vh, 880px);
 }
-.crew-editor-body {
+.subagent-editor-body {
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -388,25 +388,25 @@
 /* Inside the editor every section is a flex column with an even gap — the
    settings page's block flow stacked the chip rows and the scope rows flat
    against each other. The title's own margin dies; the gap owns the rhythm. */
-.crew-editor-body .settings-section {
+.subagent-editor-body .settings-section {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
-.crew-editor-body .settings-section .settings-section-title {
+.subagent-editor-body .settings-section .settings-section-title {
   margin-bottom: 0;
 }
 
-/* ── CrewSelect (engine + model pickers) ──
+/* ── SubagentSelect (engine + model pickers) ──
    Native <select> popups are OS-drawn and can't wear the app's skin, so these
    two pickers are a button + portaled glass menu (styles below render the
    menu; the component portals it above .modal-overlay's z-index). */
-.crew-select {
+.subagent-select {
   position: relative;
   flex: 1;
   min-width: 180px;
 }
-.crew-select .crew-select-btn {
+.subagent-select .subagent-select-btn {
   width: 100%;
   justify-content: space-between;
   gap: 8px;
@@ -414,16 +414,16 @@
   padding: 8px 10px;
   background: color-mix(in srgb, var(--surface) 72%, transparent);
 }
-.crew-select-caret {
+.subagent-select-caret {
   font-size: 10px;
   opacity: 0.6;
 }
-.crew-select-value {
+.subagent-select-value {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.crew-select-menu {
+.subagent-select-menu {
   position: fixed;
   /* Above .modal-overlay (60) — the menu portals to <body> so the modal's
      scroll body and backdrop root can't clip it. */
@@ -442,7 +442,7 @@
   box-shadow: var(--glass-rim), var(--glass-drop);
   animation: modal-in 0.16s var(--ease);
 }
-.crew-select-option {
+.subagent-select-option {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -457,31 +457,31 @@
   color: var(--text);
   text-align: left;
 }
-.crew-select-option:hover {
+.subagent-select-option:hover {
   background: var(--surface-glass-2);
 }
-.crew-select-option.selected {
+.subagent-select-option.selected {
   color: var(--accent);
 }
-.crew-select-option span:first-child {
+.subagent-select-option span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.crew-select-check {
+.subagent-select-check {
   font-size: 11px;
   flex-shrink: 0;
 }
-.crew-editor-row {
+.subagent-editor-row {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
 }
-.crew-editor-row > * {
+.subagent-editor-row > * {
   flex: 1;
   min-width: 160px;
 }
-.crew-editor-textarea {
+.subagent-editor-textarea {
   min-height: 180px;
   width: 100%;
   min-width: 0;
@@ -489,21 +489,21 @@
 }
 /* A labeled field: small caps caption over the control, so "Read only" says
    WHAT it's read-only about and the number boxes read without trailing text. */
-.crew-field {
+.subagent-field {
   display: flex;
   flex-direction: column;
   gap: 5px;
   flex: 1;
   min-width: 170px;
 }
-.crew-field-label {
+.subagent-field-label {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-dim);
 }
-.crew-field .crew-field-input {
+.subagent-field .subagent-field-input {
   width: 100%;
   min-width: 0;
   padding: 8px 10px;
@@ -511,37 +511,37 @@
 }
 /* The native spinner ticker reads as OS chrome inside a styled form. Arrow
    keys and typing still step the value — only the buttons are hidden. */
-.crew-field .crew-field-input[type="number"] {
+.subagent-field .subagent-field-input[type="number"] {
   appearance: textfield;
   -moz-appearance: textfield;
 }
-.crew-field .crew-field-input[type="number"]::-webkit-outer-spin-button,
-.crew-field .crew-field-input[type="number"]::-webkit-inner-spin-button {
+.subagent-field .subagent-field-input[type="number"]::-webkit-outer-spin-button,
+.subagent-field .subagent-field-input[type="number"]::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
-.crew-chip-group {
+.subagent-chip-group {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
-.crew-chip-group .crew-chip {
+.subagent-chip-group .subagent-chip {
   cursor: pointer;
 }
-.crew-chip-group .crew-chip[aria-pressed="true"] {
+.subagent-chip-group .subagent-chip[aria-pressed="true"] {
   color: var(--accent);
   background: var(--accent-soft);
   border-color: var(--accent);
 }
-.crew-chip-group .crew-chip:disabled {
+.subagent-chip-group .subagent-chip:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
 /* ── Narrow containers: stack the row action groups under the content ── */
-@container crew-view (max-width: 560px) {
-  .crew-agent-actions,
-  .crew-run-actions {
+@container subagent-view (max-width: 560px) {
+  .subagent-agent-actions,
+  .subagent-run-actions {
     margin-left: 0;
     width: 100%;
     justify-content: flex-end;

@@ -573,9 +573,9 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
             // model current then — later edits to the automation never reached
             // it, so the run log kept showing (and any manual follow-up kept
             // spawning with) the stale model. Re-sync both on every launch.
-            // An `agent:` harness re-syncs through the crew vocabulary (see
-            // `crew_session_vocab`) so the row stays engine-addressable.
-            let vocab = crew_session_vocab(&conn, automation);
+            // An `agent:` harness re-syncs through the subagent vocabulary (see
+            // `subagent_session_vocab`) so the row stays engine-addressable.
+            let vocab = subagent_session_vocab(&conn, automation);
             let (agent, model) = match &vocab {
                 Some((a, _, m, _)) => (a.clone(), m.clone()),
                 None => (
@@ -596,7 +596,7 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
                     automation.chat_session_id, automation.id
                 );
             }
-            let vocab = crew_session_vocab(&conn, automation);
+            let vocab = subagent_session_vocab(&conn, automation);
             let (provider, model) = match &vocab {
                 Some((_, p, m, _)) => (p.clone(), m.clone()),
                 None => (automation.harness.clone(), automation.model.clone()),
@@ -663,19 +663,19 @@ fn lock_file_path(conn: &Connection, automation_id: &str) -> Option<std::path::P
 /// labeling, the manual-follow-up path) resolves against `builtin |
 /// harness:<cli> | acp:<id>` and a real provider, and the raw
 /// `harness:agent:<id>` / provider `agent:<id>` this replaces fell dead in
-/// each of them. Mirrors what `session_fabric` writes for a crew child
+/// each of them. Mirrors what `session_fabric` writes for a subagent child
 /// (engine as agent, resolved provider for builtin engines, `agent_def_id`
 /// link). Returns `(agent, provider, model, def_id)`.
 ///
 /// `None` when the harness is not an `agent:` value — the plain paths keep
 /// their own vocabulary — or when the definition cannot be resolved (the
 /// run itself errors on that immediately after).
-fn crew_session_vocab(
+fn subagent_session_vocab(
     conn: &Connection,
     automation: &Automation,
 ) -> Option<(String, String, String, String)> {
     let rest = automation.harness.strip_prefix("agent:")?;
-    let def = crate::chat::crew::resolve_by_id_or_name(conn, rest)?;
+    let def = crate::chat::subagents::resolve_by_id_or_name(conn, rest)?;
     let engine = def.engine.clone().unwrap_or_else(|| "builtin".to_string());
     // Same precedence as the execute arm: the automation's own model wins
     // when set, otherwise the definition's.
@@ -688,7 +688,7 @@ fn crew_session_vocab(
         Some((engine.clone(), engine, model, def.id))
     } else {
         let (provider, model) =
-            crate::chat::crew::resolve_builtin_provider_model(conn, Some(&model)).ok()?;
+            crate::chat::subagents::resolve_builtin_provider_model(conn, Some(&model)).ok()?;
         Some((engine, provider, model, def.id))
     }
 }
@@ -717,25 +717,25 @@ fn execute(
     // Route based on agent type:
     // - CLI harnesses (claude_code, opencode, pi-lineage) → spawn CLI process
     // - API providers and local_gguf → chat HTTP API
-    // - `agent:<id>` → the crew definition's engine and model, then the SAME
+    // - `agent:<id>` → the subagent definition's engine and model, then the SAME
     //   two arms. The definition's prompt body rides the automation prompt as
-    //   a directive block (same composition as manual and mesh crew runs), so
+    //   a directive block (same composition as manual and mesh subagent runs), so
     //   the run-log transcript shows exactly what the agent was told. The
     //   automation's own `model` wins over the definition's when set.
     //   (Worktree policy is NOT honored here yet — the manual and mesh paths
     //   provision via the session worktree seam; automations need a
     //   sidecar-safe variant. See the research doc Part E q5.)
     let prompt = ensure_unattended_rules(&automation.prompt);
-    // The crew slot held for an `agent:` run: (agent id, engine vocabulary
+    // The subagent slot held for an `agent:` run: (agent id, engine vocabulary
     // for the history row). Released after the one-shot returns.
-    let mut crew_slot: Option<(String, String)> = None;
+    let mut subagent_slot: Option<(String, String)> = None;
     let (harness, provider, model, prompt) = if let Some(rest) =
         automation.harness.strip_prefix("agent:")
     {
         let (def_engine, def_provider, def_model, composed, slot_info) = {
             let conn = db.lock();
-            let def = crate::chat::crew::resolve_by_id_or_name(&conn, rest).ok_or_else(|| {
-                format!("crew agent \"{rest}\" not found — it may have been deleted")
+            let def = crate::chat::subagents::resolve_by_id_or_name(&conn, rest).ok_or_else(|| {
+                format!("subagent \"{rest}\" not found — it may have been deleted")
             })?;
             // The automation's own model wins when set; otherwise the
             // definition's. Builtin engines resolve provider/model through
@@ -749,7 +749,7 @@ fn execute(
                 automation.model.clone()
             };
             let engine = def.engine.clone().unwrap_or_else(|| "builtin".into());
-            let composed = crate::chat::crew::compose_first_message(&def, &prompt);
+            let composed = crate::chat::subagents::compose_first_message(&def, &prompt);
             // (agent id, name, max_concurrent, engine vocabulary for the row)
             let slot_info = (
                 def.id.clone(),
@@ -764,14 +764,14 @@ fn execute(
                 (cli.to_string(), engine, model, composed, slot_info)
             } else if engine.starts_with("acp:") {
                 return Err(format!(
-                    "crew agent \"{}\" runs on an ACP engine, which has no unattended \
+                    "subagent \"{}\" runs on an ACP engine, which has no unattended \
                      one-shot path — bind the automation to a CLI-harness or builtin \
                      agent instead",
                     def.name
                 ));
             } else {
                 let (provider, model) =
-                    crate::chat::crew::resolve_builtin_provider_model(&conn, Some(&model))?;
+                    crate::chat::subagents::resolve_builtin_provider_model(&conn, Some(&model))?;
                 // The chat-HTTP arm dispatches on "not a CLI harness" but
                 // dials with the PROVIDER — "builtin" would fail the key
                 // lookup (the live test caught exactly that).
@@ -782,13 +782,13 @@ fn execute(
         // the same budget the Run button and mesh `agent:` spawns respect.
         // Acquired after every fallible resolution above (an early error
         // never strands a slot), released after the dispatch returns.
-        crate::chat::crew::try_acquire_running(
+        crate::chat::subagents::try_acquire_running(
             &slot_info.0,
             &slot_info.1,
             slot_info.2.max(1),
-            crate::chat::crew::MAX_ACTIVE_CREW,
+            crate::chat::subagents::MAX_ACTIVE_SUBAGENT,
         )?;
-        crew_slot = Some((slot_info.0.clone(), slot_info.3.clone()));
+        subagent_slot = Some((slot_info.0.clone(), slot_info.3.clone()));
         (def_engine, def_provider, def_model, composed)
     } else {
         let h = automation.harness.clone();
@@ -798,9 +798,9 @@ fn execute(
     // doubles as the row's session — its transcript IS the run. Written only
     // once the slot is held (the run is committed); settled with the
     // one-shot's real outcome right after it returns.
-    let crew_run_id = crew_slot.as_ref().and_then(|(agent_id, engine)| {
+    let subagent_run_id = subagent_slot.as_ref().and_then(|(agent_id, engine)| {
         let conn = db.lock();
-        crate::session_fabric::record_crew_run_start(
+        crate::session_fabric::record_subagent_run_start(
             &conn,
             agent_id,
             &prepared.chat_session_id,
@@ -836,16 +836,16 @@ fn execute(
             )
         }
     };
-    if let Some(run_id) = &crew_run_id {
+    if let Some(run_id) = &subagent_run_id {
         let (status, summary) = match &result {
             Ok(()) => ("ok", None),
             Err(e) => ("error", Some(crate::util::truncate_chars(e, 240))),
         };
         let conn = db.lock();
-        crate::db::finish_crew_run(&conn, run_id, status, summary.as_deref());
+        crate::db::finish_subagent_run(&conn, run_id, status, summary.as_deref());
     }
-    if let Some((agent_id, _)) = &crew_slot {
-        crate::chat::crew::bump_running(agent_id, -1);
+    if let Some((agent_id, _)) = &subagent_slot {
+        crate::chat::subagents::bump_running(agent_id, -1);
     }
     result
 }
@@ -1383,11 +1383,11 @@ mod tests {
         // `agent:<id>` — strings no chat_sessions consumer resolves (approval
         // lookups, provider labeling, manual follow-ups all dead-end). The
         // row must carry the definition's ENGINE vocabulary + agent_def_id,
-        // exactly like a session_fabric crew child.
+        // exactly like a session_fabric subagent child.
         let conn = crate::db::mem();
-        let def = crate::chat::crew::create(
+        let def = crate::chat::subagents::create(
             &conn,
-            &crate::chat::crew::CrewAgentInput {
+            &crate::chat::subagents::SubagentInput {
                 name: "nightly-writer".into(),
                 description: "d".into(),
                 prompt_md: "p".into(),
@@ -1402,7 +1402,7 @@ mod tests {
                 max_concurrent: 2,
             },
         )
-        .expect("crew agent created");
+        .expect("subagent created");
         let db = Arc::new(Mutex::new(conn));
         let automation = {
             let conn = db.lock();

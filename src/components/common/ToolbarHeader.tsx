@@ -2,7 +2,7 @@
 //
 // The app runs undecorated (decorations:false), so the `.toolbar` in App.tsx
 // IS the caption: it floats over the top of `.main` and the window controls
-// sit at its right edge. The full-page views (Automations / Crew / Vault)
+// sit at its right edge. The full-page views (Automations / Subagent / Vault)
 // each used to spend their own row on a header underneath it, wasting ~50px
 // of vertical space and splitting the chrome in two. This renders that same
 // header markup INTO the caption instead, so the window frame owns where it

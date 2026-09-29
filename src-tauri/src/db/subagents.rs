@@ -1,10 +1,10 @@
-//! Crew agents (declarative subagents) — persistence.
+//! Subagents (declarative subagents) — persistence.
 //!
 //! One row per agent definition: a name, a markdown prompt body, a tool
 //! allowlist, permission/engine/policy fields and a spawn budget. The 7
 //! builtin roles are seeded rows (`builtin=1`) that hold the role instruction
 //! text; everything else about how a run behaves is resolved by
-//! `chat::crew` (allowlist resolution, validation, the running set), so this
+//! `chat::subagent` (allowlist resolution, validation, the running set), so this
 //! module stays a plain row store like `db/automations.rs`.
 //!
 //! A table rather than a settings blob: spawn surfaces validate against it by
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{new_id, now_ts, DbResult};
 
-/// Default policy values — mirrors the `crew_agents` DDL defaults so a
+/// Default policy values — mirrors the `subagents` DDL defaults so a
 /// partial form (or an old client) lands on the same row the DDL would give.
 const DEFAULT_SANDBOX_POLICY: &str = "read_only";
 const DEFAULT_APPROVAL_POLICY: &str = "on_request";
@@ -27,7 +27,7 @@ const DEFAULT_MAX_CONCURRENT: i64 = 2;
 /// A persisted agent definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CrewAgent {
+pub struct Subagent {
     pub id: String,
     /// Also the `Task` `subagent_type` enum value. Unique COLLATE NOCASE.
     pub name: String,
@@ -47,20 +47,20 @@ pub struct CrewAgent {
     /// Maps to the provider's reasoning-effort level.
     pub effort: Option<String>,
     /// `read_only` | `workspace_write` — also the allowlist ceiling's
-    /// mutating half (see `chat::crew::builtin_ceiling`).
+    /// mutating half (see `chat::subagent::builtin_ceiling`).
     pub sandbox_policy: String,
     /// `on_request` | `auto_edit` | `full_access`.
     pub approval_policy: String,
     /// `inherit` | `always` | `never`.
     pub worktree_policy: String,
-    /// Clamped to 1..=`chat::crew::MAX_ROUNDS`.
+    /// Clamped to 1..=`chat::subagent::MAX_ROUNDS`.
     pub max_rounds: i64,
     /// Per-agent live-run budget.
     pub max_concurrent: i64,
     /// Seeded role — cannot be deleted and its name is reserved.
     pub builtin: bool,
-    /// Who authored the row: NULL = the user (Crew panel), 'agent' = a model
-    /// created it through the crew chat tool. Display-only — the Crew panel
+    /// Who authored the row: NULL = the user (Subagent panel), 'agent' = a model
+    /// created it through the subagent chat tool. Display-only — the Subagent panel
     /// badges it so the user can always see what their agents made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
@@ -73,7 +73,7 @@ pub struct CrewAgent {
 /// the defaults are the DDL's, not zero values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CrewAgentInput {
+pub struct SubagentInput {
     pub name: String,
     #[serde(default)]
     pub description: String,
@@ -124,9 +124,9 @@ fn default_max_concurrent() -> i64 {
 /// Tolerant row mapping: the defaulted/nullable columns fall back to the DDL
 /// default when a row predates a column, so adding a column in a later
 /// migration cannot break reads of older rows.
-fn map_crew_agent(row: &Row) -> rusqlite::Result<CrewAgent> {
+fn map_subagent(row: &Row) -> rusqlite::Result<Subagent> {
     let created_at: i64 = row.get("created_at")?;
-    Ok(CrewAgent {
+    Ok(Subagent {
         id: row.get("id")?,
         name: row.get("name")?,
         description: row.get("description").unwrap_or_else(|_| String::new()),
@@ -157,16 +157,16 @@ const COLUMNS: &str = "id, name, description, prompt_md, tools, engine, model, e
      sandbox_policy, approval_policy, worktree_policy, max_rounds, max_concurrent, builtin, \
      origin, created_at, updated_at";
 
-/// Mark who authored a definition: NULL = the user (Crew panel), "agent" = a
-/// model created it through the crew chat tool. Display-only — the Crew panel
+/// Mark who authored a definition: NULL = the user (Subagent panel), "agent" = a
+/// model created it through the subagent chat tool. Display-only — the Subagent panel
 /// badges it so the user can always see what their agents made.
-pub fn set_crew_agent_origin(
+pub fn set_subagent_origin(
     conn: &Connection,
     agent_id: &str,
     origin: Option<&str>,
 ) -> DbResult<()> {
     conn.execute(
-        "UPDATE crew_agents SET origin = ?2 WHERE id = ?1",
+        "UPDATE subagents SET origin = ?2 WHERE id = ?1",
         rusqlite::params![agent_id, origin],
     )?;
     Ok(())
@@ -174,42 +174,42 @@ pub fn set_crew_agent_origin(
 
 /// Builtins first (the stable set the `Task` enum advertises), then user rows
 /// by name.
-pub fn list_crew_agents(conn: &Connection) -> DbResult<Vec<CrewAgent>> {
+pub fn list_subagents(conn: &Connection) -> DbResult<Vec<Subagent>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM crew_agents ORDER BY builtin DESC, name COLLATE NOCASE ASC"
+        "SELECT {COLUMNS} FROM subagents ORDER BY builtin DESC, name COLLATE NOCASE ASC"
     ))?;
-    let rows = stmt.query_map([], map_crew_agent)?;
+    let rows = stmt.query_map([], map_subagent)?;
     rows.collect()
 }
 
-pub fn get_crew_agent(conn: &Connection, id: &str) -> DbResult<Option<CrewAgent>> {
+pub fn get_subagent(conn: &Connection, id: &str) -> DbResult<Option<Subagent>> {
     conn.query_row(
-        &format!("SELECT {COLUMNS} FROM crew_agents WHERE id = ?1"),
+        &format!("SELECT {COLUMNS} FROM subagents WHERE id = ?1"),
         params![id],
-        map_crew_agent,
+        map_subagent,
     )
     .optional()
 }
 
 /// Look one agent up by name, case-insensitively (the same rule the
 /// `COLLATE NOCASE` unique index enforces), for the name-collision check.
-pub fn find_crew_agent_by_name(conn: &Connection, name: &str) -> DbResult<Option<CrewAgent>> {
+pub fn find_subagent_by_name(conn: &Connection, name: &str) -> DbResult<Option<Subagent>> {
     conn.query_row(
-        &format!("SELECT {COLUMNS} FROM crew_agents WHERE name = ?1 COLLATE NOCASE"),
+        &format!("SELECT {COLUMNS} FROM subagents WHERE name = ?1 COLLATE NOCASE"),
         params![name],
-        map_crew_agent,
+        map_subagent,
     )
     .optional()
 }
 
 /// Insert a user-created definition. `input` must already be validated and
-/// normalized by `chat::crew::validate_input` — this layer does no policy
+/// normalized by `chat::subagent::validate_input` — this layer does no policy
 /// checks, exactly like `db/automations.rs`.
-pub fn create_crew_agent(conn: &Connection, input: &CrewAgentInput) -> DbResult<CrewAgent> {
+pub fn create_subagent(conn: &Connection, input: &SubagentInput) -> DbResult<Subagent> {
     let id = new_id();
     let ts = now_ts();
     conn.execute(
-        "INSERT INTO crew_agents
+        "INSERT INTO subagents
            (id, name, description, prompt_md, tools, engine, model, effort,
             sandbox_policy, approval_policy, worktree_policy,
             max_rounds, max_concurrent, builtin, created_at, updated_at)
@@ -231,19 +231,19 @@ pub fn create_crew_agent(conn: &Connection, input: &CrewAgentInput) -> DbResult<
             ts,
         ],
     )?;
-    get_crew_agent(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+    get_subagent(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
 /// Overwrite a definition's editable fields. `builtin`, `id` and
 /// `created_at` are never touched. Returns the reloaded row so the caller
 /// answers with what was actually persisted.
-pub fn update_crew_agent(
+pub fn update_subagent(
     conn: &Connection,
     id: &str,
-    input: &CrewAgentInput,
-) -> DbResult<Option<CrewAgent>> {
+    input: &SubagentInput,
+) -> DbResult<Option<Subagent>> {
     conn.execute(
-        "UPDATE crew_agents SET
+        "UPDATE subagents SET
            name = ?2, description = ?3, prompt_md = ?4, tools = ?5, engine = ?6,
            model = ?7, effort = ?8, sandbox_policy = ?9, approval_policy = ?10,
            worktree_policy = ?11, max_rounds = ?12, max_concurrent = ?13, updated_at = ?14
@@ -265,21 +265,21 @@ pub fn update_crew_agent(
             now_ts(),
         ],
     )?;
-    get_crew_agent(conn, id)
+    get_subagent(conn, id)
 }
 
-pub fn delete_crew_agent(conn: &Connection, id: &str) -> DbResult<()> {
-    conn.execute("DELETE FROM crew_agents WHERE id = ?1", params![id])?;
+pub fn delete_subagent(conn: &Connection, id: &str) -> DbResult<()> {
+    conn.execute("DELETE FROM subagents WHERE id = ?1", params![id])?;
     Ok(())
 }
 
 /// Insert one row verbatim. Used ONLY by the builtin seed, which owns its own
-/// stable ids — `create_crew_agent` mints a uuid. Every column not named here
+/// stable ids — `create_subagent` mints a uuid. Every column not named here
 /// is left at its F.1 DDL default.
 fn insert_row(conn: &Connection, id: &str, name: &str, prompt_md: &str) -> DbResult<()> {
     let ts = now_ts();
     conn.execute(
-        "INSERT OR IGNORE INTO crew_agents
+        "INSERT OR IGNORE INTO subagents
            (id, name, description, prompt_md, tools, engine, model, effort,
             sandbox_policy, approval_policy, worktree_policy,
             max_rounds, max_concurrent, builtin, created_at, updated_at)
@@ -307,13 +307,13 @@ fn insert_row(conn: &Connection, id: &str, name: &str, prompt_md: &str) -> DbRes
 /// read-only default — the same set today's `Task` subagents get).
 ///
 /// `INSERT OR IGNORE` keyed on the id makes this idempotent AND
-/// non-destructive: re-running after a cleared `crew.seed.v1` marker refreshes
+/// non-destructive: re-running after a cleared `subagent.seed.v1` marker refreshes
 /// nothing a user (or a later edit) changed, and never duplicates. The
-/// instructions come from `chat::crew::BUILTIN_ROLES` — the same table
+/// instructions come from `chat::subagent::BUILTIN_ROLES` — the same table
 /// `dispatch.rs` reads at runtime, so the seed and the runtime can never
 /// disagree.
-pub fn seed_builtin_crew_agents(conn: &Connection) -> DbResult<()> {
-    for role in crate::chat::crew::BUILTIN_ROLES {
+pub fn seed_builtin_subagents(conn: &Connection) -> DbResult<()> {
+    for role in crate::chat::subagents::BUILTIN_ROLES {
         insert_row(
             conn,
             &format!("builtin-{}", role.name),
@@ -324,14 +324,14 @@ pub fn seed_builtin_crew_agents(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
-// ---- crew run history (Phase 5) ----
+// ---- subagent run history (Phase 5) ----
 
-/// One crew RUN (a spawned session's lifecycle). Dangling ids are legal on
+/// One subagent RUN (a spawned session's lifecycle). Dangling ids are legal on
 /// purpose — history outlives a deleted agent or chat, and the UI renders
 /// those as "deleted agent"/"deleted chat" instead of hiding the rows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CrewAgentRun {
+pub struct SubagentRun {
     pub id: String,
     pub agent_id: Option<String>,
     pub session_id: Option<String>,
@@ -349,8 +349,8 @@ pub struct CrewAgentRun {
     pub summary: Option<String>,
 }
 
-fn map_crew_run(row: &rusqlite::Row) -> rusqlite::Result<CrewAgentRun> {
-    Ok(CrewAgentRun {
+fn map_subagent_run(row: &rusqlite::Row) -> rusqlite::Result<SubagentRun> {
+    Ok(SubagentRun {
         id: row.get("id")?,
         agent_id: row.get("agent_id")?,
         session_id: row.get("session_id")?,
@@ -367,9 +367,9 @@ fn map_crew_run(row: &rusqlite::Row) -> rusqlite::Result<CrewAgentRun> {
 }
 
 /// Persist a new run row at spawn time (status `running`).
-pub fn record_crew_run(conn: &Connection, run: &CrewAgentRun) -> DbResult<()> {
+pub fn record_subagent_run(conn: &Connection, run: &SubagentRun) -> DbResult<()> {
     conn.execute(
-        "INSERT INTO crew_runs (id, agent_id, session_id, trigger, task, engine, model, \
+        "INSERT INTO subagent_runs (id, agent_id, session_id, trigger, task, engine, model, \
          worktree, started_at, finished_at, status, summary) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         rusqlite::params![
@@ -397,14 +397,14 @@ pub fn record_crew_run(conn: &Connection, run: &CrewAgentRun) -> DbResult<()> {
 /// watcher and the fail-fast path can both fire (with no ordering
 /// guarantee), and an unconditional UPDATE would let the watcher's late
 /// "ok" overwrite an "error" that was already recorded.
-pub fn finish_crew_run(
+pub fn finish_subagent_run(
     conn: &Connection,
     run_id: &str,
     status: &str,
     summary: Option<&str>,
 ) {
     let _ = conn.execute(
-        "UPDATE crew_runs SET finished_at = ?2, status = ?3, \
+        "UPDATE subagent_runs SET finished_at = ?2, status = ?3, \
          summary = COALESCE(?4, summary) WHERE id = ?1 AND status = 'running'",
         rusqlite::params![run_id, crate::db::now_ts(), status, summary],
     );
@@ -414,9 +414,9 @@ pub fn finish_crew_run(
 /// is written at spawn time, BEFORE the worktree exists (or before the
 /// provisioning fell back to the project root), so this is the only writer
 /// that ever sees a path. Best-effort, like every history write.
-pub fn set_crew_run_worktree(conn: &Connection, run_id: &str, worktree: Option<&str>) {
+pub fn set_subagent_run_worktree(conn: &Connection, run_id: &str, worktree: Option<&str>) {
     let _ = conn.execute(
-        "UPDATE crew_runs SET worktree = ?2 WHERE id = ?1",
+        "UPDATE subagent_runs SET worktree = ?2 WHERE id = ?1",
         rusqlite::params![run_id, worktree],
     );
 }
@@ -428,11 +428,11 @@ pub fn set_crew_run_worktree(conn: &Connection, run_id: &str, worktree: Option<&
 /// live run can still be at (the watcher gives up by then). Rows younger
 /// than the ceiling are left alone: a second concurrently-running instance
 /// of the app may own them.
-pub fn sweep_stale_crew_runs(conn: &Connection, max_age_secs: i64) {
+pub fn sweep_stale_subagent_runs(conn: &Connection, max_age_secs: i64) {
     let cutoff = crate::db::now_ts() - max_age_secs;
     let settled = conn
         .execute(
-            "UPDATE crew_runs SET finished_at = ?1, status = 'error', \
+            "UPDATE subagent_runs SET finished_at = ?1, status = 'error', \
              summary = COALESCE(summary, 'interrupted — the app exited mid-run') \
              WHERE status = 'running' AND started_at <= ?2",
             rusqlite::params![crate::db::now_ts(), cutoff],
@@ -440,30 +440,30 @@ pub fn sweep_stale_crew_runs(conn: &Connection, max_age_secs: i64) {
         .map(|n| n as i64)
         .unwrap_or(0);
     if settled > 0 {
-        eprintln!("[crew] settled {settled} stale running row(s) left by a previous process");
+        eprintln!("[subagent] settled {settled} stale running row(s) left by a previous process");
     }
 }
 
 /// Newest-first run history, optionally filtered to one agent.
-pub fn list_crew_runs(
+pub fn list_subagent_runs(
     conn: &Connection,
     agent_id: Option<&str>,
     limit: i64,
-) -> DbResult<Vec<CrewAgentRun>> {
+) -> DbResult<Vec<SubagentRun>> {
     let limit = limit.clamp(1, 200);
     let sql = |filtered: bool| {
         if filtered {
             (
                 "SELECT id, agent_id, session_id, trigger, task, engine, model, worktree, \
                  started_at, finished_at, status, summary \
-                 FROM crew_runs WHERE agent_id = ?1 ORDER BY started_at DESC LIMIT ?2",
+                 FROM subagent_runs WHERE agent_id = ?1 ORDER BY started_at DESC LIMIT ?2",
                 2,
             )
         } else {
             (
                 "SELECT id, agent_id, session_id, trigger, task, engine, model, worktree, \
                  started_at, finished_at, status, summary \
-                 FROM crew_runs ORDER BY started_at DESC LIMIT ?1",
+                 FROM subagent_runs ORDER BY started_at DESC LIMIT ?1",
                 1,
             )
         }
@@ -471,13 +471,13 @@ pub fn list_crew_runs(
     let mut out = Vec::new();
     if let Some(agent) = agent_id {
         let mut stmt = conn.prepare(sql(true).0)?;
-        let rows = stmt.query_map(rusqlite::params![agent, limit], map_crew_run)?;
+        let rows = stmt.query_map(rusqlite::params![agent, limit], map_subagent_run)?;
         for r in rows {
             out.push(r?);
         }
     } else {
         let mut stmt = conn.prepare(sql(false).0)?;
-        let rows = stmt.query_map(rusqlite::params![limit], map_crew_run)?;
+        let rows = stmt.query_map(rusqlite::params![limit], map_subagent_run)?;
         for r in rows {
             out.push(r?);
         }
@@ -488,10 +488,10 @@ pub fn list_crew_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::crew::BUILTIN_ROLES;
+    use crate::chat::subagents::BUILTIN_ROLES;
 
-    fn input(name: &str) -> CrewAgentInput {
-        CrewAgentInput {
+    fn input(name: &str) -> SubagentInput {
+        SubagentInput {
             name: name.into(),
             description: "d".into(),
             prompt_md: "p".into(),
@@ -520,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_crew_run_first_settle_wins_and_worktree_backfills() {
+    fn finish_subagent_run_first_settle_wins_and_worktree_backfills() {
         // Regression (two defects, one row): (1) the idle watcher and the
         // fail-fast path can both settle a run with no ordering guarantee,
         // and an unconditional UPDATE let the watcher's late "ok" overwrite
@@ -528,9 +528,9 @@ mod tests {
         // final. (2) The worktree column is written at spawn (before
         // provisioning exists) and must be backfillable afterwards.
         let conn = super::super::mem();
-        let run = CrewAgentRun {
+        let run = SubagentRun {
             id: "run-1".into(),
-            agent_id: Some("crew-a".into()),
+            agent_id: Some("subagent-a".into()),
             session_id: Some("s1".into()),
             trigger: "manual".into(),
             task: "t".into(),
@@ -542,18 +542,18 @@ mod tests {
             status: "running".into(),
             summary: None,
         };
-        record_crew_run(&conn, &run).unwrap();
+        record_subagent_run(&conn, &run).unwrap();
         // The fail-fast path settles an error first…
-        finish_crew_run(&conn, "run-1", "error", Some("first turn failed"));
+        finish_subagent_run(&conn, "run-1", "error", Some("first turn failed"));
         // …the late idle watcher then settles "ok" — must be a no-op.
-        finish_crew_run(&conn, "run-1", "ok", None);
-        let row = list_crew_runs(&conn, None, 10).unwrap().remove(0);
+        finish_subagent_run(&conn, "run-1", "ok", None);
+        let row = list_subagent_runs(&conn, None, 10).unwrap().remove(0);
         assert_eq!(row.status, "error");
         assert_eq!(row.summary.as_deref(), Some("first turn failed"));
         assert!(row.finished_at.is_some(), "the first settle stamped the end time");
         // Provisioning finished after the row was written → backfill.
-        set_crew_run_worktree(&conn, "run-1", Some("D:/repo/.worktrees/relay-run-1"));
-        let row = list_crew_runs(&conn, None, 10).unwrap().remove(0);
+        set_subagent_run_worktree(&conn, "run-1", Some("D:/repo/.worktrees/relay-run-1"));
+        let row = list_subagent_runs(&conn, None, 10).unwrap().remove(0);
         assert_eq!(
             row.worktree.as_deref(),
             Some("D:/repo/.worktrees/relay-run-1")
@@ -567,9 +567,9 @@ mod tests {
         // the watchers' release ceiling: a younger one may belong to a
         // concurrently running second instance of the app.
         let conn = super::super::mem();
-        let mk = |id: &str, started: i64, status: &str| CrewAgentRun {
+        let mk = |id: &str, started: i64, status: &str| SubagentRun {
             id: id.into(),
-            agent_id: Some("crew-a".into()),
+            agent_id: Some("subagent-a".into()),
             session_id: None,
             trigger: "manual".into(),
             task: "t".into(),
@@ -584,18 +584,18 @@ mod tests {
         let now = crate::db::now_ts();
         // A stale `running` row (older than the 2h ceiling), a fresh
         // `running` row, and an already-settled row.
-        record_crew_run(&conn, &mk("stale", now - 3 * 3600, "running")).unwrap();
-        record_crew_run(&conn, &mk("fresh", now, "running")).unwrap();
-        record_crew_run(
+        record_subagent_run(&conn, &mk("stale", now - 3 * 3600, "running")).unwrap();
+        record_subagent_run(&conn, &mk("fresh", now, "running")).unwrap();
+        record_subagent_run(
             &conn,
             &mk("done", now - 3 * 3600, "ok"),
         )
         .unwrap();
 
-        super::sweep_stale_crew_runs(&conn, 2 * 3600);
+        super::sweep_stale_subagent_runs(&conn, 2 * 3600);
 
         let by_id = |id: &str| {
-            list_crew_runs(&conn, None, 50)
+            list_subagent_runs(&conn, None, 50)
                 .unwrap()
                 .into_iter()
                 .find(|r| r.id == id)
@@ -618,24 +618,24 @@ mod tests {
         assert_eq!(count_builtins(&conn), 7);
 
         // Re-running through the marker is a no-op.
-        super::super::migrate_crew_agents_seed(&conn).unwrap();
+        super::super::migrate_subagents_seed(&conn).unwrap();
         assert_eq!(count_builtins(&conn), 7);
 
         // Clearing the marker forces the pass again: INSERT OR IGNORE keeps it
         // at exactly 7 (no duplicates, no clobber).
-        conn.execute("DELETE FROM app_settings WHERE key = 'crew.seed.v1'", [])
+        conn.execute("DELETE FROM app_settings WHERE key = 'subagent.seed.v1'", [])
             .unwrap();
-        super::super::migrate_crew_agents_seed(&conn).unwrap();
+        super::super::migrate_subagents_seed(&conn).unwrap();
         assert_eq!(count_builtins(&conn), 7);
 
         // A user's edit to a builtin row survives a forced re-seed.
         conn.execute(
-            "UPDATE crew_agents SET description = 'mine' WHERE id = 'builtin-explore'",
+            "UPDATE subagents SET description = 'mine' WHERE id = 'builtin-explore'",
             [],
         )
         .unwrap();
-        seed_builtin_crew_agents(&conn).unwrap();
-        let row = get_crew_agent(&conn, "builtin-explore").unwrap().unwrap();
+        seed_builtin_subagents(&conn).unwrap();
+        let row = get_subagent(&conn, "builtin-explore").unwrap().unwrap();
         assert_eq!(row.description, "mine");
         assert_eq!(count_builtins(&conn), 7);
     }
@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn seeded_rows_carry_the_f1_defaults() {
         let conn = super::super::mem();
-        let rows = list_crew_agents(&conn).unwrap();
+        let rows = list_subagents(&conn).unwrap();
         assert_eq!(rows.len(), 7, "only the builtins exist on a fresh DB");
         for row in &rows {
             let role = BUILTIN_ROLES
@@ -667,7 +667,7 @@ mod tests {
 
     fn count_builtins(conn: &Connection) -> i64 {
         conn.query_row(
-            "SELECT COUNT(*) FROM crew_agents WHERE builtin = 1",
+            "SELECT COUNT(*) FROM subagents WHERE builtin = 1",
             [],
             |r| r.get(0),
         )
@@ -683,7 +683,7 @@ mod tests {
 
         let mut inp = input("Doc Writer");
         inp.tools = Some(r#"["read_file","write_file"]"#.into());
-        let created = create_crew_agent(&conn, &inp).unwrap();
+        let created = create_subagent(&conn, &inp).unwrap();
         assert!(!created.builtin);
         assert_eq!(
             created.tools.as_deref(),
@@ -699,7 +699,7 @@ mod tests {
         edit.prompt_md = "you write docs".into();
         edit.sandbox_policy = "workspace_write".into();
         edit.max_rounds = 40;
-        let updated = update_crew_agent(&conn, &created.id, &edit)
+        let updated = update_subagent(&conn, &created.id, &edit)
             .unwrap()
             .unwrap();
         assert_eq!(updated.tools.as_deref(), Some(r#"["read_file"]"#));
@@ -710,18 +710,18 @@ mod tests {
         assert_eq!(updated.created_at, created.created_at, "immutable");
 
         edit.tools = None;
-        let cleared = update_crew_agent(&conn, &created.id, &edit)
+        let cleared = update_subagent(&conn, &created.id, &edit)
             .unwrap()
             .unwrap();
         assert!(cleared.tools.is_none(), "None must survive as SQL NULL");
 
         // The mem() fixture seeds the 7 builtins; exactly one user row exists.
         assert_eq!(
-            list_crew_agents(&conn).unwrap().iter().filter(|r| !r.builtin).count(),
+            list_subagents(&conn).unwrap().iter().filter(|r| !r.builtin).count(),
             1
         );
         assert_eq!(
-            find_crew_agent_by_name(&conn, "DOC WRITER")
+            find_subagent_by_name(&conn, "DOC WRITER")
                 .unwrap()
                 .unwrap()
                 .id,
@@ -729,19 +729,19 @@ mod tests {
             "name lookup is case-insensitive"
         );
 
-        delete_crew_agent(&conn, &created.id).unwrap();
+        delete_subagent(&conn, &created.id).unwrap();
         // The mem() fixture's 7 builtins remain; the user row is gone.
         assert_eq!(
-            list_crew_agents(&conn)
+            list_subagents(&conn)
                 .unwrap()
                 .iter()
                 .filter(|r| !r.builtin)
                 .count(),
             0
         );
-        assert!(get_crew_agent(&conn, &created.id).unwrap().is_none());
+        assert!(get_subagent(&conn, &created.id).unwrap().is_none());
         // Updating a gone row reloads to None instead of inventing one.
-        assert!(update_crew_agent(&conn, &created.id, &edit)
+        assert!(update_subagent(&conn, &created.id, &edit)
             .unwrap()
             .is_none());
     }
@@ -749,9 +749,9 @@ mod tests {
     #[test]
     fn unique_name_is_case_insensitive_at_the_db_layer() {
         let conn = crate::db::mem();
-        create_crew_agent(&conn, &input("Doc Writer")).unwrap();
+        create_subagent(&conn, &input("Doc Writer")).unwrap();
         // The COLLATE NOCASE unique index is the backstop behind
-        // chat::crew::validate_input's explicit check.
-        assert!(create_crew_agent(&conn, &input("doc writer")).is_err());
+        // chat::subagent::validate_input's explicit check.
+        assert!(create_subagent(&conn, &input("doc writer")).is_err());
     }
 }

@@ -1963,13 +1963,13 @@ pub(crate) async fn run_prompt_warmup(
         research: false,
         session_mesh: false,
         automations_write: false,
-                crew_write: true,
+                subagent_write: true,
         totp: false,
         unlockable_families: std::sync::Arc::new(
             crate::chat::tools::unlockable_family_pairs(),
         ),
         // No terminal tool allowlist: every main-loop surface renders the
-        // full registry. Only a subagent run pins a set (chat::crew).
+        // full registry. Only a subagent run pins a set (chat::subagent).
         allow: None,
     };
     let mut body = serde_json::json!({

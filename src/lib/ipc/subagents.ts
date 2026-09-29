@@ -1,10 +1,10 @@
 // Extracted domain of lib/ipc.ts (see its header). Command names and
 // payload shapes are binding (CONTRACT.md).
 //
-// Crew agents (chat/crew.rs): persisted, named subagent definitions — prompt
+// Subagents (chat/subagent.rs): persisted, named subagent definitions — prompt
 // body, tool allowlist, permission scope, engine/model, worktree policy, spawn
 // budget. Phase 1 is the registry only (no run surface yet): the list/create/
-// update/delete wrappers below back Settings → Agents → Crew.
+// update/delete wrappers below back Settings → Agents → Subagent.
 //
 // Two deliberate normalizations happen at this boundary so every consumer sees
 // one shape:
@@ -18,8 +18,8 @@
 //    same convention every other wrapper in this folder follows.
 import { safeInvoke } from "../ipcCore";
 
-/** One persisted crew agent. Mirrors the Rust `CrewAgent` 1:1 (camelCase). */
-export interface CrewAgent {
+/** One persisted subagent. Mirrors the Rust `Subagent` 1:1 (camelCase). */
+export interface Subagent {
   id: string;
   /** Also the `Task` enum value; unique, case-insensitive. */
   name: string;
@@ -47,20 +47,20 @@ export interface CrewAgent {
   maxConcurrent: number;
   /** Seeded roles can't be deleted or renamed. */
   builtin: boolean;
-  /** Who authored the row: null = the user (Crew panel), "agent" = a model
-   *  created it via the crew chat tool (badged so the user can always see
+  /** Who authored the row: null = the user (Subagent panel), "agent" = a model
+   *  created it via the subagent chat tool (badged so the user can always see
    *  what their agents made). */
   origin?: string | null;
   createdAt: number;
   updatedAt: number;
 }
 
-/** The create/update payload: `CrewAgent` minus id/builtin/timestamps, every
+/** The create/update payload: `Subagent` minus id/builtin/timestamps, every
  *  field defaulted on the Rust side so the UI can send a partial form.
  *  Arrays in the app, JSON on the wire — `tools` is the JSON-array *column*
- *  (the backend's `CrewAgentInput.tools` is `Option<String>`), and the
+ *  (the backend's `SubagentInput.tools` is `Option<String>`), and the
  *  wrappers below serialize it. `null`/omitted = inherit the engine default. */
-export interface CrewAgentInput {
+export interface SubagentInput {
   name: string;
   description?: string;
   promptMd?: string;
@@ -75,12 +75,12 @@ export interface CrewAgentInput {
   maxConcurrent?: number;
 }
 
-/** One row of run history (F.1 `crew_runs`, mirrored by F.4). The registry is
- *  Phase 1; this lands with the spawn surfaces (Phases 2.5/3/5), and the crew
+/** One row of run history (F.1 `subagent_runs`, mirrored by F.4). The registry is
+ *  Phase 1; this lands with the spawn surfaces (Phases 2.5/3/5), and the subagent
  *  store keeps a `runs` map keyed by run id so the `chat:session-spawn` event
  *  has somewhere to land. No FKs on `agent_id`/`session_id` on purpose:
  *  history outlives both a deleted agent and a deleted chat. */
-export interface CrewAgentRun {
+export interface SubagentRun {
   id: string;
   agentId: string | null;
   sessionId: string | null;
@@ -97,14 +97,14 @@ export interface CrewAgentRun {
   summary: string | null;
 }
 
-/** The wire row: exactly `CrewAgent` except `tools` is still the raw column. */
-type CrewAgentRow = Omit<CrewAgent, "tools"> & { tools: string | null };
+/** The wire row: exactly `Subagent` except `tools` is still the raw column. */
+type SubagentRow = Omit<Subagent, "tools"> & { tools: string | null };
 
 /** JSON column → allowlist. Never throws: an absent, empty, unparseable, or
  *  non-array value all mean "no explicit allowlist" (`null`). Non-string
  *  entries are dropped and duplicates collapse, so one bad row can't widen a
  *  definition's effective set. */
-export function parseCrewTools(raw: string | null | undefined): string[] | null {
+export function parseSubagentTools(raw: string | null | undefined): string[] | null {
   if (raw == null || raw === "") return null;
   let parsed: unknown;
   try {
@@ -130,7 +130,7 @@ function intOr(value: unknown, fallback: number): number {
  *  JSON array string, the app passes an array. An omitted `tools` stays omitted
  *  (the backend's `#[serde(default)]` then means "inherit"), while an explicit
  *  `null` clears the allowlist back to the engine default. */
-function serializeInput(input: CrewAgentInput): Record<string, unknown> {
+function serializeInput(input: SubagentInput): Record<string, unknown> {
   const { tools, ...rest } = input;
   const payload: Record<string, unknown> = { ...rest };
   if (tools !== undefined) payload.tools = tools == null ? null : JSON.stringify(tools);
@@ -143,13 +143,13 @@ function strOr(value: unknown, fallback: string): string {
 
 /** Row → app shape. Tolerant of every optional column so a partially
  *  migrated row still renders (with defaults) instead of blanking the list. */
-function normalizeCrewAgent(row: CrewAgentRow): CrewAgent {
+function normalizeSubagent(row: SubagentRow): Subagent {
   return {
     id: strOr(row.id, ""),
     name: strOr(row.name, ""),
     description: strOr(row.description, ""),
     promptMd: strOr(row.promptMd, ""),
-    tools: parseCrewTools(row.tools),
+    tools: parseSubagentTools(row.tools),
     engine: row.engine ?? null,
     model: row.model ?? null,
     effort: row.effort ?? null,
@@ -164,52 +164,52 @@ function normalizeCrewAgent(row: CrewAgentRow): CrewAgent {
   };
 }
 
-export const listCrewAgents = async (): Promise<CrewAgent[]> => {
-  const rows = await safeInvoke<CrewAgentRow[]>("list_crew_agents");
-  return (rows ?? []).map(normalizeCrewAgent);
+export const listSubagents = async (): Promise<Subagent[]> => {
+  const rows = await safeInvoke<SubagentRow[]>("list_subagents");
+  return (rows ?? []).map(normalizeSubagent);
 };
 
-export const getCrewAgent = async (agentId: string): Promise<CrewAgent | null> => {
-  const row = await safeInvoke<CrewAgentRow | null>("get_crew_agent", { agentId });
-  return row ? normalizeCrewAgent(row) : null;
+export const getSubagent = async (agentId: string): Promise<Subagent | null> => {
+  const row = await safeInvoke<SubagentRow | null>("get_subagent", { agentId });
+  return row ? normalizeSubagent(row) : null;
 };
 
-export const createCrewAgent = async (input: CrewAgentInput): Promise<CrewAgent | null> => {
-  const row = await safeInvoke<CrewAgentRow | null>("create_crew_agent", {
+export const createSubagent = async (input: SubagentInput): Promise<Subagent | null> => {
+  const row = await safeInvoke<SubagentRow | null>("create_subagent", {
     input: serializeInput(input),
   });
-  return row ? normalizeCrewAgent(row) : null;
+  return row ? normalizeSubagent(row) : null;
 };
 
 /** Returns the saved row so the caller can adopt the backend's normalized
  *  values (name slug, clamped rounds) instead of guessing them. */
-export const updateCrewAgent = async (
+export const updateSubagent = async (
   agentId: string,
-  input: CrewAgentInput,
-): Promise<CrewAgent | null> => {
-  const row = await safeInvoke<CrewAgentRow | null>("update_crew_agent", {
+  input: SubagentInput,
+): Promise<Subagent | null> => {
+  const row = await safeInvoke<SubagentRow | null>("update_subagent", {
     agentId,
     input: serializeInput(input),
   });
-  return row ? normalizeCrewAgent(row) : null;
+  return row ? normalizeSubagent(row) : null;
 };
 
 /** Void-safe: the backend refuses builtins and agents with live runs, which
  *  surfaces as a rejected promise the caller turns into an inline error. */
-export const deleteCrewAgent = (agentId: string) =>
-  safeInvoke<void>("delete_crew_agent", { agentId });
+export const deleteSubagent = (agentId: string) =>
+  safeInvoke<void>("delete_subagent", { agentId });
 
 // ---------------------------------------------------------------------------
 // Spawn + run history (Phase 2.5 manual run, Phase 3 mesh, Phase 5 history).
 // The command names and argument keys below are CONTRACT-binding (research doc
-// §F.3) — the Rust wave builds `run_crew_agent` against the same names, and
-// `run_crew_agent` is the ONLY UI spawn door (the session mesh still exposes
+// §F.3) — the Rust wave builds `run_subagent` against the same names, and
+// `run_subagent` is the ONLY UI spawn door (the session mesh still exposes
 // no Tauri commands of its own).
 
-/** Row → app shape, tolerant like `normalizeCrewAgent`: a run row written by
+/** Row → app shape, tolerant like `normalizeSubagent`: a run row written by
  *  an older build, or one whose agent/chat has since been deleted, must still
  *  render as a row rather than blank the list. */
-function normalizeRun(row: Partial<CrewAgentRun> | null | undefined): CrewAgentRun {
+function normalizeRun(row: Partial<SubagentRun> | null | undefined): SubagentRun {
   return {
     id: strOr(row?.id, ""),
     agentId: row?.agentId ?? null,
@@ -238,13 +238,13 @@ function normalizeRun(row: Partial<CrewAgentRun> | null | undefined): CrewAgentR
  * optional on the Rust side, so they are sent as explicit nulls rather than
  * omitted — a `Tauri` command with an `Option<T>` accepts either.
  */
-export const runCrewAgent = async (
+export const runSubagent = async (
   agentId: string,
   task: string,
   projectId?: string | null,
   wait?: boolean | null,
 ): Promise<string | null> => {
-  const sessionId = await safeInvoke<string | null>("run_crew_agent", {
+  const sessionId = await safeInvoke<string | null>("run_subagent", {
     agentId,
     task,
     projectId: projectId ?? null,
@@ -258,24 +258,24 @@ export const runCrewAgent = async (
  * frontmatter + the relay extensions — §F.6). Omit `agentIds` for the whole
  * registry. Returns the markdown text; the caller owns the save dialog.
  */
-export const exportCrewAgents = (agentIds?: string[] | null): Promise<string | null> =>
-  safeInvoke<string | null>("export_crew_agents", { agentIds: agentIds ?? null });
+export const exportSubagents = (agentIds?: string[] | null): Promise<string | null> =>
+  safeInvoke<string | null>("export_subagents", { agentIds: agentIds ?? null });
 
 /** Import one agent from a `.md` doc. Strict: an unknown tool name, a bad
  *  name format, or non-frontmatter input is a rejected promise, never a
  *  silent drop. Returns the created row. */
-export const importCrewAgent = async (markdown: string): Promise<CrewAgent | null> => {
-  const row = await safeInvoke<CrewAgentRow | null>("import_crew_agent", { markdown });
-  return row ? normalizeCrewAgent(row) : null;
+export const importSubagent = async (markdown: string): Promise<Subagent | null> => {
+  const row = await safeInvoke<SubagentRow | null>("import_subagent", { markdown });
+  return row ? normalizeSubagent(row) : null;
 };
 
 /** Run history, newest first. Both filters are optional: omit `agentId` for
  *  every agent, omit `limit` for the backend's own default page. */
-export const listCrewRuns = async (
+export const listSubagentRuns = async (
   agentId?: string | null,
   limit?: number | null,
-): Promise<CrewAgentRun[]> => {
-  const rows = await safeInvoke<Partial<CrewAgentRun>[] | null>("list_crew_runs", {
+): Promise<SubagentRun[]> => {
+  const rows = await safeInvoke<Partial<SubagentRun>[] | null>("list_subagent_runs", {
     agentId: agentId ?? null,
     limit: limit ?? null,
   });
@@ -284,11 +284,11 @@ export const listCrewRuns = async (
 
 // ---------------------------------------------------------------------------
 // Enforcement tiers (research doc §C.1) — one engine, three tiers, shown in
-// the UI rather than hidden. Exported from here (not from CrewPanel) because
+// the UI rather than hidden. Exported from here (not from SubagentsPanel) because
 // the Phase 4 origin-scoped-hooks work reuses it for the "guard this agent"
 // affordance and the hook template copy.
 
-export type CrewTier = "enforced" | "advisory";
+export type SubagentTier = "enforced" | "advisory";
 
 /** The enforcement tier a definition actually gets at spawn time. `engine` is
  *  the stored engine string, or null/undefined = inherit. Relay fully gates
@@ -297,14 +297,14 @@ export type CrewTier = "enforced" | "advisory";
  *  are "enforced". A `harness:<id>` CLI runs its own native toolset that the
  *  app cannot restrict — only the Relay-bridge surface is gated — and `acp:<id>`
  *  has no permission channel at all, so both are "advisory". */
-export function crewEngineTier(engine: string | null | undefined): CrewTier {
+export function subagentEngineTier(engine: string | null | undefined): SubagentTier {
   if (!engine || engine === "builtin" || engine === "local") return "enforced";
   return "advisory";
 }
 
 /** Badge copy per tier. The advisory string spells out the boundary so no one
  *  reads the badge as a promise the runtime can't keep. */
-export const CREW_TIER_LABELS: Record<CrewTier, { label: string; detail: string }> = {
+export const SUBAGENT_TIER_LABELS: Record<SubagentTier, { label: string; detail: string }> = {
   enforced: {
     label: "enforced",
     detail: "Every tool call is gated by the allowlist, the sandbox and the approval policy.",
@@ -316,11 +316,11 @@ export const CREW_TIER_LABELS: Record<CrewTier, { label: string; detail: string 
 };
 
 // ---------------------------------------------------------------------------
-// Tool allowlist picker source of truth. One exported const so the Crew editor
-// and the Phase 2.5 crew view offer the same choices, and so a rename lands in
+// Tool allowlist picker source of truth. One exported const so the Subagent editor
+// and the Phase 2.5 subagent view offer the same choices, and so a rename lands in
 // one place.
 //
-// The entries mirror the backend's enforcement ceiling (chat/crew.rs's
+// The entries mirror the backend's enforcement ceiling (chat/subagent.rs's
 // `BUILTIN_READ_ONLY_TOOLS` + `WORKSPACE_WRITE_TOOLS`) exactly: a "write" tool
 // is listed as such because the backend intersects the allowlist with the
 // engine's ceiling, and under `read_only` it is simply dropped. Offering a tool
@@ -331,7 +331,7 @@ export const CREW_TIER_LABELS: Record<CrewTier, { label: string; detail: string 
 // names are mirrored here as literals, like the sibling pickers do
 // (PermissionRulesPanel's TOOL_OPTIONS).
 
-export interface CrewToolOption {
+export interface SubagentToolOption {
   /** The tool name as the backend knows it. */
   id: string;
   label: string;
@@ -339,7 +339,7 @@ export interface CrewToolOption {
   group: "read" | "write";
 }
 
-export const CREW_TOOL_OPTIONS: CrewToolOption[] = [
+export const SUBAGENT_TOOL_OPTIONS: SubagentToolOption[] = [
   // Read-only — the default allowlist (BUILTIN_READ_ONLY_TOOLS)
   { id: "list_directory", label: "List files", group: "read" },
   { id: "read_file", label: "Read file", group: "read" },
@@ -364,6 +364,6 @@ export const CREW_TOOL_OPTIONS: CrewToolOption[] = [
   { id: "vault_delete", label: "Vault: delete note", group: "write" },
 ];
 
-/** Flat id list — the import form of `CREW_TOOL_OPTIONS`, for validation and
+/** Flat id list — the import form of `SUBAGENT_TOOL_OPTIONS`, for validation and
  *  the Phase 5 `.md` import. */
-export const CREW_TOOL_IDS: string[] = CREW_TOOL_OPTIONS.map((o) => o.id);
+export const SUBAGENT_TOOL_IDS: string[] = SUBAGENT_TOOL_OPTIONS.map((o) => o.id);

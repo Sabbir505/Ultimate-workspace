@@ -1,4 +1,4 @@
-// Crew store — persisted subagent definitions (Settings → Agents → Crew).
+// Subagent store — persisted subagent definitions (Settings → Agents → Subagent).
 // Mirrors state/automations.ts: one `load` that the panel calls on mount, the
 // entity array, and create/update/remove that go through the ipc wrappers.
 //
@@ -8,39 +8,39 @@
 // lands (meshSlice routes those here) so the sidebar lists a run live.
 import { create } from "zustand";
 import {
-  createCrewAgent,
-  deleteCrewAgent,
-  listCrewAgents,
-  listCrewRuns,
-  runCrewAgent,
-  updateCrewAgent,
-  type CrewAgent,
-  type CrewAgentInput,
-  type CrewAgentRun,
+  createSubagent,
+  deleteSubagent,
+  listSubagents,
+  listSubagentRuns,
+  runSubagent,
+  updateSubagent,
+  type Subagent,
+  type SubagentInput,
+  type SubagentRun,
 } from "../lib/ipc";
 
 /** `busy` key for a definition that doesn't exist yet (the editor's create
  *  form) — the create call has no id to hang the transient on. */
-export const CREW_NEW_KEY = "__new__";
+export const SUBAGENT_NEW_KEY = "__new__";
 
-interface CrewState {
+interface SubagentState {
   loaded: boolean;
-  agents: CrewAgent[];
+  agents: Subagent[];
   /** Last failure, surfaced inline by the panel (a rejected builtin delete
    *  lands here). Cleared on the next successful mutation. */
   error: string | null;
-  /** agent id (or CREW_NEW_KEY) -> a save/delete/run is in flight. */
+  /** agent id (or SUBAGENT_NEW_KEY) -> a save/delete/run is in flight. */
   busy: Record<string, boolean>;
   /** run id -> a known run. Populated by `ingestRun` from the spawn event
-   *  and by `loadRuns` from `list_crew_runs`. */
-  runs: Record<string, CrewAgentRun>;
+   *  and by `loadRuns` from `list_subagent_runs`. */
+  runs: Record<string, SubagentRun>;
   /** True once `loadRuns` has run at least once — the runs list's own
    *  "loading" gate, so an empty result is distinguishable from "not asked". */
   runsLoaded: boolean;
 
   load: () => Promise<void>;
-  create: (input: CrewAgentInput) => Promise<CrewAgent | null>;
-  update: (id: string, input: CrewAgentInput) => Promise<CrewAgent | null>;
+  create: (input: SubagentInput) => Promise<Subagent | null>;
+  update: (id: string, input: SubagentInput) => Promise<Subagent | null>;
   remove: (id: string) => Promise<void>;
   /** Run an agent on a task, by hand (Phase 2.5). Spins `busy[agentId]` for
    *  the duration, then selects the new session so the user lands in the
@@ -60,7 +60,7 @@ interface CrewState {
   loadRuns: (agentId?: string | null) => Promise<void>;
   /** Adopt one run (spawned event, or a later history list). Keyed by run id
    *  so a duplicate event is idempotent. */
-  ingestRun: (run: CrewAgentRun) => void;
+  ingestRun: (run: SubagentRun) => void;
   clearError: () => void;
 }
 
@@ -68,7 +68,7 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export const useCrewStore = create<CrewState>((set, get) => {
+export const useSubagentStore = create<SubagentState>((set, get) => {
   /** Mark a key busy for the duration of a mutation, then clear it. */
   const withBusy = async <T,>(key: string, run: () => Promise<T>): Promise<T> => {
     set((s) => ({ busy: { ...s.busy, [key]: true }, error: null }));
@@ -93,7 +93,7 @@ export const useCrewStore = create<CrewState>((set, get) => {
 
     load: async () => {
       try {
-        set({ agents: await listCrewAgents(), error: null });
+        set({ agents: await listSubagents(), error: null });
       } catch (err) {
         // A failed boot load must not leave the panel silently empty.
         set({ error: `Failed to load agents: ${errText(err)}` });
@@ -103,9 +103,9 @@ export const useCrewStore = create<CrewState>((set, get) => {
     },
 
     create: async (input) => {
-      return withBusy(CREW_NEW_KEY, async () => {
+      return withBusy(SUBAGENT_NEW_KEY, async () => {
         try {
-          const agent = await createCrewAgent(input);
+          const agent = await createSubagent(input);
           if (agent) {
             set((s) => ({
               agents: [...s.agents.filter((a) => a.id !== agent.id), agent],
@@ -126,7 +126,7 @@ export const useCrewStore = create<CrewState>((set, get) => {
     update: async (id, input) => {
       return withBusy(id, async () => {
         try {
-          const agent = await updateCrewAgent(id, input);
+          const agent = await updateSubagent(id, input);
           set({ error: null });
           await get().load();
           return agent;
@@ -144,7 +144,7 @@ export const useCrewStore = create<CrewState>((set, get) => {
       const before = get().agents;
       set((s) => ({ agents: s.agents.filter((a) => a.id !== id), error: null }));
       try {
-        await deleteCrewAgent(id);
+        await deleteSubagent(id);
       } catch (err) {
         set({ agents: before, error: `Couldn't delete the agent: ${errText(err)}` });
       }
@@ -154,7 +154,7 @@ export const useCrewStore = create<CrewState>((set, get) => {
 
     clearError: () => set({ error: null }),
 
-    // Manual run (Phase 2.5). `run_crew_agent` is a thin fresh spawn path, not
+    // Manual run (Phase 2.5). `run_subagent` is a thin fresh spawn path, not
     // the mesh param: it works with Session Mesh off and does NOT consume the
     // mesh's per-parent child budget.
     runNow: async (agentId, task, projectId, wait) => {
@@ -164,7 +164,7 @@ export const useCrewStore = create<CrewState>((set, get) => {
       // overlap.
       return withBusy(agentId, async () => {
         try {
-          const sessionId = await runCrewAgent(
+          const sessionId = await runSubagent(
             agentId,
             task,
             projectId ?? null,
@@ -176,7 +176,7 @@ export const useCrewStore = create<CrewState>((set, get) => {
           }
           // The chat store is imported lazily: state/chat → meshSlice → this
           // slice is a cycle, and the registry tests must not have to boot the
-          // whole chat store just to import the crew slice.
+          // whole chat store just to import the subagent slice.
           try {
             const { useChatStore } = await import("./chat");
             // The session row was created backend-side, so the sidebar list
@@ -200,7 +200,7 @@ export const useCrewStore = create<CrewState>((set, get) => {
 
     loadRuns: async (agentId) => {
       try {
-        const rows = await listCrewRuns(agentId ?? null, null);
+        const rows = await listSubagentRuns(agentId ?? null, null);
         set((s) => {
           // Merge, don't replace: a run ingested live from the spawn event
           // may not be in the history page yet (or may carry a fresher

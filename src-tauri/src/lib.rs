@@ -297,14 +297,14 @@ pub fn run() {
             if let Err(e) = chat::pdfprint::ensure_print_window(app.handle()) {
                 eprintln!("[relay] hidden PDF print window unavailable: {e}");
             }
-            // Crew run-history boot sweep: the live-run registry and the
+            // Subagent run-history boot sweep: the live-run registry and the
             // release watchers are per-process, so a `running` row from a
             // previous process is a crash leftover. Only rows older than the
             // watchers' own release ceiling settle — a younger one may belong
             // to a concurrently running second instance.
             {
                 let conn = shared_db.lock();
-                crate::db::sweep_stale_crew_runs(&conn, crate::chat::crew::STALE_RUNNING_SECS);
+                crate::db::sweep_stale_subagent_runs(&conn, crate::chat::subagents::STALE_RUNNING_SECS);
             }
             app.manage(DbState(Arc::clone(&shared_db)));
             app.manage(PtyState(PtyManager::new(app.handle().clone(), Arc::clone(&shared_db))));
@@ -710,19 +710,19 @@ pub fn run() {
             commands::automation_cmds::count_automation_runs,
             commands::automation_cmds::automation_next_fire,
             commands::automation_cmds::automation_webhook_info,
-            // crew agents (declarative subagents) — CRUD over the persisted
+            // subagents (declarative subagents) — CRUD over the persisted
             // agent registry. The 7 builtin roles are seeded rows and are
             // returned with the list; run/export/import land with the spawn
             // phases.
-            commands::crew_cmds::list_crew_agents,
-            commands::crew_cmds::get_crew_agent,
-            commands::crew_cmds::create_crew_agent,
-            commands::crew_cmds::update_crew_agent,
-            commands::crew_cmds::delete_crew_agent,
-            commands::crew_cmds::run_crew_agent,
-            commands::crew_cmds::export_crew_agents,
-            commands::crew_cmds::import_crew_agent,
-            commands::crew_cmds::list_crew_runs,
+            commands::subagent_cmds::list_subagents,
+            commands::subagent_cmds::get_subagent,
+            commands::subagent_cmds::create_subagent,
+            commands::subagent_cmds::update_subagent,
+            commands::subagent_cmds::delete_subagent,
+            commands::subagent_cmds::run_subagent,
+            commands::subagent_cmds::export_subagents,
+            commands::subagent_cmds::import_subagent,
+            commands::subagent_cmds::list_subagent_runs,
             // artifact generation (conversational creation)
             commands::artifact_cmds::generate_artifact_cmd,
             commands::artifact_cmds::validate_artifact_cmd,

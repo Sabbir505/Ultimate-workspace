@@ -54,7 +54,7 @@ pub(crate) fn validate_input(
         return Err(format!(
             "agent '{}' cannot run automations (supported: claude_code, opencode, \
              pi, omp, commandcode, cloud APIs, local GGUF, or \"agent:<id>\" for an \
-             existing crew agent)",
+             existing subagent)",
             input.harness,
         ));
     }
@@ -76,14 +76,14 @@ pub(crate) fn validate_input(
 /// Shared with the chat tool layer (chat/tools/automations.rs) so the model's
 /// `create_automation` / `update_automation` accept exactly the same agent set
 /// as the Automations form — one list, no drift. An `agent:<id-or-name>`
-/// value routes the run through a crew agent definition and is valid iff the
+/// value routes the run through a subagent definition and is valid iff the
 /// definition exists (the predicate, not the const, is what stays extensible).
 pub(crate) fn is_allowed_automation_agent(conn: &rusqlite::Connection, harness: &str) -> bool {
     ALLOWED_AGENTS.contains(&harness)
         || harness == "local_gguf"
         || harness
             .strip_prefix("agent:")
-            .is_some_and(|id| crate::chat::crew::resolve_by_id_or_name(conn, id).is_some())
+            .is_some_and(|id| crate::chat::subagents::resolve_by_id_or_name(conn, id).is_some())
 }
 
 /// list/get IPC surfaces never carry the webhook secret — the UI reads it

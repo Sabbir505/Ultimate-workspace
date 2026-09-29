@@ -1,23 +1,23 @@
-//! Crew agents — declarative subagents (research doc Part C.1/C.3/C.4).
+//! Subagents — declarative subagents (research doc Part C.1/C.3/C.4).
 //!
-//! A crew agent is a persisted, named identity: a prompt body, a tool
+//! A subagent is a persisted, named identity: a prompt body, a tool
 //! allowlist, a permission scope, an engine/model pick and a spawn budget.
 //! This module owns everything that is NOT a plain row read/write:
 //!
 //! * [`BUILTIN_ROLES`] — the 7 built-in roles as DATA. `dispatch.rs`'s role
-//!   `match` is a lookup against this table and `db::crew`'s seed reads the
+//!   `match` is a lookup against this table and `db::subagent`'s seed reads the
 //!   same table, so the seed and the runtime cannot disagree.
 //! * [`resolve_allowlist`] — one allowlist resolver with three outcomes
 //!   (`None` = "use the engine's own default", a set = "enforce exactly
 //!   this"), used by the schema filter, the execution check and later the
 //!   mesh.
 //! * validation — names, policies, budgets. Errors are `String`s because
-//!   they surface verbatim in the Crew editor.
+//!   they surface verbatim in the Subagent editor.
 //! * [`running_set`] — the in-process live-run registry that makes deleting a
 //!   running agent (and exceeding its `max_concurrent`) refusable.
 //!
-//! Storage lives in `db/crew.rs`; the Tauri surface in
-//! `commands/crew_cmds.rs`.
+//! Storage lives in `db/subagent.rs`; the Tauri surface in
+//! `commands/subagent_cmds.rs`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
-pub use crate::db::crew::{CrewAgent, CrewAgentInput};
+pub use crate::db::subagents::{Subagent, SubagentInput};
 
 use crate::chat::tools;
 
@@ -43,20 +43,20 @@ pub const MAX_DESCRIPTION_LEN: usize = 200;
 /// stays the authority the subagent loop enforces.
 pub const MAX_ROUNDS: i64 = 100;
 
-/// App-wide ceiling on crew runs in flight — every `agent:` spawn surface
+/// App-wide ceiling on subagent runs in flight — every `agent:` spawn surface
 /// (the manual Run button, mesh `spawn_session agent:<id>`, and automation
 /// `agent:<id>` one-shots) counts against the one number, so a burst of
 /// scheduled runs cannot squeeze out interactive ones. Deliberately
 /// separate from the mesh's own spawn caps: those guard *model fan-out*,
-/// and counting human-initiated or automated crew runs against them would
+/// and counting human-initiated or automated subagent runs against them would
 /// starve both. The per-agent `max_concurrent` on the definition is the
 /// finer-grained valve on top of this.
-pub const MAX_ACTIVE_CREW: i64 = 8;
+pub const MAX_ACTIVE_SUBAGENT: i64 = 8;
 
-/// How long a `crew_runs` row may legitimately stay `running`: every spawn
+/// How long a `subagent_runs` row may legitimately stay `running`: every spawn
 /// surface's release watcher gives up by this age, so at boot any older
 /// `running` row is a crash leftover and is settled as an error by
-/// `db::sweep_stale_crew_runs`.
+/// `db::sweep_stale_subagent_runs`.
 pub const STALE_RUNNING_SECS: i64 = 2 * 60 * 60;
 
 /// A built-in role: the `Task` `subagent_type` value and the instruction the
@@ -215,7 +215,7 @@ pub fn default_read_only_tools() -> Arc<HashSet<String>> {
 // ---- Registry name cache (the `Task` `subagent_type` enum) ----
 //
 // The `Task` schema is rebuilt on every turn and its `subagent_type` enum
-// must advertise the user's crew (F.5), but the spec builders have no DB
+// must advertise the user's subagent (F.5), but the spec builders have no DB
 // handle. So the names are cached process-wide with the same 30s TTL +
 // invalidate-on-write shape as `commands::agent_cmds`'s harness-model cache.
 //
@@ -255,8 +255,8 @@ fn registry_self_refreshing() -> &'static AtomicBool {
 }
 
 fn registry_names(conn: &Connection) -> Option<Vec<String>> {
-    // `list_crew_agents` is ordered builtins-first then by name, so the enum
-    // keeps the 7 roles in their canonical order ahead of the crew's own
+    // `list_subagents` is ordered builtins-first then by name, so the enum
+    // keeps the 7 roles in their canonical order ahead of the subagent's own
     // names. Case is preserved (the column is stored lower-case by
     // `validate_name`, but a hand-edited row must not silently lose its
     // label).
@@ -264,9 +264,9 @@ fn registry_names(conn: &Connection) -> Option<Vec<String>> {
     // The db layer directly, NOT this module's `list` — that one refreshes
     // the cache, and a cache read must never re-enter its own refresh.
     // `None` for a failed read: caching an empty list because of a transient
-    // error would silently strip the user's crew from the `Task` enum.
+    // error would silently strip the user's subagent from the `Task` enum.
     Some(
-        crate::db::list_crew_agents(conn)
+        crate::db::list_subagents(conn)
             .ok()?
             .into_iter()
             .map(|a| a.name)
@@ -294,21 +294,21 @@ pub fn refresh_registry_cache(conn: &Connection) {
         }
         // A failed read leaves the cache invalidated rather than empty: the
         // next read retries, and the enum degrades to the builtin roles
-        // instead of advertising a crew that isn't there.
+        // instead of advertising a subagent that isn't there.
         None => invalidate_registry_cache(),
     }
 }
 
 /// Drop the cached names. The next read re-reads through the remembered DB
 /// path; with no path it degrades to the builtin-only enum rather than
-/// serving a stale crew.
+/// serving a stale subagent.
 pub fn invalidate_registry_cache() {
     if let Ok(mut slot) = registry_cache().write() {
         *slot = None;
     }
 }
 
-/// Every crew agent name, case-preserved — the values the `Task`
+/// Every subagent name, case-preserved — the values the `Task`
 /// `subagent_type` enum adds on top of the 7 built-in roles. Warm within the
 /// TTL; a cold or stale cache re-reads once (best effort, and never
 /// recursively) before answering.
@@ -397,10 +397,10 @@ fn parse_tool_list(raw: &str) -> Option<HashSet<String>> {
 /// enforcement must not run off a definition that no longer exists.
 pub fn resolve_allowlist(
     conn: &Connection,
-    def: Option<&CrewAgent>,
+    def: Option<&Subagent>,
 ) -> Option<Arc<HashSet<String>>> {
     let def = def?;
-    if crate::db::get_crew_agent(conn, &def.id)
+    if crate::db::get_subagent(conn, &def.id)
         .ok()
         .flatten()
         .is_none()
@@ -434,7 +434,7 @@ pub fn live_runs(agent_id: &str) -> i64 {
     running_set().lock().get(agent_id).copied().unwrap_or(0)
 }
 
-/// Atomically check AND acquire one run slot: the app-wide crew ceiling and
+/// Atomically check AND acquire one run slot: the app-wide subagent ceiling and
 /// the per-agent `max_concurrent` are read and the count bumped under a
 /// single hold of the running-set lock, so two concurrent spawns (a
 /// double-clicked Run button racing a mesh/automation spawn of the same
@@ -452,14 +452,14 @@ pub fn try_acquire_running(
     let active: i64 = set.values().sum();
     if active >= app_cap {
         return Err(format!(
-            "{active} crew runs are already active app-wide (cap {app_cap}) — \
+            "{active} subagent runs are already active app-wide (cap {app_cap}) — \
              wait for one to settle"
         ));
     }
     let live = set.get(agent_id).copied().unwrap_or(0);
     if live >= per_agent_cap {
         return Err(format!(
-            "crew agent \"{agent_name}\" already has {live} run(s) in flight \
+            "subagent \"{agent_name}\" already has {live} run(s) in flight \
              (max_concurrent {per_agent_cap})"
         ));
     }
@@ -488,8 +488,8 @@ pub fn bump_running(agent_id: &str, delta: i64) {
 /// `existing` is the row being updated (None on create); it lets a save keep
 /// its own name without tripping the uniqueness check.
 pub fn validate_input(
-    input: &mut CrewAgentInput,
-    existing: Option<&CrewAgent>,
+    input: &mut SubagentInput,
+    existing: Option<&Subagent>,
 ) -> Result<(), String> {
     input.name = validate_name(&input.name)?;
 
@@ -632,10 +632,10 @@ pub fn slugify(name: &str) -> String {
     }
 }
 
-pub fn list(conn: &Connection) -> Vec<CrewAgent> {
-    let rows = crate::db::list_crew_agents(conn).unwrap_or_default();
+pub fn list(conn: &Connection) -> Vec<Subagent> {
+    let rows = crate::db::list_subagents(conn).unwrap_or_default();
     // A read of the registry is also the cheapest place to keep the `Task`
-    // enum honest: whoever opened the Crew panel just proved the connection
+    // enum honest: whoever opened the Subagent panel just proved the connection
     // works, and the enum may be stale.
     if !rows.is_empty() {
         refresh_registry_cache(conn);
@@ -643,38 +643,38 @@ pub fn list(conn: &Connection) -> Vec<CrewAgent> {
     rows
 }
 
-pub fn get(conn: &Connection, id: &str) -> Option<CrewAgent> {
-    crate::db::get_crew_agent(conn, id).ok().flatten()
+pub fn get(conn: &Connection, id: &str) -> Option<Subagent> {
+    crate::db::get_subagent(conn, id).ok().flatten()
 }
 
-/// Resolve a crew reference that may be an id (`crew-…`) or a name
+/// Resolve a subagent reference that may be an id (`subagent-…`) or a name
 /// (case-insensitive). This is what every `agent:`-prefixed spawn surface
 /// (manual run, mesh, automation) resolves through, so all of them accept the
 /// same vocabulary.
-pub fn resolve_by_id_or_name(conn: &Connection, value: &str) -> Option<CrewAgent> {
+pub fn resolve_by_id_or_name(conn: &Connection, value: &str) -> Option<Subagent> {
     let value = value.trim();
     if value.is_empty() {
         return None;
     }
     get(conn, value).or_else(|| {
-        crate::db::find_crew_agent_by_name(conn, value)
+        crate::db::find_subagent_by_name(conn, value)
             .ok()
             .flatten()
     })
 }
 
-/// The first message of a crew run: the definition's prompt body rides the
+/// The first message of a subagent run: the definition's prompt body rides the
 /// task as a clearly-marked directive block (same transparency trade-off as
 /// the automations' UNATTENDED_RUN_RULES prepend — the transcript shows the
 /// user exactly what instructions the agent started with). Empty prompt →
 /// the bare task.
-pub fn compose_first_message(def: &CrewAgent, task: &str) -> String {
+pub fn compose_first_message(def: &Subagent, task: &str) -> String {
     let prompt = def.prompt_md.trim();
     if prompt.is_empty() {
         return task.to_string();
     }
     format!(
-        "<crew_agent name=\"{}\">\n{}\n</crew_agent>\n\n{}",
+        "<subagent name=\"{}\">\n{}\n</subagent>\n\n{}",
         def.name, prompt, task
     )
 }
@@ -684,7 +684,7 @@ pub fn compose_first_message(def: &CrewAgent, task: &str) -> String {
 /// from the model's `provider::model` prefix, else the app's active provider;
 /// the model comes from the prefix's tail, else the definition's bare id, else
 /// the provider's configured default. This is THE shared resolution for every
-/// builtin-engine crew surface (manual run, automation routing) — the live
+/// builtin-engine subagent surface (manual run, automation routing) — the live
 /// test caught the automation path passing the engine label as the provider
 /// when each surface rolled its own.
 pub fn resolve_builtin_provider_model(
@@ -711,7 +711,7 @@ pub fn resolve_builtin_provider_model(
             .filter(|m| !m.is_empty())
             .ok_or_else(|| {
                 format!(
-                    "no model resolved for provider {provider} — set one on the crew \
+                    "no model resolved for provider {provider} — set one on the subagent \
                      agent (e.g. \"openrouter::vendor/model\") or in Settings → API Keys"
                 )
             })?,
@@ -725,7 +725,7 @@ pub fn resolve_builtin_provider_model(
 /// the Claude Code subagent economy understands (name, description, tools,
 /// model) plus the relay extensions; the body is the system prompt. Export is
 /// lossless for everything the editor can express.
-pub fn to_markdown(def: &CrewAgent) -> String {
+pub fn to_markdown(def: &Subagent) -> String {
     // Parse the stored JSON as a Vec (order-preserving) — going through
     // `parse_tool_list`'s HashSet scrambled the order between exports, which
     // made an export → diff → export workflow show phantom churn.
@@ -766,7 +766,7 @@ pub fn to_markdown(def: &CrewAgent) -> String {
 /// capabilities-parity work): a malformed fence, an unknown tool, or an
 /// unknown policy is a hard error the importer can show — never a silent
 /// drop that changes what the agent will be allowed to do.
-pub fn from_markdown(markdown: &str) -> Result<CrewAgentInput, String> {
+pub fn from_markdown(markdown: &str) -> Result<SubagentInput, String> {
     let md = markdown.trim_start_matches('\u{feff}');
     // Both fence line endings are accepted: a doc saved by a Windows editor
     // (CRLF) is the same doc, and the interior-line `trim_end_matches('\r')`
@@ -775,7 +775,7 @@ pub fn from_markdown(markdown: &str) -> Result<CrewAgentInput, String> {
         .strip_prefix("---\n")
         .or_else(|| md.strip_prefix("---\r\n"))
         .ok_or(
-            "not a crew agent markdown doc — expected a `---` frontmatter fence at the top",
+            "not a subagent markdown doc — expected a `---` frontmatter fence at the top",
         )?;
     let (frontmatter, body) = rest
         .split_once("\n---")
@@ -784,7 +784,7 @@ pub fn from_markdown(markdown: &str) -> Result<CrewAgentInput, String> {
     // ending (LF or CRLF) so it cannot ride into `prompt_md` as leading
     // blank lines.
     let body = body.trim_start_matches(['\r', '\n']);
-    // STRICT: a multi-doc export (see `export_crew_agents`) must not be
+    // STRICT: a multi-doc export (see `export_subagents`) must not be
     // silently mangled — without this check the second doc's frontmatter
     // would be swallowed into the first agent's prompt body. A closing fence
     // at line start followed by a `name:` key is exactly the concatenation
@@ -797,7 +797,7 @@ pub fn from_markdown(markdown: &str) -> Result<CrewAgentInput, String> {
                 if let Some(next) = lines.peek() {
                     if next.trim_end_matches('\r').starts_with("name:") {
                         return Err(
-                            "this file holds more than one crew agent doc — import them \
+                            "this file holds more than one subagent doc — import them \
                              one at a time"
                                 .into(),
                         );
@@ -884,7 +884,7 @@ pub fn from_markdown(markdown: &str) -> Result<CrewAgentInput, String> {
         })
         .transpose()?;
 
-    Ok(CrewAgentInput {
+    Ok(SubagentInput {
         name,
         description,
         prompt_md: body.trim_end().to_string(),
@@ -903,15 +903,15 @@ pub fn from_markdown(markdown: &str) -> Result<CrewAgentInput, String> {
 /// Create a definition. Rejects a name that already exists (case-insensitively)
 /// with a message the editor can show, rather than a raw UNIQUE-constraint
 /// error.
-pub fn create(conn: &Connection, input: &CrewAgentInput) -> Result<CrewAgent, String> {
+pub fn create(conn: &Connection, input: &SubagentInput) -> Result<Subagent, String> {
     let mut input = input.clone();
     validate_input(&mut input, None)?;
     if let Some(clash) =
-        crate::db::find_crew_agent_by_name(conn, &input.name).map_err(|e| e.to_string())?
+        crate::db::find_subagent_by_name(conn, &input.name).map_err(|e| e.to_string())?
     {
         return Err(format!("an agent named '{}' already exists", clash.name));
     }
-    let created = crate::db::create_crew_agent(conn, &input).map_err(|e| e.to_string())?;
+    let created = crate::db::create_subagent(conn, &input).map_err(|e| e.to_string())?;
     // A new name is a new `Task` enum value: invalidate, then refresh, so the
     // very next spec build (which may be mid-turn) already carries it.
     invalidate_registry_cache();
@@ -919,8 +919,8 @@ pub fn create(conn: &Connection, input: &CrewAgentInput) -> Result<CrewAgent, St
     Ok(created)
 }
 
-pub fn update(conn: &Connection, id: &str, input: &CrewAgentInput) -> Result<CrewAgent, String> {
-    let existing = crate::db::get_crew_agent(conn, id)
+pub fn update(conn: &Connection, id: &str, input: &SubagentInput) -> Result<Subagent, String> {
+    let existing = crate::db::get_subagent(conn, id)
         .map_err(|e| e.to_string())?
         .ok_or("agent not found".to_string())?;
     let mut input = input.clone();
@@ -928,12 +928,12 @@ pub fn update(conn: &Connection, id: &str, input: &CrewAgentInput) -> Result<Cre
     // Only a RENAME can collide (every other field is free-form).
     if input.name != existing.name {
         if let Some(clash) =
-            crate::db::find_crew_agent_by_name(conn, &input.name).map_err(|e| e.to_string())?
+            crate::db::find_subagent_by_name(conn, &input.name).map_err(|e| e.to_string())?
         {
             return Err(format!("an agent named '{}' already exists", clash.name));
         }
     }
-    let updated = crate::db::update_crew_agent(conn, id, &input)
+    let updated = crate::db::update_subagent(conn, id, &input)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "agent not found".to_string())?;
     // A rename moves an enum value; a fresh read is what makes the new name
@@ -954,7 +954,7 @@ pub fn update(conn: &Connection, id: &str, input: &CrewAgentInput) -> Result<Cre
 ///   sessions are fine (the future `agent_def_id` FK is `ON DELETE SET NULL`,
 ///   so they survive and the UI renders them as "agent deleted").
 pub fn delete(conn: &Connection, id: &str) -> Result<(), String> {
-    let row = crate::db::get_crew_agent(conn, id)
+    let row = crate::db::get_subagent(conn, id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "agent not found".to_string())?;
     if row.builtin {
@@ -971,7 +971,7 @@ pub fn delete(conn: &Connection, id: &str) -> Result<(), String> {
             if live == 1 { "" } else { "s" }
         ));
     }
-    crate::db::delete_crew_agent(conn, id).map_err(|e| e.to_string())?;
+    crate::db::delete_subagent(conn, id).map_err(|e| e.to_string())?;
     // The enum must stop advertising a name that can no longer resolve.
     invalidate_registry_cache();
     refresh_registry_cache(conn);
@@ -983,8 +983,8 @@ mod tests {
     use super::*;
     use crate::db::mem;
 
-    fn input(name: &str) -> CrewAgentInput {
-        CrewAgentInput {
+    fn input(name: &str) -> SubagentInput {
+        SubagentInput {
             name: name.into(),
             description: String::new(),
             prompt_md: String::new(),
@@ -1019,8 +1019,8 @@ mod tests {
         def.worktree_policy = "always".into();
         def.max_rounds = 40;
         def.max_concurrent = 1;
-        let agent = CrewAgent {
-            id: "crew-x".into(),
+        let agent = Subagent {
+            id: "subagent-x".into(),
             name: def.name,
             description: def.description,
             prompt_md: def.prompt_md,
@@ -1072,13 +1072,13 @@ mod tests {
 
     #[test]
     fn markdown_import_refuses_a_concatenated_multi_doc_export() {
-        // Regression: `export_crew_agents` concatenates every requested doc
+        // Regression: `export_subagents` concatenates every requested doc
         // with a blank line, and the first-fence parse used to swallow every
         // later doc — frontmatter included — into the FIRST agent's
         // `prompt_md`. That is exactly the silent drop STRICT import exists
         // to refuse.
-        let agent = |name: &str| CrewAgent {
-            id: format!("crew-{name}"),
+        let agent = |name: &str| Subagent {
+            id: format!("subagent-{name}"),
             name: name.into(),
             description: "d".into(),
             prompt_md: format!("prompt for {name}"),
@@ -1139,16 +1139,16 @@ mod tests {
         // "room left". try_acquire does check+bump under one lock hold.
         bump_running("acq-x", 1);
         // Per-agent cap already met.
-        let err = try_acquire_running("acq-x", "x", 1, MAX_ACTIVE_CREW).unwrap_err();
+        let err = try_acquire_running("acq-x", "x", 1, MAX_ACTIVE_SUBAGENT).unwrap_err();
         assert!(err.contains("in flight"), "{err}");
         // App-wide cap met (any agent's live runs count).
         let err = try_acquire_running("acq-y", "y", 5, 1).unwrap_err();
         assert!(err.contains("app-wide"), "{err}");
         // Room on both axes acquires exactly one slot…
-        try_acquire_running("acq-y", "y", 5, MAX_ACTIVE_CREW).expect("acquires");
+        try_acquire_running("acq-y", "y", 5, MAX_ACTIVE_SUBAGENT).expect("acquires");
         assert_eq!(live_runs("acq-y"), 1);
         // …and a same-budget racer is now refused.
-        assert!(try_acquire_running("acq-y", "y", 1, MAX_ACTIVE_CREW).is_err());
+        assert!(try_acquire_running("acq-y", "y", 1, MAX_ACTIVE_SUBAGENT).is_err());
         // Release is saturating: the count never goes negative.
         bump_running("acq-y", -1);
         bump_running("acq-y", -1);

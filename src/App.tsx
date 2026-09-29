@@ -92,11 +92,11 @@ const AutomationsView = lazy(() => import("./components/automations/AutomationsV
 // automations, lazily loaded (CodeMirror + the markdown pipeline stay out
 // of the entry chunk until the user opens the vault).
 const VaultView = lazy(() => import("./components/vault/VaultView").then((m) => ({ default: m.VaultView })));
-// Crew (declarative subagents — research doc §C.5 item 3 / Phase 2.5): the
+// Subagent (declarative subagents — research doc §C.5 item 3 / Phase 2.5): the
 // agent registry plus the manual "Run" surface and run history. Real-view-swap
 // like automations/vault, lazily loaded.
-const CrewView = lazy(() => import("./components/crew/CrewView").then((m) => ({ default: m.CrewView })));
-// Logs (local-model request log + gateway). Real-view-swap like crew/vault,
+const SubagentsView = lazy(() => import("./components/subagents/SubagentsView").then((m) => ({ default: m.SubagentsView })));
+// Logs (local-model request log + gateway). Real-view-swap like subagent/vault,
 // lazily loaded so the log table never rides in the entry chunk.
 const LogsView = lazy(() => import("./components/logs/LogsView").then((m) => ({ default: m.LogsView })));
 // Welcome wizard (PRD §9): lazy like the overlays — existing users never see
@@ -417,7 +417,7 @@ export default function App() {
           <ModelDownloadIndicator />
           <span className="spacer" data-tauri-drag-region="" />
           {/* Landing pad for the full-page views' own header chrome —
-              Automations / Crew / Vault portal their header row in here (see
+              Automations / Subagent / Vault portal their header row in here (see
               common/ToolbarHeader), so the caption IS their header instead of
               a second bar stacked above one. It sits AFTER the spacer so a
               portaled header's own left/right groups span the full caption and
@@ -490,7 +490,7 @@ export default function App() {
         )}
 
 {/* Settings/Skills/Cost are OVERLAYS mounted on top of the grid — the view
-    underneath stays MOUNTED (only automations/vault/crew/logs are real view
+    underneath stays MOUNTED (only automations/vault/subagents/logs are real view
     swaps of the grid's content). Unmounting here blanked the whole app and killed
     the terminal/browser panes every time a footer icon was clicked; the
     panes hide themselves via browserOcclusion (overlay views occlude)
@@ -503,7 +503,7 @@ export default function App() {
     on every chat↔vault↔automations switch — killing browser webviews (full
     page reload on the way back) and churning terminal ptys. */}
         <div className={`grid-wrap chat-grid-wrap${baseView === "chat" && chatPaneTree ? " split-active" : ""}`}>
-          {baseView !== "automations" && baseView !== "vault" && baseView !== "crew" && baseView !== "logs" ? (
+          {baseView !== "automations" && baseView !== "vault" && baseView !== "subagents" && baseView !== "logs" ? (
             /* The split-chat pane tree (up to six full chat views, resizable
                 gutters, drag-a-session-onto-an-edge). With no splits open the
                 same renderer draws the single main pane — identical drop
@@ -513,10 +513,10 @@ export default function App() {
             <Suspense fallback={null}>
               <AutomationsView />
             </Suspense>
-          ) : baseView === "crew" ? (
+          ) : baseView === "subagents" ? (
             /* Declarative subagents: registry + Run modal + run history. */
             <Suspense fallback={null}>
-              <CrewView />
+              <SubagentsView />
             </Suspense>
           ) : baseView === "logs" ? (
             /* Local-model request log: captured bodies + telemetry. */

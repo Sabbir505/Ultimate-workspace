@@ -244,7 +244,7 @@
 :root[data-wallpaper] .chat-view,
 :root[data-wallpaper] .automations-view,
 :root[data-wallpaper] .vault-view,
-:root[data-wallpaper] .crew-view,
+:root[data-wallpaper] .subagent-view,
 :root[data-wallpaper] .popout-chat-root {
   background: color-mix(in srgb, var(--bg-tint) var(--wallpaper-canvas-tint, 76%), transparent);
 }
@@ -313,7 +313,7 @@
 }
 
 /* ---- Full-page view headers, portaled into the caption ----
-   Automations / Crew / Vault each used to spend a row of their own on a
+   Automations / Subagent / Vault each used to spend a row of their own on a
    header underneath the title bar. They now render that same markup into
    .toolbar-view-slot (components/common/ToolbarHeader), so the window frame
    owns where it sits and the view owns what it says.
@@ -345,7 +345,7 @@
    wrapping (there is no second row to wrap onto), no bottom rule (the
    toolbar already has one). */
 .toolbar .automations-header,
-.toolbar .crew-header,
+.toolbar .subagent-header,
 .toolbar .vault-header,
 .toolbar .logs-header {
   flex: 1;
@@ -367,7 +367,7 @@
    the caption and set the bar's height. The page rules are untouched; this
    only applies inside the toolbar. */
 .toolbar .automations-header-left h1,
-.toolbar .crew-header h1,
+.toolbar .subagent-header h1,
 .toolbar .logs-header h1 {
   font-size: 14px;
   font-weight: 650;
@@ -378,7 +378,7 @@
   width: 16px;
   height: 16px;
 }
-.toolbar .crew-header-icon,
+.toolbar .subagent-header-icon,
 .toolbar .logs-header-icon {
   width: 16px;
   height: 16px;

@@ -1,14 +1,14 @@
-// Crew view (Phase 2.5) — the Run surface.
+// Subagent view (Phase 2.5) — the Run surface.
 //
 // The stores are mocked as selector-callables over a mutable fixture (the
-// crewPanel.test.tsx style) so this covers the user-facing surface only:
+// subagentPanel.test.tsx style) so this covers the user-facing surface only:
 // the runs list rendering, the Run modal's required-task gate, and what
-// submitting actually calls. Store behavior lives in crewRun.test.tsx and
-// crewStore.test.ts.
+// submitting actually calls. Store behavior lives in subagentRun.test.tsx and
+// subagentStore.test.ts.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-// ---- crew store fixture -------------------------------------------------
+// ---- subagent store fixture -------------------------------------------------
 const load = vi.fn().mockResolvedValue(undefined);
 const create = vi.fn().mockResolvedValue(null);
 const update = vi.fn().mockResolvedValue(null);
@@ -16,7 +16,7 @@ const remove = vi.fn().mockResolvedValue(undefined);
 const runNow = vi.fn().mockResolvedValue("sess-42");
 const loadRuns = vi.fn().mockResolvedValue(undefined);
 
-const crewState = {
+const subagentState = {
   loaded: true,
   agents: [] as unknown[],
   error: null as string | null,
@@ -32,13 +32,13 @@ const crewState = {
   ingestRun: vi.fn(),
   clearError: vi.fn(),
 };
-vi.mock("../state/crew", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../state/crew")>();
+vi.mock("../state/subagents", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../state/subagents")>();
   return {
     ...actual,
-    useCrewStore: Object.assign(
-      (sel: (s: typeof crewState) => unknown) => sel(crewState),
-      { getState: () => crewState, setState: vi.fn() },
+    useSubagentStore: Object.assign(
+      (sel: (s: typeof subagentState) => unknown) => sel(subagentState),
+      { getState: () => subagentState, setState: vi.fn() },
     ),
   };
 });
@@ -74,10 +74,10 @@ vi.mock("../state/chat", () => ({
   ),
 }));
 
-import { CrewView } from "../components/crew/CrewView";
-import type { CrewAgent, CrewAgentRun } from "../lib/ipc/crew";
+import { SubagentsView } from "../components/subagents/SubagentsView";
+import type { Subagent, SubagentRun } from "../lib/ipc/subagents";
 
-function agent(over: Partial<CrewAgent> = {}): CrewAgent {
+function agent(over: Partial<Subagent> = {}): Subagent {
   return {
     id: "agent-1",
     name: "doc-writer",
@@ -99,7 +99,7 @@ function agent(over: Partial<CrewAgent> = {}): CrewAgent {
   };
 }
 
-function run(over: Partial<CrewAgentRun> = {}): CrewAgentRun {
+function run(over: Partial<SubagentRun> = {}): SubagentRun {
   return {
     id: "run-1",
     agentId: "agent-1",
@@ -119,11 +119,11 @@ function run(over: Partial<CrewAgentRun> = {}): CrewAgentRun {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  crewState.agents = [agent()];
-  crewState.error = null;
-  crewState.busy = {};
-  crewState.runs = { "run-1": run() };
-  crewState.runsLoaded = true;
+  subagentState.agents = [agent()];
+  subagentState.error = null;
+  subagentState.busy = {};
+  subagentState.runs = { "run-1": run() };
+  subagentState.runsLoaded = true;
   runNow.mockResolvedValue("sess-42");
 });
 afterEach(cleanup);
@@ -132,17 +132,17 @@ afterEach(cleanup);
  *  name and the store's error, so list assertions must be scoped or they
  *  match two nodes. */
 function runsList(): HTMLElement {
-  return screen.getByRole("region", { name: "Crew runs" });
+  return screen.getByRole("region", { name: "Subagent runs" });
 }
 
-describe("CrewView runs list", () => {
+describe("SubagentsView runs list", () => {
   it("asks for run history on mount", () => {
-    render(<CrewView />);
+    render(<SubagentsView />);
     expect(loadRuns).toHaveBeenCalledWith();
   });
 
   it("renders agent name, task, trigger, engine, status and start time", () => {
-    render(<CrewView />);
+    render(<SubagentsView />);
     const list = within(runsList());
     // The run's agent name, resolved from the registry (not the raw id).
     expect(list.getByText("doc-writer")).toBeTruthy();
@@ -154,28 +154,28 @@ describe("CrewView runs list", () => {
   });
 
   it("falls back to the id when the agent was deleted", () => {
-    crewState.agents = [];
-    crewState.runs = { "run-1": run({ agentId: "agent-gone", task: "orphaned run" }) };
-    render(<CrewView />);
+    subagentState.agents = [];
+    subagentState.runs = { "run-1": run({ agentId: "agent-gone", task: "orphaned run" }) };
+    render(<SubagentsView />);
     const list = within(runsList());
     expect(list.getByText("agent-gone")).toBeTruthy();
     expect(list.getByText("orphaned run")).toBeTruthy();
   });
 
   it("shows an empty state when there is no history", () => {
-    crewState.runs = {};
-    render(<CrewView />);
+    subagentState.runs = {};
+    render(<SubagentsView />);
     expect(within(runsList()).getByText(/No runs yet/)).toBeTruthy();
   });
 
   it("surfaces a store error instead of an empty list", () => {
-    crewState.error = "Couldn't load run history: db locked";
-    render(<CrewView />);
+    subagentState.error = "Couldn't load run history: db locked";
+    render(<SubagentsView />);
     expect(within(runsList()).getByText(/db locked/)).toBeTruthy();
   });
 
   it("opens the run's chat and switches to the chat view", async () => {
-    render(<CrewView />);
+    render(<SubagentsView />);
     fireEvent.click(within(runsList()).getByLabelText("Open the run from doc-writer"));
     await waitFor(() => {
       expect(loadSessions).toHaveBeenCalled();
@@ -185,23 +185,23 @@ describe("CrewView runs list", () => {
   });
 
   it("disables open for a run whose chat was deleted", () => {
-    crewState.runs = { "run-1": run({ sessionId: null }) };
-    render(<CrewView />);
+    subagentState.runs = { "run-1": run({ sessionId: null }) };
+    render(<SubagentsView />);
     const btn = within(runsList()).getByLabelText("Run chat deleted");
     expect((btn as HTMLButtonElement).disabled).toBe(true);
   });
 });
 
-describe("CrewView run modal", () => {
+describe("SubagentsView run modal", () => {
   it("opens from the registry row's Run button", () => {
-    render(<CrewView />);
+    render(<SubagentsView />);
     expect(screen.queryByLabelText("Task")).toBeNull();
     fireEvent.click(screen.getByLabelText("Run doc-writer"));
     expect(screen.getByLabelText("Task")).toBeTruthy();
   });
 
   it("requires task text before the run can be submitted", () => {
-    render(<CrewView />);
+    render(<SubagentsView />);
     fireEvent.click(screen.getByLabelText("Run doc-writer"));
     const submit = screen.getByRole("button", { name: "Run" });
     expect((submit as HTMLButtonElement).disabled).toBe(true);
@@ -216,9 +216,9 @@ describe("CrewView run modal", () => {
   });
 
   it("offers a project picker and a wait/background toggle", () => {
-    render(<CrewView />);
+    render(<SubagentsView />);
     fireEvent.click(screen.getByLabelText("Run doc-writer"));
-    // The project picker is a CrewSelect: the option list exists while open.
+    // The project picker is a SubagentSelect: the option list exists while open.
     fireEvent.click(screen.getByLabelText("Project"));
     expect(
       screen.getAllByRole("option").map((o) => o.textContent?.replace("✓", "").trim()),
@@ -227,7 +227,7 @@ describe("CrewView run modal", () => {
   });
 
   it("submits the task, project and wait choice through runNow and closes", async () => {
-    render(<CrewView />);
+    render(<SubagentsView />);
     fireEvent.click(screen.getByLabelText("Run doc-writer"));
     fireEvent.change(screen.getByLabelText("Task"), { target: { value: "  Write the README  " } });
     fireEvent.click(screen.getByLabelText("Project"));
@@ -243,8 +243,8 @@ describe("CrewView run modal", () => {
 
   it("keeps the modal open and explains a failed run", async () => {
     runNow.mockResolvedValueOnce(null);
-    crewState.error = "Couldn't run the agent: agent is at its concurrency limit";
-    render(<CrewView />);
+    subagentState.error = "Couldn't run the agent: agent is at its concurrency limit";
+    render(<SubagentsView />);
     fireEvent.click(screen.getByLabelText("Run doc-writer"));
     fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Write the README" } });
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
@@ -259,9 +259,9 @@ describe("CrewView run modal", () => {
   });
 
   it("does not open the modal for a run-history row when no agent is left", () => {
-    crewState.agents = [];
-    crewState.runs = { "run-1": run({ agentId: "agent-gone" }) };
-    render(<CrewView />);
+    subagentState.agents = [];
+    subagentState.runs = { "run-1": run({ agentId: "agent-gone" }) };
+    render(<SubagentsView />);
     expect(within(runsList()).queryByLabelText("Run agent-gone again")).toBeNull();
   });
 });

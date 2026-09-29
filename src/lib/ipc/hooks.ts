@@ -31,7 +31,7 @@ export interface HookDef {
    * Origin scope: EMPTY = global (fires for every dispatch origin — the
    * default, and what every config saved before this field means). Otherwise
    * the hook fires only when the call's origin is in the list. The backend
-   * compares verbatim and never rejects an unknown value, so crew ids stay
+   * compares verbatim and never rejects an unknown value, so subagent ids stay
    * expressible.
    */
   origins: string[];
@@ -55,11 +55,11 @@ const HOOKS_KEY = "hooks";
 const jsonHooks = jsonSetting<HookDef>(HOOKS_KEY);
 
 /** The origin strings the backend dispatches, minus the open-ended
- *  `agent:<crew-id>` family (see {@link isKnownOrigin}). A hook whose
+ *  `agent:<subagent-id>` family (see {@link isKnownOrigin}). A hook whose
  *  `origins` is empty is global and fires for all of them. */
 export const KNOWN_HOOK_ORIGINS: string[] = [
   "chat",
-  "subagent",
+  "subagents",
   "harness",
   "relay_tools",
 ];
@@ -73,8 +73,8 @@ export const HOOK_ORIGIN_LABELS: Record<string, string> = {
   relay_tools: "relay tools bridge",
 };
 
-/** True for a known origin, and for any `agent:<id>` — crew ids are dynamic,
- *  so a closed vocabulary would flag every crew-scoped hook as unknown. */
+/** True for a known origin, and for any `agent:<id>` — subagent ids are dynamic,
+ *  so a closed vocabulary would flag every subagent-scoped hook as unknown. */
 export function isKnownOrigin(o: string): boolean {
   return KNOWN_HOOK_ORIGINS.includes(o) || /^agent:/.test(o);
 }

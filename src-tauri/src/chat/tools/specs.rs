@@ -170,10 +170,10 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             GET_AUTOMATION_DESC,
             automation_id_parameters(),
         ),
-        // Crew — the read-only list is always on (mirrors automations); the
-        // CRUD trio rides the mutating gating + the crew_write family flag
-        // below. Lets the model author the crew, not just run it.
-        openai_fn(LIST_CREW_AGENTS, LIST_CREW_AGENTS_DESC, no_parameters()),
+        // Subagent — the read-only list is always on (mirrors automations); the
+        // CRUD trio rides the mutating gating + the subagent_write family flag
+        // below. Lets the model author the subagent, not just run it.
+        openai_fn(LIST_SUBAGENTS, LIST_SUBAGENTS_DESC, no_parameters()),
         // Session Mesh — sibling-session awareness + consultation. Locked
         // with the whole family: ~1.3k tokens of specs most turns never
         // touch; `attach_connector("session-mesh")` brings all five in for
@@ -313,27 +313,27 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             automation_id_parameters(),
         ));
     }
-    // Crew CRUD — the model authoring its own subagents. Gated on BOTH the
-    // mutating posture AND the crew_write family flag: the flag is false for
+    // Subagent CRUD — the model authoring its own subagents. Gated on BOTH the
+    // mutating posture AND the subagent_write family flag: the flag is false for
     // every surface that builds ToolCaps::default() (the relay bridge, the
     // subagent registries), so they never advertise tools they cannot
     // dispatch. The consent posture at dispatch is stricter still — every
     // authoring call is approval-carded in every posture (see dispatch.rs).
-    if caps.crew_write && sandbox.allows_mutating_tools() {
+    if caps.subagent_write && sandbox.allows_mutating_tools() {
         specs.push(openai_fn(
-            CREATE_CREW_AGENT,
-            CREATE_CREW_AGENT_DESC,
-            create_crew_agent_parameters(),
+            CREATE_SUBAGENT,
+            CREATE_SUBAGENT_DESC,
+            create_subagent_parameters(),
         ));
         specs.push(openai_fn(
-            UPDATE_CREW_AGENT,
-            UPDATE_CREW_AGENT_DESC,
-            update_crew_agent_parameters(),
+            UPDATE_SUBAGENT,
+            UPDATE_SUBAGENT_DESC,
+            update_subagent_parameters(),
         ));
         specs.push(openai_fn(
-            DELETE_CREW_AGENT,
-            DELETE_CREW_AGENT_DESC,
-            crew_agent_id_parameters(),
+            DELETE_SUBAGENT,
+            DELETE_SUBAGENT_DESC,
+            subagent_id_parameters(),
         ));
     }
     // download_progress is deliberately NOT advertised: get_task_status
@@ -571,7 +571,7 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             GET_AUTOMATION_DESC,
             automation_id_parameters(),
         ),
-        anthropic_fn(LIST_CREW_AGENTS, LIST_CREW_AGENTS_DESC, no_parameters()),
+        anthropic_fn(LIST_SUBAGENTS, LIST_SUBAGENTS_DESC, no_parameters()),
         // Session Mesh — mirror of the OpenAI block above: the whole family
         // rides caps.session_mesh (locked by default, attach-to-unlock).
     ]);
@@ -710,22 +710,22 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             automation_id_parameters(),
         ));
     }
-    // Crew CRUD — mirror of the OpenAI block above (flag + posture gating).
-    if caps.crew_write && sandbox.allows_mutating_tools() {
+    // Subagent CRUD — mirror of the OpenAI block above (flag + posture gating).
+    if caps.subagent_write && sandbox.allows_mutating_tools() {
         specs.push(anthropic_fn(
-            CREATE_CREW_AGENT,
-            CREATE_CREW_AGENT_DESC,
-            create_crew_agent_parameters(),
+            CREATE_SUBAGENT,
+            CREATE_SUBAGENT_DESC,
+            create_subagent_parameters(),
         ));
         specs.push(anthropic_fn(
-            UPDATE_CREW_AGENT,
-            UPDATE_CREW_AGENT_DESC,
-            update_crew_agent_parameters(),
+            UPDATE_SUBAGENT,
+            UPDATE_SUBAGENT_DESC,
+            update_subagent_parameters(),
         ));
         specs.push(anthropic_fn(
-            DELETE_CREW_AGENT,
-            DELETE_CREW_AGENT_DESC,
-            crew_agent_id_parameters(),
+            DELETE_SUBAGENT,
+            DELETE_SUBAGENT_DESC,
+            subagent_id_parameters(),
         ));
     }
     // download_progress not advertised here either (see the OpenAI builder).
@@ -1460,26 +1460,26 @@ fn run_shell_parameters() -> Value {
 }
 
 /// `subagent_type` values: the 7 built-in roles, ALWAYS present, plus every
-/// crew agent name from the registry cache (F.5). Builtins come from
-/// `chat::crew::BUILTIN_ROLES` — the same table the registry seeds and the
-/// runtime prompt builder read, so the three cannot drift — and the crew
+/// subagent name from the registry cache (F.5). Builtins come from
+/// `chat::subagent::BUILTIN_ROLES` — the same table the registry seeds and the
+/// runtime prompt builder read, so the three cannot drift — and the subagent
 /// names are deduped against them, so a row that somehow shares a role name
 /// does not produce a two-value enum.
 ///
 /// Cached with a 30s TTL and invalidated on every registry write (see
-/// `chat::crew::cached_agent_names`), because this function is on the
+/// `chat::subagent::cached_agent_names`), because this function is on the
 /// per-turn spec-build path and has no DB handle of its own.
 ///
 /// Growth note (C.8.2): the enum is a fat-list design and is right while the
-/// crew is small. Past roughly twenty agents the right move is a `list_agents`
+/// subagent is small. Past roughly twenty agents the right move is a `list_agents`
 /// / `run_agent(name, …)` meta-tool instead — this is the seam that would
 /// carry it, so the threshold is recorded here rather than rediscovered.
 fn subagent_type_values() -> Vec<String> {
-    let mut values: Vec<String> = crate::chat::crew::BUILTIN_ROLES
+    let mut values: Vec<String> = crate::chat::subagents::BUILTIN_ROLES
         .iter()
         .map(|r| r.name.to_string())
         .collect();
-    for name in crate::chat::crew::cached_agent_names().iter() {
+    for name in crate::chat::subagents::cached_agent_names().iter() {
         if !values.iter().any(|v| v.eq_ignore_ascii_case(name)) {
             values.push(name.clone());
         }
@@ -1506,7 +1506,7 @@ fn task_parameters() -> Value {
             },
             "agent": {
                 "type": "string",
-                "description": "Crew agent id or name (overrides subagent_type). Use it when the caller names an agent that is not one of the built-in roles.",
+                "description": "Subagent id or name (overrides subagent_type). Use it when the caller names an agent that is not one of the built-in roles.",
             },
             "model": {
                 "type": "string",
@@ -1569,39 +1569,39 @@ const DELETE_AUTOMATION_DESC: &str = "Delete an automation by id, permanently an
 const RUN_AUTOMATION_NOW_DESC: &str = "Fire one run of an automation immediately; \
     it executes in the background and lands in the run history.";
 
-// ---- Crew (declarative subagents) tool descriptions + schemas ----
+// ---- Subagent (declarative subagents) tool descriptions + schemas ----
 
-const LIST_CREW_AGENTS_DESC: &str = "List the user's crew agents (named reusable \
+const LIST_SUBAGENTS_DESC: &str = "List the user's subagents (named reusable \
     subagents): id, name, prompt, allowlist, engine/model, scope. Call before \
     create/update/delete for ids.";
 
-const CREATE_CREW_AGENT_DESC: &str = "Create a crew agent: a named reusable \
+const CREATE_SUBAGENT_DESC: &str = "Create a subagent: a named reusable \
     subagent spawnable via Task, spawn_session or an automation. name \
     (lowercase-hyphen), description, prompt_md (standing instructions), \
     optional tools allowlist (omit = read-only default), engine/model, \
     sandbox_policy. User confirms before save.";
 
-const UPDATE_CREW_AGENT_DESC: &str = "Update a crew agent by id or name (from \
-    list_crew_agents). Only passed fields change.";
+const UPDATE_SUBAGENT_DESC: &str = "Update a subagent by id or name (from \
+    list_subagents). Only passed fields change.";
 
-const DELETE_CREW_AGENT_DESC: &str = "Delete a crew agent by id or name, \
+const DELETE_SUBAGENT_DESC: &str = "Delete a subagent by id or name, \
     permanently. Builtins and in-flight agents are refused.";
 
-fn crew_agent_id_parameters() -> Value {
+fn subagent_id_parameters() -> Value {
     json!({
         "type": "object",
         "required": ["agent_id"],
         "properties": {
             "agent_id": {
                 "type": "string",
-                "description": "Crew agent id or unique name - from \
-                    list_crew_agents."
+                "description": "Subagent id or unique name - from \
+                    list_subagents."
             }
         }
     })
 }
 
-fn create_crew_agent_parameters() -> Value {
+fn create_subagent_parameters() -> Value {
     json!({
         "type": "object",
         "required": ["name"],
@@ -1623,7 +1623,7 @@ fn create_crew_agent_parameters() -> Value {
             "tools": {
                 "type": "array",
                 "items": { "type": "string" },
-                "description": "Allowlist (vocabulary from list_crew_agents). \
+                "description": "Allowlist (vocabulary from list_subagents). \
                     Omit = read-only default; disallowed tools are dropped, \
                     never granted."
             },
@@ -1657,14 +1657,14 @@ fn create_crew_agent_parameters() -> Value {
     })
 }
 
-fn update_crew_agent_parameters() -> Value {
+fn update_subagent_parameters() -> Value {
     json!({
         "type": "object",
         "required": ["agent_id"],
         "properties": {
             "agent_id": {
                 "type": "string",
-                "description": "Crew agent id or unique name."
+                "description": "Subagent id or unique name."
             },
             "name": { "type": "string", "description": "New unique name." },
             "description": { "type": "string" },
@@ -1823,7 +1823,7 @@ fn spawn_session_parameters() -> Value {
             },
             "agent": {
                 "type": "string",
-                "description": "Engine for the new session, e.g. \"claude_code\",                     \"opencode\", \"builtin\", \"local\" (defaults to yours). An                     \"agent:<id-or-name>\" value instead spawns a CREW agent — a                     user-defined subagent whose prompt, tool allowlist and permission                     scope apply to the child."
+                "description": "Engine for the new session, e.g. \"claude_code\",                     \"opencode\", \"builtin\", \"local\" (defaults to yours). An                     \"agent:<id-or-name>\" value instead spawns a SUBAGENT agent — a                     user-defined subagent whose prompt, tool allowlist and permission                     scope apply to the child."
             },
             "model": {
                 "type": "string",
@@ -1853,7 +1853,7 @@ const AUTOMATION_AGENTS: [&str; 8] = [
 
 fn create_automation_parameters() -> Value {
     // The engine list stays static, but `agent:...` values route through the
-    // crew registry — the enum can't enumerate user rows (they change between
+    // subagent registry — the enum can't enumerate user rows (they change between
     // turns), so the description carries the contract.
     json!({
         "type": "object",
@@ -1877,7 +1877,7 @@ fn create_automation_parameters() -> Value {
                 "type": "string",
                 "enum": AUTOMATION_AGENTS,
                 "description": "Agent engine. Default claude_code. An \
-                    \"agent:<id-or-name>\" value instead runs a CREW agent \
+                    \"agent:<id-or-name>\" value instead runs a SUBAGENT agent \
                     (a user-defined subagent — get_capabilities lists them) \
                     with that definition's engine, model and permission scope.",
             },
@@ -2312,14 +2312,14 @@ mod tests {
 
     impl CacheGuard {
         fn start() -> Self {
-            crate::chat::crew::invalidate_registry_cache();
+            crate::chat::subagents::invalidate_registry_cache();
             Self
         }
     }
 
     impl Drop for CacheGuard {
         fn drop(&mut self) {
-            crate::chat::crew::invalidate_registry_cache();
+            crate::chat::subagents::invalidate_registry_cache();
         }
     }
 
@@ -2332,8 +2332,8 @@ mod tests {
             .collect()
     }
 
-    fn crew_input(name: &str) -> crate::chat::crew::CrewAgentInput {
-        crate::chat::crew::CrewAgentInput {
+    fn subagent_input(name: &str) -> crate::chat::subagents::SubagentInput {
+        crate::chat::subagents::SubagentInput {
             name: name.into(),
             description: String::new(),
             prompt_md: String::new(),
@@ -2350,12 +2350,12 @@ mod tests {
     }
 
     #[test]
-    fn task_enum_carries_the_seven_builtin_roles_plus_the_crew() {
+    fn task_enum_carries_the_seven_builtin_roles_plus_the_subagent() {
         let _guard = CacheGuard::start();
         let conn = crate::db::mem();
         // A cold cache still advertises the 7 roles: they are a constant, not
         // registry data.
-        for role in crate::chat::crew::BUILTIN_ROLES {
+        for role in crate::chat::subagents::BUILTIN_ROLES {
             assert!(
                 enum_values(&task_parameters()).iter().any(|v| v == role.name),
                 "builtin role {} missing from the enum",
@@ -2363,7 +2363,7 @@ mod tests {
             );
         }
 
-        crate::chat::crew::create(&conn, &crew_input("doc-writer")).unwrap();
+        crate::chat::subagents::create(&conn, &subagent_input("doc-writer")).unwrap();
         // Republish from THIS connection, then read. The cache is
         // process-wide and a parallel test can invalidate it between the write
         // and the read, so the contract under test ("a write is visible to
@@ -2372,7 +2372,7 @@ mod tests {
         // to take. Bounded, so a genuine regression still fails.
         let mut values = Vec::new();
         for _ in 0..5 {
-            crate::chat::crew::refresh_registry_cache(&conn);
+            crate::chat::subagents::refresh_registry_cache(&conn);
             values = enum_values(&task_parameters());
             if values.iter().any(|v| v == "doc-writer") {
                 break;
@@ -2386,10 +2386,10 @@ mod tests {
         // The roles keep their canonical order at the head of the enum.
         let head: Vec<&str> = values
             .iter()
-            .take(crate::chat::crew::BUILTIN_ROLES.len())
+            .take(crate::chat::subagents::BUILTIN_ROLES.len())
             .map(String::as_str)
             .collect();
-        let want: Vec<&str> = crate::chat::crew::BUILTIN_ROLES
+        let want: Vec<&str> = crate::chat::subagents::BUILTIN_ROLES
             .iter()
             .map(|r| r.name)
             .collect();
@@ -2431,17 +2431,17 @@ mod tests {
     fn task_enum_picks_up_an_agent_created_after_a_cached_read() {
         let _guard = CacheGuard::start();
         let conn = crate::db::mem();
-        crate::chat::crew::refresh_registry_cache(&conn);
+        crate::chat::subagents::refresh_registry_cache(&conn);
         assert!(!enum_values(&task_parameters())
             .iter()
             .any(|v| v == "late-comer"));
 
-        let agent = crate::chat::crew::create(&conn, &crew_input("late-comer")).unwrap();
+        let agent = crate::chat::subagents::create(&conn, &subagent_input("late-comer")).unwrap();
         // `create` invalidates + refreshes, so the next build already has it.
         assert!(enum_values(&task_parameters())
             .iter()
             .any(|v| v == "late-comer"));
-        crate::chat::crew::delete(&conn, &agent.id).unwrap();
+        crate::chat::subagents::delete(&conn, &agent.id).unwrap();
         assert!(!enum_values(&task_parameters())
             .iter()
             .any(|v| v == "late-comer"));
@@ -2611,10 +2611,10 @@ mod tests {
     #[test]
     fn no_single_tool_spec_blows_its_budget() {
         // The `Task` enum is registry-driven, so a parallel test republishing
-        // its own crew would move this total for reasons that have nothing to
+        // its own subagent would move this total for reasons that have nothing to
         // do with the registry's size. Pin it: the budget guards the built-in
         // surface.
-        crate::chat::crew::invalidate_registry_cache();
+        crate::chat::subagents::invalidate_registry_cache();
         let caps = ToolCaps::default();
         let specs = openai_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite);
         let mut sizes: Vec<(usize, String)> = specs
@@ -2683,12 +2683,12 @@ mod tests {
         // params (webhook / file-watch / git) — without them the model can
         // only schedule cron rows and must claim the other triggers are
         // impossible.
-        // 36_000 STANDS for the crew `Task` schema (Phase 2): `subagent_type`
-        // became a DYNAMIC enum (the 7 roles plus the user's crew names, from
+        // 36_000 STANDS for the subagent `Task` schema (Phase 2): `subagent_type`
+        // became a DYNAMIC enum (the 7 roles plus the user's subagent names, from
         // the 30s registry cache) and gained an optional `agent` override —
         // ~0.25k on the `Task` spec, and it is the feature that makes the
-        // enum worth anything. With an empty crew the enum is exactly today's
-        // 7 values; a large crew grows this spec, and the meta-tool escape
+        // enum worth anything. With an empty subagent the enum is exactly today's
+        // 7 values; a large subagent grows this spec, and the meta-tool escape
         // hatch is called out in `subagent_type_values`.
         // TIGHTENED 49_000→36_000 (2026-09-21, token-efficiency pass II):
         // the source ledger now rides `caps.research`, and Session Mesh /
@@ -2728,12 +2728,12 @@ mod tests {
         // so it renders even with no connectors attachable). No single chat
         // turn carries this whole surface any more; the budget guards the
         // registry's aggregate size.
-        // Bumped 53_500→55_800 for the crew CRUD family (list/create/update/
-        // delete_crew_agent, ~2.3k): the model can AUTHOR the user's
+        // Bumped 53_500→55_800 for the subagent CRUD family (list/create/update/
+        // delete_subagent, ~2.3k): the model can AUTHOR the user's
         // declarative subagents on request, not just run them — the same
         // authoring surface create_automation already provides, with the
         // identical always-carded consent posture. The default fresh-turn
-        // surface is unaffected: the CRUD trio rides `caps.crew_write` and is
+        // surface is unaffected: the CRUD trio rides `caps.subagent_write` and is
         // stripped from the bridge/subagent registries (ToolCaps::default()).
         assert!(
             all_on < 55_800,
@@ -3024,7 +3024,7 @@ mod tests {
                 l.len() + 17,
                 u.len(),
                 "{name}: unlock delta must be exactly the 17 family tools (mesh 5 + 
-                 automations 6 + totp 1 + research 2 + crew CRUD 3)"
+                 automations 6 + totp 1 + research 2 + subagent CRUD 3)"
             );
             for gone in [
                 crate::chat::tools::ADD_SOURCE_NOTE,

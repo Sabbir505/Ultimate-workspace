@@ -139,23 +139,23 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
             },
             // Match the schema: the read list is always on; the CRUD trio is
             // stripped under a read-only posture and absent from surfaces
-            // that build ToolCaps::default() (crew_write=false). A run with
+            // that build ToolCaps::default() (subagent_write=false). A run with
             // a PINNED allowlist (a subagent) may not even carry the read
             // list — the ceiling never includes it — so the report must not
             // claim a tool the run cannot call.
-            "crew_agents": if caps.crew_write && caps.allows_mutating {
-                "list_crew_agents + create/update/delete_crew_agent (full CRUD — you can author \
+            "subagents": if caps.subagent_write && caps.allows_mutating {
+                "list_subagents + create/update/delete_subagent (full CRUD — you can author \
                  the user's reusable subagents; authoring is approval-carded)"
             } else if caps
                 .allow
                 .as_ref()
-                .is_some_and(|set| !set.contains(super::LIST_CREW_AGENTS))
+                .is_some_and(|set| !set.contains(super::LIST_SUBAGENTS))
             {
-                "none (this run's pinned tool set does not include the crew tools)"
+                "none (this run's pinned tool set does not include the subagent tools)"
             } else if caps.allows_mutating {
-                "list_crew_agents only"
+                "list_subagents only"
             } else {
-                "list_crew_agents only (the write tools are stripped in this read-only posture)"
+                "list_subagents only (the write tools are stripped in this read-only posture)"
             },
             // Family-locked built-ins (see UNLOCKABLE_FAMILIES): the schema
             // hides them until attach_connector("<id>") unlocks, which the
@@ -178,7 +178,13 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
             // Settings" error, not a missing tool). The report must claim it
             // exactly as unconditionally as the schema advertises it.
             "image_generation": "generate_image — local diffusion (no cloud); always available as a tool (a missing engine/model returns setup guidance instead of a failure)",
-            "subagents": true,
+            // NOT the registry report above — this flag is the built-in Task
+            // tool's own subagent system, which is unconditionally callable:
+            // it ships in every schema and every call reaches the engine (an
+            // unconfigured engine degrades to a "set it up in Settings"
+            // error, not a missing tool). The report must claim it exactly as
+            // unconditionally as the schema advertises it.
+            "task_subagents": true,
             "skills": "listed under '## Available skills' in the system prompt; get_skill(slug) loads one",
         },
         "terminal": terminal_lifecycle_json(),
@@ -371,16 +377,16 @@ mod tests {
     #[test]
     fn report_matches_posture_for_gated_families() {
         // "Full" = mutating posture AND the write families unlocked — the
-        // gates the schema applies to each write half (crew_write rides the
+        // gates the schema applies to each write half (subagent_write rides the
         // main loop unconditionally; the bridge/subagent defaults lack it).
         let full = ToolCaps {
             automations_write: true,
-            crew_write: true,
+            subagent_write: true,
             ..ToolCaps::default()
         };
         let mut read_only = ToolCaps {
             automations_write: true,
-            crew_write: true,
+            subagent_write: true,
             ..ToolCaps::default()
         };
         read_only.allows_mutating = false;
@@ -401,19 +407,19 @@ mod tests {
         assert!(full["built_in"]["vault"].as_str().unwrap().contains("vault_write"));
         assert!(!ro["built_in"]["vault"].as_str().unwrap().contains("vault_write"));
 
-        // Crew: full CRUD only when both gates are open; the list always on.
-        assert!(full["built_in"]["crew_agents"].as_str().unwrap().contains("create"));
-        assert!(!ro["built_in"]["crew_agents"].as_str().unwrap().contains("create"));
-        assert!(ro["built_in"]["crew_agents"].as_str().unwrap().contains("list_crew_agents"));
+        // Subagent: full CRUD only when both gates are open; the list always on.
+        assert!(full["built_in"]["subagents"].as_str().unwrap().contains("create"));
+        assert!(!ro["built_in"]["subagents"].as_str().unwrap().contains("create"));
+        assert!(ro["built_in"]["subagents"].as_str().unwrap().contains("list_subagents"));
     }
 
-    /// A run with a PINNED allowlist (a subagent) may not carry the crew
+    /// A run with a PINNED allowlist (a subagent) may not carry the subagent
     /// read tool at all — the ceiling never includes it, the schema filter
     /// strips it, execution refuses it — so the report must not claim it
     /// (the module contract: the report can never disagree with what the
     /// model can actually call).
     #[test]
-    fn report_claims_no_crew_tool_when_the_pinned_set_lacks_it() {
+    fn report_claims_no_subagent_tool_when_the_pinned_set_lacks_it() {
         let pinned = ToolCaps {
             allows_mutating: true,
             allow: Some(std::sync::Arc::new(
@@ -425,9 +431,9 @@ mod tests {
             ..ToolCaps::default()
         };
         let v: Value = serde_json::from_str(&capabilities_report(&pinned)).unwrap();
-        let line = v["built_in"]["crew_agents"].as_str().unwrap();
+        let line = v["built_in"]["subagents"].as_str().unwrap();
         assert!(
-            !line.contains("list_crew_agents"),
+            !line.contains("list_subagents"),
             "a pinned set without the tool must not be told it exists: {line}"
         );
     }

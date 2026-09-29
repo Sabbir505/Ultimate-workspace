@@ -39,16 +39,16 @@ const MAX_SPAWN_DEPTH: i64 = 2;
 const MAX_CHILDREN_PER_PARENT: i64 = 3;
 const CHILDREN_WINDOW_SECS: i64 = 24 * 3600;
 const MAX_ACTIVE_SPAWNED: i64 = 8;
-/// App-wide ceiling on crew runs in flight — `chat::crew::MAX_ACTIVE_CREW`
+/// App-wide ceiling on subagent runs in flight — `chat::subagent::MAX_ACTIVE_SUBAGENT`
 /// (every `agent:` spawn surface shares the one number). Deliberately
 /// separate from `MAX_ACTIVE_SPAWNED`: that cap guards *model fan-out*
-/// through the mesh tool, and counting human-initiated or automated crew
+/// through the mesh tool, and counting human-initiated or automated subagent
 /// runs against it would starve both.
-use crate::chat::crew::MAX_ACTIVE_CREW;
-/// How long a crew run's first turn may hold its concurrency slot before
+use crate::chat::subagents::MAX_ACTIVE_SUBAGENT;
+/// How long a subagent run's first turn may hold its concurrency slot before
 /// the release watcher gives up counting it (matches the automation engine's
 /// own MAX_RUN_SECS scale — unattended work is allowed to be long).
-const CREW_SLOT_RELEASE_CEILING_SECS: u64 = 2 * 60 * 60;
+const SUBAGENT_SLOT_RELEASE_CEILING_SECS: u64 = 2 * 60 * 60;
 const QUESTION_TIMEOUT_DEFAULT: u64 = 25;
 const QUESTION_TIMEOUT_MAX: u64 = 120;
 /// Hard watcher ceiling: a question whose answer never arrives stops
@@ -1407,23 +1407,23 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
 
     let db = app.state::<DbState>();
 
-    // Crew routing: an `agent:`-prefixed `agent` value names a crew
+    // Subagent routing: an `agent:`-prefixed `agent` value names a subagent
     // DEFINITION (id or name) — its engine/model/policies override the pick
     // chain below and the child row is linked via `agent_def_id`. A bare
     // value keeps today's engine semantics. Unknown definitions proceed
     // (with a note) rather than failing the spawn — the caller may be
     // reading a stale list.
-    let crew_def = agent_arg.as_deref().and_then(|a| a.strip_prefix("agent:")).and_then(|v| {
+    let subagent_def = agent_arg.as_deref().and_then(|a| a.strip_prefix("agent:")).and_then(|v| {
         let conn = db.0.lock();
-        crate::chat::crew::resolve_by_id_or_name(&conn, v)
+        crate::chat::subagents::resolve_by_id_or_name(&conn, v)
     });
-    let crew_note = match (&agent_arg, &crew_def) {
+    let subagent_note = match (&agent_arg, &subagent_def) {
         (Some(a), None) if a.starts_with("agent:") => {
             let name = a.trim_start_matches("agent:");
             // Phase 5b adds durable run rows; until then a stale reference
             // still spawns a plain session rather than failing the call.
             format!(
-                "Note: no crew agent named \"{name}\" exists — the session runs on the \
+                "Note: no subagent named \"{name}\" exists — the session runs on the \
                  parent's engine instead.\n\n"
             )
         }
@@ -1507,10 +1507,10 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             format!("harness:{a}")
         }
     };
-    // A crew definition overrides the engine (its `engine` column) unless the
-    // caller named an engine explicitly — an `agent:` value is a crew
+    // A subagent definition overrides the engine (its `engine` column) unless the
+    // caller named an engine explicitly — an `agent:` value is a subagent
     // reference, not an engine id, so it never reaches `normalize_agent`.
-    let agent = match (&crew_def, &agent_arg) {
+    let agent = match (&subagent_def, &agent_arg) {
         (Some(def), _) => def
             .engine
             .clone()
@@ -1533,9 +1533,9 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             ),
         },
     };
-    // Model precedence for a crew child: an explicit `model` arg wins, then
+    // Model precedence for a subagent child: an explicit `model` arg wins, then
     // the definition's model, then the normal pick chain.
-    let model_pick_for_child = match &crew_def {
+    let model_pick_for_child = match &subagent_def {
         Some(def) if model_pick.is_none() => def.model.as_ref().map(|m| {
             crate::chat::subagent_model::SubagentModelPick::parse(m)
                 .unwrap_or_else(|| crate::chat::subagent_model::SubagentModelPick {
@@ -1582,19 +1582,19 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
         })
         .unwrap_or_default();
 
-    // A crew-routed mesh child holds a real concurrency slot (C.5: crew
+    // A subagent-routed mesh child holds a real concurrency slot (C.5: subagent
     // spawns keep their own budget — the mesh's caps govern ON TOP, not
     // instead). Acquired atomically with the check so a fan-out racing a
     // manual Run of the same agent cannot both pass; released by the
     // watcher below, or right here if the row never gets created.
-    if let Some(def) = &crew_def {
-        if let Err(e) = crate::chat::crew::try_acquire_running(
+    if let Some(def) = &subagent_def {
+        if let Err(e) = crate::chat::subagents::try_acquire_running(
             &def.id,
             &def.name,
             def.max_concurrent.max(1),
-            MAX_ACTIVE_CREW,
+            MAX_ACTIVE_SUBAGENT,
         ) {
-            return format!("Error: spawn_session could not start a crew run: {e}");
+            return format!("Error: spawn_session could not start a subagent run: {e}");
         }
     }
 
@@ -1612,12 +1612,12 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
                 });
                 let _ = crate::db::update_chat_session_title(&conn, &r.id, &title);
                 let _ = store::set_chat_session_origin(&conn, &r.id, &format!("spawned_by:{parent}"));
-                // A crew-routed child inherits the definition's permission
+                // A subagent-routed child inherits the definition's permission
                 // scope and carries the link — the model-fan-out caps above
                 // still govern it (this IS model fan-out), and its turns run
                 // with the definition's sandbox/approval exactly like a
-                // manual crew run.
-                if let Some(def) = &crew_def {
+                // manual subagent run.
+                if let Some(def) = &subagent_def {
                     let _ = crate::db::update_chat_session_policies(
                         &conn,
                         &r.id,
@@ -1633,8 +1633,8 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
                 r
             }
             Err(e) => {
-                if let Some(def) = &crew_def {
-                    crate::chat::crew::bump_running(&def.id, -1);
+                if let Some(def) = &subagent_def {
+                    crate::chat::subagents::bump_running(&def.id, -1);
                 }
                 return format!("Error: spawn_session could not create the session: {e}")
             }
@@ -1648,19 +1648,19 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
             child_session_id: child.id.clone(),
             title: child.title.clone().unwrap_or_else(|| "spawned session".into()),
             agent: agent.clone(),
-            agent_id: crew_def.as_ref().map(|d| d.id.clone()),
+            agent_id: subagent_def.as_ref().map(|d| d.id.clone()),
             model: child.model.clone(),
         },
     );
 
-    // A crew-routed mesh child also gets a history row; the slot itself was
+    // A subagent-routed mesh child also gets a history row; the slot itself was
     // already acquired above (before the row existed), so only the watcher —
     // which releases the slot and settles the row when the child goes idle —
     // is armed here.
-    if let Some(def) = &crew_def {
+    if let Some(def) = &subagent_def {
         let run_id = {
             let conn = db.0.lock();
-            record_crew_run_start(
+            record_subagent_run_start(
                 &conn,
                 &def.id,
                 &child.id,
@@ -1673,7 +1673,7 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
         };
         // Terminal-outcome tracking, registered before the watcher exists so
         // a fast-failing first turn cannot slip in front of the listener.
-        let (outcome, listener_ids) = arm_crew_run_outcome(app, &child.id);
+        let (outcome, listener_ids) = arm_subagent_run_outcome(app, &child.id);
         let slot_agent = def.id.clone();
         let slot_run = run_id;
         let app_for_slot = app.clone();
@@ -1681,20 +1681,20 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
         tauri::async_runtime::spawn(async move {
             let started = std::time::Instant::now();
             while session_busy(&app_for_slot, &slot_child) {
-                if started.elapsed().as_secs() >= CREW_SLOT_RELEASE_CEILING_SECS {
+                if started.elapsed().as_secs() >= SUBAGENT_SLOT_RELEASE_CEILING_SECS {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
             }
-            crate::chat::crew::bump_running(&slot_agent, -1);
+            crate::chat::subagents::bump_running(&slot_agent, -1);
             if let Some(run_id) = slot_run {
                 // The turn's real outcome (chat:done/chat:error), not an
                 // assumed "ok" — a mid-stream failure used to settle as a
                 // successful run because the idle poll can't see it.
-                let (status, summary) = crew_run_settle_pair(&outcome.lock().unwrap());
+                let (status, summary) = subagent_run_settle_pair(&outcome.lock().unwrap());
                 let db = app_for_slot.state::<DbState>();
                 let conn = db.0.lock();
-                crate::db::finish_crew_run(&conn, &run_id, status, summary.as_deref());
+                crate::db::finish_subagent_run(&conn, &run_id, status, summary.as_deref());
             }
             release_outcome_listeners(&app_for_slot, listener_ids);
         });
@@ -1702,13 +1702,13 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
 
     // First turn: the task envelope (the child's bundle/primer machinery
     // handles the fresh-CLI instructions, which include mesh awareness). A
-    // crew child rides the definition's prompt body in a directive block, and
+    // subagent child rides the definition's prompt body in a directive block, and
     // a stale `agent:` reference adds its own note.
-    let crew_body = crew_def
+    let subagent_body = subagent_def
         .as_ref()
-        .map(|d| crate::chat::crew::compose_first_message(d, &task))
+        .map(|d| crate::chat::subagents::compose_first_message(d, &task))
         .unwrap_or_else(|| task.clone());
-    let envelope = spawn_envelope(&db, &parent, &child.id, &crew_body);
+    let envelope = spawn_envelope(&db, &parent, &child.id, &subagent_body);
     let target = SessionRowLite {
         id: child.id.clone(),
         agent: Some(agent.clone()),
@@ -1904,7 +1904,7 @@ fn session_busy(app: &AppHandle, sid: &str) -> bool {
 /// blocks a run. Shared by every spawn surface that has no watcher of its
 /// own (the Task tool's in-process loop, the automations one-shot) — the
 /// manual and mesh paths call it right before arming their release watcher.
-pub(crate) fn record_crew_run_start(
+pub(crate) fn record_subagent_run_start(
     conn: &rusqlite::Connection,
     agent_id: &str,
     session_id: &str,
@@ -1914,7 +1914,7 @@ pub(crate) fn record_crew_run_start(
     model: &str,
     worktree: Option<&str>,
 ) -> Option<String> {
-    let run = crate::db::CrewAgentRun {
+    let run = crate::db::SubagentRun {
         id: crate::db::new_id(),
         agent_id: Some(agent_id.to_string()),
         session_id: Some(session_id.to_string()),
@@ -1928,26 +1928,26 @@ pub(crate) fn record_crew_run_start(
         status: "running".into(),
         summary: None,
     };
-    match crate::db::record_crew_run(conn, &run) {
+    match crate::db::record_subagent_run(conn, &run) {
         Ok(()) => Some(run.id),
         Err(e) => {
-            eprintln!("[crew] run-history write failed (non-fatal): {e}");
+            eprintln!("[subagent] run-history write failed (non-fatal): {e}");
             None
         }
     }
 }
 
-/// The terminal outcome of one crew-run session's turn, as reported by the
+/// The terminal outcome of one subagent-run session's turn, as reported by the
 /// global `chat:done` / `chat:error` events every engine emits at turn end.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CrewRunTerminal {
-    /// "ok" | "error" — the `crew_runs.status` vocabulary.
+pub(crate) struct SubagentRunTerminal {
+    /// "ok" | "error" — the `subagent_runs.status` vocabulary.
     pub status: &'static str,
     /// The error text (errors only); settles into the row's summary column.
     pub message: String,
 }
 
-/// Pure payload half of [`arm_crew_run_outcome`]: which terminal outcome
+/// Pure payload half of [`arm_subagent_run_outcome`]: which terminal outcome
 /// (if any) one `chat:done`/`chat:error` event carries for `sid`. The
 /// payloads are the typed `ChatDonePayload`/`ChatErrorPayload` — camelCase
 /// `chatSessionId` — parsed leniently because a missing/odd payload must
@@ -1956,17 +1956,17 @@ pub(crate) fn terminal_from_event(
     event: &str,
     payload: &str,
     sid: &str,
-) -> Option<CrewRunTerminal> {
+) -> Option<SubagentRunTerminal> {
     let v: Value = serde_json::from_str(payload).ok()?;
     if v.get("chatSessionId").and_then(Value::as_str) != Some(sid) {
         return None;
     }
     match event {
-        "chat:done" => Some(CrewRunTerminal {
+        "chat:done" => Some(SubagentRunTerminal {
             status: "ok",
             message: String::new(),
         }),
-        "chat:error" => Some(CrewRunTerminal {
+        "chat:error" => Some(SubagentRunTerminal {
             status: "error",
             message: v
                 .get("message")
@@ -1978,7 +1978,7 @@ pub(crate) fn terminal_from_event(
     }
 }
 
-/// Track the LAST terminal chat event for one crew-run session, so the
+/// Track the LAST terminal chat event for one subagent-run session, so the
 /// release watcher can settle the history row with the turn's real outcome
 /// instead of assuming success: a first turn that errors mid-stream leaves
 /// the session idle with no other trace, and used to settle as "ok".
@@ -1990,16 +1990,16 @@ pub(crate) fn terminal_from_event(
 /// returned ids into the watcher, which unlistens when it settles. A session
 /// the user keeps chatting in simply updates the outcome — the row settles
 /// when the session finally goes quiet.
-pub(crate) fn arm_crew_run_outcome(
+pub(crate) fn arm_subagent_run_outcome(
     app: &AppHandle,
     sid: &str,
 ) -> (
-    Arc<Mutex<Option<CrewRunTerminal>>>,
+    Arc<Mutex<Option<SubagentRunTerminal>>>,
     Vec<tauri::EventId>,
 ) {
     use tauri::Listener;
 
-    let outcome: Arc<Mutex<Option<CrewRunTerminal>>> = Arc::new(Mutex::new(None));
+    let outcome: Arc<Mutex<Option<SubagentRunTerminal>>> = Arc::new(Mutex::new(None));
     let mut ids = Vec::with_capacity(2);
     for event in ["chat:done", "chat:error"] {
         let outcome = outcome.clone();
@@ -2018,9 +2018,9 @@ pub(crate) fn arm_crew_run_outcome(
 }
 
 /// The watcher's settle pass: map the tracked outcome (default "ok") onto
-/// the (status, summary) pair `finish_crew_run` takes.
-pub(crate) fn crew_run_settle_pair(
-    outcome: &Option<CrewRunTerminal>,
+/// the (status, summary) pair `finish_subagent_run` takes.
+pub(crate) fn subagent_run_settle_pair(
+    outcome: &Option<SubagentRunTerminal>,
 ) -> (&'static str, Option<String>) {
     match outcome {
         None => ("ok", None),
@@ -2041,20 +2041,20 @@ fn release_outcome_listeners(app: &AppHandle, ids: Vec<tauri::EventId>) {
     }
 }
 
-/// The shared crew-run spawn core: a human Run button (Phase 2.5) and the
+/// The shared subagent-run spawn core: a human Run button (Phase 2.5) and the
 /// mesh's `agent:`-routed spawn (Phase 3) both land here. Resolves the
 /// definition once, pre-flights credentials, guards the run budgets, creates
 /// the session row (policies + `agent_def_id` from the definition; `origin`
 /// left to the caller — a manual run keeps it NULL, the mesh sets
 /// `spawned_by:`), optionally provisions a worktree, and dispatches the
 /// first turn through the same `run_turn` primitives every session uses —
-/// with a PLAIN first message, not the mesh's `spawn_envelope` (a crew run
+/// with a PLAIN first message, not the mesh's `spawn_envelope` (a subagent run
 /// has no parent to be told about; mesh awareness comes from the session's
 /// own bundle).
 ///
 /// Returns the new session id. On any error before the turn dispatches, no
 /// row exists and no budget slot is held.
-pub async fn crew_spawn(
+pub async fn subagent_spawn(
     app: &AppHandle,
     agent_ref: &str,
     task: &str,
@@ -2063,7 +2063,7 @@ pub async fn crew_spawn(
 ) -> Result<String, String> {
     let task = task.trim();
     if task.is_empty() {
-        return Err("a crew run needs a non-empty task".into());
+        return Err("a subagent run needs a non-empty task".into());
     }
     let db = app.state::<DbState>();
 
@@ -2073,8 +2073,8 @@ pub async fn crew_spawn(
     // the model from the definition or the provider's configured default.
     let def = {
         let conn = db.0.lock();
-        crate::chat::crew::resolve_by_id_or_name(&conn, agent_ref)
-            .ok_or_else(|| format!("crew agent \"{agent_ref}\" not found"))?
+        crate::chat::subagents::resolve_by_id_or_name(&conn, agent_ref)
+            .ok_or_else(|| format!("subagent \"{agent_ref}\" not found"))?
     };
     let engine = def
         .engine
@@ -2091,8 +2091,8 @@ pub async fn crew_spawn(
         (provider, def.model.clone().unwrap_or_default())
     } else {
         let conn = db.0.lock();
-        crate::chat::crew::resolve_builtin_provider_model(&conn, def.model.as_deref())
-            .map_err(|e| format!("crew agent \"{}\": {e}", def.name))?
+        crate::chat::subagents::resolve_builtin_provider_model(&conn, def.model.as_deref())
+            .map_err(|e| format!("subagent \"{}\": {e}", def.name))?
     };
 
     // Credential pre-flight BEFORE any row exists: a misconfigured agent must
@@ -2123,15 +2123,15 @@ pub async fn crew_spawn(
         }
     }
 
-    // Budgets: per-agent `max_concurrent`, then the app-wide crew ceiling —
+    // Budgets: per-agent `max_concurrent`, then the app-wide subagent ceiling —
     // checked AND acquired atomically (`try_acquire_running`), so two
     // concurrent spawns can never both observe room left. Every failure path
     // below the acquire releases the slot before returning.
-    crate::chat::crew::try_acquire_running(
+    crate::chat::subagents::try_acquire_running(
         &def.id,
         &def.name,
         def.max_concurrent.max(1),
-        MAX_ACTIVE_CREW,
+        MAX_ACTIVE_SUBAGENT,
     )?;
 
     // Create the session row: the definition's engine/model/policies/effort,
@@ -2141,8 +2141,8 @@ pub async fn crew_spawn(
         let conn = db.0.lock();
         let row = crate::db::create_chat_session(&conn, &provider, &model, project_id).map_err(
             |e| {
-                crate::chat::crew::bump_running(&def.id, -1);
-                format!("could not create the crew run session: {e}")
+                crate::chat::subagents::bump_running(&def.id, -1);
+                format!("could not create the subagent run session: {e}")
             },
         )?;
         let _ = crate::db::update_chat_session_agent(&conn, &row.id, Some(&engine));
@@ -2171,7 +2171,7 @@ pub async fn crew_spawn(
     // (or at the ceiling), and settles the run-history row in the same pass.
     let run_id = {
         let conn = db.0.lock();
-        record_crew_run_start(
+        record_subagent_run_start(
             &conn,
             &def.id,
             &child,
@@ -2184,7 +2184,7 @@ pub async fn crew_spawn(
     };
     // Terminal-outcome tracking, registered before the watcher exists so a
     // fast-failing first turn cannot slip in front of the listener.
-    let (outcome, listener_ids) = arm_crew_run_outcome(app, &child);
+    let (outcome, listener_ids) = arm_subagent_run_outcome(app, &child);
     let slot_agent = def.id.clone();
     let slot_run = run_id.clone();
     let app_for_slot = app.clone();
@@ -2192,20 +2192,20 @@ pub async fn crew_spawn(
     tauri::async_runtime::spawn(async move {
         let started = std::time::Instant::now();
         while session_busy(&app_for_slot, &slot_child) {
-            if started.elapsed().as_secs() >= CREW_SLOT_RELEASE_CEILING_SECS {
+            if started.elapsed().as_secs() >= SUBAGENT_SLOT_RELEASE_CEILING_SECS {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
         }
-        crate::chat::crew::bump_running(&slot_agent, -1);
+        crate::chat::subagents::bump_running(&slot_agent, -1);
         if let Some(run_id) = slot_run {
             // The turn's real outcome (chat:done/chat:error), not an assumed
-            // "ok"; the guard inside finish_crew_run keeps the fail-fast
+            // "ok"; the guard inside finish_subagent_run keeps the fail-fast
             // path's already-recorded error final if it settled first.
-            let (status, summary) = crew_run_settle_pair(&outcome.lock().unwrap());
+            let (status, summary) = subagent_run_settle_pair(&outcome.lock().unwrap());
             let db = app_for_slot.state::<DbState>();
             let conn = db.0.lock();
-            crate::db::finish_crew_run(&conn, &run_id, status, summary.as_deref());
+            crate::db::finish_subagent_run(&conn, &run_id, status, summary.as_deref());
         }
         release_outcome_listeners(&app_for_slot, listener_ids);
     });
@@ -2222,7 +2222,7 @@ pub async fn crew_spawn(
         match project.filter(|p| p.is_git_repo) {
             Some(p) => {
                 let short = child.get(..8).unwrap_or(&child).to_string();
-                let branch = format!("relay/{}-{short}", crate::chat::crew::slugify(&def.name));
+                let branch = format!("relay/{}-{short}", crate::chat::subagents::slugify(&def.name));
                 let state = app.state::<DbState>();
                 match crate::commands::worktree_cmds::ensure_worktree_with_branches(
                     app, &state, &child, p.path, branch.clone(), format!("relay/{child}"),
@@ -2261,7 +2261,7 @@ pub async fn crew_spawn(
     if let Some(run_id) = &run_id {
         if worktree_path.is_some() {
             let conn = db.0.lock();
-            crate::db::set_crew_run_worktree(&conn, run_id, worktree_path.as_deref());
+            crate::db::set_subagent_run_worktree(&conn, run_id, worktree_path.as_deref());
         }
     }
 
@@ -2286,7 +2286,7 @@ pub async fn crew_spawn(
     let first_message = format!(
         "{}{}",
         notes,
-        crate::chat::crew::compose_first_message(&def, task)
+        crate::chat::subagents::compose_first_message(&def, task)
     );
     let target = SessionRowLite {
         id: child.clone(),
@@ -2300,12 +2300,12 @@ pub async fn crew_spawn(
         // drop the slot immediately (the release watcher would also drop it
         // once the idle poll observes no activity, but fail fast here), and
         // settle the history row as an error.
-        crate::chat::crew::bump_running(&def.id, -1);
+        crate::chat::subagents::bump_running(&def.id, -1);
         if let Some(run_id) = &run_id {
             let conn = db.0.lock();
-            crate::db::finish_crew_run(&conn, run_id, "error", Some(&e));
+            crate::db::finish_subagent_run(&conn, run_id, "error", Some(&e));
         }
-        return Err(format!("crew run session created (id {child}) but its first turn \
+        return Err(format!("subagent run session created (id {child}) but its first turn \
                            failed to start: {e}"));
     }
 
@@ -2836,16 +2836,16 @@ mod tests {
         assert!(block.contains("raw only"), "{block}");
     }
 
-    /// The crew spawn surface's reference resolution: `agent:<id>` and
+    /// The subagent spawn surface's reference resolution: `agent:<id>` and
     /// `agent:<name>` both resolve through one helper (id wins, then
     /// case-insensitive name), so the manual run, the mesh param and the
     /// automation routing can never disagree on the vocabulary.
     #[test]
-    fn crew_refs_resolve_by_id_then_name() {
+    fn subagent_refs_resolve_by_id_then_name() {
         let conn = crate::db::mem();
-        let agent = crate::chat::crew::create(
+        let agent = crate::chat::subagents::create(
             &conn,
-            &crate::chat::crew::CrewAgentInput {
+            &crate::chat::subagents::SubagentInput {
                 name: "doc-writer".into(),
                 description: "test".into(),
                 prompt_md: "Write the docs.".into(),
@@ -2862,24 +2862,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::chat::crew::resolve_by_id_or_name(&conn, &agent.id).unwrap().id,
+            crate::chat::subagents::resolve_by_id_or_name(&conn, &agent.id).unwrap().id,
             agent.id
         );
         assert_eq!(
-            crate::chat::crew::resolve_by_id_or_name(&conn, "DOC-WRITER").unwrap().id,
+            crate::chat::subagents::resolve_by_id_or_name(&conn, "DOC-WRITER").unwrap().id,
             agent.id
         );
-        assert!(crate::chat::crew::resolve_by_id_or_name(&conn, "missing").is_none());
-        assert!(crate::chat::crew::resolve_by_id_or_name(&conn, "  ").is_none());
+        assert!(crate::chat::subagents::resolve_by_id_or_name(&conn, "missing").is_none());
+        assert!(crate::chat::subagents::resolve_by_id_or_name(&conn, "  ").is_none());
     }
 
-    /// A crew run's first message carries the definition's prompt body as a
+    /// A subagent run's first message carries the definition's prompt body as a
     /// clearly-marked directive block above the task — the transcript shows
     /// the user exactly what the agent was told. Empty prompt → bare task.
     #[test]
-    fn crew_first_message_rides_the_prompt_body() {
-        let def_with_prompt = crate::db::CrewAgent {
-            id: "crew-x".into(),
+    fn subagent_first_message_rides_the_prompt_body() {
+        let def_with_prompt = crate::db::Subagent {
+            id: "subagent-x".into(),
             name: "doc-writer".into(),
             description: String::new(),
             prompt_md: "Write the docs.".into(),
@@ -2897,15 +2897,15 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         };
-        let msg = crate::chat::crew::compose_first_message(&def_with_prompt, "Do the thing");
-        assert!(msg.starts_with("<crew_agent name=\"doc-writer\">"), "{msg}");
+        let msg = crate::chat::subagents::compose_first_message(&def_with_prompt, "Do the thing");
+        assert!(msg.starts_with("<subagent name=\"doc-writer\">"), "{msg}");
         assert!(msg.contains("Write the docs."), "{msg}");
         assert!(msg.ends_with("\n\nDo the thing"), "{msg}");
 
         let mut no_prompt = def_with_prompt;
         no_prompt.prompt_md = String::new();
         assert_eq!(
-            crate::chat::crew::compose_first_message(&no_prompt, "Do the thing"),
+            crate::chat::subagents::compose_first_message(&no_prompt, "Do the thing"),
             "Do the thing"
         );
     }
@@ -2914,12 +2914,12 @@ mod tests {
     /// path + release watcher both firing) must not drive it negative and
     /// wedge a later `max_concurrent` check open.
     #[test]
-    fn crew_running_counter_saturates_at_zero() {
-        crate::chat::crew::bump_running("crew-sat-test", 1);
-        assert_eq!(crate::chat::crew::live_runs("crew-sat-test"), 1);
-        crate::chat::crew::bump_running("crew-sat-test", -1);
-        crate::chat::crew::bump_running("crew-sat-test", -1);
-        assert_eq!(crate::chat::crew::live_runs("crew-sat-test"), 0);
+    fn subagent_running_counter_saturates_at_zero() {
+        crate::chat::subagents::bump_running("subagent-sat-test", 1);
+        assert_eq!(crate::chat::subagents::live_runs("subagent-sat-test"), 1);
+        crate::chat::subagents::bump_running("subagent-sat-test", -1);
+        crate::chat::subagents::bump_running("subagent-sat-test", -1);
+        assert_eq!(crate::chat::subagents::live_runs("subagent-sat-test"), 0);
     }
 
     /// The outcome tracker rides the global `chat:done`/`chat:error` pair —
@@ -2956,17 +2956,17 @@ mod tests {
     /// as a failure instead of the assumed success the idle poll used to
     /// write.
     #[test]
-    fn crew_run_settle_pair_maps_terminal_outcomes() {
-        assert_eq!(crew_run_settle_pair(&None), ("ok", None));
+    fn subagent_run_settle_pair_maps_terminal_outcomes() {
+        assert_eq!(subagent_run_settle_pair(&None), ("ok", None));
         assert_eq!(
-            crew_run_settle_pair(&Some(CrewRunTerminal {
+            subagent_run_settle_pair(&Some(SubagentRunTerminal {
                 status: "ok",
                 message: String::new(),
             })),
             ("ok", None)
         );
         let long = "x".repeat(600);
-        let (status, summary) = crew_run_settle_pair(&Some(CrewRunTerminal {
+        let (status, summary) = subagent_run_settle_pair(&Some(SubagentRunTerminal {
             status: "error",
             message: long.clone(),
         }));

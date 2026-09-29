@@ -10,10 +10,10 @@
 // turns. Config is stored as a JSON array under the `hooks` app_settings key.
 //
 // ORIGIN SCOPE: every tool call carries a dispatch origin (`chat` for the main
-// loop, `subagent` for the builtin Task roles, `agent:<id>` for a crew agent,
+// loop, `subagent` for the builtin Task roles, `agent:<id>` for a subagent,
 // `harness` for a CLI harness, `relay_tools` for the MCP bridge). A hook with no
 // origins selected is global; otherwise it fires only for the selected ones.
-// This is the guardrail for the advisory tier — a crew agent running on a CLI
+// This is the guardrail for the advisory tier — a subagent running on a CLI
 // harness can call that CLI's own tools, which Relay cannot restrict, so a
 // `before` deny hook scoped to `agent:<id>` is what actually stops them.
 
@@ -207,7 +207,7 @@ export function HooksPanel() {
     }));
 
   /** Comma/space separated ids; a bare id gets the `agent:` prefix so the
-   *  field accepts what the crew panel shows. */
+   *  field accepts what the subagent panel shows. */
   const setDraftAgentList = (raw: string) => {
     setDraftAgentOrigins(raw);
     const parsed = raw
@@ -284,7 +284,7 @@ export function HooksPanel() {
             annotate the result (<span className="mono">additionalContext</span>). The command receives one JSON
             event on stdin and runs directly — never through a shell. The first run of each command asks via a
             native dialog. Leave the origin checkboxes empty to run everywhere, or pick the origins a hook
-            should fire for — scoping a <span className="mono">before</span> hook to a crew agent
+            should fire for — scoping a <span className="mono">before</span> hook to a subagent
             (<span className="mono">agent:&lt;id&gt;</span>) is the guardrail for agents Relay can't otherwise
             restrain.
           </div>
@@ -413,11 +413,11 @@ export function HooksPanel() {
               <input
                 type="text"
                 value={draftAgentOrigins}
-                placeholder="agent:<crew-id>, agent:other-id — blank = all origins"
+                placeholder="agent:<subagent-id>, agent:other-id — blank = all origins"
                 onChange={(e) => setDraftAgentList(e.target.value)}
                 className="perm-pattern-input"
                 disabled={busy}
-                aria-label="Crew agent origins"
+                aria-label="Subagent origins"
               />
             </>
           )}

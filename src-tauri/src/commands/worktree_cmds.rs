@@ -91,7 +91,7 @@ pub async fn ensure_chat_session_worktree(
 /// The caller has already resolved the project and confirmed `is_git_repo`;
 /// the git work runs in `spawn_blocking` (a whole-tree checkout must never
 /// hold the DB mutex or ride the UI thread). Used by the composer's
-/// `ensure_chat_session_worktree` AND the crew spawn seam (branch
+/// `ensure_chat_session_worktree` AND the subagent spawn seam (branch
 /// `relay/<agent-slug>-<id8>`) so both share one implementation.
 pub(crate) async fn ensure_worktree_with_branches(
     app: &AppHandle,

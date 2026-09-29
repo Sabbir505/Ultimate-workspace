@@ -386,7 +386,7 @@ export function Sidebar() {
 
       {/* â”€â”€ Pinned upper block (non-scrolling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex-shrink-0">
-        {/* Global Views: Artifacts pill + Schedule button (automations) + Crew */}
+        {/* Global Views: Artifacts pill + Schedule button (automations) + Subagent */}
         <div className="flex flex-col gap-1 px-2 pt-2 pb-0">
           <ArtifactLibrary />
           <div className="chat-new-btn-row">
@@ -401,18 +401,18 @@ export function Sidebar() {
               <CalendarClock size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
               <span className="artifact-lib-title-label">Automations</span>
             </button>
-            {/* Crew — declarative subagents: define an agent, run it by hand,
+            {/* Subagent — declarative subagents: define an agent, run it by hand,
                 watch its run history. Same row/shape as Automations. */}
             <button
               type="button"
-              onClick={() => setActiveView("crew")}
-              className={`artifact-lib-title ${activeView === "crew" ? "is-active" : ""}`}
+              onClick={() => setActiveView("subagents")}
+              className={`artifact-lib-title ${activeView === "subagents" ? "is-active" : ""}`}
               style={{ width: "100%" }}
-              title="Open crew"
-              aria-label="Open crew"
+              title="Open subagent"
+              aria-label="Open subagent"
             >
               <Users size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
-              <span className="artifact-lib-title-label">Crew</span>
+              <span className="artifact-lib-title-label">Subagents</span>
             </button>
             {/* Vault — the local markdown knowledge base (files on disk). */}
             <button

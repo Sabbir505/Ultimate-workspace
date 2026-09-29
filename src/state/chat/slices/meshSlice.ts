@@ -8,7 +8,7 @@ import type {
   SubagentTokenPayload,
 } from "../../../lib/ipc";
 import { tailCodePointsHysteresis } from "../../../lib/safeSlice";
-import { useCrewStore } from "../../crew";
+import { useSubagentStore } from "../../subagents";
 import { MESH_MAIL_HISTORY_CAP, MESH_MAIL_RECORDS_CAP, STREAM_TAIL_CAP, STREAM_TAIL_MARGIN } from "../moduleState";
 import type { ChatStoreGet, ChatStoreSet } from "../types";
 
@@ -25,7 +25,7 @@ export function createMeshSlice(set: ChatStoreSet, get: ChatStoreGet) {
           output: "",
           status: "running",
           model: payload.model ?? null,
-          // The crew agent this Task call resolved to (Phase 2). The backend
+          // The subagent this Task call resolved to (Phase 2). The backend
           // omits the field for the 7 builtin roles and for a CLI's own
           // native subagents — normalize to null so consumers branch on one
           // shape. Copied explicitly here (like every other field) because the
@@ -117,16 +117,16 @@ export function createMeshSlice(set: ChatStoreSet, get: ChatStoreGet) {
     },
 
     onSessionSpawn: (payload: SessionSpawnPayload) => {
-      // A spawn with NO parent is not a mesh child: `run_crew_agent`
+      // A spawn with NO parent is not a mesh child: `run_subagent`
       // (Phase 2.5) emits the same event for a session it created by hand —
       // the `origin` column deliberately stays NULL there because
       // `spawned_by:<id>` is the mesh's own provenance vocabulary and the
       // depth cap walks it. Keying it under a phantom `undefined` parent
       // would both show a phantom "spawned" flag in the sidebar and drop the
-      // run on the floor, so it goes to the crew runs list instead.
+      // run on the floor, so it goes to the subagent runs list instead.
       if (payload.parentSessionId == null) {
         void get().loadSessions();
-        useCrewStore.getState().ingestRun({
+        useSubagentStore.getState().ingestRun({
           // The event carries no run-row id (history is Phase 5), so the
           // session id is the natural key: one spawn = one run, and a repeat
           // event for the same session overwrites rather than duplicates.

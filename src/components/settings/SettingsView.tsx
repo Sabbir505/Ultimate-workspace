@@ -26,7 +26,7 @@ import { ImprovementsPanel } from "./ImprovementsPanel";
 import { SttPanel } from "./SttPanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { HooksPanel } from "./HooksPanel";
-import { CrewPanel } from "../crew/CrewPanel";
+import { SubagentsPanel } from "../subagents/SubagentsPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
 import { FontSettingsPanel } from "./FontSettingsPanel";
 import { SidebarArtPanel } from "./SidebarArtPanel";
@@ -120,9 +120,9 @@ type Category =
   | "notifications"
   | "assistant"
   | "improvements"
-  | "subagent"
+  | "subagents"
   | "harnesses"
-  | "crew"
+  | "subagents"
   | "localmodels"
   | "apikeys"
   | "websearch"
@@ -141,9 +141,9 @@ const CATEGORY_KEYS: Category[] = [
   "notifications",
   "assistant",
   "improvements",
-  "subagent",
+  "subagents",
   "harnesses",
-  "crew",
+  "subagents",
   "localmodels",
   "apikeys",
   "websearch",
@@ -171,12 +171,12 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "notifications": return <Bell {...props} />;
     case "assistant": return <Bot {...props} />;
     case "improvements": return <Sparkles {...props} />;
-    case "subagent": return <GitFork {...props} />;
+    case "subagents": return <GitFork {...props} />;
     case "apikeys": return <KeyRound {...props} />;
     case "websearch": return <Globe {...props} />;
     case "localmodels": return <Cpu {...props} />;
     case "harnesses": return <TerminalSquare {...props} />;
-    case "crew": return <Users {...props} />;
+    case "subagents": return <Users {...props} />;
     case "connectors": return <Plug {...props} />;
     case "mcpgallery": return <Blocks {...props} />;
     case "knowledge": return <Library {...props} />;
@@ -216,14 +216,14 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
       { key: "apikeys", label: "API Keys", sub: "Chat provider keys" },
       { key: "websearch", label: "Web Search", sub: "Keyless or BYO-key engine" },
       { key: "localmodels", label: "Local Models", sub: "GGUF via llama-server" },
-      { key: "subagent", label: "Subagent model", sub: "Orchestration default" },
+      { key: "subagents", label: "Subagent model", sub: "Orchestration default" },
     ],
   },
   {
     title: "Agents",
     items: [
       { key: "harnesses", label: "Harnesses", sub: "CLI install & login" },
-      { key: "crew", label: "Crew", sub: "Declarative subagents" },
+      { key: "subagents", label: "Subagent", sub: "Declarative subagents" },
     ],
   },
   {
@@ -657,9 +657,9 @@ export function SettingsView() {
 
               {category === "localmodels" && <LocalModelsPanel />}
 
-              {category === "subagent" && <SubagentModelPanel />}
+              {category === "subagents" && <SubagentModelPanel />}
 
-              {category === "crew" && <CrewPanel />}
+              {category === "subagents" && <SubagentsPanel />}
 
               {category === "apikeys" && <ApiKeysPanel />}
 

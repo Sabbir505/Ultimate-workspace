@@ -1,9 +1,9 @@
-// Settings → Agents → Crew panel (Phase 1 registry surface).
+// Settings → Agents → Subagent panel (Phase 1 registry surface).
 // The store is mocked as a selector-callable over a mutable fixture (the
 // PullsPanel style) so this covers the user-facing surface only: row rendering,
 // the enforcement-tier badges, the builtin delete guard, and what the editor
 // sends to create/update. Store behavior + the ipc column parsing live in
-// crewStore.test.ts.
+// subagentStore.test.ts.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
@@ -12,7 +12,7 @@ const create = vi.fn().mockResolvedValue(null);
 const update = vi.fn().mockResolvedValue(null);
 const remove = vi.fn().mockResolvedValue(undefined);
 
-const crewState = {
+const subagentState = {
   loaded: true,
   agents: [] as unknown[],
   error: null as string | null,
@@ -22,18 +22,18 @@ const crewState = {
   update: (...a: unknown[]) => update(...a),
   remove: (...a: unknown[]) => remove(...a),
 };
-vi.mock("../state/crew", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../state/crew")>();
+vi.mock("../state/subagents", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../state/subagents")>();
   return {
     ...actual,
-    useCrewStore: (sel: (s: typeof crewState) => unknown) => sel(crewState),
+    useSubagentStore: (sel: (s: typeof subagentState) => unknown) => sel(subagentState),
   };
 });
 
-import { CrewPanel } from "../components/crew/CrewPanel";
-import { crewEngineTier, type CrewAgent } from "../lib/ipc/crew";
+import { SubagentsPanel } from "../components/subagents/SubagentsPanel";
+import { subagentEngineTier, type Subagent } from "../lib/ipc/subagents";
 
-function agent(over: Partial<CrewAgent> = {}): CrewAgent {
+function agent(over: Partial<Subagent> = {}): Subagent {
   return {
     id: "agent-1",
     name: "doc-writer",
@@ -57,26 +57,26 @@ function agent(over: Partial<CrewAgent> = {}): CrewAgent {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  crewState.agents = [];
-  crewState.error = null;
-  crewState.busy = {};
-  crewState.loaded = true;
+  subagentState.agents = [];
+  subagentState.error = null;
+  subagentState.busy = {};
+  subagentState.loaded = true;
   create.mockResolvedValue(agent({ id: "agent-new", name: "reviewer" }));
   update.mockResolvedValue(agent());
   remove.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
 
-describe("CrewPanel", () => {
+describe("SubagentsPanel", () => {
   it("loads the registry on mount and shows the empty state", async () => {
-    render(<CrewPanel />);
+    render(<SubagentsPanel />);
     await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
-    expect(screen.getByText(/No crew agents yet/)).toBeTruthy();
+    expect(screen.getByText(/No subagents yet/)).toBeTruthy();
   });
 
   it("renders a seeded agent with its description, tool count and scope", async () => {
-    crewState.agents = [agent()];
-    render(<CrewPanel />);
+    subagentState.agents = [agent()];
+    render(<SubagentsPanel />);
     expect(await screen.findByText("doc-writer")).toBeTruthy();
     expect(screen.getByText(/Writes and polishes user documentation/)).toBeTruthy();
     expect(screen.getByText(/2 tools/)).toBeTruthy();
@@ -87,20 +87,20 @@ describe("CrewPanel", () => {
   });
 
   it("says \"engine default tools\" when the row has no explicit allowlist", async () => {
-    crewState.agents = [agent({ tools: null })];
-    render(<CrewPanel />);
+    subagentState.agents = [agent({ tools: null })];
+    render(<SubagentsPanel />);
     expect(await screen.findByText(/engine default tools/)).toBeTruthy();
   });
 
   it("surfaces the store's error inline", async () => {
-    crewState.error = "Couldn't delete the agent: built-in agents cannot be deleted";
-    render(<CrewPanel />);
+    subagentState.error = "Couldn't delete the agent: built-in agents cannot be deleted";
+    render(<SubagentsPanel />);
     expect(await screen.findByText(/built-in agents cannot be deleted/)).toBeTruthy();
   });
 
   it("disables Delete on a builtin row with an explanatory tooltip", async () => {
-    crewState.agents = [agent({ builtin: true }), agent({ id: "agent-2", name: "reviewer" })];
-    render(<CrewPanel />);
+    subagentState.agents = [agent({ builtin: true }), agent({ id: "agent-2", name: "reviewer" })];
+    render(<SubagentsPanel />);
     const builtinDelete = await screen.findByLabelText("Delete doc-writer");
     const ownDelete = screen.getByLabelText("Delete reviewer");
     expect((builtinDelete as HTMLButtonElement).disabled).toBe(true);
@@ -109,22 +109,22 @@ describe("CrewPanel", () => {
   });
 
   it("deletes a user agent through the store's remove", async () => {
-    crewState.agents = [agent()];
-    render(<CrewPanel />);
+    subagentState.agents = [agent()];
+    render(<SubagentsPanel />);
     fireEvent.click(await screen.findByLabelText("Delete doc-writer"));
     await waitFor(() => expect(remove).toHaveBeenCalledWith("agent-1"));
   });
 
   it("badges a builtin engine as enforced and a harness engine as advisory", async () => {
-    crewState.agents = [
+    subagentState.agents = [
       agent(),
       agent({ id: "agent-2", name: "claude-runner", engine: "harness:claude_code" }),
       agent({ id: "agent-3", name: "local-runner", engine: "local" }),
     ];
-    render(<CrewPanel />);
-    const builtinRow = (await screen.findByText("doc-writer")).closest(".crew-agent-row")!;
-    const harnessRow = (await screen.findByText("claude-runner")).closest(".crew-agent-row")!;
-    const localRow = (await screen.findByText("local-runner")).closest(".crew-agent-row")!;
+    render(<SubagentsPanel />);
+    const builtinRow = (await screen.findByText("doc-writer")).closest(".subagent-agent-row")!;
+    const harnessRow = (await screen.findByText("claude-runner")).closest(".subagent-agent-row")!;
+    const localRow = (await screen.findByText("local-runner")).closest(".subagent-agent-row")!;
     expect(builtinRow.textContent).toContain("enforced");
     expect(harnessRow.textContent).toContain("advisory");
     expect(harnessRow.textContent).toContain("CLI tools not restrictible");
@@ -132,15 +132,15 @@ describe("CrewPanel", () => {
   });
 
   it("tiers engine strings the way the badge vocabulary defines them", () => {
-    expect(crewEngineTier("builtin")).toBe("enforced");
-    expect(crewEngineTier("local")).toBe("enforced");
-    expect(crewEngineTier(null)).toBe("enforced");
-    expect(crewEngineTier("harness:claude_code")).toBe("advisory");
-    expect(crewEngineTier("acp:zed")).toBe("advisory");
+    expect(subagentEngineTier("builtin")).toBe("enforced");
+    expect(subagentEngineTier("local")).toBe("enforced");
+    expect(subagentEngineTier(null)).toBe("enforced");
+    expect(subagentEngineTier("harness:claude_code")).toBe("advisory");
+    expect(subagentEngineTier("acp:zed")).toBe("advisory");
   });
 
   it("saves a new agent with the typed fields", async () => {
-    render(<CrewPanel />);
+    render(<SubagentsPanel />);
     fireEvent.click(await screen.findByText("New agent"));
     fireEvent.change(screen.getByLabelText("Agent name"), { target: { value: "reviewer" } });
     fireEvent.change(screen.getByLabelText("Agent description"), {
@@ -150,7 +150,7 @@ describe("CrewPanel", () => {
       target: { value: "You review code." },
     });
     fireEvent.click(screen.getByRole("button", { name: "read_file" }));
-    // The Engine picker is the custom CrewSelect: open the menu, click the
+    // The Engine picker is the custom SubagentSelect: open the menu, click the
     // option (a change event can't drive a button).
     fireEvent.click(screen.getByLabelText("Engine"));
     fireEvent.click(await screen.findByRole("option", { name: "Claude Code (harness)" }));
@@ -161,7 +161,7 @@ describe("CrewPanel", () => {
     fireEvent.change(modelField, {
       target: { value: "openrouter::x-ai/grok-4" },
     });
-    // Scope & budget are CrewSelects too: open the menu, click the option.
+    // Scope & budget are SubagentSelects too: open the menu, click the option.
     fireEvent.click(screen.getByLabelText("Approval policy"));
     fireEvent.click(await screen.findByRole("option", { name: "Auto-approve edits" }));
     fireEvent.click(screen.getByLabelText("Worktree policy"));
@@ -186,7 +186,7 @@ describe("CrewPanel", () => {
   });
 
   it("sends null for the fields left on inherit", async () => {
-    render(<CrewPanel />);
+    render(<SubagentsPanel />);
     fireEvent.click(await screen.findByText("New agent"));
     fireEvent.change(screen.getByLabelText("Agent name"), { target: { value: "reviewer" } });
     fireEvent.click(screen.getByText("Save"));
@@ -198,7 +198,7 @@ describe("CrewPanel", () => {
   });
 
   it("clamps rounds into 1–100 and concurrent runs to at least 1", async () => {
-    render(<CrewPanel />);
+    render(<SubagentsPanel />);
     fireEvent.click(await screen.findByText("New agent"));
     fireEvent.change(screen.getByLabelText("Agent name"), { target: { value: "reviewer" } });
     fireEvent.change(screen.getByLabelText("Max rounds"), { target: { value: "9000" } });
@@ -210,7 +210,7 @@ describe("CrewPanel", () => {
   });
 
   it("refuses to save an unnamed agent and keeps the editor open", async () => {
-    render(<CrewPanel />);
+    render(<SubagentsPanel />);
     fireEvent.click(await screen.findByText("New agent"));
     fireEvent.click(screen.getByText("Save"));
     expect(await screen.findByText(/Give the agent a name/)).toBeTruthy();
@@ -218,8 +218,8 @@ describe("CrewPanel", () => {
   });
 
   it("edits a builtin agent with its name locked", async () => {
-    crewState.agents = [agent({ builtin: true })];
-    render(<CrewPanel />);
+    subagentState.agents = [agent({ builtin: true })];
+    render(<SubagentsPanel />);
     fireEvent.click(await screen.findByLabelText("Edit doc-writer"));
     expect((await screen.findByLabelText("Agent name")).hasAttribute("disabled")).toBe(true);
     fireEvent.change(screen.getByLabelText("Agent prompt"), { target: { value: "Rewritten." } });
@@ -231,8 +231,8 @@ describe("CrewPanel", () => {
 
   it("keeps the editor open and shows the store's error when a save fails", async () => {
     update.mockResolvedValue(null);
-    crewState.agents = [agent()];
-    render(<CrewPanel />);
+    subagentState.agents = [agent()];
+    render(<SubagentsPanel />);
     fireEvent.click(await screen.findByLabelText("Edit doc-writer"));
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
@@ -240,7 +240,7 @@ describe("CrewPanel", () => {
   });
 
   it("cancels back to the list without saving", async () => {
-    render(<CrewPanel />);
+    render(<SubagentsPanel />);
     fireEvent.click(await screen.findByText("New agent"));
     fireEvent.change(screen.getByLabelText("Agent name"), { target: { value: "reviewer" } });
     fireEvent.click(screen.getByText("Cancel"));
@@ -249,16 +249,16 @@ describe("CrewPanel", () => {
   });
 
   it("renders no Run button until a caller passes onRun (Phase 2.5 extension point)", async () => {
-    crewState.agents = [agent()];
-    render(<CrewPanel />);
+    subagentState.agents = [agent()];
+    render(<SubagentsPanel />);
     await screen.findByText("doc-writer");
     expect(screen.queryByLabelText("Run doc-writer")).toBeNull();
   });
 
   it("hands the agent to onRun when the caller supplies it", async () => {
     const onRun = vi.fn();
-    crewState.agents = [agent()];
-    render(<CrewPanel onRun={onRun} />);
+    subagentState.agents = [agent()];
+    render(<SubagentsPanel onRun={onRun} />);
     fireEvent.click(await screen.findByLabelText("Run doc-writer"));
     expect(onRun).toHaveBeenCalledWith(expect.objectContaining({ id: "agent-1" }));
   });

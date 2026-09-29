@@ -9,7 +9,7 @@ import { parseSegments } from "../lib/segments";
 
 function taskMarker(task: string): string {
   return `<tool>${JSON.stringify({
-    kind: "subagent",
+    kind: "subagents",
     title: "SubAgent",
     role: "research",
     task,
@@ -33,7 +33,7 @@ describe("parseSegments — parallel subagent fan-out", () => {
     for (const s of tools) expect(s.done).toBe(false);
     // The marker JSON must parse (no phantom data-null "working…" row).
     for (const s of tools) {
-      expect(s.type === "tool" && s.data?.kind).toBe("subagent");
+      expect(s.type === "tool" && s.data?.kind).toBe("subagents");
     }
   });
 

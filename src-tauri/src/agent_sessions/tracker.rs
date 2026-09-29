@@ -290,7 +290,7 @@ impl ToolTracker {
                     // Relay only observes CLI-native subagents — the CLI owns
                     // their model choice, so there is nothing to report.
                     model: None,
-                    // A CLI's own subagent is not one of OUR crew agents (the
+                    // A CLI's own subagent is not one of OUR subagents (the
                     // `Task` tool is deliberately not bridged — see C.2), so
                     // there is no definition to point at.
                     agent_id: None,

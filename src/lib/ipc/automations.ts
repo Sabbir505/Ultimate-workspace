@@ -153,8 +153,8 @@ export const listenAutomationRunStarted = (
   handler: (payload: AutomationRunStartedPayload) => void,
 ) => safeListen<AutomationRunStartedPayload>("automation:run-started", handler);
 
-/** True when the automation is bound to a crew agent (``harness = "agent:<id>"``):
- *  the run routes through the crew registry (the definition's engine, model,
+/** True when the automation is bound to a subagent (``harness = "agent:<id>"``):
+ *  the run routes through the subagent registry (the definition's engine, model,
  *  prompt body and permission scope), not a raw engine id. */
-export const isCrewAutomation = (harness: string): boolean =>
+export const isSubagentAutomation = (harness: string): boolean =>
   /^agent:[^\s]+/.test(harness);

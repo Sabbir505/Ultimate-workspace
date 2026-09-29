@@ -28,19 +28,19 @@
 //! Settings → Hooks; the models never see the config, but denial text names
 //! the hook so the conversation stays recoverable.
 //!
-//! ORIGIN SCOPING (`HookDef.origins`, Phase 4 of the Crew feature): every tool
+//! ORIGIN SCOPING (`HookDef.origins`, Phase 4 of the Subagent feature): every tool
 //! call already carries a dispatch `origin` string — the main chat, a builtin
-//! `Task` role, a crew agent, a CLI harness, or the relay-tools bridge — and it
+//! `Task` role, a subagent, a CLI harness, or the relay-tools bridge — and it
 //! rides on the hook payload. `origins` narrows a hook to some of those
 //! strings: a hook is GLOBAL when the list is empty (the default, so every
 //! config saved before this field existed keeps today's behavior) and fires
 //! only when the dispatched origin is IN the list otherwise. The vocabulary is
-//! `"chat"`, `"subagent"`, `"agent:<id>"` (crew agents, id not name, so a
+//! `"chat"`, `"subagent"`, `"agent:<id>"` (subagents, id not name, so a
 //! rename can't silently unscope a rule), `"harness"` and `"relay_tools"`.
-//! This is the advisory tier's only guardrail: for a crew agent on a CLI
+//! This is the advisory tier's only guardrail: for a subagent on a CLI
 //! harness Relay cannot restrict the CLI's own tools, so a user writes one
 //! `before` deny hook per sensitive tool scoped to `agent:<id>`. The value is
-//! never validated against a closed list — crew ids are dynamic, and an
+//! never validated against a closed list — subagent ids are dynamic, and an
 //! unrecognized origin is preserved verbatim (Settings flags it) rather than
 //! dropping the user's hook.
 //!
@@ -128,10 +128,10 @@ pub struct HookDef {
     /// Origin scope: EMPTY = global (the hook fires for every dispatch origin,
     /// which is what every config written before this field means). Non-empty
     /// = the hook fires only when the call's origin string is IN the list —
-    /// `"chat"`, `"subagent"`, `"agent:<crew-id>"`, `"harness"`,
+    /// `"chat"`, `"subagent"`, `"agent:<subagent-id>"`, `"harness"`,
     /// `"relay_tools"` (see the module header). Compared verbatim, so an
     /// unrecognized value simply never matches and is reported in Settings
-    /// rather than dropped: crew ids are dynamic, so the list is deliberately
+    /// rather than dropped: subagent ids are dynamic, so the list is deliberately
     /// not a closed vocabulary.
     #[serde(default)]
     pub origins: Vec<String>,
@@ -220,7 +220,7 @@ pub fn invalidate_config_cache() {
 /// all-or-nothing `from_str::<Vec<HookDef>>` turned a single typo into "no
 /// hooks". That includes a malformed `origins` value (e.g. a string where the
 /// array belongs): the ONE entry is skipped, the rest of the array survives, and
-/// an origin string that is merely unrecognized is kept verbatim (crew ids are
+/// an origin string that is merely unrecognized is kept verbatim (subagent ids are
 /// dynamic — a closed vocabulary would drop a user's hook).
 /// Pure so it is unit-testable.
 fn parse_config_entries(items: &[Value]) -> Vec<HookDef> {
@@ -278,7 +278,7 @@ pub fn hook_matches(matcher: &str, tool: &str) -> bool {
 /// origin matches — the pre-`origins` behavior, and what the Claude import
 /// produces), otherwise the call's `origin` must be listed verbatim. No
 /// normalization or validation happens here: the list is user-authored and
-/// crew ids (`agent:<id>`) are dynamic, so an unknown value is inert rather
+/// subagent ids (`agent:<id>`) are dynamic, so an unknown value is inert rather
 /// than rejected. Pure so the scoping matrix is unit-testable without a
 /// dispatch path.
 pub fn origin_matches(def: &HookDef, origin: &str) -> bool {
@@ -956,7 +956,7 @@ pub async fn run_pre_tool<R: tauri::Runtime>(
         .filter(|d| d.enabled && d.event == HookEvent::PreToolUse && hook_matches(&d.matcher, tool))
         // Origin scope (Phase 4): a global hook (empty `origins`) fires for
         // every dispatch origin; a scoped one only for its listed origins —
-        // this is the advisory tier's guardrail for crew agents on a CLI
+        // this is the advisory tier's guardrail for subagents on a CLI
         // harness, where Relay cannot restrict the CLI's own tools.
         .filter(|d| origin_matches(d, origin))
         .collect();
@@ -1496,7 +1496,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Origin scoping (Phase 4 — advisory tier for crew agents)
+    // Origin scoping (Phase 4 — advisory tier for subagents)
     // -----------------------------------------------------------------------
 
     /// A `pre_tool_use` hook that denies with the JSON `decision: "deny"`
@@ -1573,23 +1573,23 @@ mod tests {
     fn global_hook_fires_for_every_origin_scoped_hook_only_for_its_own() {
         let dir = tempfile::tempdir().unwrap();
         let global = deny_def(&dir, "g", "global", vec![]);
-        let crew = deny_def(&dir, "c", "crew", vec!["agent:crew-1".to_string()]);
+        let subagent = deny_def(&dir, "c", "subagents", vec!["agent:subagent-1".to_string()]);
         // Empty `origins` is GLOBAL: it must match the main chat, a builtin
-        // Task role, a crew agent, a harness CLI and the relay bridge.
-        for origin in ["chat", "subagent", "agent:crew-1", "harness", "relay_tools"] {
+        // Task role, a subagent, a harness CLI and the relay bridge.
+        for origin in ["chat", "subagent", "agent:subagent-1", "harness", "relay_tools"] {
             assert!(origin_matches(&global, origin), "global hook must fire for {origin}");
         }
         // A scoped hook fires ONLY for its listed origins — including the
-        // prefix trap: `agent:crew-1` is not `agent:crew-10`.
-        assert!(origin_matches(&crew, "agent:crew-1"));
-        assert!(!origin_matches(&crew, "agent:crew-10"));
-        assert!(!origin_matches(&crew, "chat"));
-        assert!(!origin_matches(&crew, "subagent"));
-        assert!(!origin_matches(&crew, "harness"));
+        // prefix trap: `agent:subagent-1` is not `agent:subagent-10`.
+        assert!(origin_matches(&subagent, "agent:subagent-1"));
+        assert!(!origin_matches(&subagent, "agent:subagent-10"));
+        assert!(!origin_matches(&subagent, "chat"));
+        assert!(!origin_matches(&subagent, "subagent"));
+        assert!(!origin_matches(&subagent, "harness"));
         // An origin outside the vocabulary (stale or hand-edited) is inert,
         // never an error: the user's hook is kept, it just doesn't match.
-        let odd = deny_def(&dir, "o", "odd", vec!["Agent:Crew-1".to_string(), "nonsense".to_string()]);
-        assert!(!origin_matches(&odd, "agent:crew-1"), "matching is case-sensitive");
+        let odd = deny_def(&dir, "o", "odd", vec!["Agent:Subagent-1".to_string(), "nonsense".to_string()]);
+        assert!(!origin_matches(&odd, "agent:subagent-1"), "matching is case-sensitive");
         assert!(!origin_matches(&odd, "chat"));
     }
 
@@ -1600,10 +1600,10 @@ mod tests {
             &dir,
             "c",
             "c",
-            vec!["agent:crew-1".to_string(), "harness".to_string()],
+            vec!["agent:subagent-1".to_string(), "harness".to_string()],
         );
         let json = serde_json::to_string(&scoped).unwrap();
-        assert!(json.contains(r#""origins":["agent:crew-1","harness"]"#));
+        assert!(json.contains(r#""origins":["agent:subagent-1","harness"]"#));
         let back: HookDef = serde_json::from_str(&json).unwrap();
         assert_eq!(back.origins, scoped.origins);
 
@@ -1641,18 +1641,18 @@ mod tests {
             // rest of the array survives (never a silent all-or-nothing drop).
             json!({ "id": "h2", "event": "pre_tool_use", "command": "node", "origins": "chat" }),
             // An UNRECOGNIZED but well-formed origin is preserved verbatim:
-            // crew ids are dynamic, so a closed vocabulary would eat hooks.
-            json!({ "id": "h3", "event": "pre_tool_use", "command": "node", "origins": ["agent:crew-9"] }),
+            // subagent ids are dynamic, so a closed vocabulary would eat hooks.
+            json!({ "id": "h3", "event": "pre_tool_use", "command": "node", "origins": ["agent:subagent-9"] }),
         ];
         let defs = parse_config_entries(&entries);
         assert_eq!(defs.len(), 2, "only the malformed entry is dropped");
         let ids: Vec<&str> = defs.iter().map(|d| d.id.as_str()).collect();
         assert_eq!(ids, vec!["h1", "h3"]);
         assert!(defs[0].origins.is_empty());
-        assert_eq!(defs[1].origins, vec!["agent:crew-9".to_string()]);
+        assert_eq!(defs[1].origins, vec!["agent:subagent-9".to_string()]);
         // And it round-trips back to the settings blob unchanged.
         let saved = serde_json::to_string(&defs).unwrap();
-        assert!(saved.contains(r#""origins":["agent:crew-9"]"#));
+        assert!(saved.contains(r#""origins":["agent:subagent-9"]"#));
     }
 
     #[tokio::test]
@@ -1662,7 +1662,7 @@ mod tests {
         // Phase 1 — a GLOBAL deny (empty `origins`). It must block every
         // origin, which is what "empty = all" has to mean in practice.
         let app = mock_app_with_hooks(vec![deny_def(&dir, "global-guard", "global-guard", vec![])]);
-        for origin in ["chat", "subagent", "agent:crew-1", "harness", "relay_tools"] {
+        for origin in ["chat", "subagent", "agent:subagent-1", "harness", "relay_tools"] {
             let reason = deny_reason_for(&app, origin).await;
             assert!(
                 reason.as_deref().is_some_and(|r| r.contains("global-guard")),
@@ -1671,27 +1671,27 @@ mod tests {
         }
 
         // Phase 2 — the advisory-tier case: the SAME kind of deny hook, scoped
-        // to one crew agent. This is the guardrail for an agent Relay cannot
+        // to one subagent. This is the guardrail for an agent Relay cannot
         // otherwise restrain (a CLI harness running its own tools), so it has
         // to actually STOP the call there and stay out of everyone else's way.
         let app = mock_app_with_hooks(vec![deny_def(
             &dir,
-            "crew-guard",
-            "crew-guard-fired",
-            vec!["agent:crew-1".to_string()],
+            "subagent-guard",
+            "subagent-guard-fired",
+            vec!["agent:subagent-1".to_string()],
         )]);
-        let reason = deny_reason_for(&app, "agent:crew-1").await;
+        let reason = deny_reason_for(&app, "agent:subagent-1").await;
         assert!(
-            reason.as_deref().is_some_and(|r| r.contains("crew-guard-fired")),
-            "the origin-scoped deny must block agent:crew-1, got {reason:?}"
+            reason.as_deref().is_some_and(|r| r.contains("subagent-guard-fired")),
+            "the origin-scoped deny must block agent:subagent-1, got {reason:?}"
         );
         // …and NOT the main chat, a builtin role, another agent, or the CLI
         // harness surface.
-        for other in ["chat", "subagent", "agent:crew-2", "harness", "relay_tools"] {
+        for other in ["chat", "subagent", "agent:subagent-2", "harness", "relay_tools"] {
             assert_eq!(
                 deny_reason_for(&app, other).await,
                 None,
-                "the agent:crew-1 deny must not fire for {other}"
+                "the agent:subagent-1 deny must not fire for {other}"
             );
         }
     }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-/** A styled dropdown for the Crew surfaces. Native <select> popups are
+/** A styled dropdown for the Subagent surfaces. Native <select> popups are
  *  OS-drawn and can't wear the app's skin (the engine picker's flat gray
  *  list), so every picker on these forms is one of these: an input-styled
  *  button opening a glass menu.
@@ -13,7 +13,7 @@ import { createPortal } from "react-dom";
  *
  *  Mouse-first on purpose (the forms' other controls are too); Escape and
  *  outside-click close, options are real buttons so Tab reaches them. */
-export function CrewSelect({
+export function SubagentSelect({
   value,
   options,
   onChange,
@@ -56,7 +56,7 @@ export function CrewSelect({
     if (!open) return;
     const onDown = (e: PointerEvent) => {
       const el = e.target as HTMLElement;
-      if (el.closest?.(".crew-select-menu")) return;
+      if (el.closest?.(".subagent-select-menu")) return;
       if (!btnRef.current?.contains(el)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
@@ -83,33 +83,33 @@ export function CrewSelect({
 
   const current = options.find((o) => o.value === value);
   return (
-    <div className="crew-select">
+    <div className="subagent-select">
       <button
         ref={btnRef}
         type="button"
-        className="crew-select-btn"
+        className="subagent-select-btn"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
         disabled={disabled}
         onClick={() => (open ? setOpen(false) : openMenu())}
       >
-        <span className="crew-select-value">{current?.label ?? "Select…"}</span>
-        <span className="crew-select-caret" aria-hidden="true">
+        <span className="subagent-select-value">{current?.label ?? "Select…"}</span>
+        <span className="subagent-select-caret" aria-hidden="true">
           ▾
         </span>
       </button>
       {open &&
         pos &&
         createPortal(
-          <div className="crew-select-menu" role="listbox" aria-label={ariaLabel} style={pos}>
+          <div className="subagent-select-menu" role="listbox" aria-label={ariaLabel} style={pos}>
             {options.map((o) => (
               <button
                 key={o.value}
                 type="button"
                 role="option"
                 aria-selected={o.value === value}
-                className={`crew-select-option${o.value === value ? " selected" : ""}`}
+                className={`subagent-select-option${o.value === value ? " selected" : ""}`}
                 onClick={() => {
                   onChange(o.value);
                   setOpen(false);
@@ -117,7 +117,7 @@ export function CrewSelect({
               >
                 <span>{o.label}</span>
                 {o.value === value && (
-                  <span className="crew-select-check" aria-hidden="true">
+                  <span className="subagent-select-check" aria-hidden="true">
                     ✓
                   </span>
                 )}

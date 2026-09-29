@@ -187,7 +187,7 @@ export const PET_MILESTONES: PetMilestone[] = [
   { key: "globe", label: "Globetrotter", hint: "teleported once", met: (s) => s.teleports >= 1 },
   { key: "friend", label: "Best friend", hint: "petted 50 times", met: (s) => s.pets >= 50 },
   { key: "solid", label: "Unbreakable", hint: "survived 10 errors", met: (s) => s.errors >= 10 },
-  { key: "crew", label: "Overnight crew", hint: "10 automation runs", met: (s) => s.automations >= 10 },
+  { key: "subagents", label: "Overnight subagent", hint: "10 automation runs", met: (s) => s.automations >= 10 },
   { key: "regular", label: "Regular", hint: "25 turns together", met: (s) => s.turns >= 25 },
 ];
 

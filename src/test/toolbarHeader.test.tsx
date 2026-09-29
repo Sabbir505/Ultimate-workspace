@@ -34,11 +34,11 @@ describe("ToolbarHeader", () => {
 
     const { container } = render(
       <ToolbarHeader>
-        <h1>Crew</h1>
+        <h1>Subagent</h1>
       </ToolbarHeader>,
     );
 
-    const heading = screen.getByRole("heading", { name: "Crew" });
+    const heading = screen.getByRole("heading", { name: "Subagent" });
     expect(slot.contains(heading)).toBe(true);
     // Gone from the view — the caption is now the only place it renders.
     expect(container.querySelector("h1")).toBeNull();

@@ -78,10 +78,10 @@ pub(crate) use automations::{
     execute_automation_tool, is_automation_tool, is_mutating_automation_tool,
 };
 
-/// Crew (declarative subagents) CRUD — same family shape as automations:
+/// Subagent (declarative subagents) CRUD — same family shape as automations:
 /// consts above, executor + classifiers here, dispatch in the family ladder.
-mod crew;
-pub(crate) use crew::{execute_crew_tool, is_crew_tool, is_mutating_crew_tool};
+mod subagents;
+pub(crate) use subagents::{execute_subagent_tool, is_subagent_tool, is_mutating_subagent_tool};
 
 /// `get_capabilities` — in-process connector/MCP availability report so the
 /// model NEVER spawns a shell just to introspect what's connected. Two
@@ -240,22 +240,22 @@ pub const DELETE_AUTOMATION: &str = "delete_automation";
 /// Fire one run of an automation immediately (same path the scheduler uses).
 pub const RUN_AUTOMATION_NOW: &str = "run_automation_now";
 
-// ---- Crew (declarative subagents — chat/crew.rs) ----
+// ---- Subagent (declarative subagents — chat/subagent.rs) ----
 //
-// Lets the model author the crew, not just run it: "create me an agent that
-// reviews PRs" produces a real definition, marked origin="agent" so the Crew
+// Lets the model author the subagent, not just run it: "create me an agent that
+// reviews PRs" produces a real definition, marked origin="agent" so the Subagent
 // panel always shows what the agents made. Dispatch lives in the family
 // ladder (dispatch.rs) like automations — DB via the AppHandle — and the
 // consent posture mirrors automations exactly: authoring/deleting are
 // approval-carded in EVERY posture. Built-in-chat only: the relay bridge
 // (unlocked_registry) and the subagent registries (ToolCaps::default()) both
-// end up crew_write=false — the bridge via its ALLOWED_RELAY_TOOLS filter,
+// end up subagent_write=false — the bridge via its ALLOWED_RELAY_TOOLS filter,
 // the subagents via the default caps — so neither advertises a tool it
 // cannot dispatch (the parity invariant).
-pub const LIST_CREW_AGENTS: &str = "list_crew_agents";
-pub const CREATE_CREW_AGENT: &str = "create_crew_agent";
-pub const UPDATE_CREW_AGENT: &str = "update_crew_agent";
-pub const DELETE_CREW_AGENT: &str = "delete_crew_agent";
+pub const LIST_SUBAGENTS: &str = "list_subagents";
+pub const CREATE_SUBAGENT: &str = "create_subagent";
+pub const UPDATE_SUBAGENT: &str = "update_subagent";
+pub const DELETE_SUBAGENT: &str = "delete_subagent";
 
 // ---- Session Mesh (cross-session awareness / messaging / spawning) ----
 //
@@ -482,13 +482,13 @@ pub struct ToolCaps {
     /// `attach_connector("automations")` or the send-time keyword fast-path
     /// (`prompts::detect_family_unlocks`).
     pub automations_write: bool,
-    /// Crew WRITE half (`create/update/delete_crew_agent`) offered this turn.
-    /// `list_crew_agents` stays always-on. True for every main-loop turn
+    /// Subagent WRITE half (`create/update/delete_subagent`) offered this turn.
+    /// `list_subagents` stays always-on. True for every main-loop turn
     /// (authoring an agent is approval-carded at dispatch in EVERY posture,
     /// so the schema can ride always); false by default so the harness relay
     /// bridge and subagent registries — which build `ToolCaps::default()` —
     /// never advertise a tool they cannot dispatch.
-    pub crew_write: bool,
+    pub subagent_write: bool,
     /// `totp_code` unlocked for this turn (attach_connector("totp")). The
     /// 2FA-code tool rides almost no turns; locked by default.
     pub totp: bool,
@@ -578,7 +578,7 @@ impl ToolCaps {
             research: true,
             session_mesh: true,
             automations_write: true,
-            crew_write: true,
+            subagent_write: true,
             totp: true,
             ..ToolCaps::default()
         }
@@ -615,7 +615,7 @@ impl Default for ToolCaps {
             research: false,
             session_mesh: false,
             automations_write: false,
-            crew_write: false,
+            subagent_write: false,
             totp: false,
             unlockable_families: std::sync::Arc::new(unlockable_family_pairs()),
             allow: None,

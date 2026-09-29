@@ -850,7 +850,7 @@ fn emit_failed_task_panel_entry(app: &AppHandle, sid: &str, args: &Value, reason
             prompt: prompt.to_string(),
             model: None,
             // A bailed-out call never resolved a definition (the failure is
-            // exactly why), so there is no crew agent to name.
+            // exactly why), so there is no subagent to name.
             agent_id: None,
         },
     );
@@ -890,7 +890,7 @@ fn compose_subagent_system_prompt_with_tools(
 }
 
 /// The pinned prompt for a run with no definition (or one whose `tools IS
-/// NULL`): byte-for-byte the text the inline `format!` produced before crew
+/// NULL`): byte-for-byte the text the inline `format!` produced before subagent
 /// agents existed, and pinned by a characterization test.
 fn compose_subagent_system_prompt(instructions: &str, cwd_line: &str) -> String {
     compose_subagent_system_prompt_with_tools(instructions, cwd_line, None)
@@ -966,7 +966,7 @@ fn is_subagent_grounding_tool(name: &str) -> bool {
 
 /// Is this tool a workspace mutation? Drives the honest half of the blurb.
 fn is_subagent_mutating_tool(name: &str) -> bool {
-    crate::chat::crew::WORKSPACE_WRITE_TOOLS.contains(&name)
+    crate::chat::subagents::WORKSPACE_WRITE_TOOLS.contains(&name)
 }
 
 /// Shared opener — every subagent is told who spawned it before anything
@@ -1030,9 +1030,9 @@ async fn run_task_subagent(
         return bail("Task requires a non-empty \"prompt\".");
     }
 
-    // Resolve the crew definition this call names, if any, and its EFFECTIVE
+    // Resolve the subagent definition this call names, if any, and its EFFECTIVE
     // tool set. Two doors (F.5): the explicit `agent` argument (id first,
-    // then name, case-insensitive) and `subagent_type` naming a crew agent
+    // then name, case-insensitive) and `subagent_type` naming a subagent
     // from the dynamic enum. An unmatched `agent` value is NOT an error — the
     // call falls through to the plain role path, so a stale name in a
     // replayed history degrades instead of failing the turn.
@@ -1043,26 +1043,26 @@ async fn run_task_subagent(
     // means "the engine default" — no definition, `tools IS NULL`, or a
     // definition deleted between the two reads — and that default is the
     // read-only 12.
-    let (crew_def, effective_allow) = {
+    let (subagent_def, effective_allow) = {
         let db_state = app.state::<crate::DbState>();
         let conn = db_state.0.lock();
         // A Task dispatch proves the connection works and that the schema may
         // be stale — keep the `Task` enum cache honest from the same place.
-        crate::chat::crew::refresh_registry_cache(&conn);
-        let def = resolve_crew_def(&conn, args);
-        let allow = crate::chat::crew::resolve_allowlist(&conn, def.as_ref())
-            .unwrap_or_else(crate::chat::crew::default_read_only_tools);
+        crate::chat::subagents::refresh_registry_cache(&conn);
+        let def = resolve_subagent_def(&conn, args);
+        let allow = crate::chat::subagents::resolve_allowlist(&conn, def.as_ref())
+            .unwrap_or_else(crate::chat::subagents::default_read_only_tools);
         (def, allow)
     };
     // The run's round budget: the definition's, clamped to the loop's own
     // ceiling; the default when there is no definition.
-    let max_rounds: usize = crew_def
+    let max_rounds: usize = subagent_def
         .as_ref()
-        .map(|d| d.max_rounds.clamp(1, crate::chat::crew::MAX_ROUNDS) as usize)
+        .map(|d| d.max_rounds.clamp(1, crate::chat::subagents::MAX_ROUNDS) as usize)
         .unwrap_or(SUBAGENT_MAX_ROUNDS);
     // The hook origin a user rule can be scoped to (F.5): the plain
-    // "subagent" for a built-in role, the agent's ID for a crew run.
-    let hook_origin = match crew_def.as_ref() {
+    // "subagent" for a built-in role, the agent's ID for a subagent run.
+    let hook_origin = match subagent_def.as_ref() {
         Some(def) => format!("agent:{}", def.id),
         None => "subagent".to_string(),
     };
@@ -1073,7 +1073,7 @@ async fn run_task_subagent(
     // The policy string the hook payload reports, and the sandbox the schema
     // builder runs under. A `workspace_write` definition is the only thing
     // that ever turns mutating specs on for a subagent.
-    let sandbox_policy = match crew_def.as_ref().map(|d| d.sandbox_policy.as_str()) {
+    let sandbox_policy = match subagent_def.as_ref().map(|d| d.sandbox_policy.as_str()) {
         Some("workspace_write") => permission::SandboxPolicy::WorkspaceWrite,
         _ => permission::SandboxPolicy::ReadOnly,
     };
@@ -1176,25 +1176,25 @@ async fn run_task_subagent(
     // reflected in the instructions instead of being ignored, and the project
     // cwd is injected so the subagent knows which codebase it is operating in.
     //
-    // The 7 role instructions live as DATA in `chat::crew::BUILTIN_ROLES` —
-    // the same table `db::crew`'s builtin seed writes into the registry — so
+    // The 7 role instructions live as DATA in `chat::subagent::BUILTIN_ROLES` —
+    // the same table `db::subagent`'s builtin seed writes into the registry — so
     // the `Task` schema enum, the registry and this prompt builder cannot
     // drift apart. An unrecognized role keeps the neutral fallback.
     //
-    // A CREW definition's `prompt_md` REPLACES the role instruction when it
+    // A SUBAGENT definition's `prompt_md` REPLACES the role instruction when it
     // is non-empty (that is the whole point of a user-written agent: it says
     // what this agent is for). With an empty body it falls back to the role
     // table, so a definition that only tunes tools/rounds still gets sensible
     // instructions. The tool blurb comes from the run's effective allowlist,
     // never from a constant, so the prompt cannot promise a tool the run
     // does not have.
-    let role_instructions = crew_def
+    let role_instructions = subagent_def
         .as_ref()
         .map(|d| d.prompt_md.trim())
         .filter(|p| !p.is_empty())
         .map(str::to_string)
         .or_else(|| {
-            crate::chat::crew::builtin_role_instruction(role.as_str()).map(str::to_string)
+            crate::chat::subagents::builtin_role_instruction(role.as_str()).map(str::to_string)
         })
         .unwrap_or_else(|| "Complete the task concisely.".to_string());
     let cwd_line = project_path
@@ -1204,7 +1204,7 @@ async fn run_task_subagent(
     // `None` (the pinned read-only text) only when the run resolved NO
     // definition — an explicit definition always gets a blurb generated from
     // the set it actually resolved, so the two can never disagree.
-    let blurb_allow: Option<&HashSet<String>> = crew_def.as_ref().map(|_| &*effective_allow);
+    let blurb_allow: Option<&HashSet<String>> = subagent_def.as_ref().map(|_| &*effective_allow);
     let system_prompt =
         compose_subagent_system_prompt_with_tools(&role_instructions, &cwd_line, blurb_allow);
 
@@ -1222,9 +1222,9 @@ async fn run_task_subagent(
             // The model this subagent actually runs on (post-orchestration) —
             // the Agents panel shows it so a different-model spawn is visible.
             model: Some(model.clone()),
-            // The crew agent this run resolved, so the panel can label the row
+            // The subagent this run resolved, so the panel can label the row
             // with the agent's name. `None` for a built-in role.
-            agent_id: crew_def.as_ref().map(|d| d.id.clone()),
+            agent_id: subagent_def.as_ref().map(|d| d.id.clone()),
         },
     );
 
@@ -1240,16 +1240,16 @@ async fn run_task_subagent(
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    // Run-history row for a CREW run (a definition resolved; the 7 built-in
-    // roles keep their pre-crew behavior and stay out of the history). The
+    // Run-history row for a SUBAGENT run (a definition resolved; the 7 built-in
+    // roles keep their pre-subagent behavior and stay out of the history). The
     // Task surface runs the in-process loop, so the row's engine is builtin
     // and its "session" is the PARENT chat — that is where the transcript
     // lives. Settled right after the loop returns: this surface has no idle
     // watcher because the loop is synchronous inside the caller's turn.
-    let crew_run_id = crew_def.as_ref().and_then(|def| {
+    let subagent_run_id = subagent_def.as_ref().and_then(|def| {
         let db_state = app.state::<crate::DbState>();
         let conn = db_state.0.lock();
-        crate::session_fabric::record_crew_run_start(
+        crate::session_fabric::record_subagent_run_start(
             &conn,
             &def.id,
             sid,
@@ -1306,14 +1306,14 @@ async fn run_task_subagent(
 
     // Settle the task-run history row with the loop's real outcome (the
     // finish guard makes this the only settle).
-    if let Some(run_id) = &crew_run_id {
+    if let Some(run_id) = &subagent_run_id {
         let (status, summary) = match &result {
             Ok(_) => ("ok", None),
             Err(e) => ("error", Some(crate::util::truncate_chars(e, 240))),
         };
         let db_state = app.state::<crate::DbState>();
         let conn = db_state.0.lock();
-        crate::db::finish_crew_run(&conn, run_id, status, summary.as_deref());
+        crate::db::finish_subagent_run(&conn, run_id, status, summary.as_deref());
     }
 
     match result {
@@ -1344,8 +1344,8 @@ async fn run_task_subagent(
     }
 }
 
-/// Tools a subagent may use when NO crew definition resolved — the same 12
-/// read-only names `chat::crew::BUILTIN_READ_ONLY_TOOLS` pins, which is also
+/// Tools a subagent may use when NO subagent definition resolved — the same 12
+/// read-only names `chat::subagent::BUILTIN_READ_ONLY_TOOLS` pins, which is also
 /// the default when a definition's `tools IS NULL`. Enough to ground an
 /// answer in the actual workspace/web, no mutation (so no approval card can
 /// ever be needed — reads are exempt from the fs scope gate by contract), no
@@ -1358,13 +1358,13 @@ async fn run_task_subagent(
 /// main tool loop does). `reset_source_ledger` stays EXCLUDED: a subagent
 /// must never wipe the session's ledger.
 ///
-/// The list itself now lives in `chat::crew` (Phase 2 removed this const in
+/// The list itself now lives in `chat::subagent` (Phase 2 removed this const in
 /// favour of that table, so there is exactly one copy to keep honest); the
-/// set form is `chat::crew::default_read_only_tools()`.
+/// set form is `chat::subagent::default_read_only_tools()`.
 /// Max model rounds (tool rounds + final answer) per subagent. Deliberately
 /// generous (100): research subagents that read many files per round need
 /// room, and each round is a bounded tool batch — the RESULT cap below is
-/// what keeps context size in check, not the round count. A crew definition
+/// what keeps context size in check, not the round count. A subagent definition
 /// may lower it (`max_rounds`, clamped to 1..=this).
 const SUBAGENT_MAX_ROUNDS: usize = 100;
 /// Cap per tool result fed back to the subagent (keeps context bounded).
@@ -1376,7 +1376,7 @@ const SUBAGENT_RESULT_CAP: usize = 6_000;
 /// rather than four more parameters on three functions: the point is that
 /// these four can never disagree about what the run may do.
 struct SubagentRunContext {
-    /// The run's EFFECTIVE tool set (`chat::crew::resolve_allowlist`, or the
+    /// The run's EFFECTIVE tool set (`chat::subagent::resolve_allowlist`, or the
     /// read-only default).
     allow: Arc<HashSet<String>>,
     /// `WorkspaceWrite` only for a `workspace_write` definition.
@@ -1403,7 +1403,7 @@ fn subagent_tool_specs(is_anthropic: bool, run: &SubagentRunContext) -> Vec<Valu
     // research: the default allowlist carries the ledger tools (research
     // fan-out records against the SESSION's ledger — see the allowlist
     // comment), so the subagent registry renders with the research family on
-    // even though a subagent never runs "in research mode" itself. A crew
+    // even though a subagent never runs "in research mode" itself. A subagent
     // agent that did NOT ask for the ledger tools is still filtered out of
     // the wire schema by `allow` — the family only rides to be available.
     let caps = tools::ToolCaps {
@@ -1421,7 +1421,7 @@ fn subagent_tool_specs(is_anthropic: bool, run: &SubagentRunContext) -> Vec<Valu
 }
 
 /// Execute one subagent tool call, wrapped with the user-hook pass (origin
-/// `"subagent"` for a built-in role, `"agent:<id>"` for a crew run).
+/// `"subagent"` for a built-in role, `"agent:<id>"` for a subagent run).
 /// Subagents can't pause for an approval card of their own — a hook's `ask`
 /// degrades to a refusal pointing at the main chat, mirroring how the
 /// subagent loop has no other interactive surface.
@@ -1479,7 +1479,7 @@ async fn subagent_run_tool(
 ///
 /// The refusal STRING is load-bearing: it is the tool result a model reads
 /// when it guesses a tool, and models (and the transcripts users read) are
-/// calibrated to it. Kept verbatim from the pre-crew const-filter era.
+/// calibrated to it. Kept verbatim from the pre-subagent const-filter era.
 fn subagent_tool_refusal(allow: &HashSet<String>, name: &str) -> Option<String> {
     if allow.contains(name) {
         return None;
@@ -1573,14 +1573,14 @@ async fn subagent_run_tool_inner(
     tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app), Some(sid)).await
 }
 
-/// Resolve the crew definition a `Task` call names, or `None` for a plain
+/// Resolve the subagent definition a `Task` call names, or `None` for a plain
 /// built-in-role run.
 ///
 /// Two doors, in this order (F.5):
 /// 1. the explicit `agent` argument — matched by id first (an id is
 ///    unambiguous), then by name, case-insensitively (the registry's own
 ///    uniqueness rule, so `Doc Writer` and `doc-writer` are one agent);
-/// 2. `subagent_type` naming a crew agent — the dynamic enum the schema
+/// 2. `subagent_type` naming a subagent — the dynamic enum the schema
 ///    advertises, so the model can pick one by name alone.
 ///
 /// An unmatched value is NOT an error: `None` degrades to the role path
@@ -1591,16 +1591,16 @@ async fn subagent_run_tool_inner(
 /// A BUILT-IN row never resolves a definition, through either door. Role
 /// names are reserved (`validate_name` refuses a custom agent named after
 /// one), so a `builtin=1` match is never the user's intent — and keeping it
-/// out of the crew path is what guarantees a role's prompt, tools, rounds and
-/// hook origin are byte-identical to the pre-crew behaviour no matter which
+/// out of the subagent path is what guarantees a role's prompt, tools, rounds and
+/// hook origin are byte-identical to the pre-subagent behaviour no matter which
 /// argument the model reached for.
-fn resolve_crew_def(
+fn resolve_subagent_def(
     conn: &rusqlite::Connection,
     args: &Value,
-) -> Option<crate::chat::crew::CrewAgent> {
-    let by_id = |raw: &str| crate::chat::crew::get(conn, raw);
-    let by_name = |raw: &str| crate::db::find_crew_agent_by_name(conn, raw).ok().flatten();
-    let crew_only = |row: Option<crate::chat::crew::CrewAgent>| row.filter(|r| !r.builtin);
+) -> Option<crate::chat::subagents::Subagent> {
+    let by_id = |raw: &str| crate::chat::subagents::get(conn, raw);
+    let by_name = |raw: &str| crate::db::find_subagent_by_name(conn, raw).ok().flatten();
+    let subagent_only = |row: Option<crate::chat::subagents::Subagent>| row.filter(|r| !r.builtin);
 
     let agent_arg = args
         .get("agent")
@@ -1608,7 +1608,7 @@ fn resolve_crew_def(
         .map(str::trim)
         .filter(|s| !s.is_empty());
     if let Some(raw) = agent_arg {
-        if let Some(row) = crew_only(by_id(raw).or_else(|| by_name(raw))) {
+        if let Some(row) = subagent_only(by_id(raw).or_else(|| by_name(raw))) {
             return Some(row);
         }
     }
@@ -1617,10 +1617,10 @@ fn resolve_crew_def(
         .and_then(|v| v.as_str())
         .map(str::trim)
         .unwrap_or("");
-    if role.is_empty() || crate::chat::crew::is_builtin_role(role) {
+    if role.is_empty() || crate::chat::subagents::is_builtin_role(role) {
         return None;
     }
-    crew_only(by_name(role))
+    subagent_only(by_name(role))
 }
 
 /// Stream a subagent completion WITH tools. Runs up to the run's round
@@ -2178,41 +2178,41 @@ async fn run_gated_automation_tool(
     tools::execute_automation_tool(app, name, args).await
 }
 
-/// One-line card summary for a gated crew call.
-fn crew_tool_summary(name: &str, args: &Value) -> String {
+/// One-line card summary for a gated subagent call.
+fn subagent_tool_summary(name: &str, args: &Value) -> String {
     let id = args
         .get("agent_id")
         .and_then(|v| v.as_str())
         .unwrap_or("?");
     match name {
-        tools::CREATE_CREW_AGENT => format!(
-            "Create crew agent \"{}\"",
+        tools::CREATE_SUBAGENT => format!(
+            "Create subagent \"{}\"",
             args.get("name").and_then(|n| n.as_str()).unwrap_or(id)
         ),
-        tools::UPDATE_CREW_AGENT => format!("Update crew agent \"{id}\""),
-        tools::DELETE_CREW_AGENT => format!("Delete crew agent \"{id}\""),
+        tools::UPDATE_SUBAGENT => format!("Update subagent \"{id}\""),
+        tools::DELETE_SUBAGENT => format!("Delete subagent \"{id}\""),
         other => other.to_string(),
     }
 }
 
-/// Approval-card wrapper for the crew write trio — mirrors
+/// Approval-card wrapper for the subagent write trio — mirrors
 /// `run_gated_automation_tool`: authoring or deleting an agent is the moment
 /// of consent, in every posture.
-async fn run_gated_crew_tool(
+async fn run_gated_subagent_tool(
     mgr: &Arc<ChatManager>,
     app: &AppHandle,
     sid: &str,
     name: &str,
     args: &Value,
 ) -> String {
-    let summary = crew_tool_summary(name, args);
+    let summary = subagent_tool_summary(name, args);
     if !run_approval_gate(mgr, app, sid, name, args, summary).await {
         return format!(
             "The user denied the {name} action. Do not retry it unless the user explicitly asks."
         );
     }
 
-    tools::execute_crew_tool(app, name, args).await
+    tools::execute_subagent_tool(app, name, args).await
 }
 
 /// Approval-card wrapper for the mesh write pair (`message_session` /
@@ -2701,15 +2701,15 @@ async fn run_tool_inner(
         return tools::execute_automation_tool(app, name, args).await;
     }
 
-    // Crew tools (list/create/update/delete agent definitions) — same family
+    // Subagent tools (list/create/update/delete agent definitions) — same family
     // shape as automations. The read list auto-runs; authoring/deleting is
     // approval-carded in EVERY posture including full_auto — an agent must
     // never exist (or vanish) that the user did not explicitly click yes on.
     // Plan mode has already refused the mutating ones via is_mutating_tool.
-    if tools::is_crew_tool(name) {
-        let decision = if name == tools::LIST_CREW_AGENTS {
+    if tools::is_subagent_tool(name) {
+        let decision = if name == tools::LIST_SUBAGENTS {
             permission::PermissionDecision::AutoRun
-        } else if name == tools::DELETE_CREW_AGENT {
+        } else if name == tools::DELETE_SUBAGENT {
             if matches!(approval, permission::ApprovalPolicy::FullAccess) {
                 permission::PermissionDecision::AutoRun
             } else {
@@ -2720,9 +2720,9 @@ async fn run_tool_inner(
             permission::PermissionDecision::NeedsApproval
         };
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
-            return run_gated_crew_tool(mgr, app, sid, name, args).await;
+            return run_gated_subagent_tool(mgr, app, sid, name, args).await;
         }
-        return tools::execute_crew_tool(app, name, args).await;
+        return tools::execute_subagent_tool(app, name, args).await;
     }
 
     // Vault tools (vault_list/read/search + write/move/delete) — crate::vault
@@ -3722,17 +3722,17 @@ pub(crate) async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Va
 mod tests {
     use super::*;
 
-    /// CHARACTERIZATION (written before the crew refactor, pinned against the
+    /// CHARACTERIZATION (written before the subagent refactor, pinned against the
     /// prompt the inline `format!` produced): a built-in role's composed
-    /// system prompt is byte-identical to the pre-crew text, with a project
+    /// system prompt is byte-identical to the pre-subagent text, with a project
     /// root bound. The three consts below are that text, split out of the
     /// `format!` WITHOUT retyping a character — this test is the guard that
     /// the extraction was a no-op.
     #[test]
-    fn builtin_role_prompt_is_byte_identical_to_the_pre_crew_text() {
+    fn builtin_role_prompt_is_byte_identical_to_the_pre_subagent_text() {
         let role = "explore";
         let prompt = compose_subagent_system_prompt(
-            crate::chat::crew::builtin_role_instruction(role).unwrap(),
+            crate::chat::subagents::builtin_role_instruction(role).unwrap(),
             "You are operating in the project at: C:\\work\\repo",
         );
         let expected = concat!(
@@ -3750,18 +3750,18 @@ mod tests {
     fn builtin_role_prompt_without_a_project_root_is_also_byte_identical() {
         let role = "test";
         let prompt = compose_subagent_system_prompt(
-            crate::chat::crew::builtin_role_instruction(role).unwrap(),
+            crate::chat::subagents::builtin_role_instruction(role).unwrap(),
             NO_PROJECT_ROOT_LINE,
         );
         let expected = format!(
             "{SUBAGENT_PREAMBLE}{}\n{NO_PROJECT_ROOT_LINE}\n{SUBAGENT_READ_ONLY_BLURB}",
-            crate::chat::crew::builtin_role_instruction(role).unwrap()
+            crate::chat::subagents::builtin_role_instruction(role).unwrap()
         );
         assert_eq!(prompt, expected);
         assert!(prompt.contains(NO_PROJECT_ROOT_LINE));
     }
 
-    /// CONTRACT (the pre-crew invariant, generalized -- C.4): the subagent
+    /// CONTRACT (the pre-subagent invariant, generalized -- C.4): the subagent
     /// loop bypasses the main loop's permission layer (no approval cards by
     /// design), so the effective tool set IS the permission boundary. Three
     /// properties, checked under both policies:
@@ -3783,7 +3783,7 @@ mod tests {
         ];
         let conn = crate::db::mem();
         let input = |name: &str, tools_json: &str, sandbox: &str| {
-            crate::chat::crew::CrewAgentInput {
+            crate::chat::subagents::SubagentInput {
                 name: name.into(),
                 description: String::new(),
                 prompt_md: String::new(),
@@ -3806,9 +3806,9 @@ mod tests {
             ("greedy-reader", "read_only", false),
             ("greedy-writer", "workspace_write", true),
         ] {
-            let def = crate::chat::crew::create(&conn, &input(slug, greedy, sandbox)).unwrap();
+            let def = crate::chat::subagents::create(&conn, &input(slug, greedy, sandbox)).unwrap();
             let set =
-                crate::chat::crew::resolve_allowlist(&conn, Some(&def)).expect("explicit list");
+                crate::chat::subagents::resolve_allowlist(&conn, Some(&def)).expect("explicit list");
             for name in SPAWN_CAPABLE {
                 assert!(
                     !set.contains(name),
@@ -3830,10 +3830,10 @@ mod tests {
         }
 
         // (3): no definition = no registry set = today's 12 read-only names.
-        let dflt = crate::chat::crew::default_read_only_tools();
+        let dflt = crate::chat::subagents::default_read_only_tools();
         let mut got: Vec<&str> = dflt.iter().map(String::as_str).collect();
         got.sort_unstable();
-        let mut want: Vec<&str> = crate::chat::crew::BUILTIN_READ_ONLY_TOOLS.to_vec();
+        let mut want: Vec<&str> = crate::chat::subagents::BUILTIN_READ_ONLY_TOOLS.to_vec();
         want.sort_unstable();
         assert_eq!(got, want, "the default effective set must not drift");
         assert!(dflt.contains(tools::READ_FILE));
@@ -3841,7 +3841,7 @@ mod tests {
         for name in SPAWN_CAPABLE {
             assert!(!dflt.contains(name), "{name} in the default set");
         }
-        for name in crate::chat::crew::WORKSPACE_WRITE_TOOLS {
+        for name in crate::chat::subagents::WORKSPACE_WRITE_TOOLS {
             assert!(!dflt.contains(name), "{name} is mutating");
         }
     }
@@ -3852,9 +3852,9 @@ mod tests {
     #[test]
     fn subagent_null_tool_list_falls_back_to_the_default() {
         let conn = crate::db::mem();
-        let def = crate::chat::crew::create(
+        let def = crate::chat::subagents::create(
             &conn,
-            &crate::chat::crew::CrewAgentInput {
+            &crate::chat::subagents::SubagentInput {
                 name: "planner".into(),
                 description: String::new(),
                 prompt_md: String::new(),
@@ -3870,7 +3870,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(crate::chat::crew::resolve_allowlist(&conn, Some(&def)).is_none());
+        assert!(crate::chat::subagents::resolve_allowlist(&conn, Some(&def)).is_none());
     }
 
     /// The execution check refuses a tool outside the effective set with the
@@ -3878,7 +3878,7 @@ mod tests {
     /// we get to change quietly.
     #[test]
     fn subagent_execution_check_keeps_its_refusal_text() {
-        let dflt = crate::chat::crew::default_read_only_tools();
+        let dflt = crate::chat::subagents::default_read_only_tools();
         let expected = format!(
             "Error: `{}` is not available to subagents (read-only tool set). \
 Use one of the listed read-only tools instead.",
@@ -3897,12 +3897,12 @@ Use one of the listed read-only tools instead.",
     /// let one `Task` call spend a fortune.
     #[test]
     fn subagent_max_rounds_clamps_to_the_loop_ceiling() {
-        let clamp = |raw: i64| raw.clamp(1, crate::chat::crew::MAX_ROUNDS) as usize;
+        let clamp = |raw: i64| raw.clamp(1, crate::chat::subagents::MAX_ROUNDS) as usize;
         assert_eq!(clamp(500), SUBAGENT_MAX_ROUNDS);
         assert_eq!(clamp(0), 1);
         assert_eq!(clamp(-3), 1);
         assert_eq!(clamp(40), 40);
-        assert_eq!(SUBAGENT_MAX_ROUNDS as i64, crate::chat::crew::MAX_ROUNDS);
+        assert_eq!(SUBAGENT_MAX_ROUNDS as i64, crate::chat::subagents::MAX_ROUNDS);
     }
 
     /// A `workspace_write` definition may write INSIDE the project it was
@@ -3927,11 +3927,11 @@ Use one of the listed read-only tools instead.",
         assert!(subagent_fs_scope_refusal(tools::READ_FILE, &outside, &roots).is_none());
     }
 
-    /// A crew definition's composed prompt says what the run can ACTUALLY do
+    /// A subagent definition's composed prompt says what the run can ACTUALLY do
     /// -- the whole reason the blurb is generated from the effective set
     /// rather than kept as a constant.
     #[test]
-    fn crew_agent_prompt_uses_its_body_and_its_real_tool_set() {
+    fn subagent_prompt_uses_its_body_and_its_real_tool_set() {
         let instructions = "You are the release notes writer.";
         let cwd = "You are operating in the project at: C:/work/repo";
         let set = |names: &[&str]| -> HashSet<String> {
@@ -3966,16 +3966,16 @@ Use one of the listed read-only tools instead.",
         assert!(!with_ledger.contains("MAY modify"), "{with_ledger}");
     }
 
-    /// `resolve_crew_def` is the only place that decides what a `Task` call
+    /// `resolve_subagent_def` is the only place that decides what a `Task` call
     /// may become: id before name, case-insensitive name, a built-in role
     /// never resolving a definition, and an unknown name degrading rather
     /// than failing the turn.
     #[test]
-    fn crew_def_resolution_prefers_id_then_name_and_never_fails_a_call() {
+    fn subagent_def_resolution_prefers_id_then_name_and_never_fails_a_call() {
         let conn = crate::db::mem();
-        let def = crate::chat::crew::create(
+        let def = crate::chat::subagents::create(
             &conn,
-            &crate::chat::crew::CrewAgentInput {
+            &crate::chat::subagents::SubagentInput {
                 name: "doc-writer".into(),
                 description: String::new(),
                 prompt_md: "Write the docs.".into(),
@@ -3991,7 +3991,7 @@ Use one of the listed read-only tools instead.",
             },
         )
         .unwrap();
-        let call = |v: Value| resolve_crew_def(&conn, &v).map(|d| d.id);
+        let call = |v: Value| resolve_subagent_def(&conn, &v).map(|d| d.id);
 
         assert_eq!(
             call(json!({"agent": def.id, "subagent_type": "explore"})),
@@ -4008,7 +4008,7 @@ Use one of the listed read-only tools instead.",
             Some(def.id.clone()),
             "the dynamic enum path resolves by name"
         );
-        for role in crate::chat::crew::BUILTIN_ROLES {
+        for role in crate::chat::subagents::BUILTIN_ROLES {
             assert!(
                 call(json!({"subagent_type": role.name})).is_none(),
                 "role {} must not resolve a def",

@@ -13,7 +13,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useChatStore } from "../../state/chat";
-import { useCrewStore } from "../../state/crew";
+import { useSubagentStore } from "../../state/subagents";
 import { useUiStore } from "../../state/ui";
 import { ThinkingBlock } from "../chat/MessageBubble";
 import { parseSegments, type Segment as SubSegment } from "../../lib/segments";
@@ -110,7 +110,7 @@ function SubagentListItem({
     agentId?: string | null;
   };
   selected: boolean;
-  /** Display name of the crew agent this run resolved to, when known. */
+  /** Display name of the subagent this run resolved to, when known. */
   agentLabel?: string | null;
   onClick: () => void;
 }) {
@@ -131,7 +131,7 @@ function SubagentListItem({
       {sub.agentId && (
         <span
           className="subagent-list-role"
-          title={`Crew agent: ${agentLabel ?? sub.agentId}`}
+          title={`Subagent: ${agentLabel ?? sub.agentId}`}
           style={{ opacity: 0.75 }}
         >
           {agentLabel ?? sub.agentId}
@@ -161,18 +161,18 @@ export function SubagentPanel() {
   const subagentsBySession = useChatStore((s) => s.subagents);
   const activeSubagentId = useUiStore((s) => s.activeSubagentId);
   const setActiveSubagentId = useUiStore((s) => s.setActiveSubagentId);
-  const crewAgents = useCrewStore((s) => s.agents);
+  const subagentAgents = useSubagentStore((s) => s.agents);
   const panelRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Crew agent id -> name, for the row chip. The panel must never trigger a
+  // Subagent id -> name, for the row chip. The panel must never trigger a
   // registry load of its own; when the store is cold (the user never opened
   // Settings -> Agents) the chip falls back to the raw id.
-  const crewNameById = useMemo(() => {
+  const subagentNameById = useMemo(() => {
     const map = new Map<string, string>();
-    for (const a of crewAgents) map.set(a.id, a.name);
+    for (const a of subagentAgents) map.set(a.id, a.name);
     return map;
-  }, [crewAgents]);
+  }, [subagentAgents]);
 
   // Resolve the selected subagent across ALL sessions' maps: a chip click in
   // a split pane targets THAT pane's session, which isn't necessarily the
@@ -264,10 +264,10 @@ export function SubagentPanel() {
             {selectedSub.agentId && (
               <span
                 className="subagent-panel-role"
-                title="Crew agent this subagent ran as"
+                title="Subagent this subagent ran as"
                 style={{ opacity: 0.75 }}
               >
-                {crewNameById.get(selectedSub.agentId) ?? selectedSub.agentId}
+                {subagentNameById.get(selectedSub.agentId) ?? selectedSub.agentId}
               </span>
             )}
             {selectedSub.model && (
@@ -379,7 +379,7 @@ export function SubagentPanel() {
             sub={sub}
             selected={activeSubagentId === sub.id}
             agentLabel={
-              sub.agentId ? crewNameById.get(sub.agentId) ?? sub.agentId : null
+              sub.agentId ? subagentNameById.get(sub.agentId) ?? sub.agentId : null
             }
             onClick={() => setActiveSubagentId(sub.id)}
           />

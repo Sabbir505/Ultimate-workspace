@@ -1,4 +1,4 @@
-// CrewSelect — the crew surfaces' styled dropdown (button + portaled glass
+// SubagentSelect — the subagent surfaces' styled dropdown (button + portaled glass
 // menu). Covers the interaction contract: opens anchored to the button,
 // picks call onChange and close, Escape closes, and — the regression this
 // file pins — the menu RE-ANCHORS when the button moves under it (the
@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 
-import { CrewSelect } from "../components/crew/CrewSelect";
+import { SubagentSelect } from "../components/subagents/SubagentSelect";
 
 const OPTIONS = [
   { value: "builtin", label: "Built-in loop" },
@@ -33,50 +33,50 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-describe("CrewSelect", () => {
+describe("SubagentSelect", () => {
   it("shows the selected option's label and opens an accessible menu", () => {
     const { container } = render(
-      <CrewSelect value="builtin" options={OPTIONS} onChange={() => {}} ariaLabel="Engine" />,
+      <SubagentSelect value="builtin" options={OPTIONS} onChange={() => {}} ariaLabel="Engine" />,
     );
     const btn = container.querySelector("button")!;
     expect(btn.textContent).toContain("Built-in loop");
     expect(btn.getAttribute("aria-expanded")).toBe("false");
 
     fireEvent.click(btn);
-    const menu = document.querySelector(".crew-select-menu")!;
+    const menu = document.querySelector(".subagent-select-menu")!;
     expect(menu).toBeTruthy();
     expect(btn.getAttribute("aria-expanded")).toBe("true");
     expect(menu.getAttribute("role")).toBe("listbox");
-    expect(menu.querySelectorAll(".crew-select-option").length).toBe(2);
+    expect(menu.querySelectorAll(".subagent-select-option").length).toBe(2);
   });
 
   it("selecting an option calls onChange once and closes the menu", () => {
     const onChange = vi.fn();
     const { container } = render(
-      <CrewSelect value="" options={OPTIONS} onChange={onChange} ariaLabel="Engine" />,
+      <SubagentSelect value="" options={OPTIONS} onChange={onChange} ariaLabel="Engine" />,
     );
     fireEvent.click(container.querySelector("button")!);
-    const option = [...document.querySelectorAll(".crew-select-option")].find((b) =>
+    const option = [...document.querySelectorAll(".subagent-select-option")].find((b) =>
       b.textContent?.includes("Claude Code"),
     )!;
     fireEvent.click(option);
     expect(onChange).toHaveBeenCalledWith("harness:claude_code");
-    expect(document.querySelector(".crew-select-menu")).toBeNull();
+    expect(document.querySelector(".subagent-select-menu")).toBeNull();
   });
 
   it("closes on Escape", () => {
     const { container } = render(
-      <CrewSelect value="" options={OPTIONS} onChange={() => {}} ariaLabel="Engine" />,
+      <SubagentSelect value="" options={OPTIONS} onChange={() => {}} ariaLabel="Engine" />,
     );
     fireEvent.click(container.querySelector("button")!);
-    expect(document.querySelector(".crew-select-menu")).toBeTruthy();
+    expect(document.querySelector(".subagent-select-menu")).toBeTruthy();
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(document.querySelector(".crew-select-menu")).toBeNull();
+    expect(document.querySelector(".subagent-select-menu")).toBeNull();
   });
 
   it("re-anchors the open menu when the button moves (scroll/resize)", () => {
     const { container } = render(
-      <CrewSelect value="" options={OPTIONS} onChange={() => {}} ariaLabel="Engine" />,
+      <SubagentSelect value="" options={OPTIONS} onChange={() => {}} ariaLabel="Engine" />,
     );
     const btn = container.querySelector("button") as HTMLButtonElement;
     // jsdom rects are all-zero; pin a movable one so the anchor is real.
@@ -84,7 +84,7 @@ describe("CrewSelect", () => {
     btn.getBoundingClientRect = () => rectAt(top);
 
     fireEvent.click(btn);
-    let menu = document.querySelector(".crew-select-menu") as HTMLElement;
+    let menu = document.querySelector(".subagent-select-menu") as HTMLElement;
     // Drops 4px below the button (100 + 32 + 4).
     expect(menu.style.top).toBe("136px");
 
@@ -92,21 +92,21 @@ describe("CrewSelect", () => {
     // menu must follow instead of floating where the button used to be.
     top = 260;
     fireEvent.scroll(window);
-    menu = document.querySelector(".crew-select-menu") as HTMLElement;
+    menu = document.querySelector(".subagent-select-menu") as HTMLElement;
     // 260 + 32 + 4.
     expect(menu.style.top).toBe("296px");
 
     // Window resize re-anchors too.
     top = 40;
     fireEvent.resize(window);
-    menu = document.querySelector(".crew-select-menu") as HTMLElement;
+    menu = document.querySelector(".subagent-select-menu") as HTMLElement;
     // 40 + 32 + 4.
     expect(menu.style.top).toBe("76px");
   });
 
   it("cleans its listeners up when the menu closes", () => {
     const { container } = render(
-      <CrewSelect value="" options={OPTIONS} onChange={() => {}} ariaLabel="Engine" />,
+      <SubagentSelect value="" options={OPTIONS} onChange={() => {}} ariaLabel="Engine" />,
     );
     const btn = container.querySelector("button") as HTMLButtonElement;
     let top = 100;
@@ -114,11 +114,11 @@ describe("CrewSelect", () => {
 
     fireEvent.click(btn);
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(document.querySelector(".crew-select-menu")).toBeNull();
+    expect(document.querySelector(".subagent-select-menu")).toBeNull();
 
     // After close, a scroll must not resurrect or move anything.
     top = 400;
     fireEvent.scroll(window);
-    expect(document.querySelector(".crew-select-menu")).toBeNull();
+    expect(document.querySelector(".subagent-select-menu")).toBeNull();
   });
 });

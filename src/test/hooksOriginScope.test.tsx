@@ -88,16 +88,16 @@ afterEach(cleanup);
 
 describe("origin vocabulary", () => {
   it("knows the four dispatched origins and the whole agent: family", () => {
-    expect(KNOWN_HOOK_ORIGINS).toEqual(["chat", "subagent", "harness", "relay_tools"]);
+    expect(KNOWN_HOOK_ORIGINS).toEqual(["chat", "subagents", "harness", "relay_tools"]);
     for (const o of KNOWN_HOOK_ORIGINS) expect(isKnownOrigin(o)).toBe(true);
-    // Crew ids are dynamic — any agent:<id> is known, including ids this
-    // build has never seen (a check that would flag every crew hook unknown).
+    // Subagent ids are dynamic — any agent:<id> is known, including ids this
+    // build has never seen (a check that would flag every subagent hook unknown).
     expect(isKnownOrigin("agent:abc")).toBe(true);
     expect(isKnownOrigin("agent:doc-writer")).toBe(true);
     // Case and prefix are exact: the backend matches verbatim.
     expect(isKnownOrigin("Agent:abc")).toBe(false);
     expect(isKnownOrigin("agent")).toBe(false);
-    expect(isKnownOrigin("crew:abc")).toBe(false);
+    expect(isKnownOrigin("subagent:abc")).toBe(false);
     expect(isKnownOrigin("")).toBe(false);
   });
 });
@@ -134,13 +134,13 @@ describe("HookDef.origins loading", () => {
     safeInvokeMock.mockImplementation(async (cmd: string) =>
       cmd === "get_setting"
         ? JSON.stringify([
-            { ...stored({ id: "a" }), origins: ["chat", "agent:crew-1"] },
+            { ...stored({ id: "a" }), origins: ["chat", "agent:subagent-1"] },
             { ...stored({ id: "b" }), origins: "chat" },
           ])
         : null,
     );
     const loaded = await getHooks();
-    expect(loaded[0].origins).toEqual(["chat", "agent:crew-1"]);
+    expect(loaded[0].origins).toEqual(["chat", "agent:subagent-1"]);
     // A hand-edited non-array degrades to global rather than throwing in the
     // panel; the backend skips such an entry, so the user sees it as global.
     expect(loaded[1].origins).toEqual([]);
@@ -159,8 +159,8 @@ describe("HooksPanel origin picker", () => {
     fireEvent.click(screen.getByLabelText("Scope to main chat"));
     fireEvent.click(screen.getByLabelText("Scope to CLI harness (claude/kimi)"));
     expect(screen.getByText("Only for:")).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Crew agent origins"), {
-      target: { value: "crew-7" },
+    fireEvent.change(screen.getByLabelText("Subagent origins"), {
+      target: { value: "subagent-7" },
     });
 
     fireEvent.click(screen.getByText("Add"));
@@ -168,7 +168,7 @@ describe("HooksPanel origin picker", () => {
     const saved = saveHooksMock.mock.calls[0][0] as HookDef[];
     expect(saved).toHaveLength(1);
     // A bare id in the field is stored in its dispatched form, `agent:<id>`.
-    expect(saved[0].origins).toEqual(["chat", "harness", "agent:crew-7"]);
+    expect(saved[0].origins).toEqual(["chat", "harness", "agent:subagent-7"]);
   });
 
   it("saves an empty list (global) when nothing is selected", async () => {
@@ -188,7 +188,7 @@ describe("HooksPanel origin picker", () => {
     await screen.findByText(/No hooks yet/);
     fireEvent.change(screen.getByLabelText("Hook event"), { target: { value: "turn_complete" } });
     expect(screen.queryByLabelText("Scope to main chat")).toBeNull();
-    expect(screen.queryByLabelText("Crew agent origins")).toBeNull();
+    expect(screen.queryByLabelText("Subagent origins")).toBeNull();
     expect(screen.getByText(/Fires for every turn/)).toBeTruthy();
   });
 
@@ -200,17 +200,17 @@ describe("HooksPanel origin picker", () => {
     render(<HooksPanel />);
     await screen.findByText(/No hooks yet/);
     fireEvent.change(screen.getByLabelText("Command"), { target: { value: "node" } });
-    fireEvent.change(screen.getByLabelText("Crew agent origins"), {
-      target: { value: "crew-7" },
+    fireEvent.change(screen.getByLabelText("Subagent origins"), {
+      target: { value: "subagent-7" },
     });
 
     // Round-trip through a lifecycle event (the scope is dropped)…
     fireEvent.change(screen.getByLabelText("Hook event"), { target: { value: "turn_complete" } });
-    expect(screen.queryByLabelText("Crew agent origins")).toBeNull();
+    expect(screen.queryByLabelText("Subagent origins")).toBeNull();
     fireEvent.change(screen.getByLabelText("Hook event"), { target: { value: "pre_tool_use" } });
 
     // …and the mirror is empty with the parsed scope, not showing stale ids.
-    expect((screen.getByLabelText("Crew agent origins") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Subagent origins") as HTMLInputElement).value).toBe("");
     expect(screen.getByText(/Runs for:/)).toBeTruthy();
     fireEvent.click(screen.getByText("Add"));
     await waitFor(() => expect(saveHooksMock).toHaveBeenCalledTimes(1));
@@ -222,7 +222,7 @@ describe("HooksPanel origin picker", () => {
   it("shows the stored scope and flags an unknown origin without hiding it", async () => {
     getHooksMock.mockResolvedValue([
       stored({ id: "everywhere", name: "everywhere" }),
-      stored({ id: "scoped", name: "scoped", origins: ["agent:crew-1", "harness"] }),
+      stored({ id: "scoped", name: "scoped", origins: ["agent:subagent-1", "harness"] }),
       stored({ id: "weird", name: "weird", origins: ["agenttypo"] }),
     ]);
     render(<HooksPanel />);
@@ -230,12 +230,12 @@ describe("HooksPanel origin picker", () => {
     // A global hook says so…
     expect(screen.getByText("all origins")).toBeTruthy();
     // …a scoped one names its origins.
-    expect(screen.getByText("only: agent:crew-1, harness")).toBeTruthy();
+    expect(screen.getByText("only: agent:subagent-1, harness")).toBeTruthy();
     // The unknown one is flagged AND still displayed.
     const chips = screen.getAllByText(/unknown origin/);
     expect(chips).toHaveLength(1);
     expect(chips[0].textContent).toContain("agenttypo");
     // A known `agent:<id>` never gets the chip.
-    expect(screen.queryByText(/unknown origin: agent:crew-1/)).toBeNull();
+    expect(screen.queryByText(/unknown origin: agent:subagent-1/)).toBeNull();
   });
 });

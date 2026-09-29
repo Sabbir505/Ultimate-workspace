@@ -9,7 +9,7 @@ import { createPortal } from "react-dom";
 import { Folder, GitBranch, GitFork, Pin, Users } from "lucide-react";
 import { relativeTime } from "../../lib/relativeTime";
 import { sessionModelIcon } from "./agentIcons";
-import { useCrewStore } from "../../state/crew";
+import { useSubagentStore } from "../../state/subagents";
 import {
   endChatSessionDrag,
   startChatSessionDrag,
@@ -33,9 +33,9 @@ export interface ChatSessionRowData {
   /** Session's agent + provider pair — drives the second-row brand icon. */
   agent?: string | null;
   provider?: string | null;
-  /** The crew agent definition this chat runs (research doc §C.3, Phase 2.5).
+  /** The subagent definition this chat runs (research doc §C.3, Phase 2.5).
    *  Optional: the sidebar passes it once the session list carries the
-   *  `agent_def_id` column. The chip also resolves from the crew store's
+   *  `agent_def_id` column. The chip also resolves from the subagent store's
    *  live `runs` map, so a run spawned in this window is tagged either way. */
   agentDefId?: string | null;
 }
@@ -85,24 +85,24 @@ export function ChatSessionRow({
   // read the full title without a tooltip round-trip.
   const [titleOverflows, setTitleOverflows] = useState(false);
 
-  // Crew tag (Phase 2.5): a chat spawned by a crew agent is a normal chat, so
+  // Subagent tag (Phase 2.5): a chat spawned by a subagent is a normal chat, so
   // the sidebar row is the only place the agent shows. Two sources, in order:
-  // the session's own `agentDefId` (persisted on the row), then the crew
+  // the session's own `agentDefId` (persisted on the row), then the subagent
   // store's live `runs` map keyed by session id — that's how a run started
   // a second ago is tagged before anything re-reads the session list.
   // `runs` is a stable object reference between ingests, so this selector
   // doesn't defeat the memo below.
-  const crewRuns = useCrewStore((s) => s.runs);
-  const crewAgents = useCrewStore((s) => s.agents);
+  const subagentRuns = useSubagentStore((s) => s.runs);
+  const subagentAgents = useSubagentStore((s) => s.agents);
   const runAgentId = useMemo(() => {
     if (session.agentDefId) return session.agentDefId;
-    for (const run of Object.values(crewRuns)) {
+    for (const run of Object.values(subagentRuns)) {
       if (run.sessionId === session.id && run.agentId) return run.agentId;
     }
     return null;
-  }, [session.agentDefId, session.id, crewRuns]);
-  const crewAgentName = runAgentId
-    ? (crewAgents.find((a) => a.id === runAgentId)?.name ?? runAgentId)
+  }, [session.agentDefId, session.id, subagentRuns]);
+  const subagentAgentName = runAgentId
+    ? (subagentAgents.find((a) => a.id === runAgentId)?.name ?? runAgentId)
     : null;
 
   useEffect(() => {
@@ -302,18 +302,18 @@ export function ChatSessionRow({
               <span className="chat-session-context-text">{session.branchName}</span>
             </span>
           )}
-          {/* Crew tag — same chip vocabulary as the project/branch chips
+          {/* Subagent tag — same chip vocabulary as the project/branch chips
               (chat-session-context + its -icon/-text), so no new CSS. Falls
               back to the raw id when the agent was deleted: `ON DELETE SET
               NULL` leaves the session (and its runs) intact. */}
-          {crewAgentName && (
+          {subagentAgentName && (
             <span
               className="chat-session-context"
-              title={`Crew agent: ${crewAgentName}`}
-              aria-label={`Crew agent: ${crewAgentName}`}
+              title={`Subagent: ${subagentAgentName}`}
+              aria-label={`Subagent: ${subagentAgentName}`}
             >
               <Users size={10} strokeWidth={1.8} className="chat-session-context-icon" />
-              <span className="chat-session-context-text">{crewAgentName}</span>
+              <span className="chat-session-context-text">{subagentAgentName}</span>
             </span>
           )}
           <span

@@ -14,7 +14,7 @@ pub mod codeexec;
 pub mod commands;
 pub mod compaction;
 pub mod context_windows;
-pub mod crew;
+pub mod subagents;
 pub mod dispatch;
 pub mod docdesign;
 pub mod docs;
@@ -591,14 +591,14 @@ impl ChatManager {
                 session_mesh: pre_unlocked_families
                     .iter()
                     .any(|f| f == tools::FAMILY_SESSION_MESH),
-                crew_write: true,
+                subagent_write: true,
                 automations_write: pre_unlocked_families
                     .iter()
                     .any(|f| f == tools::FAMILY_AUTOMATIONS),
                 totp: pre_unlocked_families.iter().any(|f| f == tools::FAMILY_TOTP),
                 unlockable_families: Arc::new(tools::unlockable_family_pairs()),
                 // No terminal tool allowlist: every main-loop surface renders the
-                // full registry. Only a subagent run pins a set (chat::crew).
+                // full registry. Only a subagent run pins a set (chat::subagent).
                 allow: None,
             }
         };

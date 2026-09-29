@@ -1,7 +1,7 @@
 // The Run modal (Phase 2.5, research doc §C.5 item 3): the one door from a
-// crew definition to an actual run.
+// subagent definition to an actual run.
 //
-// Exactly three inputs, because that is all `run_crew_agent` takes:
+// Exactly three inputs, because that is all `run_subagent` takes:
 //   - TASK TEXT (required) — the whole point. An empty task is refused inline
 //     rather than disabled on the button alone, so a keyboard/programmatic
 //     submit gets the same explanation.
@@ -17,26 +17,26 @@
 
 import { useEffect, useState } from "react";
 import { Modal } from "../common/Modal";
-import { CrewSelect } from "./CrewSelect";
-import { CREW_TIER_LABELS, crewEngineTier, type CrewAgent } from "../../lib/ipc";
-import { useCrewStore } from "../../state/crew";
+import { SubagentSelect } from "./SubagentSelect";
+import { SUBAGENT_TIER_LABELS, subagentEngineTier, type Subagent } from "../../lib/ipc";
+import { useSubagentStore } from "../../state/subagents";
 import { useProjectsStore } from "../../state/projects";
 
-export interface CrewRunModalProps {
-  agent: CrewAgent;
+export interface SubagentRunModalProps {
+  agent: Subagent;
   onClose: () => void;
 }
 
-export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
+export function SubagentRunModal({ agent, onClose }: SubagentRunModalProps) {
   const [task, setTask] = useState("");
   const [projectId, setProjectId] = useState("");
   const [wait, setWait] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const projects = useProjectsStore((s) => s.projects);
-  const runNow = useCrewStore((s) => s.runNow);
+  const runNow = useSubagentStore((s) => s.runNow);
   // One busy flag per agent (the store keys it by agent id) — the submit
   // button reflects the same state the registry row's Run button shows.
-  const busy = useCrewStore((s) => s.busy[agent.id] === true);
+  const busy = useSubagentStore((s) => s.busy[agent.id] === true);
 
   // Keep the project list populated; the store may not have loaded if the
   // user came straight here from a fresh window.
@@ -61,15 +61,15 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
     if (sessionId) {
       onClose();
     } else {
-      setError(useCrewStore.getState().error ?? "The run didn't start.");
+      setError(useSubagentStore.getState().error ?? "The run didn't start.");
     }
   };
 
-  const tier = crewEngineTier(agent.engine);
+  const tier = subagentEngineTier(agent.engine);
 
   return (
     <Modal
-      className="crew-glass-modal"
+      className="subagent-glass-modal"
       title={`Run ${agent.name}`}
       onClose={busy ? undefined : onClose}
       actions={
@@ -91,7 +91,7 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
       <div className="settings-section">
         <div className="settings-section-title">Task</div>
         <textarea
-          className="perm-pattern-input crew-modal-textarea"
+          className="perm-pattern-input subagent-modal-textarea"
           aria-label="Task"
           rows={6}
           value={task}
@@ -107,7 +107,7 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
 
       <div className="settings-section">
         <div className="settings-section-title">Project</div>
-        <CrewSelect
+        <SubagentSelect
           ariaLabel="Project"
           value={projectId}
           disabled={busy}
@@ -126,7 +126,7 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
         </p>
       </div>
 
-      <label className="settings-section crew-modal-wait">
+      <label className="settings-section subagent-modal-wait">
         <input
           type="checkbox"
           aria-label="Wait for the run to finish"
@@ -134,7 +134,7 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
           disabled={busy}
           onChange={(e) => setWait(e.target.checked)}
         />
-        <span className="settings-section-title crew-modal-wait-title">
+        <span className="settings-section-title subagent-modal-wait-title">
           Wait for the first turn to finish
         </span>
       </label>
@@ -143,10 +143,10 @@ export function CrewRunModal({ agent, onClose }: CrewRunModalProps) {
         land in the run when it starts.
       </p>
 
-      {error && <div className="settings-note crew-error">{error}</div>}
+      {error && <div className="settings-note subagent-error">{error}</div>}
 
       <p className="settings-section-hint" style={{ marginBottom: 0 }}>
-        {CREW_TIER_LABELS[tier].detail} Up to{" "}
+        {SUBAGENT_TIER_LABELS[tier].detail} Up to{" "}
         <span className="mono">{agent.maxRounds}</span> rounds.
       </p>
     </Modal>

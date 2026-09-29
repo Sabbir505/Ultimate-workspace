@@ -442,14 +442,14 @@ pub(super) fn builtin_tool_specs_json(provider_id: &ChatProviderId, model: &str,
         research: false,
         session_mesh: false,
         automations_write: false,
-                crew_write: true,
+                subagent_write: true,
         totp: false,
         unlockable_families: std::sync::Arc::new(
             crate::chat::tools::unlockable_family_pairs(),
         ),
         fs_rules: Vec::new(),
         // No terminal tool allowlist: every main-loop surface renders the
-        // full registry. Only a subagent run pins a set (chat::crew).
+        // full registry. Only a subagent run pins a set (chat::subagent).
         allow: None,
     };
     serde_json::to_string(&crate::chat::tools::openai_tool_specs(
@@ -779,14 +779,14 @@ pub async fn count_context_tokens(
                             research: false,
                             session_mesh: false,
                             automations_write: false,
-                crew_write: true,
+                subagent_write: true,
                             totp: false,
                             unlockable_families: std::sync::Arc::new(
                                 crate::chat::tools::unlockable_family_pairs(),
                             ),
                             fs_rules: Vec::new(),
                             // No terminal tool allowlist: every main-loop surface renders the
-                            // full registry. Only a subagent run pins a set (chat::crew).
+                            // full registry. Only a subagent run pins a set (chat::subagent).
                             allow: None,
                         },
                         crate::chat::permission::SandboxPolicy::WorkspaceWrite,
@@ -1090,14 +1090,14 @@ pub async fn count_context_breakdown(
                 research: false,
                 session_mesh: false,
                 automations_write: false,
-                crew_write: true,
+                subagent_write: true,
                 totp: false,
                 unlockable_families: std::sync::Arc::new(
                     crate::chat::tools::unlockable_family_pairs(),
                 ),
                 fs_rules: Vec::new(),
                 // No terminal tool allowlist: every main-loop surface renders the
-                // full registry. Only a subagent run pins a set (chat::crew).
+                // full registry. Only a subagent run pins a set (chat::subagent).
                 allow: None,
             };
             let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(
@@ -1228,14 +1228,14 @@ pub async fn count_context_breakdown(
         research: false,
         session_mesh: false,
         automations_write: false,
-                crew_write: true,
+                subagent_write: true,
         totp: false,
         unlockable_families: std::sync::Arc::new(
             crate::chat::tools::unlockable_family_pairs(),
         ),
         fs_rules: Vec::new(),
         // No terminal tool allowlist: every main-loop surface renders the
-        // full registry. Only a subagent run pins a set (chat::crew).
+        // full registry. Only a subagent run pins a set (chat::subagent).
         allow: None,
     };
     let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(

@@ -1195,7 +1195,7 @@ fn static_relay_schemas() -> Vec<Value> {
                     "caller_session_id": { "type": "string", "description": "YOUR own Relay session id (stated in your Session Mesh context) — include it so the spawn tree is tracked." },
                     "task": { "type": "string", "description": "The new session's first instruction — a complete, self-contained task description." },
                     "title": { "type": "string", "description": "Short sidebar title (defaults to the task's first words)." },
-                    "agent": { "type": "string", "description": "Engine for the new session, e.g. \"claude_code\", \"opencode\", \"builtin\", \"local\" (defaults to yours). An \"agent:<id-or-name>\" value instead spawns a CREW agent — a user-defined subagent whose prompt, tool allowlist and permission scope apply to the child." },
+                    "agent": { "type": "string", "description": "Engine for the new session, e.g. \"claude_code\", \"opencode\", \"builtin\", \"local\" (defaults to yours). An \"agent:<id-or-name>\" value instead spawns a SUBAGENT agent — a user-defined subagent whose prompt, tool allowlist and permission scope apply to the child." },
                     "model": { "type": "string", "description": "Model for the new session when it should differ from yours: bare model id keeps your provider; \"provider::model\" (e.g. \"anthropic::claude-haiku-4-5\") also switches provider for builtin engines. Omit to use the session-wide subagent model from Relay Settings, else your own model." },
                     "mode": { "type": "string", "enum": ["background", "wait"], "description": "\"background\" (default) returns the session id now; \"wait\" blocks for the first turn's output (bounded)." }
                 },

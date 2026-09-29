@@ -14,7 +14,7 @@ mod checkpoints;
 mod connector_credentials;
 mod cost;
 mod cost_v2;
-pub(crate) mod crew;
+pub(crate) mod subagents;
 pub mod docs;
 #[cfg(test)]
 mod docs_eval;
@@ -327,13 +327,19 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_session_origin(conn)?;
     migrate_doc_chunks_heading(conn)?;
     migrate_doc_corpora_chunk_version(conn)?;
+    // The registry shipped as `crew_agents`/`crew_runs`; the feature is
+    // "subagents" now — the vocabulary every spawn surface and tool speaks.
+    // Runs before the seed so the builtins land in the renamed table. SQLite
+    // rewrites REFERENCES clauses in other tables on rename, so
+    // chat_sessions.agent_def_id keeps pointing at the same rows.
+    migrate_crew_tables_rename(conn)?;
     // Declarative subagents: the 7 builtin roles must exist in the registry
     // before any spawn surface resolves a name against it.
-    migrate_crew_agents_seed(conn)?;
+    migrate_subagents_seed(conn)?;
     // Who authored each definition (NULL = user, "agent" = a model made it
-    // through the crew chat tool) — display-only, badge in the Crew panel.
-    migrate_crew_agents_origin(conn)?;
-    // And crew-run sessions point at their definition through a real column —
+    // through the subagent chat tool) — display-only, badge in the Subagent panel.
+    migrate_subagents_origin(conn)?;
+    // And subagent-run sessions point at their definition through a real column —
     // NOT the `origin` vocabulary (spawned_by: drives the depth walk there).
     migrate_chat_session_agent_def(conn)?;
     // Research caches grow without bound otherwise: drop rows past their TTL
@@ -342,10 +348,36 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_unc_paths(conn)
 }
 
-/// Authorship marker for crew definitions (NULL = user, "agent" = a model
-/// created it via the crew chat tool) — display-only, badged in the panel.
-fn migrate_crew_agents_origin(conn: &Connection) -> DbResult<()> {
-    let sql = "ALTER TABLE crew_agents ADD COLUMN origin TEXT";
+/// The registry tables shipped as `crew_agents`/`crew_runs`; the feature is
+/// "subagents" now. Renames both on databases that predate the rename (fresh
+/// DBs create the new names directly in `init_schema`, so this no-ops). The
+/// old-named indexes die here; `init_schema` recreates them under the new
+/// names.
+fn migrate_crew_tables_rename(conn: &Connection) -> DbResult<()> {
+    let table_exists = |name: &str| -> DbResult<bool> {
+        Ok(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [name],
+                |r| r.get::<_, i64>(0),
+            )? > 0,
+        )
+    };
+    if table_exists("crew_agents")? {
+        conn.execute("ALTER TABLE crew_agents RENAME TO subagents", [])?;
+        conn.execute("DROP INDEX IF EXISTS idx_crew_agents_builtin", [])?;
+    }
+    if table_exists("crew_runs")? {
+        conn.execute("ALTER TABLE crew_runs RENAME TO subagent_runs", [])?;
+        conn.execute("DROP INDEX IF EXISTS idx_crew_runs_agent", [])?;
+    }
+    Ok(())
+}
+
+/// Authorship marker for subagent definitions (NULL = user, "agent" = a model
+/// created it via the subagent chat tool) — display-only, badged in the panel.
+fn migrate_subagents_origin(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE subagents ADD COLUMN origin TEXT";
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
@@ -354,13 +386,13 @@ fn migrate_crew_agents_origin(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
-/// Crew-run sessions point at their definition through a real column, not the
+/// Subagent-run sessions point at their definition through a real column, not the
 /// `origin` vocabulary: `spawned_by:` there is load-bearing (the mesh depth
 /// walk parses it), so `agent_def_id` carries the identity instead. Nullable
 /// FK with ON DELETE SET NULL (mirrors `project_id`): deleting a definition
 /// never deletes the sessions that ran it.
 fn migrate_chat_session_agent_def(conn: &Connection) -> DbResult<()> {
-    let sql = "ALTER TABLE chat_sessions ADD COLUMN agent_def_id TEXT REFERENCES crew_agents(id) ON DELETE SET NULL";
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN agent_def_id TEXT REFERENCES subagents(id) ON DELETE SET NULL";
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
@@ -655,11 +687,11 @@ fn migrate_chat_messages_superseded(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
-/// `app_settings` marker written once the 7 builtin crew roles exist.
-/// Bump to `crew.seed.v2` if `BUILTIN_ROLES` ever changes shape — a fresh
+/// `app_settings` marker written once the 7 builtin subagent roles exist.
+/// Bump to `subagent.seed.v2` if `BUILTIN_ROLES` ever changes shape — a fresh
 /// marker re-runs the (INSERT OR IGNORE, so still idempotent) seed.
-pub const CREW_SEED_MARKER: &str = "crew.seed.v1";
-/// Seed the 7 builtin crew roles (`explore`/`edit`/`analyze`/`research`/
+pub const SUBAGENT_SEED_MARKER: &str = "subagent.seed.v1";
+/// Seed the 7 builtin subagent roles (`explore`/`edit`/`analyze`/`research`/
 /// `write`/`test`/`refactor`) as `builtin=1` rows so the registry and the
 /// `Task` role enum can never disagree.
 ///
@@ -667,13 +699,13 @@ pub const CREW_SEED_MARKER: &str = "crew.seed.v1";
 /// IGNORE` (keyed on the stable `builtin-<role>` ids, so a re-run after a
 /// cleared marker is a no-op and never duplicates or clobbers a user's edits
 /// to a builtin row), and the whole pass is skipped once the
-/// `crew.seed.v1` marker is set. The marker is the B-30 one-shot-backfill
+/// `subagent.seed.v1` marker is set. The marker is the B-30 one-shot-backfill
 /// pattern (`migrate_chat_session_agent` / `migrate_chat_fts`): it exists so
 /// startup doesn't pay 7 inserts forever, and `INSERT OR IGNORE` remains the
 /// correctness guarantee. Clear the marker to re-seed a drifted DB.
-pub(crate) fn migrate_crew_agents_seed(conn: &Connection) -> DbResult<()> {
+pub(crate) fn migrate_subagents_seed(conn: &Connection) -> DbResult<()> {
     ensure_settings_table(conn);
-    let done = settings::get_setting(conn, CREW_SEED_MARKER)
+    let done = settings::get_setting(conn, SUBAGENT_SEED_MARKER)
         .ok()
         .flatten()
         .as_deref()
@@ -681,8 +713,8 @@ pub(crate) fn migrate_crew_agents_seed(conn: &Connection) -> DbResult<()> {
     if done {
         return Ok(());
     }
-    crew::seed_builtin_crew_agents(conn)?;
-    settings::set_setting(conn, CREW_SEED_MARKER, "1")?;
+    subagents::seed_builtin_subagents(conn)?;
+    settings::set_setting(conn, SUBAGENT_SEED_MARKER, "1")?;
     Ok(())
 }
 
@@ -1381,8 +1413,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         CREATE INDEX IF NOT EXISTS idx_automation_runs_running
           ON automation_runs(status) WHERE finished_at IS NULL;
 
-        -- Declarative subagents ("crew") — the persisted registry every spawn
-        -- surface resolves against (see db/crew.rs + chat/crew.rs). The 7
+        -- Declarative subagents ("subagents") — the persisted registry every spawn
+        -- surface resolves against (see db/subagent.rs + chat/subagent.rs). The 7
         -- builtin roles are seeded rows (builtin=1, id `builtin-<role>`) so
         -- the `Task` role enum and the registry can never disagree; they carry
         -- the role instruction only, which dispatch.rs still composes with the
@@ -1390,8 +1422,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         -- is UNIQUE COLLATE NOCASE so "Doc Writer" and "doc writer" cannot
         -- both exist. `tools` is a JSON array of tool names; NULL = inherit
         -- the engine default. The 7 role names are reserved — see
-        -- chat::crew::validate_name.
-        CREATE TABLE IF NOT EXISTS crew_agents (
+        -- chat::subagent::validate_name.
+        CREATE TABLE IF NOT EXISTS subagents (
           id              TEXT PRIMARY KEY,
           name            TEXT NOT NULL UNIQUE COLLATE NOCASE,
           description     TEXT NOT NULL DEFAULT '',
@@ -1411,13 +1443,13 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         );
         -- Builtins first (the stable set the Task enum advertises), then user
         -- rows by name.
-        CREATE INDEX IF NOT EXISTS idx_crew_agents_builtin
-          ON crew_agents(builtin, name);
+        CREATE INDEX IF NOT EXISTS idx_subagents_builtin
+          ON subagents(builtin, name);
 
-        -- One row per crew RUN (a spawned session's lifecycle), not per turn.
+        -- One row per subagent RUN (a spawned session's lifecycle), not per turn.
         -- No FKs on purpose: history outlives a deleted agent or chat —
         -- dangling ids render as "deleted agent" in the runs list.
-        CREATE TABLE IF NOT EXISTS crew_runs (
+        CREATE TABLE IF NOT EXISTS subagent_runs (
           id           TEXT PRIMARY KEY,
           agent_id     TEXT,
           session_id   TEXT,
@@ -1431,8 +1463,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           status       TEXT NOT NULL DEFAULT 'running',
           summary      TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_crew_runs_agent
-          ON crew_runs(agent_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_subagent_runs_agent
+          ON subagent_runs(agent_id, started_at DESC);
 
         CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_artifacts_expires ON artifacts(expires_at);
@@ -1739,12 +1771,12 @@ pub use automations::{
     Automation, AutomationInput, AutomationRun,
 };
 
-// crew (declarative subagents — the persisted agent registry)
-pub use crew::{
-    create_crew_agent, delete_crew_agent, find_crew_agent_by_name, finish_crew_run,
-    set_crew_agent_origin, set_crew_run_worktree, sweep_stale_crew_runs,
-    get_crew_agent, list_crew_agents, list_crew_runs, record_crew_run,
-    seed_builtin_crew_agents, update_crew_agent, CrewAgent, CrewAgentInput, CrewAgentRun,
+// subagent (declarative subagents — the persisted agent registry)
+pub use subagents::{
+    create_subagent, delete_subagent, find_subagent_by_name, finish_subagent_run,
+    set_subagent_origin, set_subagent_run_worktree, sweep_stale_subagent_runs,
+    get_subagent, list_subagents, list_subagent_runs, record_subagent_run,
+    seed_builtin_subagents, update_subagent, Subagent, SubagentInput, SubagentRun,
 };
 
 // persistent user memory (MEMORY_DESIGN_ARCHITECTURE.md §9)
@@ -1795,11 +1827,11 @@ pub(crate) fn mem() -> Connection {
     migrate_doc_corpora_chunk_version(&conn).unwrap();
     migrate_doc_chunks_fts(&conn).unwrap();
     migrate_unc_paths(&conn).unwrap();
-    // The 7 builtin crew roles are part of the production schema shape, so
+    // The 7 builtin subagent roles are part of the production schema shape, so
     // tests that resolve a name against the registry see them too.
-    migrate_crew_agents_seed(&conn).unwrap();
-    migrate_crew_agents_origin(&conn).unwrap();
-    // Same for the crew-run link column: tests that crew-spawn (or assert the
+    migrate_subagents_seed(&conn).unwrap();
+    migrate_subagents_origin(&conn).unwrap();
+    // Same for the subagent-run link column: tests that subagent-spawn (or assert the
     // FK's ON DELETE SET NULL) need it present.
     migrate_chat_session_agent_def(&conn).unwrap();
     llm_log::ensure_schema(&conn).unwrap();
@@ -1810,15 +1842,60 @@ pub(crate) fn mem() -> Connection {
 mod tests {
     use super::*;
 
-    /// Crew-run sessions link to their definition through `agent_def_id` with
+    /// Subagent-run sessions link to their definition through `agent_def_id` with
     /// ON DELETE SET NULL: deleting the definition must keep the sessions (a
-    /// crew run's transcript is the user's data) and only clear the pointer.
+    /// subagent run's transcript is the user's data) and only clear the pointer.
+    /// Databases created before the subagent rename carry `crew_agents` /
+    /// `crew_runs`. The rename migration must carry the rows across (a user's
+    /// registry is their data) and leave the schema in the exact shape
+    /// `init_schema` produces, so the later `origin`/seed migrations find the
+    /// renamed tables.
+    #[test]
+    fn crew_table_rename_carries_rows_and_yields_the_new_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        // The pre-rename shape (id + name is all the rename itself touches).
+        conn.execute(
+            "CREATE TABLE crew_agents (id TEXT PRIMARY KEY, name TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE crew_runs (id TEXT PRIMARY KEY, agent_id TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO crew_agents (id, name) VALUES ('a-1', 'doc-writer')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO crew_runs (id, agent_id) VALUES ('r-1', 'a-1')", [])
+            .unwrap();
+
+        migrate_crew_tables_rename(&conn).unwrap();
+
+        let name: String = conn
+            .query_row("SELECT name FROM subagents WHERE id = 'a-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(name, "doc-writer");
+        let runs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subagent_runs WHERE agent_id = 'a-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(runs, 1);
+        // Idempotent: a second configure pass finds nothing to rename.
+        migrate_crew_tables_rename(&conn).unwrap();
+    }
+
     #[test]
     fn agent_def_id_round_trips_and_survives_agent_deletion() {
         let conn = mem();
-        let agent = crate::chat::crew::create(
+        let agent = crate::chat::subagents::create(
             &conn,
-            &crate::chat::crew::CrewAgentInput {
+            &crate::chat::subagents::SubagentInput {
                 name: "test-runner".into(),
                 description: "test fixture".into(),
                 prompt_md: String::new(),
@@ -1839,7 +1916,7 @@ mod tests {
         let row = get_chat_session(&conn, &sess.id).unwrap().unwrap();
         assert_eq!(row.agent_def_id.as_deref(), Some(agent.id.as_str()));
         // Delete the definition: the session survives, the pointer clears.
-        crate::chat::crew::delete(&conn, &agent.id).unwrap();
+        crate::chat::subagents::delete(&conn, &agent.id).unwrap();
         let after = get_chat_session(&conn, &sess.id).unwrap().unwrap();
         assert_eq!(after.agent_def_id, None);
     }

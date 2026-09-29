@@ -63,8 +63,8 @@ export interface ChatSession {
    *  null = human-created; "spawned_by:<chatId>" = an agent spawned this
    *  session; "automation:<id>" = an automation run-log. */
   origin?: string | null;
-  /** The crew agent definition this session runs (research doc §C.3, Phase
-   *  2.5). null/undefined = a plain chat. Set for a manual crew run, a mesh
+  /** The subagent definition this session runs (research doc §C.3, Phase
+   *  2.5). null/undefined = a plain chat. Set for a manual subagent run, a mesh
    *  spawn that named an agent, and a `Task` call that resolved one.
    *  Deliberately NOT folded into `origin` — that column's `spawned_by:<id>`
    *  spelling is what the mesh depth cap walks. `ON DELETE SET NULL` in the

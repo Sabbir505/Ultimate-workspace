@@ -902,7 +902,7 @@ export function ActivityStepRow({
   // REAL status from the store instead (hook is unconditional — rules of
   // hooks); null when this step isn't a subagent or never registered
   // (persisted messages from before this session's spawns).
-  const isSubagentStep = step.data?.kind === "subagent";
+  const isSubagentStep = step.data?.kind === "subagents";
   const subTask = isSubagentStep ? step.data?.task || step.data?.detail || "" : "";
   const subRole = isSubagentStep ? step.data?.role || "agent" : "";
   const subId = isSubagentStep ? step.data?.subId : undefined;
@@ -1912,7 +1912,7 @@ export type Block =
  *  cards and result rows keep their dedicated rendering. */
 export function foldableTitle(step: ActivityStep): string | null {
   const kind = step.data?.kind;
-  if (kind === "subagent" || kind === "edit" || kind === "result") return null;
+  if (kind === "subagents" || kind === "edit" || kind === "result") return null;
   const title = step.data?.title?.trim();
   return title ? title : null;
 }

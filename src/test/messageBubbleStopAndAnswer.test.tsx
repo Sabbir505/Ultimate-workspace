@@ -19,6 +19,7 @@ import { cleanup, fireEvent, render } from "@testing-library/react";
 import { MessageBubble } from "../components/chat/MessageBubble";
 import { useChatStore } from "../state/chat";
 import type { ChatMessage } from "../lib/ipc";
+import { flushLazy } from "./flushLazy";
 
 function assistantMsg(content: string): ChatMessage {
   return {
@@ -70,7 +71,7 @@ describe("MessageBubble stopped turns", () => {
 });
 
 describe("MessageBubble answer visibility", () => {
-  it("interleaves narration with tool rows; the trailing answer stays visible collapsed", () => {
+  it("interleaves narration with tool rows; the trailing answer stays visible collapsed", async () => {
     const content = [
       tool("Reading a web page", "rust-lang.org/learn"),
       "\n\n## Analysis\n\nRust is a systems language with strong guarantees.",
@@ -80,6 +81,7 @@ describe("MessageBubble answer visibility", () => {
     const { queryByText, container } = render(
       <MessageBubble message={assistantMsg(content)} chatSessionId="s1" />,
     );
+    await flushLazy();
 
     // Collapsed: the mid-turn narration ("Analysis") hides WITH the process
     // region it belongs to; the trailing answer stays visible.
@@ -92,7 +94,7 @@ describe("MessageBubble answer visibility", () => {
     expect(queryByText(/strong guarantees/)).not.toBeNull();
   });
 
-  it("keeps the final answer visible when interleaved thinking precedes it", () => {
+  it("keeps the final answer visible when interleaved thinking precedes it", async () => {
     const content = [
       "<think>Considering the options.</think>",
       "\n\nFirst conclusion stands on its own.",
@@ -102,6 +104,7 @@ describe("MessageBubble answer visibility", () => {
     const { queryByText, container } = render(
       <MessageBubble message={assistantMsg(content)} chatSessionId="s1" />,
     );
+    await flushLazy();
     // Collapsed: the prose BETWEEN the thinking blocks belongs to the process
     // transcript; the final answer stays outside and visible.
     expect(queryByText(/First conclusion stands/)).toBeNull();

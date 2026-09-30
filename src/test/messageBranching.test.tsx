@@ -15,6 +15,7 @@ vi.mock("../lib/ipc", () => ({
 import { MessageBubble } from "../components/chat/MessageBubble";
 import { useChatStore } from "../state/chat";
 import type { ChatMessage, ChatMessageRecord } from "../lib/ipc";
+import { flushLazy } from "./flushLazy";
 
 // The store holds ChatMessageRecord[]; the bubble takes ChatMessage. This
 // factory produces a ChatMessageRecord; the few bubble render sites cast it
@@ -70,7 +71,7 @@ describe("MessageBubble inline edit editor", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("renders a superseded bubble dimmed with a previous-version tag", () => {
+  it("renders a superseded bubble dimmed with a previous-version tag", async () => {
     render(
       <MessageBubble
         message={bubble({ supersededBy: 1 }) as ChatMessage}
@@ -78,7 +79,8 @@ describe("MessageBubble inline edit editor", () => {
         superseded
       />,
     );
-    const root = screen.getByText("original question").closest(".chat-bubble");
+    await flushLazy();
+    const root = (await screen.findByText("original question")).closest(".chat-bubble");
     expect(root?.classList.contains("superseded")).toBe(true);
     expect(screen.getByText("previous version")).toBeTruthy();
   });

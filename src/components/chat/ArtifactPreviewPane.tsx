@@ -9,7 +9,7 @@
 // memoized adapter), so the document — including the markdown parse — only
 // re-renders when the actual file content changes.
 import { useCallback, useEffect, useMemo, useRef, useState, memo, isValidElement } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import { LazyReactMarkdown, defaultUrlTransform } from "../common/LazyMarkdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -90,7 +90,7 @@ function MarkdownDocument({ text }: { text: string }) {
     const sources = parseChatSources(text);
     const body = sources.length > 0 ? linkCitations(text, sources) : text;
     return (
-      <ReactMarkdown
+      <LazyReactMarkdown
         remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
         rehypePlugins={[rehypeKatex]}
         urlTransform={citeUrlTransform}
@@ -149,7 +149,7 @@ function MarkdownDocument({ text }: { text: string }) {
         }}
       >
         {body}
-      </ReactMarkdown>
+      </LazyReactMarkdown>
     );
   }, [text]);
   return rendered;

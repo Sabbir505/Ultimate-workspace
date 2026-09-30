@@ -1,6 +1,12 @@
 // Past Runs table — one row per automation_runs entry. Click a row that has
 // a chat session attached to open the run log in the chat view.
-import { useEffect, useState } from "react";
+//
+// Rows are windowed with @tanstack/react-virtual: a long-running automation
+// accumulates a run row every fire, and the 1 Hz elapsed-time timer below
+// re-rendered the whole list each tick. Virtualizing means only the ~20 rows
+// actually on screen re-render per tick.
+import { useEffect, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   CheckCircle2,
   ExternalLink,
@@ -13,6 +19,16 @@ import {
 import type { AutomationRun } from "../../lib/ipc";
 import { formatDateTime, formatDuration } from "../../lib/format";
 import { friendlyRunError, isFailureStatus, STOPPED_STATUS } from "./shared";
+
+/** Approximate row height in px. Rows are single-line, so this is stable
+ *  enough to scroll smoothly; `measureElement` corrects per-row when a summary
+ *  wraps on a narrow window. */
+const ROW_ESTIMATE_PX = 34;
+/** Height of the scroll viewport. Below this the table stops scrolling and
+ *  simply grows, so a 3-run automation doesn't get a scrollbar for nothing. */
+const MAX_VIEWPORT_PX = 420;
+/** Rows rendered beyond the viewport, so a fast flick doesn't flash blanks. */
+const OVERSCAN = 8;
 
 function runDuration(startSec: number, endSec: number | null, liveNowSec?: number): string {
   if (!endSec) {
@@ -95,6 +111,94 @@ function statusBadge(status: string): {
   };
 }
 
+/** Shared column template so the header and every data row line up. The
+ *  Summary column takes the slack; the rest are sized to their content. */
+const GRID_COLS = "grid grid-cols-[104px_150px_86px_104px_minmax(0,1fr)_76px]";
+
+/** One row of the run table. A `div` grid rather than a `<tr>`: windowing
+ *  absolutely-positioned rows inside a real `<tbody>` either nests invalid
+ *  markup or loses column alignment once the rows leave the table's layout
+ *  flow, so the roles below carry the table semantics to assistive tech. */
+function RunRow({
+  run,
+  nowSec,
+  onOpenRunLog,
+  onStopRun,
+  stopping,
+}: {
+  run: AutomationRun;
+  nowSec: number;
+  onOpenRunLog: (chatSessionId: string) => void;
+  onStopRun?: () => void;
+  stopping?: boolean;
+}) {
+  const badge = statusBadge(run.status);
+  const failed = isFailureStatus(run.status);
+  // Raw error text stays in the tooltip; the cell shows the
+  // plain-language translation so users can act on it.
+  const friendly = failed ? friendlyRunError(run.summary || run.status) : null;
+  return (
+    <div
+      role="row"
+      className={`${GRID_COLS} items-center border-t border-gray-200 dark:border-white/20 hover:bg-gray-50 dark:hover:bg-white/5 transition-colors`}
+    >
+      <div role="cell" className="px-3 py-2">
+        <span
+          className={`inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${badge.className}`}
+        >
+          {badge.icon} {badge.label}
+        </span>
+      </div>
+      <div role="cell" className="px-3 py-2 text-gray-700 dark:text-slate-200 whitespace-nowrap">
+        {formatDateTime(run.startedAt)}
+      </div>
+      <div role="cell" className="px-3 py-2 text-gray-700 dark:text-slate-200 whitespace-nowrap font-mono text-xs">
+        {runDuration(run.startedAt, run.finishedAt, run.status === "running" ? nowSec : undefined)}
+      </div>
+      <div role="cell" className="px-3 py-2 text-gray-500 dark:text-slate-400 text-xs">
+        {SOURCE_LABELS[run.source] ?? "Scheduled"}
+      </div>
+      <div role="cell" className="px-3 py-2 text-gray-700 dark:text-slate-200 text-xs min-w-0" title={run.summary}>
+        <span className="flex items-center gap-2 min-w-0">
+          <span className="truncate">
+            {friendly
+              ? friendly.text
+              : run.summary || (run.status === "running" ? "In progress…" : "—")}
+          </span>
+          {run.status === "running" && onStopRun && (
+            <button
+              onClick={onStopRun}
+              disabled={stopping}
+              title="Stop this run"
+              className="inline-flex shrink-0 items-center gap-1 border-0 bg-transparent shadow-none text-[11px] text-red-600 dark:text-red-400 hover:underline disabled:opacity-50"
+            >
+              {stopping ? (
+                <Loader2 size={10} className="animate-spin" strokeWidth={2.5} />
+              ) : (
+                <Square size={8} strokeWidth={2.5} fill="currentColor" />
+              )}
+              {stopping ? "Stopping…" : "Stop"}
+            </button>
+          )}
+        </span>
+      </div>
+      <div role="cell" className="px-3 py-2 text-right">
+        {run.chatSessionId ? (
+          <button
+            onClick={() => onOpenRunLog(run.chatSessionId!)}
+            className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:underline"
+            title="Open run log"
+          >
+            Open <ExternalLink size={11} strokeWidth={1.8} />
+          </button>
+        ) : (
+          <span className="text-xs text-gray-400 dark:text-slate-500">—</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function AutomationRunTable({
   runs,
   loading,
@@ -115,6 +219,18 @@ export function AutomationRunTable({
   // crashed React). Compute first, return the empty states after.
   const inFlight = runs.some((r) => r.status === "running");
   const nowSec = useNowSeconds(inFlight);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: runs.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_ESTIMATE_PX,
+    overscan: OVERSCAN,
+    // jsdom (and the frame before the viewport is measured) reports a
+    // zero-height scroll element, which would window the list down to nothing.
+    // Seed a plausible viewport so the first paint and the tests both see rows.
+    initialRect: { width: 1000, height: MAX_VIEWPORT_PX },
+  });
 
   if (loading && runs.length === 0) {
     return (
@@ -148,107 +264,69 @@ export function AutomationRunTable({
         </span>
       </h3>
 
-      <div className="rounded-lg border border-gray-200 dark:border-white/20 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 dark:bg-white/5 text-gray-500 dark:text-slate-400">
-            <tr>
-              <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider">
+      <div
+        ref={scrollRef}
+        className="rounded-lg border border-gray-200 dark:border-white/20 overflow-auto"
+        style={{ maxHeight: MAX_VIEWPORT_PX }}
+      >
+        <div role="table" aria-label="Past runs" aria-rowcount={runs.length} className="w-full text-sm">
+          <div
+            role="rowgroup"
+            className="sticky top-0 z-10 bg-gray-50 dark:bg-white/5 text-gray-500 dark:text-slate-400"
+          >
+            <div role="row" className={GRID_COLS}>
+              <div role="columnheader" className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider">
                 Status
-              </th>
-              <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider">
+              </div>
+              <div role="columnheader" className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider">
                 Started
-              </th>
-              <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider">
+              </div>
+              <div role="columnheader" className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider">
                 Duration
-              </th>
-              <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider">
+              </div>
+              <div role="columnheader" className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider">
                 Source
-              </th>
-              <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider">
+              </div>
+              <div role="columnheader" className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider">
                 Summary
-              </th>
-              <th className="px-3 py-2 text-right text-[10px] font-bold uppercase tracking-wider">
+              </div>
+              <div role="columnheader" className="px-3 py-2 text-right text-[10px] font-bold uppercase tracking-wider">
                 Log
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-200 dark:divide-white/20">
-            {runs.map((r) => {
-              const badge = statusBadge(r.status);
-              const failed = isFailureStatus(r.status);
-              // Raw error text stays in the tooltip; the cell shows the
-              // plain-language translation so users can act on it.
-              const friendly = failed ? friendlyRunError(r.summary || r.status) : null;
+              </div>
+            </div>
+          </div>
+          {/* The row group carries the full scroll height while only the
+              visible window's rows are actually in the DOM; each row is
+              absolutely positioned at its virtual offset. */}
+          <div
+            role="rowgroup"
+            style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}
+          >
+            {rowVirtualizer.getVirtualItems().map((vi) => {
+              const r = runs[vi.index];
               return (
-                <tr
+                <div
                   key={r.id}
-                  className="hover:bg-gray-50 dark:hover:bg-white/5 transition-colors"
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    transform: `translateY(${vi.start}px)`,
+                  }}
                 >
-                  <td className="px-3 py-2">
-                    <span
-                      className={`inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${badge.className}`}
-                    >
-                      {badge.icon} {badge.label}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 text-gray-700 dark:text-slate-200 whitespace-nowrap">
-                    {formatDateTime(r.startedAt)}
-                  </td>
-                  <td className="px-3 py-2 text-gray-700 dark:text-slate-200 whitespace-nowrap font-mono text-xs">
-                    {runDuration(
-                      r.startedAt,
-                      r.finishedAt,
-                      r.status === "running" ? nowSec : undefined,
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-gray-500 dark:text-slate-400 text-xs">
-                    {SOURCE_LABELS[r.source] ?? "Scheduled"}
-                  </td>
-                  <td
-                    className="px-3 py-2 text-gray-700 dark:text-slate-200 text-xs max-w-[280px] truncate"
-                    title={r.summary}
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <span className="truncate">
-                        {friendly
-                          ? friendly.text
-                          : r.summary || (r.status === "running" ? "In progress…" : "—")}
-                      </span>
-                      {r.status === "running" && onStopRun && (
-                        <button
-                          onClick={onStopRun}
-                          disabled={stopping}
-                          title="Stop this run"
-                          className="inline-flex shrink-0 items-center gap-1 border-0 bg-transparent shadow-none text-[11px] text-red-600 dark:text-red-400 hover:underline disabled:opacity-50"
-                        >
-                          {stopping ? (
-                            <Loader2 size={10} className="animate-spin" strokeWidth={2.5} />
-                          ) : (
-                            <Square size={8} strokeWidth={2.5} fill="currentColor" />
-                          )}
-                          {stopping ? "Stopping…" : "Stop"}
-                        </button>
-                      )}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 text-right">
-                    {r.chatSessionId ? (
-                      <button
-                        onClick={() => onOpenRunLog(r.chatSessionId!)}
-                        className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:underline"
-                        title="Open run log"
-                      >
-                        Open <ExternalLink size={11} strokeWidth={1.8} />
-                      </button>
-                    ) : (
-                      <span className="text-xs text-gray-400 dark:text-slate-500">—</span>
-                    )}
-                  </td>
-                </tr>
+                  <RunRow
+                    run={r}
+                    nowSec={nowSec}
+                    onOpenRunLog={onOpenRunLog}
+                    onStopRun={onStopRun}
+                    stopping={stopping}
+                  />
+                </div>
               );
             })}
-          </tbody>
-        </table>
+          </div>
+        </div>
       </div>
     </div>
   );

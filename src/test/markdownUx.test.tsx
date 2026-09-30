@@ -7,6 +7,7 @@ import { act } from "react";
 import { cleanup, render } from "@testing-library/react";
 import { MessageBubble } from "../components/chat/MessageBubble";
 import type { ChatMessage } from "../lib/ipc";
+import { flushLazy } from "./flushLazy";
 
 afterEach(() => cleanup());
 
@@ -24,7 +25,7 @@ function assistantMsg(content: string): ChatMessage {
 }
 
 describe("MessageBubble markdown UX", () => {
-  it("wraps generated tables in the toolbar wrapper with Copy + CSV actions", () => {
+  it("wraps generated tables in the toolbar wrapper with Copy + CSV actions", async () => {
     const content = [
       "| Property | Value |",
       "| --- | --- |",
@@ -34,6 +35,7 @@ describe("MessageBubble markdown UX", () => {
     const { container, getByTitle } = render(
       <MessageBubble message={assistantMsg(content)} chatSessionId="s1" />,
     );
+    await flushLazy();
     const wrap = container.querySelector(".chat-table-wrap");
     expect(wrap).not.toBeNull();
     // The table is a direct child and uses real table layout (fills width).
@@ -42,7 +44,7 @@ describe("MessageBubble markdown UX", () => {
     expect(getByTitle("Download as CSV")).toBeTruthy();
   });
 
-  it("turns [1] citations into chips when the message has a numbered Sources heading", () => {
+  it("turns [1] citations into chips when the message has a numbered Sources heading", async () => {
     const content = [
       "The model ships with a 200K window [1] and step (1) stays plain.",
       "",
@@ -52,6 +54,9 @@ describe("MessageBubble markdown UX", () => {
     const { container } = render(
       <MessageBubble message={assistantMsg(content)} chatSessionId="s1" />,
     );
+    // Resolve the lazy markdown chunk BEFORE installing fake timers — the
+    // flush below needs real ones to settle the dynamic import.
+    await flushLazy();
     // Only the resolved bracket citation becomes a chip; a single-number
     // parenthesized prose marker ("step (1)") deliberately stays plain text.
     const chips = container.querySelectorAll(".chat-citation");
@@ -76,11 +81,12 @@ describe("MessageBubble markdown UX", () => {
     }
   });
 
-  it("keeps dollar amounts as plain text (no KaTeX space collapse)", () => {
+  it("keeps dollar amounts as plain text (no KaTeX space collapse)", async () => {
     const content = 'He said "it costs $5 and $10 total".';
     const { container } = render(
       <MessageBubble message={assistantMsg(content)} chatSessionId="s1" />,
     );
+    await flushLazy();
     expect(container.querySelector(".katex")).toBeNull();
     expect(container.textContent).toContain("$5 and $10 total");
   });

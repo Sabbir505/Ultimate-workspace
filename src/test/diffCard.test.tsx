@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { MessageBubble } from "../components/chat/MessageBubble";
 import type { ChatMessage } from "../lib/ipc";
+import { flushLazy } from "./flushLazy";
 
 function assistantMsg(content: string): ChatMessage {
   return {
@@ -45,14 +46,15 @@ function expandProcess(container: HTMLElement) {
 }
 
 describe("MessageBubble inline diff cards", () => {
-  it("renders an edit tool call as a diff card with stats and preview lines", () => {
+  it("renders an edit tool call as a diff card with stats and preview lines", async () => {
     const content = [
       editTool("src/lib/auth.ts", "const token = legacyVerify(session)", "const token = await tokenStore.verify(session)\nif (token.expired) await tokenStore.rotate()"),
       "\n\nDone.",
     ].join("");
-    const { container, queryByText } = render(
+    const { container, queryByText, findByText } = render(
       <MessageBubble message={assistantMsg(content)} />,
     );
+    await flushLazy();
     expandProcess(container);
 
     // Edit steps render as a COMPACT row first (✏ Edit file dir +N −M) — the
@@ -76,7 +78,7 @@ describe("MessageBubble inline diff cards", () => {
     expect(queryByText("Applied ✓")).not.toBeNull();
     expect(queryByText("Accept ✓")).toBeNull();
     // The trailing answer still renders outside any collapsed group.
-    expect(queryByText(/Done\./)).not.toBeNull();
+    expect(await findByText(/Done\./)).not.toBeNull();
   });
 
   it("keeps non-edit tools in the collapsed activity groups while the edit renders its own card", () => {

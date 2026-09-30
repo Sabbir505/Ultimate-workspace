@@ -5,11 +5,9 @@
 //! pieces it renders.
 import { Fragment, createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Brain as BrainIcon, Pencil } from "lucide-react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkBreaks from "remark-breaks";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
+// The parser + plugin family load on first use (see common/LazyMarkdown), so
+// the entry chunk no longer carries the ~700 KB markdown pipeline.
+import { ChatMarkdown, defaultUrlTransform } from "../common/LazyMarkdown";
 import "katex/dist/katex.min.css";
 // PERF rec #3 (2026-09-06): this chunk imports katex.min.css — math can
 // only render inside MessageBubble, so the stylesheet (and the fonts it
@@ -1740,16 +1738,10 @@ export function Markdown({
   const build = () => {
     const body = hasSources ? linkCitations(content, sources!) : content;
     return (
-      <ReactMarkdown
-        // singleDollarTextMath: false — a lone `$` pair must NOT open math:
-        // "$5 and $10" used to render as KaTeX, which collapses the spaces
-        // ("5and10"). `$$…$$` display math still works.
-        remarkPlugins={[remarkGfm, remarkBreaks, [remarkMath, { singleDollarTextMath: false }]]}
-        // remarkBreaks: chat convention (ChatGPT/Discord/Slack) — a model
-        // answer written with single newlines renders those breaks instead of
-        // collapsing into one run-on paragraph. The .md FILE preview
-        // (ArtifactPreviewPane) deliberately stays standard-markdown.
-        rehypePlugins={[rehypeKatex]}
+      <ChatMarkdown
+        // The plugin list (gfm + breaks + math-with-singleDollar-off + katex)
+        // is configured inside common/LazyMarkdown so it loads with the parser
+        // instead of being hoisted into the entry chunk.
         urlTransform={citeUrlTransform}
         components={{
           table: MarkdownTable,
@@ -1867,7 +1859,7 @@ export function Markdown({
         }}
       >
         {body}
-      </ReactMarkdown>
+      </ChatMarkdown>
     );
   };
   return (

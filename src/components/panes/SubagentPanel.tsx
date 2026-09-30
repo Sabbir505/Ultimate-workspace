@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import { LazyReactMarkdown } from "../common/LazyMarkdown";
 import remarkGfm from "remark-gfm";
 import { useChatStore } from "../../state/chat";
 import { useSubagentStore } from "../../state/subagents";
@@ -304,9 +304,9 @@ export function SubagentPanel() {
           <div className="subagent-bubble subagent-prompt-bubble">
             <div className="subagent-bubble-label">Prompt</div>
             <div className="subagent-bubble-content">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
+              <LazyReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
                 {selectedSub.prompt}
-              </ReactMarkdown>
+              </LazyReactMarkdown>
             </div>
           </div>
           {/* Output — assistant-style bubble: the SAME ordered segment stream
@@ -319,9 +319,9 @@ export function SubagentPanel() {
                 if (seg.type === "text") {
                   return seg.text.trim().length > 0 ? (
                     <div className="subagent-seg-text" key={`t:${i}`}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
+                      <LazyReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
                         {seg.text}
-                      </ReactMarkdown>
+                      </LazyReactMarkdown>
                     </div>
                   ) : null;
                 }

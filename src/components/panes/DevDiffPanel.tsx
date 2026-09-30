@@ -21,7 +21,7 @@
 // stand up a second one.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import { LazyReactMarkdown } from "../common/LazyMarkdown";
 import remarkGfm from "remark-gfm";
 import { SmoothReveal } from "../common/SmoothReveal";
 import { mdLinkComponents } from "../chat/MdLink";
@@ -1075,9 +1075,9 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
               <button className="dev-diff-review-card-close" onClick={() => setWholeTreeReview(null)} title="Dismiss review">✕</button>
             </div>
             <div className="dev-diff-review-card-body dev-diff-review-md">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
+              <LazyReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
                 {wholeTreeReview}
-              </ReactMarkdown>
+              </LazyReactMarkdown>
             </div>
           </div>
         )}

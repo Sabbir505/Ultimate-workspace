@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { MessageBubble } from "../components/chat/MessageBubble";
 import type { ChatMessage } from "../lib/ipc";
+import { flushLazy } from "./flushLazy";
 
 // react-markdown/syntax-highlighter are heavy and not under test; render real
 // MessageBubble but assert only on structural text/toggles, not markdown HTML.
@@ -33,22 +34,23 @@ function tool(title: string, detail = "", kind = "web"): string {
 afterEach(() => cleanup());
 
 describe("MessageBubble activity grouping", () => {
-  it("collapses a multi-tool run into one summary line, not per-call rows", () => {
+  it("collapses a multi-tool run into one summary line, not per-call rows", async () => {
     const content = [
       tool("Reading a web page", "rust-lang.org/learn"),
       "Let me check another source.",
       tool("Reading a web page", "doc.rust-lang.org/book"),
       "\n\nBased on these, Rust is a systems language.",
     ].join("");
-    const { queryByText, getByRole } = render(
+    const { queryByText, findByText, getByRole } = render(
       <MessageBubble message={assistantMsg(content)} />,
     );
+    await flushLazy();
 
     // The generic per-call title must NOT appear as loose rows by default —
     // only the synthesized summary and the final answer render.
     expect(queryByText("Reading a web page — rust-lang.org/learn")).toBeNull();
     // The trailing synthesized answer renders outside the collapsed group.
-    expect(queryByText(/systems language/)).not.toBeNull();
+    expect(await findByText(/systems language/)).not.toBeNull();
 
     // Exactly one process summary toggle in the bubble.
     const toggles = document.body.querySelectorAll(".chat-process-toggle");
@@ -87,22 +89,23 @@ describe("MessageBubble activity grouping", () => {
     expect(queryByText(/solana validators/)).toBeNull();
   });
 
-  it("renders thinking between tool calls as its own disclosure inside the process region", () => {
+  it("renders thinking between tool calls as its own disclosure inside the process region", async () => {
     const content = [
       tool("Searching the web", "rust async runtime"),
       "<think>I should verify this on the official site.</think>",
       tool("Reading a web page", "rust-lang.org"),
       "\n\nFinal answer.",
     ].join("");
-    const { container, queryByText } = render(
+    const { container, findByText } = render(
       <MessageBubble message={assistantMsg(content)} />,
     );
+    await flushLazy();
 
     // Exactly ONE process summary for the whole turn — thinking never creates
     // a second outer container.
     expect(container.querySelectorAll(".chat-process-toggle").length).toBe(1);
     // Trailing answer still renders outside the group.
-    expect(queryByText(/Final answer/)).not.toBeNull();
+    expect(await findByText(/Final answer/)).not.toBeNull();
 
     // Expanding the process row reveals the thinking disclosure and BOTH tool
     // steps (the think splits the run into two activity groups).

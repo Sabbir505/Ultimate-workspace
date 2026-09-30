@@ -5,8 +5,10 @@
 // feedback (the text goes back to the model so it can revise). Execution
 // steps come separately, after approval, via the model's todo_write calls.
 import { useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+// GFM must load through the lazy module, not here: a static `remark-gfm`
+// import hoists the whole mdast/micromark GFM family into the ENTRY chunk,
+// because this card renders in the always-mounted chat surface.
+import { GfmMarkdown } from "../common/LazyMarkdown";
 import type { PendingPlanProposal } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { mdLinkComponents } from "./MdLink";
@@ -61,9 +63,9 @@ export function PlanProposalCard({
         will be tracked in Progress.
       </div>
       <div className="plan-proposal-body">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
+        <GfmMarkdown components={mdLinkComponents}>
           {proposal.plan}
-        </ReactMarkdown>
+        </GfmMarkdown>
       </div>
       {feedbackOpen && (
         <textarea

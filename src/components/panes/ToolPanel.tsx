@@ -13,7 +13,7 @@
 // left-edge drag handle doubles as the chat|panel splitter (same pattern as
 // DevDiffPanel's resize handle), with the width persisted in the ui store.
 import { lazy, useState, Suspense, useCallback, useEffect, useMemo, useRef, memo } from "react";
-import ReactMarkdown from "react-markdown";
+import { LazyReactMarkdown } from "../common/LazyMarkdown";
 import remarkGfm from "remark-gfm";
 import { Globe, Terminal, FileDiff, GitPullRequest, Bot, FileCode, NotebookText, GitBranch } from "lucide-react";
 import { openBrowserPane, openShellTerminal, restoreMinimizedBrowser } from "../../lib/sessionLauncher";
@@ -109,9 +109,9 @@ const PlanCanvas = memo(function PlanCanvas({
         </button>
       </div>
       <div className="canvas-plan-body">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
+        <LazyReactMarkdown remarkPlugins={[remarkGfm]} components={mdLinkComponents}>
           {content}
-        </ReactMarkdown>
+        </LazyReactMarkdown>
       </div>
     </div>
   );

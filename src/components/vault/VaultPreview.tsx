@@ -11,7 +11,7 @@
 
 import { cloneElement, isValidElement, memo, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import { LazyReactMarkdown, defaultUrlTransform } from "../common/LazyMarkdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import remarkMath from "remark-math";
@@ -435,7 +435,7 @@ const Md = memo(function Md({
   const openNote = useVaultStore((s) => s.openNote);
   const transformed = useMemo(() => wikilinksToMarkdown(text), [text]);
   return (
-    <ReactMarkdown
+    <LazyReactMarkdown
       remarkPlugins={[remarkVaultHighlight, remarkGfm, remarkBreaks, remarkMath]}
       rehypePlugins={[[rehypeKatex, { throwOnError: false }], rehypeTaskCheckboxPositions]}
       urlTransform={(url) => {
@@ -651,7 +651,7 @@ const Md = memo(function Md({
       }}
     >
       {transformed}
-    </ReactMarkdown>
+    </LazyReactMarkdown>
   );
 });
 

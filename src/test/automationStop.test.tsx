@@ -2,7 +2,7 @@
 // time ticking from started_at (not "—" until it ends) and offer Stop in both
 // the table row and (via the store) the controls row; a stopped run records
 // the neutral "stopped" status — never rendered as a failure.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const stopAutomationRunMock = vi.fn();
@@ -36,6 +36,19 @@ const run = (over: Partial<Record<string, unknown>> = {}) => ({
   chatSessionId: "c1",
   source: "manual",
   ...over,
+});
+
+// The run table is windowed with @tanstack/react-virtual, which sizes its
+// viewport from the scroll element's offsetWidth/offsetHeight. jsdom leaves
+// both at 0, so the virtualizer would compute a zero-height viewport and
+// render no rows at all. Give it a plausible viewport for this file.
+beforeAll(() => {
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(400);
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(900);
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });
 
 beforeEach(() => {
@@ -168,5 +181,35 @@ describe("automations store stopRun", () => {
     await useAutomationsStore.getState().stopRun("a1");
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
     expect(toastErrorMock.mock.calls[0][0]).toBe("Couldn't stop the run");
+  });
+});
+
+describe("AutomationRunTable virtualization", () => {
+  it("windows a long run log instead of mounting every row", () => {
+    // 500 runs is a normal history for an hourly automation. The point of the
+    // virtualizer is that the DOM holds a window, not all 500 rows — and that
+    // the count in the heading still reports the truth.
+    const many = Array.from({ length: 500 }, (_, i) =>
+      run({
+        id: `r${i}`,
+        startedAt: nowSec - i * 3600,
+        finishedAt: nowSec - i * 3600 + 30,
+        status: "ok",
+        summary: `run ${i}`,
+      }),
+    );
+    const { container } = render(
+      <AutomationRunTable runs={many} loading={false} onOpenRunLog={() => {}} />,
+    );
+
+    const rows = container.querySelectorAll('[role="row"]');
+    // One header row plus a bounded window — never the full 500.
+    expect(rows.length).toBeGreaterThan(1);
+    expect(rows.length).toBeLessThan(80);
+    // The row group still reserves the full scroll height.
+    const group = container.querySelector('[role="rowgroup"]:last-of-type') as HTMLElement;
+    expect(group.style.height).toBe(`${500 * 34}px`);
+    // …and the header reports the true total, not the window size.
+    expect(container.textContent).toContain("(500)");
   });
 });

@@ -10,11 +10,10 @@
 // StepCodeHighlighter below. That moves it out of the initial bundle.
 import { Fragment, createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Pencil } from "lucide-react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkBreaks from "remark-breaks";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
+// The markdown parser, the remark/rehype plugins and the KaTeX stylesheet all
+// live with ActivitySteps, which owns the <Markdown> renderer. Importing them
+// here as well pinned ~700 KB of pipeline in the ENTRY chunk; this component
+// only re-exports ThinkingBlock.
 import "katex/dist/katex.min.css";
 // PERF rec #3 (2026-09-06): this chunk imports katex.min.css — math can
 // only render inside MessageBubble, so the stylesheet (and the fonts it

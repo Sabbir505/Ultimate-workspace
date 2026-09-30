@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 import { MessageBubble } from "../components/chat/MessageBubble";
 import type { ChatMessage } from "../lib/ipc";
+import { flushLazy } from "./flushLazy";
 
 afterEach(() => cleanup());
 
@@ -68,7 +69,7 @@ describe("streaming caret gate", () => {
     expect(bubbleOf(container).classList.contains("streaming")).toBe(false);
   });
 
-  it("keeps the caret target anchored to the last rendered markdown block", () => {
+  it("keeps the caret target anchored to the last rendered markdown block", async () => {
     // The CSS is `… > .chat-markdown:last-child`, so the markdown container
     // must be a DIRECT child of .chat-bubble-inner with no wrapper div in
     // between — otherwise the selector silently matches nothing and the caret
@@ -77,11 +78,17 @@ describe("streaming caret gate", () => {
       <MessageBubble message={msg("assistant", "first para\n\nsecond para")} chatSessionId="s1" live />,
     );
     const inner = container.querySelector(".chat-bubble-inner") as HTMLElement;
+    // The .chat-markdown container itself mounts synchronously — only the
+    // parsed blocks inside it wait on the lazy chunk.
     const md = inner.querySelector(":scope > .chat-markdown");
     expect(md).not.toBeNull();
     const lastEl = inner.lastElementChild as HTMLElement;
     expect(lastEl.classList.contains("chat-markdown")).toBe(true);
     // …and it has block children for the ::after to attach to.
-    expect(md!.lastElementChild).not.toBeNull();
+    await flushLazy();
+    // Re-query: the flush commits a re-render, and React may hand back a
+    // replacement node for the wrapper.
+    const mdLive = inner.querySelector(":scope > .chat-markdown");
+    expect(mdLive!.lastElementChild).not.toBeNull();
   });
 });

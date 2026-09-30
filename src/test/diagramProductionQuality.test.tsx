@@ -265,11 +265,12 @@ describe("ArtifactExportMenu options", () => {
         <ArtifactExportMenu preview={base} path={base.path} filename={base.filename} variant="kebab" />,
       );
       fireEvent.click(container.querySelector(".artifact-kebab-btn")!);
-      // Turn on transparent, then export SVG.
+      // Turn on transparent, then export SVG (the SVG button in the
+      // one-line format row).
       fireEvent.click(container.querySelector('button[role="menuitemcheckbox"]')!);
       fireEvent.click(
-        [...container.querySelectorAll(".artifact-kebab-item")].find((el) =>
-          el.textContent!.includes("Download as SVG"),
+        [...container.querySelectorAll(".artifact-kebab-format-btn")].find((el) =>
+          el.textContent!.includes("SVG"),
         )!,
       );
 

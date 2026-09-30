@@ -547,6 +547,30 @@ function DownloadIcon() {
   );
 }
 
+/** "Open in the OS default app" — an arrow leaving a box. Sits beside the
+ *  Download action as a labelled button: the header used to carry a bare "↗"
+ *  glyph that read as "open the preview" and gave no hint that it hands the
+ *  file to the system, so the capability was effectively invisible. */
+function ExternalAppIcon() {
+  return (
+    <svg
+      width={15}
+      height={15}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="10" y1="14" x2="21" y2="3" />
+    </svg>
+  );
+}
+
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 3;
 const ZOOM_STEP = 0.1;
@@ -936,12 +960,12 @@ export function ArtifactPreviewPaneInner({
             )}
             <button
               type="button"
-              className="artifact-preview-header-btn"
-              title="Open in default app"
-              aria-label="Open in default app"
+              className="artifact-preview-open-app-btn"
+              title="Open in your system's default app"
               onClick={() => void openArtifact(artifact.path)}
             >
-              ↗
+              <ExternalAppIcon />
+              <span>Open</span>
             </button>
             <button
               type="button"

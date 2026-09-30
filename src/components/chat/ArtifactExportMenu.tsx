@@ -407,6 +407,11 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
   const [scale, setScale] = useState<ExportScale>(DEFAULT_EXPORT_SCALE);
   const [transparent, setTransparent] = useState(false);
   const kebabRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  // Whether the popup opens downward (default) or flips above the button. The
+  // kebab is pinned to the TOP of a diagram card, so a card low in the chat
+  // left no room below and the menu ran off the bottom of the window.
+  const [dropUp, setDropUp] = useState(false);
   // Fallback background for diagrams that don't declare their own (see Props).
   const fallbackBg = exportBg ?? EXPORT_BG;
 
@@ -419,6 +424,31 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
+  }, [menuOpen]);
+
+  // Measure once on open: flip the popup above the button when the space below
+  // can't hold it and the space above can. Runs after paint so the menu has
+  // its real height, and re-runs on scroll/resize so a chat scroll while the
+  // menu is open re-evaluates which side has room.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const decide = () => {
+      const anchor = kebabRef.current?.getBoundingClientRect();
+      const menu = menuRef.current?.getBoundingClientRect();
+      if (!anchor || !menu) return;
+      const below = window.innerHeight - anchor.bottom;
+      const above = anchor.top;
+      setDropUp(menu.height > below && above > below);
+    };
+    decide();
+    const frame = requestAnimationFrame(decide);
+    window.addEventListener("scroll", decide, true);
+    window.addEventListener("resize", decide);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", decide, true);
+      window.removeEventListener("resize", decide);
+    };
   }, [menuOpen]);
 
   if (!supportsRasterExport(preview.kind)) return null;
@@ -576,34 +606,45 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
           <KebabIcon />
         </button>
         {menuOpen && (
-          <div className="artifact-kebab-menu" role="menu">
-            <button
-              type="button"
-              role="menuitem"
-              className="artifact-kebab-item"
-              disabled={busy !== null}
-              onClick={() => runAndClose(handleDownloadPng)}
-            >
-              Download as PNG
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="artifact-kebab-item"
-              disabled={busy !== null}
-              onClick={() => runAndClose(handleDownloadJpg)}
-            >
-              Download as JPG
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="artifact-kebab-item"
-              disabled={svgDisabled || busy !== null}
-              onClick={() => runAndClose(handleDownloadSvg)}
-            >
-              Download as SVG
-            </button>
+          <div
+            ref={menuRef}
+            className={`artifact-kebab-menu${dropUp ? " drop-up" : ""}`}
+            role="menu"
+          >
+            {/* The three formats are one action on three targets, so they read
+                as a single segmented row instead of three near-identical
+                lines. As separate rows the menu was 311px tall — taller than
+                the diagram card it hangs off, and taller than the space left
+                below it near the bottom of the chat. */}
+            <div className="artifact-kebab-format-row" role="group" aria-label="Download as">
+              <button
+                type="button"
+                className="artifact-kebab-format-btn"
+                disabled={svgDisabled || busy !== null}
+                title={svgTooltip}
+                onClick={() => runAndClose(handleDownloadSvg)}
+              >
+                SVG
+              </button>
+              <button
+                type="button"
+                className="artifact-kebab-format-btn"
+                disabled={busy !== null}
+                title={`Download as PNG (${scale}×)`}
+                onClick={() => runAndClose(handleDownloadPng)}
+              >
+                PNG
+              </button>
+              <button
+                type="button"
+                className="artifact-kebab-format-btn"
+                disabled={busy !== null}
+                title="Download as JPG"
+                onClick={() => runAndClose(handleDownloadJpg)}
+              >
+                JPG
+              </button>
+            </div>
             <button
               type="button"
               role="menuitem"
@@ -616,6 +657,9 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
             {isHtmlDiagram && (
               <>
                 <div className="artifact-kebab-divider" role="separator" />
+                {/* Label on its own line, control full-width beneath it: side
+                    by side, the label and the four scale chips fought over
+                    the menu's 176px and the label wrapped. */}
                 <div className="artifact-kebab-option-row" role="group" aria-label="PNG export scale">
                   <span className="artifact-kebab-option-label">PNG scale</span>
                   <div className="artifact-kebab-scale-seg">

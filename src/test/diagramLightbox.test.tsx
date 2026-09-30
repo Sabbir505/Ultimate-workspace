@@ -79,6 +79,46 @@ describe("DiagramLightbox", () => {
     expect(document.body.querySelector(".diagram-lightbox-stage")).toBeNull();
   });
 
+  it("clamps the pan to the visible card, so a drag can reach the screen edge", () => {
+    // The HTML path draws the artifact on a card NARROWER than the stage it
+    // sits on. Clamping against the stage stopped the drag hundreds of pixels
+    // short of the right edge — the "invisible border I can't drag past"
+    // report. jsdom lays nothing out, so the boxes are stubbed: a 400px card
+    // centred in a 1000px viewport.
+    render(
+      <DiagramLightbox html="<!doctype html><html><body><div>hi</div></body></html>" filename="page.html" onClose={() => {}} />,
+    );
+    const root = document.body.querySelector<HTMLElement>(".diagram-lightbox")!;
+    const stage = document.body.querySelector<HTMLElement>(".diagram-lightbox-content")!;
+    const card = document.body.querySelector<HTMLElement>(".diagram-lightbox-doc")!;
+    vi.spyOn(root, "getBoundingClientRect").mockReturnValue({
+      left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800, x: 0, y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+    const box = (el: HTMLElement, w: number, h: number, left: number, top: number) => {
+      Object.defineProperty(el, "offsetWidth", { configurable: true, value: w });
+      Object.defineProperty(el, "offsetHeight", { configurable: true, value: h });
+      Object.defineProperty(el, "offsetLeft", { configurable: true, value: left });
+      Object.defineProperty(el, "offsetTop", { configurable: true, value: top });
+    };
+    box(stage, 1000, 800, 0, 0);
+    box(card, 400, 200, 300, 300);
+
+    // Wheel-zoom anchored on a cursor far to the RIGHT: the content is pushed
+    // right, and the clamp decides how far. (The wheel listener is a native
+    // non-passive one; the component's pointer handlers are React synthetic
+    // events that jsdom doesn't route into a portal.)
+    fireEvent.wheel(stage, { deltaY: -100, clientX: 5000, clientY: 400 });
+
+    // Card-based clamp: the card's right edge may reach x=1000, so at 1.15×
+    // its centre travels to 770 from 500 → -270px. A stage-based clamp sizes
+    // the content at the full 1000px stage, where the "cover" interval
+    // collapses to the centre and yields 0px — the drag dead zone.
+    const transform = stage.style.transform;
+    const panX = Number(/translate\(([-\d.]+)px/.exec(transform)?.[1] ?? "NaN");
+    expect(panX).toBe(-270);
+  });
+
   it("injects a viewBox into svg files that lack one so the full drawing stays reachable", () => {
     // A root svg without a viewBox crops its drawing to the svg viewport
     // (the paper) — only the top-left slice renders, and no amount of
@@ -139,8 +179,16 @@ describe("MermaidDiagram render fallback", () => {
     expect(kebabBtn).not.toBeNull();
     fireEvent.click(kebabBtn!);
     const menu = container.querySelector(".chat-mermaid-block .artifact-kebab-menu");
-    expect(menu?.textContent).toContain("Download as PNG");
-    expect(menu?.textContent).toContain("Download as JPG");
+    // The three formats share ONE row (they are one action on three
+    // targets); as three separate lines the menu outgrew the card it hangs
+    // off and ran off the bottom of the window.
+    const formatRow = menu?.querySelector(".artifact-kebab-format-row");
+    expect(formatRow).not.toBeNull();
+    expect(
+      [...(formatRow?.querySelectorAll(".artifact-kebab-format-btn") ?? [])].map((b) =>
+        b.textContent?.trim(),
+      ),
+    ).toEqual(["SVG", "PNG", "JPG"]);
     expect(menu?.textContent).toContain("Open in tab");
   });
 });

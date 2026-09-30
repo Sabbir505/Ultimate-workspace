@@ -120,6 +120,7 @@ mod git_watcher;
 mod harness_adapters;
 mod harness_bundle;
 mod harness_config;
+mod harness_subagent_watch;
 mod hooks;
 mod improve_engine;
 mod installed_skills;
@@ -400,6 +401,23 @@ pub fn run() {
                     // watcher — same reasons.
                     automation_triggers::sync_fs_watchers(&app_handle, &db_state.0);
                 });
+            }
+            // CLI harnesses' native subagent stores (`~/.claude/agents/*.md`):
+            // watch the user-level dirs, then start reacting to the change
+            // events so an agent a harness authors — or a prompt a human edits
+            // in a terminal — reaches the registry without the user opening
+            // the Subagents panel. Same deferred slot as the git watcher: the
+            // event bus needs the window up before anything listens.
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn({
+                    let app_handle = app_handle.clone();
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        harness_subagent_watch::install_store_watchers(&app_handle);
+                    }
+                });
+                harness_subagent_watch::listen(&app_handle);
             }
             // STT auto-start (Settings → Knowledge opt-in): same deferred
             // pattern — the sidecar spawns once the managed states exist.
@@ -722,6 +740,9 @@ pub fn run() {
             commands::subagent_cmds::run_subagent,
             commands::subagent_cmds::export_subagents,
             commands::subagent_cmds::import_subagent,
+            commands::subagent_cmds::import_harness_subagent,
+            commands::subagent_cmds::sync_harness_subagents,
+            commands::subagent_cmds::unlink_native_subagent,
             commands::subagent_cmds::list_subagent_runs,
             // artifact generation (conversational creation)
             commands::artifact_cmds::generate_artifact_cmd,

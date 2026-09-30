@@ -1804,6 +1804,55 @@ fn message_session_parameters() -> Value {
     })
 }
 
+/// The `agent` parameter's description, rebuilt per spec-build so it carries
+/// the LIVE registry vocabulary. `agent` has to stay a free-form string (a
+/// bare value is an engine id, an `agent:`-prefixed one is a subagent), so it
+/// cannot use the hard `enum` the `Task` `subagent_type` param gets — the
+/// names go in the prose instead, which is the only place both halves of the
+/// dual meaning can be stated together.
+///
+/// The list is capped (same fat-list concern as [`subagent_type_values`]): past
+/// a dozen agents `list_subagents` is the better answer anyway, and inlining
+/// every name would grow this description with the registry until it dominated
+/// the request.
+///
+/// Two claims this description deliberately makes, because the runtime does
+/// them:
+/// * the unknown-name behavior — the spawn SUCCEEDS on the parent's engine and
+///   says so in its reply, so a model that guesses wrong would otherwise read
+///   it as a subagent having run;
+/// * what a definition actually transfers. The prompt and the sandbox/approval
+///   scope do; the tool allowlist does NOT, because a mesh spawn is a NORMAL
+///   chat session and runs the engine's own toolset. The old text promised all
+///   three, which was a false promise about sandboxing.
+fn spawn_agent_description() -> String {
+    const INLINE_LIMIT: usize = 12;
+    let names = crate::chat::subagents::cached_agent_names();
+    let vocabulary = match names.len() {
+        0 => "No user agents yet — call `list_subagents` to confirm.".to_string(),
+        n if n <= INLINE_LIMIT => format!(
+            "Passable now: {}. `list_subagents` has their prompts.",
+            names
+                .iter()
+                .map(|n| format!("{n:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        n => format!(
+            "{n} agents are defined — call `list_subagents` for their names rather \
+             than guessing one."
+        ),
+    };
+    format!(
+        "Engine for the new session: \"claude_code\", \"opencode\", \"builtin\", \
+         \"local\" (defaults to yours). An \"agent:<id-or-name>\" value instead \
+         spawns a SUBAGENT — its prompt, permission scope and engine/model apply, \
+         but its tool allowlist does not (the child is a normal chat on the \
+         engine's own tools). An unknown name does not fail: the spawn runs on \
+         your engine and says so. {vocabulary}"
+    )
+}
+
 fn spawn_session_parameters() -> Value {
     json!({
         "type": "object",
@@ -1823,7 +1872,7 @@ fn spawn_session_parameters() -> Value {
             },
             "agent": {
                 "type": "string",
-                "description": "Engine for the new session, e.g. \"claude_code\",                     \"opencode\", \"builtin\", \"local\" (defaults to yours). An                     \"agent:<id-or-name>\" value instead spawns a SUBAGENT agent — a                     user-defined subagent whose prompt, tool allowlist and permission                     scope apply to the child."
+                "description": spawn_agent_description(),
             },
             "model": {
                 "type": "string",
@@ -1878,7 +1927,8 @@ fn create_automation_parameters() -> Value {
                 "enum": AUTOMATION_AGENTS,
                 "description": "Agent engine. Default claude_code. An \
                     \"agent:<id-or-name>\" value instead runs a SUBAGENT agent \
-                    (a user-defined subagent — get_capabilities lists them) \
+                    (a user-defined subagent — `list_subagents` is the \
+                    authority, `get_capabilities` indexes their names) \
                     with that definition's engine, model and permission scope.",
             },
             "enabled": {

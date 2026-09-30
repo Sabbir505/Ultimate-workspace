@@ -51,6 +51,16 @@ export interface Subagent {
    *  created it via the subagent chat tool (badged so the user can always see
    *  what their agents made). */
   origin?: string | null;
+  /** The native `.md` this row was imported from, when it came from a CLI
+   *  harness's own store (`~/.claude/agents/doc-writer.md`). null for builtin,
+   *  hand-made and `.md`-imported rows.
+   *
+   *  A non-null value means the row FOLLOWS that file: the backend re-syncs the
+   *  file's name/description/prompt/allowlist/model onto it when the file
+   *  changes, and badges it when the file disappears. The editor never writes
+   *  it — saving an agent keeps the link.
+   */
+  sourcePath?: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -159,6 +169,11 @@ function normalizeSubagent(row: SubagentRow): Subagent {
     maxRounds: intOr(row.maxRounds, 100),
     maxConcurrent: intOr(row.maxConcurrent, 2),
     builtin: row.builtin === true,
+    origin: row.origin ?? null,
+    // Coerce a blank path to null: it is the "not linked" state, and a link to
+    // "" would show the "linked to file" badge with nothing to point at. The
+    // Rust mapper does the same, so the two agree on every row.
+    sourcePath: strOr(row.sourcePath, "") || null,
     createdAt: intOr(row.createdAt, 0),
     updatedAt: intOr(row.updatedAt, 0),
   };
@@ -281,6 +296,83 @@ export const listSubagentRuns = async (
   });
   return (rows ?? []).map(normalizeRun);
 };
+
+// ---------------------------------------------------------------------------
+// Native harness stores (`~/.claude/agents/*.md` and friends).
+//
+// An import here is a LINK, not a copy: the backend stores the file's path on
+// the row and re-syncs the file's identity/prompt/allowlist/model onto it when
+// the file changes. That is what makes an agent a harness authored show up in
+// the registry AND stay correct after someone edits its markdown.
+
+/**
+ * Import (or re-import) ONE native file. Idempotent: the first call creates a
+ * row linked to `sourcePath`, later calls refresh that same row in place.
+ *
+ * The backend re-reads the file itself rather than trusting a client payload,
+ * so a file that changed between listing and importing still lands with its
+ * current content. `projectRoot` adds the project's own store to the walk
+ * (omit it and only `~/`-level stores are searched).
+ */
+export const importHarnessSubagent = async (
+  harnessId: string,
+  sourcePath: string,
+  projectRoot?: string | null,
+): Promise<Subagent | null> => {
+  const row = await safeInvoke<SubagentRow | null>("import_harness_subagent", {
+    harnessId,
+    sourcePath,
+    projectRoot: projectRoot ?? null,
+  });
+  return row ? normalizeSubagent(row) : null;
+};
+
+/** What a bulk native-store sync did, per file. Returned so the card can say
+ *  what happened instead of leaving the user to infer it from a list changing. */
+export interface NativeSyncReport {
+  /** Rows created from files that had no link yet. */
+  created: string[];
+  /** Rows refreshed because their file's fields changed. */
+  updated: string[];
+  /** Files that already matched their row. */
+  unchanged: string[];
+  /** Linked rows whose `.md` is gone. The rows are kept (they may have run
+   *  history) and badged in the panel; this is the list behind that badge. */
+  missing: string[];
+}
+
+/**
+ * Reconcile the registry with every harness's native store: import what isn't
+ * linked yet, refresh what is. This is the bulk, single-click counterpart to
+ * `importHarnessSubagent` — the user has said "bring these in", so unlike the
+ * filesystem watcher (which only refreshes rows already linked) this one
+ * creates rows.
+ *
+ * `harnessIds` narrows the sweep; omit it for all five stores that have one.
+ */
+export const syncHarnessSubagents = async (
+  harnessIds?: string[] | null,
+  projectRoot?: string | null,
+): Promise<NativeSyncReport> => {
+  const report = await safeInvoke<NativeSyncReport | null>("sync_harness_subagents", {
+    harnessIds: harnessIds ?? null,
+    projectRoot: projectRoot ?? null,
+  });
+  return {
+    created: report?.created ?? [],
+    updated: report?.updated ?? [],
+    unchanged: report?.unchanged ?? [],
+    missing: report?.missing ?? [],
+  };
+};
+
+/**
+ * Stop a row from following its `.md` — "make this mine". The definition keeps
+ * everything it has; it just stops being refreshed from the file, so a later
+ * sync of that file imports a separate agent instead of overwriting this one.
+ */
+export const unlinkNativeSubagent = (agentId: string) =>
+  safeInvoke<void>("unlink_native_subagent", { agentId });
 
 // ---------------------------------------------------------------------------
 // Enforcement tiers (research doc §C.1) — one engine, three tiers, shown in

@@ -13,6 +13,8 @@ import {
   listSubagents,
   listSubagentRuns,
   runSubagent,
+  syncHarnessSubagents,
+  unlinkNativeSubagent,
   updateSubagent,
   type Subagent,
   type SubagentInput,
@@ -37,6 +39,11 @@ interface SubagentState {
   /** True once `loadRuns` has run at least once — the runs list's own
    *  "loading" gate, so an empty result is distinguishable from "not asked". */
   runsLoaded: boolean;
+  /** Names of linked rows whose native `.md` has disappeared, as last reported
+   *  by a sync. Drives the "source file missing" badge. Empty until a sync has
+   *  run — the badge is informational, never a gate, so an unrefreshed set
+   *  costs nothing. */
+  missingNative: string[];
 
   load: () => Promise<void>;
   create: (input: SubagentInput) => Promise<Subagent | null>;
@@ -61,6 +68,14 @@ interface SubagentState {
   /** Adopt one run (spawned event, or a later history list). Keyed by run id
    *  so a duplicate event is idempotent. */
   ingestRun: (run: SubagentRun) => void;
+  /** Reconcile the registry with every CLI harness's native `.md` store:
+   *  import what isn't linked, refresh what is, and record which linked rows
+   *  lost their file. The bulk, user-initiated half — the filesystem watcher
+   *  only ever refreshes rows that were already imported. */
+  syncNative: (harnessIds?: string[] | null, projectRoot?: string | null) => Promise<void>;
+  /** Stop a row from following its native `.md`. The row is kept; it just stops
+   *  being overwritten by the next sync of that file. */
+  unlinkNative: (id: string) => Promise<void>;
   clearError: () => void;
 }
 
@@ -90,6 +105,7 @@ export const useSubagentStore = create<SubagentState>((set, get) => {
     busy: {},
     runs: {},
     runsLoaded: false,
+    missingNative: [],
 
     load: async () => {
       try {
@@ -151,6 +167,31 @@ export const useSubagentStore = create<SubagentState>((set, get) => {
     },
 
     ingestRun: (run) => set((s) => ({ runs: { ...s.runs, [run.id]: run } })),
+
+    syncNative: async (harnessIds, projectRoot) => {
+      // Not wrapped in `withBusy`: the button that calls this owns its own
+      // spinner, and a native sync can touch many rows at once, so hanging one
+      // shared busy key off it would light up unrelated per-row controls.
+      try {
+        const report = await syncHarnessSubagents(harnessIds, projectRoot);
+        set({ missingNative: report.missing, error: null });
+        // Refetch rather than trusting the report's names: the backend
+        // de-collides and slugs, so the rows it actually stored are the truth
+        // the panel should render.
+        await get().load();
+      } catch (err) {
+        set({ error: `Couldn't sync the harness stores: ${errText(err)}` });
+      }
+    },
+
+    unlinkNative: async (id) => {
+      try {
+        await unlinkNativeSubagent(id);
+        await get().load();
+      } catch (err) {
+        set({ error: `Couldn't unlink the agent: ${errText(err)}` });
+      }
+    },
 
     clearError: () => set({ error: null }),
 

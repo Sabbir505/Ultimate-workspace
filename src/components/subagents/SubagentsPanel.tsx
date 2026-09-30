@@ -26,6 +26,8 @@ import {
   Bell,
   Bot,
   Eye,
+  FileWarning,
+  Link2,
   Pencil,
   Play,
   Plus,
@@ -33,6 +35,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Unlink,
   Users,
   Wrench,
 } from "lucide-react";
@@ -210,14 +213,19 @@ function ToolChip({
 function AgentRow({
   agent,
   busy,
+  missingSource,
   onEdit,
   onDelete,
+  onUnlink,
   onRun,
 }: {
   agent: Subagent;
   busy: boolean;
+  /** The row is linked to a native `.md` that no longer exists on disk. */
+  missingSource: boolean;
   onEdit: () => void;
   onDelete: () => void;
+  onUnlink?: (agent: Subagent) => void;
   onRun?: (agent: Subagent) => void;
 }) {
   const tier = subagentEngineTier(agent.engine);
@@ -251,6 +259,27 @@ function AgentRow({
             >
               <Sparkles size={11} strokeWidth={1.8} aria-hidden="true" />
               made by agent
+            </span>
+          )}
+          {/* A linked row is not a snapshot: it follows its `.md`. The badge
+              says so, because a user who edits the file in a terminal and then
+              edits the row here needs to know which one wins. */}
+          {agent.sourcePath && !missingSource && (
+            <span
+              className="subagent-meta-chip"
+              title={`This agent follows ${agent.sourcePath} — edits to that file are applied here automatically`}
+            >
+              <Link2 size={11} strokeWidth={1.8} aria-hidden="true" />
+              linked to file
+            </span>
+          )}
+          {missingSource && (
+            <span
+              className="subagent-meta-chip warn"
+              title={`${agent.sourcePath} is gone. The agent is kept (it may have run history) and stops updating until the file comes back — unlink it to keep this version permanently.`}
+            >
+              <FileWarning size={11} strokeWidth={1.8} aria-hidden="true" />
+              source file missing
             </span>
           )}
           <span className="subagent-meta-chip" title="Tool allowlist">
@@ -298,6 +327,20 @@ function AgentRow({
       >
         <Pencil size={16} />
       </button>
+      {/* Unlink is only offered for a row that actually follows a file, and it
+          keeps the definition — this is "make this mine", not a delete. */}
+      {agent.sourcePath && onUnlink && (
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => onUnlink(agent)}
+          disabled={busy}
+          title="Stop following the harness's file — keep this version permanently"
+          aria-label={`Unlink ${agent.name} from its source file`}
+        >
+          <Unlink size={16} />
+        </button>
+      )}
       <button
         type="button"
         className="ghost subagent-danger"
@@ -322,6 +365,11 @@ export function SubagentsPanel({ onRun }: { onRun?: (agent: Subagent) => void } 
   const create = useSubagentStore((s) => s.create);
   const update = useSubagentStore((s) => s.update);
   const remove = useSubagentStore((s) => s.remove);
+  const unlinkNative = useSubagentStore((s) => s.unlinkNative);
+  /** Rows whose native `.md` is gone. Empty until a sync has reported, which
+   *  is fine: the badge is informational and an unrefreshed set shows nothing
+   *  rather than showing something stale. */
+  const missingNative = useSubagentStore((s) => s.missingNative);
 
   /** id of the row being edited; null + an open editor = the create form. */
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -714,8 +762,10 @@ export function SubagentsPanel({ onRun }: { onRun?: (agent: Subagent) => void } 
               key={a.id}
               agent={a}
               busy={busy[a.id] === true}
+              missingSource={missingNative.includes(a.name)}
               onEdit={() => openEdit(a)}
               onDelete={() => void remove(a.id)}
+              onUnlink={() => void unlinkNative(a.id)}
               onRun={onRun}
             />
           ))}

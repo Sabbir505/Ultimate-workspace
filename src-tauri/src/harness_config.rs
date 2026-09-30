@@ -23,6 +23,8 @@
 //! markdown definitions under `~/.claude/agents` etc.) — see the "Native
 //! subagents" section below.
 
+use std::path::Path;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -698,6 +700,51 @@ pub struct HarnessSubagentInfo {
     /// verbatim as the registry row's promptMd. Rides the listing instead of
     /// a second read because the file can change between listing and import.
     pub prompt_md: String,
+}
+
+/// The harnesses that HAVE a native subagent store, in a stable order. The
+/// authority both the "sync every store" command and the filesystem watcher
+/// walk, so adding a sixth store is a one-line change here rather than a
+/// duplicated list in three places.
+///
+/// `pi` is deliberately absent: it has no native subagent concept, and
+/// `harness_subagent_dirs` returns nothing for it anyway — listing it would
+/// render a permanently empty block.
+pub const NATIVE_SUBAGENT_HARNESSES: [&str; 5] = [
+    "claude_code",
+    "opencode",
+    "kimi_code",
+    "omp",
+    "commandcode",
+];
+
+/// Re-read ONE native store file — what the sync path calls when it already
+/// knows which path a linked row points at (a watcher firing on
+/// `~/.claude/agents/doc-writer.md` re-syncs that row without re-walking the
+/// whole store).
+///
+/// Shares the tolerant reader with the listing, so a file that stopped parsing
+/// (frontmatter trimmed) returns `None` and the caller leaves the row alone
+/// rather than blanking an agent's prompt.
+pub fn native_subagent_at(path: &Path) -> Option<HarnessSubagentInfo> {
+    if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    parse_native_subagent_md(&text, stem, &path.to_string_lossy())
+}
+
+/// Every native store directory that currently EXISTS, for the watcher. A
+/// store the user hasn't created yet simply has nothing to watch; the watcher
+/// re-collects on every listing call, so a store that appears later gets picked
+/// up without a restart.
+pub fn existing_native_store_dirs() -> Vec<std::path::PathBuf> {
+    NATIVE_SUBAGENT_HARNESSES
+        .iter()
+        .flat_map(|id| harness_subagent_dirs(id, None))
+        .filter(|d| d.is_dir())
+        .collect()
 }
 
 /// Store directories for a harness id: user-level always, project-level when

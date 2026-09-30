@@ -64,6 +64,18 @@ pub struct Subagent {
     /// badges it so the user can always see what their agents made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// The native `.md` this row was imported from, when it came from a CLI
+    /// harness's own store (`~/.claude/agents/doc-writer.md`). NULL for
+    /// builtin, hand-made and `.md`-imported rows.
+    ///
+    /// The link is what makes the native-store import an upsert rather than a
+    /// copy: the sync resolves a file to its row by this path, so editing the
+    /// file updates the definition in place instead of producing a second
+    /// `-2` agent. The editor never writes it — `update_subagent` doesn't name
+    /// the column, so saving a linked agent from the panel keeps the link
+    /// without the form having to know it exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -148,6 +160,10 @@ fn map_subagent(row: &Row) -> rusqlite::Result<Subagent> {
         max_concurrent: row.get("max_concurrent").unwrap_or(DEFAULT_MAX_CONCURRENT),
         builtin: row.get::<_, i64>("builtin").unwrap_or(0) != 0,
         origin: row.get::<_, Option<String>>("origin").unwrap_or(None),
+        source_path: row
+            .get::<_, Option<String>>("source_path")
+            .unwrap_or(None)
+            .filter(|s| !s.is_empty()),
         created_at,
         updated_at: row.get("updated_at").unwrap_or(created_at),
     })
@@ -155,7 +171,7 @@ fn map_subagent(row: &Row) -> rusqlite::Result<Subagent> {
 
 const COLUMNS: &str = "id, name, description, prompt_md, tools, engine, model, effort, \
      sandbox_policy, approval_policy, worktree_policy, max_rounds, max_concurrent, builtin, \
-     origin, created_at, updated_at";
+     origin, source_path, created_at, updated_at";
 
 /// Mark who authored a definition: NULL = the user (Subagent panel), "agent" = a
 /// model created it through the subagent chat tool. Display-only — the Subagent panel
@@ -170,6 +186,48 @@ pub fn set_subagent_origin(
         rusqlite::params![agent_id, origin],
     )?;
     Ok(())
+}
+
+/// Point a row at the native `.md` it was imported from — the upsert key for
+/// the CLI-harness store sync. Setting the same path on a different row is
+/// refused by the unique index, which is the point: one file, one row.
+pub fn set_subagent_source_path(
+    conn: &Connection,
+    agent_id: &str,
+    source_path: &str,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE subagents SET source_path = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![agent_id, source_path, now_ts()],
+    )?;
+    Ok(())
+}
+
+/// The row a native `.md` is already linked to, if any. NOCASE to match the
+/// unique index: on Windows and macOS `Doc.md` and `doc.md` are one file, and
+/// a case-sensitive match here would let the sync create a duplicate row for a
+/// file it already owns.
+pub fn find_subagent_by_source_path(
+    conn: &Connection,
+    source_path: &str,
+) -> DbResult<Option<Subagent>> {
+    conn.query_row(
+        &format!("SELECT {COLUMNS} FROM subagents WHERE source_path = ?1 COLLATE NOCASE"),
+        params![source_path],
+        map_subagent,
+    )
+    .optional()
+}
+
+/// Every row that is linked to a native store, with the path that links it.
+/// The sync's starting set: the files it finds minus these are the ones that
+/// need importing.
+pub fn list_subagents_by_source(conn: &Connection) -> DbResult<Vec<Subagent>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM subagents WHERE source_path IS NOT NULL"
+    ))?;
+    let rows = stmt.query_map([], map_subagent)?;
+    rows.collect()
 }
 
 /// Builtins first (the stable set the `Task` enum advertises), then user rows

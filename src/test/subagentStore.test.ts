@@ -274,9 +274,26 @@ describe("listSubagents wrapper", () => {
       maxRounds: 100,
       maxConcurrent: 2,
       builtin: false,
+      // A row from a build before either column existed still normalizes to the
+      // "not authored by an agent / not linked to a file" state rather than
+      // `undefined` — the origin badge and the linked-file lookup both read
+      // these.
+      origin: null,
+      sourcePath: null,
       createdAt: 0,
       updatedAt: 0,
     });
+  });
+
+  it("carries the native-store link through, and coerces a blank one to null", async () => {
+    invokeMock.mockResolvedValue([
+      { id: "a", name: "linked", sourcePath: "/home/dev/.claude/agents/a.md" },
+      { id: "b", name: "blank", sourcePath: "" },
+    ]);
+    const [linked, blank] = await listSubagents();
+    expect(linked.sourcePath).toBe("/home/dev/.claude/agents/a.md");
+    // An empty string is the "not linked" state, not a link to "".
+    expect(blank.sourcePath).toBeNull();
   });
 
   it("returns an empty list when the runtime returns nothing", async () => {

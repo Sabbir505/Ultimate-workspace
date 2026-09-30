@@ -341,6 +341,9 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     // Who authored each definition (NULL = user, "agent" = a model made it
     // through the subagent chat tool) — display-only, badge in the Subagent panel.
     migrate_subagents_origin(conn)?;
+    // The `.md` a definition was imported from (CLI harness native stores) —
+    // what makes that import an upsert instead of a copy.
+    migrate_subagents_source_path(conn)?;
     // And subagent-run sessions point at their definition through a real column —
     // NOT the `origin` vocabulary (spawned_by: drives the depth walk there).
     migrate_chat_session_agent_def(conn)?;
@@ -410,6 +413,35 @@ fn migrate_subagents_origin(conn: &Connection) -> DbResult<()> {
             return Err(e);
         }
     }
+    Ok(())
+}
+
+/// The `.md` a definition was imported from, when it came from a CLI harness's
+/// own store (`~/.claude/agents/doc-writer.md` and friends). NULL for every
+/// hand-made and builtin row.
+///
+/// This is what turns the native-store import from a copy into a LINK: the
+/// upsert keys on this path, so editing the `.md` updates the row in place
+/// instead of producing a second `-2` agent. Deliberately NOT part of
+/// `SubagentInput` — the editor round-trips `SubagentInput`, and
+/// `db::update_subagent` simply doesn't name this column, so saving a linked
+/// agent from the panel keeps the link without the form knowing it exists.
+///
+/// NOCASE on the index: the app runs on Windows and macOS, where `Doc.md` and
+/// `doc.md` are the same file, and a case-sensitive unique index would let the
+/// same file claim two rows.
+fn migrate_subagents_source_path(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE subagents ADD COLUMN source_path TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_subagents_source_path \
+         ON subagents(source_path) WHERE source_path IS NOT NULL",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1465,6 +1497,11 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           max_rounds      INTEGER NOT NULL DEFAULT 100,
           max_concurrent  INTEGER NOT NULL DEFAULT 2,
           builtin         INTEGER NOT NULL DEFAULT 0,
+          -- The native `.md` this row was imported from, when it came from a
+          -- CLI harness's own store; NULL otherwise. Uniquely indexed
+          -- (NOCASE, see migrate_subagents_source_path) so one file maps to
+          -- one row and a re-import updates in place.
+          source_path     TEXT,
           created_at      INTEGER NOT NULL,
           updated_at      INTEGER NOT NULL
         );
@@ -1800,8 +1837,9 @@ pub use automations::{
 
 // subagent (declarative subagents — the persisted agent registry)
 pub use subagents::{
-    create_subagent, delete_subagent, find_subagent_by_name, finish_subagent_run,
-    set_subagent_origin, set_subagent_run_worktree, sweep_stale_subagent_runs,
+    create_subagent, delete_subagent, find_subagent_by_name, find_subagent_by_source_path,
+    finish_subagent_run, list_subagents_by_source, set_subagent_origin,
+    set_subagent_source_path, set_subagent_run_worktree, sweep_stale_subagent_runs,
     get_subagent, list_subagents, list_subagent_runs, record_subagent_run,
     seed_builtin_subagents, update_subagent, Subagent, SubagentInput, SubagentRun,
 };

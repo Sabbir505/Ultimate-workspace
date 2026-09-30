@@ -272,6 +272,16 @@
   font-family: var(--font-mono);
   font-size: 10.5px;
 }
+/* A row that follows a harness's native `.md`. Positive, not decorative: it
+   tells the user an edit in the file lands here, and that on a conflict the
+   file — not this form — wins. */
+.subagent-meta-chip.ok {
+  color: var(--success, #4ec98a);
+  border-color: color-mix(in srgb, var(--success, #4ec98a) 40%, transparent);
+}
+.subagent-meta-chip.ok svg {
+  opacity: 1;
+}
 .subagent-run-actions {
   display: flex;
   align-items: center;

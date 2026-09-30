@@ -11,16 +11,21 @@ const load = vi.fn().mockResolvedValue(undefined);
 const create = vi.fn().mockResolvedValue(null);
 const update = vi.fn().mockResolvedValue(null);
 const remove = vi.fn().mockResolvedValue(undefined);
+const unlinkNative = vi.fn().mockResolvedValue(undefined);
 
 const subagentState = {
   loaded: true,
   agents: [] as unknown[],
   error: null as string | null,
   busy: {} as Record<string, boolean>,
+  // Linked rows whose native `.md` is gone. Empty by default; the badge test
+  // flips it to exercise the "source file missing" chip.
+  missingNative: [] as string[],
   load: (...a: unknown[]) => load(...a),
   create: (...a: unknown[]) => create(...a),
   update: (...a: unknown[]) => update(...a),
   remove: (...a: unknown[]) => remove(...a),
+  unlinkNative: (...a: unknown[]) => unlinkNative(...a),
 };
 vi.mock("../state/subagents", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../state/subagents")>();
@@ -61,6 +66,7 @@ beforeEach(() => {
   subagentState.error = null;
   subagentState.busy = {};
   subagentState.loaded = true;
+  subagentState.missingNative = [];
   create.mockResolvedValue(agent({ id: "agent-new", name: "reviewer" }));
   update.mockResolvedValue(agent());
   remove.mockResolvedValue(undefined);
@@ -129,6 +135,38 @@ describe("SubagentsPanel", () => {
     expect(harnessRow.textContent).toContain("advisory");
     expect(harnessRow.textContent).toContain("CLI tools not restrictible");
     expect(localRow.textContent).toContain("enforced");
+  });
+
+  it("badges a linked row, and a linked row whose file is gone", async () => {
+    subagentState.agents = [
+      agent({ id: "agent-1", name: "linked", sourcePath: "/home/dev/.claude/agents/a.md" }),
+      agent({ id: "agent-2", name: "orphaned", sourcePath: "/home/dev/.claude/agents/gone.md" }),
+      agent({ id: "agent-3", name: "handmade" }),
+    ];
+    subagentState.missingNative = ["orphaned"];
+    render(<SubagentsPanel />);
+
+    const linkedRow = (await screen.findByText("linked")).closest(".subagent-agent-row")!;
+    const orphanRow = (await screen.findByText("orphaned")).closest(".subagent-agent-row")!;
+    const handmadeRow = (await screen.findByText("handmade")).closest(".subagent-agent-row")!;
+
+    expect(linkedRow.textContent).toContain("linked to file");
+    // A link whose file vanished is called out separately — it is the one case
+    // where the row silently stops tracking anything.
+    expect(orphanRow.textContent).toContain("source file missing");
+    expect(orphanRow.textContent).not.toContain("linked to file");
+    // A hand-made row claims nothing.
+    expect(handmadeRow.textContent).not.toContain("linked to file");
+    expect(handmadeRow.textContent).not.toContain("source file missing");
+
+    // Unlink is offered only where there is a link, and it keeps the row.
+    expect(screen.getByLabelText("Unlink linked from its source file")).toBeTruthy();
+    expect(screen.getByLabelText("Unlink orphaned from its source file")).toBeTruthy();
+    expect(screen.queryByLabelText("Unlink handmade from its source file")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Unlink linked from its source file"));
+    await waitFor(() =>
+      expect(unlinkNative).toHaveBeenCalledWith("agent-1"),
+    );
   });
 
   it("tiers engine strings the way the badge vocabulary defines them", () => {

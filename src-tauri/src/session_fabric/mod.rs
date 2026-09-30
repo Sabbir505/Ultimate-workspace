@@ -2894,6 +2894,7 @@ mod tests {
             max_concurrent: 2,
             builtin: false,
             origin: None,
+            source_path: None,
             created_at: 0,
             updated_at: 0,
         };

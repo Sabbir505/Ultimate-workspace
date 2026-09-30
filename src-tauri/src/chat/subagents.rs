@@ -978,6 +978,251 @@ pub fn delete(conn: &Connection, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ---- Native harness stores (.md ↔ registry row) ----
+//
+// A CLI harness keeps its own subagent definitions as markdown files. Importing
+// one used to be a pure COPY — the frontend built a `SubagentInput` and called
+// `create_subagent` — which meant three things went wrong at once: a re-import
+// produced a second `-2` row instead of updating, an edit to the `.md` never
+// reached the row, and the copy carried no record of where it came from.
+//
+// These two functions make it a LINK. `sync_native_subagent` is the upsert,
+// keyed on the file's absolute path (`source_path`, uniquely indexed NOCASE),
+// and `unlink` is the inverse. Who calls them is a UI concern (the Subagents
+// panel, and the file watcher that re-syncs on a change); this module owns the
+// identity rules, because those are the part that can corrupt the registry.
+
+/// What a sync did to one file, so the caller can report honestly rather than
+/// guessing from the returned row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// No row was linked to this file; one was created.
+    Created,
+    /// The file's identity/prompt/allowlist/model were refreshed onto the
+    /// existing row.
+    Updated,
+    /// The file parsed but every field already matched — no write.
+    Unchanged,
+}
+
+/// A native file's name, in the registry's vocabulary.
+///
+/// [`validate_name`] REJECTS anything outside `a-z0-9- `, and native stores are
+/// full of names it would refuse (`Doc Writer`, `code-reviewer_v2`). Lowercase
+/// first, fold every other run of disallowed characters into a single `-`, trim
+/// the separators `normalize_name` would have produced anyway, and clip to
+/// [`MAX_NAME_LEN`] so a long native name is a suffix-truncated name rather than
+/// a hard error — the file's real content is its prompt, and a name the user
+/// can rename later beats refusing to import.
+fn native_agent_name(raw: &str) -> String {
+    let folded: String = raw
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut name = normalize_name(&folded);
+    while name.contains("--") {
+        name = name.replace("--", "-");
+    }
+    let name = name.trim_matches('-').to_string();
+    if name.is_empty() {
+        return "imported-agent".to_string();
+    }
+    if name.chars().count() > MAX_NAME_LEN {
+        name.chars().take(MAX_NAME_LEN).collect::<String>().trim_end_matches('-').to_string()
+    } else {
+        name
+    }
+}
+
+/// The first free name at or after `base`: `base`, then `base-2`, `base-3`…
+/// A collision is against ANY existing row (a builtin role name is reserved and
+/// `validate_input` would reject it outright, so it counts as taken) and the
+/// comparison is case-insensitive to match the `COLLATE NOCASE` unique index.
+fn unique_native_name(conn: &Connection, base: &str) -> String {
+    let taken = |candidate: &str| -> bool {
+        is_builtin_role(candidate)
+            || crate::db::find_subagent_by_name(conn, candidate)
+                .map(|r| r.is_some())
+                .unwrap_or(false)
+    };
+    if !taken(base) {
+        return base.to_string();
+    }
+    for i in 2..1000 {
+        let candidate = format!("{base}-{i}");
+        if candidate.chars().count() <= MAX_NAME_LEN && !taken(&candidate) {
+            return candidate;
+        }
+    }
+    // A thousand collisions on one base is not a real scenario, but the
+    // function has to terminate with something storable: clip the base so the
+    // timestamp tail fits inside MAX_NAME_LEN.
+    let keep = MAX_NAME_LEN.saturating_sub(11);
+    let clipped: String = base.chars().take(keep).collect();
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    format!("{clipped}-{}", secs % 1_000_000_000)
+}
+
+/// The registry payload a native file describes, before name de-collision.
+///
+/// Scope and budget are the EDITOR's defaults, not the file's: a `.md`
+/// carries identity, prompt, tools and model, and Relay's sandbox/approval/
+/// worktree/round/concurrency knobs have no native counterpart to read them
+/// from. The user tunes those in the editor afterwards, and — importantly — a
+/// later re-sync does NOT clobber them (see [`sync_native_subagent`]).
+fn native_input(harness_id: &str, info: &crate::harness_config::HarnessSubagentInfo) -> SubagentInput {
+    SubagentInput {
+        name: native_agent_name(&info.name),
+        description: info.description.trim().to_string(),
+        prompt_md: info.prompt_md.clone(),
+        // An empty native tool list means "the file named none" — the
+        // registry's null (inherit the engine default), not an empty
+        // allowlist that would allow nothing.
+        tools: (!info.tools.is_empty()).then(|| serde_json::to_string(&info.tools).unwrap()),
+        engine: Some(format!("harness:{harness_id}")),
+        model: info.model.clone().filter(|m| !m.is_empty()),
+        effort: None,
+        sandbox_policy: "read_only".into(),
+        approval_policy: "on_request".into(),
+        worktree_policy: "inherit".into(),
+        max_rounds: MAX_ROUNDS,
+        max_concurrent: 2,
+    }
+}
+
+/// Bring the registry in line with one native file.
+///
+/// Split ownership, and the split is the whole design:
+/// * the FILE owns `description`, `prompt_md`, `tools` and `model` — those are
+///   refreshed on every sync, so editing the `.md` in a terminal changes the
+///   agent without the user coming back to the app;
+/// * the APP owns `sandbox_policy`, `approval_policy`, `worktree_policy`,
+///   `max_rounds`, `max_concurrent` and `effort` — a re-sync never touches
+///   them, so tuning an imported agent in the editor isn't undone by the next
+///   file save;
+/// * `name` follows the file, but only when the file's name is actually free.
+///   A collision (or a reserved builtin role name) keeps the row's current
+///   name, because renaming a row the user may already be spawning by name is a
+///   worse outcome than a stale label.
+pub fn sync_native_subagent(
+    conn: &Connection,
+    harness_id: &str,
+    info: &crate::harness_config::HarnessSubagentInfo,
+) -> Result<(Subagent, SyncOutcome), String> {
+    if info.source_path.trim().is_empty() {
+        return Err("the native agent has no source path to link against".into());
+    }
+    let existing =
+        crate::db::find_subagent_by_source_path(conn, &info.source_path).map_err(|e| e.to_string())?;
+
+    let Some(existing) = existing else {
+        let mut input = native_input(harness_id, info);
+        input.name = unique_native_name(conn, &input.name);
+        let created = create(conn, &input)?;
+        crate::db::set_subagent_source_path(conn, &created.id, &info.source_path)
+            .map_err(|e| e.to_string())?;
+        let row = get(conn, &created.id).ok_or("the imported agent vanished".to_string())?;
+        refresh_registry_cache(conn);
+        return Ok((row, SyncOutcome::Created));
+    };
+
+    if existing.builtin {
+        // Can't happen (builtins never carry a source_path), but a hand-edited
+        // row must not be able to route a native file onto a role.
+        return Err(format!(
+            "'{}' is a built-in role and cannot be linked to a native file",
+            existing.name
+        ));
+    }
+
+    let mut input = native_input(harness_id, info);
+    input.name = if native_agent_name(&info.name).eq_ignore_ascii_case(&existing.name) {
+        existing.name.clone()
+    } else {
+        let wanted = native_agent_name(&info.name);
+        // Take the file's name only if NO OTHER row holds it. A holder that IS
+        // this row is a plain rename and is fine; any other holder means the
+        // row keeps the name it was imported under.
+        //
+        // That second case is also what keeps a suffixed row stable: a file
+        // whose name was already taken gets imported as `doc-writer-2`, and
+        // the file itself still says "Doc Writer" on every later sync. Reading
+        // the check the other way round would have it trying to move back onto
+        // the very name it was suffixed to avoid, and every re-sync of an
+        // untouched file would fail.
+        let free = !is_builtin_role(&wanted)
+            && crate::db::find_subagent_by_name(conn, &wanted)
+                .map(|holder| holder.is_none_or(|h| h.id == existing.id))
+                .unwrap_or(false);
+        if free {
+            wanted
+        } else {
+            existing.name.clone()
+        }
+    };
+    // Carry the app-owned knobs over from the existing row: `native_input`
+    // restates the editor defaults, which would silently reset a tuned agent.
+    input.sandbox_policy = existing.sandbox_policy.clone();
+    input.approval_policy = existing.approval_policy.clone();
+    input.worktree_policy = existing.worktree_policy.clone();
+    input.max_rounds = existing.max_rounds;
+    input.max_concurrent = existing.max_concurrent;
+    input.effort = existing.effort.clone();
+
+    let file_owned_changed = existing.description != input.description
+        || existing.prompt_md != input.prompt_md
+        || existing.tools != input.tools
+        || existing.model != input.model
+        || existing.engine != input.engine;
+    let name_changed = input.name != existing.name;
+    if !file_owned_changed && !name_changed {
+        return Ok((existing, SyncOutcome::Unchanged));
+    }
+    let updated = update(conn, &existing.id, &input)?;
+    Ok((updated, SyncOutcome::Updated))
+}
+
+/// Linked rows whose `.md` no longer exists on disk.
+///
+/// A missing file does NOT delete the row. The agent may have runs in flight and
+/// a history the user cares about, and the file may simply be temporarily
+/// unreadable; the right response is to SHOW the user that the link is broken so
+/// they can decide. This is the query behind that badge.
+pub fn native_rows_with_missing_sources(conn: &Connection) -> Vec<Subagent> {
+    crate::db::list_subagents_by_source(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| {
+            a.source_path
+                .as_deref()
+                .is_some_and(|p| !std::path::Path::new(p).is_file())
+        })
+        .collect()
+}
+
+/// Drop a row's link to its native file, leaving the definition itself. The
+/// "make this mine" action: after it, the row no longer follows the `.md`, so a
+/// later sync of that file imports a separate agent instead of overwriting.
+pub fn unlink_native_subagent(conn: &Connection, agent_id: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE subagents SET source_path = NULL WHERE id = ?1",
+        rusqlite::params![agent_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1035,6 +1280,7 @@ mod tests {
             max_concurrent: def.max_concurrent,
             builtin: false,
             origin: None,
+            source_path: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -1093,6 +1339,7 @@ mod tests {
             max_concurrent: 2,
             builtin: false,
             origin: None,
+            source_path: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -1661,5 +1908,209 @@ mod tests {
         refresh_registry_cache(&conn);
         assert!(cached_agent_names().contains(&"late-comer".to_string()));
         assert!(get(&conn, &agent.id).is_some());
+    }
+
+    // ---- native store sync ----
+
+    /// A stand-in for one row of `harness_subagents`' output. `path` is the
+    /// identity the upsert keys on; the rest is what the file "says".
+    fn native(
+        path: &str,
+        name: &str,
+        description: &str,
+        prompt: &str,
+    ) -> crate::harness_config::HarnessSubagentInfo {
+        crate::harness_config::HarnessSubagentInfo {
+            name: name.into(),
+            description: description.into(),
+            tools: vec!["read_file".into()],
+            model: Some("claude-sonnet-4".into()),
+            mode: None,
+            source_path: path.into(),
+            prompt_md: prompt.into(),
+        }
+    }
+
+    #[test]
+    fn native_names_are_slugged_into_the_registry_vocabulary() {
+        // The native stores are full of names `validate_name` would reject
+        // outright (capitals, underscores) — an import that hard-failed on
+        // them would leave most real files unimportable.
+        assert_eq!(native_agent_name("Doc Writer"), "doc-writer");
+        assert_eq!(native_agent_name("code-reviewer_v2"), "code-reviewer-v2");
+        assert_eq!(native_agent_name("  Spaced   Out  "), "spaced-out");
+        assert_eq!(native_agent_name("!!!"), "imported-agent");
+        // Clipped rather than refused, and never left with a trailing dash.
+        let long = native_agent_name(&"a".repeat(200));
+        assert!(long.chars().count() <= MAX_NAME_LEN);
+        assert!(!long.ends_with('-'));
+    }
+
+    #[test]
+    fn syncing_a_new_file_creates_a_linked_row() {
+        let conn = mem();
+        let info = native("/tmp/store/a.md", "Code Reviewer", "Reviews diffs", "Be sharp.");
+        let (row, outcome) = sync_native_subagent(&conn, "claude_code", &info).unwrap();
+        assert_eq!(outcome, SyncOutcome::Created);
+        // Slugged on the way in, and linked to the file so a re-sync finds it.
+        assert_eq!(row.name, "code-reviewer");
+        assert_eq!(row.source_path.as_deref(), Some("/tmp/store/a.md"));
+        assert_eq!(row.engine.as_deref(), Some("harness:claude_code"));
+        assert_eq!(row.prompt_md, "Be sharp.");
+    }
+
+    #[test]
+    fn re_syncing_the_same_file_updates_in_place_instead_of_duplicating() {
+        let conn = mem();
+        let first = native("/tmp/store/a.md", "Doc Writer", "v1", "Prompt v1.");
+        let (row, _) = sync_native_subagent(&conn, "claude_code", &first).unwrap();
+
+        // Same path, edited contents — the shape a user gets by editing the
+        // markdown in a terminal.
+        let second = native("/tmp/store/a.md", "Doc Writer", "v2", "Prompt v2.");
+        let (updated, outcome) = sync_native_subagent(&conn, "claude_code", &second).unwrap();
+        assert_eq!(outcome, SyncOutcome::Updated);
+        // SAME ROW — the id is the proof, and it is the whole point of the
+        // source_path column.
+        assert_eq!(updated.id, row.id);
+        assert_eq!(updated.prompt_md, "Prompt v2.");
+        assert_eq!(updated.description, "v2");
+        // And there is still exactly one non-builtin row.
+        let users: Vec<_> = list(&conn).into_iter().filter(|a| !a.builtin).collect();
+        assert_eq!(users.len(), 1);
+    }
+
+    #[test]
+    fn an_unchanged_file_writes_nothing() {
+        let conn = mem();
+        let info = native("/tmp/store/a.md", "Doc Writer", "Reviews", "Prompt.");
+        let (row, first) = sync_native_subagent(&conn, "claude_code", &info).unwrap();
+        let (again, outcome) = sync_native_subagent(&conn, "claude_code", &info).unwrap();
+        assert_eq!(first, SyncOutcome::Created);
+        assert_eq!(outcome, SyncOutcome::Unchanged);
+        assert_eq!(again.updated_at, row.updated_at);
+    }
+
+    #[test]
+    fn a_resync_never_resets_the_policies_the_user_tuned() {
+        let conn = mem();
+        let info = native("/tmp/store/a.md", "Doc Writer", "v1", "Prompt v1.");
+        let (row, _) = sync_native_subagent(&conn, "claude_code", &info).unwrap();
+        // The user opens the editor and widens it.
+        let mut tuned = SubagentInput {
+            name: row.name.clone(),
+            description: row.description.clone(),
+            prompt_md: row.prompt_md.clone(),
+            tools: row.tools.clone(),
+            engine: row.engine.clone(),
+            model: row.model.clone(),
+            effort: Some("high".into()),
+            sandbox_policy: "workspace_write".into(),
+            approval_policy: "full_access".into(),
+            worktree_policy: "always".into(),
+            max_rounds: 7,
+            max_concurrent: 5,
+        };
+        validate_input(&mut tuned, Some(&row)).unwrap();
+        update(&conn, &row.id, &tuned).unwrap();
+
+        // The file is then edited — which must NOT undo any of that.
+        let edited = native("/tmp/store/a.md", "Doc Writer", "v2", "Prompt v2.");
+        let (after, outcome) = sync_native_subagent(&conn, "claude_code", &edited).unwrap();
+        assert_eq!(outcome, SyncOutcome::Updated);
+        assert_eq!(after.sandbox_policy, "workspace_write");
+        assert_eq!(after.approval_policy, "full_access");
+        assert_eq!(after.worktree_policy, "always");
+        assert_eq!(after.effort.as_deref(), Some("high"));
+        assert_eq!(after.max_rounds, 7);
+        assert_eq!(after.max_concurrent, 5);
+        // …while the file-owned fields did move.
+        assert_eq!(after.prompt_md, "Prompt v2.");
+    }
+
+    #[test]
+    fn a_new_file_whose_name_is_taken_gets_a_suffixed_row() {
+        let conn = mem();
+        create(&conn, &input("doc-writer")).unwrap();
+        // A DIFFERENT file that also wants the name `doc-writer`.
+        let info = native("/tmp/store/other.md", "Doc Writer", "d", "p");
+        let (row, outcome) = sync_native_subagent(&conn, "claude_code", &info).unwrap();
+        assert_eq!(outcome, SyncOutcome::Created);
+        assert_eq!(row.name, "doc-writer-2");
+        // And a second sync still finds THAT row, rather than colliding again.
+        let edited = native("/tmp/store/other.md", "Doc Writer", "d2", "p2");
+        let (again, outcome) = sync_native_subagent(&conn, "claude_code", &edited).unwrap();
+        assert_eq!(outcome, SyncOutcome::Updated);
+        assert_eq!(again.id, row.id);
+        assert_eq!(again.name, "doc-writer-2");
+    }
+
+    #[test]
+    fn a_builtin_role_name_is_reserved_for_a_native_file_too() {
+        let conn = mem();
+        let info = native("/tmp/store/write.md", "write", "mine", "p");
+        let (row, outcome) = sync_native_subagent(&conn, "claude_code", &info).unwrap();
+        assert_eq!(outcome, SyncOutcome::Created);
+        // The builtin owns `write`; the native file cannot shadow it.
+        assert_ne!(row.name, "write");
+        assert!(row.name.starts_with("write-"));
+    }
+
+    #[test]
+    fn renaming_the_file_keeps_the_old_name_when_the_new_one_is_taken() {
+        let conn = mem();
+        create(&conn, &input("taken")).unwrap();
+        let info = native("/tmp/store/a.md", "First Name", "d", "p");
+        let (row, _) = sync_native_subagent(&conn, "claude_code", &info).unwrap();
+        assert_eq!(row.name, "first-name");
+
+        // The file's `name:` changes to something another row already holds.
+        let renamed = native("/tmp/store/a.md", "Taken", "d2", "p2");
+        let (after, _) = sync_native_subagent(&conn, "claude_code", &renamed).unwrap();
+        // Renaming a row the user may already spawn by name is worse than a
+        // stale label, so the collision keeps the current name.
+        assert_eq!(after.name, "first-name");
+        // The file-owned fields still applied.
+        assert_eq!(after.prompt_md, "p2");
+    }
+
+    #[test]
+    fn a_missing_source_is_reported_without_deleting_the_row() {
+        let conn = mem();
+        // A path that does not exist: the sync still links it (the file may be
+        // about to be created), and the "missing" query then flags it.
+        let info = native("/tmp/definitely/not/here.md", "Ghost", "d", "p");
+        let (row, _) = sync_native_subagent(&conn, "claude_code", &info).unwrap();
+        let missing = native_rows_with_missing_sources(&conn);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].id, row.id);
+        // The row survives — it may have run history.
+        assert!(get(&conn, &row.id).is_some());
+    }
+
+    #[test]
+    fn unlinking_stops_the_row_following_its_file() {
+        let conn = mem();
+        let info = native("/tmp/store/a.md", "Doc Writer", "v1", "p1");
+        let (row, _) = sync_native_subagent(&conn, "claude_code", &info).unwrap();
+        unlink_native_subagent(&conn, &row.id).unwrap();
+        assert!(get(&conn, &row.id).unwrap().source_path.is_none());
+
+        // A later sync of that file now imports a SEPARATE agent rather than
+        // overwriting the one the user claimed.
+        let edited = native("/tmp/store/a.md", "Doc Writer", "v2", "p2");
+        let (fresh, outcome) = sync_native_subagent(&conn, "claude_code", &edited).unwrap();
+        assert_eq!(outcome, SyncOutcome::Created);
+        assert_ne!(fresh.id, row.id);
+        // The unlinked row kept its own contents.
+        assert_eq!(get(&conn, &row.id).unwrap().prompt_md, "p1");
+    }
+
+    #[test]
+    fn a_sync_without_a_source_path_is_refused() {
+        let conn = mem();
+        let mut info = native("", "Doc Writer", "d", "p");
+        info.source_path = "   ".into();
+        assert!(sync_native_subagent(&conn, "claude_code", &info).is_err());
     }
 }

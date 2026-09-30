@@ -418,3 +418,112 @@ describe("transport buttons", () => {
     expect(ctx.started()[0].stopped).toBe(true);
   });
 });
+
+// The streaming read: sentences arrive WHILE the answer is still generating
+// (beginStream/feedStream/endStream). These pin the behaviors the streaming
+// feature lives or dies on — the first sentence sounds before the model has
+// finished, late arrivals prefetch instead of idling the engine at the
+// boundary, and a drained queue parks instead of finishing early.
+describe("streaming read", () => {
+  const s1 = "Streamed opener sentence number one.";
+  const s2 = "Streamed follow-up sentence number two.";
+  const s3 = "Streamed closing sentence number three.";
+
+  it("voices the first fed sentence while the stream is still open", async () => {
+    durations.set(s1, 3000);
+    ttsPlayer.beginStream("msg:s:stream", "Answer");
+    await tick();
+    // Setup done, nothing fed yet: parked, not failed.
+    expect(useTtsStore.getState().phase).toBe("buffering");
+
+    ttsPlayer.feedStream([{ text: s1, paragraphStart: false }]);
+    await vi.waitFor(() => expect(ctx.started()).toHaveLength(1));
+    expect(useTtsStore.getState().phase).toBe("playing");
+    expect(useTtsStore.getState().key).toBe("msg:s:stream");
+  });
+
+  it("prefetches a sentence that arrives mid-playback", async () => {
+    durations.set(s1, 4000);
+    durations.set(s2, 4000);
+    ttsPlayer.beginStream("msg:s2:stream", "Answer");
+    await tick();
+    ttsPlayer.feedStream([{ text: s1, paragraphStart: false }]);
+    await vi.waitFor(() => expect(ctx.started()).toHaveLength(1));
+    expect(calls).not.toContain(s2);
+
+    // The model finishes its second sentence while the first still sounds.
+    ttsPlayer.feedStream([{ text: s2, paragraphStart: false }]);
+    await vi.waitFor(() => expect(calls).toContain(s2));
+  });
+
+  it("parks on buffering when the queue drains mid-stream, then finishes on endStream", async () => {
+    durations.set(s1, 800);
+    ttsPlayer.beginStream("msg:s3:stream", "Answer");
+    await tick();
+    ttsPlayer.feedStream([{ text: s1, paragraphStart: false }]);
+    await vi.waitFor(() => expect(ctx.started()).toHaveLength(1));
+
+    ctx.sources[0].onended?.();
+    await vi.waitFor(() => expect(useTtsStore.getState().phase).toBe("buffering"));
+    // Still loaded: a finish here would flash idle and let the turn-final
+    // auto-read replay the answer.
+    expect(useTtsStore.getState().key).toBe("msg:s3:stream");
+
+    ttsPlayer.endStream();
+    expect(useTtsStore.getState().phase).toBe("idle");
+    expect(useTtsStore.getState().key).toBeNull();
+  });
+
+  it("drains the tail after endStream and then finishes", async () => {
+    durations.set(s1, 800);
+    durations.set(s2, 800);
+    ttsPlayer.beginStream("msg:s4:stream", "Answer");
+    await tick();
+    ttsPlayer.feedStream([{ text: s1, paragraphStart: false }]);
+    await vi.waitFor(() => expect(ctx.started()).toHaveLength(1));
+
+    // The model finished: remaining sentences are fed and the feed is closed.
+    ttsPlayer.feedStream([{ text: s2, paragraphStart: false }]);
+    ttsPlayer.endStream();
+    ctx.sources[0].onended?.();
+    await vi.waitFor(() => expect(ctx.started()).toHaveLength(2));
+    ctx.sources[1].onended?.();
+    await vi.waitFor(() => expect(useTtsStore.getState().phase).toBe("idle"));
+  });
+
+  it("ignores feeds after the stream was superseded", async () => {
+    ttsPlayer.beginStream("msg:s5:stream", "Answer");
+    await tick();
+    ttsPlayer.stop();
+    const before = calls.length;
+    ttsPlayer.feedStream([{ text: s3, paragraphStart: false }]);
+    ttsPlayer.endStream();
+    await tick();
+    expect(calls.length).toBe(before);
+    expect(useTtsStore.getState().phase).toBe("idle");
+  });
+
+  it("batches streamed sentences into groups on the GPU device", async () => {
+    vi.mocked(ttsStatus).mockResolvedValue({
+      modelId: "gpu-model",
+      voice: "vf",
+      speed: 1,
+      device: "gpu",
+      voices: [],
+    } as unknown as TtsStatus);
+    ttsPlayer.beginStream("msg:s6:stream", "Answer");
+    await tick();
+    // Under the warm-up budget: held, nothing synthesized yet.
+    ttsPlayer.feedStream([{ text: "Tiny gpu streamed lead-in.", paragraphStart: false }]);
+    await tick();
+    expect(calls).toHaveLength(0);
+    // Past the budget: one group call, sentences joined.
+    const filler = Array.from({ length: 20 }, (_, i) => `Gpu filler clause ${i} here.`).join(" ");
+    ttsPlayer.feedStream([{ text: filler, paragraphStart: false }]);
+    await tick();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("Tiny gpu streamed lead-in.");
+    expect(calls[0]).toContain("Gpu filler clause 19 here.");
+    ttsPlayer.endStream();
+  });
+});

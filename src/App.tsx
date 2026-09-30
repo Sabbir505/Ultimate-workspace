@@ -50,7 +50,7 @@ import { useChatStore } from "./state/chat";
 import { GitToolsSidebar } from "./components/chat/GitToolsSidebar";
 const CommandPalette = lazy(() => import("./components/command-palette/CommandPalette").then((m) => ({ default: m.CommandPalette })));
 import { useChatEvents } from "./hooks/useChatEvents";
-import { useTtsAutoRead } from "./hooks/useTtsAutoRead";
+import { useTtsAutoRead, useTtsStreamRead } from "./hooks/useTtsAutoRead";
 import { VoiceLoopController } from "./hooks/useVoiceLoop";
 import { useAutomationEvents } from "./hooks/useAutomationEvents";
 import { useBudgetEvents } from "./hooks/useBudgetEvents";
@@ -244,6 +244,7 @@ export default function App() {
   // Mirrors the persisted read-aloud preference so a finishing turn can honour
   // it without an IPC round-trip (see hooks/useTtsAutoRead).
   useTtsAutoRead();
+  useTtsStreamRead();
   useAutomationEvents();
   useBudgetEvents();
   useMemoryEvents();

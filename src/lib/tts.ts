@@ -894,9 +894,32 @@ class TtsPlayer {
    *  it before touching the audio graph or the store. */
   private token = 0;
 
+  // ---- Streaming read (beginStream/feedStream/endStream) ----
+  /** True between beginStream and endStream: the chunk queue may still grow,
+   *  so a drained pump parks on "buffering" instead of finishing. */
+  private streamOpen = false;
+  /** The token captured at beginStream — a play()/stop() that superseded the
+   *  stream invalidates later feeds (they would append to a read that no
+   *  longer exists). */
+  private streamMy = -1;
+  /** Setup (settings + audio context) finished; feeds may append directly. */
+  private streamReady = false;
+  /** Chunks that arrived while setup was still running. */
+  private streamQueue: SpeechChunk[] = [];
+  /** GPU batching: sentences accumulate here until the group clears its
+   *  budget (GPU pays ~4.5 s of process start per call, so a call per
+   *  sentence would spend the whole turn booting CUDA). */
+  private streamHold: SpeechChunk[] = [];
+  private streamHoldChars = 0;
+  private streamHoldFirst = true;
+  /** True while a pump loop owns the queue — appending chunks while it runs
+   *  needs no kick (the loop's next iteration sees them). */
+  private pumping = false;
+
   /** Play `text`, replacing whatever was playing. */
   async play({ key, label, text }: PlayTextOptions): Promise<void> {
     const my = (this.token += 1);
+    this.streamOpen = false; // a manual play supersedes any streaming read
     this.skipTarget = null;
     this.pausePending = false;
     this.stopSource("stopped");
@@ -949,6 +972,145 @@ class TtsPlayer {
     await this.pump(my, ctx);
   }
 
+  /** Begin an open-ended streaming read: chunks arrive via feedStream() as
+   *  the model emits them, so the first sentence sounds while the answer is
+   *  still generating — true token-streaming read-aloud. endStream() closes
+   *  the feed; the read finishes when the fed queue drains. */
+  beginStream(key: string, label: string): void {
+    const my = (this.token += 1);
+    this.streamOpen = true;
+    this.streamMy = my;
+    this.streamReady = false;
+    this.streamQueue = [];
+    this.streamHold = [];
+    this.streamHoldChars = 0;
+    this.streamHoldFirst = true;
+    this.skipTarget = null;
+    this.pausePending = false;
+    this.stopSource("stopped");
+    this.chunks = [];
+    this.index = 0;
+    this.offset = 0;
+    useTtsStore
+      .getState()
+      .set({ key, label, error: null, phase: "loading", index: 0, total: 0 });
+    void (async () => {
+      // The same setup ladder play() climbs — settings once (one voice for
+      // the whole stream), audio context resumed, then the queue may fill.
+      const status = await this.resolveSettings();
+      if (my !== this.token || !status) return; // superseded, or error is in the store
+      const ctx = sharedAudioContext();
+      if (!ctx) {
+        useTtsStore
+          .getState()
+          .set({ phase: "idle", key: null, label: null, error: "Audio playback is unavailable" });
+        return;
+      }
+      if (ctx.state === "suspended") {
+        try {
+          await ctx.resume();
+        } catch {
+          /* stays suspended — playback below will simply not advance */
+        }
+      }
+      if (my !== this.token) return;
+      this.streamReady = true;
+      useTtsStore.getState().set({ phase: "buffering" });
+      const queued = this.streamQueue;
+      this.streamQueue = [];
+      if (queued.length) this.feedInner(queued, ctx);
+    })();
+  }
+
+  /** Append newly-complete sentences to the running streaming read. No-ops
+   *  once the stream was superseded (a manual play, a stop, a barge-in). */
+  feedStream(chunks: SpeechChunk[]): void {
+    if (!this.streamOpen || this.token !== this.streamMy || chunks.length === 0) return;
+    if (!this.streamReady) {
+      this.streamQueue.push(...chunks); // setup still climbing; drained when ready
+      return;
+    }
+    const ctx = sharedAudioContext();
+    if (ctx) this.feedInner(chunks, ctx);
+  }
+
+  /** The stream is done generating — release any held-back GPU batch and let
+   *  the queue drain to a natural finish. */
+  endStream(): void {
+    if (this.token !== this.streamMy) {
+      this.streamOpen = false;
+      return;
+    }
+    this.streamOpen = false;
+    if (this.streamHold.length) {
+      const ctx = sharedAudioContext();
+      if (ctx) {
+        const group = this.joinHold();
+        this.appendChunks(group);
+        this.kick(ctx);
+      }
+    }
+    // Short answers can drain before the model finishes: nothing pumping and
+    // nothing queued means the read is already over — finish it now instead
+    // of waiting for a pump that will never run.
+    if (!this.pumping && this.index >= this.chunks.length) {
+      this.chunks = [];
+      useTtsStore
+        .getState()
+        .set({ phase: "idle", key: null, label: null, index: 0, total: 0 });
+    }
+  }
+
+  /** Merge the held GPU sentences into one group chunk and reset the hold. */
+  private joinHold(): SpeechChunk[] {
+    const group: SpeechChunk[] = [
+      {
+        text: this.streamHold.map((c) => c.text).join(" "),
+        paragraphStart: this.streamHold[0]?.paragraphStart ?? false,
+      },
+    ];
+    this.streamHold = [];
+    this.streamHoldChars = 0;
+    return group;
+  }
+
+  private appendChunks(chunks: SpeechChunk[]): void {
+    // First word latency on CPU: cap the opening chunk at a clause.
+    const append =
+      this.chunks.length === 0 && this.device !== "gpu"
+        ? splitFirstChunk(chunks, CPU_FIRST_CHUNK_CHARS)
+        : chunks;
+    this.chunks.push(...append);
+    useTtsStore.getState().set({ total: this.chunks.length });
+  }
+
+  private feedInner(chunks: SpeechChunk[], ctx: AudioContext): void {
+    if (this.device === "gpu") {
+      this.streamHold.push(...chunks);
+      this.streamHoldChars += chunks.reduce((n, c) => n + c.text.length, 0);
+      const budget = this.streamHoldFirst ? GPU_WARMUP_CHARS : GPU_CHUNK_CHARS;
+      if (this.streamHoldChars < budget) return;
+      this.streamHoldFirst = false;
+      chunks = this.joinHold();
+    }
+    this.appendChunks(chunks);
+    // Prefetch what was just appended when a sentence is already sounding —
+    // playSentence only walks the queue at sentence starts, so without this
+    // the engine would idle through the boundary every time a sentence
+    // arrived mid-playback (i.e. constantly, in a streaming read).
+    if (this.pumping) this.topUp(ctx, this.index);
+    this.kick(ctx);
+  }
+
+  /** Start the pump if it isn't running and playback isn't parked. */
+  private kick(ctx: AudioContext): void {
+    if (this.pumping) return; // the loop's next iteration sees the new chunks
+    const phase = useTtsStore.getState().phase;
+    if (phase === "paused" || phase === "idle") return; // resume()/replay owns it
+    if (this.index >= this.chunks.length) return;
+    void this.pump(this.token, ctx);
+  }
+
   /** Resume a paused read from where it stopped. */
   resume(): void {
     if (useTtsStore.getState().phase !== "paused" || this.chunks.length === 0) return;
@@ -988,6 +1150,7 @@ class TtsPlayer {
   /** Stop and clear. The store returns to idle so the play button reverts. */
   stop(): void {
     this.token += 1;
+    this.streamOpen = false; // barge-in / stop cuts the streaming feed too
     this.skipTarget = null;
     this.pausePending = false;
     this.stopSource("stopped");
@@ -1116,31 +1279,44 @@ class TtsPlayer {
   }
 
   private async pump(my: number, ctx: AudioContext): Promise<void> {
-    while (this.index < this.chunks.length) {
-      if (my !== this.token) return;
-      const result = await this.playSentence(my, ctx);
-      if (my !== this.token) return;
-      if (result === "stopped") return;
-      if (result === "paused") {
-        useTtsStore.getState().set({ phase: "paused" });
+    this.pumping = true;
+    try {
+      while (this.index < this.chunks.length) {
+        if (my !== this.token) return;
+        const result = await this.playSentence(my, ctx);
+        if (my !== this.token) return;
+        if (result === "stopped") return;
+        if (result === "paused") {
+          useTtsStore.getState().set({ phase: "paused" });
+          return;
+        }
+        if (this.skipTarget != null) {
+          this.index = this.skipTarget;
+          this.skipTarget = null;
+        } else {
+          this.index += 1;
+        }
+        this.offset = 0;
+        // Beat between paragraphs. The token is re-checked after the wait, so a
+        // stop or a replay during the pause is not resumed into.
+        if (this.chunks[this.index]?.paragraphStart) {
+          await new Promise((resolve) => setTimeout(resolve, PARAGRAPH_PAUSE_MS));
+          if (my !== this.token) return;
+        }
+      }
+      // Drained. A streaming read whose model is still generating parks here
+      // — the next feedStream() kicks the pump again — instead of finishing
+      // (a finish would flash idle and let the turn-final auto-read replay
+      // what was already voiced).
+      if (this.streamOpen && my === this.token) {
+        useTtsStore.getState().set({ phase: "buffering" });
         return;
       }
-      if (this.skipTarget != null) {
-        this.index = this.skipTarget;
-        this.skipTarget = null;
-      } else {
-        this.index += 1;
-      }
-      this.offset = 0;
-      // Beat between paragraphs. The token is re-checked after the wait, so a
-      // stop or a replay during the pause is not resumed into.
-      if (this.chunks[this.index]?.paragraphStart) {
-        await new Promise((resolve) => setTimeout(resolve, PARAGRAPH_PAUSE_MS));
-        if (my !== this.token) return;
-      }
+      this.chunks = [];
+      useTtsStore.getState().set({ phase: "idle", key: null, label: null, index: 0, total: 0 });
+    } finally {
+      this.pumping = false;
     }
-    this.chunks = [];
-    useTtsStore.getState().set({ phase: "idle", key: null, label: null, index: 0, total: 0 });
   }
 
   private async playSentence(my: number, ctx: AudioContext): Promise<SentenceResult> {

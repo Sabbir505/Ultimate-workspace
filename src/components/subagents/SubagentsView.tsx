@@ -12,7 +12,7 @@
 //
 // Layout note: the master-detail chrome Automations uses is scoped to that
 // view's own stylesheet and container queries, so this view has its own
-// stylesheet (styles/subagent.css) with the same container contract — the
+// stylesheet (styles/subagents.css) with the same container contract — the
 // settings-panel classes this used to borrow are tuned to the narrow settings
 // column and broke at full width.
 

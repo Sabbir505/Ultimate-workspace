@@ -1,7 +1,7 @@
 /* logs — the local-model request log (full-page view, same slot as
    automations/vault/subagent). Own class namespace: the settings-panel classes the
    components could borrow are tuned to the narrow settings column and broke at
-   full width, so this follows subagent.css — same view container contract
+   full width, so this follows subagents.css — same view container contract
    (toolbar-h clearance, container queries so the tool side-panel shrinking is
    visible), same surface/border/text tokens. */
 

@@ -18,7 +18,7 @@
 //    take effect under `workspace_write`, and spawn-capable tools are absent
 //    from `SUBAGENT_TOOL_OPTIONS` so depth stays 1.
 //
-// Visual language is the Subagent view's own (styles/subagent.css): full-page rows,
+// Visual language is the Subagent view's own (styles/subagents.css): full-page rows,
 // subagent-chip toggles, and the shared Modal for the editor and the Run dialog.
 
 import {

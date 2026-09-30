@@ -2,31 +2,32 @@
 // read-aloud with your voice.
 //
 // Consumes mic RMS levels (256 ms chunks — the exact cadence the dictation
-// capture produces) and decides when SUSTAINED speech is present. Pure and
-// synchronous, so the policy is unit-testable without a microphone: feed it
-// numbers, act on the events it returns.
+// capture produces) plus a "is the TTS actually sounding right now" flag,
+// and decides when SUSTAINED speech is present. Pure and synchronous, so the
+// policy is unit-testable without a microphone: feed it numbers, act on the
+// events it returns.
 //
-// The failure this design replaces: a "pause-and-check" echo guard that
-// paused playback on the first spike and confirmed a barge-in if energy
-// lasted two more chunks (~0.5 s). Real speaker echo outlives 0.5 s, so
-// Relay kept hearing ITSELF, "confirming", and cutting its own read off a
-// few words in — while the pause/resume cycling chopped whatever audio got
-// out. Energy-only gating cannot tell a voice from an echo inside a single
-// second.
+// Two hard-won rules live here, both learned from live-run logs:
 //
-// What it does instead — ECHO CALIBRATION, no pausing, ever:
+//  · Calibrate on SOUNDING audio only. The first version started its
+//    calibration window when the loop's speaking phase began — which is
+//    seconds before the first audio (the engine is still synthesizing). The
+//    window measured a silent room, the voice threshold collapsed to the
+//    noise floor, and the gate then "confirmed" a barge-in on the TTS's own
+//    sound and cut the read a few words in.
 //
-//  1. calibrate — the first moments of each playback episode measure the
-//     loudest the ROOM hears while nobody is talking (the speaker bleed).
-//  2. arm — the voice threshold sits well ABOVE that bleed (echoMultiplier).
-//     A human at the microphone is louder than speakers a meter away; the
-//     speakers cannot trigger their own death.
-//  3. confirm — sustained (confirmChunks) energy above the voice threshold.
-//     Never a pause, never a mid-read silence, never a stutter.
+// A deliberate non-feature: the ceiling is NOT ratcheted by loud runs that
+// die unsustained. Such a run is usually echo — but it is indistinguishable
+// from a real voice's inter-word dip, and folding those into the ceiling
+// deafens the gate to the person it exists to hear. The headroom multiplier
+// and the 3-chunk confirm window absorb echo's passage-to-passage variation
+// instead.
 //
-// Cost: barge-in takes ~calibration + one confirm window (~2 s). Worth it —
-// the alternative was the read dying mid-sentence. The quiet floor still
-// adapts per room exactly as before.
+// The measured ceiling seeds the NEXT episode (module-level, one user's
+// room): episode 2+ arms instantly instead of deaf for another 1.3 s, and
+// only a device/room change needs the re-measure — which the ratchet
+// absorbs within one episode.
+
 export type VoiceGateEvent = "confirm";
 
 export interface VoiceGateConfig {
@@ -37,25 +38,27 @@ export interface VoiceGateConfig {
   /** Sound must clear `noiseFloor * floorMultiplier` on top of the minimum. */
   floorMultiplier: number;
   /** Sustained chunks above the voice threshold that confirm a barge-in
-   *  (~256 ms each). Two — half a second of loud speech. */
+   *  (~256 ms each). Three — under a second of loud speech, but long enough
+   *  that a single dynamic TTS passage cannot confirm on its own. */
   confirmChunks: number;
-  /** Chunks of playback (with nobody speaking) measured before arming — the
-   *  echo-bleed estimate. Five ≈ 1.3 s. */
+  /** SOUNDING chunks measured before arming — the echo-bleed estimate.
+   *  Five ≈ 1.3 s of actual audio. */
   calibChunks: number;
-  /** The armed voice threshold: `max(minThreshold, echoPeak * multiplier,
-   *  floor * floorMultiplier)`. Above the speakers' bleed at the mic. */
+  /** The armed voice threshold while audio sounds: `max(minThreshold,
+   *  echoPeak * multiplier, floor * floorMultiplier)` — above the speakers'
+   *  bleed at the mic, so the speakers cannot trigger their own death. */
   echoMultiplier: number;
-  /** Headphones: the mic never hears the TTS, so calibration is skipped and
-   *  the threshold is the plain noise-floor rule — barge-in arms instantly. */
+  /** Headphones: the mic never hears the TTS, so there is no echo to
+   *  calibrate — arm on the plain noise-floor rule immediately. */
   echoGuard: boolean;
 }
 
 export const DEFAULT_VOICE_GATE: VoiceGateConfig = {
   minThreshold: 0.016,
   floorMultiplier: 2.6,
-  confirmChunks: 2,
+  confirmChunks: 3,
   calibChunks: 5,
-  echoMultiplier: 1.7,
+  echoMultiplier: 2,
   echoGuard: true,
 };
 
@@ -64,51 +67,80 @@ export const DEFAULT_VOICE_GATE: VoiceGateConfig = {
 const FLOOR_MIN = 0.0015;
 const FLOOR_MAX = 0.02;
 
+/** The echo ceiling measured by the most recent calibration anywhere in this
+ *  run — the room and speaker volume do not change between episodes, so the
+ *  next episode seeds from it and arms instantly. */
+let lastMeasuredEcho = 0;
+
+/** Forget the measured echo ceiling — call when the audio device or speaker
+ *  output changes (the next episode re-measures from scratch). Exported for
+ *  that and for test isolation. */
+export function resetEchoCalibration(): void {
+  lastMeasuredEcho = 0;
+}
+
 export class VoiceActivityGate {
   private cfg: VoiceGateConfig;
-  private state: "calibrating" | "armed" | "confirmed" = "calibrating";
+  private state: "calibrating" | "armed" | "confirmed";
   private calibLeft: number;
-  private echoPeak = 0;
+  private echoPeak: number;
   private run = 0;
+  private runPeak = 0;
   private floor: number;
 
   constructor(cfg: Partial<VoiceGateConfig> = {}, initialFloor = 0.004) {
     this.cfg = { ...DEFAULT_VOICE_GATE, ...cfg };
-    this.calibLeft = this.cfg.echoGuard ? this.cfg.calibChunks : 0;
-    if (this.calibLeft === 0) this.state = "armed";
     this.floor = Math.min(Math.max(initialFloor, FLOOR_MIN), FLOOR_MAX);
+    this.echoPeak = this.cfg.echoGuard ? lastMeasuredEcho : 0;
+    const seeded = this.echoPeak * this.cfg.echoMultiplier >= this.cfg.minThreshold;
+    this.state = !this.cfg.echoGuard || seeded ? "armed" : "calibrating";
+    this.calibLeft = this.state === "calibrating" ? this.cfg.calibChunks : 0;
   }
 
   /** Current sound threshold (exposed for tests and diagnostics). While
    *  calibrating it is deliberately impossible to clear — the estimate is
-   *  not in yet. */
-  get threshold(): number {
+   *  not in yet. `sounding` mirrors the caller's "is the TTS actually
+   *  producing audio right now": with nothing sounding there is no echo, so
+   *  only the room floor applies. */
+  threshold(sounding = true): number {
     if (this.state === "calibrating") return Infinity;
-    const byEcho = this.cfg.echoGuard ? this.echoPeak * this.cfg.echoMultiplier : 0;
+    const byEcho = sounding ? this.echoPeak * this.cfg.echoMultiplier : 0;
     return Math.max(this.cfg.minThreshold, byEcho, this.floor * this.cfg.floorMultiplier);
   }
 
   /** Forget everything. Call after acting on a confirm, or when playback
-   *  changes under the gate — the next episode recalibrates. */
+   *  changes under the gate. The measured ceiling carries over — same room,
+   *  same speakers — so the next episode arms immediately. */
   reset(): void {
-    this.state = this.cfg.echoGuard ? "calibrating" : "armed";
-    this.calibLeft = this.cfg.echoGuard ? this.cfg.calibChunks : 0;
-    this.echoPeak = 0;
+    // Always arm: reset happens after a confirmed barge-in (or a player
+    // change), by which point the ceiling is measured — re-calibrating would
+    // spend the first 1.3 s of the next episode deaf for nothing.
+    this.state = "armed";
+    this.echoPeak = this.cfg.echoGuard ? lastMeasuredEcho : 0;
     this.run = 0;
+    this.runPeak = 0;
   }
 
-  /** Feed one chunk's RMS. Returns the event to act on, or null. */
-  feed(rms: number): VoiceGateEvent | null {
+  /** Feed one chunk's RMS. `sounding` = the TTS is producing audio right now
+   *  (the caller reads it off the player's phase). Returns the event to act
+   *  on, or null. */
+  feed(rms: number, sounding: boolean): VoiceGateEvent | null {
     if (this.state === "confirmed") return null; // latched until reset()
 
     if (this.state === "calibrating") {
+      // Silence says nothing about the echo — only sounding chunks count,
+      // and a silent stretch must not consume the window.
+      if (!sounding) return null;
       this.echoPeak = Math.max(this.echoPeak, rms);
       this.calibLeft -= 1;
-      if (this.calibLeft <= 0) this.state = "armed";
+      if (this.calibLeft <= 0) {
+        this.state = "armed";
+        lastMeasuredEcho = this.echoPeak;
+      }
       return null;
     }
 
-    const loud = rms >= this.threshold;
+    const loud = rms >= this.threshold(sounding);
     if (!loud) {
       // Quiet chunk: the floor drifts toward it (EMA), clamped. Only quiet
       // chunks move the floor — a loud chunk must not raise the bar behind
@@ -116,10 +148,12 @@ export class VoiceActivityGate {
       this.floor += (Math.min(rms, this.floor) - this.floor) * 0.04;
       this.floor = Math.min(Math.max(this.floor, FLOOR_MIN), FLOOR_MAX);
       this.run = 0;
+      this.runPeak = 0;
       return null;
     }
 
     this.run += 1;
+    this.runPeak = Math.max(this.runPeak, rms);
     if (this.run >= this.cfg.confirmChunks) {
       this.state = "confirmed";
       return "confirm";
@@ -134,7 +168,9 @@ export class VoiceActivityGate {
  *  chunk cadence and never fight over graph conventions. No transcription
  *  happens here — this watcher exists to catch speech during playback, so it
  *  deliberately retains nothing. */
-export async function startMicLevelFeed(feed: (rms: number) => void): Promise<() => void> {
+export async function startMicLevelFeed(
+  feed: (rms: number) => void,
+): Promise<() => void> {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   const ctx = new AudioContext({ sampleRate: 16000 });
   const source = ctx.createMediaStreamSource(stream);

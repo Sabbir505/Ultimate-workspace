@@ -9,6 +9,18 @@
 //! vendor's CUDA build of `sherpa-onnx-offline-tts`, published as a
 //! self-contained tar.bz2, as a short-lived child process.
 //!
+//! Why there is no PERSISTENT worker (checked against v1.13.8, 2026-09-30,
+//! after live-run logs showed the ~5-7 s spawn dominating streaming reads):
+//! the pinned bundle ships statically-linked exes only — no `sherpa-onnx-http-server`
+//! target exists in that release's CMake, the offline WebSocket server is
+//! ASR-only, there is no C-API DLL to LoadLibrary into a resident worker, and
+//! the official Rust and Python bindings are built from CPU-only prebuilts.
+//! A resident engine would therefore mean building sherpa-onnx from source
+//! (CUDA + shared libs) and shipping our own worker binary. Until then the
+//! spawn is paid per call and the player overlaps it with playback (see
+//! GPU_STREAM_FLUSH_MS in src/lib/tts.ts); the CPU engine is in-process and
+//! warm, so for hands-free voice it is often the lower-latency device.
+//!
 //! Measured on a GTX 1660 Ti (Turing) with the multilingual Kokoro model, same
 //! sentence, best of three:
 //!

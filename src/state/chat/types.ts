@@ -423,6 +423,10 @@ export interface ChatState {
     chatSessionId: string,
     targetPaneId: string,
     edge: import("./paneTree").ChatPaneEdge,
+    /** Measured drop context. With it, a drop that would crush the target
+     *  pane re-flows the axis to make room instead of refusing; only a
+     *  window too small for another pane is rejected. */
+    geometry?: import("./paneTree").ChatPaneDropGeometry,
   ) => Promise<void>;
   /** Load (or re-target) a pinned pane's history page. */
   loadPaneMessages: (paneId: string, chatSessionId: string) => Promise<void>;

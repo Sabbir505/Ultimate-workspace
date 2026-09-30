@@ -43,11 +43,15 @@ vi.mock("../lib/ipc", () => ({
 
 import {
   MAX_CHAT_PANES,
+  MIN_CHAT_PANE_W,
+  type ChatPaneDropGeometry,
   chatLeafSessions,
   countChatPanes,
+  equalizeChatPaneAxisToward,
   findPaneForSession,
   insertChatPaneSplit,
   owningSplitId,
+  predictChatLeafAxisSize,
   removeChatPane,
   setChatPaneRatio,
 } from "../state/chat/paneTree";
@@ -516,5 +520,122 @@ describe("pane store actions", () => {
     const s = useChatStore.getState();
     expect(s.chatPaneTree).toBeNull();
     expect(s.paneBuffers[paneId!]).toBeUndefined();
+  });
+});
+
+// Dropping onto a pane too small to give up half used to be refused outright,
+// even though the room existed in the sibling panes. The drop now re-flows the
+// split axis toward the new pane, and refuses only when the window genuinely
+// cannot fit one more usable pane.
+//
+// Fresh session ids: the deleteChat test above tombstones "s2" for the whole
+// app run (the deletedSessions map has no reset), and a tombstoned session
+// silently no-ops every pane action.
+describe("pane drop auto-fit", () => {
+  beforeEach(() => seedSessions("a1", "a2", "a3"));
+
+  const chain = (aRatio: number, bRatio: number) => ({
+    kind: "split" as const,
+    id: "s-outer",
+    dir: "row" as const,
+    ratio: aRatio,
+    a: mainLeaf,
+    b: {
+      kind: "split" as const,
+      id: "s-inner",
+      dir: "row" as const,
+      ratio: bRatio,
+      a: { kind: "leaf" as const, paneId: "pane-b", sessionId: "s2" },
+      b: { kind: "leaf" as const, paneId: "pane-c", sessionId: "s3" },
+    },
+  });
+
+  it("equalizeChatPaneAxisToward gives every pane on the axis an equal share", () => {
+    // 0.8 / 0.25 custom ratios → main 40%, B 15%, C 45% of the width.
+    const equalized = equalizeChatPaneAxisToward(chain(0.8, 0.25), "pane-c", "row");
+    expect(equalized).not.toBe(null);
+    const root = equalized as Extract<typeof equalized, { kind: "split" }>;
+    // Root gives the target's side (2 leaves of 3) two thirds…
+    expect(root.ratio).toBeCloseTo(1 / 3);
+    // …and the inner split halves that between B and C. All three = 1/3.
+    expect(root.b.kind === "split" && root.b.ratio).toBeCloseTo(0.5);
+    for (const paneId of ["main", "pane-b", "pane-c"]) {
+      expect(predictChatLeafAxisSize(root, paneId, "row", 1200)).toBeCloseTo(400);
+    }
+  });
+
+  it("predictChatLeafAxisSize walks real ratios and ignores perpendicular splits", () => {
+    // Perpendicular (col) split divides HEIGHT only — both its leaves span the
+    // full width of their branch, so the row axis passes straight through.
+    const tree = {
+      kind: "split" as const,
+      id: "s-outer",
+      dir: "row" as const,
+      ratio: 0.5,
+      a: mainLeaf,
+      b: {
+        kind: "split" as const,
+        id: "s-inner",
+        dir: "col" as const,
+        ratio: 0.2,
+        a: { kind: "leaf" as const, paneId: "pane-b", sessionId: "s2" },
+        b: { kind: "leaf" as const, paneId: "pane-c", sessionId: "s3" },
+      },
+    };
+    expect(predictChatLeafAxisSize(tree, "main", "row", 1200)).toBe(600);
+    expect(predictChatLeafAxisSize(tree, "pane-b", "row", 1200)).toBe(600);
+    expect(predictChatLeafAxisSize(tree, "pane-c", "row", 1200)).toBe(600);
+    // …but the col ratio DOES divide the height.
+    expect(predictChatLeafAxisSize(tree, "pane-b", "col", 1000)).toBe(200);
+    expect(predictChatLeafAxisSize(tree, "pane-c", "col", 1000)).toBe(800);
+    expect(predictChatLeafAxisSize(tree, "pane-x", "row", 1200)).toBeNull();
+  });
+
+  it("equalizeChatPaneAxisToward leaves the tree alone when the pane is absent", () => {
+    const tree = chain(0.8, 0.25);
+    expect(equalizeChatPaneAxisToward(tree, "pane-x", "row")).toBe(tree);
+  });
+
+  it("a drop that would crush the pane re-flows the axis instead of refusing", async () => {
+    await useChatStore.getState().openChatSplit("a2");
+    const paneA = findPaneForSession(useChatStore.getState().chatPaneTree, "a2")!;
+    // Two panes of 600px each in a 1200px grid: 600/2 = 300 < 320, which used
+    // to bounce the drop.
+    const geometry: ChatPaneDropGeometry = {
+      paneWidth: 600,
+      paneHeight: 800,
+      rootWidth: 1200,
+      rootHeight: 800,
+    };
+    await useChatStore.getState().moveChatSessionToPane("a3", paneA, "right", geometry);
+
+    const s = useChatStore.getState();
+    expect(countChatPanes(s.chatPaneTree)).toBe(3);
+    // The root split now gives the dropped branch its 2-of-3 leaf share, so
+    // every pane lands on an equal 400px — above the 320 floor.
+    const root = s.chatPaneTree!;
+    expect(root.kind).toBe("split");
+    expect(root.kind === "split" && root.ratio).toBeCloseTo(1 / 3);
+    expect(
+      predictChatLeafAxisSize(root, findPaneForSession(root, "a3")!, "row", 1200),
+    ).toBeGreaterThanOrEqual(MIN_CHAT_PANE_W);
+    expect(s.paneBuffers[findPaneForSession(root, "a3")!]).toBeDefined();
+  });
+
+  it("still refuses when the window cannot fit another usable pane", async () => {
+    await useChatStore.getState().openChatSplit("a2");
+    const paneA = findPaneForSession(useChatStore.getState().chatPaneTree, "a2")!;
+    const before = useChatStore.getState().chatPaneTree;
+    // 800px of width / 3 panes = 267px each — below the floor even re-flowed.
+    await useChatStore.getState().moveChatSessionToPane("a3", paneA, "right", {
+      paneWidth: 400,
+      paneHeight: 800,
+      rootWidth: 800,
+      rootHeight: 800,
+    });
+    const s = useChatStore.getState();
+    expect(s.chatPaneTree).toBe(before);
+    // No new pane buffer — the drop did not land (just the openChatSplit one).
+    expect(Object.keys(s.paneBuffers).length).toBe(1);
   });
 });

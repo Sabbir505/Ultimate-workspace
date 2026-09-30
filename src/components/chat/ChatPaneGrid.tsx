@@ -13,10 +13,11 @@
 // Every pane is also a drop target: while a chat session is dragged from the
 // sidebar, four edge zones (left/right/top/bottom) arm over the pane and the
 // hovered edge previews the OUTCOME — a half-pane dashed overlay, equal to
-// what the existing pane will shrink to. Dropping opens that session there.
+// what the existing pane will shrink to. Dropping opens that session there;
+// when the pane is too small to give up half, the store re-flows the split
+// axis to make room (paneTree.ts fit helpers) rather than refusing.
 import { useCallback, useRef, useState } from "react";
 import { startPointerDrag } from "../../lib/pointerDrag";
-import { useUiStore } from "../../state/ui";
 import {
   draggedChatSessionId,
   endChatSessionDrag,
@@ -98,9 +99,6 @@ function PaneDropZones({ paneId }: { paneId: string }) {
   );
 }
 
-const MIN_SPLIT_HALF_W = 320; // px — a left/right split halves the pane's width
-const MIN_SPLIT_HALF_H = 240; // px — a top/bottom split halves its height
-
 /** One edge hit zone (a strip along that edge). Stateless: hover reporting
  *  goes to the parent so exactly one preview renders. */
 function DropZone({
@@ -130,22 +128,26 @@ function DropZone({
         const sessionId = draggedChatSessionId();
         endChatSessionDrag();
         if (!sessionId) return;
-        // Refuse splits that would crush a pane below a usable size (the
-        // split halves this pane along the drop axis). Zero-rect environments
-        // (jsdom tests, hidden panes) skip the guard.
+        // Measure the drop so the store can auto-fit the axis when the split
+        // would crush this pane (and refuse only when the window itself is
+        // too small). Zero rects (jsdom, hidden pane) mean "cannot measure" —
+        // the store skips the fit check rather than blocking the drop.
         const paneEl = zoneRef.current?.closest(".chat-pane");
-        const rect = paneEl?.getBoundingClientRect();
-        const half =
-          edge === "left" || edge === "right" ? rect?.width ?? 0 : rect?.height ?? 0;
-        const min = edge === "left" || edge === "right" ? MIN_SPLIT_HALF_W : MIN_SPLIT_HALF_H;
-        if (rect && rect.width > 0 && rect.height > 0 && half / 2 < min) {
-          useUiStore.getState().pushToast(
-            "info",
-            "Not enough room to split this pane — try a larger window",
-          );
-          return;
-        }
-        void useChatStore.getState().moveChatSessionToPane(sessionId, paneId, edge);
+        const rootEl = zoneRef.current?.closest(".chat-grid-wrap");
+        const paneRect = paneEl?.getBoundingClientRect();
+        const rootRect = rootEl?.getBoundingClientRect();
+        const geometry =
+          paneRect && rootRect
+            ? {
+                paneWidth: paneRect.width,
+                paneHeight: paneRect.height,
+                rootWidth: rootRect.width,
+                rootHeight: rootRect.height,
+              }
+            : undefined;
+        void useChatStore
+          .getState()
+          .moveChatSessionToPane(sessionId, paneId, edge, geometry);
       }}
     />
   );

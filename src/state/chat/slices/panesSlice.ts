@@ -16,14 +16,20 @@ import { forkChatSession, toastError, type ChatSession } from "../../../lib/ipc"
 import {
   CHAT_MAIN_PANE_ID,
   MAX_CHAT_PANES,
+  MIN_CHAT_PANE_H,
+  MIN_CHAT_PANE_W,
+  type ChatPaneDropGeometry,
   type ChatPaneEdge,
   countChatPanes,
+  edgeToSplit,
+  equalizeChatPaneAxisToward,
   findChatLeaf,
   findPaneForSession,
   insertChatPaneSplit,
   nextChatPaneId,
   nextChatSplitId,
   owningSplitId,
+  predictChatLeafAxisSize,
   removeChatPane,
   removeChatPanePromote,
   setChatPaneRatio as applyPaneRatio,
@@ -51,6 +57,40 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
 
   const toast = (message: string) => useUiStore.getState().pushToast("info", message);
 
+  /** Fit the freshly built post-split tree to the space actually available.
+   *
+   *  Splitting halves the target pane, so when it is already smaller than
+   *  2×min the old behavior refused the drop outright — even though the room
+   *  usually exists in the sibling panes, and the user could always reach it
+   *  by hand-resizing first. Instead: re-flow the drop axis toward the new
+   *  pane (equal shares for the panes on that axis) and accept when every
+   *  half clears the floor. Refuse only when the window itself is too small.
+   *
+   *  Null geometry (⋮ menu, unit tests, unmeasurable pane) skips the check —
+   *  same as the pre-geometry guard, which only ever ran on real drops. */
+  const fitPaneDrop = (
+    next: ChatPaneNode,
+    newPaneId: string,
+    edge: ChatPaneEdge,
+    geometry: ChatPaneDropGeometry | undefined,
+  ): ChatPaneNode | null => {
+    if (!geometry) return next;
+    const { dir } = edgeToSplit(edge);
+    const paneAxis = dir === "row" ? geometry.paneWidth : geometry.paneHeight;
+    const rootAxis = dir === "row" ? geometry.rootWidth : geometry.rootHeight;
+    // Zero rects mean "could not measure" — never block a drop on that.
+    if (!(paneAxis > 0) || !(rootAxis > 0)) return next;
+    const min = dir === "row" ? MIN_CHAT_PANE_W : MIN_CHAT_PANE_H;
+    if (paneAxis / 2 >= min) return next; // fits as-is; leave the user's ratios alone
+
+    const rebalanced = equalizeChatPaneAxisToward(next, newPaneId, dir);
+    const share = predictChatLeafAxisSize(rebalanced, newPaneId, dir, rootAxis);
+    if (share != null && share >= min) return rebalanced;
+
+    toast("Not enough room to split this pane — try a larger window");
+    return null;
+  };
+
   /** Shared engine behind openChatSplit (⋮ menu), moveChatSessionToPane
    *  (drag-and-drop) and forkChatToPanes: put `chatSessionId` on one edge of
    *  `targetPaneId`, creating the first split when the tree doesn't exist
@@ -59,6 +99,7 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
     chatSessionId: string,
     targetPaneId: string,
     edge: ChatPaneEdge,
+    geometry?: ChatPaneDropGeometry,
   ): Promise<string | null> => {
     const st = get();
     // Stale source (row deleted mid-drag, tombstoned id): silently no-op.
@@ -137,12 +178,16 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
       splitId: nextChatSplitId(),
     });
     if (!next) return null;
+    // Auto-fit before committing: re-flow the axis when the drop would crush
+    // the pane, refuse only when the window genuinely can't fit another pane.
+    const fitted = fitPaneDrop(next, newPaneId, edge, geometry);
+    if (!fitted) return null;
 
     set((s) => {
       let paneBuffers = s.paneBuffers;
       if (removedPaneId) paneBuffers = omitKey(paneBuffers, removedPaneId);
       return {
-        chatPaneTree: next,
+        chatPaneTree: fitted,
         paneBuffers: {
           ...paneBuffers,
           [newPaneId]: { sessionId: chatSessionId, messages: [], hasMoreHistory: false },
@@ -332,8 +377,9 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
       chatSessionId: string,
       targetPaneId: string,
       edge: ChatPaneEdge,
+      geometry?: ChatPaneDropGeometry,
     ) => {
-      await openSessionOnPaneEdge(chatSessionId, targetPaneId, edge);
+      await openSessionOnPaneEdge(chatSessionId, targetPaneId, edge, geometry);
     },
   };
 }

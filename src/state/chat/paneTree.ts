@@ -292,3 +292,95 @@ export function setChatPaneRatio(
   if (b !== node.b) return { ...node, b };
   return node;
 }
+
+// ---- Drop-fit: auto-resize instead of refusing -----------------------------
+//
+// Splitting a pane halves it, so a pane narrower than 2×MIN_CHAT_PANE_W (or
+// shorter than 2×MIN_CHAT_PANE_H) cannot take a drop without crushing the two
+// halves. The first cut refused the drop with a toast — but the room usually
+// EXISTS, it just sits in the sibling panes, and the user could always get
+// there by hand-resizing first. These helpers re-flow the split axis toward
+// the dropped pane instead, and only refuse when the window genuinely cannot
+// fit one more pane at a usable size.
+
+/** Smallest usable pane, in px, per axis. Same floor the drop guard has always
+ *  enforced for a split's two halves. */
+export const MIN_CHAT_PANE_W = 320;
+export const MIN_CHAT_PANE_H = 240;
+
+/** Pixel geometry of a drop, measured in the renderer. The store needs it
+ *  because ratios alone cannot tell whether a split fits — a ratio is a
+ *  fraction of whatever container it lands in. Null/zero fields (jsdom, hidden
+ *  pane) mean "cannot measure" and skip the fit check entirely. */
+export interface ChatPaneDropGeometry {
+  /** The pane being dropped ON. */
+  paneWidth: number;
+  paneHeight: number;
+  /** The whole grid area (`.chat-grid-wrap`) — the space the axis can grow
+   *  into by re-flowing sibling panes. */
+  rootWidth: number;
+  rootHeight: number;
+}
+
+/** Re-flow the splits along `dir` on the path from the root down to leaf
+ *  `paneId` so that leaf gets an equal share of that axis: each matching split
+ *  gives the target's side exactly its leaf-count fraction.
+ *
+ *  Only splits on the path are touched — the rest of the tree keeps whatever
+ *  ratios the user dragged it to. Splits in the OTHER direction are left alone
+ *  (they don't divide this axis), which is why their leaves inherit whatever
+ *  the re-flowed share hands them. */
+export function equalizeChatPaneAxisToward(
+  node: ChatPaneNode,
+  paneId: string,
+  dir: "row" | "col",
+): ChatPaneNode {
+  const walk = (cur: ChatPaneNode): { node: ChatPaneNode; hasTarget: boolean } => {
+    if (cur.kind === "leaf") {
+      return { node: cur, hasTarget: cur.paneId === paneId };
+    }
+    const a = walk(cur.a);
+    if (a.hasTarget) {
+      // The target's side gets its leaf-count share of this split.
+      const share = countChatPanes(a.node) / countChatPanes(cur);
+      return {
+        node: cur.dir === dir ? { ...cur, ratio: share, a: a.node } : { ...cur, a: a.node },
+        hasTarget: true,
+      };
+    }
+    const b = walk(cur.b);
+    if (b.hasTarget) {
+      const share = countChatPanes(b.node) / countChatPanes(cur);
+      return {
+        node: cur.dir === dir ? { ...cur, ratio: 1 - share, b: b.node } : { ...cur, b: b.node },
+        hasTarget: true,
+      };
+    }
+    return { node: cur, hasTarget: false };
+  };
+  return walk(node).node;
+}
+
+/** The axis size leaf `paneId` will actually get in `node`, given the root
+ *  container's size along `dir`. Walks the real ratios, so it stays honest
+ *  whatever wrote them. Null when the leaf isn't in the tree. */
+export function predictChatLeafAxisSize(
+  node: ChatPaneNode,
+  paneId: string,
+  dir: "row" | "col",
+  rootAxisSize: number,
+): number | null {
+  if (node.kind === "leaf") {
+    return node.paneId === paneId ? rootAxisSize : null;
+  }
+  if (node.dir === dir) {
+    const a = predictChatLeafAxisSize(node.a, paneId, dir, rootAxisSize * node.ratio);
+    if (a != null) return a;
+    return predictChatLeafAxisSize(node.b, paneId, dir, rootAxisSize * (1 - node.ratio));
+  }
+  // Perpendicular split: both children span this container's full axis.
+  return (
+    predictChatLeafAxisSize(node.a, paneId, dir, rootAxisSize) ??
+    predictChatLeafAxisSize(node.b, paneId, dir, rootAxisSize)
+  );
+}

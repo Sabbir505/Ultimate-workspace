@@ -170,14 +170,28 @@ export function VoiceLoopController(): null {
 
   // The TTS store's phase IS the speaking state machine: loading/buffering/
   // playing = speaking (watcher armed); idle = the read finished → listen
-  // again, unless the loop bar's stop asked to end the episode.
+  // again, unless the loop bar's stop asked to end the episode. A read that
+  // lands on idle while the loop is still WAITING never made a sound (no
+  // voice model, synthesis failed, or a stop) — the loop must go back to
+  // listening instead of stranding in "Thinking", and say why it went quiet.
   useEffect(
     () =>
       useTtsStore.subscribe((s) => {
         const store = useVoiceLoopStore.getState();
         if (store.mode !== "handsfree") return;
-        if (store.phase === "waiting" && (s.phase === "playing" || s.phase === "buffering")) {
-          store.set({ phase: "speaking" });
+        if (store.phase === "waiting") {
+          if (s.phase === "playing" || s.phase === "buffering") {
+            store.set({ phase: "speaking" });
+            return;
+          }
+          if (s.phase === "idle") {
+            startListeningRef.current();
+            if (s.error) {
+              useVoiceLoopStore
+                .getState()
+                .set({ error: `Read-aloud failed: ${s.error}` });
+            }
+          }
           return;
         }
         if (store.phase === "speaking" && s.phase === "idle") {
@@ -193,22 +207,45 @@ export function VoiceLoopController(): null {
   );
 
   // Turn persistence landed: either read-aloud starts (the subscription above
-  // flips us to speaking) or there is no voice engine — resume the mic after
-  // a grace beat so a TTS-less setup still loops.
+  // flips us to speaking) or nothing will — re-check on a beat instead of
+  // giving up after one look, because a read can still be warming up (GPU
+  // process start) or was never started at all (an in-progress read blocked
+  // the auto-read). Loading earns another beat (bounded — a hung engine must
+  // not strand the loop); a PAUSED old read earns one beat and then the loop
+  // takes the audio floor back, since in hands-free the loop owns playback;
+  // idle resumes the mic and surfaces the engine's error.
   useEffect(() => {
     onVoiceTurnComplete((sessionId) => {
       const store = useVoiceLoopStore.getState();
       if (store.mode !== "handsfree" || store.phase !== "waiting") return;
       if (sessionId !== pendingSessionRef.current) return;
-      window.setTimeout(() => {
+      let beats = 0;
+      const check = () => {
         const s = useVoiceLoopStore.getState();
         if (s.mode !== "handsfree" || s.phase !== "waiting") return;
-        // The subscription owns the happy path; this catches "no TTS model".
-        if (useTtsStore.getState().phase === "idle") {
-          s.set({ phase: "idle", transcript: "" });
+        const tts = useTtsStore.getState();
+        if (tts.phase === "playing" || tts.phase === "buffering") return; // subscription owns it
+        if (tts.phase === "idle") {
           startListeningRef.current();
+          if (tts.error) {
+            useVoiceLoopStore.getState().set({ error: `Read-aloud failed: ${tts.error}` });
+          }
+          return;
         }
-      }, SPEAK_START_GRACE_MS);
+        if (tts.phase === "paused" && beats >= 1) {
+          ttsPlayer.stop(); // the loop owns the floor; a stale pause blocks every read
+          startListeningRef.current();
+          return;
+        }
+        if (beats >= 20) {
+          s.set({ error: "Read-aloud never started — the voice engine did not respond." });
+          startListeningRef.current();
+          return;
+        }
+        beats += 1;
+        window.setTimeout(check, SPEAK_START_GRACE_MS);
+      };
+      window.setTimeout(check, SPEAK_START_GRACE_MS);
     });
   }, []);
 

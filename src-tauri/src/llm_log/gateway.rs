@@ -761,7 +761,7 @@ mod tests {
 
     fn req(raw: &str) -> ParsedRequest {
         let idx = raw.find("\r\n\r\n").expect("test fixture needs a head") + 4;
-        parse_request(raw[..idx].as_bytes(), raw[idx..].as_bytes()).expect("parses")
+        parse_request(&raw.as_bytes()[..idx], &raw.as_bytes()[idx..]).expect("parses")
     }
 
     #[test]

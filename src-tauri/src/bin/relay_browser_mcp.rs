@@ -430,6 +430,12 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         // session_fabric::execute_mesh_tool.
         | "list_sessions" | "read_session" | "search_sessions"
         | "message_session" | "spawn_session"
+        // Subagent registry, whole family: list so a harness can find
+        // spawnable agent ids/names, CRUD so it can author one. Authoring is
+        // bridged ungated but scoped app-side (gate_relay_subagent_op keeps
+        // agent-authored rows read-only), so mapping these here cannot widen
+        // what an agent may do.
+        | "list_subagents" | "create_subagent" | "update_subagent" | "delete_subagent"
         // Vault CRUD — advertised by the app (get_capabilities' relay_tools
         // list AND the live tools/list) and dispatched app-side via
         // execute_vault_tool. Mapped here (not left to route_tool_op's

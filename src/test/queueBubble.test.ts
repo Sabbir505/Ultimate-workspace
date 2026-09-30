@@ -86,6 +86,9 @@ describe("queued message bubble", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(useChatStore.getState().streaming.s1).toBeDefined();
+    // Tokens arrive — the turn now has a visible partial, so a follow-up
+    // QUEUES (a still-silent turn would be auto-cancelled by a new send).
+    useChatStore.setState((s) => ({ streaming: { ...s.streaming, s1: "partial…" } }));
 
     // Queue a second message while the turn streams.
     await useChatStore.getState().sendMessage("queued");
@@ -118,6 +121,7 @@ describe("queued message bubble", () => {
     void useChatStore.getState().sendMessage("first");
     await Promise.resolve();
     await Promise.resolve();
+    useChatStore.setState((s) => ({ streaming: { ...s.streaming, s1: "partial…" } }));
     await useChatStore.getState().sendMessage("queued");
 
     // Stop: cancelStream drains the queue (optimistic bubble appended) and
@@ -206,6 +210,7 @@ describe("steer vs a failing cancel (audit 2026-09-14 #2)", () => {
     void useChatStore.getState().sendMessage("running turn");
     await Promise.resolve();
     await Promise.resolve();
+    useChatStore.setState((s) => ({ streaming: { ...s.streaming, s1: "partial…" } }));
     await useChatStore.getState().sendMessage("first queued");
     await useChatStore.getState().sendMessage("second queued");
     const steeredId = useChatStore.getState().messageQueue.s1[1].id;
@@ -240,6 +245,8 @@ describe("queue stack actions (steer / edit / move / delete)", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(useChatStore.getState().streaming.s1).toBeDefined();
+    // Tokens arrive: the turn has a visible partial, so follow-ups queue.
+    useChatStore.setState((s) => ({ streaming: { ...s.streaming, s1: "partial…" } }));
 
     // Stack two follow-ups while the turn streams.
     await useChatStore.getState().sendMessage("first queued");

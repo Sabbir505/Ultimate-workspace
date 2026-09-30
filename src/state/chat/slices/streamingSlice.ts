@@ -61,26 +61,42 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
       const activeChatSessionId = sessionIdOverride ?? get().activeChatSessionId;
       if (!activeChatSessionId) return;
       if (isDeletedSession(activeChatSessionId)) return;
-      // A turn is already running for this session: stack the message above
-      // the composer instead of dropping it. drainQueue sends the queue FIFO
-      // when the current turn finishes (onDone / onError / cancelStream).
-      // Per-session check (H2): concurrent sessions each own a `streaming` key,
-      // and the legacy scalar may name whichever session last emitted a token —
-      // gating on it would let a second turn start in an already-streaming chat.
+      // A turn is already running for this session. Two very different cases:
+      //
+      //  · The agent has produced NOTHING yet (the streaming key exists but
+      //    holds no text — the pre-first-token thinking phase): a new
+      //    instruction means "forget that, do this instead". Auto-cancel the
+      //    silent turn and start the new one. Queueing here read as the app
+      //    ignoring the send, and the backend rejects a second concurrent
+      //    turn anyway ("a turn is already running" toasts).
+      //  · There is a visible partial: keep the queue — the user can see
+      //    what the turn already wrote and may genuinely want both, FIFO,
+      //    when it finishes. drainQueue sends the queue when the turn ends
+      //    (onDone / onError / cancelStream).
+      //
+      // Per-session check (H2): concurrent sessions each own a `streaming`
+      // key, and the legacy scalar may name whichever session last emitted a
+      // token — gating on it would let a second turn start in an
+      // already-streaming chat.
       if (activeChatSessionId in get().streaming) {
-        const queued: QueuedChatMessage = {
-          id: queueIdCounter.next++,
-          content,
-          attachments: attachments ?? undefined,
-          forceResearch: forceResearch || undefined,
-        };
-        set((s) => ({
-          messageQueue: {
-            ...s.messageQueue,
-            [activeChatSessionId]: [...(s.messageQueue[activeChatSessionId] ?? []), queued],
-          },
-        }));
-        return;
+        if ((get().streaming[activeChatSessionId] ?? "").trim() === "") {
+          await get().cancelStream(activeChatSessionId);
+          // Fall through: the session is free, the normal send path runs.
+        } else {
+          const queued: QueuedChatMessage = {
+            id: queueIdCounter.next++,
+            content,
+            attachments: attachments ?? undefined,
+            forceResearch: forceResearch || undefined,
+          };
+          set((s) => ({
+            messageQueue: {
+              ...s.messageQueue,
+              [activeChatSessionId]: [...(s.messageQueue[activeChatSessionId] ?? []), queued],
+            },
+          }));
+          return;
+        }
       }
 
       // Client-side fallback title. The LLM auto-titling in onDone

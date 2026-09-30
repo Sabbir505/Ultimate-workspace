@@ -15,8 +15,11 @@
 //
 // For the optimistic just-sent message, real ChatAttachment objects (with the
 // image base64) can be passed in `liveAttachments` so images get a genuine
-// thumbnail even before the backend persists anything.
+// thumbnail even before the backend persists anything. For a PERSISTED image
+// the marker carries the path the backend saved the bytes to, and the card
+// re-reads them over IPC — otherwise the image survived only as a glyph.
 import type { ChatAttachmentInput } from "../../lib/ipc";
+import { splitImageMarker, usePersistedImageDataUri } from "../../lib/chatAttachments";
 
 /** A parsed attachment to render as a card. */
 export interface ParsedAttachment {
@@ -32,6 +35,8 @@ export interface ParsedAttachment {
   preview?: string;
   /** For the optimistic message: a live image data URI (base64). */
   thumbDataUri?: string;
+  /** For a persisted image: where the backend saved the uploaded bytes. */
+  path?: string;
 }
 
 /** A single combined regex matching any attachment marker, with four
@@ -72,13 +77,14 @@ export function parseAttachments(
   // Collect every match in document order, then strip them all in one pass.
   for (const m of content.matchAll(RE_ANY)) {
     if (m[1] != null) {
-      // [Attached image: NAME]
-      const name = m[1].trim();
+      // [Attached image: NAME] or [Attached image: NAME|<path on disk>]
+      const { name, path } = splitImageMarker(m[1]);
       attachments.push({
         key: `img-${i++}`,
         name,
         kind: "image",
         badge: badgeFor(name, "image"),
+        path,
       });
     } else if (m[2] != null) {
       // [Attached file NAME could not be read as text.]
@@ -174,16 +180,22 @@ function FileGlyph({ kind }: { kind: ParsedAttachment["kind"] }) {
 }
 
 /** A single attachment preview card. Images always keep the thumbnail-tile
- *  silhouette — with the live base64 image when one exists, otherwise the
- *  picture glyph in the tile — so an attachment stays recognizable as an
- *  image across the optimistic→persisted transition instead of collapsing
- *  into a generic file row (images are never persisted with their bytes, so
- *  history can only show the placeholder). Docs/text render as a compact
- *  document row (small glyph left, name + ext badge beside it, preview
- *  clamped under). */
+ *  silhouette so an attachment stays recognizable as an image across the
+ *  optimistic→persisted transition instead of collapsing into a generic file
+ *  row. The picture itself comes from the live base64 when this app run sent
+ *  it, otherwise from the file the backend persisted for the message — and
+ *  only if neither is available does the tile fall back to the glyph (history
+ *  from before uploads were saved, or the file has since been deleted).
+ *  Docs/text render as a compact document row (small glyph left, name + ext
+ *  badge beside it, preview clamped under). */
 function AttachmentPreviewCard({ att }: { att: ParsedAttachment }) {
   const isImage = att.kind === "image";
-  const hasThumb = isImage && !!att.thumbDataUri;
+  // Only reach for the disk when this run didn't supply the bytes.
+  const persistedUri = usePersistedImageDataUri(
+    isImage && !att.thumbDataUri ? att.path : undefined,
+  );
+  const thumbSrc = att.thumbDataUri ?? persistedUri;
+  const hasThumb = isImage && !!thumbSrc;
   return (
     <div
       className={`msg-attachment-card${isImage ? "" : " no-thumb"}${hasThumb ? "" : isImage ? " img-placeholder" : ""}`}
@@ -191,7 +203,7 @@ function AttachmentPreviewCard({ att }: { att: ParsedAttachment }) {
     >
       <div className="msg-attachment-thumb">
         {hasThumb ? (
-          <img src={att.thumbDataUri} alt={att.name} loading="lazy" />
+          <img src={thumbSrc} alt={att.name} loading="lazy" />
         ) : (
           <FileGlyph kind={att.kind} />
         )}

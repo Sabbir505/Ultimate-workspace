@@ -14,7 +14,34 @@ describe("parseAttachments", () => {
     expect(attachments[0].kind).toBe("image");
     expect(attachments[0].name).toBe("cat.png");
     expect(attachments[0].badge).toBe("PNG");
+    // History from before uploads were written to disk carries no path; such a
+    // card can only show the glyph.
+    expect(attachments[0].path).toBeUndefined();
     expect(text).toBe("Look at this photo.");
+  });
+
+  it("splits the saved upload path out of a persisted image marker", () => {
+    // What the backend persists now: the path rides inside the marker so the
+    // card can re-render the real image after a restart.
+    const path = "C:\\Users\\me\\AppData\\relay\\chat-uploads\\1756-shot.png";
+    const { attachments, text } = parseAttachments(
+      `Look at this.\n\n[Attached image: shot.png|${path}]`,
+    );
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0].name).toBe("shot.png");
+    expect(attachments[0].badge).toBe("PNG");
+    expect(attachments[0].path).toBe(path);
+    expect(text).toBe("Look at this.");
+  });
+
+  it("keeps the path verbatim, spaces and drive colon included", () => {
+    const { attachments } = parseAttachments(
+      `[Attached image: Screenshot 2026-09-16 at 10.14.33.png|C:\\Users\\a b\\AppData\\relay\\chat-uploads\\1756-Screenshot.png]`,
+    );
+    expect(attachments[0].name).toBe("Screenshot 2026-09-16 at 10.14.33.png");
+    expect(attachments[0].path).toBe(
+      "C:\\Users\\a b\\AppData\\relay\\chat-uploads\\1756-Screenshot.png",
+    );
   });
 
   it("parses a doc/text attachment with extracted content into a card with a preview", () => {

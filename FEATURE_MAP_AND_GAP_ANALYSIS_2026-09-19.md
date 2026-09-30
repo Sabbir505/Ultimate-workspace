@@ -5,14 +5,20 @@
 > competitive landscape (coding agents, AI chat/local-LLM desktop apps) and agent-ecosystem
 > standards (MCP, A2A, Agent Skills, OTel). Items marked **[code]** were verified in the codebase;
 > items marked **[research]** come from external research and should be re-verified before building.
+>
+> **Re-verified 2026-09-30 against the codebase** (73 commits landed since this analysis). Claims
+> that no longer hold are marked inline: ✅ = resolved (with the commit/date that closed it),
+> 🟡 = partially resolved (what remains is stated). Unmarked claims are still open. Section 2's
+> snapshot numbers were refreshed in the same pass; §4.1.6 and the babel/elk half of §4.6.3 were
+> found to be stale *when written* (already true/false before 2026-09-19).
 
 ---
 
 ## 1. Executive summary
 
 Relay is in an unusually strong and clean state: four audit waves fully remediated, no open Sev-1
-bugs, ~339 backend commands across 16 subsystems, a 17-section settings surface, 163 frontend test
-files, and several features **no competitor ships** (agent-controllable native browser panes, a
+bugs, ~339 backend commands across 16 subsystems, a 17-section settings surface, 200 frontend test
+files (~1,567 tests as of 2026-09-30), and several features **no competitor ships** (agent-controllable native browser panes, a
 GGUF model market with one-click local serving, Session Mesh peer-to-peer agent messaging,
 run-while-closed local automations, self-improving artifacts, a cross-agent cost dashboard).
 
@@ -45,7 +51,7 @@ Sections 5–7 turn these into a prioritized, effort-tagged backlog.
 | Product | Relay — local-first, multi-pane desktop shell for AI coding agents |
 | Stack | Tauri v2 (Rust), React + TypeScript + Zustand, SQLite (WAL, ~46 tables), React Native/Expo mobile |
 | Platforms shipped | Windows (NSIS installer); macOS/Linux compile-only |
-| Test surface | 163 vitest files (~1,055+ tests), `cargo test --lib` 1,078 passed, `tsc --noEmit` clean |
+| Test surface | 200 vitest files (~1,567 tests), `cargo test --lib` 1,481 passed, `tsc --noEmit` clean (2026-09-30; was 163 files / ~1,055 tests / 1,078 cargo on 09-19). CI gates every push: `tsc` + `vitest` + `cargo test` + `clippy -D warnings` (`.github/workflows/ci.yml`) |
 | Backend surface | ~339 registered Tauri commands, 30+ ALTER-style DB migrations |
 | Agent tools exposed to models | 45+ built-in tools (see §3.13) plus vendor MCP/connector tools |
 
@@ -155,17 +161,17 @@ Subagents: `Task` spawns read-only-tool subagents (100-round cap, alternate-mode
 2. **Unsigned installer / distribution trust.** No Authenticode signing → SmartScreen/AV friction; updater signing exists only **[code + research]**. No winget/Scoop presence **[code]**.
 3. **Unattended full-auto authority.** Automations force `full_auto` (and `--dangerously-skip-permissions` for Claude); the "authority story" is a documented open decision **[docs]**. Budgets are advisory-only — nothing hard-stops a runaway run **[code]**.
 4. **Exec-gate remembered approvals live in plain `app_settings`** (hashed idents, unauthenticated) — a DB writer could pre-allow execution **[code]**.
-5. **Pairing proof is replayable** (static HMAC over token); needs a coordinated challenge-response release **[docs]**.
-6. **Linux secrets are XOR-obfuscated, not encrypted** **[code]**.
+5. 🟡 **Pairing proof is replayable** — mitigated 2026-09-26 (398e5fd mobile overhaul): every E2E connection now derives a per-connection key via `HKDF(token, conn_salt)` (`mobile/relay_crypto.rs:43-59`), so a replayed proof pairs but cannot decrypt anything, and plaintext frames on E2E connections are rejected. The proof itself is still a static HMAC (no nonce/challenge) — a coordinated release can still upgrade it.
+6. ✅ **Linux secrets are XOR-obfuscated, not encrypted** — stale when written: Linux has used the OS keyring (Secret Service via D-Bus, `keyring = "3"` with `linux-native` features) since 2026-07-31 (`secrets.rs:15-18`); XOR remains only as the no-keyring-backend fallback (`secrets.rs:262-284`).
 7. **Harness bearer tokens sit in plaintext project `mcp.json`/`opencode.json`** (CLI-required; needs env-var indirection refactor) **[docs]**.
 8. **Prompt injection via stored memories** accepted as residual risk; no content firewall on retrieved memory/RAG excerpts before injection **[docs]**.
 9. **Checkpoints are unbounded per session** (pruned only on session delete) **[docs]**.
 
 ### 4.2 Table-stakes vs. coding-agent competitors **[research, cross-checked vs code]**
-1. **Lifecycle hooks** (pre/post tool-call, session start/stop; user scripts) — Claude Code, Gemini CLI, Copilot have them; Relay has none (noted as "cheap because `check_permission()` is centralized" in the project's own Action_list).
-2. **Triggers beyond cron** for automations — inbound webhooks as a *trigger* (Relay only posts outbound on completion), file-watch, git-event (push/PR), email/IMAP. n8n/Zapier/ChatGPT Scheduled all ship richer trigger sets.
-3. **Declarative named subagents** — user-defined agents with their own prompt, tool allowlist, permission scope, model (Claude Code subagents, Copilot `.agent.md`, Roo orchestrator, Amp). Relay's `Task`/`spawn_session` are ad-hoc, not user-definable.
-4. **Worktree-per-agent auto-provisioning** in orchestration — Cursor 2.0 isolates each of 8 parallel agents in worktrees; Relay supports worktrees but doesn't auto-provision one per spawned agent.
+1. ✅ **Lifecycle hooks** — shipped 2026-09-21 (7ff4df6): user-configured scripts around agent tool calls with `pre_tool_use` (deny / ask / rewrite `updatedInput`), `post_tool_use`, and `TurnComplete`/`session_start` lifecycle events, configured in Settings → Hooks with Claude Code import (`src-tauri/src/hooks.rs`, ~1,700 lines); origin-scoped to chat/subagent/harness (76cbfbc). Only a `session stop` event is still absent.
+2. ✅ **Triggers beyond cron** — shipped 2026-09-26 (2150eb5): inbound webhook listener (loopback server, per-automation secret, test button), file-watch (notify), git-event (HEAD-SHA compare), and Gmail (historyId) trigger engines alongside cron (`automation_triggers.rs:56-61`). Caveat: webhook/file/gmail triggers fire only while the app is open; run-while-closed scheduling is still Windows Task Scheduler cron only (§4.5.2).
+3. ✅ **Declarative named subagents** — shipped 2026-09-24/26 (76cbfbc "declarative subagents — registry, five spawn surfaces, scoped hooks, .md interchange"; 7f0c510 CRUD chat tools with carded consent; d5d0235 harness-authored definitions read-only by default; f61bb58 "crew" → subagents). User-defined agents with prompt, tool allowlist, permission scope, model, and worktree policy, spawnable from UI/`Task`/`spawn_session`/automations, importable/exported as `.md`.
+4. ✅ **Worktree-per-agent auto-provisioning** — shipped with declarative subagents (76cbfbc): each definition carries `worktree_policy: inherit | always | never` (`chat/subagents.rs:559-566`) and the spawn path provisions `relay/<slug>-<id8>` worktrees (`session_fabric/mod.rs:2217-2249`). Opt-in per subagent definition (default `inherit`), not a global per-session default.
 5. **Inline per-hunk edit review** — the default interaction model elsewhere (Cursor/Zed/Cline); Relay removed accept/reject per edit by design (harnesses run full-auto), leaving only per-turn Undo. A "confirm edits" middle posture is missing.
 6. **Shareable session/trace links** (OpenCode share, Amp threads, Warp Drive) — no equivalent; would also serve bug reports.
 7. **Autonomous PR review bot** (Bugbot/Copilot review) — Relay can technically build this from automations + GitHub tools, but there's no packaged experience.
@@ -183,38 +189,38 @@ Subagents: `Task` spawns read-only-tool subagents (100-round cap, alternate-mode
 7. **Native provider search tools** — Anthropic/OpenAI server-side `web_search` tools (Responses API) unused; Relay's default search is keyless scraping.
 
 ### 4.4 Product/quality ceilings **[code, cross-checked]**
-1. **RAG quality**: brute cosine over one embedding model, no hybrid fusion ranking (FTS leg exists but is unioned crudely), no reranker, no contextual chunk enrichment, no eval harness. This is the single biggest quality gap in the local stack.
-2. **Local serving**: one chat model at a time; no continuous batching/concurrent slots; no live load-time VRAM estimator tied to sliders (market-time detection only); no per-model tool-calling capability badges or raw tool-call debug view.
-3. **Voice**: turn-based pipeline only — no streaming partial transcripts, no sentence-level streaming TTS, no barge-in; no system-wide dictation (in-app only); no real-time/local speech-to-speech exploration.
+1. 🟡 **RAG quality** — big half closed 2026-09-21 (5cb6c66): hybrid retrieval now RRF-fuses the FTS leg with vectors (`db/docs.rs` `search_chunks_hybrid`, Reciprocal Rank Fusion), a local `bge-reranker-v2-m3` sidecar reranks (top-50→top-8, `docs_index.rs:220-244`), and a recall@8 eval harness exists (`db/docs_eval.rs`). **Still open:** contextual chunk enrichment — the heading trail is display-only, never embedded (`db/docs.rs:236-237`).
+2. 🟡 **Local serving** — the debug half landed 2026-09-27 (9e66ed4): a request log storing request/response bodies verbatim behind a loopback gateway, rendered raw in the Logs view (`LogDetail.tsx:122-133`). **Still open:** no live load-time VRAM estimator tied to sliders (`LlamaAdvancedFields.tsx` has the fields but no estimate), no per-model tool-calling capability badges.
+3. 🟡 **Voice** — streaming halves landed 2026-09-26 (398e5fd wave): whisper live partial transcripts (`speech.rs` partial/commit tags) and sentence-level Kokoro streaming (playback starts on the first sentence, `tts.rs:17-18`). **Still open:** barge-in cancel, system-wide dictation, speech-to-speech.
 4. **Web search**: scraping-based default; no native provider search; no YouTube transcript tool (yt-dlp) or Exa.
 5. **Docs index**: not watcher-driven (manual re-index); image OCR Windows-only.
 6. **GitHub surface**: PR-only — no issues, no merge, no repo CRUD, no PAT fallback path; GitHub is the only git host (GitLab on the roadmap).
-7. **Multi-model comparison**: 6 panes exist, but no fork-two-models-on-one-thread compare view (Msty Split Chats / LM Studio Split View pattern).
+7. ✅ **Multi-model comparison** — shipped 2026-09-22 (5801806): fork one chat into 2–4 new sessions pinned side-by-side (`ForkChatModal.tsx` `FORK_OPTIONS = [2,3,4]`, per-fork config + history copy + worktree, equalized pane ratios), each pane independently re-modelable — the Msty/LM Studio compare pattern (ratios fixed in fd51b05).
 8. **Chat export**: markdown + zip exist; no PDF export; memory/automations/improve tables excluded from backups (asymmetric export).
-9. **Automations UX**: no approval-gate step inside a run, no chained/dependent automations, no per-run cost projection.
+9. **Automations UX**: no approval-gate step inside a run, no chained/dependent automations, no per-run cost projection. (The *trigger* half of this theme is solved — see §4.2.2.)
 10. **Loops feature is effectively empty** — scanner returns nothing until a harness creates `loops/`; UI ships regardless.
 
 ### 4.5 Platform & parity **[code]**
 1. **Windows-only shipping**: NSIS-only target; macOS .dmg compile-only (on roadmap as P3); Linux undecided (iframe browser fallback, XOR secrets, no OCR, no STT one-click install, no TTS GPU, no run-while-closed).
 2. **Run-while-closed automations Windows-only** (launchd/cron deferred).
-3. **Mobile companion**: no task dispatch from phone (competitors do phone→desktop task initiation **[research]**), no automations CRUD, no git/PR tools, no connector/memory/knowledge editing, no PDF/DOCX in-app preview, push needs a dev build (Expo Go can't push), stale push tokens never cleaned, `expo-secure-store` migration not done, pairing token in AsyncStorage.
-4. **Harness approval parity**: only Claude Code gets live approval cards; Kimi/OpenCode/ACP runs are always full-auto with post-hoc diffs.
-5. **Kimi cross-attribution risk** (two panes, same cwd, probe window) documented open **[code]**.
+3. 🟡 **Mobile companion** — largely closed by the 2026-09-26 overhaul (398e5fd): ✅ task dispatch from phone (phone composer → desktop session, `mobile/dispatch.rs`), ✅ automations CRUD (create/edit/delete), ✅ memory editing (edit/forget/purge), 🟡 git tools (status/diff/commit/push/branches/log — no PR creation yet). **Still open:** connector/knowledge editing, PDF/DOCX in-app preview (save/share card only), push still needs a dev build (Expo Go ships without expo-notifications), stale push tokens never cleaned (single overwritten token, no expiry), `expo-secure-store` migration not done, pairing token still in AsyncStorage.
+4. 🟡 **Harness approval parity** — much closer since 2026-09-26: every adapter now carries `diff_prompt_patterns` so any harness pane promotes to `diff_ready` on an approval prompt, and `PermissionModeMenu` passes each CLI's own native postures through to the spawn (OpenCode build/plan, Claude Code default/acceptEdits/plan/bypassPermissions) instead of forcing full-auto. **Still open:** Relay's interactive approval *cards* remain built-in-chat-only; no in-UI note flags the residual gap for harness panes.
+5. ✅ **Kimi cross-attribution risk** — fixed 2026-09-30: a process-wide claim registry makes the on-disk probe skip session ids another live pane already owns (stepping to the next candidate, flagged ambiguous), the recency guard is now mandatory, and Windows cwd matching is case-insensitive (`harness_adapters/mod.rs` `session_claims`, `kimi_code.rs` `find_newest_session_id`); provenance (`output` / `disk_probe` / `disk_probe_ambiguous`) is persisted on `sessions.harness_session_id_source` and surfaced as an `id?` badge in the pane header.
 6. **Renderer-crash recovery** for browser panes unhandled; Linux pane drift between resize syncs **[docs]**.
 7. **Quick-action keybindings stored but never registered OS-wide** (no `globalShortcut`); no Alt+Space-style global quick-capture.
 8. **No i18n/localization layer**; RTL only via `dir=auto`; no a11y audit.
 
 ### 4.6 Engineering hygiene **[code/docs]**
-1. **CI runs no tests** — `.github/workflows/build.yml` has no `cargo test`/`vitest`/`tsc` step; regressions can ship to release.
-2. **`cargo clippy` not installed/wired**; ~1,733 `.unwrap()`s in non-test Rust as a breadth signal.
-3. **Bundle bloat**: react-markdown/micromark (~450 KB) in entry chunk; `babel-standalone` (2.98 MB) + `flowchart-elk` (1.45 MB) not code-split; entry chunk regrown to ~766 KB.
-4. **24 recurring frontend timers**, six 1 Hz whole-component ticks + always-on pet rAF.
-5. **`AutomationRunTable` and CSV preview not virtualized**; `get_git_status` spawns git per call (no cache).
+1. ✅ **CI runs no tests** — fixed 2026-09-19 (42dad6f): `.github/workflows/ci.yml` gates every push with `tsc --noEmit`, `vitest`, `cargo test --lib`.
+2. ✅ **`cargo clippy` not wired** — fixed in the same commit: `cargo clippy --workspace --all-targets -- -D warnings` in CI; the pre-existing lint debt (766 instances) is allow-listed at the crate root and new lint kinds still fail.
+3. ✅ **Bundle bloat** — the babel-standalone/flowchart-elk half of this claim was already stale when written (both were dynamic imports behind their own chunks since the 2026-09-06 manualChunks rework). The react-markdown half was real and is fixed 2026-09-30: parser + remark/rehype plugins (incl. KaTeX) now load behind `React.lazy` (`components/common/LazyMarkdown.tsx`), taking the entry chunk from 1,182 KB to 751 KB (gzip 364→234 KB) with zero markdown modules left in it. **Still open (moved):** CSV preview virtualization (§4.6.5).
+4. 🟡 **Recurring frontend timers** — marginally improved: 23 `setInterval`s (was ~24) and **5** whole-component 1 Hz ticks (was 6) + the always-on pet rAF. Not addressed as an initiative.
+5. 🟡 **Virtualization / git-status caching** — `AutomationRunTable` virtualized 2026-09-30 (`@tanstack/react-virtual`, rows windowed, verified with a 500-run test); the chat pane drop now auto-fits the axis instead of refusing (same date). **Still open:** CSV preview not virtualized; `get_git_status` still spawns git per call (polling approach is deliberate per PRD §7.11).
 6. **Single global DB mutex** — fine now, flagged for observation at 100+ projects; vector search materializes every embedding blob per query.
-7. **Stale hardcoded price table** + uniform 0.1× cache-read rate under-prices OpenAI cache hits ~5×.
-8. **Dead/orphaned code**: `DocumentsLibrary.tsx` mounted nowhere; `ProjectItem`/`SessionRow` leftovers of the retired projects tree; `SHOW_FAKE_UPDATE` wired into shipping paths; static harness model catalog carries a live-query TODO.
-9. **~40 `react-hooks/exhaustive-deps` suppressions** concentrated in the largest components; occlusion-registration tax on every new overlay.
-10. **Docs staleness**: `BUILD_LOG.md` ends 2026-08-14; `docs/research/` point-in-time; several older audit docs overstate open work.
+7. ✅ **Stale hardcoded price table + uniform 0.1× cache-read rate** — fixed 2026-09-26 (425e322): prices auto-refresh from the LiteLLM registry (~60 s after boot, then daily, `pricing_live.rs:218-223`), explicit per-model cache-read rates override the family default (OpenAI now prices its published 0.5×), an observed-rate layer feeds back from real usage (`db/cost_v2.rs`), and the cost hero shows cache savings.
+8. ✅ **Dead/orphaned code** — cleaned 2026-09-30: `DocumentsLibrary.tsx`, `ProjectItem.tsx`/`SessionRow.tsx` (+ their test and orphaned CSS), `SHOW_FAKE_UPDATE` + `seedFakeUpdate`, `ensureBrowserTabs`, dead `.split-*`/`.broadcast-bar` layout CSS all deleted; the static harness model catalog TODO was resolved earlier by the live `list_harness_models` probe (425e322, §5.13).
+9. 🟡 **`react-hooks/exhaustive-deps` suppressions** — 38 today (was ~40); occlusion-registration tax unchanged. Not addressed as an initiative.
+10. 🟡 **Docs staleness** — `BUILD_LOG.md` gained a "Current status (verified 2026-09-21)" header (test counts, 369 commands) deferring newer history to git/AI_CONTEXT, but its dated entries still end 2026-08-14.
 11. **Google Fonts fetched from network at cold start** in a local-first app; CSP allows cdnjs (deliberate but fragile).
 
 ---
@@ -222,39 +228,40 @@ Subagents: `Task` spawns read-only-tool subagents (100-round cap, alternate-mode
 ## 5. Improvements to existing features (prioritized)
 
 Effort: S < 1 day-ish · M ≈ 1–3 days · L ≈ 1–2 weeks · XL > 2 weeks (solo, rough).
+Status re-verified against the code on **2026-09-30**: ✅ done · 🟡 partial · ⬜ open.
 
-| # | Improvement | Why now | Effort | Impact |
-|---|---|---|---|---|
-| 1 | Add `cargo test --lib`, `vitest`, `tsc --noEmit`, `cargo clippy -D warnings` to CI | Nothing prevents shipping regressions today | S | Critical |
-| 2 | Sign installer (Azure Artifact Signing or OV cert) + submit winget manifest | Distribution trust; every competitor signed | M | Critical |
-| 3 | Windows sandbox layer 1: Job Objects + write-restricted token for `run_code`/`run_shell` (Codex blueprint), graceful fallback banner | Unlocks honest `full_auto`; top safety gap | L–XL | Critical |
-| 4 | Map MCP tool annotations (readOnly/destructive hints + icons) into the permission ladder and approval cards | Cheap correctness win; aligns with 2026 MCP | M | High |
-| 5 | Hooks system (pre/post tool-call user scripts) via centralized `check_permission()` | Project's own Action_list says it's cheap; table stakes | M | High |
-| 6 | Automation triggers beyond cron: inbound webhook listener, file-watch (reuse git watcher infra), git-event, email/IMAP | Closes the biggest automation gap | L | High |
-| 7 | Hybrid RAG: RRF-fuse FTS5 + vectors, add local ONNX bge-reranker-v2-m3 (top-50→top-8), contextual chunk enrichment (path+headings) | Biggest local-quality ceiling; local-first friendly | L | High |
-| 8 | Live load-time VRAM estimator (sliders → predicted memory, OOM warn) in the local-model load panel | LM Studio sets this bar; parts exist (auto-NGL, watts) | M | High |
-| 9 | Per-model tool-calling badges + raw tool-call debug pane for local models | Trust in local agents | S–M | Medium |
-| 10 | Streaming voice loop: partial whisper transcripts, sentence-level Kokoro streaming, barge-in cancel | Voice becomes "usable," not "demoable" | L | High |
-| 11 | Auto-provision a worktree per spawned session/agent (opt-in toggle already exists per chat) | Matches Cursor/OpenCode orchestration norm | S–M | Medium |
-| 12 | Register or remove quick-action keybindings; add global Alt+Space quick-capture overlay (answers via last provider) | Known dead setting; Raycast/Ollama/Gemini pattern | M | Medium |
-| 13 | Replace static harness model catalog with live `list_harness_models` (TODO already in code) | Pricing drift; wrong models shown | S | Medium |
-| 14 | Auto-refresh pricing table + family-aware cache-read rates; show cache savings in cost dashboard hero | Under-pricing ~5× for OpenAI cache | M | Medium |
-| 15 | Budget enforcement mode (warn → pause-at-threshold) as opt-in; per-run live spend projection | Advisory-only today | M | High |
-| 16 | Checkpoint pruning (count/age-based per session) | Unbounded refs growth | S | Medium |
-| 17 | Backup/export completeness: include memory, automations, improve tables in project zip export | Asymmetric export today | M | Medium |
-| 18 | Code-split `babel-standalone` + `flowchart-elk`; lazy-load react-markdown; virtualize AutomationRunTable | Entry chunk ~766 KB and growing | M | Medium |
-| 19 | Fix Kimi two-pane session cross-attribution; add session-id source confidence indicator | Documented open bug | S–M | Medium |
-| 20 | Delete/mount orphans: `DocumentsLibrary`, leftover ProjectItem/SessionRow, `SHOW_FAKE_UPDATE`, dead layout code | Hygiene | S | Low |
-| 21 | Self-host Google Fonts (bundle woff2) | Local-first integrity; cold start | S | Low |
-| 22 | Mobile: expo-secure-store migration + push-token cleanup + version sync | Documented skipped items | M | Medium |
-| 23 | Linux decision: pick tier (supported/experimental/unsupported), then fix secrets (proper encryption), OCR fallback, browser drift | Endless half-state is worse than a decision | M + decision | Medium |
-| 24 | Harness approval parity: extend approval-card relay to Kimi/OpenCode (they support permission flags) or document the gap in-UI | Silent full-auto surprise | L | Medium |
-| 25 | Watcher-driven incremental docs indexing (reuse git-watcher infra); cross-platform OCR fallback path | RAG freshness on Windows + elsewhere | M | Medium |
-| 26 | Mesh turn-end hooks + Settings section + eval scenarios (close Session Mesh P4) | P4 partial; polling latency | M | Medium |
-| 27 | Improvements engine P3: cross-artifact pack health, flaky-case quarantine, artifact cost attribution in dashboard | Shipped P0–P2; P3 designed | M | Low |
-| 28 | Browser: renderer-crash recovery affordance, `upload_file` (allowlist dir), downloads-to-workspace with timeline | Phase-3 differentiators already researched in-repo | L | Medium |
-| 29 | Connectors: Slack/Linear/Jira additions + connector health dashboard (token expiry surfacing) | On roadmap; clear enterprise pull | M–L | Medium |
-| 30 | Second git host: GitLab (REST + connector) | Reduces single-vendor risk | L | Medium |
+| # | Improvement | Why now | Effort | Impact | Status 2026-09-30 |
+|---|---|---|---|---|---|
+| 1 | Add `cargo test --lib`, `vitest`, `tsc --noEmit`, `cargo clippy -D warnings` to CI | Nothing prevents shipping regressions today | S | Critical | ✅ 42dad6f — `ci.yml` gates every push with all four |
+| 2 | Sign installer (Azure Artifact Signing or OV cert) + submit winget manifest | Distribution trust; every competitor signed | M | Critical | ⬜ — updater minisign only; no Authenticode/winget |
+| 3 | Windows sandbox layer 1: Job Objects + write-restricted token for `run_code`/`run_shell` (Codex blueprint), graceful fallback banner | Unlocks honest `full_auto`; top safety gap | L–XL | Critical | ⬜ — `codeexec.rs` TODOs intact; only kill-on-close Job Objects (orphan cleanup) exist |
+| 4 | Map MCP tool annotations (readOnly/destructive hints + icons) into the permission ladder and approval cards | Cheap correctness win; aligns with 2026 MCP | M | High | ⬜ — Relay's *own* MCP server advertises hints, but the client still parses name+description only |
+| 5 | Hooks system (pre/post tool-call user scripts) via centralized `check_permission()` | Project's own Action_list says it's cheap; table stakes | M | High | ✅ 7ff4df6 — pre/post tool-use (deny/ask/rewrite) + lifecycle events, Settings → Hooks, Claude Code import |
+| 6 | Automation triggers beyond cron: inbound webhook listener, file-watch (reuse git watcher infra), git-event, email/IMAP | Closes the biggest automation gap | L | High | 🟡 2150eb5 — webhook listener, file-watch, git-event, Gmail shipped; webhook/file/gmail fire only while the app is open; IMAP not started |
+| 7 | Hybrid RAG: RRF-fuse FTS5 + vectors, add local ONNX bge-reranker-v2-m3 (top-50→top-8), contextual chunk enrichment (path+headings) | Biggest local-quality ceiling; local-first friendly | L | High | 🟡 5cb6c66 — RRF fusion + reranker sidecar + recall@8 eval harness shipped; contextual enrichment still missing (heading trail is display-only) |
+| 8 | Live load-time VRAM estimator (sliders → predicted memory, OOM warn) in the local-model load panel | LM Studio sets this bar; parts exist (auto-NGL, watts) | M | High | ⬜ |
+| 9 | Per-model tool-calling badges + raw tool-call debug pane for local models | Trust in local agents | S–M | Medium | 🟡 9e66ed4 — raw request/response log behind a loopback gateway shipped; capability badges not |
+| 10 | Streaming voice loop: partial whisper transcripts, sentence-level Kokoro streaming, barge-in cancel | Voice becomes "usable," not "demoable" | L | High | 🟡 398e5fd wave — live partials + sentence-level streaming shipped; barge-in still open |
+| 11 | Auto-provision a worktree per spawned session/agent (opt-in toggle already exists per chat) | Matches Cursor/OpenCode orchestration norm | S–M | Medium | ✅ 76cbfbc — `worktree_policy: inherit/always/never` per subagent definition, provisioned at spawn |
+| 12 | Register or remove quick-action keybindings; add global Alt+Space quick-capture overlay (answers via last provider) | Known dead setting; Raycast/Ollama/Gemini pattern | M | Medium | ⬜ — still DOM-level only (no `global-shortcut` plugin); the Mod+/ cheatsheet overlay (5801806) is in-app |
+| 13 | Replace static harness model catalog with live `list_harness_models` (TODO already in code) | Pricing drift; wrong models shown | S | Medium | ✅ 425e322 — live probe with 30 s TTL cache + force-refresh + provenance badges |
+| 14 | Auto-refresh pricing table + family-aware cache-read rates; show cache savings in cost dashboard hero | Under-pricing ~5× for OpenAI cache | M | Medium | ✅ 425e322 — daily LiteLLM refresh, explicit cache-read rates, observed-rate layer, cache-savings hero |
+| 15 | Budget enforcement mode (warn → pause-at-threshold) as opt-in; per-run live spend projection | Advisory-only today | M | High | ⬜ — still advisory by documented product decision |
+| 16 | Checkpoint pruning (count/age-based per session) | Unbounded refs growth | S | Medium | ⬜ — pruned only on session delete |
+| 17 | Backup/export completeness: include memory, automations, improve tables in project zip export | Asymmetric export today | M | Medium | ⬜ |
+| 18 | Code-split `babel-standalone` + `flowchart-elk`; lazy-load react-markdown; virtualize AutomationRunTable | Entry chunk ~766 KB and growing | M | Medium | ✅ 2026-09-30 — babel/elk were already split (since 09-06; claim was stale); react-markdown + plugins now lazy (entry 1,182 → 751 KB); AutomationRunTable virtualized |
+| 19 | Fix Kimi two-pane session cross-attribution; add session-id source confidence indicator | Documented open bug | S–M | Medium | ✅ 2026-09-30 — claim registry + mandatory recency guard + case-insensitive cwd match; provenance persisted and shown as an `id?` badge |
+| 20 | Delete/mount orphans: `DocumentsLibrary`, leftover ProjectItem/SessionRow, `SHOW_FAKE_UPDATE`, dead layout code | Hygiene | S | Low | ✅ 2026-09-30 — all deleted with their orphaned CSS/test; `ensureBrowserTabs` too |
+| 21 | Self-host Google Fonts (bundle woff2) | Local-first integrity; cold start | S | Low | ⬜ — still fetched from googleapis at cold start |
+| 22 | Mobile: expo-secure-store migration + push-token cleanup + version sync | Documented skipped items | M | Medium | ⬜ — secure-store, token cleanup, and the AsyncStorage pairing token all unchanged |
+| 23 | Linux decision: pick tier (supported/experimental/unsupported), then fix secrets (proper encryption), OCR fallback, browser drift | Endless half-state is worse than a decision | M + decision | Medium | 🟡 — secrets half is moot (OS keyring already in use; §4.1.6); tier decision + OCR fallback + drift still open |
+| 24 | Harness approval parity: extend approval-card relay to Kimi/OpenCode (they support permission flags) or document the gap in-UI | Silent full-auto surprise | L | Medium | 🟡 398e5fd wave — per-harness native postures pass through to spawns and all adapters promote to `diff_ready`; Relay approval *cards* still built-in-chat-only |
+| 25 | Watcher-driven incremental docs indexing (reuse git-watcher infra); cross-platform OCR fallback path | RAG freshness on Windows + elsewhere | M | Medium | ⬜ |
+| 26 | Mesh turn-end hooks + Settings section + eval scenarios (close Session Mesh P4) | P4 partial; polling latency | M | Medium | 🟡 — mesh default model/engine picker exists in Settings; turn-end hooks and eval scenarios don't |
+| 27 | Improvements engine P3: cross-artifact pack health, flaky-case quarantine, artifact cost attribution in dashboard | Shipped P0–P2; P3 designed | M | Low | 🟡 — per-version run health exists; cross-artifact rollup, quarantine, and dashboard attribution don't |
+| 28 | Browser: renderer-crash recovery affordance, `upload_file` (allowlist dir), downloads-to-workspace with timeline | Phase-3 differentiators already researched in-repo | L | Medium | ⬜ — full-screen (d04abe3) landed, but crash recovery / upload_file / downloads timeline didn't |
+| 29 | Connectors: Slack/Linear/Jira additions + connector health dashboard (token expiry surfacing) | On roadmap; clear enterprise pull | M–L | Medium | ⬜ |
+| 30 | Second git host: GitLab (REST + connector) | Reduces single-vendor risk | L | Medium | ⬜ — GitLab remotes explicitly rejected |
 
 ---
 
@@ -264,8 +271,8 @@ Effort: S < 1 day-ish · M ≈ 1–3 days · L ≈ 1–2 weeks · XL > 2 weeks (
 1. **Windows sandbox stack for agent execution** (S/J + restricted token + AppContainer + per-domain network proxy allowlist; Codex/MXC blueprint). *Impact: unlocks full_auto honestly, unattended automations, and enterprise credibility. Effort: XL, incremental (Job Objects first).* [research]
 2. **MCP 2026 client upgrade pack**: stateless `_meta` request model + `server/discover`, MRTR input loop wired into the existing approval card UI, Tasks extension, CIMD OAuth in connectors, official registry in the gallery with verification badges. *Impact: keeps the app's core interop current; Relay already has strong MCP bones (client + gallery + 2 servers). Effort: L each, ship as a series.* [research]
 3. **MCP Apps host** (SEP-1865): render tool-provided UIs in Relay's existing sandboxed-iframe + postMessage infrastructure (already battle-tested by JSX/HTML previews). *Impact: first-mover desktop host; makes connectors/MCP visually first-class. Effort: L.* [research]
-4. **Hooks + triggers automation pack**: pre/post-tool hooks (5.5) + inbound webhook/file-watch/git/email triggers (5.6) + approval-gate step inside automation runs + chained automations. *Impact: turns automations from "cron for prompts" into a local n8n-class surface — a real differentiator when combined with run-while-closed. Effort: L–XL total.* [research]
-5. **Declarative subagents ("Crew")**: user-defined named agents (prompt, tool allowlist, permission scope, model, worktree policy) stored in DB, spawnable via UI, `Task`, `spawn_session`, and automations; auto-provision worktrees. *Impact: converts Session Mesh + subagents into a product; matches the Claude Code `.md` subagent economy. Effort: L.* [research]
+4. 🟡 **Hooks + triggers automation pack**: pre/post-tool hooks (5.5) + inbound webhook/file-watch/git/email triggers (5.6) + approval-gate step inside automation runs + chained automations. *Impact: turns automations from "cron for prompts" into a local n8n-class surface — a real differentiator when combined with run-while-closed. Effort: L–XL total.* [research] — **hooks + triggers shipped 2026-09-21/26** (7ff4df6, 2150eb5); approval-gate step and chained automations remain.
+5. ✅ **Declarative subagents ("Crew")**: user-defined named agents (prompt, tool allowlist, permission scope, model, worktree policy) stored in DB, spawnable via UI, `Task`, `spawn_session`, and automations; auto-provision worktrees. *Impact: converts Session Mesh + subagents into a product; matches the Claude Code `.md` subagent economy. Effort: L.* — **shipped 2026-09-24/26** (76cbfbc registry + five spawn surfaces + `.md` interchange; 7f0c510 agent-authored CRUD with carded consent; d5d0235 harness-authored definitions read-only by default; worktree auto-provisioning included).
 6. **Skills marketplace v1**: install-from-URL, SKILL.md progressive-disclosure loader, publish Relay-native skills (browser control, doc-gen, research), gallery with the MCP registry pattern (namespace verification). *Impact: rides the Agent Skills standard (Anthropic/OpenAI/Microsoft adopting); cheap distribution. Effort: M–L.* [research]
 7. **Inline edit-review posture**: optional "confirm edits" mode that intercepts write/edit tools with per-hunk accept/reject cards (reuse DiffCard + checkpoint machinery) for users who don't want full-auto. *Impact: closes the biggest interaction-model gap vs Cursor/Cline without abandoning full-auto. Effort: L.* [research]
 8. **OTel GenAI trace export + agent run timeline**: per-session/automation trace (spans per tool call with IO/diff previews), OTLP export toggle, `traceparent` into MCP `_meta`; timeline UI reusing the browser-timeline component. *Impact: observability is unserved in desktop shells; doubles as debugging + trust UX. Effort: L.* [research]
@@ -275,11 +282,11 @@ Effort: S < 1 day-ish · M ≈ 1–3 days · L ≈ 1–2 weeks · XL > 2 weeks (
 10. **System-wide dictation + quick capture**: global hotkey overlay (Alt+Space) that dictates/asks from any app using the existing whisper + provider stack; optional "type into focused window." *Effort: M–L.* [research]
 11. **OpenAI-compatible local endpoint**: expose Relay's llama-server sidecars (and a stateful `previous_response_id` API) on loopback so ChatGPT/Claude Desktop/other tools can use Relay's models — free distribution, Ollama's playbook. *Effort: M.* [research]
 12. **`relay daemon` headless mode + `relay chat` CLI**: run sidecars/automations/mesh without UI; enables home-server deployments and SSH use. *Effort: M–L (sidecar binaries already exist).* [research]
-13. **Multi-model compare view**: fork a thread to 2–3 models side-by-side (panes exist), vote/merge the winner; auto-compact shared prefix for cost. *Effort: M–L.* [research]
+13. ✅ **Multi-model compare view**: fork a thread to 2–3 models side-by-side (panes exist), vote/merge the winner; auto-compact shared prefix for cost. *Effort: M–L.* — **shipped 2026-09-22** (5801806: fork to 2–4 side-by-side panes with per-pane model pick + equalized ratios; Mod+/ cheatsheet). Vote/merge and shared-prefix compaction remain open.
 14. **Auto model routing Phase 4**: OpenRouter `auto` as ranking source, learned router from thumbs-down/retry feedback, TTFB-aware ranking (telemetry already collected). *Effort: M.* [code: Phase 4 designed in-repo]
 15. **Project wiki / repo knowledge**: auto-generate + maintain a searchable project knowledge base from git history + RAG (Devin Wiki pattern), surfaced as an agent tool and sidebar tab. *Effort: L.* [research]
 16. **Packaged PR review bot**: automation template that reviews open PRs on schedule with the GitHub review tools + posts review comments (Bugbot pattern); include eval pack. *Effort: S–M (parts all exist).* [research]
-17. **Phone → desktop task dispatch**: compose a task on mobile → runs as a desktop automation/session with push on completion (extends the pairing channel; Claude Cowork pattern). *Effort: M.* [research]
+17. ✅ **Phone → desktop task dispatch**: compose a task on mobile → runs as a desktop automation/session with push on completion (extends the pairing channel; Claude Cowork pattern). *Effort: M.* — **shipped 2026-09-26** (398e5fd: phone composer dispatches into desktop sessions; automations CRUD from the phone in the same wave).
 18. **AGENTS.md support**: read/layer project `AGENTS.md` into harness bundles + built-in chat context; author/update via tools. *Effort: S.* [research]
 19. **A2A interop for Session Mesh**: Agent Card + task lifecycle so Relay can delegate to external A2A agents (and expose itself). *Effort: L.* [research]
 20. **Local vision/audio chat UX**: unified GGUF + mmproj pairing in the market (partially exists), image-paste flow for local vision models, capability badges; later libmtmd audio/video input. *Effort: M.* [code+research]
@@ -304,10 +311,11 @@ Cloud execution/VMs (see Tier-1 #4 for the local alternative), IDE/autocomplete,
 ## 7. Recommended sequencing
 
 **Now (next 2–4 weeks) — trust + hygiene:**
-CI tests + clippy (5.1) · installer signing + winget (5.2) · Windows sandbox layer 1: Job Objects (5.3) · MCP tool annotations → permissions (5.4) · hooks system (5.5) · keybindings register-or-remove + Alt+Space capture (5.12) · live harness model catalog (5.13) · checkpoint pruning (5.16) · orphan cleanup (5.20).
+CI tests + clippy (5.1) ✅ · installer signing + winget (5.2) · Windows sandbox layer 1: Job Objects (5.3) · MCP tool annotations → permissions (5.4) · hooks system (5.5) ✅ · keybindings register-or-remove + Alt+Space capture (5.12) · live harness model catalog (5.13) ✅ · checkpoint pruning (5.16) · orphan cleanup (5.20) ✅.
+*(Of this wave, 5.2 signing, 5.3 sandbox, 5.4 annotations, 5.12 keybindings and 5.16 pruning are the remaining open items — 5.3 and 5.2 are the two biggest.)*
 
 **Next (1–3 months) — ecosystem + quality:**
-MCP 2026 client series (6.2) · MCP registry in gallery (6.2) · automation triggers pack (5.6) · hybrid RAG + reranker (5.7) · VRAM estimator (5.8) · declarative subagents + worktree-per-agent (6.5, 5.11) · confirm-edits posture (6.7) · skills install-from-URL + gallery (6.6) · streaming voice loop (5.10) · budget enforcement (5.15) · OTel traces (6.8).
+MCP 2026 client series (6.2) · MCP registry in gallery (6.2) · automation triggers pack (5.6) ✅ · hybrid RAG + reranker (5.7) 🟡 · VRAM estimator (5.8) · declarative subagents + worktree-per-agent (6.5, 5.11) ✅ · confirm-edits posture (6.7) · skills install-from-URL + gallery (6.6) · streaming voice loop (5.10) 🟡 · budget enforcement (5.15) · OTel traces (6.8).
 
 **Later (3–6+ months) — reach + frontier:**
 macOS/Linux + platform tier (6.21) · MCP Apps host (6.3) · real-time voice (6.9) · local OpenAI-compatible endpoint + daemon mode (6.11/6.12) · multi-model compare (6.13) · routing Phase 4 (6.14) · project wiki (6.15) · A2A (6.19) · mobile v2 (dispatch, automations CRUD, previews) (6.17) · GitLab + Slack/Linear/Jira connectors (5.29/5.30) · i18n (6.28) · computer-use decision (6.30).

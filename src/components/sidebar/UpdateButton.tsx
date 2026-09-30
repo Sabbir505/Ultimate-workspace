@@ -14,8 +14,47 @@ import { useUpdaterStore } from "../../state/updater";
 import { parseReleaseNotes } from "../../lib/releaseNotes";
 import { formatBytes, formatDate } from "../../lib/format";
 
-function NotesSection({ title, items }: { title: string; items: string[] }) {
-  if (items.length === 0) return null;
+/** Fallback card width, used only before the popover has rendered. Keep in
+ *  sync with `.update-popover { width }` in banners.css. */
+const POPOVER_WIDTH = 300;
+/** Minimum gap between the card and any viewport edge. */
+const EDGE = 8;
+/** Gap between the button and the card. */
+const POPOVER_GAP = 6;
+
+/** Where the details card goes, given the button's rect, the card's measured
+ *  size, and the viewport. Pure so the placement rules are testable.
+ *
+ *  The card is anchored to the button's RIGHT edge, not its left: the button
+ *  is a small pill in the top-LEFT sidebar header, so a left-anchored card sat
+ *  hard against the screen's left side and straddled the sidebar boundary with
+ *  a long overhang past the pill. Starting it where the pill ends reads as
+ *  attached to the control and keeps the left margin clear.
+ *
+ *  It drops below the button, flips above when the card is taller than the
+ *  space underneath, and never crosses a viewport edge. `card` may be
+ *  nullish (the first pass, before the card has rendered): height is then
+ *  unknown, so the flip is deferred to the measured second pass.
+ *
+ *  DEPENDS ON the CSS: `.update-popover { max-height: min(520px, 100vh - 16px) }`
+ *  is what bounds the card to the viewport, which is what makes the flip
+ *  above always able to fit. If that cap is removed or raised, this has to
+ *  clamp the height too. */
+export function computePopoverPos(
+  anchor: { left: number; right: number; top: number; bottom: number },
+  card: { w: number; h: number } | null,
+  viewport: { w: number; h: number },
+): { top: number; left: number } {
+  const width = card?.w || POPOVER_WIDTH;
+  const height = card?.h || 0;
+  const left = Math.max(EDGE, Math.min(anchor.right, viewport.w - EDGE - width));
+  const below = anchor.bottom + POPOVER_GAP;
+  const fitsBelow = height === 0 || below + height <= viewport.h - EDGE;
+  const top = fitsBelow ? below : Math.max(EDGE, anchor.top - POPOVER_GAP - height);
+  return { top, left };
+}
+
+function NotesSection({ title, items }: { title: string; items: string[] }) {  if (items.length === 0) return null;
   return (
     <div className="update-popover-section">
       <div className="update-popover-section-title">{title}</div>
@@ -44,27 +83,35 @@ export function UpdateButton() {
   const btnRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
-  // Position the popover below the button. Uses position:fixed + viewport
-  // coords to escape the sidebar's overflow:hidden and stacking context
-  // (createPortal crashed the WebView in this app — see GitToolsSidebar.tsx).
+  // Position the popover. Uses position:fixed + viewport coords to escape the
+  // sidebar's overflow:hidden and stacking context (createPortal crashed the
+  // WebView in this app — see GitToolsSidebar.tsx).
   const reposition = () => {
     const r = btnRef.current?.getBoundingClientRect();
     if (!r) return;
-    // Open rightward from the button's left edge; clamp so a narrow viewport
-    // can't push it off-screen.
-    const width = 300;
-    const left = Math.min(r.left, window.innerWidth - width - 8);
-    setPopoverPos({ top: r.bottom + 6, left: Math.max(8, left) });
+    const card = popoverRef.current;
+    setPopoverPos(
+      computePopoverPos(
+        { left: r.left, right: r.right, top: r.top, bottom: r.bottom },
+        card ? { w: card.offsetWidth, h: card.offsetHeight } : null,
+        { w: window.innerWidth, h: window.innerHeight },
+      ),
+    );
   };
 
-  // Recompute when the popover opens and on viewport changes while open.
+  // Recompute when the popover opens and on viewport changes while open. The
+  // second pass (next frame) runs once the card has actually rendered, so the
+  // height-driven flip above/below is decided on real measurements rather than
+  // a guess.
   useEffect(() => {
     if (!open) return;
     reposition();
+    const frame = requestAnimationFrame(reposition);
     const onScroll = () => reposition();
     window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onScroll);
     return () => {
+      cancelAnimationFrame(frame);
       window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onScroll);
     };

@@ -249,7 +249,6 @@ export const ChatComposer = memo(function ChatComposer({
   // render neither, or two toggles would fight over one mic.
   const voiceMode = useVoiceLoopStore((s) => s.mode);
   const loopPhase = useVoiceLoopStore((s) => s.phase);
-  const loopTranscript = useVoiceLoopStore((s) => s.transcript);
   const loopLevel = useVoiceLoopStore((s) => s.level);
   const loopError = useVoiceLoopStore((s) => s.error);
   const loopOwnsComposer =
@@ -1564,38 +1563,6 @@ export const ChatComposer = memo(function ChatComposer({
           <div className="composer-footer-spacer" />
         </div>
         )}
-        {/* Hands-free loop status: only on the composer that owns the loop,
-            only while an episode runs. The wave IS the status — no text, no
-            dot, no transport: it reacts to the mic while listening, breathes
-            while Relay thinks, ripples while it speaks. Live transcript rides
-            beside it; the X ends the mode. */}
-        {loopOwnsComposer && loopActive && (
-          <div className={`voice-loop-bar phase-${loopPhase}`} role="status">
-            <span className="voice-loop-meter" aria-hidden="true">
-              {Array.from({ length: 9 }, (_, i) => i + 1).map((bar) => (
-                <span
-                  key={bar}
-                  className="voice-loop-meter-bar"
-                  data-on={loopPhase === "listening" && loopLevel * 9 >= bar}
-                  style={{ animationDelay: `${(bar - 1) * 0.09}s` }}
-                />
-              ))}
-            </span>
-            <span className="voice-loop-transcript">
-              {loopPhase === "listening" && loopTranscript ? loopTranscript : ""}
-            </span>
-            {loopError && <span className="voice-loop-error">{loopError}</span>}
-            <button
-              type="button"
-              className="voice-loop-stop"
-              title="Stop hands-free"
-              aria-label="Stop hands-free voice loop"
-              onClick={exitHandsFree}
-            >
-              <X size={12} strokeWidth={2} aria-hidden />
-            </button>
-          </div>
-        )}
         <div className="composer-control-bar" role="toolbar" aria-label="Composer controls">
           <div className="composer-attach-wrap" ref={attachMenuRef}>
             <button
@@ -1710,10 +1677,16 @@ export const ChatComposer = memo(function ChatComposer({
             {loopOwnsComposer && (
               <button
                 type="button"
-                className={`composer-mic-btn handsfree${voiceMode === "handsfree" ? " on" : ""}`}
+                className={`composer-mic-btn handsfree${voiceMode === "handsfree" ? ` on phase-${loopPhase}` : ""}`}
                 title={
                   voiceMode === "handsfree"
-                    ? "Hands-free voice: on — click to stop"
+                    ? loopError
+                      ? `Hands-free: ${loopError}`
+                      : loopPhase === "listening"
+                        ? "Hands-free: listening — click to stop"
+                        : loopPhase === "speaking"
+                          ? "Hands-free: speaking (talk to interrupt) — click to stop"
+                          : "Hands-free: thinking — click to stop"
                     : "Hands-free voice: talk, Relay answers aloud, keep going"
                 }
                 aria-pressed={voiceMode === "handsfree"}
@@ -1721,6 +1694,15 @@ export const ChatComposer = memo(function ChatComposer({
                 onClick={toggleHandsFree}
               >
                 <AudioLines size={14} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden />
+                <span className="voice-btn-wave" aria-hidden="true">
+                  {Array.from({ length: 5 }, (_, i) => i + 1).map((bar) => (
+                    <span
+                      key={bar}
+                      className="voice-btn-wave-bar"
+                      data-on={voiceMode === "handsfree" && loopPhase === "listening" && loopLevel * 5 >= bar}
+                    />
+                  ))}
+                </span>
               </button>
             )}
             <button

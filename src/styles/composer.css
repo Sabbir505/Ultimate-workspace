@@ -360,7 +360,13 @@
 }
 
 /* Hands-free voice loop toggle (AudioLines) — same circular chip as the mic
-   button; "on" glows green for the duration of the mode. */
+   button; "on" glows green for the duration of the mode. The tiny wave strip
+   overlays the glyph: live mic bars while listening, an animated pulse while
+   Relay thinks or speaks — the button itself is the status. */
+.composer-mic-btn.handsfree {
+  position: relative;
+  overflow: hidden;
+}
 .composer-mic-btn.handsfree.on {
   background: rgba(46, 160, 67, 0.15);
   border-color: var(--success, #2ea043);
@@ -369,112 +375,55 @@
 .composer-mic-btn.handsfree.on:hover:not(:disabled) {
   background: rgba(46, 160, 67, 0.25);
 }
-
-/* Loop status — one slim row between the drafts area and the control bar,
-   only while an episode runs. The wave is the whole UI: it lights with the
-   mic while listening, breathes slowly while Relay thinks, ripples while it
-   speaks. Green = your turn, amber = Relay's. */
-.voice-loop-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 6px 0 2px;
-  padding: 5px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.04);
-  font-size: 12px;
-  min-width: 0;
-}
-.voice-loop-meter {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  height: 16px;
-  flex: none;
-}
-.voice-loop-meter-bar {
-  width: 3px;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.14);
-  transition: background 0.15s var(--ease), height 0.15s var(--ease);
-}
-.voice-loop-meter-bar:nth-child(1) { height: 5px; }
-.voice-loop-meter-bar:nth-child(2) { height: 9px; }
-.voice-loop-meter-bar:nth-child(3) { height: 13px; }
-.voice-loop-meter-bar:nth-child(4) { height: 16px; }
-.voice-loop-meter-bar:nth-child(5) { height: 11px; }
-.voice-loop-meter-bar:nth-child(6) { height: 16px; }
-.voice-loop-meter-bar:nth-child(7) { height: 13px; }
-.voice-loop-meter-bar:nth-child(8) { height: 9px; }
-.voice-loop-meter-bar:nth-child(9) { height: 5px; }
-
-/* Listening: the room drives the wave — a lit bar stands tall and green.
-   Still bars breathe gently so a silent room doesn't read as dead. */
-.phase-listening .voice-loop-meter-bar {
-  animation: voice-breathe 2.4s ease-in-out infinite;
-}
-.voice-loop-meter-bar[data-on="true"] {
-  background: var(--success, #2ea043);
-  height: 16px;
-  animation: none;
-}
-
-/* Relay's floor — thinking and speaking glow amber. Thinking breathes slow
-   and shallow; speaking ripples like speech, staggered per bar. */
-.phase-sending .voice-loop-meter-bar,
-.phase-waiting .voice-loop-meter-bar,
-.phase-speaking .voice-loop-meter-bar {
-  background: #d29922;
-}
-.phase-sending .voice-loop-meter-bar,
-.phase-waiting .voice-loop-meter-bar {
-  animation: voice-breathe 2s ease-in-out infinite;
-}
-.phase-speaking .voice-loop-meter-bar {
-  animation: voice-speak 0.9s ease-in-out infinite;
-}
-
-@keyframes voice-breathe {
-  0%, 100% { transform: scaleY(0.55); }
-  50% { transform: scaleY(1); }
-}
-@keyframes voice-speak {
-  0%, 100% { transform: scaleY(0.45); }
-  35% { transform: scaleY(1.15); }
-  70% { transform: scaleY(0.7); }
-}
-
-.voice-loop-transcript {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-dim);
-}
-.voice-loop-error {
-  flex: none;
-  color: var(--danger, #d64545);
-}
-.voice-loop-stop {
-  flex: none;
-  width: 20px;
-  height: 20px;
-  padding: 0;
+.voice-btn-wave {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.2s var(--ease);
+  pointer-events: none;
 }
-.voice-loop-stop:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: var(--text);
+.composer-mic-btn.handsfree.on .voice-btn-wave {
+  opacity: 1;
 }
+.voice-btn-wave-bar {
+  width: 2px;
+  height: 3px;
+  border-radius: 1px;
+  background: var(--success, #2ea043);
+  transition: height 0.12s var(--ease), opacity 0.12s var(--ease);
+  opacity: 0.45;
+}
+/* Listening: bars fill with the mic level over the glyph. */
+.voice-btn-wave-bar[data-on="true"] {
+  height: 12px;
+  opacity: 1;
+}
+/* Thinking: a slow shared breathe. */
+.composer-mic-btn.handsfree.phase-sending .voice-btn-wave-bar,
+.composer-mic-btn.handsfree.phase-waiting .voice-btn-wave-bar {
+  animation: voice-btn-breathe 1.6s ease-in-out infinite;
+}
+/* Speaking: a quick ripple, staggered per bar. */
+.composer-mic-btn.handsfree.phase-speaking .voice-btn-wave-bar {
+  animation: voice-btn-speak 0.8s ease-in-out infinite;
+}
+.composer-mic-btn.handsfree.phase-speaking .voice-btn-wave-bar:nth-child(2) { animation-delay: 0.12s; }
+.composer-mic-btn.handsfree.phase-speaking .voice-btn-wave-bar:nth-child(3) { animation-delay: 0.24s; }
+.composer-mic-btn.handsfree.phase-speaking .voice-btn-wave-bar:nth-child(4) { animation-delay: 0.36s; }
+.composer-mic-btn.handsfree.phase-speaking .voice-btn-wave-bar:nth-child(5) { animation-delay: 0.48s; }
+@keyframes voice-btn-breathe {
+  0%, 100% { height: 3px; opacity: 0.45; }
+  50% { height: 10px; opacity: 0.9; }
+}
+@keyframes voice-btn-speak {
+  0%, 100% { height: 3px; opacity: 0.5; }
+  40% { height: 13px; opacity: 1; }
+}
+
 
 /* Floating live-dictation pill — hovers above the composer card, top center
    (.chat-composer is position:relative). Wave bars only. */

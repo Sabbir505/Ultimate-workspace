@@ -31,6 +31,7 @@ import {
   requestVoiceLoopStart,
   requestVoiceLoopStop,
 } from "../../state/voiceLoop";
+import { ttsPlayer } from "../../lib/tts";
 import { TemplatePickerModal, BroadcastModal } from "./composerModals";
 import { PetStrip } from "../pet/PetStrip";
 import {
@@ -1104,6 +1105,10 @@ export const ChatComposer = memo(function ChatComposer({
 
   const handleSend = useCallback(() => {
     if (needsModel || agentLocked) return;
+    // The answer may be read aloud when it arrives — the voice engine warms
+    // NOW, while the model is still generating its first tokens, so the
+    // engine load overlaps generation instead of stacking after it.
+    ttsPlayer.warmup();
     // The command pill contributes its `/slug` token to the message text so
     // every downstream parser (invoked skills, /create routing, /research
     // detection) sees the same content it would have seen with a plain-text

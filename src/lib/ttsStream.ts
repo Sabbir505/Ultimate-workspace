@@ -22,6 +22,10 @@
 import { parseSegments } from "./segments";
 import { markdownToSpeech, splitSentences, type SpeechChunk } from "./tts";
 
+/** How many pushes arrived before the opener — the "how long was the model
+ *  thinking vs writing" number the latency story needs. */
+let pushes = 0;
+
 /** An opener shorter than this sounds clipped — a couple of words that end
  *  before the engine's cadence establishes itself. */
 const OPEN_MIN_CHARS = 24;
@@ -68,8 +72,21 @@ export class StreamingSpeechFeeder {
     const speech = markdownToSpeech(prose);
 
     if (this.openerEnd < 0) {
+      pushes += 1;
       const cut = openerCut(speech);
-      if (cut <= 0) return [];
+      if (cut <= 0) {
+        if (pushes === 8 || pushes === 40) {
+          console.log(
+            `[voice] no opener yet after ${pushes} pushes ` +
+              `(prose so far: ${speech.length} chars — thinking block or short tokens)`,
+          );
+        }
+        return [];
+      }
+      console.log(
+        `[voice] opener after ${pushes} push(es): ${cut} chars of prose → ` +
+          JSON.stringify(speech.slice(0, cut)),
+      );
       this.openerEnd = cut;
       const opener = splitSentences(speech.slice(0, cut));
       this.openerChunks = opener.length;

@@ -39,6 +39,14 @@ const CPU_CHUNK_CHARS = MAX_SENTENCE_CHARS;
  *  ~110 characters ≈ 6–7 s of audio ≈ 4–5 s of synthesis at ~1.5× realtime:
  *  the word "first" stops meaning "after a paragraph". */
 const CPU_FIRST_CHUNK_CHARS = 110;
+
+/** Timeline logging for the voice path — the latency story ("why did the
+ *  first word take 10 s?") is only visible with timestamps, and it is not
+ *  reconstructible from synthetic tests. One line at each load-bearing
+ *  moment; open devtools and filter [voice]. */
+function vlog(msg: string): void {
+  console.log(`[voice] +${Math.round(performance.now())}ms ${msg}`);
+}
 /** Kept under the backend's own 1200-character guard (commands/tts.rs truncates
  *  there), which a group has to clear with its join spaces included. */
 const GPU_CHUNK_CHARS = 1100;
@@ -934,7 +942,11 @@ class TtsPlayer {
         const sig = `${status.modelId}|${status.device}`;
         if (this.warmedSig === sig) return;
         this.warmedSig = sig;
-        return ttsPreload();
+        vlog(`warming engine ${sig}`);
+        const t0 = performance.now();
+        return ttsPreload().then(() => {
+          vlog(`engine warm in ${Math.round(performance.now() - t0)}ms (${sig})`);
+        });
       })
       .catch(() => {
         /* no backend or no model — the first speak will surface it */
@@ -1044,6 +1056,7 @@ class TtsPlayer {
       }
       if (my !== this.token) return;
       this.streamReady = true;
+      vlog(`stream ${my} ready (device=${this.device})`);
       useTtsStore.getState().set({ phase: "buffering" });
       const queued = this.streamQueue;
       this.streamQueue = [];
@@ -1070,6 +1083,7 @@ class TtsPlayer {
       this.streamOpen = false;
       return;
     }
+    vlog(`stream ${this.streamMy} END (fed ${this.index}/${this.chunks.length} chunks)`);
     this.streamOpen = false;
     if (this.streamHold.length) {
       const ctx = sharedAudioContext();
@@ -1110,6 +1124,10 @@ class TtsPlayer {
         ? splitFirstChunk(chunks, CPU_FIRST_CHUNK_CHARS)
         : chunks;
     this.chunks.push(...append);
+    vlog(
+      `stream ${this.streamMy} fed ${chunks.length} chunk(s) ` +
+        `(${chunks.reduce((n, c) => n + c.text.length, 0)} chars) → queue ${this.chunks.length}`,
+    );
     useTtsStore.getState().set({ total: this.chunks.length });
   }
 
@@ -1182,6 +1200,9 @@ class TtsPlayer {
 
   /** Stop and clear. The store returns to idle so the play button reverts. */
   stop(): void {
+    if (useTtsStore.getState().phase !== "idle") {
+      vlog(`STOP — playback cut (streamOpen=${this.streamOpen})`);
+    }
     this.token += 1;
     this.streamOpen = false; // barge-in / stop cuts the streaming feed too
     this.skipTarget = null;
@@ -1386,6 +1407,9 @@ class TtsPlayer {
       return "paused";
     }
     useTtsStore.getState().set({ phase: "playing", index: index + 1, error: null });
+    if (this.streamOpen && index === 0) {
+      vlog(`stream ${this.streamMy} FIRST AUDIO — sentence ${index + 1} sounding`);
+    }
     return this.startSource(ctx, buffer, this.offset);
   }
 

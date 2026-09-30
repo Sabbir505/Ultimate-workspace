@@ -22,6 +22,12 @@ import { blobToBase64, encodeWav16k, joinSamples } from "./voiceRecording";
 export const PARTIAL_TICK_MS = 1500;
 export const VOICE_SILENCE_CHUNKS = 3;
 export const SEGMENT_MAX_SECONDS = 20;
+/** Extended-silence episode for the hands-free voice loop: after a committed
+ *  segment, this much continuous quiet (6 × 256 ms ≈ 1.5 s) with no new sound
+ *  means the UTTERANCE ended — not just the sentence — so the loop may yield
+ *  the turn and send. Fired once per episode (an exact-count check; any sound
+ *  resets the run). */
+export const VOICE_YIELD_CHUNKS = 6;
 
 /** Whisper was trained on subtitle-style transcripts and sprinkles newline
  *  tokens at segment boundaries — mid-flow, semi-random — plus bracketed
@@ -98,6 +104,7 @@ export function useVoiceDictationCore({
   target,
   pushToTalk = false,
   isActiveTarget,
+  onExtendedSilence,
 }: {
   target: DictationTarget;
   /** Enable window-global Alt-hold push-to-talk. */
@@ -106,6 +113,12 @@ export function useVoiceDictationCore({
    *  once (split chat, two open notes) must nominate the focused one — a solo
    *  Alt press would otherwise open a mic capture in every instance. */
   isActiveTarget?: () => boolean;
+  /** Fired once per extended-silence episode while recording (see
+   *  VOICE_YIELD_CHUNKS): the hook the hands-free voice loop uses to detect
+   *  "the user finished the utterance". The callback runs on the audio
+   *  thread's tick — keep it cheap, defer real work. Optional; dictation
+   *  surfaces never pass it. */
+  onExtendedSilence?: () => void;
 }) {
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
@@ -167,6 +180,10 @@ export function useVoiceDictationCore({
   const generationRef = useRef(0);
   const partialTimerRef = useRef<number | null>(null);
   const waveBarsRef = useRef<(HTMLSpanElement | null)[]>([]);
+  /** Read through a ref like `targetRef`: the callback is a fresh closure on
+   *  most renders but the audio tick must always call the current one. */
+  const onExtendedSilenceRef = useRef(onExtendedSilence);
+  onExtendedSilenceRef.current = onExtendedSilence;
   // Mirrors `recording` for hotkey/async paths where state may be stale, plus
   // a "released while the mic was still opening" latch (push-to-talk during
   // the first-run permission prompt).
@@ -486,6 +503,15 @@ export function useVoiceDictationCore({
             segmentHadSoundRef.current
           ) {
             flushVoiceSegment();
+          } else if (
+            silenceRunRef.current === VOICE_YIELD_CHUNKS &&
+            !segmentHadSoundRef.current
+          ) {
+            // A committed segment is behind us and the quiet has gone on long
+            // enough that the utterance is over — the hands-free loop's turn
+            // yield. Exact-count check: fires once per silence episode, and
+            // only after this recording actually captured sound.
+            onExtendedSilenceRef.current?.();
           }
         } else {
           silenceRunRef.current = 0;
@@ -656,5 +682,5 @@ export function useVoiceDictationCore({
     };
   }, [pushToTalk, isActiveTarget, transcribing, beginVoiceRecording, finishVoiceRecording, cancelVoiceRecording]);
 
-  return { recording, transcribing, waveBarsRef, toggleRecording, cancelRecording: cancelVoiceRecording };
+  return { recording, transcribing, waveBarsRef, levelRef, toggleRecording, cancelRecording: cancelVoiceRecording };
 }

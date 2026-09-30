@@ -137,3 +137,26 @@ describe("VoiceActivityGate", () => {
     expect(high.threshold(sound)).toBeGreaterThanOrEqual(0.02 * 2.6);
   });
 });
+
+describe("VoiceActivityGate — suspect (the duck probe trigger)", () => {
+  beforeEach(() => resetEchoCalibration());
+
+  it("emits one suspect at the raw bleed, then stays latched until endProbe", () => {
+    const gate = new VoiceActivityGate();
+    calibrate(gate, 0.05); // a quiet passage: voice threshold = 0.075
+    // 0.06 is above the raw bleed (≥ 0.05×1.1) but below the voice threshold
+    // — ambiguous: tell the caller to duck and re-listen.
+    expect(gate.feed(0.06, sound)).toBe("suspect");
+    // Latched — one probe per spike, not one per chunk.
+    expect(gate.feed(0.06, sound)).toBeNull();
+    // The probe expired unanswered: re-arm the latch.
+    gate.endProbe();
+    expect(gate.feed(0.06, sound)).toBe("suspect");
+  });
+
+  it("never suspects during the echo window or on non-sounding chunks", () => {
+    const gate = new VoiceActivityGate();
+    expect(gate.feed(VOICE, sound)).toBeNull(); // still measuring the bleed
+    expect(gate.feed(VOICE, silent)).toBeNull(); // nothing playing: floor rule
+  });
+});

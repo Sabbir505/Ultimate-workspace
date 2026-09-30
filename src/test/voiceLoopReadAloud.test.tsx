@@ -34,7 +34,15 @@ vi.mock("../lib/voiceActivity", async (importOriginal) => {
 });
 
 vi.mock("../lib/tts", () => ({
-  ttsPlayer: { stop: vi.fn(), pause: vi.fn(), resume: vi.fn(), warmup: vi.fn() },
+  ttsPlayer: {
+    stop: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
+    warmup: vi.fn(),
+    duck: vi.fn(),
+    unduck: vi.fn(),
+    isDucked: vi.fn(() => false),
+  },
 }));
 
 const chatState = vi.hoisted(() => ({

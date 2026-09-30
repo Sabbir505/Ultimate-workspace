@@ -863,6 +863,10 @@ class TtsPlayer {
    *  everything else, which lengthened the stall it was meant to cover. */
   private pending = new Map<string, Promise<AudioBuffer | null>>();
   private source: AudioBufferSourceNode | null = null;
+  /** Player-owned output gain (see startSource) — the duck-probe's handle. */
+  private gain: GainNode | null = null;
+  /** True while ducked for a barge-in probe. */
+  private ducked = false;
   private index = 0;
   /** Resume point inside `sentences[index]`, in seconds. */
   private offset = 0;
@@ -968,6 +972,7 @@ class TtsPlayer {
   /** Play `text`, replacing whatever was playing. */
   async play({ key, label, text }: PlayTextOptions): Promise<void> {
     const my = (this.token += 1);
+    this.unduck();
     this.streamOpen = false; // a manual play supersedes any streaming read
     this.skipTarget = null;
     this.pausePending = false;
@@ -1031,6 +1036,7 @@ class TtsPlayer {
     // engine load and the LLM's time-to-first-token then overlap instead of
     // stack.
     this.warmup();
+    this.unduck();
     this.streamOpen = true;
     this.streamMy = my;
     this.streamReady = false;
@@ -1215,11 +1221,34 @@ class TtsPlayer {
     this.stopSource("paused");
   }
 
+  /** Drop the output volume for a barge-in probe: the read keeps sounding
+   *  (no pause-and-resume stutter), but its echo at the mic collapses, so the
+   *  watcher's plain floor rule can hear a real voice over it. */
+  duck(): void {
+    if (this.ducked || !this.gain) return;
+    this.ducked = true;
+    this.gain.gain.value = 0.12;
+    vlog("duck — probe open, output at 12%");
+  }
+
+  /** Restore full volume after an unanswered probe (a confirm stops the read
+   *  outright, which also unducks). */
+  unduck(): void {
+    if (!this.ducked) return;
+    this.ducked = false;
+    if (this.gain) this.gain.gain.value = 1;
+  }
+
+  isDucked(): boolean {
+    return this.ducked;
+  }
+
   /** Stop and clear. The store returns to idle so the play button reverts. */
   stop(): void {
     if (useTtsStore.getState().phase !== "idle") {
       vlog(`STOP — playback cut (streamOpen=${this.streamOpen})`);
     }
+    this.unduck();
     this.token += 1;
     this.streamOpen = false; // barge-in / stop cuts the streaming feed too
     this.skipTarget = null;
@@ -1584,7 +1613,15 @@ class TtsPlayer {
       // through setRate's ramp on the running node. (Guarded: test doubles and
       // exotic nodes may not expose the AudioParam.)
       if (src.playbackRate) src.playbackRate.value = this.rate;
-      src.connect(ctx.destination);
+      // A player-owned gain node sits between every source and the speakers:
+      // duck() drops it so the barge-in probe can hear the room without the
+      // read's own echo drowning it out.
+      if (!this.gain || this.gain.context !== ctx) {
+        this.gain = ctx.createGain();
+        this.gain.gain.value = 1;
+        this.gain.connect(ctx.destination);
+      }
+      src.connect(this.gain);
       const startAt = Math.min(Math.max(offset, 0), Math.max(buffer.duration - 0.02, 0));
       const done = (result: SentenceResult) => {
         if (this.settle !== done) return;

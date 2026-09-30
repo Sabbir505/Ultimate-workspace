@@ -54,6 +54,10 @@ const SPEAK_START_GRACE_MS = 1500;
  *  which is better than dropping the utterance). */
 const STREAM_FREE_TIMEOUT_MS = 4000;
 
+/** How long a duck-probe stays open: the read is quiet, the room is audible.
+ *  A voice inside the window confirms; an unanswered probe restores volume. */
+const BARGE_PROBE_MS = 1000;
+
 function waitForStreamFree(sessionId: string): Promise<void> {
   const t0 = Date.now();
   const check = (): Promise<void> => {
@@ -297,15 +301,36 @@ export function VoiceLoopController(): null {
     const gate = new VoiceActivityGate({ echoGuard: true });
     let dead = false;
     let stop: (() => void) | null = null;
+    let probeTimer: number | null = null;
     const t0 = performance.now();
     void startMicLevelFeed((rms) => {
       if (dead) return;
-      const sounding = useTtsStore.getState().phase === "playing";
+      // "Sounding" = real audio is on the air AND not currently ducked — a
+      // duck collapses the echo, so during a probe the gate deliberately
+      // hears the room as if nothing were playing (plain floor rule).
+      const sounding = useTtsStore.getState().phase === "playing" && !ttsPlayer.isDucked();
       useVoiceLoopStore.getState().set({ level: Math.min(1, rms * 8) });
-      if (gate.feed(rms, sounding) === "confirm") {
+      const ev = gate.feed(rms, sounding);
+      if (ev === "suspect") {
+        // Open the probe: drop the read's volume so its echo stops masking
+        // the room. A real voice now confirms against the floor rule; an
+        // unanswered probe restores the volume after a second.
+        ttsPlayer.duck();
+        if (probeTimer != null) window.clearTimeout(probeTimer);
+        probeTimer = window.setTimeout(() => {
+          probeTimer = null;
+          ttsPlayer.unduck();
+          gate.endProbe();
+        }, BARGE_PROBE_MS);
+      } else if (ev === "confirm") {
+        if (probeTimer != null) {
+          window.clearTimeout(probeTimer);
+          probeTimer = null;
+        }
+        ttsPlayer.unduck();
         console.log(
           `[voice] barge-in at +${Math.round(performance.now() - t0)}ms ` +
-            `(rms ${rms.toFixed(3)} ≥ threshold ${gate.threshold(sounding) === Infinity ? "∞" : gate.threshold(sounding).toFixed(3)}, sounding=${sounding})`,
+            `(rms ${rms.toFixed(3)}, sounding=${sounding})`,
         );
         gate.reset();
         bargeInRef.current();
@@ -327,6 +352,8 @@ export function VoiceLoopController(): null {
       });
     return () => {
       dead = true;
+      if (probeTimer != null) window.clearTimeout(probeTimer);
+      ttsPlayer.unduck(); // never leave the player quiet because we left
       stop?.();
     };
   }, [mode, phase]);

@@ -34,7 +34,7 @@
 // only a device/room change needs the re-measure — which the ratchet
 // absorbs within one episode.
 
-export type VoiceGateEvent = "confirm";
+export type VoiceGateEvent = "suspect" | "confirm";
 
 export interface VoiceGateConfig {
   /** Absolute minimum RMS that counts as sound at all. Typical mic noise
@@ -47,13 +47,18 @@ export interface VoiceGateConfig {
    *  (~256 ms each). Three — under a second of loud speech, but long enough
    *  that a single dynamic TTS passage cannot confirm on its own. */
   confirmChunks: number;
-  /** SOUNDING chunks measured before arming — the echo-bleed estimate.
-   *  Five ≈ 1.3 s of actual audio. */
+  /** SOUNDING chunks measured before the echo ceiling is trusted. Five ≈
+   *  1.3 s of actual audio. */
   calibChunks: number;
   /** The armed voice threshold while audio sounds: `max(minThreshold,
    *  echoPeak * multiplier, floor * floorMultiplier)` — above the speakers'
    *  bleed at the mic, so the speakers cannot trigger their own death. */
   echoMultiplier: number;
+  /** A sounding chunk at or above `echoPeak * suspectMultiplier` (but below
+   *  the voice threshold) emits one "suspect" — the caller ducks the
+   *  playback for a probe, which collapses the echo and lets a NORMAL voice
+   *  confirm against the plain floor rule. */
+  suspectMultiplier: number;
   /** Headphones: the mic never hears the TTS, so there is no echo to
    *  calibrate — arm on the plain noise-floor rule immediately. */
   echoGuard: boolean;
@@ -64,7 +69,8 @@ export const DEFAULT_VOICE_GATE: VoiceGateConfig = {
   floorMultiplier: 2.6,
   confirmChunks: 3,
   calibChunks: 5,
-  echoMultiplier: 2,
+  echoMultiplier: 1.5,
+  suspectMultiplier: 1.1,
   echoGuard: true,
 };
 
@@ -99,6 +105,9 @@ export class VoiceActivityGate {
   private run = 0;
   private runPeak = 0;
   private floor: number;
+  /** Latched between a "suspect" emission and the caller's endProbe() — one
+   *  duck per spike, not one per chunk. */
+  private suspected = false;
 
   constructor(cfg: Partial<VoiceGateConfig> = {}, initialFloor = 0.004) {
     this.cfg = { ...DEFAULT_VOICE_GATE, ...cfg };
@@ -133,6 +142,14 @@ export class VoiceActivityGate {
         : 0;
     this.run = 0;
     this.runPeak = 0;
+    this.suspected = false;
+  }
+
+  /** Close the probe the caller opened in response to a "suspect" (the duck
+   *  expired without a confirm). Re-arms the latch so a later spike can
+   *  suspect again. */
+  endProbe(): void {
+    this.suspected = false;
   }
 
   /** Feed one chunk's RMS. `sounding` = the TTS is producing audio right now
@@ -152,6 +169,20 @@ export class VoiceActivityGate {
 
     const loud = rms >= this.threshold(sounding);
     if (!loud) {
+      // A sounding chunk above the raw bleed but below the voice threshold:
+      // ambiguous — echo dynamics or the start of a voice. Emit one
+      // "suspect" so the caller can duck the playback and re-listen with the
+      // plain floor rule (see useVoiceLoop's probe).
+      if (
+        sounding &&
+        !this.suspected &&
+        this.cfg.echoGuard &&
+        this.echoPeak > 0 &&
+        rms >= Math.max(this.cfg.minThreshold, this.echoPeak * this.cfg.suspectMultiplier)
+      ) {
+        this.suspected = true;
+        return "suspect";
+      }
       // Quiet chunk: the floor drifts toward it (EMA), clamped. Only quiet
       // chunks move the floor — a loud chunk must not raise the bar behind
       // itself, or sustained speech would silence the gate mid-word.

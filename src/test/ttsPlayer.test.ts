@@ -34,6 +34,8 @@ class FakeCtx {
   state = "running";
   destination = {};
   sources: FakeSource[] = [];
+  /** Player-owned output gain (created lazily by startSource). */
+  gainNode = { gain: { value: 1 }, connect() {} };
   resume() {
     return Promise.resolve();
   }
@@ -41,6 +43,9 @@ class FakeCtx {
     const src = new FakeSource();
     this.sources.push(src);
     return src;
+  }
+  createGain() {
+    return this.gainNode;
   }
   decodeAudioData(buf: ArrayBuffer) {
     // The mocked engine encodes each sentence's length in the payload, so a
@@ -592,5 +597,31 @@ describe("streaming read", () => {
     expect(useTtsStore.getState().phase).toBe("playing");
     gates.get(s2)!.resolve(audio(4000));
     await tick();
+  });
+});
+
+describe("duck probe", () => {
+  it("drops the output gain while probing and restores it afterwards", async () => {
+    void ttsPlayer.play({ key: "kd", text: "One sentence to start the gain node." });
+    await vi.waitFor(() => expect(ctx.started()).toHaveLength(1));
+    expect(ctx.gainNode.gain.value).toBe(1);
+
+    ttsPlayer.duck();
+    expect(ttsPlayer.isDucked()).toBe(true);
+    expect(ctx.gainNode.gain.value).toBe(0.12);
+
+    ttsPlayer.unduck();
+    expect(ttsPlayer.isDucked()).toBe(false);
+    expect(ctx.gainNode.gain.value).toBe(1);
+  });
+
+  it("restores the gain when the read is stopped mid-probe", async () => {
+    void ttsPlayer.play({ key: "kd2", text: "A sentence that will be stopped." });
+    await vi.waitFor(() => expect(ctx.started()).toHaveLength(1));
+    ttsPlayer.duck();
+    expect(ctx.gainNode.gain.value).toBe(0.12);
+    ttsPlayer.stop();
+    expect(ctx.gainNode.gain.value).toBe(1);
+    expect(ttsPlayer.isDucked()).toBe(false);
   });
 });

@@ -27,7 +27,7 @@ vi.mock("../lib/voiceActivity", () => ({
 }));
 
 vi.mock("../lib/tts", () => ({
-  ttsPlayer: { stop: vi.fn(), pause: vi.fn(), resume: vi.fn() },
+  ttsPlayer: { stop: vi.fn(), pause: vi.fn(), resume: vi.fn(), warmup: vi.fn() },
 }));
 
 vi.mock("../state/chat", () => ({

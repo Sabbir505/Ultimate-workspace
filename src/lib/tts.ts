@@ -16,7 +16,7 @@
 // builds (macOS) reject them at PARSE time, which would break the whole module
 // rather than degrade a feature.
 import { sharedAudioContext } from "./sound";
-import { ttsSpeak, ttsStatus, type TtsStatus } from "./ipc";
+import { ttsPreload, ttsSpeak, ttsStatus, type TtsStatus } from "./ipc";
 import { useTtsStore } from "../state/tts";
 
 /** Sentences longer than this are split further at clause boundaries. Kokoro's
@@ -915,6 +915,31 @@ class TtsPlayer {
   /** True while a pump loop owns the queue — appending chunks while it runs
    *  needs no kick (the loop's next iteration sees them). */
   private pumping = false;
+  /** Signature (model|device) of the engine already warmed this run — the
+   *  preload is idempotent on the backend, but skipping the repeat keeps the
+   *  warm call one IPC hop instead of two. */
+  private warmedSig: string | null = null;
+
+  /** Pay the engine's cold start (model load, session creation) NOW so the
+   *  first synthesized word is not the one that waits for it. Safe to call
+   *  from anywhere, any number of times: it no-ops once warm for the current
+   *  model/device, and re-warms after a model or device switch. Called when a
+   *  hands-free episode starts, and at the head of every streaming read —
+   *  the load then overlaps the model's time-to-first-token instead of
+   *  stacking after it. */
+  warmup(): void {
+    void ttsStatus()
+      .then((status) => {
+        if (!status?.modelId) return; // nothing to warm
+        const sig = `${status.modelId}|${status.device}`;
+        if (this.warmedSig === sig) return;
+        this.warmedSig = sig;
+        return ttsPreload();
+      })
+      .catch(() => {
+        /* no backend or no model — the first speak will surface it */
+      });
+  }
 
   /** Play `text`, replacing whatever was playing. */
   async play({ key, label, text }: PlayTextOptions): Promise<void> {
@@ -978,6 +1003,10 @@ class TtsPlayer {
    *  the feed; the read finishes when the fed queue drains. */
   beginStream(key: string, label: string): void {
     const my = (this.token += 1);
+    // Warm while the model is still generating its first sentence — the
+    // engine load and the LLM's time-to-first-token then overlap instead of
+    // stack.
+    this.warmup();
     this.streamOpen = true;
     this.streamMy = my;
     this.streamReady = false;
@@ -1088,7 +1117,11 @@ class TtsPlayer {
     if (this.device === "gpu") {
       this.streamHold.push(...chunks);
       this.streamHoldChars += chunks.reduce((n, c) => n + c.text.length, 0);
-      const budget = this.streamHoldFirst ? GPU_WARMUP_CHARS : GPU_CHUNK_CHARS;
+      // The FIRST group goes out the moment it exists — time-to-first-audio
+      // is the whole point of streaming, and the GPU's per-call process start
+      // dominates whatever a bigger batch would save on the opener. Later
+      // groups batch to the full budget.
+      const budget = this.streamHoldFirst ? 0 : GPU_CHUNK_CHARS;
       if (this.streamHoldChars < budget) return;
       this.streamHoldFirst = false;
       chunks = this.joinHold();
@@ -1382,6 +1415,12 @@ class TtsPlayer {
     const target = (index === 0 ? LEAD_SECS : LEAD_FLOOR_SECS) * this.rate;
     let lead = this.leadSecs(index, buffer);
     if (lead >= target) return;
+    // A streaming read's OPENER plays the instant it is synthesized — waiting
+    // to build a lead here would hold the first words hostage to sentences
+    // the model has not written yet. The sentences behind it still prefetch
+    // (playSentence's topUp), so the stall protection the lead exists for is
+    // rebuilt as the stream continues.
+    if (index === 0 && this.streamOpen) return;
     // A wait the listener can see coming: the bar reports `buffering` rather
     // than pretending a silent read is a playing one.
     useTtsStore.getState().set({ phase: "buffering" });

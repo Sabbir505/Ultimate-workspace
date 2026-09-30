@@ -103,6 +103,10 @@ export function VoiceLoopController(): null {
     const store = useVoiceLoopStore.getState();
     if (store.mode !== "handsfree") return;
     if (recordingRef.current) return;
+    // The answer's voice engine warms NOW, while the user is still talking —
+    // by the time the model answers, the model load is long paid and the
+    // first synthesized word is not the one that waits for it.
+    ttsPlayer.warmup();
     store.set({ phase: "listening", transcript: "", level: 0, error: null });
     dict.toggleRecording(); // not recording → begins capture
   }, [dict]);

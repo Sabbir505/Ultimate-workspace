@@ -513,17 +513,44 @@ describe("streaming read", () => {
     } as unknown as TtsStatus);
     ttsPlayer.beginStream("msg:s6:stream", "Answer");
     await tick();
-    // Under the warm-up budget: held, nothing synthesized yet.
+    // The FIRST group goes out immediately — time-to-first-audio beats
+    // batching on the opener, process start dominates whatever a bigger
+    // batch would save.
     ttsPlayer.feedStream([{ text: "Tiny gpu streamed lead-in.", paragraphStart: false }]);
     await tick();
-    expect(calls).toHaveLength(0);
-    // Past the budget: one group call, sentences joined.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toBe("Tiny gpu streamed lead-in.");
+    // Later groups batch to the full budget: under it, held.
     const filler = Array.from({ length: 20 }, (_, i) => `Gpu filler clause ${i} here.`).join(" ");
     ttsPlayer.feedStream([{ text: filler, paragraphStart: false }]);
     await tick();
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("Tiny gpu streamed lead-in.");
-    expect(calls[0]).toContain("Gpu filler clause 19 here.");
+    // endStream releases whatever was held short of the budget; the pump,
+    // mid-sentence, picks it up at the boundary.
     ttsPlayer.endStream();
+    ctx.sources[0].onended?.();
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toContain("Gpu filler clause 19 here.");
+    ctx.sources[1].onended?.();
+    await vi.waitFor(() => expect(useTtsStore.getState().phase).toBe("idle"));
+  });
+
+  it("plays the streaming opener without waiting to build a lead behind it", async () => {
+    durations.set(s1, 4000);
+    gate(s2); // the follow-up's synthesis is held: a lead-builder would wait
+
+    ttsPlayer.beginStream("msg:s7:stream", "Answer");
+    await tick();
+    ttsPlayer.feedStream([
+      { text: s1, paragraphStart: false },
+      { text: s2, paragraphStart: false },
+    ]);
+    // The opener sounds even though the 6-second lead can never be met while
+    // the second sentence's synthesis is held — holding the first words
+    // hostage to sentences the model has not finished is exactly backwards.
+    await vi.waitFor(() => expect(ctx.started()).toHaveLength(1));
+    expect(useTtsStore.getState().phase).toBe("playing");
+    gates.get(s2)!.resolve(audio(4000));
+    await tick();
   });
 });

@@ -136,6 +136,16 @@ pub(super) fn send_claude_turn(
         entry.turn_in_flight.store(false, Ordering::SeqCst);
         return Err(format!("failed to write to CLI stdin: {e}"));
     }
+    // The turn's clock starts NOW, at prompt-send — not at the model's first
+    // event. The persistent CLI's boot/handshake lag (seconds on a cold
+    // start) belongs to the turn; without this the composer's live ELAPSED
+    // chip ignored it and lagged the bubble's "Working for Xs" by exactly
+    // that much. The reader's first message_start ADOPTS this accumulator
+    // (turn_perf::adopt) instead of replacing it.
+    crate::chat::turn_perf::register(
+        sid,
+        crate::chat::turn_perf::TurnPerf::new_opt(Some(app.clone()), sid),
+    );
     Ok(())
 }
 

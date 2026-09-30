@@ -93,6 +93,16 @@ pub fn unregister(session_id: &str) {
     ACTIVE.lock().remove(session_id);
 }
 
+/// Take the session's active accumulator WITHOUT registering anything — the
+/// adopt path for harness readers. A persistent-CLI turn registers its
+/// accumulator at PROMPT-SEND (`send_claude_turn`), so ELAPSED counts the
+/// CLI's boot/handshake lag; when the model's first event arrives, the reader
+/// adopts that accumulator instead of registering a fresh one whose clock
+/// would silently skip everything before `message_start`.
+pub fn adopt(session_id: &str) -> Option<TurnPerf> {
+    ACTIVE.lock().get(session_id).cloned()
+}
+
 /// Call `record_token` + `maybe_emit_perf` on the session's active `TurnPerf`
 /// if one is registered. Idempotent no-op when none is (non-streamed paths).
 pub fn record_active_token(session_id: &str) {

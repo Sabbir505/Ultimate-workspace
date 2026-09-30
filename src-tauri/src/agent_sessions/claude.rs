@@ -675,9 +675,21 @@ pub(super) fn read_claude_stream(
                 match v.pointer("/event/type").and_then(|t| t.as_str()) {
                     Some("message_start") => {
                         if perf.is_none() {
-                            perf = Some(crate::chat::turn_perf::register(
-                                sid,
-                                crate::chat::turn_perf::TurnPerf::new_opt(app.cloned(), sid),
+                            // Adopt the accumulator the send path registered at
+                            // prompt-send (its clock already covers the CLI's
+                            // boot/handshake); only a turn that never went
+                            // through send (tests, replayed transcripts) gets a
+                            // fresh one here.
+                            perf = Some(crate::chat::turn_perf::adopt(sid).unwrap_or_else(
+                                || {
+                                    crate::chat::turn_perf::register(
+                                        sid,
+                                        crate::chat::turn_perf::TurnPerf::new_opt(
+                                            app.cloned(),
+                                            sid,
+                                        ),
+                                    )
+                                },
                             ));
                         }
                         if let Some(p) = &perf {

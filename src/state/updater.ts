@@ -108,30 +108,9 @@ export function wireUpdaterEvents(): void {
   });
 }
 
-// DEV-ONLY: seeds fake update data so the green Update button is visible for
-// UI review without a real published update. Flip SHOW_FAKE_UPDATE to false
-// (and remove the seed call in Sidebar.tsx) once the UI is signed off. When
-// true, the real periodic check() is skipped so it doesn't clobber the mock
-// with an "up to date" response.
-export const SHOW_FAKE_UPDATE = import.meta.env.DEV && false;
-
-/** Seed the store with a fake available update (dev review only). */
-export function seedFakeUpdate(): void {
-  useUpdaterStore.setState({
-    update: {
-      updateAvailable: true,
-      version: "0.5.0",
-      pubDate: new Date().toISOString(),
-      notes: [
-        "### Features",
-        "- New green Update button in the sidebar header",
-        "- Hover to preview release notes before updating",
-        "",
-        "### Bug Fixes",
-        "- Browsing a project no longer rebinds the active chat to it",
-        "- Fixed HTML artifact classification (diagrams vs webapps)",
-      ].join("\n"),
-    },
-    install: "idle",
-  });
-}
+// The dev-only "fake update" seed that used to live here (SHOW_FAKE_UPDATE +
+// seedFakeUpdate) was removed: it was pinned to `&& false`, so the branch was
+// unreachable in every build while still sitting in the shipping App.tsx and
+// Sidebar.tsx code paths. To review the green update button, point check() at
+// a real published release or patch a scratch branch — don't re-add a flag
+// that the shipping tree has to carry.

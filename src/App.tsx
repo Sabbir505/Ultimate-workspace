@@ -78,7 +78,7 @@ import { useProjectsSidebarStore } from "./state/projectsSidebar";
 import { useSettingsStore } from "./state/settings";
 import { useSkillsStore } from "./state/skills";
 import { useUiStore } from "./state/ui";
-import { useUpdaterStore, wireUpdaterEvents, SHOW_FAKE_UPDATE } from "./state/updater";
+import { useUpdaterStore, wireUpdaterEvents } from "./state/updater";
 import { useOcclusion } from "./hooks/useOcclusion";
 
 // Lazy-loaded overlay views. They're only fetched the first time the user
@@ -227,10 +227,7 @@ export default function App() {
     // Auto-updater: wire download-progress + installed events, then check on
     // startup and every 4 hours. A check is a single HTTP GET + semver compare;
     // a found update surfaces the green Update button in the sidebar header.
-    // Skipped entirely when the dev-only fake-update flag is on, so the real
-    // check's "up to date" response doesn't clobber the mock seed.
     wireUpdaterEvents();
-    if (SHOW_FAKE_UPDATE) return;
     const updaterStore = useUpdaterStore.getState();
     void updaterStore.check();
     const FOUR_HOURS = 4 * 60 * 60 * 1000;

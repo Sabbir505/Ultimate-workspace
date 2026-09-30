@@ -48,7 +48,6 @@ import { ArtifactLibrary } from "./ArtifactLibrary";
 import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
 import { AppVersion } from "./AppVersion";
 import { UpdateButton } from "./UpdateButton";
-import { seedFakeUpdate, SHOW_FAKE_UPDATE } from "../../state/updater";
 import { useOcclusion } from "../../hooks/useOcclusion";
 import { PetStrip } from "../pet/PetStrip";
 
@@ -249,12 +248,6 @@ export function Sidebar() {
   // webview-occlusion system (M22) — a native browser webview would otherwise
   // paint on top of it.
   useOcclusion("sidebar:pairing-qr", pairingModalOpen);
-
-  // DEV-ONLY mock update for visual review (see SHOW_FAKE_UPDATE in state/updater).
-  useEffect(() => {
-    if (!SHOW_FAKE_UPDATE) return;
-    seedFakeUpdate();
-  }, []);
 
   const handleNewChat = useNewChatAction();
 

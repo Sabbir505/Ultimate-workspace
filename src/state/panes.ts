@@ -277,28 +277,6 @@ export function activeTabUrl(pane: Pane): string {
   return tabs[pane.data.activeTabIndex]?.url ?? pane.data.url;
 }
 
-/** Migration: ensure every browser pane has a tabs array with at least one default
- *  tab. Call this at app boot / state hydration. Mutates the panes array in place
- *  and returns it. */
-export function ensureBrowserTabs(panes: Pane[]): Pane[] {
-  return panes.map((p) => {
-    if (p.data.kind !== "browser") return p;
-    if (p.data.tabs && p.data.tabs.length > 0 && p.data.activeTabIndex !== undefined) return p;
-    const defaultTab: BrowserTabData = {
-      tabId: "default",
-      url: p.data.url || DEFAULT_BROWSER_URL,
-      title: "",
-    };
-    return {
-      ...p,
-      data: {
-        ...p.data,
-        tabs: [defaultTab],
-        activeTabIndex: 0,
-      },
-    };
-  });
-}
 
 const DEFAULT_BROWSER_TAB = (url: string): BrowserTabData => ({
   tabId: "default",

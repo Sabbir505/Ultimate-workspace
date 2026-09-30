@@ -14,7 +14,13 @@
 //    seconds before the first audio (the engine is still synthesizing). The
 //    window measured a silent room, the voice threshold collapsed to the
 //    noise floor, and the gate then "confirmed" a barge-in on the TTS's own
-//    sound and cut the read a few words in.
+//    sound and cut the read a few words in. Conversely, a window that waits
+//    for audio would never close during "waiting" (the model is generating,
+//    nothing sounds) — so the two cases are treated separately: NON-sounding
+//    chunks follow the plain noise-floor rule from the first chunk (no
+//    playback, no echo, any loudness is a voice), and only SOUNDING chunks
+//    pass through the echo-measurement window before the echo threshold
+//    applies to them.
 //
 // A deliberate non-feature: the ceiling is NOT ratcheted by loud runs that
 // die unsustained. Such a run is usually echo — but it is indistinguishable
@@ -81,8 +87,14 @@ export function resetEchoCalibration(): void {
 
 export class VoiceActivityGate {
   private cfg: VoiceGateConfig;
-  private state: "calibrating" | "armed" | "confirmed";
-  private calibLeft: number;
+  private state: "armed" | "confirmed" = "armed";
+  /** SOUNDING chunks left before the echo ceiling is trusted. While this is
+   *  above zero, sounding chunks measure the bleed and never confirm — a
+   *  voice cannot be told apart from the TTS's first moments. Non-sounding
+   *  chunks are unaffected: when nothing plays there is no echo, so the
+   *  plain floor rule applies from the very first chunk (this is what keeps
+   *  barge-in responsive during "waiting", where audio never comes). */
+  private echoCalibLeft: number;
   private echoPeak: number;
   private run = 0;
   private runPeak = 0;
@@ -91,19 +103,20 @@ export class VoiceActivityGate {
   constructor(cfg: Partial<VoiceGateConfig> = {}, initialFloor = 0.004) {
     this.cfg = { ...DEFAULT_VOICE_GATE, ...cfg };
     this.floor = Math.min(Math.max(initialFloor, FLOOR_MIN), FLOOR_MAX);
+    // A previously measured ceiling (same room, same speakers) skips the
+    // window entirely; headphones never calibrate at all.
     this.echoPeak = this.cfg.echoGuard ? lastMeasuredEcho : 0;
     const seeded = this.echoPeak * this.cfg.echoMultiplier >= this.cfg.minThreshold;
-    this.state = !this.cfg.echoGuard || seeded ? "armed" : "calibrating";
-    this.calibLeft = this.state === "calibrating" ? this.cfg.calibChunks : 0;
+    this.echoCalibLeft = this.cfg.echoGuard && !seeded ? this.cfg.calibChunks : 0;
   }
 
-  /** Current sound threshold (exposed for tests and diagnostics). While
-   *  calibrating it is deliberately impossible to clear — the estimate is
-   *  not in yet. `sounding` mirrors the caller's "is the TTS actually
-   *  producing audio right now": with nothing sounding there is no echo, so
-   *  only the room floor applies. */
+  /** Current sound threshold (exposed for tests and diagnostics). `sounding`
+   *  mirrors the caller's "is the TTS actually producing audio right now":
+   *  with nothing sounding there is no echo, so only the room floor applies.
+   *  Infinity = the echo window is still measuring sounding audio. */
   threshold(sounding = true): number {
-    if (this.state === "calibrating") return Infinity;
+    if (this.state === "confirmed") return Infinity;
+    if (sounding && this.echoCalibLeft > 0) return Infinity;
     const byEcho = sounding ? this.echoPeak * this.cfg.echoMultiplier : 0;
     return Math.max(this.cfg.minThreshold, byEcho, this.floor * this.cfg.floorMultiplier);
   }
@@ -112,11 +125,12 @@ export class VoiceActivityGate {
    *  changes under the gate. The measured ceiling carries over — same room,
    *  same speakers — so the next episode arms immediately. */
   reset(): void {
-    // Always arm: reset happens after a confirmed barge-in (or a player
-    // change), by which point the ceiling is measured — re-calibrating would
-    // spend the first 1.3 s of the next episode deaf for nothing.
     this.state = "armed";
     this.echoPeak = this.cfg.echoGuard ? lastMeasuredEcho : 0;
+    this.echoCalibLeft =
+      this.cfg.echoGuard && this.echoPeak * this.cfg.echoMultiplier < this.cfg.minThreshold
+        ? this.cfg.calibChunks
+        : 0;
     this.run = 0;
     this.runPeak = 0;
   }
@@ -127,16 +141,12 @@ export class VoiceActivityGate {
   feed(rms: number, sounding: boolean): VoiceGateEvent | null {
     if (this.state === "confirmed") return null; // latched until reset()
 
-    if (this.state === "calibrating") {
-      // Silence says nothing about the echo — only sounding chunks count,
-      // and a silent stretch must not consume the window.
-      if (!sounding) return null;
+    // Echo window: sounding chunks measure the bleed and must never confirm
+    // (the TTS's own first moments are indistinguishable from a voice).
+    if (sounding && this.echoCalibLeft > 0) {
       this.echoPeak = Math.max(this.echoPeak, rms);
-      this.calibLeft -= 1;
-      if (this.calibLeft <= 0) {
-        this.state = "armed";
-        lastMeasuredEcho = this.echoPeak;
-      }
+      this.echoCalibLeft -= 1;
+      if (this.echoCalibLeft === 0) lastMeasuredEcho = this.echoPeak;
       return null;
     }
 

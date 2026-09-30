@@ -49,6 +49,21 @@ import {
  *  before concluding there is no voice engine and resuming the mic. */
 const SPEAK_START_GRACE_MS = 1500;
 
+/** After cancelling an interrupted turn, how long to let the session's
+ *  streaming key drain before sending anyway (the store would queue then,
+ *  which is better than dropping the utterance). */
+const STREAM_FREE_TIMEOUT_MS = 4000;
+
+function waitForStreamFree(sessionId: string): Promise<void> {
+  const t0 = Date.now();
+  const check = (): Promise<void> => {
+    if (useChatStore.getState().streaming[sessionId] == null) return Promise.resolve();
+    if (Date.now() - t0 >= STREAM_FREE_TIMEOUT_MS) return Promise.resolve();
+    return new Promise((r) => window.setTimeout(r, 100)).then(check);
+  };
+  return check();
+}
+
 export function VoiceLoopController(): null {
   const mode = useVoiceLoopStore((s) => s.mode);
   const phase = useVoiceLoopStore((s) => s.phase);
@@ -129,6 +144,19 @@ export function VoiceLoopController(): null {
       if (!finalText || !sessionId) return;
       pendingSessionRef.current = sessionId;
       useVoiceLoopStore.getState().set({ phase: "sending" });
+      // A spoken instruction while the answer is still generating is an
+      // INTERRUPT, not a queued follow-up: the typed path would stack it in
+      // the message queue to send after the current turn finishes, which
+      // reads as the app ignoring the speaker. Stop the streaming turn (its
+      // partial stays visible), wait for the session to actually free, then
+      // send. If the cancel never lands (timeout), send anyway — queueing is
+      // better than dropping the utterance.
+      const chat = useChatStore.getState();
+      if (chat.streaming[sessionId] != null) {
+        void chat.cancelStream(sessionId);
+        await waitForStreamFree(sessionId);
+      }
+      useVoiceLoopStore.getState().set({ phase: "sending" });
       // Fire, not await — sendMessage resolves when the TURN completes; the
       // waiting state is ours to manage from here via the turn-complete
       // notification.
@@ -156,18 +184,20 @@ export function VoiceLoopController(): null {
 
   // ---- waiting → speaking → listening ----
 
-  /** Barge-in (Phase A): stop playback, cut the stream if it is still running,
-   *  and hand the floor straight back to the listener. */
+  /** Barge-in: the speaker's voice overrides whatever the loop was doing —
+   *  stop the read, cut the still-generating answer (its partial stays in
+   *  the transcript), and hand the floor back to the listener. Armed for
+   *  both "waiting" (the model is generating; the mic is otherwise dead for
+   *  the whole generation) and "speaking". */
   const bargeIn = useCallback(() => {
     ttsPlayer.stop();
     const store = useVoiceLoopStore.getState();
-    if (store.phase === "speaking") {
-      const session =
-        pendingSessionRef.current ?? useChatStore.getState().activeChatSessionId;
-      // Harmless no-op when the turn already finished streaming.
-      if (session) void useChatStore.getState().cancelStream(session);
-      startListeningRef.current();
-    }
+    if (store.phase !== "speaking" && store.phase !== "waiting") return;
+    const session =
+      pendingSessionRef.current ?? useChatStore.getState().activeChatSessionId;
+    // Harmless no-op when the turn already finished streaming.
+    if (session) void useChatStore.getState().cancelStream(session);
+    startListeningRef.current();
   }, []);
   const bargeInRef = useRef(bargeIn);
   bargeInRef.current = bargeIn;
@@ -254,14 +284,16 @@ export function VoiceLoopController(): null {
   }, []);
 
   // The barge-in watcher (Phase A): mic open, energy-only, no transcription —
-  // it exists to catch speech while Relay is talking. Armed exactly while the
-  // loop is in the speaking state. The gate calibrates on the playback's own
-  // echo — and only on chunks where audio is ACTUALLY sounding: the loop
-  // enters "speaking" while the engine is still synthesizing, and a
-  // calibration that runs on a silent room collapses the voice threshold to
-  // the noise floor, making the gate confirm a barge-in on the TTS itself.
+  // it exists to catch speech while Relay holds the floor. Armed for BOTH
+  // "waiting" (the model is generating — without this the mic is dead for the
+  // whole generation and the user talks into nothing) and "speaking". The
+  // gate calibrates on the playback's own echo — and only on chunks where
+  // audio is ACTUALLY sounding: the loop enters "speaking" while the engine
+  // is still synthesizing, and a calibration that runs on a silent room
+  // collapses the voice threshold to the noise floor, making the gate
+  // confirm a barge-in on the TTS itself.
   useEffect(() => {
-    if (mode !== "handsfree" || phase !== "speaking") return;
+    if (mode !== "handsfree" || (phase !== "speaking" && phase !== "waiting")) return;
     const gate = new VoiceActivityGate({ echoGuard: true });
     let dead = false;
     let stop: (() => void) | null = null;

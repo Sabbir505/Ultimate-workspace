@@ -25,14 +25,24 @@ function calibrate(gate: VoiceActivityGate, level = ECHO) {
 describe("VoiceActivityGate", () => {
   beforeEach(() => resetEchoCalibration());
 
-  it("stays deaf until audio actually sounds, however long the synth takes", () => {
+  it("arms instantly for silence (waiting) and only measures when audio sounds", () => {
     const gate = new VoiceActivityGate();
-    // The engine is synthesizing: the loop is "speaking" but nothing sounds.
-    // These chunks must not consume the calibration window.
-    for (let i = 0; i < 20; i++) gate.feed(ECHO, silent);
-    expect(gate.threshold(silent)).toBe(Infinity);
-    // Audio starts: only now does the window fill.
-    calibrate(gate);
+    // Nothing is playing (the model is still generating): no echo can exist,
+    // so the plain floor rule applies from the very first chunk.
+    expect(gate.threshold(silent)).toBeLessThan(0.05);
+    expect(gate.feed(VOICE, silent)).toBeNull();
+    expect(gate.feed(VOICE, silent)).toBeNull();
+    expect(gate.feed(VOICE, silent)).toBe("confirm");
+  });
+
+  it("keeps the echo threshold impossible until audio has been measured", () => {
+    const gate = new VoiceActivityGate();
+    // The TTS's first sounding moments cannot be told apart from a voice —
+    // they measure the bleed instead of confirming.
+    expect(gate.threshold(sound)).toBe(Infinity);
+    for (let i = 0; i < 4; i++) gate.feed(ECHO, sound);
+    expect(gate.threshold(sound)).toBe(Infinity);
+    calibrate(gate, ECHO); // the fifth sounding chunk closes the window
     expect(gate.threshold(sound)).toBeGreaterThan(ECHO);
   });
 

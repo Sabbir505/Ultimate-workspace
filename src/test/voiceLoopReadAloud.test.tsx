@@ -19,24 +19,40 @@ vi.mock("../lib/voiceDictationCore", () => ({
   },
 }));
 
-vi.mock("../lib/voiceActivity", () => ({
-  VoiceActivityGate: class {},
-  // The barge-in watcher must never open a real mic in tests; a promise that
-  // never settles keeps the armed watcher inert.
-  startMicLevelFeed: vi.fn(() => new Promise<() => void>(() => {})),
-}));
+// Real gate policy, mocked capture: the mic feed never opens a real device,
+// but the RMS values a test pushes must run through the actual VoiceActivityGate.
+const mic = vi.hoisted(() => ({ feed: null as ((rms: number) => void) | null }));
+vi.mock("../lib/voiceActivity", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/voiceActivity")>();
+  return {
+    ...actual,
+    startMicLevelFeed: vi.fn((cb: (rms: number) => void) => {
+      mic.feed = cb;
+      return Promise.resolve(() => {});
+    }),
+  };
+});
 
 vi.mock("../lib/tts", () => ({
   ttsPlayer: { stop: vi.fn(), pause: vi.fn(), resume: vi.fn(), warmup: vi.fn() },
 }));
 
+const chatState = vi.hoisted(() => ({
+  activeChatSessionId: "s1",
+  streaming: {} as Record<string, string>,
+  sendMessage: undefined as unknown as (text: string) => Promise<void>,
+  cancelStream: undefined as unknown as (id: string) => Promise<void>,
+}));
+const sendMessageMock = vi.fn(async () => {});
+const cancelStreamMock = vi.fn(async (id: string) => {
+  delete chatState.streaming[id];
+});
+chatState.sendMessage = sendMessageMock as unknown as (text: string) => Promise<void>;
+chatState.cancelStream = cancelStreamMock as unknown as (id: string) => Promise<void>;
+
 vi.mock("../state/chat", () => ({
   useChatStore: {
-    getState: () => ({
-      activeChatSessionId: "s1",
-      sendMessage,
-      cancelStream: vi.fn(),
-    }),
+    getState: () => chatState,
   },
 }));
 
@@ -56,6 +72,7 @@ function renderController() {
 describe("voice loop read-aloud handoff", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete chatState.streaming.s1;
     useVoiceLoopStore.setState({ mode: "off", phase: "idle", transcript: "", level: 0, error: null });
     useTtsStore.setState({ phase: "idle", key: null, error: null });
   });
@@ -122,7 +139,7 @@ describe("voice loop read-aloud handoff", () => {
       await act(async () => {
         onExtendedSilence?.();
       });
-      expect(sendMessage).toHaveBeenCalledWith("hello there");
+      expect(sendMessageMock).toHaveBeenCalledWith("hello there");
       expect(useVoiceLoopStore.getState().phase).toBe("waiting");
 
       // The turn persists (autoReadFinishedTurn fires the notification), but
@@ -164,5 +181,40 @@ describe("voice loop read-aloud handoff", () => {
     });
     expect(useVoiceLoopStore.getState().phase).toBe("idle");
     expect(useVoiceLoopStore.getState().mode).toBe("off");
+  });
+
+  it("a raised voice during waiting interrupts the generating answer", async () => {
+    renderController();
+    act(() => {
+      useVoiceLoopStore.getState().setMode("handsfree");
+      useVoiceLoopStore.getState().set({ phase: "waiting" });
+      chatState.streaming.s1 = "partial answer still streaming";
+    });
+    await act(async () => {}); // the watcher effect arms and captures the feed
+    expect(mic.feed).not.toBeNull();
+    // Three sustained loud chunks with nothing sounding — a real voice.
+    act(() => {
+      for (let i = 0; i < 3; i++) mic.feed!(0.3);
+    });
+    expect(cancelStreamMock).toHaveBeenCalledWith("s1");
+    expect(chatState.streaming.s1).toBeUndefined();
+    expect(useVoiceLoopStore.getState().phase).toBe("listening");
+  });
+
+  it("a spoken yield during a streaming answer cancels it instead of queueing", async () => {
+    renderController();
+    act(() => {
+      useVoiceLoopStore.getState().setMode("handsfree");
+      useVoiceLoopStore.getState().set({ phase: "listening", transcript: "stop that" });
+      chatState.streaming.s1 = "answer still streaming";
+    });
+    await act(async () => {
+      onExtendedSilence?.();
+    });
+    expect(cancelStreamMock).toHaveBeenCalledWith("s1");
+    // Sent only after the session freed — a fresh turn, not a queued one.
+    expect(sendMessageMock).toHaveBeenCalledWith("stop that");
+    expect(chatState.streaming.s1).toBeUndefined();
+    expect(useVoiceLoopStore.getState().phase).toBe("waiting");
   });
 });

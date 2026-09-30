@@ -1743,14 +1743,17 @@ export const ChatComposer = memo(function ChatComposer({
                 chip while a dictation is mid-flight); an empty composer is
                 the voice row — hands-free toggle + mic — and nothing else. */}
             {streaming ? (
-              <button
-                className="composer-send-btn stop"
-                onClick={onStop}
-                title="Stop generating"
-                aria-label="Stop generating"
-              >
-                ■
-              </button>
+              <>
+                {voiceMode === "handsfree" && handsFreeChip}
+                <button
+                  className="composer-send-btn stop"
+                  onClick={onStop}
+                  title="Stop generating"
+                  aria-label="Stop generating"
+                >
+                  ■
+                </button>
+              </>
             ) : isEmpty && !recording && !transcribing ? (
               <>
                 {handsFreeChip}
@@ -1758,6 +1761,10 @@ export const ChatComposer = memo(function ChatComposer({
               </>
             ) : (
               <>
+                {/* Hands-free stays visible with text in the composer: the
+                    spoken words land here live, so the wave must not vanish
+                    the moment they do — it is also the only stop control. */}
+                {voiceMode === "handsfree" && handsFreeChip}
                 {(recording || transcribing) && micChip}
                 <button
                   className="composer-send-btn"

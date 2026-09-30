@@ -50,13 +50,19 @@ const chatState = vi.hoisted(() => ({
   streaming: {} as Record<string, string>,
   sendMessage: undefined as unknown as (text: string) => Promise<void>,
   cancelStream: undefined as unknown as (id: string) => Promise<void>,
+  setComposerDraft: undefined as unknown as (id: string, text: string) => void,
 }));
 const sendMessageMock = vi.fn(async () => {});
 const cancelStreamMock = vi.fn(async (id: string) => {
   delete chatState.streaming[id];
 });
+const setComposerDraftMock = vi.fn();
 chatState.sendMessage = sendMessageMock as unknown as (text: string) => Promise<void>;
 chatState.cancelStream = cancelStreamMock as unknown as (id: string) => Promise<void>;
+chatState.setComposerDraft = setComposerDraftMock as unknown as (
+  id: string,
+  text: string,
+) => void;
 
 vi.mock("../state/chat", () => ({
   useChatStore: {
@@ -224,5 +230,28 @@ describe("voice loop read-aloud handoff", () => {
     expect(sendMessageMock).toHaveBeenCalledWith("stop that");
     expect(chatState.streaming.s1).toBeUndefined();
     expect(useVoiceLoopStore.getState().phase).toBe("waiting");
+  });
+
+  it("mirrors the live transcript into the composer draft and clears it on send", async () => {
+    renderController();
+    act(() => {
+      useVoiceLoopStore.getState().setMode("handsfree");
+    });
+    // Words land in the composer as they are recognized.
+    act(() => {
+      useVoiceLoopStore.getState().set({ phase: "listening", transcript: "tell me a" });
+    });
+    expect(setComposerDraftMock).toHaveBeenLastCalledWith("s1", "tell me a");
+    act(() => {
+      useVoiceLoopStore.getState().set({ transcript: "tell me a story" });
+    });
+    expect(setComposerDraftMock).toHaveBeenLastCalledWith("s1", "tell me a story");
+
+    // The yield sends and clears the draft — imperatively, in yieldTurn.
+    await act(async () => {
+      onExtendedSilence?.();
+    });
+    expect(sendMessageMock).toHaveBeenCalledWith("tell me a story");
+    expect(setComposerDraftMock).toHaveBeenLastCalledWith("s1", "");
   });
 });

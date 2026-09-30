@@ -71,6 +71,7 @@ function waitForStreamFree(sessionId: string): Promise<void> {
 export function VoiceLoopController(): null {
   const mode = useVoiceLoopStore((s) => s.mode);
   const phase = useVoiceLoopStore((s) => s.phase);
+  const transcript = useVoiceLoopStore((s) => s.transcript);
 
   // Load the persisted mode once per run. The mic is deliberately NOT opened
   // here — restoring hands-free at boot without a gesture would silently open
@@ -108,6 +109,35 @@ export function VoiceLoopController(): null {
   // which would otherwise read a stale `recording` from a closed-over render.
   const recordingRef = useRef(false);
   recordingRef.current = dict.recording;
+
+  // Live mic level for the toggle's wave bars while LISTENING. The dictation
+  // engine computes an EMA of chunk RMS into levelRef; without this poll the
+  // bars sat static — the barge-in watcher that feeds `level` only arms for
+  // speaking/waiting. 200 ms is well under what the eye reads as live.
+  useEffect(() => {
+    if (mode !== "handsfree" || phase !== "listening") return;
+    const iv = window.setInterval(() => {
+      useVoiceLoopStore
+        .getState()
+        .set({ level: Math.min(1, (dict.levelRef.current ?? 0) * 8) });
+    }, 200);
+    return () => {
+      window.clearInterval(iv);
+      useVoiceLoopStore.getState().set({ level: 0 });
+    };
+  }, [mode, phase, dict]);
+
+  // Mirror the live transcript into the active session's composer draft, so
+  // the words appear in the composer as they are recognized — the same
+  // feedback composer dictation gives. The clear happens imperatively in
+  // yieldTurn at the send moment: an effect keyed on phase === "sending"
+  // never fires, because "sending" and "waiting" land in one React batch.
+  useEffect(() => {
+    if (mode !== "handsfree" || phase !== "listening") return;
+    const sid = useChatStore.getState().activeChatSessionId;
+    if (!sid) return;
+    useChatStore.getState().setComposerDraft(sid, useVoiceLoopStore.getState().transcript);
+  }, [mode, phase, transcript]);
 
   // ---- listening → sending → waiting ----
   const yieldingRef = useRef(false);
@@ -147,6 +177,9 @@ export function VoiceLoopController(): null {
       const sessionId = useChatStore.getState().activeChatSessionId;
       if (!finalText || !sessionId) return;
       pendingSessionRef.current = sessionId;
+      // The spoken words became the message — the composer draft (where the
+      // live mirror put them) clears now, imperatively.
+      useChatStore.getState().setComposerDraft(sessionId, "");
       useVoiceLoopStore.getState().set({ phase: "sending" });
       // A spoken instruction while the answer is still generating is an
       // INTERRUPT, not a queued follow-up: the typed path would stack it in

@@ -22,6 +22,7 @@ import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { MemoryPanel } from "./MemoryPanel";
 import { SubagentModelPanel } from "./SubagentModelPanel";
+import { MeshPanel } from "./MeshPanel";
 import { ImprovementsPanel } from "./ImprovementsPanel";
 import { SttPanel } from "./SttPanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
@@ -112,6 +113,7 @@ import {
   Bell,
   Sparkles,
   Users,
+  Network,
   ChevronRight,
 } from "lucide-react";
 
@@ -123,6 +125,7 @@ type Category =
   | "subagents"
   | "harnesses"
   | "subagents"
+  | "mesh"
   | "localmodels"
   | "apikeys"
   | "websearch"
@@ -144,6 +147,7 @@ const CATEGORY_KEYS: Category[] = [
   "subagents",
   "harnesses",
   "subagents",
+  "mesh",
   "localmodels",
   "apikeys",
   "websearch",
@@ -177,6 +181,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "localmodels": return <Cpu {...props} />;
     case "harnesses": return <TerminalSquare {...props} />;
     case "subagents": return <Users {...props} />;
+    case "mesh": return <Network {...props} />;
     case "connectors": return <Plug {...props} />;
     case "mcpgallery": return <Blocks {...props} />;
     case "knowledge": return <Library {...props} />;
@@ -223,6 +228,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
     items: [
       { key: "harnesses", label: "Harnesses", sub: "CLI install & login" },
       { key: "subagents", label: "Subagents", sub: "Registry & orchestration default" },
+      { key: "mesh", label: "Session Mesh", sub: "Peer awareness & messaging" },
     ],
   },
   {
@@ -659,6 +665,8 @@ export function SettingsView() {
               {category === "subagents" && <SubagentModelPanel />}
 
               {category === "subagents" && <SubagentsSettingsSection />}
+
+              {category === "mesh" && <MeshPanel />}
 
               {category === "apikeys" && <ApiKeysPanel />}
 

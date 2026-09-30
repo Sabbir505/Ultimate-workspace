@@ -20,6 +20,12 @@ export interface GgufModel {
   hasVision: boolean;
   /** Absolute path to the companion mmproj GGUF, if one exists. */
   mmprojPath: string | null;
+  /**
+   * Tool-calling verdict: the scan heuristic ("template" = chat template
+   * renders tool calls, "likely" = capable architecture family, "unknown")
+   * combined with the per-model override ("forced"/"disabled" win).
+   */
+  toolSupport: "template" | "likely" | "unknown" | "forced" | "disabled";
 }
 
 export interface StartedModel {
@@ -72,6 +78,12 @@ export interface LlamaOverrides {
   repeatPenalty?: number;
   /** Free-form extra llama-server args, whitespace-split. Escape hatch. */
   extraArgs?: string;
+  /**
+   * Tool-calling verdict: undefined = trust the scan heuristic,
+   * true = force the tool loop on, false = the model cannot render tool
+   * calls (local turns skip tools instead of 400ing).
+   */
+  supportsTools?: boolean;
   lastGoodNgl?: number;
 }
 

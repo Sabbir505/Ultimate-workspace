@@ -569,6 +569,11 @@ pub struct EvalCase {
     pub expect_json: String,
     pub source: String,
     pub enabled: bool,
+    /// P3 flaky quarantine: a case whose outcome flips across identical
+    /// eval runs is parked out of gating + pack health (design §"Flaky
+    /// cases are auto-quarantined rather than allowed to veto candidates").
+    pub quarantined: bool,
+    pub quarantine_reason: String,
     pub created_at: i64,
 }
 
@@ -580,9 +585,14 @@ fn map_case(row: &rusqlite::Row) -> rusqlite::Result<EvalCase> {
         expect_json: row.get("expect_json")?,
         source: row.get("source")?,
         enabled: row.get::<_, i64>("enabled")? != 0,
+        quarantined: row.get::<_, i64>("quarantined")? != 0,
+        quarantine_reason: row.get("quarantine_reason")?,
         created_at: row.get("created_at")?,
     })
 }
+
+const CASE_COLS: &str =
+    "id, artifact_id, input_text, expect_json, source, enabled, quarantined, quarantine_reason, created_at";
 
 pub fn add_eval_case(
     conn: &Connection,
@@ -604,6 +614,8 @@ pub fn add_eval_case(
         expect_json: expect_json.to_string(),
         source: source.to_string(),
         enabled: true,
+        quarantined: false,
+        quarantine_reason: String::new(),
         created_at: now_ts(),
     })
 }
@@ -613,14 +625,87 @@ pub fn list_eval_cases(
     artifact_id: &str,
     enabled_only: bool,
 ) -> DbResult<Vec<EvalCase>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, artifact_id, input_text, expect_json, source, enabled, created_at
-           FROM improve_eval_cases
+    let sql = format!(
+        "SELECT {CASE_COLS} FROM improve_eval_cases
           WHERE artifact_id = ?1 AND (?2 = 0 OR enabled = 1)
-          ORDER BY created_at ASC",
-    )?;
+          ORDER BY created_at ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![artifact_id, enabled_only as i64], map_case)?;
     rows.collect()
+}
+
+/// P3: park / release a case. Quarantined cases stay listed (the panel
+/// shows them with the reason and an Un-quarantine action) but the engine
+/// skips them and pack health counts them separately.
+pub fn set_case_quarantined(
+    conn: &Connection,
+    case_id: &str,
+    quarantined: bool,
+    reason: &str,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE improve_eval_cases SET quarantined = ?2, quarantine_reason = ?3 WHERE id = ?1",
+        params![case_id, quarantined as i64, reason],
+    )?;
+    Ok(())
+}
+
+/// P3 flaky detection: quarantine a case when its outcome FLIPS across the
+/// two most recent eval runs that evaluated the SAME (base_version,
+/// candidate_version) pair — identical inputs yielding different verdicts
+/// is the definition of flake. A flip across DIFFERENT versions is normal
+/// iteration (the candidate actually changed), never quarantined. Returns
+/// the case ids quarantined by this pass.
+pub fn quarantine_flaky_cases(conn: &Connection, artifact_id: &str) -> DbResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.eval_case_id, p.base_version, p.candidate_version,
+                COALESCE(r.candidate_ok, r.champion_ok, 0),
+                ru.started_at
+           FROM improve_eval_results r
+           JOIN improve_eval_runs ru ON ru.id = r.eval_run_id
+           LEFT JOIN improve_proposals p ON p.id = ru.proposal_id
+           JOIN improve_eval_cases c ON c.id = r.eval_case_id
+          WHERE ru.artifact_id = ?1 AND c.quarantined = 0
+          ORDER BY r.eval_case_id, ru.started_at ASC",
+    )?;
+    let rows: Vec<(String, Option<i64>, Option<i64>, i64)> = stmt
+        .query_map(params![artifact_id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Group by case, keep the two most recent results per (base, candidate)
+    // pair, compare.
+    let mut by_case: std::collections::HashMap<String, Vec<(Option<i64>, Option<i64>, i64)>> =
+        std::collections::HashMap::new();
+    for (case_id, base, cand, ok) in rows {
+        by_case.entry(case_id).or_default().push((base, cand, ok));
+    }
+    let mut quarantined = Vec::new();
+    for (case_id, results) in by_case {
+        // results are in ascending run time; walk from the end.
+        if results.len() < 2 {
+            continue;
+        }
+        let (b2, c2, ok2) = results[results.len() - 1];
+        let (b1, c1, ok1) = results[results.len() - 2];
+        if b1 == b2 && c1 == c2 && ok1 != ok2 {
+            let reason = format!(
+                "flaky: pass/fail flipped across two identical eval runs \
+                 (base {b1:?}, candidate {c2:?}) — parked out of gating; \
+                 un-quarantine after stabilizing the expectation"
+            );
+            set_case_quarantined(conn, &case_id, true, &reason)?;
+            quarantined.push(case_id);
+        }
+    }
+    Ok(quarantined)
 }
 
 /// Harvest corrected/failed runs into eval cases (dedup by input text).
@@ -899,6 +984,198 @@ pub fn promoted_recently(conn: &Connection, artifact_id: &str, within_secs: i64)
     )?;
     Ok(n > 0)
 }
+
+// ---- P3: cross-artifact pack health + artifact cost attribution ----
+
+/// Pack health for one artifact — the P3 rollup: how many cases are active
+/// vs quarantined, whether the pack DISCRIMINATES (at least one case ever
+/// failed — a pack that passed everything forever proves nothing), where
+/// its cases came from, and how much eval history backs it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackHealth {
+    pub artifact_id: String,
+    pub kind: String,
+    pub name: String,
+    pub cases_total: i64,
+    pub cases_active: i64,
+    pub cases_quarantined: i64,
+    /// Cases with at least one failing result in eval history — the pack's
+    /// evidence it can actually distinguish champion from candidate.
+    pub cases_discriminating: i64,
+    pub cases_harvested: i64,
+    pub eval_runs: i64,
+    pub last_eval_at: Option<i64>,
+    /// Live-traffic (total, bad) runs — from `run_health`.
+    pub runs_total: i64,
+    pub runs_bad: i64,
+    /// Derived: every active case passed every recorded run and there is
+    /// enough history to expect a failure — the pack is suspect.
+    pub suspect: bool,
+}
+
+pub fn pack_health(conn: &Connection, a: &ImproveArtifact) -> DbResult<PackHealth> {
+    let (cases_total, cases_quarantined, cases_harvested): (i64, i64, i64) = conn.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(quarantined), 0),
+                COALESCE(SUM(CASE WHEN source = 'harvested' THEN 1 ELSE 0 END), 0)
+           FROM improve_eval_cases WHERE artifact_id = ?1",
+        params![a.id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let cases_discriminating: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT r.eval_case_id)
+           FROM improve_eval_results r
+           JOIN improve_eval_runs ru ON ru.id = r.eval_run_id
+          WHERE ru.artifact_id = ?1
+            AND (COALESCE(r.champion_ok, 1) = 0 OR COALESCE(r.candidate_ok, 1) = 0)",
+        params![a.id],
+        |r| r.get(0),
+    )?;
+    let (eval_runs, last_eval_at): (i64, Option<i64>) = conn.query_row(
+        "SELECT COUNT(*), MAX(started_at) FROM improve_eval_runs WHERE artifact_id = ?1",
+        params![a.id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (runs_total, runs_bad) = run_health(conn, &a.id)?;
+    let cases_active = cases_total - cases_quarantined;
+    // "Packs passing everything forever are suspect" (design §P3): with ≥3
+    // eval runs of ≥1 active case and ZERO discriminating results, the pack
+    // has never once failed anything — it cannot veto a bad candidate.
+    let suspect = cases_active > 0 && cases_discriminating == 0 && eval_runs >= 3;
+    Ok(PackHealth {
+        artifact_id: a.id.clone(),
+        kind: a.kind.clone(),
+        name: a.name.clone(),
+        cases_total,
+        cases_active,
+        cases_quarantined,
+        cases_discriminating,
+        cases_harvested,
+        eval_runs,
+        last_eval_at,
+        runs_total,
+        runs_bad,
+        suspect,
+    })
+}
+
+/// Cross-artifact rollup: pack health for every tracked artifact, in sweep
+/// order (most recently created first).
+pub fn pack_health_all(conn: &Connection) -> DbResult<Vec<PackHealth>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, ref_key, name, created_at FROM improve_artifacts ORDER BY created_at DESC",
+    )?;
+    let artifacts: Vec<ImproveArtifact> = stmt
+        .query_map([], map_artifact)?
+        .collect::<Result<Vec<_>, _>>()?;
+    artifacts.iter().map(|a| pack_health(conn, a)).collect()
+}
+
+/// Cost attribution for one artifact: the engine's throwaway sessions
+/// (eval runs) plus its LIVE runs' sessions, joined to chat_messages for
+/// tokens and recorded/estimated cost. Small row counts — Rust-side
+/// aggregation over per-session sums, no cross-table SQL gymnastics.
+#[derive(Debug, Clone, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactCost {
+    pub artifact_id: String,
+    pub kind: String,
+    pub name: String,
+    /// Live-traffic runs attributed (improve_runs with a chat session).
+    pub live_runs: i64,
+    /// Eval runs attributed (proposer/judge/case turns since the P3 column).
+    pub eval_runs: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    /// Recorded `cost_usd`, falling back to the pricing estimate, summed.
+    pub cost_usd: f64,
+}
+
+fn session_cost(conn: &Connection, session_ids: &[String]) -> DbResult<(i64, i64, i64, f64)> {
+    let (mut tin, mut tout, mut tcache, mut tcost) = (0i64, 0i64, 0i64, 0f64);
+    for sid in session_ids {
+        let (i, o, c, cost): (i64, i64, i64, f64) = conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(cache_read_input_tokens), 0),
+                    COALESCE(SUM(COALESCE(cost_usd, pricing_estimated_usd, 0)), 0.0)
+               FROM chat_messages WHERE chat_session_id = ?1",
+            params![sid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        tin += i;
+        tout += o;
+        tcache += c;
+        tcost += cost;
+    }
+    Ok((tin, tout, tcache, tcost))
+}
+
+pub fn artifact_cost_rollups(
+    conn: &Connection,
+    since_secs: i64,
+    max_artifacts: i64,
+) -> DbResult<Vec<ArtifactCost>> {
+    let cutoff = now_ts() - since_secs;
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, ref_key, name, created_at FROM improve_artifacts
+          ORDER BY created_at DESC LIMIT ?1",
+    )?;
+    let artifacts: Vec<ImproveArtifact> = stmt
+        .query_map(params![max_artifacts], map_artifact)?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut out = Vec::new();
+    for a in artifacts {
+        let mut cost = ArtifactCost {
+            artifact_id: a.id.clone(),
+            kind: a.kind.clone(),
+            name: a.name.clone(),
+            ..Default::default()
+        };
+
+        // Live runs: closed runs since the cutoff with a chat session.
+        // Per-ROW selects — COUNT(*) with a bare column collapses to ONE
+        // aggregate row, which made run counts read 1 forever.
+        let mut stmt = conn.prepare(
+            "SELECT chat_session_id FROM improve_runs
+              WHERE artifact_id = ?1 AND finished_at IS NOT NULL AND started_at >= ?2
+                AND chat_session_id IS NOT NULL",
+        )?;
+        let live_sessions: Vec<String> = stmt
+            .query_map(params![a.id, cutoff], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        cost.live_runs = live_sessions.len() as i64;
+
+        // Eval runs: the engine's throwaway sessions (P3 column).
+        let mut stmt = conn.prepare(
+            "SELECT chat_session_id FROM improve_eval_runs
+              WHERE artifact_id = ?1 AND started_at >= ?2 AND chat_session_id IS NOT NULL",
+        )?;
+        let eval_rows: Vec<String> = stmt
+            .query_map(params![a.id, cutoff], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        cost.eval_runs = eval_rows.len() as i64;
+        // Runs may record MULTIPLE sessions (P3 stores the whole set for one
+        // eval run, comma-joined).
+        let eval_sessions: Vec<String> = eval_rows
+            .iter()
+            .flat_map(|s| s.split(',').map(|p| p.trim().to_string()).collect::<Vec<_>>())
+            .collect();
+
+        let (tin, tout, tcache, tcost) =
+            session_cost(conn, &[live_sessions, eval_sessions].concat())?;
+        cost.input_tokens = tin;
+        cost.output_tokens = tout;
+        cost.cache_read_tokens = tcache;
+        cost.cost_usd = tcost;
+        out.push(cost);
+    }
+    Ok(out)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1262,5 +1539,211 @@ mod tests {
         assert_eq!(harvest_eval_cases(&conn, &a.id, 0, 10).unwrap(), 0);
         // Enabled filter.
         assert_eq!(list_eval_cases(&conn, &a.id, false).unwrap().len(), 2);
+    }
+
+    // ---- P3: quarantine, pack health, cost attribution ----
+
+    /// SQL fixtures for eval runs + results (no helpers existed — the engine
+    /// owns these inserts, the tests need the raw shapes).
+    fn p3_insert_eval_run(conn: &Connection, artifact_id: &str, proposal_id: &str, at: i64) -> String {
+        let id = new_id();
+        conn.execute(
+            "INSERT INTO improve_eval_runs (id, artifact_id, proposal_id, started_at, finished_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![id, artifact_id, proposal_id, at],
+        )
+        .unwrap();
+        id
+    }
+    fn p3_insert_result(conn: &Connection, run_id: &str, case_id: &str, candidate_ok: bool) {
+        conn.execute(
+            "INSERT INTO improve_eval_results (id, eval_run_id, eval_case_id, champion_ok, candidate_ok)
+             VALUES (?1, ?2, ?3, 1, ?4)",
+            params![new_id(), run_id, case_id, candidate_ok as i64],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn p3_flaky_quarantine_trips_only_on_identical_runs() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
+        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal")
+            .unwrap()
+            .unwrap();
+        let p = create_proposal(&conn, &a.id, 1, v2, "fix", None, None, None).unwrap();
+        let c1 = add_eval_case(&conn, &a.id, "case one", r#"{"mustContain":["x"]}"#, "manual").unwrap();
+        let c2 = add_eval_case(&conn, &a.id, "case two", r#"{"mustContain":["x"]}"#, "manual").unwrap();
+
+        // Case ONE flips across two runs of the SAME (base, candidate) pair:
+        // identical inputs, opposite verdicts — the definition of flake.
+        let r1 = p3_insert_eval_run(&conn, &a.id, &p.id, 1_000);
+        p3_insert_result(&conn, &r1, &c1.id, false);
+        let r2 = p3_insert_eval_run(&conn, &a.id, &p.id, 2_000);
+        p3_insert_result(&conn, &r2, &c1.id, true);
+        // Case TWO "flips" across DIFFERENT candidates (v2 → v3): that is
+        // the candidate actually changing — iteration, not flake.
+        let v3 = record_version(&conn, &a.id, 1, "v3", None, "auto_proposal")
+            .unwrap()
+            .unwrap();
+        let p2 = create_proposal(&conn, &a.id, 1, v3, "fix2", None, None, None).unwrap();
+        p3_insert_result(&conn, &r2, &c2.id, false);
+        let r3 = p3_insert_eval_run(&conn, &a.id, &p2.id, 3_000);
+        p3_insert_result(&conn, &r3, &c2.id, true);
+
+        let quarantined = quarantine_flaky_cases(&conn, &a.id).unwrap();
+        assert_eq!(quarantined, vec![c1.id.clone()], "only the same-pair flip is flake");
+        let cases = list_eval_cases(&conn, &a.id, false).unwrap();
+        let one = cases.iter().find(|c| c.id == c1.id).unwrap();
+        let two = cases.iter().find(|c| c.id == c2.id).unwrap();
+        assert!(one.quarantined);
+        assert!(one.quarantine_reason.contains("flaky"));
+        assert!(!two.quarantined);
+
+        // A stable third run on the SAME pair for case two must NOT newly
+        // quarantine it (results: (v2,fail),(v3,pass),(v3,pass) — the last
+        // two share a pair and AGREE).
+        p3_insert_result(&conn, &r3, &c2.id, true);
+        assert!(quarantine_flaky_cases(&conn, &a.id).unwrap().is_empty());
+
+        // Release clears both fields.
+        set_case_quarantined(&conn, &c1.id, false, "").unwrap();
+        let cases = list_eval_cases(&conn, &a.id, false).unwrap();
+        let one = cases.iter().find(|c| c.id == c1.id).unwrap();
+        assert!(!one.quarantined);
+        assert_eq!(one.quarantine_reason, "");
+    }
+
+    #[test]
+    fn p3_pack_health_flags_suspect_packs_and_counts_quarantine() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
+        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal")
+            .unwrap()
+            .unwrap();
+        let p = create_proposal(&conn, &a.id, 1, v2, "fix", None, None, None).unwrap();
+        let c1 = add_eval_case(&conn, &a.id, "case one", r#"{"mustContain":["x"]}"#, "manual").unwrap();
+        let c2 = add_eval_case(&conn, &a.id, "case two", r#"{"mustContain":["x"]}"#, "harvested").unwrap();
+
+        // Three eval runs where EVERY case passes — the pack never
+        // discriminated once. With ≥3 runs, that is the suspect signature.
+        for i in 1..=3 {
+            let r = p3_insert_eval_run(&conn, &a.id, &p.id, i * 1_000);
+            p3_insert_result(&conn, &r, &c1.id, true);
+            p3_insert_result(&conn, &r, &c2.id, true);
+        }
+        let health = pack_health(&conn, &a).unwrap();
+        assert_eq!(health.cases_total, 2);
+        assert_eq!(health.cases_active, 2);
+        assert_eq!(health.cases_harvested, 1);
+        assert_eq!(health.eval_runs, 3);
+        assert_eq!(health.cases_discriminating, 0);
+        assert!(health.suspect, "all-pass pack with ≥3 runs is suspect");
+        assert_eq!(health.last_eval_at, Some(3_000));
+
+        // One failing candidate result → the pack discriminates → not suspect.
+        let r4 = p3_insert_eval_run(&conn, &a.id, &p.id, 4_000);
+        p3_insert_result(&conn, &r4, &c1.id, false);
+        let health = pack_health(&conn, &a).unwrap();
+        assert_eq!(health.cases_discriminating, 1);
+        assert!(!health.suspect);
+
+        // Quarantine drops the case from ACTIVE but keeps it in TOTAL, and
+        // a pack with no active cases is vacuously not suspect.
+        set_case_quarantined(&conn, &c2.id, true, "flaky").unwrap();
+        let health = pack_health(&conn, &a).unwrap();
+        assert_eq!(health.cases_total, 2);
+        assert_eq!(health.cases_quarantined, 1);
+        assert_eq!(health.cases_active, 1);
+        assert!(!health.suspect);
+    }
+
+    #[test]
+    fn p3_artifact_costs_attribute_live_and_eval_sessions() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
+
+        // Live traffic: one closed improve_run over a chat session whose
+        // assistant message carries tokens + recorded cost.
+        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
+            .unwrap();
+        start_run(&conn, &a.id, Some(&cs.id)).unwrap();
+        super::super::add_chat_message(
+            &conn,
+            super::super::NewChatMessage {
+                chat_session_id: &cs.id,
+                role: "assistant",
+                content: "done",
+                input_tokens: Some(1_000),
+                output_tokens: Some(200),
+                cache_read_input_tokens: Some(500),
+                cost_usd: Some(0.01),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        finish_session_runs(&conn, &cs.id, "applied", None).unwrap();
+
+        // Eval spend: one eval run whose P3 session column holds a
+        // comma-joined set — priced via the fallback estimate.
+        let mk = |sid: &str| {
+            let s = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
+                .unwrap();
+            let _ = sid;
+            s.id.clone()
+        };
+        let sa = mk("a");
+        let sb = mk("b");
+        for sid in [&sa, &sb] {
+            super::super::add_chat_message(
+                &conn,
+                super::super::NewChatMessage {
+                    chat_session_id: sid,
+                    role: "assistant",
+                    content: "eval turn",
+                    input_tokens: Some(2_000),
+                    output_tokens: Some(100),
+                    pricing_estimated_usd: Some(0.002),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO improve_eval_runs (id, artifact_id, proposal_id, started_at, chat_session_id)
+             VALUES ('er1', ?1, NULL, ?2, ?3)",
+            params![a.id, super::super::now_ts(), format!("{sa},{sb}")],
+        )
+        .unwrap();
+
+        let rollups = artifact_cost_rollups(&conn, 30 * 86_400, 100).unwrap();
+        let row = rollups.iter().find(|r| r.artifact_id == a.id).unwrap();
+        assert_eq!(row.live_runs, 1);
+        assert_eq!(row.eval_runs, 1);
+        assert_eq!(row.input_tokens, 5_000);
+        assert_eq!(row.output_tokens, 400);
+        assert_eq!(row.cache_read_tokens, 500);
+        assert!((row.cost_usd - 0.014).abs() < 1e-9, "got {}", row.cost_usd);
+
+        // Range filter: the recent eval run shows in the 30-day window…
+        let rollups = artifact_cost_rollups(&conn, 30 * 86_400, 100).unwrap();
+        let row = rollups.iter().find(|r| r.artifact_id == a.id).unwrap();
+        assert_eq!(row.eval_runs, 1);
+        // …an eval run 45 days back stays OUT of 30 days but shows in 90.
+        let old_session = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
+            .unwrap()
+            .id;
+        conn.execute(
+            "INSERT INTO improve_eval_runs (id, artifact_id, proposal_id, started_at, chat_session_id)
+             VALUES ('er-old', ?1, NULL, ?2, ?3)",
+            params![a.id, super::super::now_ts() - 45 * 86_400, old_session],
+        )
+        .unwrap();
+        let rollups = artifact_cost_rollups(&conn, 30 * 86_400, 100).unwrap();
+        let row = rollups.iter().find(|r| r.artifact_id == a.id).unwrap();
+        assert_eq!(row.eval_runs, 1, "old eval run stays out of the 30-day window");
+        let rollups = artifact_cost_rollups(&conn, 90 * 86_400, 100).unwrap();
+        let row = rollups.iter().find(|r| r.artifact_id == a.id).unwrap();
+        assert_eq!(row.eval_runs, 2, "90-day window sees both");
     }
 }

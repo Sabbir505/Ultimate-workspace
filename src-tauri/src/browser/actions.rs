@@ -52,6 +52,13 @@ impl BrowserManager {
         self.active.lock().as_ref().map(|(p, _)| p.to_string())
     }
 
+    /// Project id registered for a pane — the `upload_file` allowlist (both
+    /// the built-in tool and the relay-browser MCP op) resolves the pane's
+    /// project folder through this.
+    pub(crate) fn project_of_pane(&self, pane_id: &str) -> Option<String> {
+        self.project_pane_registry.lock().get(pane_id).cloned()
+    }
+
     /// Cheap liveness probe for the tool-schema gate: is a page open in the
     /// built-in browser pane right now? (`ToolCaps.browser` — the interaction
     /// tools are only advertised when there is something to act on, or once

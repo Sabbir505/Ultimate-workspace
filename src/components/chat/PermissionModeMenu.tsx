@@ -185,7 +185,9 @@ export function PermissionModeMenuInner({ mode, onModeChange, variant = "pill", 
           onKeyDown={onKeyDown}
         >
           <div className="permission-mode-hint">
-            Approval posture for tool calls this turn.
+            {modesOverride
+              ? "The harness's own postures — applied when the pane starts. Relay approval cards relay into built-in chat only; this CLI answers its own prompts in-pane."
+              : "Approval posture for tool calls this turn."}
           </div>
           <div className="permission-mode-divider" />
           {modes.map((opt, i) => (

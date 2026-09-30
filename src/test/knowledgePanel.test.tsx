@@ -176,6 +176,30 @@ describe("KnowledgePanel", () => {
     expect(docsStartIndexMock).toHaveBeenCalledWith("corp-1");
   });
 
+  it("indexes a corpus immediately after adding it", async () => {
+    // The 2026-09-30 report: adding a corpus left it inert (0 files ·
+    // 0 chunks · never indexed) because nothing kicked the run off — the
+    // add flow itself must now start the index.
+    docsAddCorpusMock.mockResolvedValue(corpus({ fileCount: 0, chunkCount: 0, lastIndexedAt: null }));
+    docsStartIndexMock.mockResolvedValue(undefined);
+    openMock.mockResolvedValue("D:/projects/Ultimate-workspace");
+    await renderWithDefaults([], sidecar());
+    fireEvent.click(screen.getByRole("button", { name: /\+ Add folder/ }));
+    await waitFor(() => expect(docsAddCorpusMock).toHaveBeenCalledWith("D:/projects/Ultimate-workspace"));
+    await waitFor(() => expect(docsStartIndexMock).toHaveBeenCalledWith("corp-1"));
+  });
+
+  it("surfaces a start failure when the auto-index cannot launch", async () => {
+    docsAddCorpusMock.mockResolvedValue(corpus());
+    docsStartIndexMock.mockRejectedValue("no embedding model installed");
+    openMock.mockResolvedValue("D:/projects/trading");
+    await renderWithDefaults([], sidecar());
+    fireEvent.click(screen.getByRole("button", { name: /\+ Add folder/ }));
+    await waitFor(() =>
+      expect(screen.getByText(/indexing failed to start/i)).toBeTruthy(),
+    );
+  });
+
   it("removes a corpus after confirm", async () => {
     docsRemoveCorpusMock.mockResolvedValue(undefined);
     docsListCorporaMock.mockResolvedValue([]);

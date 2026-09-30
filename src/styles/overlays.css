@@ -521,6 +521,28 @@ table.kv th {
   color: #a78bfa;
   border-color: transparent;
 }
+/* Tool-calling badge (shared ModelToolBadge) — styled standalone so it
+   renders in the picker rows as well as the settings/market lists: green
+   when the template advertises tools / forced on, amber for the weaker arch
+   heuristic, gray when the user disabled tools for the model. */
+.model-tag.tools {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(52, 211, 153, 0.1);
+  color: #34d399;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.model-tag.tools-likely {
+  background: rgba(251, 191, 36, 0.1);
+  color: #fbbf24;
+}
+.model-tag.tools-disabled {
+  background: transparent;
+  color: var(--text-dim);
+  border-color: var(--border);
+}
 .running-pill {
   display: inline-flex;
   align-items: center;
@@ -1048,4 +1070,26 @@ table.kv th {
   font-size: 12px;
   padding: 3px 6px;
   font-family: var(--font-mono);
+}
+
+/* Approval-parity gap note: harnesses without a native per-call permission
+   model (pi, ACP v1) show this chip where the mode menu would be. */
+.permission-mode-gap-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: help;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+.permission-mode-gap-note:hover {
+  color: var(--text);
+}
+
+/* Renderer-crash recovery card (BrowserPane): distinct from the generic
+   load-failure card so the user knows the pane process (not the page) died. */
+.browser-crashed {
+  border-color: color-mix(in srgb, var(--danger, #d9534f) 45%, transparent);
 }

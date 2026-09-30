@@ -802,8 +802,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
    side without a [dir] override. `user-select: none` keeps a drag-select
    across the bubble from swallowing the caret's glyph. */
 .chat-bubble.assistant.streaming .chat-bubble-inner > .chat-markdown:last-child
-  > *:last-child::after,
-.chat-bubble.assistant.streaming .chat-bubble-inner > .chat-markdown:last-child::after {
+  > *:last-child::after {
   content: "";
   display: inline-block;
   width: 0.5em;
@@ -847,8 +846,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
   /* Hold the caret solid. A frozen block still says "output continues here";
    * a fading one just looks like a rendering glitch. */
   .chat-bubble.assistant.streaming .chat-bubble-inner > .chat-markdown:last-child
-    > *:last-child::after,
-  .chat-bubble.assistant.streaming .chat-bubble-inner > .chat-markdown:last-child::after {
+    > *:last-child::after {
     animation: none;
     opacity: 1;
   }

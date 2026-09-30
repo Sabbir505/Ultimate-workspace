@@ -2994,7 +2994,7 @@ async fn run_browser_tool(
 ) -> Option<String> {
     use tools::{
         BROWSER_CLICK, BROWSER_EXTRACT, BROWSER_OBSERVE, BROWSER_READ, BROWSER_SCREENSHOT,
-        BROWSER_SCROLL, BROWSER_TYPE,
+        BROWSER_SCROLL, BROWSER_TYPE, BROWSER_UPLOAD_FILE,
     };
     if !matches!(
         name,
@@ -3005,6 +3005,7 @@ async fn run_browser_tool(
             | BROWSER_SCREENSHOT
             | BROWSER_OBSERVE
             | BROWSER_EXTRACT
+            | BROWSER_UPLOAD_FILE
     ) {
         return None;
     }
@@ -3085,6 +3086,23 @@ async fn run_browser_tool(
         BROWSER_SCROLL => {
             let dy = args.get("amount").and_then(|v| v.as_i64()).unwrap_or(600);
             mgr.scroll_by(dy).await
+        }
+        BROWSER_UPLOAD_FILE => {
+            match (
+                args.get("ref").and_then(|v| v.as_i64()),
+                args.get("path").and_then(|v| v.as_str()),
+            ) {
+                (Some(r), Some(path)) => {
+                    let mgr2 = std::sync::Arc::clone(&mgr);
+                    let path = path.trim().to_string();
+                    let dir = artifacts_dir.to_path_buf();
+                    match tokio::task::spawn_blocking(move || mgr2.upload_file_active(r, &path, &dir)).await {
+                        Ok(res) => res,
+                        Err(e) => Err(format!("browser_upload_file failed: {e}")),
+                    }
+                }
+                _ => Err("browser_upload_file requires an integer \"ref\" (from browser_read) and a \"path\" inside the workspace.".to_string()),
+            }
         }
         BROWSER_OBSERVE => mgr.observe_active().await,
         BROWSER_EXTRACT => {
@@ -3640,10 +3658,18 @@ pub(crate) async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Va
     // (truncated — see RERANK_DOC_CHARS), reorder by returned scores, then
     // cut to top_k. Fail-open: ANY failure (sidecar down mid-flight, HTTP
     // error, parse error) keeps the fused order — one diagnostic line.
+    // Docs are passed in their enriched form (path · heading + content, the
+    // same input the embedder saw) so the reranker judges the chunk in its
+    // section context, not as free-floating text.
     let hits = if rerank_on {
         let documents: Vec<String> = hits
             .iter()
-            .map(|h| crate::util::truncate_chars(&h.content, RERANK_DOC_CHARS))
+            .map(|h| {
+                crate::util::truncate_chars(
+                    &crate::chat::docs::enriched_embed_text(&h.path, &h.heading, &h.content),
+                    RERANK_DOC_CHARS,
+                )
+            })
             .collect();
         match crate::chat::local_models::rerank_texts(
             rerank_base_url.as_deref().unwrap_or_default(),

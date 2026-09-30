@@ -492,3 +492,62 @@
   color: var(--danger, #d9534f);
   margin: 4px 0 10px;
 }
+
+/* Tool-call debug pane (LogDetail): re-derived tool schemas + calls. */
+.logs-tool-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.logs-tool-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.logs-tool-label {
+  color: var(--text-dim);
+}
+.logs-tool-count {
+  font-weight: 600;
+  color: var(--text);
+}
+.logs-tool-none {
+  color: var(--text-dim);
+  font-style: italic;
+}
+.logs-tool-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.logs-tool-chip {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  border: 1px solid var(--border);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+.logs-tool-call {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.logs-tool-args {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 120px;
+  overflow-y: auto;
+}

@@ -16,6 +16,13 @@ interface Props {
 
 const KV_OPTIONS = ["", "f16", "q8_0", "q4_0"];
 
+/** Tri-state tool-calling verdict. undefined = trust the scan heuristic. */
+const TOOL_OPTIONS = [
+  { value: "", label: "auto (scan)" },
+  { value: "on", label: "forced on" },
+  { value: "off", label: "disabled" },
+];
+
 /** One numeric override. Empty string = auto (undefined) — typing clears. */
 function NumField({
   label,
@@ -82,6 +89,26 @@ export function LlamaAdvancedFields({ overrides, onChange, variant = "panel" }: 
           </select>
         </label>
         <NumField label="Threads" title="--threads — CPU threads." value={overrides.threads} onChange={(v) => patch({ threads: v })} />
+        <label
+          className="llama-field"
+          title="Tool calling — whether this model can render OpenAI-style tool calls. 'Disabled' skips sending the tools schema on local turns (models whose template can't do tools just 400 with it). 'Forced on' overrides a missing scan signal."
+        >
+          <span className="llama-field-label">Tool calling</span>
+          <select
+            value={overrides.supportsTools === true ? "on" : overrides.supportsTools === false ? "off" : ""}
+            onChange={(e) =>
+              patch({
+                supportsTools: e.target.value === "on" ? true : e.target.value === "off" ? false : undefined,
+              })
+            }
+          >
+            {TOOL_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <NumField label="Batch" title="--batch — logical batch size." value={overrides.batch} onChange={(v) => patch({ batch: v })} />
         <NumField label="uBatch" title="--ubatch — physical batch size." value={overrides.ubatch} onChange={(v) => patch({ ubatch: v })} />
         <NumField label="Parallel" title="--parallel — concurrent request slots." value={overrides.parallel} onChange={(v) => patch({ parallel: v })} />

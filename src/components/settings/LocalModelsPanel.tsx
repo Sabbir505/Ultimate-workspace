@@ -25,6 +25,7 @@ import {
   type StartedModel,
 } from "../../lib/ipc";
 import { shortModelName } from "../../lib/modelLabel";
+import { ModelToolBadge } from "../common/ModelToolBadge";
 import { useChatStore } from "../../state/chat";
 import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
@@ -638,6 +639,7 @@ export function LocalModelsPanel() {
                     {m.quantization && <span className="model-tag">{m.quantization}</span>}
                     {m.paramCountLabel && <span>{m.paramCountLabel}</span>}
                     {m.hasVision && <span className="model-tag vision">Vision</span>}
+                    <ModelToolBadge toolSupport={m.toolSupport} />
                     <FitBadge ram={ram} />
                     {isRunning && (
                       <span className="running-pill">● Running · port {active.port}</span>

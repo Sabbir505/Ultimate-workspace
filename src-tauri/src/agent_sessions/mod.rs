@@ -983,6 +983,36 @@ impl AgentSessionManager {
         flag.map(|f| f.load(Ordering::SeqCst)).unwrap_or(false)
     }
 
+    /// Kill the session's live CLI child WITHOUT cancel semantics — the
+    /// per-turn completion watchdog's lever. `cancel` would poison the turn
+    /// (sets `cancelled`, discards the streamed reply, emits `chat:done`);
+    /// this only closes the process: the reader's blocking `read_line` wakes
+    /// on the resulting stdout EOF and runs the NORMAL completion path with
+    /// the full reply intact. Guarded by the spawn generation (E-5) so a
+    /// watcher left over from a superseded turn can never kill the new
+    /// child, and by `child.take()` so a cancel/new spawn that already
+    /// emptied the slot is a no-op. Returns whether a child was killed.
+    pub fn kill_child_if_generation(&self, chat_session_id: &str, generation: u64) -> bool {
+        let entry = {
+            let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sessions.get(chat_session_id).cloned()
+        };
+        let Some(entry) = entry else {
+            return false;
+        };
+        let mut entry = entry.lock().unwrap_or_else(|e| e.into_inner());
+        if entry.proc_generation.load(Ordering::SeqCst) != generation {
+            return false;
+        }
+        match entry.child.take() {
+            Some(mut child) => {
+                kill_child_tree(&mut child);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn cancel(&self, app: &AppHandle, chat_session_id: &str) -> Result<(), String> {
         // E-6: poison recovery like `send` — the panic that poisoned the lock
         // is exactly when children most need to be killed, so teardown must

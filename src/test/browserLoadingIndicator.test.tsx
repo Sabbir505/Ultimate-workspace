@@ -33,6 +33,7 @@ const handlers: {
   navigated?: (p: { paneId: string; tabId: string; url: string }) => void;
   urlChanged?: (p: { paneId: string; tabId: string; url: string }) => void;
   loadCompleted?: (p: { paneId: string; tabId: string; success: boolean }) => void;
+  crashed?: (p: { paneId: string; tabId: string; reason: string }) => void;
 } = {};
 
 const paneId = (id: string, tab = "t-1") => ({ paneId: id, tabId: tab, success: true });
@@ -61,6 +62,10 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
   }),
   listenBrowserLoadCompleted: vi.fn(async (h: typeof handlers.loadCompleted) => {
     handlers.loadCompleted = h;
+    return () => {};
+  }),
+  listenBrowserCrashed: vi.fn(async (h: typeof handlers.crashed) => {
+    handlers.crashed = h;
     return () => {};
   }),
   listenBrowserTitle: vi.fn(async () => () => {}),
@@ -118,6 +123,7 @@ beforeEach(() => {
   delete handlers.navigated;
   delete handlers.urlChanged;
   delete handlers.loadCompleted;
+  delete handlers.crashed;
   usePanesStore.setState({ panes: [], focusedPaneId: null });
   useUiStore.setState({
     activeView: "chat",
@@ -310,5 +316,34 @@ describe("browser loading indicator", () => {
       handlers.loadCompleted?.(DONE);
     });
     expect(loadbar(container).classList.contains("active")).toBe(false);
+  });
+
+  // Crash recovery (Windows renderer died): the pane shows the crash card
+  // with a Recover button; clicking it closes the dead native webview and
+  // resets the tab so the create path spins up a fresh one at the same URL.
+  it("shows the crash card on browser:crashed and recovers the tab", async () => {
+    const closeTabMock = vi.fn(async () => undefined);
+    // re-patch the module mock for this test: vi.mocked on the imported fn
+    const { browserCloseTab } = await import("../lib/ipc");
+    (browserCloseTab as ReturnType<typeof vi.fn>).mockImplementation(closeTabMock);
+
+    const { container } = render(<Harness />);
+    await settle();
+    expect(document.querySelector(".browser-crashed")).toBeNull();
+
+    await act(async () => {
+      handlers.crashed?.({ paneId: PANE_ID, tabId: TAB_ID, reason: "renderer exited" });
+    });
+    const card = document.querySelector(".browser-crashed") as HTMLElement;
+    expect(card).toBeTruthy();
+    expect(card.textContent).toContain("renderer exited");
+
+    fireEvent.click(document.querySelector<HTMLElement>("[data-testid=\"browser-recover\"]")!);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(closeTabMock).toHaveBeenCalledWith(PANE_ID, TAB_ID);
+    // The card is gone (state reset; the create effect re-creates the view).
+    expect(document.querySelector(".browser-crashed")).toBeNull();
   });
 });

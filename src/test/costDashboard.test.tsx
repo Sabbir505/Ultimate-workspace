@@ -20,6 +20,19 @@ vi.mock("../lib/ipc", async (importOriginal) => {
     rangeStart: "2026-07-09", rangeEnd: "2026-08-07", rangeDays: 30,
   }),
     safeListen: vi.fn().mockResolvedValue(() => {}),
+    getArtifactCosts: vi.fn().mockResolvedValue([
+      {
+        artifactId: "a1",
+        kind: "skill",
+        name: "Docx skill",
+        liveRuns: 4,
+        evalRuns: 2,
+        inputTokens: 12_000,
+        outputTokens: 3_400,
+        cacheReadTokens: 8_000,
+        costUsd: 0.042,
+      },
+    ]),
   };
 });
 
@@ -28,6 +41,18 @@ describe("CostDashboard", () => {
     render(<CostDashboard />);
     expect(await screen.findByText(/\$100/)).toBeTruthy();
     expect(await screen.findByText(/claude-sonnet-4-5/)).toBeTruthy();
+  });
+
+  it("attributes per-artifact spend (improvements engine P3)", async () => {
+    render(<CostDashboard />);
+    const table = await screen.findByTestId("artifact-cost-table");
+    expect(table.textContent).toContain("Docx skill");
+    expect(table.textContent).toContain("Skill");
+    // Live vs eval split: 4 tracked runs + 2 engine eval runs, with cost.
+    const cells = table.querySelectorAll("td");
+    expect(cells[2].textContent).toBe("4");
+    expect(cells[3].textContent).toBe("2");
+    expect(table.textContent).toContain("$0.04");
   });
 
   it("surfaces the cache-savings headline with the cached share", async () => {

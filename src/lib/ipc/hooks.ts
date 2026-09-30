@@ -11,7 +11,11 @@ export type HookEvent =
   | "pre_tool_use"
   | "post_tool_use"
   | "turn_complete"
-  | "session_start";
+  | "session_start"
+  /** Session Mesh P4: a mesh mail was delivered into a session. */
+  | "mesh_message"
+  /** Session Mesh P4: a watched mesh turn ended (answered or expired). */
+  | "mesh_turn_complete";
 
 export interface HookDef {
   id: string;

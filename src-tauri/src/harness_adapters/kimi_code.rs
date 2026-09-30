@@ -100,6 +100,21 @@ impl HarnessAdapter for KimiCodeAdapter {
     fn diff_prompt_patterns(&self) -> &'static [Regex] {
         &DIFF_PATTERNS
     }
+
+    fn permission_flags(&self, mode: &str) -> Vec<String> {
+        // Interactive posture flags (kimi command reference, re-checked
+        // 2026-09): --yolo = "Ask When Needed" (routine edits/commands run,
+        // risky actions still prompt), --auto = "Never Ask", --plan = plan
+        // mode. "manual" (the config default) passes nothing. These are
+        // INTERACTIVE-mode flags — kimi rejects all three with --prompt, so
+        // headless turns never take them (perturn.rs keeps its own contract).
+        match mode {
+            "yolo" => vec!["--yolo".into()],
+            "auto" => vec!["--auto".into()],
+            "plan" => vec!["--plan".into()],
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// Kimi's session_index.jsonl stores workDir with forward slashes

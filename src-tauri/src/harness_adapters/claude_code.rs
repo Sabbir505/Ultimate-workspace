@@ -127,6 +127,19 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     fn diff_prompt_patterns(&self) -> &'static [Regex] {
         &DIFF_PATTERNS
     }
+
+    fn permission_flags(&self, mode: &str) -> Vec<String> {
+        // Native --permission-mode vocabulary (CLI reference, re-checked
+        // 2026-09): default | acceptEdits | plan | bypassPermissions (+ the
+        // newer auto/dontAsk we don't surface yet). "default" and the legacy
+        // "manual" label pass nothing — the CLI's own configured default.
+        match mode {
+            "acceptEdits" | "plan" | "bypassPermissions" => {
+                vec!["--permission-mode".into(), mode.to_string()]
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// `D:\Projects\foo bar` -> `D--Projects-foo-bar`, `/home/u/foo` -> `-home-u-foo`.

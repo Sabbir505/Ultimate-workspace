@@ -78,6 +78,23 @@ pub fn strip_unc_prefix(path: &str) -> String {
     path.to_string()
 }
 
+/// Normalize `std::fs::canonicalize` output for STORAGE and DISPLAY. Windows
+/// canonicalization returns extended-length paths — `\\?\D:\…` for local
+/// drives, `\\?\UNC\server\share` for network shares — which the UI then
+/// shows verbatim and every later path comparison risks mismatching. Local
+/// drives lose the prefix; UNC collapses back to its `\\server\share` form.
+/// Everything the path is later USED for (read_dir, walkdir, cmd.exe)
+/// accepts the normalized shape.
+pub fn normalize_canonical_path(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+    }
+    strip_unc_prefix(path)
+}
+
 /// The user's home directory: `USERPROFILE` (Windows) first, then `HOME`
 /// (POSIX). Shared by the harness adapters and the installed-skills scanner
 /// so the resolution rule (USERPROFILE wins on Windows, where both can be set
@@ -335,6 +352,27 @@ mod tests {
             strip_unc_prefix(r"\\server\share\foo"),
             r"\\server\share\foo"
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn normalizes_canonical_output_for_storage_and_display() {
+        // The exact shape std::fs::canonicalize returns for a local folder.
+        assert_eq!(
+            normalize_canonical_path(r"\\?\D:\projects\Ultimate-workspace"),
+            r"D:\projects\Ultimate-workspace"
+        );
+        // canonicalize of a network share — collapse back to share form.
+        assert_eq!(
+            normalize_canonical_path(r"\\?\UNC\server\share\docs"),
+            r"\\server\share\docs"
+        );
+        // Already-plain paths pass through untouched.
+        assert_eq!(
+            normalize_canonical_path(r"D:\projects\trading"),
+            r"D:\projects\trading"
+        );
+        assert_eq!(normalize_canonical_path("/home/u/proj"), "/home/u/proj");
     }
 
     #[test]

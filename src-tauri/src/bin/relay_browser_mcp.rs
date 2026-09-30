@@ -410,7 +410,8 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         | "history" | "hover" | "evaluate" | "click_and_wait" | "screenshot"
         | "find" | "fill_form" | "select_option" | "press_key" | "batch"
         | "read_console" | "read_network" | "list_tabs" | "switch_tab"
-        | "new_tab" | "close_tab" | "zoom" | "print_to_pdf" | "observe" | "extract" => {
+        | "new_tab" | "close_tab" | "zoom" | "print_to_pdf" | "observe" | "extract"
+        | "upload_file" => {
             Ok(tool.to_string())
         }
         "generate_document" | "generate_diagram" | "generate_file"
@@ -915,6 +916,20 @@ fn browser_schemas() -> Vec<Value> {
                 }
             },
             "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "upload_file",
+            "description": "Upload a local file into a file input on the page currently open in the browser pane. `ref` selects the input (from read_page/observe); `path` must be an absolute path INSIDE the workspace (the artifacts dir or the pane's project folder) - outside paths are refused. Windows-only today.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ref": { "type": "integer" },
+                    "path": { "type": "string" },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["ref", "path"]
+            },
+            "annotations": { "destructiveHint": false }
         }),
     ]
 }

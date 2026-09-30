@@ -17,6 +17,9 @@ const mocks = vi.hoisted(() => ({
   setImproveAutonomy: vi.fn(),
   getImproveAutonomy: vi.fn(),
   checkImprovementCanaries: vi.fn(),
+  listImprovePackHealth: vi.fn(),
+  listImproveEvalCases: vi.fn(),
+  setImproveCaseQuarantine: vi.fn(),
   toastError: vi.fn(),
 }));
 
@@ -64,6 +67,9 @@ beforeEach(() => {
   mocks.setImproveAutonomy.mockResolvedValue(undefined);
   mocks.getImproveAutonomy.mockResolvedValue("manual");
   mocks.checkImprovementCanaries.mockResolvedValue([]);
+  mocks.listImprovePackHealth.mockResolvedValue([]);
+  mocks.listImproveEvalCases.mockResolvedValue([]);
+  mocks.setImproveCaseQuarantine.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
 
@@ -138,5 +144,82 @@ describe("ImprovementsPanel", () => {
   it("resolves matured canary windows on open", async () => {
     render(<ImprovementsPanel />);
     await waitFor(() => expect(mocks.checkImprovementCanaries).toHaveBeenCalled());
+  });
+
+  // ---- P3: pack health + flaky quarantine ----
+
+  const suspectPack = {
+    artifactId: "a1",
+    kind: "skill",
+    name: "Docx skill",
+    casesTotal: 2,
+    casesActive: 2,
+    casesQuarantined: 0,
+    casesDiscriminating: 0,
+    casesHarvested: 1,
+    evalRuns: 3,
+    lastEvalAt: 3,
+    runsTotal: 5,
+    runsBad: 1,
+    suspect: true,
+  };
+
+  it("shows pack health with the suspect badge", async () => {
+    mocks.listImprovePackHealth.mockResolvedValue([suspectPack]);
+    render(<ImprovementsPanel />);
+    expect(await screen.findByTestId("pack-health-row")).toBeTruthy();
+    expect(screen.getByTestId("pack-health-suspect")).toBeTruthy();
+    expect(screen.getByTestId("pack-health-suspect-count").textContent).toContain("1 suspect");
+    expect(screen.getByTestId("pack-health-row").textContent).toContain("2/2 cases");
+    expect(screen.getByTestId("pack-health-row").textContent).toContain("3 eval runs");
+  });
+
+  it("quarantines and releases eval cases from the artifact row", async () => {
+    mocks.listImprovePackHealth.mockResolvedValue([]);
+    mocks.listImproveEvalCases.mockResolvedValue([
+      {
+        id: "c1",
+        artifactId: "a1",
+        inputText: "write a report about X",
+        expectJson: '{"judge":true}',
+        source: "harvested",
+        enabled: true,
+        quarantined: false,
+        quarantineReason: "",
+        createdAt: 1,
+      },
+    ]);
+    render(<ImprovementsPanel />);
+    fireEvent.click(await screen.findByTestId("artifact-row"));
+    const qBtn = await screen.findByTestId("quarantine-c1");
+    fireEvent.click(qBtn);
+    await waitFor(() =>
+      expect(mocks.setImproveCaseQuarantine).toHaveBeenCalledWith("c1", true),
+    );
+  });
+
+  it("releases a quarantined case and shows the reason", async () => {
+    mocks.listImprovePackHealth.mockResolvedValue([]);
+    mocks.listImproveEvalCases.mockResolvedValue([
+      {
+        id: "c2",
+        artifactId: "a1",
+        inputText: "flaky input",
+        expectJson: "{}",
+        source: "manual",
+        enabled: true,
+        quarantined: true,
+        quarantineReason: "flaky: pass/fail flipped across two identical eval runs",
+        createdAt: 1,
+      },
+    ]);
+    render(<ImprovementsPanel />);
+    fireEvent.click(await screen.findByTestId("artifact-row"));
+    const badge = await screen.findByText("quarantined");
+    expect(badge.getAttribute("title")).toContain("flaky");
+    fireEvent.click(await screen.findByTestId("unquarantine-c2"));
+    await waitFor(() =>
+      expect(mocks.setImproveCaseQuarantine).toHaveBeenCalledWith("c2", false),
+    );
   });
 });

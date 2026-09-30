@@ -74,6 +74,10 @@ export interface PaneData {
     source?: string;
     costInPerMtok?: number;
     costOutPerMtok?: number;
+    /** Local rows: the GGUF scan's tool-calling verdict (template probe +
+     *  arch heuristic combined with the per-model override) — drives the
+     *  inline badge. */
+    toolSupport?: "template" | "likely" | "unknown" | "forced" | "disabled";
   }[];
   /** Custom endpoint footnote (harness config relay / provider base URL). */
   endpoint?: string | null;

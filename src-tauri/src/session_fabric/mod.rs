@@ -970,6 +970,19 @@ async fn deliver_mail(app: &AppHandle, mail: store::MailRow) -> Result<(), Strin
             .map_err(|e| e.to_string())?;
     }
     emit_mail_status(app, &mail, store::MAIL_DELIVERED, None);
+    // Session Mesh P4: `mesh_message` hook fires on every delivery — the
+    // envelope turn is about to run in the target session. Detached
+    // observer; never gates or delays the delivery.
+    crate::hooks::mesh_event_detached(
+        app,
+        crate::hooks::HookEvent::MeshMessage,
+        &mail.to_session,
+        &mail.from_session,
+        &mail.id,
+        &mail.mode,
+        "delivered",
+        &mail.body,
+    );
 
     run_turn(app, &target, &envelope).await?;
 
@@ -1025,6 +1038,18 @@ async fn watch_answer(app: AppHandle, mail: store::MailRow, watermark: i64) {
                     let _ = store::set_mail_status(&conn, &mail.id, store::MAIL_EXPIRED, None);
                     drop(conn);
                     emit_mail_status(&app, &mail, store::MAIL_EXPIRED, None);
+                    // Mesh P4: final expiry (busy past both windows) reports
+                    // through the same hook the idle path uses.
+                    crate::hooks::mesh_event_detached(
+                        &app,
+                        crate::hooks::HookEvent::MeshTurnComplete,
+                        &mail.to_session,
+                        &mail.from_session,
+                        &mail.id,
+                        &mail.mode,
+                        "expired",
+                        "",
+                    );
                     resolve_waiter(&app, &mail.id, None)
                 };
                 if !had_live_waiter {
@@ -1068,6 +1093,17 @@ async fn watch_answer(app: AppHandle, mail: store::MailRow, watermark: i64) {
             }
             drop(db);
             emit_mail_status(&app, &mail, store::MAIL_ANSWERED, Some(&a));
+            // Session Mesh P4: the watched turn ended with a captured answer.
+            crate::hooks::mesh_event_detached(
+                &app,
+                crate::hooks::HookEvent::MeshTurnComplete,
+                &mail.to_session,
+                &mail.from_session,
+                &mail.id,
+                &mail.mode,
+                "answered",
+                &a,
+            );
             // Resolved waiter = the asker's tool call is still parked and
             // gets the answer as its result. A FAILED send means the tool
             // call already returned (timeout / queued path) — push the
@@ -1083,6 +1119,18 @@ async fn watch_answer(app: AppHandle, mail: store::MailRow, watermark: i64) {
             let _ = store::set_mail_status(&conn, &mail.id, store::MAIL_EXPIRED, None);
             drop(conn);
             emit_mail_status(&app, &mail, store::MAIL_EXPIRED, None);
+            // Session Mesh P4: the watched turn ended with NO answer — the
+            // hook still fires so audit/notification scripts see expiry too.
+            crate::hooks::mesh_event_detached(
+                &app,
+                crate::hooks::HookEvent::MeshTurnComplete,
+                &mail.to_session,
+                &mail.from_session,
+                &mail.id,
+                &mail.mode,
+                "expired",
+                "",
+            );
             resolve_waiter(&app, &mail.id, None);
         }
     }
@@ -2483,6 +2531,11 @@ fn emit_mail_status(app: &AppHandle, mail: &store::MailRow, status: &str, answer
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
+
+/// P4 multi-step eval scenarios (hook round-trip, question lifecycle, caps
+/// under burst) — see the module header. Test-only.
+#[cfg(test)]
+mod eval;
 
 #[cfg(test)]
 mod tests {

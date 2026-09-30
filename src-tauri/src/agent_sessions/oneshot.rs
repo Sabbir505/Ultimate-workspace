@@ -280,6 +280,9 @@ pub fn run_one_shot(
             );
         } else {
             let cell = Arc::new(Mutex::new(None));
+            // Throwaway terminal-frame flag: one-shot turns are bounded by
+            // `max_duration` below, not by the interactive turn watchdog.
+            let terminal = AtomicBool::new(false);
             read_per_turn_stream(
                 app2.as_ref(),
                 &db2,
@@ -289,6 +292,7 @@ pub fn run_one_shot(
                 &cell,
                 per_turn_kind,
                 cancelled_flag,
+                &terminal,
                 watches,
                 &generation,
                 1,

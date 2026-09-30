@@ -11,6 +11,12 @@
 > 🟡 = partially resolved (what remains is stated). Unmarked claims are still open. Section 2's
 > snapshot numbers were refreshed in the same pass; §4.1.6 and the babel/elk half of §4.6.3 were
 > found to be stale *when written* (already true/false before 2026-09-19).
+>
+> **Second pass, also 2026-09-30:** six open gaps were implemented end-to-end in one wave —
+> RAG contextual enrichment (§4.4.1), per-model tool-calling badges + the raw tool-call debug
+> pane on the Logs page (§4.4.2), harness approval parity (§4.5.4), Session Mesh P4 (§5.26),
+> improvements-engine P3 (§5.27), and the browser trio (§5.28). All ✅ marks below reflect the
+> post-wave state; the full suites (cargo test/clippy, vitest, tsc) gate every claim.
 
 ---
 
@@ -30,11 +36,12 @@ The gaps cluster into six themes, in rough priority order:
 2. **Ecosystem drift** — MCP moved to a stateless 2026-07-28 spec with MCP Apps, a registry, and
    tool annotations; Agent Skills (SKILL.md) became an open standard; A2A hit v1.0. Relay is a
    2025-generation MCP client and has partial skills support.
-3. **Table-stakes parity** — hooks (pre/post tool events), triggers beyond cron, declarative
-   named subagents, shareable trace/session links, cloud-burst execution (currently a deliberate
+3. **Table-stakes parity** — hooks (pre/post tool events) ✅, triggers beyond cron ✅, declarative
+   named subagents ✅, shareable trace/session links, cloud-burst execution (currently a deliberate
    non-goal), inline per-hunk edit review.
-4. **Quality ceilings** — RAG is brute cosine with no reranking/hybrid fusion; web search is
-   scraping-based; one local model served at a time; no local vision/audio input path in chat UX.
+4. **Quality ceilings** — RAG is brute cosine with no reranking/hybrid fusion ✅ (RRF + reranker +
+   contextual enrichment all shipped); web search is scraping-based; one local model served at a
+   time; no local vision/audio input path in chat UX.
 5. **Platform reach** — Windows-only shipping (no macOS .dmg / Linux packages), degraded Linux
    browser + secrets + OCR, mobile companion is read/control-only with no task dispatch.
 6. **Engineering hygiene** — CI runs no tests, no clippy, entry-chunk bloat, unregistered
@@ -53,7 +60,7 @@ Sections 5–7 turn these into a prioritized, effort-tagged backlog.
 | Platforms shipped | Windows (NSIS installer); macOS/Linux compile-only |
 | Test surface | 200 vitest files (~1,567 tests), `cargo test --lib` 1,481 passed, `tsc --noEmit` clean (2026-09-30; was 163 files / ~1,055 tests / 1,078 cargo on 09-19). CI gates every push: `tsc` + `vitest` + `cargo test` + `clippy -D warnings` (`.github/workflows/ci.yml`) |
 | Backend surface | ~339 registered Tauri commands, 30+ ALTER-style DB migrations |
-| Agent tools exposed to models | 45+ built-in tools (see §3.13) plus vendor MCP/connector tools |
+| Agent tools exposed to models | 46+ built-in tools (see §3.13) plus vendor MCP/connector tools |
 
 ---
 
@@ -84,9 +91,9 @@ Sections 5–7 turn these into a prioritized, effort-tagged backlog.
 
 ### 3.4 Native browser panes **[code]**
 - Real child webviews (WebView2/WKWebView; Linux separate-window fallback) with multi-tab browsing, occlusion system so popovers never get painted over, per-pane history, zoom, find, devtools, clear-site-data, print-to-pdf.
-- **Agent control**: click/type/scroll/hover by ref, fill_form, select_option, press_key, snapshot/read_page (cleaned Markdown + ref map), observe, extract, evaluate JS, wait_for, tab management, batch ops, screenshot, console/network reads, cookie-banner dismissal.
+- **Agent control**: click/type/scroll/hover by ref, fill_form, select_option, press_key, snapshot/read_page (cleaned Markdown + ref map), observe, extract, evaluate JS, wait_for, tab management, batch ops, screenshot, console/network reads, cookie-banner dismissal, `upload_file` (workspace-allowlisted file onto a page's file input via the DevTools protocol; 2026-09-30).
 - **Trust layer**: URL gates, pause/stop, credential-takeover confirmations, user-owned action timeline, agent-active indicator, watch mode pacing.
-- **`relay-browser-mcp` sidecar**: standalone stdio MCP server + CLI exposing the real visible panes to any harness via loopback WS (28 operations); per-project `.mcp.json`/config registration at spawn.
+- **`relay-browser-mcp` sidecar**: standalone stdio MCP server + CLI exposing the real visible panes to any harness via loopback WS (29 operations — `upload_file` added 2026-09-30); per-project `.mcp.json`/config registration at spawn.
 
 ### 3.5 Git & GitHub **[code]**
 - Git sidebar: status, diff (whole/file/scoped), branch CRUD + search, commit/commit&push/push modal, log, ahead/behind, **worktrees** (create/remove + per-chat-session worktrees `relay/<id8>`), Git Graph commit table, FS-watcher driven refresh (no polling).
@@ -132,7 +139,7 @@ Sections 5–7 turn these into a prioritized, effort-tagged backlog.
 - **Skills Library**: reads SKILL.md skills + loops from `~/.claude/skills` + `~/.agents/skills`, editable in place, writes to both roots; DB-backed prompt templates; `get_skill`/`list_skills` tools; slash-command integration.
 
 ### 3.13 Built-in agent tool registry **[code]** (45+ tools)
-Read-only: `web_search, fetch_url, open_url, browser_read, browser_screenshot, browser_observe, browser_extract, generate_file, generate_document, plan_document, revise_document, generate_diagram, generate_image, get_skill, list_skills, list_artifacts, get_capabilities, attach_connector, attach_mcp_server, add_source_note, get_source_ledger, reset_source_ledger, check_sufficiency, todo_write, enter_plan_mode, present_plan, list_directory, read_file, search_files, search_content, search_docs, totp_code, list_automations, list_sessions, read_session, search_sessions, Task, get_task_status, cancel_task, browser_click/type/scroll (cap)`.
+Read-only: `web_search, fetch_url, open_url, browser_read, browser_screenshot, browser_observe, browser_extract, browser_upload_file (cap, workspace-allowlisted), generate_file, generate_document, plan_document, revise_document, generate_diagram, generate_image, get_skill, list_skills, list_artifacts, get_capabilities, attach_connector, attach_mcp_server, add_source_note, get_source_ledger, reset_source_ledger, check_sufficiency, todo_write, enter_plan_mode, present_plan, list_directory, read_file, search_files, search_content, search_docs, totp_code, list_automations, list_sessions, read_session, search_sessions, Task, get_task_status, cancel_task, browser_click/type/scroll (cap)`.
 Mutating (gated): `write_file, edit_file, move_file, copy_file, delete_file (always approved), download_file, run_shell (always approved), open_file, run_code (cap), create/update/delete_automation, run_automation_now, message_session, spawn_session, memory_save/recall/forget (cap)`.
 Subagents: `Task` spawns read-only-tool subagents (100-round cap, alternate-model capable, Agents panel streaming).
 
@@ -189,8 +196,8 @@ Subagents: `Task` spawns read-only-tool subagents (100-round cap, alternate-mode
 7. **Native provider search tools** — Anthropic/OpenAI server-side `web_search` tools (Responses API) unused; Relay's default search is keyless scraping.
 
 ### 4.4 Product/quality ceilings **[code, cross-checked]**
-1. 🟡 **RAG quality** — big half closed 2026-09-21 (5cb6c66): hybrid retrieval now RRF-fuses the FTS leg with vectors (`db/docs.rs` `search_chunks_hybrid`, Reciprocal Rank Fusion), a local `bge-reranker-v2-m3` sidecar reranks (top-50→top-8, `docs_index.rs:220-244`), and a recall@8 eval harness exists (`db/docs_eval.rs`). **Still open:** contextual chunk enrichment — the heading trail is display-only, never embedded (`db/docs.rs:236-237`).
-2. 🟡 **Local serving** — the debug half landed 2026-09-27 (9e66ed4): a request log storing request/response bodies verbatim behind a loopback gateway, rendered raw in the Logs view (`LogDetail.tsx:122-133`). **Still open:** no live load-time VRAM estimator tied to sliders (`LlamaAdvancedFields.tsx` has the fields but no estimate), no per-model tool-calling capability badges.
+1. ✅ **RAG quality** — closed in two waves: 2026-09-21 (5cb6c66) shipped RRF fusion + the reranker sidecar + the recall@8 eval harness; 2026-09-30 closed the last half — **contextual chunk enrichment**: the embedder input is now `path · heading + content` (`chat/docs.rs::enriched_embed_text`), `DOCS_CHUNK_SCHEMA_VERSION` bumped to 2 so every corpus re-chunks once, the reranker judges the same enriched documents, and the eval gained a dedicated enrichment case (context tokens reach the vector leg while FTS/display stay raw).
+2. 🟡 **Local serving** — the debug half landed 2026-09-27 (9e66ed4); the badges half landed 2026-09-30: per-model **tool-calling capability badges** ("template" = chat template renders tool calls, "likely" = capable arch, "forced"/"disabled" = user override) in the model picker and Local Models panel, a tri-state Tool-calling override in the per-model gear menu, and the raw **tool-call debug pane** on the Logs page (`LogDetail.tsx` re-derives advertised tools + emitted calls — native `tool_calls` and Hermes text — from the stored verbatim bodies). An explicit "disabled" override also skips the tools schema on local turns instead of 400ing. **Still open:** live load-time VRAM estimator tied to sliders.
 3. 🟡 **Voice** — streaming halves landed 2026-09-26 (398e5fd wave): whisper live partial transcripts (`speech.rs` partial/commit tags) and sentence-level Kokoro streaming (playback starts on the first sentence, `tts.rs:17-18`). **Still open:** barge-in cancel, system-wide dictation, speech-to-speech.
 4. **Web search**: scraping-based default; no native provider search; no YouTube transcript tool (yt-dlp) or Exa.
 5. **Docs index**: not watcher-driven (manual re-index); image OCR Windows-only.
@@ -204,9 +211,9 @@ Subagents: `Task` spawns read-only-tool subagents (100-round cap, alternate-mode
 1. **Windows-only shipping**: NSIS-only target; macOS .dmg compile-only (on roadmap as P3); Linux undecided (iframe browser fallback, XOR secrets, no OCR, no STT one-click install, no TTS GPU, no run-while-closed).
 2. **Run-while-closed automations Windows-only** (launchd/cron deferred).
 3. 🟡 **Mobile companion** — largely closed by the 2026-09-26 overhaul (398e5fd): ✅ task dispatch from phone (phone composer → desktop session, `mobile/dispatch.rs`), ✅ automations CRUD (create/edit/delete), ✅ memory editing (edit/forget/purge), 🟡 git tools (status/diff/commit/push/branches/log — no PR creation yet). **Still open:** connector/knowledge editing, PDF/DOCX in-app preview (save/share card only), push still needs a dev build (Expo Go ships without expo-notifications), stale push tokens never cleaned (single overwritten token, no expiry), `expo-secure-store` migration not done, pairing token still in AsyncStorage.
-4. 🟡 **Harness approval parity** — much closer since 2026-09-26: every adapter now carries `diff_prompt_patterns` so any harness pane promotes to `diff_ready` on an approval prompt, and `PermissionModeMenu` passes each CLI's own native postures through to the spawn (OpenCode build/plan, Claude Code default/acceptEdits/plan/bypassPermissions) instead of forcing full-auto. **Still open:** Relay's interactive approval *cards* remain built-in-chat-only; no in-UI note flags the residual gap for harness panes.
+4. 🟡 **Harness approval parity** — much closer since 2026-09-26, and closed further on 2026-09-30: every adapter now carries `diff_prompt_patterns` (pane promotes to `diff_ready` on an approval prompt), `PermissionModeMenu` shows each CLI's OWN native postures — Claude Code default/acceptEdits/plan/bypassPermissions, Kimi manual/yolo/auto/plan, OpenCode build/plan, OMP always-ask/write/yolo, CommandCode standard/plan/accept-edits/yolo/dont-ask (all verified against the CLIs' 2026-09 docs) — and adapters map the picked label to real spawn flags (`permission_flags`), applied at pane start and headless where the CLI accepts them (CommandCode's `--permission-mode` replaces the formerly unconditional baked `--yolo`; "standard" headless now really blocks mutating tools). Harnesses with NO native per-call model (pi — project trust only; ACP v1 — no permission channel) render an explicit "in-pane approvals" note chip in the composer instead of a silently missing menu, and the menu hint states the residual gap plainly. **Still open:** Relay's interactive approval *cards* remain built-in-chat-only (documented in-UI now, not silent).
 5. ✅ **Kimi cross-attribution risk** — fixed 2026-09-30: a process-wide claim registry makes the on-disk probe skip session ids another live pane already owns (stepping to the next candidate, flagged ambiguous), the recency guard is now mandatory, and Windows cwd matching is case-insensitive (`harness_adapters/mod.rs` `session_claims`, `kimi_code.rs` `find_newest_session_id`); provenance (`output` / `disk_probe` / `disk_probe_ambiguous`) is persisted on `sessions.harness_session_id_source` and surfaced as an `id?` badge in the pane header.
-6. **Renderer-crash recovery** for browser panes unhandled; Linux pane drift between resize syncs **[docs]**.
+6. 🟡 **Renderer-crash recovery** — the Windows half closed 2026-09-30: WebView2 `ProcessFailed` → `browser:crashed` → the pane shows a crash card with a **Recover** button that re-creates the webview at the same URL, and the event lands in the trust timeline. **Still open:** Linux pane drift between resize syncs (and a macOS equivalent — WKWebView surfaces no such event through the tauri-managed child).
 7. **Quick-action keybindings stored but never registered OS-wide** (no `globalShortcut`); no Alt+Space-style global quick-capture.
 8. **No i18n/localization layer**; RTL only via `dir=auto`; no a11y audit.
 
@@ -238,9 +245,9 @@ Status re-verified against the code on **2026-09-30**: ✅ done · 🟡 partial 
 | 4 | Map MCP tool annotations (readOnly/destructive hints + icons) into the permission ladder and approval cards | Cheap correctness win; aligns with 2026 MCP | M | High | ⬜ — Relay's *own* MCP server advertises hints, but the client still parses name+description only |
 | 5 | Hooks system (pre/post tool-call user scripts) via centralized `check_permission()` | Project's own Action_list says it's cheap; table stakes | M | High | ✅ 7ff4df6 — pre/post tool-use (deny/ask/rewrite) + lifecycle events, Settings → Hooks, Claude Code import |
 | 6 | Automation triggers beyond cron: inbound webhook listener, file-watch (reuse git watcher infra), git-event, email/IMAP | Closes the biggest automation gap | L | High | 🟡 2150eb5 — webhook listener, file-watch, git-event, Gmail shipped; webhook/file/gmail fire only while the app is open; IMAP not started |
-| 7 | Hybrid RAG: RRF-fuse FTS5 + vectors, add local ONNX bge-reranker-v2-m3 (top-50→top-8), contextual chunk enrichment (path+headings) | Biggest local-quality ceiling; local-first friendly | L | High | 🟡 5cb6c66 — RRF fusion + reranker sidecar + recall@8 eval harness shipped; contextual enrichment still missing (heading trail is display-only) |
+| 7 | Hybrid RAG: RRF-fuse FTS5 + vectors, add local ONNX bge-reranker-v2-m3 (top-50→top-8), contextual chunk enrichment (path+headings) | Biggest local-quality ceiling; local-first friendly | L | High | ✅ 2026-09-30 — enrichment shipped: embedder input is `path · heading + content`, schema v2 forces one re-chunk, reranker sees enriched docs, eval gained an enrichment case (RRF + reranker were 5cb6c66) |
 | 8 | Live load-time VRAM estimator (sliders → predicted memory, OOM warn) in the local-model load panel | LM Studio sets this bar; parts exist (auto-NGL, watts) | M | High | ⬜ |
-| 9 | Per-model tool-calling badges + raw tool-call debug pane for local models | Trust in local agents | S–M | Medium | 🟡 9e66ed4 — raw request/response log behind a loopback gateway shipped; capability badges not |
+| 9 | Per-model tool-calling badges + raw tool-call debug pane for local models | Trust in local agents | S–M | Medium | ✅ 2026-09-30 — badges (template/likely/forced/disabled) in the picker + Local Models panel, tri-state override in the gear menu ("disabled" skips the tools schema), and the Logs-page tool-call debug pane parses advertised tools + emitted calls (native + Hermes) from the stored bodies |
 | 10 | Streaming voice loop: partial whisper transcripts, sentence-level Kokoro streaming, barge-in cancel | Voice becomes "usable," not "demoable" | L | High | 🟡 398e5fd wave — live partials + sentence-level streaming shipped; barge-in still open |
 | 11 | Auto-provision a worktree per spawned session/agent (opt-in toggle already exists per chat) | Matches Cursor/OpenCode orchestration norm | S–M | Medium | ✅ 76cbfbc — `worktree_policy: inherit/always/never` per subagent definition, provisioned at spawn |
 | 12 | Register or remove quick-action keybindings; add global Alt+Space quick-capture overlay (answers via last provider) | Known dead setting; Raycast/Ollama/Gemini pattern | M | Medium | ⬜ — still DOM-level only (no `global-shortcut` plugin); the Mod+/ cheatsheet overlay (5801806) is in-app |
@@ -255,11 +262,11 @@ Status re-verified against the code on **2026-09-30**: ✅ done · 🟡 partial 
 | 21 | Self-host Google Fonts (bundle woff2) | Local-first integrity; cold start | S | Low | ⬜ — still fetched from googleapis at cold start |
 | 22 | Mobile: expo-secure-store migration + push-token cleanup + version sync | Documented skipped items | M | Medium | ⬜ — secure-store, token cleanup, and the AsyncStorage pairing token all unchanged |
 | 23 | Linux decision: pick tier (supported/experimental/unsupported), then fix secrets (proper encryption), OCR fallback, browser drift | Endless half-state is worse than a decision | M + decision | Medium | 🟡 — secrets half is moot (OS keyring already in use; §4.1.6); tier decision + OCR fallback + drift still open |
-| 24 | Harness approval parity: extend approval-card relay to Kimi/OpenCode (they support permission flags) or document the gap in-UI | Silent full-auto surprise | L | Medium | 🟡 398e5fd wave — per-harness native postures pass through to spawns and all adapters promote to `diff_ready`; Relay approval *cards* still built-in-chat-only |
+| 24 | Harness approval parity: extend approval-card relay to Kimi/OpenCode (they support permission flags) or document the gap in-UI | Silent full-auto surprise | L | Medium | ✅ 2026-09-30 — native catalogs for every harness that has one (kimi yolo/auto/plan, omp approval-modes, commandcode permission-modes — 2026-09 docs-verified), adapters map labels to spawn flags, CommandCode headless honors the label (--permission-mode replaces baked --yolo), and pi/ACP get an explicit in-pane-approvals note chip; approval *cards* remain built-in-chat-only, stated in the menu hint |
 | 25 | Watcher-driven incremental docs indexing (reuse git-watcher infra); cross-platform OCR fallback path | RAG freshness on Windows + elsewhere | M | Medium | ⬜ |
-| 26 | Mesh turn-end hooks + Settings section + eval scenarios (close Session Mesh P4) | P4 partial; polling latency | M | Medium | 🟡 — mesh default model/engine picker exists in Settings; turn-end hooks and eval scenarios don't |
-| 27 | Improvements engine P3: cross-artifact pack health, flaky-case quarantine, artifact cost attribution in dashboard | Shipped P0–P2; P3 designed | M | Low | 🟡 — per-version run health exists; cross-artifact rollup, quarantine, and dashboard attribution don't |
-| 28 | Browser: renderer-crash recovery affordance, `upload_file` (allowlist dir), downloads-to-workspace with timeline | Phase-3 differentiators already researched in-repo | L | Medium | ⬜ — full-screen (d04abe3) landed, but crash recovery / upload_file / downloads timeline didn't |
+| 26 | Mesh turn-end hooks + Settings section + eval scenarios (close Session Mesh P4) | P4 partial; polling latency | M | Medium | ✅ 2026-09-30 — `mesh_message` / `mesh_turn_complete` lifecycle hooks fire on delivery and watched-turn end (answered/expired; payloads carry from_session/mail_id/mode/preview), a Settings → Session Mesh section hosts the master switch + hook deep-links, and `session_fabric/eval.rs` adds three multi-step scenarios (hook round-trip, question lifecycle, caps under burst) |
+| 27 | Improvements engine P3: cross-artifact pack health, flaky-case quarantine, artifact cost attribution in dashboard | Shipped P0–P2; P3 designed | M | Low | ✅ 2026-09-30 — pack health per artifact (active/quarantined/discriminating/suspect "never fails anything" badge), flaky cases auto-quarantined on pass/fail flips across identical eval runs (skipped by gating, releasable in-panel), and per-artifact cost attribution (live runs + the engine's own eval sessions → chat_messages) in the Cost dashboard |
+| 28 | Browser: renderer-crash recovery affordance, `upload_file` (allowlist dir), downloads-to-workspace with timeline | Phase-3 differentiators already researched in-repo | L | Medium | ✅ 2026-09-30 — crash recovery (WebView2 ProcessFailed → `browser:crashed` → pane card + Recover re-creates the webview), `browser_upload_file` (workspace-allowlisted, DevTools `DOM.setFileInputFiles`; built-in tool + relay-browser MCP op, gated on browser-live), and downloads now close their timeline story (download_complete with size / download_interrupted) on top of the existing artifacts-dir routing |
 | 29 | Connectors: Slack/Linear/Jira additions + connector health dashboard (token expiry surfacing) | On roadmap; clear enterprise pull | M–L | Medium | ⬜ |
 | 30 | Second git host: GitLab (REST + connector) | Reduces single-vendor risk | L | Medium | ⬜ — GitLab remotes explicitly rejected |
 
@@ -315,7 +322,8 @@ CI tests + clippy (5.1) ✅ · installer signing + winget (5.2) · Windows sandb
 *(Of this wave, 5.2 signing, 5.3 sandbox, 5.4 annotations, 5.12 keybindings and 5.16 pruning are the remaining open items — 5.3 and 5.2 are the two biggest.)*
 
 **Next (1–3 months) — ecosystem + quality:**
-MCP 2026 client series (6.2) · MCP registry in gallery (6.2) · automation triggers pack (5.6) ✅ · hybrid RAG + reranker (5.7) 🟡 · VRAM estimator (5.8) · declarative subagents + worktree-per-agent (6.5, 5.11) ✅ · confirm-edits posture (6.7) · skills install-from-URL + gallery (6.6) · streaming voice loop (5.10) 🟡 · budget enforcement (5.15) · OTel traces (6.8).
+MCP 2026 client series (6.2) · MCP registry in gallery (6.2) · automation triggers pack (5.6) ✅ · hybrid RAG + reranker (5.7) ✅ · VRAM estimator (5.8) · declarative subagents + worktree-per-agent (6.5, 5.11) ✅ · confirm-edits posture (6.7) · skills install-from-URL + gallery (6.6) · streaming voice loop (5.10) 🟡 · budget enforcement (5.15) · OTel traces (6.8).
+*(The 2026-09-30 second pass also cleared 5.9, 5.24, 5.26, 5.27 and 5.28 from the later lists.)*
 
 **Later (3–6+ months) — reach + frontier:**
 macOS/Linux + platform tier (6.21) · MCP Apps host (6.3) · real-time voice (6.9) · local OpenAI-compatible endpoint + daemon mode (6.11/6.12) · multi-model compare (6.13) · routing Phase 4 (6.14) · project wiki (6.15) · A2A (6.19) · mobile v2 (dispatch, automations CRUD, previews) (6.17) · GitLab + Slack/Linear/Jira connectors (5.29/5.30) · i18n (6.28) · computer-use decision (6.30).

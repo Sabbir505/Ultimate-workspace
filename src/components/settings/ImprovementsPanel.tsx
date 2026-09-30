@@ -27,15 +27,20 @@ import {
   getImproveAutonomy,
   getSetting,
   listImproveArtifacts,
+  listImproveEvalCases,
   listImprovementProposals,
+  listImprovePackHealth,
   listImproveVersions,
   rejectImprovementProposal,
   runImprovementSweep,
   setImproveAutonomy,
+  setImproveCaseQuarantine,
   setImproveChannel,
   setSetting,
   toastError,
   type ImproveArtifact,
+  type ImproveEvalCase,
+  type ImprovePackHealth,
   type ImproveProposal,
   type ImproveVersion,
 } from "../../lib/ipc";
@@ -65,17 +70,22 @@ export function ImprovementsPanel() {
   const [busy, setBusy] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [tiers, setTiers] = useState<Record<string, "manual" | "auto" | "canary">>({});
+  // P3: cross-artifact pack health + per-artifact eval cases (quarantine UI).
+  const [health, setHealth] = useState<ImprovePackHealth[]>([]);
+  const [cases, setCases] = useState<Record<string, ImproveEvalCase[]>>({});
 
   const refresh = useCallback(async () => {
     try {
-      const [a, p, en] = await Promise.all([
+      const [a, p, en, h] = await Promise.all([
         listImproveArtifacts(),
         listImprovementProposals(),
         getSetting("improvements.enabled"),
+        listImprovePackHealth().catch(() => null),
       ]);
       if (a) setArtifacts(a);
       if (p) setProposals(p);
       if (en !== null) setEnabled(en !== "false");
+      if (h) setHealth(h);
     } catch (err) {
       toastError("Could not load improvements", err);
     }
@@ -152,6 +162,14 @@ export function ImprovementsPanel() {
         toastError("Could not load version history", err);
       }
     }
+    if (!cases[artifactId]) {
+      try {
+        const c = await listImproveEvalCases(artifactId);
+        if (c) setCases((prev) => ({ ...prev, [artifactId]: c }));
+      } catch {
+        /* the eval-cases section just stays empty */
+      }
+    }
     if (!(artifactId in tiers)) {
       try {
         const t = await getImproveAutonomy(artifactId);
@@ -159,6 +177,25 @@ export function ImprovementsPanel() {
       } catch {
         /* default tier applies */
       }
+    }
+  };
+
+  const toggleCaseQuarantine = async (artifactId: string, caseId: string, quarantined: boolean) => {
+    // Optimistic flip; refresh pack health with the panel refresh.
+    setCases((prev) => ({
+      ...prev,
+      [artifactId]: (prev[artifactId] ?? []).map((c) =>
+        c.id === caseId
+          ? { ...c, quarantined, quarantineReason: quarantined ? "quarantined by user" : "" }
+          : c,
+      ),
+    }));
+    try {
+      await setImproveCaseQuarantine(caseId, quarantined);
+      const h = await listImprovePackHealth().catch(() => null);
+      if (h) setHealth(h);
+    } catch (err) {
+      toastError("Could not update the case", err);
     }
   };
 
@@ -247,6 +284,58 @@ export function ImprovementsPanel() {
           </span>
         </div>
       </section>
+
+      {/* P3: cross-artifact pack health — one row per artifact's eval pack. */}
+      {health.length > 0 && (
+        <>
+          <div className="improve-section-head">
+            <h4>Pack health</h4>
+            {health.some((h) => h.suspect) && (
+              <span className="improve-count-chip warn" data-testid="pack-health-suspect-count">
+                {health.filter((h) => h.suspect).length} suspect
+              </span>
+            )}
+          </div>
+          <div className="improve-pack-health">
+            {health.map((h) => (
+              <div key={h.artifactId} className="improve-pack-row" data-testid="pack-health-row">
+                <span className="improve-artifact-name">{h.name}</span>
+                <span className="improve-kind-chip">{KIND_LABEL[h.kind] ?? h.kind}</span>
+                <span className="improve-pack-stat" title="Active (enabled, not quarantined) eval cases / total">
+                  {h.casesActive}/{h.casesTotal} cases
+                </span>
+                <span
+                  className="improve-pack-stat"
+                  title="Cases with at least one failing result ever — the pack's evidence it can discriminate"
+                >
+                  {h.casesDiscriminating} discriminating
+                </span>
+                <span className="improve-pack-stat" title="Recorded eval runs over this pack">
+                  {h.evalRuns} eval {h.evalRuns === 1 ? "run" : "runs"}
+                </span>
+                {h.casesQuarantined > 0 && (
+                  <span
+                    className="improve-pack-stat quarantined"
+                    title="Flaky cases parked out of gating"
+                    data-testid="pack-health-quarantined"
+                  >
+                    {h.casesQuarantined} quarantined
+                  </span>
+                )}
+                {h.suspect && (
+                  <span
+                    className="improve-pack-suspect"
+                    title="Every active case passed every recorded eval run (≥3 runs) — this pack has never discriminated and cannot veto a bad candidate. Add harder cases."
+                    data-testid="pack-health-suspect"
+                  >
+                    <AlertTriangle size={11} strokeWidth={2} aria-hidden="true" /> never fails — suspect
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <div className="improve-section-head">
         <h4>Proposals</h4>
@@ -364,6 +453,46 @@ export function ImprovementsPanel() {
                       <option value="canary">Canary — shadow window, auto-rollback</option>
                     </select>
                   </div>
+                  {/* P3: the pack's cases with flaky-quarantine controls. */}
+                  {(cases[a.id] ?? []).length > 0 && (
+                    <div className="improve-cases" data-testid={`cases-${a.id}`}>
+                      <span className="improve-meta-label">Eval cases</span>
+                      {(cases[a.id] ?? []).map((c) => (
+                        <div key={c.id} className={`improve-case-row${c.quarantined ? " quarantined" : ""}`}>
+                          <span className="improve-case-input" title={c.inputText}>
+                            {c.inputText.length > 90 ? `${c.inputText.slice(0, 90)}…` : c.inputText}
+                          </span>
+                          <span className="improve-kind-chip">{c.source}</span>
+                          {c.quarantined ? (
+                            <>
+                              <span
+                                className="improve-pack-stat quarantined"
+                                title={c.quarantineReason}
+                              >
+                                quarantined
+                              </span>
+                              <button
+                                className="ghost improve-rollback-btn"
+                                data-testid={`unquarantine-${c.id}`}
+                                onClick={() => void toggleCaseQuarantine(a.id, c.id, false)}
+                              >
+                                Un-quarantine
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              className="ghost improve-rollback-btn"
+                              data-testid={`quarantine-${c.id}`}
+                              title="Park this case — excluded from gating and pack health"
+                              onClick={() => void toggleCaseQuarantine(a.id, c.id, true)}
+                            >
+                              Quarantine
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <div className="improve-timeline">
                     {(versions[a.id] ?? []).map((v) => (
                       <div key={v.id} className="improve-version-row">

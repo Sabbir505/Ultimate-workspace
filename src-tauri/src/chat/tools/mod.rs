@@ -143,6 +143,9 @@ pub const BROWSER_OBSERVE: &str = "browser_observe";
 /// Focused extraction: only the page sections matching a prompt (keyword
 /// scoring over headings), capped — far cheaper than a full read.
 pub const BROWSER_EXTRACT: &str = "browser_extract";
+/// Put a local file (allowlist: the workspace roots) onto a page's file
+/// input — the agentic upload path (DevTools `DOM.setFileInputFiles`).
+pub const BROWSER_UPLOAD_FILE: &str = "browser_upload_file";
 
 // ---- System tools (background downloads + native shell) ----
 //
@@ -865,6 +868,10 @@ const BROWSER_OBSERVE_DESC: &str = "List what is actionable on the page currentl
     the browser pane: one line per interactive element — ref, tag, label, and the \
     input extras (type/placeholder/aria) — with NO page text. The cheap way to \
     decide what to click or type; use browser_read when you need the content.";
+
+/// `browser_upload_file`: put a workspace file onto a page's file input so
+/// downloads-then-upload flows and form submissions work end to end.
+const BROWSER_UPLOAD_FILE_DESC: &str = "Upload a workspace file into a file input on the open browser pane. `ref` from browser_read; `path` must be inside the workspace (artifacts dir or the pane's project folder).";
 
 const BROWSER_EXTRACT_DESC: &str = "Pull ONLY the page sections relevant to a \
     prompt: the page is split at headings, sections scored by keyword overlap, \

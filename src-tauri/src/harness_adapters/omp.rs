@@ -100,6 +100,20 @@ impl HarnessAdapter for OmpAdapter {
     fn diff_prompt_patterns(&self) -> &'static [Regex] {
         &DIFF_PATTERNS
     }
+
+    fn permission_flags(&self, mode: &str) -> Vec<String> {
+        // Native --approval-mode vocabulary (omp.sh docs, re-checked
+        // 2026-09): always-ask (reads run, writes/executables prompt) |
+        // write (workspace writes run, executables prompt) | yolo (omp's
+        // own built-in default, no flag needed — passing it anyway is
+        // harmless and makes the chosen posture explicit).
+        match mode {
+            "always-ask" | "write" | "yolo" => {
+                vec!["--approval-mode".into(), mode.to_string()]
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

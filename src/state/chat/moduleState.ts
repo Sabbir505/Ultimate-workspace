@@ -254,6 +254,13 @@ export const permissionModeToPolicies = (
   }
 };
 
+// Per-harness NATIVE permission catalogs — what the composer's mode menu
+// lists for harness sessions. Values are the CLIs' own vocabulary, stored
+// verbatim on the session's permission_mode and mapped to spawn flags by
+// each adapter's `permission_flags` (harness_adapters). Every mode applies
+// when the pane starts (a running TUI can't be re-flagged); descriptions
+// say so. Harnesses WITHOUT a native per-call model (pi, ACP) have no entry
+// — the composer renders an explicit gap note instead of a menu.
 export const HARNESS_PERMISSION_MODES: Record<string, HarnessModeOption[] | undefined> = {
   claude_code: [
     {
@@ -281,24 +288,78 @@ export const HARNESS_PERMISSION_MODES: Record<string, HarnessModeOption[] | unde
     {
       value: "build",
       label: "Build",
-      description: "Full agent — reads and writes.",
+      description: "Full agent — reads and writes. The TUI's Tab key switches agents mid-session.",
     },
     {
       value: "plan",
       label: "Plan",
-      description: "OpenCode's read-only planning mode — no changes.",
+      description: "OpenCode's read-only planning agent — no changes. Applied at pane start (--agent plan).",
     },
   ],
   kimi_code: [
     {
-      value: "default",
-      label: "Default",
-      description: "Kimi works normally (prompt mode auto-approves tool calls).",
+      value: "manual",
+      label: "Manual",
+      description: "Kimi's own default posture — asks in its own TUI before risky actions.",
+    },
+    {
+      value: "yolo",
+      label: "Auto edits",
+      description: "“Ask When Needed”: routine edits/commands run, risky actions still ask in-pane. Applied at pane start (--yolo).",
+    },
+    {
+      value: "auto",
+      label: "Never ask",
+      description: "Kimi decides everything without interrupting. Applied at pane start (--auto).",
     },
     {
       value: "plan",
       label: "Plan",
-      description: "Kimi researches and replies with a plan — no file changes.",
+      description: "Research and reply with a plan — no file changes. Applied at pane start (--plan); headless turns get a plan directive.",
+    },
+  ],
+  omp: [
+    {
+      value: "always-ask",
+      label: "Always ask",
+      description: "Reads run; writes and executables prompt in-pane. Applied at pane start (--approval-mode always-ask).",
+    },
+    {
+      value: "write",
+      label: "Auto writes",
+      description: "Workspace writes run; executable actions still prompt. Applied at pane start (--approval-mode write).",
+    },
+    {
+      value: "yolo",
+      label: "Yolo",
+      description: "Everything runs without prompting (omp's built-in default). Applied at pane start (--approval-mode yolo).",
+    },
+  ],
+  commandcode: [
+    {
+      value: "standard",
+      label: "Standard",
+      description: "CommandCode asks before each mutating action (its default).",
+    },
+    {
+      value: "plan",
+      label: "Plan",
+      description: "Read-only planning — no changes until switched out. Applied at pane start.",
+    },
+    {
+      value: "accept-edits",
+      label: "Accept edits",
+      description: "File edits auto-run; other actions still ask. Applied at pane start.",
+    },
+    {
+      value: "yolo",
+      label: "Yolo",
+      description: "Everything runs without asking. Applied at pane start.",
+    },
+    {
+      value: "dont-ask",
+      label: "Don't ask",
+      description: "Fail-closed: pre-approved actions run, everything else is denied. Applied at pane start.",
     },
   ],
 };

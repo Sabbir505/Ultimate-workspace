@@ -130,8 +130,10 @@ pub fn finish_index(
 /// metadata) a corpus was last indexed with. Bump when chunking or chunk
 /// metadata changes so every corpus is re-chunked once: the mtime/size diff
 /// can never see these changes on its own. v1 = heading-trail enrichment +
-/// the doc_chunks_fts keyword index.
-pub const DOCS_CHUNK_SCHEMA_VERSION: i64 = 1;
+/// the doc_chunks_fts keyword index. v2 = contextual chunk enrichment: the
+/// embedder input became `path · heading + content`
+/// (`chat::docs::enriched_embed_text`) instead of bare content.
+pub const DOCS_CHUNK_SCHEMA_VERSION: i64 = 2;
 
 /// The corpus's stored chunk-schema version (0 = pre-versioning / never
 /// indexed).
@@ -233,8 +235,10 @@ pub fn delete_indexed_files_not_in(
 // ---- doc_chunks ----
 
 /// Replace all chunks of one file (called with the freshly embedded set).
-/// Each tuple is `(content, embedding, heading)`; heading is the markdown
-/// heading trail for display only — it is never embedded.
+/// Each tuple is `(content, embedding, heading)`: content is the RAW chunk
+/// text (FTS leg + display); the embedding is computed from the enriched
+/// text (`chat::docs::enriched_embed_text` — path · heading + content);
+/// heading is the markdown heading trail for display.
 pub fn replace_file_chunks(
     conn: &Connection,
     corpus_id: &str,
@@ -314,8 +318,10 @@ pub struct ChunkHit {
     pub path: String,
     pub kind: String,
     pub content: String,
-    /// Markdown heading trail at the chunk's start ('' when none) — display
-    /// enrichment only, never part of the embedded text.
+    /// Markdown heading trail at the chunk's start ('' when none). Since
+    /// chunk-schema v2 the trail + path are also part of the text the
+    /// stored embedding was computed from (contextual enrichment); the
+    /// content field itself stays raw.
     pub heading: String,
     pub score: f32,
 }

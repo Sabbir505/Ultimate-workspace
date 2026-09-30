@@ -106,6 +106,12 @@ impl HarnessAdapter for PiAdapter {
     fn diff_prompt_patterns(&self) -> &'static [Regex] {
         &DIFF_PATTERNS
     }
+
+    // No permission_flags override: pi has NO per-tool-call approval model
+    // at all (verified against its CLI/security docs, 2026-09 — the only
+    // gate is project trust via `--approve`, which governs loading project
+    // extensions, not tool calls). The composer renders an explicit gap
+    // note for this harness instead of a mode menu.
 }
 
 #[cfg(test)]

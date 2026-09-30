@@ -708,6 +708,10 @@ async fn dispatch_inner(
         "close_tab" => op_close_tab(req, browser, app).await,
         "zoom" => op_zoom(req, browser, app).await,
         "print_to_pdf" => op_print_to_pdf(req, browser, app).await,
+        // Workspace-scoped agentic upload (P3): file goes onto the page's
+        // file input via the DevTools protocol; the ALLOWLIST (artifacts dir
+        // + the pane's project folder) is enforced inside upload_file_active.
+        "upload_file" => op_upload_file(req, browser, app).await,
         // The relay sidecar asks for the CURRENT bridged-tool schemas (its
         // tools/list) — derived from the live registry app-side, so new tools
         // reach harness sessions without a sidecar-side hand copy. Takes the
@@ -1865,6 +1869,67 @@ async fn op_print_to_pdf(
         message: e,
     })?;
     Ok(serde_json::json!({ "path": path.to_string_lossy() }))
+}
+
+/// `upload_file` — put a local workspace file onto the page's file input
+/// (ref from read_page/observe). Windows-only backend (WebView2 CDP).
+async fn op_upload_file(
+    req: &Request,
+    browser: &BrowserManager,
+    app: &AppHandle,
+) -> Result<Value, McpError> {
+    let label = resolve_or_open(req, browser, app).await?;
+    let r = req
+        .args
+        .get("ref")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| McpError {
+            code: "bad_request",
+            message: "upload_file requires an integer \"ref\"".into(),
+        })?;
+    let path = req
+        .args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| McpError {
+            code: "bad_request",
+            message: "upload_file requires a \"path\" inside the workspace".into(),
+        })?
+        .to_string();
+    let dir = crate::chat::dispatch::artifacts_dir(app);
+    let mgr = app.state::<crate::BrowserState>().0.clone();
+    // Resolve the allowlist BEFORE the blocking task (the AppHandle can't
+    // cross it): artifacts dir + THIS pane's registered project folder.
+    let mut roots: Vec<String> = vec![dir.to_string_lossy().into_owned()];
+    if let Some((pane, _)) = parse_label(&label) {
+        if let Some(project_id) = mgr.project_of_pane(&pane) {
+            let state = app.state::<crate::DbState>();
+            let conn = state.0.lock();
+            if let Ok(Some(project)) = crate::db::get_project(&conn, &project_id) {
+                roots.push(project.path);
+            }
+        }
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        if !crate::chat::permission::path_within_scope(&path, &roots) {
+            return Err(format!(
+                "upload_file: {path} is outside the allowed upload roots (the artifacts dir and the pane's project folder)."
+            ));
+        }
+        mgr.upload_file_for_pane(&label, r, &path)
+    })
+    .await
+    .map_err(|e| McpError {
+        code: "browser_unavailable",
+        message: format!("upload task failed: {e}"),
+    })?
+    .map_err(|e| McpError {
+        code: "browser_unavailable",
+        message: e,
+    })?;
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 /// Parse `browser-{pane}-tab-{tab}` back into (pane_id, tab_id). Returns None

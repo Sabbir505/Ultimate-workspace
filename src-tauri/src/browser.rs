@@ -1564,6 +1564,56 @@ fn attach_core_listeners(
                             Some(target.to_string_lossy().to_string()),
                         );
                     }
+                    // Completion watcher on the OPERATION (the `sender` of a
+                    // StateChanged callback IS the download operation, so it
+                    // stays alive as long as the handler does): closes the
+                    // timeline story with finished+size or interrupted.
+                    let app_done = app_dl.clone();
+                    let label_done = label_dl.clone();
+                    let name_done = file_name.clone();
+                    let path_done = target.to_string_lossy().to_string();
+                    let state_handler = webview2_com::StateChangedEventHandler::create(Box::new(
+                        move |sender, _| {
+                            use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED;
+                            use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED;
+                            let outcome = sender.as_ref().and_then(|op| {
+                                let mut st = webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_DOWNLOAD_STATE::default();
+                                unsafe { op.State(&mut st) }.ok()?;
+                                Some(st.0)
+                            });
+                            if let Some(state) = app_done.try_state::<crate::BrowserState>() {
+                                if outcome == Some(COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED.0) {
+                                    let mut bytes = 0i64;
+                                    if let Some(op) = sender.as_ref() {
+                                        let _ = unsafe { op.BytesReceived(&mut bytes) };
+                                    }
+                                    state.0.append_timeline(
+                                        &pane_done(&label_done),
+                                        "download_complete",
+                                        &format!(
+                                            "{name_done} finished ({} bytes) -> {path_done}",
+                                            bytes.max(0)
+                                        ),
+                                        "ok",
+                                        None,
+                                        Some(path_done.clone()),
+                                    );
+                                } else if outcome == Some(COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED.0) {
+                                    state.0.append_timeline(
+                                        &pane_done(&label_done),
+                                        "download_interrupted",
+                                        &format!("{name_done} interrupted before finishing"),
+                                        "error",
+                                        None,
+                                        Some(path_done.clone()),
+                                    );
+                                }
+                            }
+                            Ok(())
+                        },
+                    ));
+                    let mut state_token = 0i64;
+                    let _ = unsafe { operation.add_StateChanged(&state_handler, &mut state_token) };
                 }
             }
             Ok(())
@@ -1576,6 +1626,88 @@ fn attach_core_listeners(
         }
         Err(e) => browser_log(app, &format!("download redirect unavailable: {e}")),
     }
+
+    // Renderer crash detection (crash-recovery affordance): ProcessFailed
+    // covers the renderer exiting (crash/OOM/kill) and going unresponsive.
+    // The frontend shows a Recover affordance on the pane; the timeline
+    // records the event for the trust view. macOS/Linux panes have no
+    // equivalent event surfaced by their backends today.
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND;
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ProcessFailedEventArgs;
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED;
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED;
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE;
+    use webview2_com::ProcessFailedEventHandler;
+    let app_crash = app.clone();
+    let label_crash = label.to_string();
+    let crash_handler = ProcessFailedEventHandler::create(Box::new(
+        move |_sender, args: Option<ICoreWebView2ProcessFailedEventArgs>| {
+            if let Some(args) = args {
+                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                let _ = unsafe { args.ProcessFailedKind(&mut kind) };
+                let what = if kind.0
+                    == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED.0
+                {
+                    "renderer exited"
+                } else if kind.0
+                    == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE.0
+                {
+                    "renderer unresponsive"
+                } else if kind.0
+                    == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED.0
+                {
+                    "browser process exited"
+                } else {
+                    "process failed"
+                };
+                let (pane_id, tab_id) = split_label(&label_crash);
+                browser_log(
+                    &app_crash,
+                    &format!("CRASH label={label_crash} {what} (kind {})", kind.0),
+                );
+                let _ = app_crash.emit(
+                    "browser:crashed",
+                    BrowserCrashedEvent {
+                        pane_id: pane_id.clone(),
+                        tab_id,
+                        reason: what.to_string(),
+                    },
+                );
+                if let Some(state) = app_crash.try_state::<crate::BrowserState>() {
+                    state
+                        .0
+                        .append_timeline(&pane_id, "crashed", what, "error", None, None);
+                }
+            }
+            Ok(())
+        },
+    ));
+    let mut crash_token = 0i64;
+    let _ = unsafe { core.add_ProcessFailed(&crash_handler, &mut crash_token) };
+}
+
+/// `browser-{pane}-tab-{tab}` → (pane, tab); ('', '') on a malformed label.
+fn split_label(label: &str) -> (String, String) {
+    label
+        .strip_prefix("browser-")
+        .and_then(|rest| rest.split_once("-tab-"))
+        .map(|(p, t)| (p.to_string(), t.to_string()))
+        .unwrap_or_default()
+}
+
+/// Pane id half of a browser label (for timeline appends from callbacks).
+fn pane_done(label: &str) -> String {
+    split_label(label).0
+}
+
+/// Payload of the `browser:crashed` event — the pane shows its Recover
+/// affordance when this lands.
+#[derive(Clone, serde::Serialize)]
+pub struct BrowserCrashedEvent {
+    pub pane_id: String,
+    pub tab_id: String,
+    /// Human-readable cause ("renderer exited" | "renderer unresponsive" | …).
+    pub reason: String,
 }
 
 /// JS snippet that reports the current document title + URL back to the host
@@ -2439,6 +2571,18 @@ mod tabs;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_label_round_trips_browser_label() {
+        // The crash handler + download-completion callbacks recover
+        // (pane_id, tab_id) from the webview label — same parse as the
+        // nav handlers, pinned here so a label-format change breaks loudly.
+        assert_eq!(split_label("browser-abc-123-tab-default"), ("abc-123".into(), "default".into()));
+        assert_eq!(split_label("browser-pane-1-tab-tab-2"), ("pane-1".into(), "tab-2".into()));
+        assert_eq!(split_label("not-a-label"), (String::new(), String::new()));
+        assert_eq!(split_label("browser-x-tab-"), ("x".into(), String::new()));
+        assert_eq!(pane_done("browser-p1-tab-t9"), "p1");
+    }
 
     // NOTE: there is deliberately no unit test for the pane-handler wiring,
     // and that is the considered choice rather than a gap. The guarantee is

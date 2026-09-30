@@ -53,6 +53,89 @@ impl BrowserManager {
         self.run_action_for_pane(label, &evaluate_js(expression)).await
     }
 
+    /// `browser_upload_file` against the ACTIVE pane: resolves the pane,
+    /// enforces the upload ALLOWLIST (the artifacts dir + the pane's
+    /// registered project folder — an agent must not upload arbitrary user
+    /// files from anywhere on disk), then drives the CDP upload.
+    pub fn upload_file_active(
+        &self,
+        r: i64,
+        path: &str,
+        artifacts_dir: &std::path::Path,
+    ) -> Result<String, String> {
+        let label = self.active_label()?;
+        let mut roots: Vec<String> = vec![artifacts_dir.to_string_lossy().into_owned()];
+        let pane_id = self.active_pane_id().unwrap_or_default();
+        if let Some(project_id) = self.project_pane_registry.lock().get(&pane_id).cloned() {
+            let state = self.app.state::<crate::DbState>();
+            let conn = state.0.lock();
+            if let Ok(Some(project)) = crate::db::get_project(&conn, &project_id) {
+                roots.push(project.path);
+            }
+        }
+        if !crate::chat::permission::path_within_scope(path, &roots) {
+            return Err(format!(
+                "upload_file: {path} is outside the allowed upload roots (the artifacts dir and the pane's project folder)."
+            ));
+        }
+        self.upload_file_for_pane(&label, r, path)
+    }
+
+    /// Upload a local file into the page's file input tagged
+    /// `data-relay-ref="{r}"` — the `browser_upload_file` agent op. The
+    /// ALLOWLIST IS THE CALLER'S JOB (workspace roots); this fn validates
+    /// existence and drives the DevTools protocol
+    /// (`DOM.setFileInputFiles` — the same mechanism Playwright's
+    /// setInputFiles uses; JS-level value setting cannot put a real file on
+    /// an input). Windows-only: the CDP execution layer needs WebView2.
+    /// Blocking (main-thread COM roundtrips, up to ~20 s per CDP step) —
+    /// call inside `tokio::task::spawn_blocking` from async contexts, same
+    /// contract as [`Self::capture_pane_png`].
+    pub fn upload_file_for_pane(
+        &self,
+        label: &str,
+        r: i64,
+        path: &str,
+    ) -> Result<String, String> {
+        let abs = std::path::PathBuf::from(path);
+        if !abs.is_file() {
+            return Err(format!("upload_file: no such file: {path}"));
+        }
+        self.upload_file_blocking(label, r, &abs.to_string_lossy())
+    }
+
+    #[cfg(windows)]
+    fn upload_file_blocking(&self, label: &str, r: i64, path: &str) -> Result<String, String> {
+        let doc = self.call_devtools_protocol(label, "DOM.getDocument", "{}")?;
+        let doc_v: serde_json::Value = serde_json::from_str(&doc)
+            .map_err(|e| format!("bad DOM.getDocument reply: {e}"))?;
+        let root = doc_v
+            .pointer("/root/nodeId")
+            .and_then(|x| x.as_i64())
+            .ok_or_else(|| "DOM.getDocument returned no root node".to_string())?;
+        let selector = format!("[data-relay-ref=\"{r}\"]");
+        let qparams = serde_json::json!({ "nodeId": root, "selector": selector }).to_string();
+        let q = self.call_devtools_protocol(label, "DOM.querySelector", &qparams)?;
+        let q_v: serde_json::Value =
+            serde_json::from_str(&q).map_err(|e| format!("bad DOM.querySelector reply: {e}"))?;
+        let node = q_v.get("nodeId").and_then(|x| x.as_i64()).unwrap_or(0);
+        if node == 0 {
+            return Err(format!(
+                "no element carrying ref {r} exists on the page — run browser_read to refresh the refs"
+            ));
+        }
+        let files = serde_json::json!({ "files": [path], "nodeId": node }).to_string();
+        self.call_devtools_protocol(label, "DOM.setFileInputFiles", &files)?;
+        Ok(format!(
+            "Attached {path} to the file input (ref {r}); the page saw the change. Verify with browser_read."
+        ))
+    }
+
+    #[cfg(not(windows))]
+    fn upload_file_blocking(&self, _label: &str, _r: i64, _path: &str) -> Result<String, String> {
+        Err("upload_file needs the Windows WebView2 DevTools backend".to_string())
+    }
+
     /// Compact interactive snapshot (same ref numbering as click/type) — backs
     /// the `include_snapshot` action flag and the `find` tool (a query filters
     /// the listing without changing the numbering).

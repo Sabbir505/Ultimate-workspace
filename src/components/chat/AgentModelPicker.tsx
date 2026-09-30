@@ -23,6 +23,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { listHarnesses, listAcpAgents, listHarnessModels, listChatModels, scanLocalModels, listChatInstances, providerKindOf, type ChatInstancePayload, type GgufModel, type HarnessModelConfig, type LlamaOverrides } from "../../lib/ipc";
+import { ModelToolBadge } from "../common/ModelToolBadge";
 import type { HarnessStatus, AcpAgentStatus } from "../../types";
 import { fuzzyFilter, type FuzzyResult } from "../../lib/fuzzy";
 import { shortModelName } from "../../lib/modelLabel";
@@ -311,9 +312,17 @@ export function AgentModelPickerInner({
     } else if (key === "local") {
       void scanLocalModels()
         .then((list: GgufModel[] | null) => {
+          // dedupeIds keeps first occurrence per display id — carry that
+          // model's tool-calling verdict onto the row for the badge.
+          const supportById = new Map<string, GgufModel["toolSupport"]>();
+          for (const m of list ?? []) {
+            const id = m.name || m.filename;
+            if (!supportById.has(id)) supportById.set(id, m.toolSupport);
+          }
           const rows = dedupeIds((list ?? []).map((m) => m.name || m.filename)).map((id) => ({
             id,
             label: shortModelName(id),
+            toolSupport: supportById.get(id),
           }));
           settle({ status: "ready", rows });
         })
@@ -991,6 +1000,12 @@ export function AgentModelPickerInner({
                               marked. */}
                           {r.source && r.source !== "cli" && (
                             <span className="model-source-badge">{r.source}</span>
+                          )}
+                          {/* Local rows: tool-calling verdict from the GGUF
+                              scan (template probe + arch heuristic) combined
+                              with the per-model override. */}
+                          {isLocalRow && r.toolSupport && (
+                            <ModelToolBadge toolSupport={r.toolSupport} />
                           )}
                         </span>
                         <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>

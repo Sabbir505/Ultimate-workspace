@@ -266,8 +266,20 @@ export function KnowledgePanel() {
       });
       if (typeof picked !== "string" || !picked) return;
       setBusy("add");
-      await docsAddCorpus(picked);
+      const corpus = await docsAddCorpus(picked);
       await docsListCorpora().then((c) => c && setCorpora(c));
+      // A corpus is INERT until indexed, and until now nothing started the
+      // run — "added a corpus, RAG does nothing" (2026-09-30 report). Kick
+      // the index off immediately; errors surface through the same
+      // progress-event banner the manual Index button feeds (e.g. no
+      // embedding model installed).
+      if (corpus) {
+        try {
+          await docsStartIndex(corpus.id);
+        } catch (err) {
+          setError(`Corpus added, but indexing failed to start: ${String(err)}`);
+        }
+      }
     } catch (err) {
       setError(`Failed to add folder: ${String(err)}`);
     } finally {

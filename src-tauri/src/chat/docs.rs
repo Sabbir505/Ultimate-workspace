@@ -181,16 +181,52 @@ pub fn chunk_text(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// One chunk plus its display metadata.
+/// One chunk plus its contextual metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkMeta {
     pub content: String,
     /// Markdown heading trail in effect where the chunk starts
-    /// ("Guide > Setup", '' before any heading). Display enrichment only —
-    /// it is stored alongside the chunk and rendered at query time, NEVER
-    /// embedded (embedding it would double-pay tokens and pollute vector
-    /// space).
+    /// ("Guide > Setup", '' before any heading). Since chunk-schema v2 the
+    /// trail (plus the relative path) is prepended to the text that gets
+    /// EMBEDDED (contextual chunk enrichment, `enriched_embed_text`) — the
+    /// stored chunk content stays raw for the FTS leg and display.
     pub heading: String,
+}
+
+/// Cap for the contextual prefix (rel path + heading trail) that precedes a
+/// chunk in the embed/rerank input — a pathological path or deeply nested
+/// trail must not eat the chunk's own token budget.
+const CONTEXT_PREFIX_CAP: usize = 300;
+
+/// The `path · heading` context line situating a chunk ('' when the chunk has
+/// no context at all — empty path, or empty path AND heading).
+fn context_prefix(path: &str, heading: &str) -> String {
+    let path = path.trim();
+    let heading = heading.trim();
+    let line = match (path.is_empty(), heading.is_empty()) {
+        (true, _) => String::new(),
+        (false, true) => path.to_string(),
+        (false, false) => format!("{path} · {heading}"),
+    };
+    if line.chars().count() > CONTEXT_PREFIX_CAP {
+        format!("{}…", crate::util::truncate_chars(&line, CONTEXT_PREFIX_CAP))
+    } else {
+        line
+    }
+}
+
+/// The text that gets EMBEDDED (and fed to the reranker) for one chunk:
+/// a `path · heading` context line, a blank line, then the raw chunk
+/// content. This is the "contextual chunk enrichment" pass (chunk-schema
+/// v2): keyword search (FTS over the raw content) and display are unchanged
+/// — only the vector leg's input gains the context, so chunks inside long
+/// documents remain retrievable by the section they live in, not just by
+/// their own tokens.
+pub fn enriched_embed_text(path: &str, heading: &str, content: &str) -> String {
+    match context_prefix(path, heading) {
+        prefix if prefix.is_empty() => content.to_string(),
+        prefix => format!("{prefix}\n\n{content}"),
+    }
 }
 
 /// [`chunk_text`] with enrichment: `path` decides whether heading trails are
@@ -433,6 +469,34 @@ mod tests {
         let plain = chunk_text(&text);
         let with_meta: Vec<String> = metas.into_iter().map(|m| m.content).collect();
         assert_eq!(plain, with_meta);
+    }
+
+    #[test]
+    fn enriched_embed_text_carries_path_and_heading() {
+        // Markdown chunk mid-document: path + trail line, blank line, raw body.
+        let enriched = enriched_embed_text("guides/setup.md", "Guide > Setup", "body text");
+        assert_eq!(enriched, "guides/setup.md · Guide > Setup\n\nbody text");
+        // Before any heading: path-only prefix.
+        assert_eq!(
+            enriched_embed_text("a.md", "", "body"),
+            "a.md\n\nbody",
+            "path-only context"
+        );
+        // Non-markdown files (code, image surrogates) still get the path.
+        assert_eq!(
+            enriched_embed_text("src/main.rs", "", "fn main() {}"),
+            "src/main.rs\n\nfn main() {}"
+        );
+        // No path at all (defensive): content unchanged — the embedding input
+        // must never be WORSE than the pre-enrichment bare content.
+        assert_eq!(enriched_embed_text("", "", "body"), "body");
+        assert_eq!(enriched_embed_text("   ", "  ", "body"), "body");
+        // A pathological path+trail is capped, never allowed to eat the body.
+        let long = format!("{} — {}", "deep/".repeat(80), "Very > ".repeat(40));
+        let got = enriched_embed_text(&long, "", "tail");
+        assert!(got.chars().count() < CONTEXT_PREFIX_CAP + 8 + 4);
+        assert!(got.ends_with("\n\ntail"));
+        assert!(got.contains('…'), "capped prefix is ellipsized");
     }
 
     #[test]

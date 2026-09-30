@@ -860,6 +860,7 @@ mod tests {
         ("browser_screenshot", "harness uses the relay-browser MCP browser family"),
         ("browser_observe", "harness uses the relay-browser MCP browser family"),
         ("browser_extract", "harness uses the relay-browser MCP browser family"),
+        ("browser_upload_file", "harness uses the relay-browser MCP browser family"),
         // FS tools are sandboxed per-turn (fs_roots) in the built-in chat; the
         // bridge path is ungated, so exposing them would bypass permissions.
         // Harnesses read/write the project with their own FS tools.

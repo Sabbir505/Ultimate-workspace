@@ -219,6 +219,20 @@ pub trait HarnessAdapter: Send + Sync {
     /// the recent output tail when the pane goes quiet; a hit promotes the
     /// pane state from "waiting" to "diff_ready" (PRD §7.3, best-effort).
     fn diff_prompt_patterns(&self) -> &'static [Regex];
+    /// The harness's native permission-mode flags for one interactive spawn.
+    /// `mode` is the label persisted on the session's `permission_mode`
+    /// column — the composer's mode menu stores the harness's OWN vocabulary
+    /// (see `HARNESS_PERMISSION_MODES` in moduleState.ts), so there is no
+    /// mapping layer. Empty = the CLI's own configured default stands.
+    ///
+    /// Only modes the CLI accepts in INTERACTIVE mode are mapped here —
+    /// headless per-turn spawns have their own contracts (perturn.rs: kimi
+    /// rejects --yolo/--plan with -p; the pi-lineage print modes auto-approve).
+    /// Applied at pane spawn AND resume; a mid-session mode change takes
+    /// effect the next time the pane (re)opens.
+    fn permission_flags(&self, _mode: &str) -> Vec<String> {
+        Vec::new()
+    }
     /// True when the binary is runnable on PATH (checked via `--version`).
     fn is_installed(&self) -> bool {
         binary_on_path(self.binary())
@@ -473,8 +487,12 @@ impl TurnHarness {
             }
             TurnHarness::Pi => "@echo off\r\npi -p --approve --mode json %*\r\n",
             TurnHarness::Omp => "@echo off\r\nomp -p --auto-approve --mode=json %*\r\n",
+            // The posture flag (--yolo OR --permission-mode <label>) is NOT
+            // baked here — argv_args owns it (the composer's mode menu can
+            // replace the yolo alias with a native label; see its
+            // --permission-mode conditional). The wrapper only forwards %*.
             TurnHarness::CommandCode => {
-                "@echo off\r\ncommandcode -p --output-format json --yolo --tools-all --skip-onboarding --no-auto-update %*\r\n"
+                "@echo off\r\ncommandcode -p --output-format json --tools-all --skip-onboarding --no-auto-update %*\r\n"
             }
         }
     }
@@ -528,15 +546,25 @@ impl TurnHarness {
                     TurnHarness::Omp => {
                         vec!["-p".into(), "--auto-approve".into(), "--mode=json".into()]
                     }
-                    _ => vec![
-                        "-p".into(),
-                        "--output-format".into(),
-                        "json".into(),
-                        "--yolo".into(),
-                        "--tools-all".into(),
-                        "--skip-onboarding".into(),
-                        "--no-auto-update".into(),
-                    ],
+                    _ => {
+                        let mut a = vec![
+                            "-p".into(),
+                            "--output-format".into(),
+                            "json".into(),
+                            "--tools-all".into(),
+                            "--skip-onboarding".into(),
+                            "--no-auto-update".into(),
+                        ];
+                        // A caller-supplied --permission-mode REPLACES the
+                        // --yolo alias — same knob (the composer's mode menu
+                        // stores commandcode's own label; perturn passes the
+                        // headless-accepted subset). Passing both would leave
+                        // the winning flag at the CLI's discretion.
+                        if !flags.iter().any(|f| f == "--permission-mode") {
+                            a.push("--yolo".into());
+                        }
+                        a
+                    }
                 };
                 a.extend(flags);
                 a
@@ -1232,6 +1260,38 @@ mod tests {
     }
 
     #[test]
+    fn commandcode_permission_mode_replaces_the_yolo_alias() {
+        // Default (no mode label): full-auto --yolo stays baked.
+        let (spec, _, transport) = turn_spec(TurnHarness::CommandCode, "hello", vec![]).unwrap();
+        assert_eq!(transport, TurnPromptTransport::Stdin);
+        assert!(spec.args.contains(&"--yolo".to_string()));
+        assert!(!spec.args.iter().any(|a| a == "--permission-mode"));
+        // A native label from the composer's mode menu replaces the alias —
+        // the same knob must never appear twice (the winner would be the
+        // CLI's discretion).
+        let (labeled, _, _) = turn_spec(
+            TurnHarness::CommandCode,
+            "hello",
+            vec!["--permission-mode".into(), "plan".into()],
+        )
+        .unwrap();
+        assert!(
+            !labeled.args.contains(&"--yolo".to_string()),
+            "--yolo must yield to --permission-mode: {:?}",
+            labeled.args
+        );
+        let pos = labeled
+            .args
+            .iter()
+            .position(|a| a == "--permission-mode")
+            .unwrap();
+        assert_eq!(labeled.args[pos + 1], "plan");
+        // The wrapper body no longer bakes the alias either (Windows doubles
+        // argv through it) — %*-forwarding only.
+        assert!(!TurnHarness::CommandCode.wrapper_body().contains("--yolo"));
+    }
+
+    #[test]
     #[cfg(windows)]
     fn wrapper_batch_transports_hostile_prompt_literally() {
         // End-to-end canary for the cmd.exe parse chain: a probe shim records
@@ -1318,6 +1378,46 @@ mod tests {
         // adapter added without an ADAPTER_ORDER entry would vanish from
         // list_harnesses.
         assert_eq!(all_adapters().len(), adapters().len());
+    }
+
+    /// The native permission catalog (TS `HARNESS_PERMISSION_MODES`) and the
+    /// adapters' `permission_flags` must agree: every catalog value maps to
+    /// the CLI's real flag, and unknown/legacy labels degrade to no flags.
+    #[test]
+    fn permission_flags_match_native_catalogs() {
+        let flags = |id: &str, mode: &str| {
+            get_adapter(id)
+                .unwrap_or_else(|| panic!("{id} missing"))
+                .permission_flags(mode)
+        };
+        // claude_code: the three non-default postures ride --permission-mode.
+        assert_eq!(flags("claude_code", "acceptEdits"), ["--permission-mode", "acceptEdits"]);
+        assert_eq!(flags("claude_code", "plan"), ["--permission-mode", "plan"]);
+        assert_eq!(flags("claude_code", "bypassPermissions"), ["--permission-mode", "bypassPermissions"]);
+        assert!(flags("claude_code", "default").is_empty());
+        assert!(flags("claude_code", "manual").is_empty()); // legacy built-in label
+        // kimi_code: interactive posture flags — never passed headless.
+        assert_eq!(flags("kimi_code", "yolo"), ["--yolo"]);
+        assert_eq!(flags("kimi_code", "auto"), ["--auto"]);
+        assert_eq!(flags("kimi_code", "plan"), ["--plan"]);
+        assert!(flags("kimi_code", "manual").is_empty());
+        assert!(flags("kimi_code", "default").is_empty()); // pre-2026-09-30 label
+        // opencode: the agent selector is the lever; build passes nothing.
+        assert_eq!(flags("opencode", "plan"), ["--agent", "plan"]);
+        assert!(flags("opencode", "build").is_empty());
+        // omp: --approval-mode names the no-prompt ceiling tier.
+        assert_eq!(flags("omp", "always-ask"), ["--approval-mode", "always-ask"]);
+        assert_eq!(flags("omp", "write"), ["--approval-mode", "write"]);
+        assert_eq!(flags("omp", "yolo"), ["--approval-mode", "yolo"]);
+        // commandcode: --permission-mode vocabulary.
+        for m in ["plan", "accept-edits", "yolo", "dont-ask"] {
+            assert_eq!(flags("commandcode", m), ["--permission-mode".to_string(), m.to_string()]);
+        }
+        assert!(flags("commandcode", "standard").is_empty());
+        // pi has NO per-call model: everything maps to nothing.
+        for m in ["plan", "yolo", "manual", "default"] {
+            assert!(flags("pi", m).is_empty(), "pi must not take flags for {m}");
+        }
     }
 
     #[test]

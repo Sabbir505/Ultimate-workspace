@@ -50,11 +50,13 @@ import {
   listenBrowserNavigatedTab,
   listenBrowserUrlChangedTab,
   listenBrowserTitle,
+  listenBrowserCrashed,
   listenBrowserLoadCompleted,
   tauriRuntimeAvailable,
   type BrowserRect,
   type BrowserNavigatedPayload,
   type BrowserLoadCompletedPayload,
+  type BrowserCrashedPayload,
 } from "../../lib/ipc";
 import {
   usePanesStore,
@@ -70,6 +72,7 @@ import { useBrowserTrustStore } from "../../state/browserTrust";
 import {
   browserCancelAgent,
   browserClearSiteData,
+  browserCloseTab,
   browserConfirmResult,
   browserSetAgentPaused,
   browserTimeline,
@@ -100,6 +103,9 @@ interface TabState {
   /** null = still deciding, true = native child webview, false = iframe fallback. */
   nativeOk: boolean | null;
   createError: string | null;
+  /** Renderer crash reason (Windows WebView2 ProcessFailed) — shows the
+   *  Recover affordance until the user re-creates the pane. */
+  crashed: string | null;
 }
 
 function rectOf(el: HTMLElement): BrowserRect {
@@ -132,6 +138,7 @@ function makeTabState(url: string): TabState {
     loadFailed: false,
     nativeOk: null,
     createError: null,
+    crashed: null,
   };
 }
 
@@ -667,6 +674,46 @@ export function BrowserPane({ pane, visible = true }: Props) {
     [paneId],
   );
 
+  // --- Renderer crash (Windows): the native child died or hung. Surface a
+  // Recover affordance on the pane — without it the OS webview just
+  // vanishes/freezes and the pane shows a permanently blank body with no
+  // way back except closing the tab by hand. ---
+  useEventSubscription<BrowserCrashedPayload>(
+    listenBrowserCrashed,
+    ({ paneId: eventPaneId, tabId, reason }) => {
+      if (eventPaneId !== paneId) return;
+      setTabStates((prev) => {
+        const existing = prev.get(tabId);
+        if (!existing) return prev;
+        const next = new Map(prev);
+        next.set(tabId, { ...existing, crashed: reason || "renderer crashed" });
+        return next;
+      });
+    },
+    [paneId],
+  );
+
+  // Recover a crashed tab: drop the dead native webview and reset its state
+  // so the create effect spins up a fresh one at the same URL. The rect
+  // comes from the body div as in the normal create path.
+  const recoverCrashedTab = (tabId: string) => {
+    createInFlightRef.current.delete(tabId);
+    void browserCloseTab(paneId, tabId).catch(() => {});
+    setTabStates((prev) => {
+      const next = new Map(prev);
+      const existing = prev.get(tabId);
+      if (!existing) return prev;
+      next.set(tabId, {
+        ...existing,
+        nativeOk: null,
+        crashed: null,
+        createError: null,
+        loading: true,
+      });
+      return next;
+    });
+  };
+
   // --- Safety net: the load-end event can be MISSED entirely. `listen()` is
   // async, so on first mount the navigation-start and load-complete
   // subscriptions are still registering when the create path fires the very
@@ -1174,12 +1221,34 @@ export function BrowserPane({ pane, visible = true }: Props) {
           const src = ts ? currentUrl(ts.history) : tab.url;
           const loadFailed = ts?.loadFailed ?? false;
           const createError = ts?.createError ?? null;
+          const crashed = ts?.crashed ?? null;
 
           return (
             <div
               key={tab.tabId}
               style={{ display: isActive && nativeOk !== true ? "block" : "none", width: "100%", height: "100%" }}
             >
+              {/* Crash recovery (Windows): the pane's renderer process died.
+                  The native webview is gone — an iframe reload can't fix that;
+                  the Recover button re-creates it at the same URL. */}
+              {isActive && crashed && (
+                <div className="browser-blocked browser-crashed" data-testid="browser-crashed">
+                  <div style={{ fontWeight: 600 }}>The browser renderer stopped</div>
+                  <div className="hint">{crashed}. Reload the pane to recover this tab.</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      className="primary"
+                      data-testid="browser-recover"
+                      onClick={() => recoverCrashedTab(tab.tabId)}
+                    >
+                      Recover
+                    </button>
+                    <button className="ghost" onClick={openExternal}>
+                      Open externally ↗
+                    </button>
+                  </div>
+                </div>
+              )}
               {nativeOk !== true && (
                 <iframe
                   ref={(el) => {

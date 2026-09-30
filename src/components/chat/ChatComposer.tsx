@@ -12,7 +12,7 @@
 // the OS onto the composer card.
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUpToLine, AudioLines, GripVertical, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
+import { ArrowUpToLine, AudioLines, GripVertical, Info, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { ArtifactTypeSelector } from "./ArtifactTypeSelector";
@@ -116,6 +116,10 @@ interface Props {
    *  "acceptEdits"/"build" aren't built-in PermissionModes). */
   onPermissionModeChange?: (mode: string) => void;
   permissionModeSupported?: boolean;
+  /** Gap flag for harnesses with NO native per-call permission model (pi,
+   *  ACP v1): when set, the composer renders an "in-pane approvals" chip
+   *  with this explanation instead of a silently missing mode menu. */
+  permissionModeNote?: string;
   /** Whether the mode menu offers the "Plan" posture — true for builtin/local
    *  sessions with tools enabled (the plan gate lives in the built-in loop). */
   planAvailable?: boolean;
@@ -199,6 +203,7 @@ export const ChatComposer = memo(function ChatComposer({
   permissionMode,
   onPermissionModeChange,
   permissionModeSupported = true,
+  permissionModeNote,
   planAvailable = false,
   modes: harnessModes,
   effort,
@@ -1734,6 +1739,20 @@ export const ChatComposer = memo(function ChatComposer({
               planAvailable={planAvailable}
               modes={harnessModes}
             />
+          )}
+          {/* Gap flag (approval-parity): harnesses with NO native per-call
+              permission model (pi, ACP v1) get an explicit note chip instead
+              of a silently missing menu — the residual "Relay approval cards
+              are built-in-chat only" gap must be visible, not discoverable. */}
+          {!showModeSelector && permissionModeNote && (
+            <span
+              className="composer-control-chip permission-mode-gap-note"
+              title={permissionModeNote}
+              data-testid="permission-mode-gap-note"
+            >
+              <Info size={12} aria-hidden="true" />
+              in-pane approvals
+            </span>
           )}
           <div className="composer-control-spacer" />
 

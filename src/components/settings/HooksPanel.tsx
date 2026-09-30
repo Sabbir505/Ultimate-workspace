@@ -45,7 +45,12 @@ const TOOL_MATCHER_CHIPS = [
  *  know the session but not the dispatch origin — so the backend keeps them
  *  global and the picker would be a lie here. */
 function isLifecycle(event: HookEvent): boolean {
-  return event === "turn_complete" || event === "session_start";
+  return (
+    event === "turn_complete" ||
+    event === "session_start" ||
+    event === "mesh_message" ||
+    event === "mesh_turn_complete"
+  );
 }
 
 function emptyHook(event: HookEvent): HookDef {
@@ -70,6 +75,8 @@ function eventBadge(event: HookEvent): string {
     case "post_tool_use": return "after";
     case "turn_complete": return "turn done";
     case "session_start": return "session start";
+    case "mesh_message": return "mesh in";
+    case "mesh_turn_complete": return "mesh turn done";
   }
 }
 
@@ -316,6 +323,8 @@ export function HooksPanel() {
             <option value="post_tool_use">After tool (post_tool_use)</option>
             <option value="turn_complete">Turn finished (turn_complete)</option>
             <option value="session_start">First message (session_start)</option>
+            <option value="mesh_message">Mesh mail delivered (mesh_message)</option>
+            <option value="mesh_turn_complete">Mesh turn finished (mesh_turn_complete)</option>
           </select>
           <input
             type="text"

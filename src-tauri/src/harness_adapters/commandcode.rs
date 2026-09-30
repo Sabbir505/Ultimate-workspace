@@ -107,6 +107,20 @@ impl HarnessAdapter for CommandCodeAdapter {
     fn diff_prompt_patterns(&self) -> &'static [Regex] {
         &DIFF_PATTERNS
     }
+
+    fn permission_flags(&self, mode: &str) -> Vec<String> {
+        // Interactive --permission-mode vocabulary (commandcode.ai docs,
+        // re-checked 2026-09): standard | plan | accept-edits | yolo |
+        // dont-ask (fail-closed allowlist for unattended runs). "standard"
+        // and the legacy "default" label pass nothing — the CLI's own
+        // configured default stands.
+        match mode {
+            "plan" | "accept-edits" | "yolo" | "dont-ask" => {
+                vec!["--permission-mode".into(), mode.to_string()]
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

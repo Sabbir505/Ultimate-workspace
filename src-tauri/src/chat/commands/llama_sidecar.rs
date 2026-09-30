@@ -90,10 +90,19 @@ pub(super) fn scan_local_models_blocking(folder: Option<String>, db: &DbState) -
     sys.refresh_memory();
     let total_ram = sys.total_memory();
 
+    // Per-model tool-calling overrides — the user's verdict beats the scan
+    // heuristic in the badge ("forced"/"disabled").
+    let overrides_map = {
+        let conn = db.0.lock();
+        local_models::load_overrides_map(&conn)
+    };
+
     let models: Vec<GgufModel> = files
         .into_iter()
         .map(|f| {
             let mc = memory_class(f.size_bytes, total_ram);
+            let supports_tools = overrides_map.get(&f.id).and_then(|o| o.supports_tools);
+            let tool_support = local_models::tool_support_label(f.tool_support, supports_tools);
             GgufModel {
                 id: f.id,
                 path: f.path,
@@ -107,6 +116,7 @@ pub(super) fn scan_local_models_blocking(folder: Option<String>, db: &DbState) -
                 source: f.source,
                 has_vision: f.has_vision,
                 mmproj_path: f.mmproj_path,
+                tool_support: tool_support.to_string(),
             }
         })
         .collect();

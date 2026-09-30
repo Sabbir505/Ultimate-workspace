@@ -98,6 +98,13 @@ pub fn resolve_db_path(default_dir: &std::path::Path) -> std::path::PathBuf {
 /// versions stored canonicalized `\\?\D:\...` project paths, which cmd.exe
 /// cannot use as a working directory. Rewriting in place keeps the row ids
 /// (and their sessions) intact. No-op on POSIX.
+///
+/// `doc_corpora` joined late (2026-09-30): Knowledge corpora kept storing
+/// the verbatim prefix, which the Knowledge panel showed verbatim
+/// (`\\?\D:\projects\...`) — the visible symptom of "added a corpus, RAG
+/// does nothing" (the rows read as foreign; indexing itself tolerated both
+/// shapes). The `NOT LIKE '\\?\UNC\%'` guard keeps network-share paths out:
+/// `SUBSTR` would mangle `\\?\UNC\s` into `UNC\s`.
 #[cfg(windows)]
 fn migrate_unc_paths(conn: &Connection) -> DbResult<()> {
     conn.execute_batch(
@@ -105,6 +112,8 @@ fn migrate_unc_paths(conn: &Connection) -> DbResult<()> {
         UPDATE projects SET path = SUBSTR(path, 5) WHERE path LIKE '\\?\%';
         UPDATE sessions SET worktree_path = SUBSTR(worktree_path, 5)
           WHERE worktree_path LIKE '\\?\%';
+        UPDATE doc_corpora SET path = SUBSTR(path, 5)
+          WHERE path LIKE '\\?\%' AND path NOT LIKE '\\?\UNC\%';
         ",
     )?;
     Ok(())
@@ -145,6 +154,38 @@ fn migrate_improve_autonomy(conn: &Connection) -> DbResult<()> {
 /// registry link column mirrors each run into the self-improvement loop.
 fn migrate_automation_runs_improve_link(conn: &Connection) -> DbResult<()> {
     let sql = "ALTER TABLE automation_runs ADD COLUMN improve_run_id TEXT REFERENCES improve_runs(id) ON DELETE SET NULL";
+    if let Err(e) = conn.execute(sql, []) {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// P3 flaky-case quarantine: a case whose outcome flips across identical
+/// eval runs is parked (excluded from gating + pack health) instead of
+/// being allowed to veto candidates. Manual un-quarantine via the panel.
+fn migrate_improve_case_quarantine(conn: &Connection) -> DbResult<()> {
+    for sql in [
+        "ALTER TABLE improve_eval_cases ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE improve_eval_cases ADD COLUMN quarantine_reason TEXT NOT NULL DEFAULT ''",
+    ] {
+        if let Err(e) = conn.execute(sql, []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// P3 cost attribution: the throwaway chat sessions the engine creates for
+/// proposer/judge/case turns are recorded on the eval run, so their token +
+/// cost spend attributes back to the artifact (join → chat_messages).
+fn migrate_improve_eval_runs_session(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE improve_eval_runs ADD COLUMN chat_session_id TEXT";
     if let Err(e) = conn.execute(sql, []) {
         let msg = e.to_string();
         if !msg.contains("duplicate column name") {
@@ -255,8 +296,9 @@ fn migrate_doc_chunks_fts(conn: &Connection) -> DbResult<()> {
 
 /// Add the `heading` column to `doc_chunks` (hybrid-RAG contextual
 /// enrichment): the markdown heading trail at the chunk's start, written by
-/// the indexer for display. `''` for chunks before any heading and for
-/// non-markdown files.
+/// the indexer. `''` for chunks before any heading and for non-markdown
+/// files. Since chunk-schema v2 the trail (plus the rel path) is also part
+/// of the embedder input; the column keeps serving display.
 fn migrate_doc_chunks_heading(conn: &Connection) -> DbResult<()> {
     let sql = "ALTER TABLE doc_chunks ADD COLUMN heading TEXT NOT NULL DEFAULT ''";
     if let Err(e) = conn.execute(sql, []) {
@@ -341,6 +383,8 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_messages_perf(conn)?;
     migrate_improve_autonomy(conn)?;
     migrate_automation_runs_improve_link(conn)?;
+    migrate_improve_case_quarantine(conn)?;
+    migrate_improve_eval_runs_session(conn)?;
     migrate_automations_origin(conn)?;
     migrate_automations_triggers(conn)?;
     migrate_chat_fts(conn)?;
@@ -1231,6 +1275,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           expect_json TEXT NOT NULL,          -- JSON: mustContain/mustNotContain/regex arrays + judge flag
           source TEXT NOT NULL DEFAULT 'manual',
           enabled INTEGER NOT NULL DEFAULT 1,
+          quarantined INTEGER NOT NULL DEFAULT 0,   -- P3: flaky case parked out of gating
+          quarantine_reason TEXT NOT NULL DEFAULT '',
           created_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_improve_eval_cases_artifact ON improve_eval_cases(artifact_id, enabled);
@@ -1242,7 +1288,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           started_at INTEGER NOT NULL,
           finished_at INTEGER,
           verdict TEXT,                       -- 'passed'|'failed'
-          report_json TEXT
+          report_json TEXT,
+          chat_session_id TEXT                -- P3: engine throwaway sessions (cost attribution)
         );
 
         CREATE TABLE IF NOT EXISTS improve_eval_results (
@@ -1690,8 +1737,10 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         );
 
         -- heading holds the markdown heading trail at the chunk's start
-        -- ("Guide > Setup", '' when none/non-markdown) — display enrichment
-        -- only, it is NOT part of what gets embedded.
+        -- ("Guide > Setup", '' when none/non-markdown). Since chunk-schema
+        -- v2 the trail + path are part of the text the EMBEDDING was
+        -- computed from (contextual enrichment); content stays raw for the
+        -- FTS index below and for display.
         CREATE TABLE IF NOT EXISTS doc_chunks (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           corpus_id TEXT NOT NULL,
@@ -1926,6 +1975,40 @@ pub(crate) fn mem() -> Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Knowledge corpora kept storing `std::fs::canonicalize`'s verbatim
+    /// `\\?\D:\…` prefix long after projects/sessions were normalized —
+    /// the Knowledge panel showed the raw prefix and the rows read as
+    /// foreign. The migration must rewrite them (once, idempotently) while
+    /// leaving already-plain paths and network-share forms alone.
+    #[test]
+    #[cfg(windows)]
+    fn migrate_unc_paths_rewrites_verbatim_corpus_paths() {
+        let conn = mem();
+        let verbatim = super::docs::add_corpus(
+            &conn,
+            r"\\?\D:\projects\Ultimate-workspace",
+            "Ultimate-workspace",
+        )
+        .unwrap();
+        let plain = super::docs::add_corpus(&conn, r"D:\projects\trading", "trading").unwrap();
+        let unc = super::docs::add_corpus(&conn, r"\\?\UNC\server\share", "nas").unwrap();
+
+        // Re-run: the migration is idempotent (runs on every configure).
+        super::migrate_unc_paths(&conn).unwrap();
+
+        let read = |id: &str| -> String {
+            conn.query_row("SELECT path FROM doc_corpora WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(read(&verbatim.id), r"D:\projects\Ultimate-workspace");
+        assert_eq!(read(&plain.id), r"D:\projects\trading");
+        // SUBSTR would mangle a share path into `UNC\server\share` — it must
+        // stay verbatim (walkdir accepts the form; only display keeps it).
+        assert_eq!(read(&unc.id), r"\\?\UNC\server\share");
+    }
 
     /// Subagent-run sessions link to their definition through `agent_def_id` with
     /// ON DELETE SET NULL: deleting the definition must keep the sessions (a

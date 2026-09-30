@@ -1126,6 +1126,10 @@ pub struct GgufModel {
     pub has_vision: bool,
     /// Absolute path to the companion mmproj GGUF, if found.
     pub mmproj_path: Option<String>,
+    /// Tool-calling verdict, scan heuristic combined with the user's
+    /// per-model override (`tool_support_label`): "template" | "likely" |
+    /// "unknown" | "forced" | "disabled". Drives the picker badge.
+    pub tool_support: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

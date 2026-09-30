@@ -680,6 +680,19 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   const harnessModeOptions = harnessAgent
     ? HARNESS_PERMISSION_MODES[harnessAgent]
     : undefined;
+  // Approval-parity gap flag: harnesses with NO native per-call permission
+  // model (pi — project trust only; ACP v1 — no permission channel) render
+  // an explicit note chip instead of a silently missing menu. The residual
+  // "Relay approval cards are built-in-chat only" gap must be visible.
+  const permissionModeNote = harnessAgent
+    ? !harnessModeOptions
+      ? harnessAgent === "pi"
+        ? "Pi has no per-call approval model Relay can drive — its only lever is the project-trust gate (--approve), and its print modes auto-approve tool calls. Approvals stay inside pi's own TUI; Relay approval cards don't relay into it."
+        : "This harness has no per-call approval model Relay can drive. Approvals stay inside its own TUI; Relay approval cards don't relay into it."
+      : undefined
+    : acpAgent
+      ? "ACP v1 has no permission channel — the agent's own prompts are the only gate, and Relay approval cards don't relay into it."
+      : undefined;
   const handlePermissionModeChange = useCallback(
     (mode: string) => {
       if (!activeChatSessionId) return;
@@ -1982,6 +1995,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           // harness with a native mode catalog (OpenCode build/plan).
           (!harnessAgent && !acpAgent) || !!harnessModeOptions
         }
+        permissionModeNote={permissionModeNote}
         planAvailable={planModeSupported}
         modes={harnessModeOptions}
         agentLoading={harnessAgent ? harnessLoading : false}

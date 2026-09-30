@@ -6,8 +6,9 @@
 // still on screen to read or re-derive from.
 
 import { useEffect, useState } from "react";
-import { Copy, Check, AlertTriangle } from "lucide-react";
+import { Copy, Check, AlertTriangle, Wrench } from "lucide-react";
 import { llmLogGet } from "../../lib/ipc";
+import { summarizeToolCalls } from "../../lib/llmLogTools";
 import type { LlmLogDetail as Detail } from "../../types";
 
 function pretty(body: string): string {
@@ -31,6 +32,69 @@ function Stat({ label, value }: { label: string; value: string | number | null |
       <span className="logs-stat-label">{label}</span>
       <span className="logs-stat-value">{value ?? "—"}</span>
     </div>
+  );
+}
+
+/**
+ * The raw tool-call debug pane: re-derives which tool schemas the request
+ * advertised and which tool calls the response produced (native tool_calls
+ * or Hermes-style text) from the verbatim stored bodies. The point is
+ * per-model trust — "did THIS local model actually emit a parseable tool
+ * call?" — without reading SSE by eye.
+ */
+function ToolCallsPane({ detail }: { detail: Detail }) {
+  const summary = summarizeToolCalls(detail.requestBody, detail.responseBody);
+  const nothing =
+    summary.requestedTools.length === 0 &&
+    summary.respondedCalls.length === 0 &&
+    !summary.requestNote;
+  if (nothing) return null;
+
+  return (
+    <section className="logs-pane logs-tool-pane" data-testid="log-tool-calls">
+      <header className="logs-pane-head">
+        <h3>
+          <Wrench size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />
+          Tool calls
+        </h3>
+      </header>
+      <div className="logs-tool-summary">
+        <div className="logs-tool-row">
+          <span className="logs-tool-label">Tools advertised</span>
+          {summary.requestedTools.length === 0 ? (
+            <span className="logs-tool-none">none in request</span>
+          ) : (
+            <span className="logs-tool-count">{summary.requestedTools.length}</span>
+          )}
+        </div>
+        {summary.requestedTools.length > 0 && (
+          <div className="logs-tool-names">
+            {summary.requestedTools.map((t) => (
+              <code key={t} className="logs-tool-chip">
+                {t}
+              </code>
+            ))}
+          </div>
+        )}
+        <div className="logs-tool-row">
+          <span className="logs-tool-label">Tool calls in response</span>
+          {summary.respondedCalls.length === 0 ? (
+            <span className="logs-tool-none">none parsed</span>
+          ) : (
+            <span className="logs-tool-count">{summary.respondedCalls.length}</span>
+          )}
+        </div>
+        {summary.respondedCalls.map((c, i) => (
+          <div key={`${c.name}-${i}`} className="logs-tool-call">
+            <code className="logs-tool-chip">{c.name}</code>
+            {c.argsPreview && <pre className="logs-tool-args">{c.argsPreview}</pre>}
+          </div>
+        ))}
+        {summary.requestNote && (
+          <div className="logs-tool-none">{summary.requestNote}</div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -113,6 +177,8 @@ export function LogDetail({ id }: { id: string }) {
           Bodies were capped at the configured limit. The untruncated response is not stored.
         </p>
       )}
+
+      <ToolCallsPane detail={detail} />
 
       <section className="logs-pane">
         <header className="logs-pane-head">

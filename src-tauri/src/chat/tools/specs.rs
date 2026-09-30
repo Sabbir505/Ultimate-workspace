@@ -213,6 +213,11 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
                 BROWSER_EXTRACT_DESC,
                 browser_extract_parameters(),
             ),
+            openai_fn(
+                BROWSER_UPLOAD_FILE,
+                BROWSER_UPLOAD_FILE_DESC,
+                browser_upload_file_parameters(),
+            ),
         ]);
     }
     // Persistent memory (MEMORY_DESIGN_ARCHITECTURE.md §12.1) — gated by the
@@ -601,6 +606,11 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
                 BROWSER_EXTRACT,
                 BROWSER_EXTRACT_DESC,
                 browser_extract_parameters(),
+            ),
+            anthropic_fn(
+                BROWSER_UPLOAD_FILE,
+                BROWSER_UPLOAD_FILE_DESC,
+                browser_upload_file_parameters(),
             ),
         ]);
     }
@@ -1237,6 +1247,24 @@ fn browser_read_parameters() -> Value {
             }
         },
         "additionalProperties": false
+    })
+}
+
+/// `browser_upload_file`: a ref (the file input) + a workspace-local path.
+fn browser_upload_file_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": {
+                "type": "integer",
+                "description": "The file input's ref number from the latest browser_read.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Absolute path of the file to upload. Must be inside the workspace (the artifacts dir or the pane's project folder) - anything else is refused.",
+            }
+        },
+        "required": ["ref", "path"],
     })
 }
 
@@ -2778,6 +2806,9 @@ mod tests {
         // so it renders even with no connectors attachable). No single chat
         // turn carries this whole surface any more; the budget guards the
         // registry's aggregate size.
+        // Bumped 55_800→56_500 for browser_upload_file (P3): one gated
+        // interaction tool (~0.6k) so agents can put a workspace file onto a
+        // page's file input — downloads-then-upload flows work end to end.
         // Bumped 53_500→55_800 for the subagent CRUD family (list/create/update/
         // delete_subagent, ~2.3k): the model can AUTHOR the user's
         // declarative subagents on request, not just run them — the same
@@ -2786,8 +2817,8 @@ mod tests {
         // surface is unaffected: the CRUD trio rides `caps.subagent_write` and is
         // stripped from the bridge/subagent registries (ToolCaps::default()).
         assert!(
-            all_on < 55_800,
-            "all-on tool specs total {all_on} chars (budget 55_800) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 56_500,
+            "all-on tool specs total {all_on} chars (budget 56_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 
@@ -2967,6 +2998,11 @@ mod tests {
                 "{name}: memory tools must be stripped when the feature is off");
             assert!(names(&browser_on).iter().any(|n| n == crate::chat::tools::BROWSER_CLICK),
                 "{name}: browser_click must be advertised once the pane is live");
+            // upload_file rides the same gate as the other interaction tools.
+            assert!(!d.iter().any(|n| n == crate::chat::tools::BROWSER_UPLOAD_FILE),
+                "{name}: browser_upload_file must be absent while no page is open");
+            assert!(names(&browser_on).iter().any(|n| n == crate::chat::tools::BROWSER_UPLOAD_FILE),
+                "{name}: browser_upload_file must be advertised once the pane is live");
         }
     }
 

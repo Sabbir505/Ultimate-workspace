@@ -5,7 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { LogsView } from "../components/logs/LogsView";
-import { llmLogList } from "../lib/ipc";
+import { llmLogGet, llmLogList } from "../lib/ipc";
 import type { LlmLogSummary } from "../types";
 
 // vi.mock is hoisted above module-level consts, so the fixtures have to be
@@ -147,6 +147,44 @@ describe("LogsView", () => {
     expect(screen.getByText(/chat\.completion\.chunk/)).toBeTruthy();
     // The runtime's own timings object is kept unparsed.
     expect(screen.getByText(/predicted_per_second/)).toBeTruthy();
+    // A request with no tools and a response with no tool calls renders no
+    // tool-call pane at all — the section exists for the tool story only.
+    expect(screen.queryByTestId("log-tool-calls")).toBeNull();
+  });
+
+  it("derives the tool-call debug pane from raw bodies", async () => {
+    // Override the module mock for this one row: a tools request answered by
+    // a streamed tool call whose arguments arrive in two fragments.
+    vi.mocked(llmLogGet).mockImplementationOnce((id: string) =>
+      Promise.resolve({
+        ...ROWS.find((r) => r.id === id)!,
+        requestBody: JSON.stringify({
+          model: "local",
+          tools: [
+            { type: "function", function: { name: "read_file", parameters: {} } },
+            { type: "function", function: { name: "search_docs", parameters: {} } },
+          ],
+          messages: [],
+        }),
+        responseBody: [
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read_file","arguments":"{\\"path\\":"}}]}}]}',
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"docs/x.md\\"}"}}]}}]}',
+          "data: [DONE]",
+          "",
+        ].join("\n"),
+      }),
+    );
+    render(<LogsView />);
+    fireEvent.click(await screen.findByText("/v1/chat/completions"));
+
+    await waitFor(() => expect(screen.getByTestId("log-tool-calls")).toBeTruthy());
+    // Advertised schemas…
+    expect(screen.getByText("Tools advertised")).toBeTruthy();
+    expect(screen.getAllByText("read_file").length).toBe(2);
+    expect(screen.getByText("search_docs")).toBeTruthy();
+    // …and the response's re-assembled call with its arguments joined.
+    expect(screen.getByText("Tool calls in response")).toBeTruthy();
+    expect(screen.getByText('{"path":"docs/x.md"}')).toBeTruthy();
   });
 
   it("shows the real bound gateway port, not a placeholder", async () => {

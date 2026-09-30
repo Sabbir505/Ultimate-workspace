@@ -43,6 +43,46 @@ impl PerTurn {
     }
 }
 
+/// How long a per-turn CLI has to exit on its own after printing its
+/// semantically-terminal frame before the watchdog kills the process tree,
+/// and how often the watchdog polls. A healthy CLI exits in well under a
+/// second after its final frame (the 5s grace only ever bites wedged
+/// processes), and a turn that ends by process exit is untouched either way.
+const TURN_WATCHDOG_GRACE: Duration = Duration::from_secs(5);
+const TURN_WATCHDOG_POLL: Duration = Duration::from_millis(250);
+
+/// Whether this JSONL frame is the harness's semantically-terminal frame —
+/// the CLI's contract that the turn is complete and the process has nothing
+/// left to do. The reader ends a turn ONLY at process EOF, so a CLI that
+/// prints this frame but never exits (wedged child, a `.cmd` wrapper's
+/// cmd.exe lingering because a spawned grandchild holds the pipe) hangs the
+/// whole completed turn — the reply is fully on screen but `chat:done` never
+/// fires. Detection feeds the completion watchdog (spawn_per_turn); a family
+/// WITHOUT a verified terminal frame returns false for everything and keeps
+/// pure process-exit semantics (nothing changes for it).
+///
+/// Per family (sources verified 2026-09-30):
+/// - CommandCode `-p --output-format json`: one final
+///   `{"type":"result","subtype":…}` line after the wrapped event frames.
+/// - Kimi `--output-format stream-json`: Claude-Code-lineage frames — the
+///   run closes with a `{"type":"result",…}` line ("prints result and
+///   exits after one round"). Same-frame detection as commandcode.
+/// - Pi / Omp `--mode json`: `{"type":"agent_settled"}` is the documented
+///   final record of a fully settled run. `agent_end` is deliberately NOT
+///   terminal — retries/compaction/queued work may follow it (upstream
+///   docs/json.md), and killing there would truncate live turns.
+/// - OpenCode `run --format json`: no documented terminal event (the
+///   process just exits) — and this per-turn path is only the degraded
+///   fallback for the persistent server. Stays process-exit-ended.
+fn is_turn_terminal_frame(kind: PerTurn, v: &Value) -> bool {
+    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match kind {
+        PerTurn::CommandCode | PerTurn::Kimi => ty == "result",
+        PerTurn::Pi | PerTurn::Omp => ty == "agent_settled",
+        PerTurn::OpenCode => false,
+    }
+}
+
 /// Spawn a fresh one-shot process for a single turn, resuming the CLI's own
 /// session when we have its id from a previous turn.
 pub(super) fn spawn_per_turn(
@@ -275,7 +315,7 @@ End your reply with the plan and wait for the user's approval.]"
             spec
         }
         PerTurn::CommandCode => {
-            // The fixed headless flags (-p --output-format json --yolo
+            // The fixed headless flags (-p --output-format json
             // --skip-onboarding --no-auto-update) live in turn_spec's argv —
             // here only the per-session bits ride along. Resume uses
             // `--resume <id>` ("by id or name", CLI reference); `-m` selects
@@ -291,6 +331,30 @@ End your reply with the plan and wait for the user's approval.]"
             if let Some(id) = &resume {
                 flags.push("--resume".into());
                 flags.push(id.clone());
+            }
+            // Native permission posture: the composer's mode menu stores the
+            // CLI's own label. Headless `--permission-mode` accepts
+            // standard|plan|accept-edits|yolo (docs, re-checked 2026-09-30);
+            // standard/plan/accept-edits ride explicitly and REPLACE the
+            // baked --yolo alias (argv_args skips the alias when the flag is
+            // present). "standard" is real enforcement — headless mode
+            // auto-denies mutating tools without --yolo. "yolo" and the
+            // legacy/other labels keep the baked alias; "dont-ask" is
+            // CLI-settings-only (not accepted headless).
+            let harness_mode = {
+                let conn = db.0.lock();
+                crate::db::get_chat_session(&conn, sid)
+                    .ok()
+                    .flatten()
+                    .map(|cs| cs.permission_mode)
+                    .unwrap_or_default()
+            };
+            if matches!(
+                harness_mode.as_str(),
+                "standard" | "plan" | "accept-edits"
+            ) {
+                flags.push("--permission-mode".into());
+                flags.push(harness_mode.clone());
             }
             let (spec, env, transport) = crate::harness_adapters::turn_spec(
                 crate::harness_adapters::TurnHarness::CommandCode,
@@ -419,6 +483,13 @@ End your reply with the plan and wait for the user's approval.]"
     // keep seeing `true` even after the next send replaces the entry's flag.
     let cancelled = Arc::new(AtomicBool::new(false));
     entry.cancelled = Arc::clone(&cancelled);
+    // Terminal-frame flag: the reader flips it when the harness prints its
+    // semantically-final frame (is_turn_terminal_frame); the watchdog below
+    // then bounds how long the CLI may linger before the turn is force-
+    // closed. Fresh per turn like `cancelled`.
+    let terminal_seen = Arc::new(AtomicBool::new(false));
+    let terminal_reader = Arc::clone(&terminal_seen);
+    let cancelled_reader = Arc::clone(&cancelled);
 
     // E-5 for the per-turn CLIs: every turn spawns a fresh process, so each
     // send bumps the generation and the reader clears `turn_in_flight` only
@@ -444,7 +515,8 @@ End your reply with the plan and wait for the user's approval.]"
             &in_flight2,
             &session_cell,
             kind,
-            &cancelled,
+            &cancelled_reader,
+            &terminal_reader,
             watches,
             &proc_generation,
             my_generation,
@@ -452,6 +524,65 @@ End your reply with the plan and wait for the user's approval.]"
             None,
         );
     });
+
+    // Turn-completion watchdog. `read_per_turn_stream` ends a turn ONLY when
+    // the CLI process exits (stdout EOF), so a harness that prints its final
+    // frame and then never exits used to hang the whole completed turn —
+    // reply fully streamed, `chat:done` never fired (observed live on the
+    // CommandCode family). Once the reader flags the terminal frame, this
+    // watcher grants the process a short grace to exit on its own and then
+    // kills ONLY the child tree (kill_child_if_generation): stdout closes,
+    // the reader wakes on EOF, and the NORMAL completion path persists the
+    // full reply — no cancel semantics, nothing discarded. Generation and
+    // in-flight checks make a watcher from a superseded/cancelled turn a
+    // no-op (E-5), and a clean exit mid-grace is detected before any kill.
+    if !matches!(kind, PerTurn::OpenCode) {
+        let app3 = app.clone();
+        let sid3 = sid.to_string();
+        let in_flight3 = Arc::clone(&entry.turn_in_flight);
+        let gen3 = Arc::clone(&entry.proc_generation);
+        let cancelled3 = Arc::clone(&cancelled);
+        let terminal3 = Arc::clone(&terminal_seen);
+        std::thread::spawn(move || {
+            // Phase 1: wait for the terminal frame (or the turn to end by
+            // itself). Exits when the turn completes, is cancelled, or a
+            // newer send superseded this process.
+            loop {
+                std::thread::sleep(TURN_WATCHDOG_POLL);
+                if cancelled3.load(Ordering::SeqCst)
+                    || gen3.load(Ordering::SeqCst) != my_generation
+                    || !in_flight3.load(Ordering::SeqCst)
+                {
+                    return;
+                }
+                if terminal3.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            // Phase 2: grace for the CLI to exit on its own.
+            let deadline = std::time::Instant::now() + TURN_WATCHDOG_GRACE;
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(TURN_WATCHDOG_POLL);
+                if cancelled3.load(Ordering::SeqCst)
+                    || gen3.load(Ordering::SeqCst) != my_generation
+                    || !in_flight3.load(Ordering::SeqCst)
+                {
+                    return;
+                }
+            }
+            let killed =
+                app3.state::<crate::agent_sessions::AgentSessionState>()
+                    .0
+                    .kill_child_if_generation(&sid3, my_generation);
+            if killed {
+                eprintln!(
+                    "[agent_sessions] {sid3}: {} printed its terminal frame but never exited \
+— watchdog killed the CLI tree to close the turn",
+                    kind.display()
+                );
+            }
+        });
+    }
     Ok(())
 }
 
@@ -469,6 +600,10 @@ pub(super) fn read_per_turn_stream(
     session_cell: &Arc<Mutex<Option<String>>>,
     kind: PerTurn,
     cancelled: &AtomicBool,
+    // Flipped when the harness prints its semantically-terminal frame —
+    // arms the spawn-side completion watchdog. One-shot automation runs
+    // pass a throwaway (their turns are bounded by `max_duration` instead).
+    terminal_seen: &AtomicBool,
     mut watches: Vec<DirWatch>,
     proc_generation: &AtomicU64,
     my_generation: u64,
@@ -597,6 +732,12 @@ pub(super) fn read_per_turn_stream(
                 &mut tools,
                 &mut seen_tools,
             ),
+        }
+        // Arm the completion watchdog when the harness declares the turn
+        // semantically over — the process still has to exit (or be killed
+        // after the grace) for EOF to close the turn.
+        if is_turn_terminal_frame(kind, &v) {
+            terminal_seen.store(true, Ordering::SeqCst);
         }
         partial.maybe_flush(db, sid, &full);
     }
@@ -732,5 +873,138 @@ pub(super) fn read_per_turn_stream(
         if let (Some(pending_id), Some(h)) = (registered_ask, app) {
             super::ask::emit_relay_ask(h, sid, pending_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The watchdog's trigger table: only a family's VERIFIED terminal frame
+    /// may arm the kill. `agent_end` must stay non-terminal (retries /
+    /// compaction / queued work may follow it — killing there would truncate
+    /// live pi/omp turns), and OpenCode keeps pure process-exit semantics.
+    #[test]
+    fn terminal_frame_detection_is_per_family() {
+        let result = json!({ "type": "result", "subtype": "success", "finalText": "done" });
+        let cc_event = json!({ "type": "event", "event": { "type": "run_end" } });
+        let settled = json!({ "type": "agent_settled" });
+        let agent_end = json!({ "type": "agent_end", "messages": [], "willRetry": true });
+        let delta = json!({
+            "type": "message_update",
+            "assistantMessageEvent": { "type": "text_delta", "delta": "hi" }
+        });
+        let kimi_assistant = json!({ "role": "assistant", "content": "hi" });
+
+        for kind in [PerTurn::CommandCode, PerTurn::Kimi] {
+            assert!(is_turn_terminal_frame(kind, &result), "{kind:?} result frame");
+            assert!(!is_turn_terminal_frame(kind, &cc_event));
+            assert!(!is_turn_terminal_frame(kind, &kimi_assistant));
+            assert!(!is_turn_terminal_frame(kind, &settled));
+        }
+        for kind in [PerTurn::Pi, PerTurn::Omp] {
+            assert!(is_turn_terminal_frame(kind, &settled), "{kind:?} agent_settled");
+            // agent_end may be followed by retries/compaction — never kill on it.
+            assert!(!is_turn_terminal_frame(kind, &agent_end));
+            assert!(!is_turn_terminal_frame(kind, &delta));
+            assert!(!is_turn_terminal_frame(kind, &result));
+        }
+        // OpenCode: no verified terminal event — process-exit semantics only.
+        for frame in [&result, &cc_event, &settled, &agent_end, &delta] {
+            assert!(!is_turn_terminal_frame(PerTurn::OpenCode, frame));
+        }
+    }
+
+    /// Minimal live entry with a real sleeper child, mirroring the send-path
+    /// construction (mod.rs `or_insert_with`).
+    fn entry_with_child(child: Option<Child>, generation: u64) -> Arc<Mutex<AgentChild>> {
+        Arc::new(Mutex::new(AgentChild {
+            harness: "commandcode".to_string(),
+            model: String::new(),
+            child,
+            spawned_model: None,
+            spawned_mode: None,
+            spawned_effort: None,
+            spawned_cwd: None,
+            spawned_connectors: Vec::new(),
+            cli_session_id: Arc::new(Mutex::new(None)),
+            turn_in_flight: Arc::new(AtomicBool::new(false)),
+            reader_alive: Arc::new(AtomicBool::new(false)),
+            proc_generation: Arc::new(AtomicU64::new(generation)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            stdin: Arc::new(Mutex::new(None)),
+            acp_pending: Arc::new(Mutex::new(None)),
+            acp_request_id: Arc::new(Mutex::new(None)),
+            acp_last_prompt: Arc::new(Mutex::new(None)),
+            send_ctx: std::sync::Mutex::new(None),
+            oc_base_url: None,
+            oc_full: Arc::new(Mutex::new(String::new())),
+            oc_in_think: Arc::new(Mutex::new(false)),
+            oc_last_event_ms: Arc::new(AtomicU64::new(0)),
+            oc_config_stamp: Arc::new(Mutex::new(None)),
+            oc_reader_alive: Arc::new(AtomicBool::new(false)),
+        }))
+    }
+
+    fn spawn_sleeper() -> Child {
+        let mut cmd = Command::new("cmd.exe");
+        cmd.args(["/C", "ping -n 8 127.0.0.1 >nul"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        no_console_window(&mut cmd);
+        cmd.spawn().expect("sleeper spawn")
+    }
+
+    /// The watchdog's kill lever: only the CURRENT spawn generation's child
+    /// may die, the kill empties the slot (a cancel/new spawn racing first is
+    /// a no-op, never a double-kill of a recycled pid), and a surviving child
+    /// proves the generation guard left it untouched.
+    #[test]
+    fn kill_child_if_generation_gates_on_generation_and_empties_the_slot() {
+        let mgr = AgentSessionManager::new();
+        let entry = entry_with_child(Some(spawn_sleeper()), 7);
+        mgr.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("wd-gen-test".to_string(), Arc::clone(&entry));
+
+        // Stale watcher (older generation) → nothing dies, child still live.
+        assert!(!mgr.kill_child_if_generation("wd-gen-test", 6));
+        let still_live = entry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .child
+            .as_mut()
+            .expect("child kept")
+            .try_wait()
+            .expect("try_wait");
+        assert!(still_live.is_none(), "sleeper must still be running");
+
+        // Current generation → killed, and the slot is emptied: a second
+        // call (or a racing cancel) finds nothing to kill.
+        assert!(mgr.kill_child_if_generation("wd-gen-test", 7));
+        assert!(!mgr.kill_child_if_generation("wd-gen-test", 7));
+        assert!(
+            entry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .child
+                .is_none()
+        );
+    }
+
+    /// A session with no live child (never spawned, or already reaped) is a
+    /// clean no-op — the watchdog must not error or resurrect anything.
+    #[test]
+    fn kill_child_if_generation_handles_missing_sessions_and_children() {
+        let mgr = AgentSessionManager::new();
+        assert!(!mgr.kill_child_if_generation("wd-missing", 1));
+        let entry = entry_with_child(None, 3);
+        mgr.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("wd-empty".to_string(), entry);
+        assert!(!mgr.kill_child_if_generation("wd-empty", 3));
     }
 }

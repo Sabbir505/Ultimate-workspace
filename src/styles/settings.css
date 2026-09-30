@@ -3108,3 +3108,75 @@
   color: #fff;
   background: rgba(0, 0, 0, 0.45);
 }
+
+/* P3: pack health rows + eval-case quarantine controls (ImprovementsPanel). */
+.improve-pack-health {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.improve-pack-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+.improve-pack-stat {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.improve-pack-stat.quarantined {
+  color: var(--yellow, #eab308);
+}
+.improve-pack-suspect {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--yellow, #eab308);
+  white-space: nowrap;
+}
+.improve-count-chip.warn {
+  background: color-mix(in srgb, var(--yellow, #eab308) 16%, transparent);
+  color: var(--yellow, #eab308);
+}
+.improve-cases {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+}
+.improve-case-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.improve-case-row.quarantined {
+  opacity: 0.75;
+}
+.improve-case-input {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+/* Artifact cost attribution table (CostDashboard → ArtifactCostPanel). */
+.cost-artifact-panel {
+  margin-top: 8px;
+}
+.cost-artifact-table th.num,
+.cost-artifact-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

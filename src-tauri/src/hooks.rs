@@ -80,13 +80,27 @@ pub enum HookEvent {
     TurnComplete,
     /// Fires detached when a session's FIRST message is sent. Observe-only.
     SessionStart,
+    /// Session Mesh: fires detached when a mesh mail is DELIVERED into a
+    /// session (the envelope turn is about to run). Observe-only.
+    /// (Session Mesh P4.)
+    MeshMessage,
+    /// Session Mesh: fires detached when a WATCHED mesh turn ends — the
+    /// target went idle and the answer was captured (or the watch expired).
+    /// Observe-only. (Session Mesh P4.)
+    MeshTurnComplete,
 }
 
 impl HookEvent {
     /// Lifecycle hooks never gate anything: they are detached observers with
     /// no result text to annotate and no tool call to deny.
     pub fn is_lifecycle(self) -> bool {
-        matches!(self, HookEvent::TurnComplete | HookEvent::SessionStart)
+        matches!(
+            self,
+            HookEvent::TurnComplete
+                | HookEvent::SessionStart
+                | HookEvent::MeshMessage
+                | HookEvent::MeshTurnComplete
+        )
     }
 }
 
@@ -153,7 +167,7 @@ impl HookDef {
     /// Stable identity for the exec-gate allow entry: the command plus its
     /// argument TEMPLATE (not the per-call substitution), so one Allow covers
     /// every invocation of the same configured hook.
-    fn gate_ident(&self) -> String {
+    pub(crate) fn gate_ident(&self) -> String {
         format!("{}\u{1}{}", self.command, self.args.join("\u{1}"))
     }
 }
@@ -561,6 +575,8 @@ pub fn event_name(event: HookEvent) -> &'static str {
         HookEvent::PostToolUse => "post_tool_use",
         HookEvent::TurnComplete => "turn_complete",
         HookEvent::SessionStart => "session_start",
+        HookEvent::MeshMessage => "mesh_message",
+        HookEvent::MeshTurnComplete => "mesh_turn_complete",
     }
 }
 
@@ -633,6 +649,61 @@ pub fn lifecycle_detached<R: tauri::Runtime>(
                 "error"
             };
             emit_hook_run(&app, Some(&sid), event, &def, "", verdict, &outcome, started.elapsed().as_millis());
+        }
+    });
+    drop(spawned);
+}
+
+/// Fire the Session Mesh lifecycle hooks (`mesh_message` on delivery,
+/// `mesh_turn_complete` when a watched turn ends) without awaiting them —
+/// the mesh sibling of [`lifecycle_detached`], carrying the mesh fields the
+/// turn events lack: `from_session`, `mail_id`, `mode`, and the envelope/
+/// answer preview. Same contract: detached, global (never origin-scoped —
+/// the mesh has no dispatch origin in hand), `PreTrusted`, outputs ignored.
+pub fn mesh_event_detached<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    event: HookEvent,
+    target_sid: &str,
+    from_session: &str,
+    mail_id: &str,
+    mode: &str,
+    status: &str,
+    preview: &str,
+) {
+    debug_assert!(matches!(event, HookEvent::MeshMessage | HookEvent::MeshTurnComplete));
+    let app = app.clone();
+    let target_sid = target_sid.to_string();
+    let from_session = from_session.to_string();
+    let mail_id = mail_id.to_string();
+    let mode = mode.to_string();
+    let status = status.to_string();
+    let preview = crate::util::truncate_chars(preview, RESULT_SNIPPET_CHARS);
+    let spawned = tauri::async_runtime::spawn(async move {
+        let defs: Vec<HookDef> = load_config(&app)
+            .into_iter()
+            .filter(|d| d.enabled && d.event == event)
+            .filter(|d| hook_matches(&d.matcher, ""))
+            .collect();
+        for def in defs {
+            let payload = json!({
+                "hook_event_name": event_name(event),
+                "chat_session_id": target_sid,
+                "from_session": from_session,
+                "mail_id": mail_id,
+                "mode": mode,
+                "status": status,
+                "reply_preview": preview,
+            });
+            let started = Instant::now();
+            let outcome = run_hook_gated(&app, &def, &payload, GateMode::PreTrusted).await;
+            let verdict = if !outcome.ran {
+                if outcome.gate_denied { "untrusted" } else { "error" }
+            } else if outcome.exit_code == Some(0) {
+                "ok"
+            } else {
+                "error"
+            };
+            emit_hook_run(&app, Some(&target_sid), event, &def, "", verdict, &outcome, started.elapsed().as_millis());
         }
     });
     drop(spawned);
@@ -1225,6 +1296,24 @@ pub async fn test_hook<R: tauri::Runtime>(app: &AppHandle<R>, def: &HookDef) -> 
             "hook_event_name": "session_start",
             "chat_session_id": null,
             "status": "start",
+            "reply_preview": "Relay hook test",
+        }),
+        HookEvent::MeshMessage => json!({
+            "hook_event_name": "mesh_message",
+            "chat_session_id": null,
+            "from_session": null,
+            "mail_id": "test",
+            "mode": "question",
+            "status": "delivered",
+            "reply_preview": "Relay hook test",
+        }),
+        HookEvent::MeshTurnComplete => json!({
+            "hook_event_name": "mesh_turn_complete",
+            "chat_session_id": null,
+            "from_session": null,
+            "mail_id": "test",
+            "mode": "question",
+            "status": "answered",
             "reply_preview": "Relay hook test",
         }),
         HookEvent::PreToolUse => hook_payload(

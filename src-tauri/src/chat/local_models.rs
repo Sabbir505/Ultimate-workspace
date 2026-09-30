@@ -22,6 +22,11 @@ pub struct GgufMeta {
     pub architecture: Option<String>,
     pub param_count_label: Option<String>,
     pub quantization: Option<String>,
+    /// True when the GGUF's `tokenizer.chat_template` renders tool calls
+    /// (the Jinja references `tools`/`tool_calls`) — the strongest static
+    /// signal that the model can do OpenAI-style tool calling through
+    /// llama-server's `--jinja` path.
+    pub tool_template: bool,
 }
 
 /// Architectures that only make sense as embedding models (served with
@@ -57,6 +62,64 @@ pub fn is_chat_gguf_arch(arch: Option<&str>) -> bool {
     }
 }
 
+/// Architectures whose mainstream chat templates ship tool-calling support.
+/// Weaker than reading the actual `tokenizer.chat_template` (a fine-tune can
+/// drop tool support from a capable arch), so this only feeds the "likely"
+/// badge tier — never a hard claim.
+pub fn is_tool_capable_arch(arch: &str) -> bool {
+    matches!(
+        arch,
+        "qwen2" | "qwen2_moe" | "qwen3" | "qwen3_moe" | "qwen31_moe"
+            | "llama4" | "mistral" | "minicpm" | "glm4" | "granite"
+            | "command2" | "commandr" | "command-r" | "phi4" | "magistral"
+    )
+}
+
+/// Static tool-calling signal for a scanned GGUF — drives the picker badge
+/// and pairs with the per-model `supports_tools` override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSupport {
+    /// `tokenizer.chat_template` renders tool calls — native support.
+    Template,
+    /// Architecture family ships tool templates, but this file's template
+    /// doesn't advertise it (or wasn't readable).
+    Likely,
+    /// No signal either way.
+    Unknown,
+}
+
+impl ToolSupport {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolSupport::Template => "template",
+            ToolSupport::Likely => "likely",
+            ToolSupport::Unknown => "unknown",
+        }
+    }
+}
+
+/// Jinja chat templates that render tool calls always mention the tool list
+/// or tool-call slots. Lowercase substring probe over the raw template.
+fn template_advertises_tools(template: &str) -> bool {
+    let t = template.to_ascii_lowercase();
+    t.contains("tools") || t.contains("tool_call") || t.contains("toolcall")
+}
+
+/// Combine the static scan signal with the user's per-model override.
+/// The override WINS: `Some(false)` → disabled, `Some(true)` → forced on
+/// even without a static signal (model families the heuristics don't know).
+/// Wire values match `ToolSupport::as_str` plus `forced`/`disabled`.
+pub fn tool_support_label(
+    scan: ToolSupport,
+    supports_tools: Option<bool>,
+) -> &'static str {
+    match supports_tools {
+        Some(true) => "forced",
+        Some(false) => "disabled",
+        None => scan.as_str(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GgufFile {
     pub id: String,
@@ -72,6 +135,8 @@ pub struct GgufFile {
     pub has_vision: bool,
     /// Absolute path to the companion mmproj GGUF, if found.
     pub mmproj_path: Option<String>,
+    /// Static tool-calling signal (template probe + architecture heuristic).
+    pub tool_support: ToolSupport,
 }
 
 // ---- Memory sanity ----
@@ -120,6 +185,7 @@ pub fn parse_gguf(path: &Path) -> GgufMeta {
         architecture: None,
         param_count_label: None,
         quantization: None,
+        tool_template: false,
     };
 
     let mut file = match fs::File::open(path) {
@@ -222,6 +288,12 @@ pub fn parse_gguf(path: &Path) -> GgufMeta {
         .remove("general.file_type")
         .or_else(|| kv.remove("general.quantization_version"))
         .or_else(|| kv.remove("tokenizer.ggml.type"));
+    // Tool-calling signal: the chat template itself. String KVs only (the
+    // parser stores type-8 values), so this reads the raw Jinja.
+    meta.tool_template = kv
+        .remove("tokenizer.chat_template")
+        .map(|t| template_advertises_tools(&t))
+        .unwrap_or(false);
 
     meta
 }
@@ -430,6 +502,18 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
         };
         let size_bytes = meta_info.len();
         let full_path = path.to_string_lossy().to_string();
+        let tool_support = if meta.tool_template {
+            ToolSupport::Template
+        } else if meta
+            .architecture
+            .as_deref()
+            .map(is_tool_capable_arch)
+            .unwrap_or(false)
+        {
+            ToolSupport::Likely
+        } else {
+            ToolSupport::Unknown
+        };
         files.push(GgufFile {
             id: full_path.clone(),
             path: full_path,
@@ -439,6 +523,7 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
             source: source.to_string(),
             has_vision,
             mmproj_path,
+            tool_support,
         });
     }
     files
@@ -663,6 +748,10 @@ pub struct LlamaOverrides {
     /// Free-form extra args, whitespace-split and appended verbatim —
     /// the power-user escape hatch for flags we don't surface.
     pub extra_args: Option<String>,
+    /// Tool-calling verdict for this model: None = trust the scan heuristic,
+    /// Some(true) = force the tool loop on, Some(false) = the model cannot
+    /// render tool calls — local_gguf turns skip tools instead of 400ing.
+    pub supports_tools: Option<bool>,
     /// Auto-recorded ngl of the last successful start (backend-written).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_good_ngl: Option<i32>,
@@ -752,6 +841,21 @@ pub fn load_overrides_map(conn: &rusqlite::Connection) -> HashMap<String, LlamaO
         .flatten()
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default()
+}
+
+/// Whether tool calling is explicitly DISABLED for the active local sidecar
+/// (`supports_tools: false` on its overrides). The heuristic never disables —
+/// only an explicit user "no" does, so an unknown-arch model that actually
+/// works keeps working. `active_model_id` is the `chat.local_gguf.model`
+/// setting (empty/missing sidecar → tools stay as the caller set them).
+pub fn tools_disabled_for_active_model(
+    conn: &rusqlite::Connection,
+    active_model_id: Option<&str>,
+) -> bool {
+    active_model_id
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| load_overrides(conn, id).supports_tools == Some(false))
+        .unwrap_or(false)
 }
 
 /// The persisted overrides for one model (default when absent).
@@ -1240,6 +1344,15 @@ impl LocalModelRegistry {
                 "--host".to_string(),
                 "127.0.0.1".to_string(),
                 "-c".to_string(),
+                "2048".to_string(),
+                // Physical batch must cover the context: embeddings need
+                // pooling, and with pooling llama-server rejects any input
+                // longer than the ubatch outright (HTTP 500 "Input (N tokens)
+                // is too large to process. increase the physical batch size",
+                // default 512). Corpus chunks target 1800 chars plus the
+                // path·heading enrichment — ~600 tokens on dense text — which
+                // tripped exactly that limit and aborted whole index runs.
+                "--ubatch-size".to_string(),
                 "2048".to_string(),
                 "--embedding".to_string(),
                 "--n-gpu-layers".to_string(),
@@ -2711,6 +2824,93 @@ mod tests {
         // A user/last-good rung that is also a fallback rung mustn't repeat.
         assert_eq!(build_ngl_ladder(32), vec![32, 64, 16, 8, 4, 0]);
         assert_eq!(build_ngl_ladder(0), vec![0, 64, 32, 16, 8, 4]);
+    }
+
+    #[test]
+    fn tool_template_probe_matches_jinja_markers() {
+        assert!(template_advertises_tools(
+            "{% for t in tools %}{{ t.function.name }}{% endfor %}"
+        ));
+        assert!(template_advertises_tools(
+            "{{ content }}<tool_call>{{ name }}</tool_call>"
+        ));
+        assert!(template_advertises_tools("ToolCall rendering"));
+        assert!(!template_advertises_tools("You are a helpful assistant."));
+        // The word "tool" alone (e.g. "don't invent tools") without the
+        // plural/call markers is not a template that renders tool calls.
+        assert!(!template_advertises_tools("never fabricate a tool result"));
+    }
+
+    #[test]
+    fn tool_support_label_override_beats_heuristic() {
+        // Heuristic alone.
+        assert_eq!(tool_support_label(ToolSupport::Template, None), "template");
+        assert_eq!(tool_support_label(ToolSupport::Likely, None), "likely");
+        assert_eq!(tool_support_label(ToolSupport::Unknown, None), "unknown");
+        // The user's explicit verdict always wins.
+        assert_eq!(
+            tool_support_label(ToolSupport::Template, Some(false)),
+            "disabled"
+        );
+        assert_eq!(
+            tool_support_label(ToolSupport::Unknown, Some(true)),
+            "forced"
+        );
+    }
+
+    #[test]
+    fn tools_disabled_requires_explicit_override_on_the_active_model() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+
+        // No active model / no override → tools stay as the caller set them.
+        assert!(!tools_disabled_for_active_model(&conn, None));
+        assert!(!tools_disabled_for_active_model(&conn, Some("")));
+        assert!(!tools_disabled_for_active_model(&conn, Some("C:/m/a.gguf")));
+
+        // Explicit "no" on the active model disables.
+        let mut map = HashMap::new();
+        map.insert(
+            "C:/m/a.gguf".to_string(),
+            LlamaOverrides {
+                supports_tools: Some(false),
+                ..Default::default()
+            },
+        );
+        crate::db::set_setting(
+            &conn,
+            OVERRIDES_KEY,
+            &serde_json::to_string(&map).unwrap(),
+        )
+        .unwrap();
+        assert!(tools_disabled_for_active_model(&conn, Some("C:/m/a.gguf")));
+
+        // ...but a DIFFERENT active model (or a forced-yes entry) does not.
+        assert!(!tools_disabled_for_active_model(&conn, Some("C:/m/b.gguf")));
+        map.insert(
+            "C:/m/b.gguf".to_string(),
+            LlamaOverrides {
+                supports_tools: Some(true),
+                ..Default::default()
+            },
+        );
+        crate::db::set_setting(
+            &conn,
+            OVERRIDES_KEY,
+            &serde_json::to_string(&map).unwrap(),
+        )
+        .unwrap();
+        assert!(!tools_disabled_for_active_model(&conn, Some("C:/m/b.gguf")));
+    }
+
+    #[test]
+    fn arch_heuristic_covers_mainstream_tool_families() {
+        assert!(is_tool_capable_arch("qwen3"));
+        assert!(is_tool_capable_arch("qwen3_moe"));
+        assert!(is_tool_capable_arch("llama4"));
+        assert!(is_tool_capable_arch("glm4"));
+        assert!(!is_tool_capable_arch("gemma3"));
+        assert!(!is_tool_capable_arch("stablelm"));
     }
 
     #[test]

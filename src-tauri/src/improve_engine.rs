@@ -62,12 +62,14 @@ pub fn resolve_active_chat_model(conn: &Connection) -> Option<(String, String)> 
 
 /// Run one blocking chat turn with `body` as the working instructions and
 /// `input` as the user request, in a throwaway session. Returns the
-/// assistant's reply text. Cost flows through chat_messages → cost rollups.
+/// assistant's reply text and the SESSION ID — P3: the id lands on the eval
+/// run so the turn's token/cost spend attributes back to the artifact
+/// (artifact_cost_rollups) instead of vanishing into the generic chat total.
 pub fn run_artifact_turn(
     db: &Arc<parking_lot::Mutex<Connection>>,
     body: &str,
     input: &str,
-) -> EngResult<String> {
+) -> EngResult<(String, String)> {
     let (provider, model) = {
         let conn = db.lock();
         resolve_active_chat_model(&conn).ok_or_else(|| {
@@ -83,14 +85,16 @@ pub fn run_artifact_turn(
     let prompt = format!("{body}\n\n---\n\nUser request: {input}");
     crate::chat::run_one_shot_chat(db, &session_id, &prompt, &provider, &model, None)?;
     let conn = db.lock();
-    conn.query_row(
-        "SELECT content FROM chat_messages
-          WHERE chat_session_id = ?1 AND role = 'assistant'
-          ORDER BY id DESC LIMIT 1",
-        rusqlite::params![session_id],
-        |r| r.get::<_, String>(0),
-    )
-    .map_err(|e| format!("eval turn left no assistant reply: {e}"))
+    let reply = conn
+        .query_row(
+            "SELECT content FROM chat_messages
+              WHERE chat_session_id = ?1 AND role = 'assistant'
+              ORDER BY id DESC LIMIT 1",
+            rusqlite::params![session_id],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|e| format!("eval turn left no assistant reply: {e}"))?;
+    Ok((reply, session_id))
 }
 
 /// Extract the first balanced JSON object from a possibly chatty/fenced reply.
@@ -232,7 +236,7 @@ JSON shape (all keys required):\n\
         },
     );
 
-    let reply = run_artifact_turn(db, PROPOSER_INSTRUCTIONS, &proposer_prompt)?;
+    let (reply, _proposer_session) = run_artifact_turn(db, PROPOSER_INSTRUCTIONS, &proposer_prompt)?;
     let json = extract_json(&reply).ok_or("proposer reply contained no JSON object")?;
     let parsed: serde_json::Value = serde_json::from_str(&json).map_err(|e| format!("bad proposer JSON: {e}"))?;
     let change_summary = parsed
@@ -359,6 +363,37 @@ pub fn evaluate_proposal(db: &Arc<parking_lot::Mutex<Connection>>, proposal_id: 
     }
     improve::set_proposal_status(&db.lock(), proposal_id, "evaluating", None).map_err(|e| e.to_string())?;
 
+    // P3 flaky quarantine FIRST: cases whose outcome flipped across
+    // identical eval runs are parked before this pass consumes them — a
+    // nondeterministic case must not veto a candidate (design §"Flaky
+    // cases are auto-quarantined"). Newly quarantined ids ride the report.
+    let newly_quarantined: Vec<String> = {
+        let conn = db.lock();
+        improve::quarantine_flaky_cases(&conn, &artifact.id).map_err(|e| e.to_string())?
+    };
+    let quarantined_in_pack = cases.iter().filter(|c| c.quarantined).count();
+    let cases: Vec<EvalCase> = cases
+        .into_iter()
+        .filter(|c| {
+            if c.quarantined {
+                eprintln!(
+                    "[improve] skipping quarantined eval case {} for {}",
+                    &c.id[..c.id.len().min(8)],
+                    artifact.name
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    if cases.is_empty() {
+        // Every case is quarantined (or was already): nothing to gate on.
+        improve::set_proposal_status(&db.lock(), proposal_id, "failed_eval", None)
+            .map_err(|e| e.to_string())?;
+        return Err("every eval case is quarantined — un-quarantine or re-harvest the pack first".into());
+    }
+
     let eval_run_id = {
         let conn = db.lock();
         let id = uuid::Uuid::new_v4().to_string();
@@ -371,8 +406,11 @@ pub fn evaluate_proposal(db: &Arc<parking_lot::Mutex<Connection>>, proposal_id: 
     };
 
     let mut outcomes = Vec::new();
+    // P3 cost attribution: every throwaway session this eval creates is
+    // stamped onto the run (comma-joined) when it finalizes.
+    let mut eval_sessions: Vec<String> = Vec::new();
     for case in &cases {
-        let outcome = eval_case(db, &artifact, &base_body, &cand_body, case);
+        let outcome = eval_case(db, &artifact, &base_body, &cand_body, case, &mut eval_sessions);
         let ok = outcome.is_ok();
         let res = match &outcome {
             Ok(o) => CaseOutcome {
@@ -412,6 +450,8 @@ pub fn evaluate_proposal(db: &Arc<parking_lot::Mutex<Connection>>, proposal_id: 
     let verdict = apply_regression_gate(&outcomes);
     let report = serde_json::json!({
         "verdict": verdict,
+        "quarantinedCases": newly_quarantined,
+        "skippedQuarantined": quarantined_in_pack,
         "cases": outcomes.iter().map(|o| serde_json::json!({
             "caseId": o.case_id,
             "championOk": o.champion_ok,
@@ -424,8 +464,15 @@ pub fn evaluate_proposal(db: &Arc<parking_lot::Mutex<Connection>>, proposal_id: 
     {
         let conn = db.lock();
         conn.execute(
-            "UPDATE improve_eval_runs SET finished_at = ?2, verdict = ?3, report_json = ?4 WHERE id = ?1",
-            rusqlite::params![eval_run_id, db::now_ts(), verdict, report.to_string()],
+            "UPDATE improve_eval_runs SET finished_at = ?2, verdict = ?3, report_json = ?4,
+                    chat_session_id = ?5 WHERE id = ?1",
+            rusqlite::params![
+                eval_run_id,
+                db::now_ts(),
+                verdict,
+                report.to_string(),
+                eval_sessions.join(","),
+            ],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -583,11 +630,14 @@ fn eval_case(
     base_body: &str,
     cand_body: &str,
     case: &EvalCase,
+    sessions: &mut Vec<String>,
 ) -> EngResult<CaseOutcome> {
     let expect: CaseExpectations =
         serde_json::from_str(&case.expect_json).map_err(|e| format!("bad expect_json: {e}"))?;
-    let champion_reply = run_artifact_turn(db, base_body, &case.input_text)?;
-    let candidate_reply = run_artifact_turn(db, cand_body, &case.input_text)?;
+    let (champion_reply, s1) = run_artifact_turn(db, base_body, &case.input_text)?;
+    sessions.push(s1);
+    let (candidate_reply, s2) = run_artifact_turn(db, cand_body, &case.input_text)?;
+    sessions.push(s2);
 
     let deterministic = |reply: &str| -> (bool, Vec<String>) {
         let mut failures = Vec::new();
@@ -630,7 +680,8 @@ Score each response 1–5 against the rubric. Respond with ONLY JSON: \
             expect.rubric.as_deref().unwrap_or("Correctly and completely addresses the user's request."),
             case.input_text, a, b,
         );
-        let judge_reply = run_artifact_turn(db, JUDGE_INSTRUCTIONS, &judge_prompt)?;
+        let (judge_reply, s3) = run_artifact_turn(db, JUDGE_INSTRUCTIONS, &judge_prompt)?;
+        sessions.push(s3);
         let json = extract_json(&judge_reply).ok_or("judge reply contained no JSON")?;
         let parsed: serde_json::Value = serde_json::from_str(&json).map_err(|e| format!("bad judge JSON: {e}"))?;
         let a_score = parsed.get("a").and_then(|v| v.as_f64());

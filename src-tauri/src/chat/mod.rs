@@ -530,6 +530,24 @@ impl ChatManager {
                 _ => Vec::new(),
             }
         };
+        // Per-model tool-calling override: `supports_tools: false` on the
+        // ACTIVE local sidecar's overrides means the model cannot render
+        // tool calls — sending a tools schema just 400s (or silently emits
+        // template garbage). Skip tools for local turns; the heuristic never
+        // disables on its own, only an explicit user "no" does.
+        let tools_enabled = if local_model {
+            let active = {
+                let conn = db.lock();
+                db::get_setting(&conn, "chat.local_gguf.model").ok().flatten()
+            };
+            let disabled = {
+                let conn = db.lock();
+                local_models::tools_disabled_for_active_model(&conn, active.as_deref())
+            };
+            tools_enabled && !disabled
+        } else {
+            tools_enabled
+        };
         let caps = {
             // Attach-on-demand catalog: available-but-not-attached connectors
             // and gallery servers. Drives the `attach_connector` /

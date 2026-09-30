@@ -13,6 +13,12 @@
 //! 3. Mixed query — the gold doc is hit by BOTH legs; fusion must never lose
 //!    it (and by RRF arithmetic it must rank first: 2/(60+1) beats any
 //!    single-leg score ≤ 1/(60+1)).
+//! 4. Contextual enrichment (chunk-schema v2) — the gold chunk's CONTENT
+//!    shares no tokens with the query, but its path/heading context does.
+//!    Since the embedder input is `path · heading + content`
+//!    (`chat::docs::enriched_embed_text`), the fixture embedding (standing
+//!    in for embedding-of-enriched-text) matches the query vector while the
+//!    FTS leg (raw content only) is blind: the vector leg must carry it.
 //!
 //! Deterministic: no network, no RNG, fixed embeddings.
 
@@ -22,7 +28,10 @@ use super::docs::{
     add_corpus, replace_file_chunks, search_chunks, search_chunks_hybrid,
 };
 
-/// One hand-authored chunk: content, 3-dim embedding, display heading.
+/// One hand-authored chunk: content, 3-dim embedding, context heading.
+/// Embeddings stand in for "the embedding of the v2 embedder input"
+/// (`path · heading + content`), so context tokens are allowed to influence
+/// them — that IS the enrichment contract under test.
 struct Fixture {
     path: String,
     content: String,
@@ -59,6 +68,18 @@ fn fixture() -> (Connection, String) {
             content: "kumquat orchard irrigation log".into(),
             emb: [0.9, 0.1, 0.05],
             heading: "Harvest > Orchard".into(),
+        },
+        // Enrichment gold: content shares NO token with the enrichment query
+        // ("deployment rollback runbook") — the tokens live only in the
+        // path/heading context. The embedding stands for the v2 embedder
+        // input (context + content), so it is aligned with that query's
+        // vector; pre-v2 (bare-content embeddings, e.g. [0.1, 0.9, 0.1]) it
+        // would have been unretrievable by the vector leg too.
+        Fixture {
+            path: "ops/deployment.md".into(),
+            content: "step logging and status dashboards for nightly jobs".into(),
+            emb: [0.03, 0.02, 0.99],
+            heading: "Ops > Deployment rollback runbook".into(),
         },
         // Near-keyway junk (matched by the queries' FTS noise only).
         Fixture {
@@ -187,6 +208,40 @@ fn eval_hybrid_docs_recall_at_8() {
     );
     assert!(hybrid[0].heading == "Harvest > Orchard", "enrichment rides along");
 
+    // ── 4. Contextual enrichment: context tokens reach the vector leg ──
+    // The gold's content has no query token; the query terms live only in
+    // the path ("ops/deployment.md") and heading ("Ops > Deployment
+    // rollback runbook"). FTS (raw content) must be blind; the vector leg
+    // (embedding of enriched text) must carry it — that is exactly what
+    // chunk-schema v2 buys.
+    let ctx_q = "deployment rollback runbook";
+    let ctx_vec = [0.02f32, 0.03, 1.0];
+    let gold_ctx = "ops/deployment.md";
+    // Fixture sanity: no query token may appear in the indexed content, or
+    // the FTS leg would get credit for context's work.
+    assert!(!["deployment", "rollback", "runbook"]
+        .iter()
+        .any(|t| gold_ctx_content().contains(t)));
+    let fts_only =
+        search_chunks_hybrid(&conn, ctx_q, None, None, LEG_LIMIT, TOP_K).unwrap();
+    assert!(
+        !fts_only.iter().any(|h| h.path == gold_ctx),
+        "fixture broken: enrichment gold matched the keyword leg"
+    );
+    let vector_only = search_chunks(&conn, &ctx_vec, TOP_K).unwrap();
+    assert!(
+        vector_only.iter().any(|h| h.path == gold_ctx),
+        "enrichment gold missing from vector-only top-{TOP_K}: {:?}",
+        vector_only.iter().map(|h| h.path.as_str()).collect::<Vec<_>>()
+    );
+    let hybrid =
+        search_chunks_hybrid(&conn, ctx_q, Some(&ctx_vec), None, LEG_LIMIT, TOP_K).unwrap();
+    assert_eq!(
+        recall(&hybrid, gold_ctx),
+        1.0,
+        "hybrid lost the enrichment gold at @{TOP_K}"
+    );
+
     // Corpus scoping still works through the hybrid entry point.
     let scoped =
         search_chunks_hybrid(&conn, mix_q, Some(&mix_vec), Some(corpus_id), LEG_LIMIT, 3)
@@ -198,4 +253,9 @@ fn eval_hybrid_docs_recall_at_8() {
 /// The gold semantic doc's indexed content (kept in sync with the fixture).
 fn gold_sem_content() -> &'static str {
     "fermenting vegetable brines with lactobacillus cultures"
+}
+
+/// The enrichment gold's indexed content (kept in sync with the fixture).
+fn gold_ctx_content() -> &'static str {
+    "step logging and status dashboards for nightly jobs"
 }

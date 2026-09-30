@@ -253,3 +253,54 @@ pub async fn check_improvement_canaries(db: State<'_, DbState>) -> CmdResult<Vec
         .await
         .map_err(|e| e.to_string())?
 }
+
+/// P3: cross-artifact pack health — active vs quarantined cases,
+/// discriminating evidence, eval history, and the "never fails anything"
+/// suspect flag, per tracked artifact.
+#[tauri::command(async)]
+pub fn list_improve_pack_health(
+    db: State<'_, DbState>,
+) -> CmdResult<Vec<db::improve::PackHealth>> {
+    let conn = db.0.lock();
+    db::improve::pack_health_all(&conn).map_err(|e| e.to_string())
+}
+
+/// P3: park / release one eval case. `quarantined=false` releases it (the
+/// reason clears).
+#[tauri::command(async)]
+pub fn set_improve_case_quarantine(
+    db: State<'_, DbState>,
+    case_id: String,
+    quarantined: bool,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::improve::set_case_quarantined(
+        &conn,
+        &case_id,
+        quarantined,
+        if quarantined {
+            "quarantined by user"
+        } else {
+            ""
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// P3: per-artifact cost attribution (live runs + the engine's own eval
+/// sessions, joined to chat_messages). `range_days` 7|30|90 like the cost
+/// dashboard.
+#[tauri::command(async)]
+pub fn get_artifact_costs(
+    db: State<'_, DbState>,
+    range_days: i64,
+) -> CmdResult<Vec<db::improve::ArtifactCost>> {
+    let days = match range_days {
+        7 => 7,
+        30 => 30,
+        90 => 90,
+        _ => 30,
+    };
+    let conn = db.0.lock();
+    db::improve::artifact_cost_rollups(&conn, days * 86_400, 200).map_err(|e| e.to_string())
+}

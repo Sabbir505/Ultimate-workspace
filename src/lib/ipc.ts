@@ -163,6 +163,18 @@ export const listenBrowserLoadCompleted = (
   handler: (payload: BrowserLoadCompletedPayload) => void,
 ) => safeListen<BrowserLoadCompletedPayload>("browser:load-completed", handler);
 
+/** Renderer crash (Windows WebView2 ProcessFailed): the pane's native child
+ *  died or stopped responding. The pane shows a Recover affordance; the
+ *  trust timeline also records the event. */
+export interface BrowserCrashedPayload {
+  paneId: string;
+  tabId: string;
+  reason: string;
+}
+export const listenBrowserCrashed = (
+  handler: (payload: BrowserCrashedPayload) => void,
+) => safeListen<BrowserCrashedPayload>("browser:crashed", handler);
+
 // --- Browser pane project registry + MCP roundtrip wrappers ---
 export const registerBrowserPaneProject = (paneId: string, projectId: string) =>
   safeInvoke<void>("register_browser_pane_project", { paneId, projectId });

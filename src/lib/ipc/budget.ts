@@ -163,10 +163,52 @@ export interface ImproveEvalCase {
   expectJson: string;
   source: string;
   enabled: boolean;
+  /** P3: flaky case parked out of gating — shown with its reason. */
+  quarantined: boolean;
+  quarantineReason: string;
   createdAt: number;
 }
 export const listImproveEvalCases = (artifactId: string) =>
   safeInvoke<ImproveEvalCase[] | null>("list_improve_eval_cases", { artifactId });
+export const setImproveCaseQuarantine = (caseId: string, quarantined: boolean) =>
+  safeInvoke<void>("set_improve_case_quarantine", { caseId, quarantined });
+
+/** P3: cross-artifact pack health — per-artifact eval-pack vitals. */
+export interface ImprovePackHealth {
+  artifactId: string;
+  kind: string;
+  name: string;
+  casesTotal: number;
+  casesActive: number;
+  casesQuarantined: number;
+  /** Cases with ≥1 failing result ever — evidence the pack discriminates. */
+  casesDiscriminating: number;
+  casesHarvested: number;
+  evalRuns: number;
+  lastEvalAt: number | null;
+  runsTotal: number;
+  runsBad: number;
+  /** Every active case passed ≥3 eval runs and nothing ever failed. */
+  suspect: boolean;
+}
+export const listImprovePackHealth = () =>
+  safeInvoke<ImprovePackHealth[] | null>("list_improve_pack_health");
+
+/** P3: per-artifact cost attribution (live runs + the engine's own eval
+ *  sessions), joined to chat_messages. */
+export interface ArtifactCostRollup {
+  artifactId: string;
+  kind: string;
+  name: string;
+  liveRuns: number;
+  evalRuns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+}
+export const getArtifactCosts = (rangeDays: 7 | 30 | 90) =>
+  safeInvoke<ArtifactCostRollup[] | null>("get_artifact_costs", { rangeDays });
 
 export const setImproveAutonomy = (artifactId: string, tier: "manual" | "auto" | "canary") =>
   safeInvoke<void>("set_improve_autonomy", { artifactId, tier });

@@ -129,6 +129,17 @@ impl HarnessAdapter for OpenCodeAdapter {
     fn diff_prompt_patterns(&self) -> &'static [Regex] {
         &DIFF_PATTERNS
     }
+
+    fn permission_flags(&self, mode: &str) -> Vec<String> {
+        // The built-in AGENT is the lever (`opencode run` has no --mode
+        // flag — yargs silently dropped it): plan = the read-only planning
+        // agent; build is the default and passes nothing. The TUI switches
+        // agents with Tab mid-session.
+        match mode {
+            "plan" => vec!["--agent".into(), "plan".into()],
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

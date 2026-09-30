@@ -107,6 +107,36 @@ describe("LlamaAdvancedFields", () => {
     expect(container.textContent).toContain("Last good: 12 GPU layers");
     expect(container.textContent).not.toContain(">Context<");
   });
+
+  it("patches the tool-calling verdict tri-state through onChange", () => {
+    let value: LlamaOverrides | undefined;
+    const { container } = render(
+      <LlamaAdvancedFields overrides={{}} onChange={(v) => (value = v)} />,
+    );
+    const select = Array.from(container.querySelectorAll<HTMLSelectElement>(".llama-field select")).find(
+      (s) => s.previousElementSibling?.textContent === "Tool calling" ||
+        s.closest(".llama-field")?.querySelector(".llama-field-label")?.textContent === "Tool calling",
+    );
+    expect(select).toBeTruthy();
+    // Default = trust the scan heuristic.
+    expect(select!.value).toBe("");
+    fireEvent.change(select!, { target: { value: "off" } });
+    expect(value?.supportsTools).toBe(false);
+    fireEvent.change(select!, { target: { value: "on" } });
+    expect(value?.supportsTools).toBe(true);
+    fireEvent.change(select!, { target: { value: "" } });
+    expect(value?.supportsTools).toBeUndefined();
+  });
+
+  it("reflects a persisted supportsTools override", () => {
+    const { container } = render(
+      <LlamaAdvancedFields overrides={{ supportsTools: false }} onChange={() => {}} />,
+    );
+    const select = Array.from(container.querySelectorAll<HTMLSelectElement>(".llama-field select")).find(
+      (s) => s.closest(".llama-field")?.querySelector(".llama-field-label")?.textContent === "Tool calling",
+    )!;
+    expect(select.value).toBe("off");
+  });
 });
 
 describe("AgentModelPicker per-model gear sub-modal", () => {
@@ -152,6 +182,22 @@ describe("AgentModelPicker per-model gear sub-modal", () => {
         onLoadLocalModel={load}
       />,
     );
+
+  it("badges local rows with the tool-calling verdict (unknown stays unlabeled)", async () => {
+    scanLocalModelsMock.mockResolvedValue([
+      { ...LOCAL_MODEL, name: "tool-model", toolSupport: "template" },
+      { ...LOCAL_MODEL, id: "gguf-2", name: "mute-model", toolSupport: "unknown" },
+      { ...LOCAL_MODEL, id: "gguf-3", name: "off-model", toolSupport: "disabled" },
+    ]);
+    renderPicker({}, () => {});
+    fireEvent.click(document.querySelector<HTMLElement>(".agent-chip")!);
+
+    // Template verdict → green "Tools"; disabled → explicit "No tools";
+    // unknown → no badge at all (a gray badge on every untuned base is noise).
+    expect(await screen.findByText("Tools")).toBeTruthy();
+    expect(await screen.findByText("No tools")).toBeTruthy();
+    expect(screen.queryByText("Tools ~")).toBeNull();
+  });
 
   it("seeds the draft from persisted overrides; Load model passes the merged draft", async () => {
     scanLocalModelsMock.mockResolvedValue([LOCAL_MODEL]);

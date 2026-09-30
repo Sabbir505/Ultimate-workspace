@@ -32,6 +32,44 @@ pub const PROGRESS_EVENT: &str = "docs:index:progress";
 /// overhead dominating.
 const EMBED_BATCH: usize = 16;
 
+/// Char budget for the one retry after a failed batch embed (see the
+/// `run_index` embed arm): heads of the enriched texts, sized to fit
+/// sidecars running llama-server's DEFAULT 512-token physical batch —
+/// ~450 tokens worst case on prose (≈4 chars/token), while CJK content
+/// (~1 token/char) still fits our own sidecar's 2048 context.
+const EMBED_RETRY_CHAR_CAP: usize = 1800;
+
+#[cfg(test)]
+mod retry_budget_tests {
+    use super::*;
+
+    /// The retry budget must keep the enrichment HEAD (path · heading leads
+    /// the embed text and anchors retrieval) and cut only the content tail.
+    #[test]
+    fn retry_head_keeps_the_enrichment_prefix() {
+        let text = format!(
+            "4H-1H-Trading-Algo/AI_CONTEXT.md · Strategy > Context\n\n{}",
+            "x".repeat(5000)
+        );
+        let shrunk: String = text.chars().take(EMBED_RETRY_CHAR_CAP).collect();
+        assert_eq!(shrunk.chars().count(), EMBED_RETRY_CHAR_CAP);
+        assert!(shrunk.starts_with("4H-1H-Trading-Algo/AI_CONTEXT.md · Strategy"));
+        // Multibyte-safe: no replacement chars from a byte-slice cut.
+        let cjk = format!("a.md · 标题\n\n{}", "内容".repeat(2000));
+        let shrunk_cjk: String = cjk.chars().take(EMBED_RETRY_CHAR_CAP).collect();
+        assert_eq!(shrunk_cjk.chars().count(), EMBED_RETRY_CHAR_CAP);
+        assert!(!shrunk_cjk.contains('\u{FFFD}'));
+    }
+
+    /// Short texts pass through the budget untouched (no needless re-slice).
+    #[test]
+    fn retry_budget_leaves_short_texts_whole() {
+        let text = "a.md · Heading\n\nshort body".to_string();
+        let shrunk: String = text.chars().take(EMBED_RETRY_CHAR_CAP).collect();
+        assert_eq!(shrunk, text);
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexProgress {
@@ -251,10 +289,11 @@ pub fn docs_add_corpus(
     path: String,
     name: Option<String>,
 ) -> CmdResult<docs_db::DocCorpus> {
-    let canonical = std::fs::canonicalize(&path)
-        .map_err(|e| format!("folder not readable: {e}"))?
-        .to_string_lossy()
-        .to_string();
+    let canonical = crate::util::normalize_canonical_path(
+        &std::fs::canonicalize(&path)
+            .map_err(|e| format!("folder not readable: {e}"))?
+            .to_string_lossy(),
+    );
     let name = name
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| {
@@ -388,6 +427,24 @@ pub async fn docs_start_index(
     let corpus_id_for_task = corpus_id.clone();
 
     tauri::async_runtime::spawn(async move {
+        // Panic-proof slot lease: the manual `registry.active.remove` after
+        // `run_index` never ran when the task unwound, and the leaked slot
+        // made every later Index press fail with "indexing already in
+        // progress" until the app restarted. Drop runs on unwind too.
+        struct SlotLease {
+            registry: Arc<IndexRegistry>,
+            corpus_id: String,
+        }
+        impl Drop for SlotLease {
+            fn drop(&mut self) {
+                self.registry.active.lock().remove(&self.corpus_id);
+            }
+        }
+        let _lease = SlotLease {
+            registry: Arc::clone(&registry_arc),
+            corpus_id: corpus_id_for_task.clone(),
+        };
+
         let progress = run_index(
             &app_for_task,
             &db_arc,
@@ -399,7 +456,7 @@ pub async fn docs_start_index(
         )
         .await;
 
-        registry_arc.active.lock().remove(&corpus_id_for_task);
+        drop(_lease);
 
         // Refresh the row the UI shows (counts + last_indexed_at).
         if progress.state == "done" || progress.state == "cancelled" {
@@ -558,8 +615,9 @@ async fn run_index(
             docs::WalkKind::Text => match std::fs::read_to_string(&abs) {
                 Ok(text) => {
                     // chunk_text_with_meta additionally tracks the markdown
-                    // heading trail (display enrichment); the embedded text
-                    // is unchanged.
+                    // heading trail; since chunk-schema v2 the trail + the
+                    // relative path are part of the EMBEDDED text (contextual
+                    // enrichment) while the stored chunk content stays raw.
                     let mut metas = docs::chunk_text_with_meta(&text, &rel);
                     let remaining = docs::MAX_CHUNKS_PER_CORPUS - total_chunks;
                     metas.truncate(remaining);
@@ -633,13 +691,43 @@ async fn run_index(
         };
 
         // A dead sidecar fails every embed from here on — abort the run.
-        let texts: Vec<String> = metas.iter().map(|m| m.content.clone()).collect();
+        // Embed the ENRICHED text (path · heading + content); the pairs kept
+        // for storage still carry the raw content + heading.
+        let texts: Vec<String> = metas
+            .iter()
+            .map(|m| docs::enriched_embed_text(&rel, &m.heading, &m.content))
+            .collect();
         let vectors = match embed_all(&base_url, &texts).await {
             Ok(v) => v,
-            Err(e) => finish!(
-                "error",
-                Some(format!("embedding failed for {rel}: {e}"))
-            ),
+            Err(first) => {
+                // One oversized chunk used to abort the WHOLE corpus run. The
+                // common per-input failure is a too-long reject against a
+                // server whose physical batch (ubatch) is smaller than the
+                // chunk — our own sidecar now launches matched to its
+                // context, but an externally-provided base_url (or an older
+                // bundled binary) may still run the 512 default. Retry the
+                // file once with the enriched texts cut to a conservative
+                // head budget (~450 tokens worst case on prose, fits the 512
+                // default; CJK ~1 token/char still fits our 2048 context).
+                // The head keeps the path·heading prefix — the enrichment
+                // that anchors retrieval. A second failure is a real sidecar
+                // problem: abort with the ORIGINAL error (the shrunk retry's
+                // error would just repeat it, less legibly).
+                let shrunk: Vec<String> = texts
+                    .iter()
+                    .map(|t| t.chars().take(EMBED_RETRY_CHAR_CAP).collect())
+                    .collect();
+                match embed_all(&base_url, &shrunk).await {
+                    Ok(v) => {
+                        eprintln!(
+                            "[docs] embedding failed for {rel} ({first}); retry with \
+{EMBED_RETRY_CHAR_CAP}-char heads succeeded"
+                        );
+                        v
+                    }
+                    Err(_) => finish!("error", Some(format!("embedding failed for {rel}: {first}"))),
+                }
+            }
         };
         if vectors.len() != texts.len() {
             finish!(

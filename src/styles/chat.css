@@ -875,14 +875,18 @@ div[data-index]:has(.chat-session-row.menu-open) {
   -webkit-user-select: text;
 }
 
-/* ---------- Message attachment preview cards ----------
+/* ---------- Message attachments ----------
    Rendered ABOVE the text bubble in a horizontal flex-wrap row, separated from
-   the message text. Images show a rich thumbnail; docs/text/files show a file
-   card with an ext/label badge and an optional content preview. */
+   the message text. Each attachment renders as ITSELF, not as a card about
+   itself: images are the bare picture (the filename lives in the tooltip),
+   docs/text are a quiet glyph + name row with an optional clamped content
+   preview, and an image whose bytes are gone shows a dashed tile so the gap
+   stays identifiable. */
 .msg-attachments {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: flex-end;
   margin-bottom: 8px;
   max-width: 100%;
 }
@@ -890,94 +894,73 @@ div[data-index]:has(.chat-session-row.menu-open) {
   /* User attachments sit above the right-aligned bubble. */
   justify-content: flex-end;
 }
-.msg-attachment-card {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  width: 180px;
-  max-width: 100%;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-glass);
-  box-shadow: var(--glass-rim-soft);
-  overflow: hidden;
+
+/* The bare image. Both caps set, no fixed dimensions — the picture scales
+   down proportionally (a tall full-page screenshot must not push the message
+   past the viewport) and a small one keeps its natural size un-letterboxed.
+   Rounded corners only: no border, no frame, no caption row. Caps stay
+   modest so a batch of screenshots wraps like a gallery row instead of
+   swallowing the transcript. */
+.msg-attachment-image {
+  display: block;
+  max-width: min(100%, 320px);
+  max-height: 240px;
+  border-radius: 10px;
 }
-.msg-attachment-thumb {
-  width: 100%;
-  height: 88px;
+
+/* Image bytes missing (history from before uploads were saved, or the file
+   was deleted). A dashed tile + the name — a bare glyph identifies nothing. */
+.msg-attachment-placeholder {
   display: flex;
   align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-xs);
-  background: var(--surface-solid);
-  overflow: hidden;
+  gap: 8px;
+  max-width: 100%;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-glass-2) 55%, transparent);
   color: var(--text-dim);
 }
-.msg-attachment-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
+.msg-attachment-placeholder svg {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  opacity: 0.75;
 }
-.msg-attachment-thumb svg {
-  width: 26px;
-  height: 26px;
+.msg-attachment-placeholder .msg-attachment-name {
+  color: var(--text-dim);
 }
-/* Text/doc cards have no image tile — render as a compact document row
-   (small glyph left, name + badge beside it, preview clamped under). The
-   media-tile layout put an 88px empty block above every attached or pasted
-   document, blowing the user bubble out of proportion. */
-.msg-attachment-card.no-thumb {
-  width: 224px;
-  flex-direction: row;
+
+/* Doc/text attachment: an unboxed row — small glyph, filename beside it, the
+   extracted-text preview clamped underneath. The old bordered card blew the
+   user bubble out of proportion for what is metadata about a file, so this
+   stays a quiet inline row, width-capped so a log dump can't span the whole
+   transcript column. */
+.msg-attachment-file {
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 8px;
-  padding: 7px 8px;
+  width: max-content;
+  max-width: min(100%, 320px);
+  min-width: 0;
 }
-.msg-attachment-card.no-thumb .msg-attachment-thumb {
-  width: 24px;
-  height: 24px;
+.msg-attachment-file-glyph {
+  display: flex;
   flex: none;
-  background: transparent;
-  border-radius: var(--radius-xs);
+  color: var(--text-dim);
 }
-.msg-attachment-card.no-thumb .msg-attachment-thumb svg {
+.msg-attachment-file-glyph svg {
   width: 16px;
   height: 16px;
 }
-/* An image attachment without a live thumbnail (every persisted image —
-   bytes are not stored across turns) keeps the full-size tile so the card
-   still reads as an image, with a faint inset framing the placeholder
-   glyph like an empty picture frame. */
-.msg-attachment-card.img-placeholder .msg-attachment-thumb {
-  height: 88px;
-  border: 1px dashed var(--border-strong);
-  background: color-mix(in srgb, var(--surface-glass-2) 55%, transparent);
-}
-.msg-attachment-card.img-placeholder .msg-attachment-thumb svg {
-  width: 26px;
-  height: 26px;
-  opacity: 0.75;
-}
-.msg-attachment-card.no-thumb .msg-attachment-meta {
-  flex: 1;
-  min-width: 0;
-}
-.msg-attachment-card.no-thumb .msg-attachment-preview {
+.msg-attachment-file .msg-attachment-preview {
   width: 100%;
   max-height: calc(7 * 1.45em + 8px); /* ~7 mono lines */
   padding: 4px 6px;
 }
-.msg-attachment-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
+
 .msg-attachment-name {
-  flex: 1;
   min-width: 0;
   font-size: 12px;
   font-weight: 600;
@@ -986,22 +969,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.msg-attachment-badge {
-  flex: none;
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  padding: 2px 6px;
-  border-radius: 99px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-}
-.msg-attachment-badge[data-kind="image"] {
-  background: color-mix(in srgb, var(--state-diff) 14%, transparent);
-  color: var(--state-diff);
-  border-color: color-mix(in srgb, var(--state-diff) 35%, transparent);
-}
+
 /* Truncation: an exact line multiple + a bottom fade (the .doc-card-snippet
    recipe). The old -webkit-line-clamp: 4 never actually hid lines here —
    with white-space: pre-wrap Chromium still paints the next line past the

@@ -13,9 +13,8 @@ describe("parseAttachments", () => {
     expect(attachments).toHaveLength(1);
     expect(attachments[0].kind).toBe("image");
     expect(attachments[0].name).toBe("cat.png");
-    expect(attachments[0].badge).toBe("PNG");
-    // History from before uploads were written to disk carries no path; such a
-    // card can only show the glyph.
+    // History from before uploads were written to disk carries no path; such
+    // an attachment can only show the placeholder tile.
     expect(attachments[0].path).toBeUndefined();
     expect(text).toBe("Look at this photo.");
   });
@@ -29,7 +28,6 @@ describe("parseAttachments", () => {
     );
     expect(attachments).toHaveLength(1);
     expect(attachments[0].name).toBe("shot.png");
-    expect(attachments[0].badge).toBe("PNG");
     expect(attachments[0].path).toBe(path);
     expect(text).toBe("Look at this.");
   });
@@ -50,7 +48,6 @@ describe("parseAttachments", () => {
     expect(attachments).toHaveLength(1);
     expect(attachments[0].kind).toBe("doc");
     expect(attachments[0].name).toBe("report.pdf");
-    expect(attachments[0].badge).toBe("PDF");
     expect(attachments[0].preview).toContain("Some extracted text");
     // The code block + marker are stripped from the inline text.
     expect(text).toBe("Here is the report.");
@@ -60,7 +57,7 @@ describe("parseAttachments", () => {
     const content = `notes\n\nAttached file: notes.txt\n\`\`\`\nhello\n\`\`\``;
     const { attachments } = parseAttachments(content);
     expect(attachments[0].kind).toBe("text");
-    expect(attachments[0].badge).toBe("TXT");
+    expect(attachments[0].name).toBe("notes.txt");
   });
 
   it("parses an unreadable-doc marker into a doc card", () => {

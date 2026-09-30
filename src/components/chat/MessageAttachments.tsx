@@ -1,4 +1,4 @@
-// Visual attachment cards rendered ABOVE the message text bubble.
+// Visual attachments rendered ABOVE the message text bubble.
 //
 // Attachments are not stored as structured data on a persisted message — at
 // send time they're folded into the message `content` as text markers (see
@@ -8,29 +8,28 @@
 //   [Attached file NAME could not be read as text.]     → unreadable doc
 //   [Connected: NAME, NAME]                             → connector chips
 //
-// This module parses those markers out of the content, renders each as a
-// rounded preview card (image thumbnail for images, a file card with ext
-// badge + content preview for docs/text), and returns the cleaned text with
-// the markers removed so they no longer appear as inline plain text.
+// This module parses those markers out of the content, renders each as the
+// attachment itself — the picture for images, a quiet glyph + name row for
+// docs/text — and returns the cleaned text with the markers removed so they
+// no longer appear as inline plain text.
 //
 // For the optimistic just-sent message, real ChatAttachment objects (with the
 // image base64) can be passed in `liveAttachments` so images get a genuine
-// thumbnail even before the backend persists anything. For a PERSISTED image
-// the marker carries the path the backend saved the bytes to, and the card
-// re-reads them over IPC — otherwise the image survived only as a glyph.
+// preview even before the backend persists anything. For a PERSISTED image
+// the marker carries the path the backend saved the bytes to, and the
+// renderer re-reads them over IPC — otherwise the image survived only as a
+// glyph.
 import type { ChatAttachmentInput } from "../../lib/ipc";
 import { splitImageMarker, usePersistedImageDataUri } from "../../lib/chatAttachments";
 
-/** A parsed attachment to render as a card. */
+/** A parsed attachment to render. */
 export interface ParsedAttachment {
   /** Stable key. */
   key: string;
   /** Original filename. */
   name: string;
-  /** "image" | "doc" | "text" — drives the card style. */
+  /** "image" | "doc" | "text" — drives the rendering shape. */
   kind: "image" | "doc" | "text";
-  /** Upper-cased extension / label badge, e.g. "PDF", "PNG", "PASTED". */
-  badge: string;
   /** For doc/text: a short excerpt of the extracted content (preview). */
   preview?: string;
   /** For the optimistic message: a live image data URI (base64). */
@@ -53,14 +52,7 @@ function extOf(name: string): string {
   return dot > 0 ? name.slice(dot + 1) : "";
 }
 
-function badgeFor(name: string, kind: ParsedAttachment["kind"]): string {
-  if (kind === "image") {
-    const e = extOf(name).toUpperCase();
-    return e || "IMAGE";
-  }
-  const e = extOf(name).toUpperCase();
-  return e || "FILE";
-}
+const DOC_EXTS = ["docx", "pptx", "xlsx", "pdf", "doc", "ppt", "xls"];
 
 /** Parse attachment markers out of `content`. Returns the list of attachments
  *  (in document order), the connector names from any `[Connected: …]` marker,
@@ -83,7 +75,6 @@ export function parseAttachments(
         key: `img-${i++}`,
         name,
         kind: "image",
-        badge: badgeFor(name, "image"),
         path,
       });
     } else if (m[2] != null) {
@@ -93,7 +84,6 @@ export function parseAttachments(
         key: `unread-${i++}`,
         name,
         kind: "doc",
-        badge: badgeFor(name, "doc"),
         preview: "Could not be read as text",
       });
     } else if (m[3] != null) {
@@ -104,20 +94,18 @@ export function parseAttachments(
       attachments.push({
         key: `doc-${i++}`,
         name,
-        kind: ext && ["docx", "pptx", "xlsx", "pdf", "doc", "ppt", "xls"].includes(ext) ? "doc" : "text",
-        badge: badgeFor(name, "doc"),
+        kind: ext && DOC_EXTS.includes(ext) ? "doc" : "text",
         preview: body.slice(0, 280),
       });
     } else if (m[5] != null) {
       // [Attached file: NAME] — the optimistic marker (pre-persist). No
-      // extracted text yet; render as a plain file card.
+      // extracted text yet; render as a plain file row.
       const name = m[5].trim();
       const ext = extOf(name);
       attachments.push({
         key: `pending-${i++}`,
         name,
-        kind: ext && ["docx", "pptx", "xlsx", "pdf", "doc", "ppt", "xls"].includes(ext) ? "doc" : "text",
-        badge: badgeFor(name, "doc"),
+        kind: ext && DOC_EXTS.includes(ext) ? "doc" : "text",
       });
     } else if (m[6] != null) {
       // [Connected: NAME, NAME] — the connectors attached to this
@@ -179,15 +167,15 @@ function FileGlyph({ kind }: { kind: ParsedAttachment["kind"] }) {
   );
 }
 
-/** A single attachment preview card. Images always keep the thumbnail-tile
- *  silhouette so an attachment stays recognizable as an image across the
- *  optimistic→persisted transition instead of collapsing into a generic file
- *  row. The picture itself comes from the live base64 when this app run sent
- *  it, otherwise from the file the backend persisted for the message — and
- *  only if neither is available does the tile fall back to the glyph (history
- *  from before uploads were saved, or the file has since been deleted).
- *  Docs/text render as a compact document row (small glyph left, name + ext
- *  badge beside it, preview clamped under). */
+/** One attachment, rendered as the attachment itself rather than a card about
+ *  it. An image IS its picture — no frame, no filename row, no type pill, the
+ *  way a pasted screenshot reads in any chat app; the name stays reachable in
+ *  the tooltip/alt text and the model still sees it in the message body. When
+ *  the bytes are gone (history from before uploads were saved, or the file has
+ *  since been deleted) a dashed tile + name stands in, because a bare glyph
+ *  identifies nothing. Docs/text keep their name — a file with no name is
+ *  unusable — but drop the boxed card and the ext pill for a quiet glyph +
+ *  name row with the content preview clamped underneath. */
 function AttachmentPreviewCard({ att }: { att: ParsedAttachment }) {
   const isImage = att.kind === "image";
   // Only reach for the disk when this run didn't supply the bytes.
@@ -195,31 +183,40 @@ function AttachmentPreviewCard({ att }: { att: ParsedAttachment }) {
     isImage && !att.thumbDataUri ? att.path : undefined,
   );
   const thumbSrc = att.thumbDataUri ?? persistedUri;
-  const hasThumb = isImage && !!thumbSrc;
-  return (
-    <div
-      className={`msg-attachment-card${isImage ? "" : " no-thumb"}${hasThumb ? "" : isImage ? " img-placeholder" : ""}`}
-      title={att.name}
-    >
-      <div className="msg-attachment-thumb">
-        {hasThumb ? (
-          <img src={thumbSrc} alt={att.name} loading="lazy" />
-        ) : (
-          <FileGlyph kind={att.kind} />
-        )}
-      </div>
-      <div className="msg-attachment-meta">
+
+  if (isImage && thumbSrc) {
+    return (
+      <img
+        className="msg-attachment-image"
+        src={thumbSrc}
+        alt={att.name}
+        title={att.name}
+        loading="lazy"
+      />
+    );
+  }
+
+  if (isImage) {
+    return (
+      <div className="msg-attachment-placeholder" title={att.name}>
+        <FileGlyph kind="image" />
         <span className="msg-attachment-name">{att.name}</span>
-        <span className="msg-attachment-badge" data-kind={att.kind}>{att.badge}</span>
       </div>
-      {att.preview && (
-        <div className="msg-attachment-preview">{att.preview}</div>
-      )}
+    );
+  }
+
+  return (
+    <div className="msg-attachment-file" title={att.name}>
+      <span className="msg-attachment-file-glyph">
+        <FileGlyph kind={att.kind} />
+      </span>
+      <span className="msg-attachment-name">{att.name}</span>
+      {att.preview && <div className="msg-attachment-preview">{att.preview}</div>}
     </div>
   );
 }
 
-/** The attachment grid rendered above the message text. Returns null when
+/** The attachment row rendered above the message text. Returns null when
  *  there are no attachments, so the bubble layout is unchanged for plain
  *  messages. */
 export function MessageAttachments({

@@ -156,9 +156,20 @@ pub fn build_instructions_md(
              engine. Leave its `agent`/`model` unset unless the task genuinely \
              needs a specific engine or model — the app's configured default \
              subagent model applies then; a model the target engine doesn't \
-             have is replaced by that engine's default. When a spawned session \
+             have is replaced by that engine's default. To pass a NAMED \
+             reusable subagent instead, use `agent:\"<id-or-name>\"` — \
+             `list_subagents` is the live registry. When a spawned session \
              finishes its task, its result is \
-             automatically messaged back into this session. Never launch a \
+             automatically messaged back into this session. The user can also \
+             ask you to BUILD a reusable agent ('make an agent that reviews \
+             PRs'): `create_subagent` / `update_subagent` / \
+             `delete_subagent` are yours for that, and `list_subagents` gives \
+             you the ids. Write the `prompt_md` as standing instructions the \
+             agent will run under, not as a one-off task. Agents you create \
+             are badged 'made by agent' and start READ-ONLY — you can change \
+             what they do, but only the user can widen what they are allowed \
+             to do, so never promise a capability you would have to ask them \
+             for. Never launch a \
              coding-agent CLI in your shell instead: an externally launched \
              agent opens a stray terminal window and is invisible to Relay: \
              unwatchable, unresumable, and unknown to the Session Mesh."

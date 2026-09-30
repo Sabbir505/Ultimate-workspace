@@ -199,11 +199,27 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
 pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
     use tauri::Manager;
     let db = app.state::<crate::DbState>();
-    let (connected_ids, account_displays, fallback_tool_names) = {
+    let (connected_ids, account_displays, fallback_tool_names, subagents) = {
         let conn = db.0.lock();
         let rows = crate::db::list_connector_credential_rows(&conn).unwrap_or_default();
         let credentialed: Vec<String> =
             rows.iter().map(|r| r.connector_id.clone()).collect();
+        // The registry, as name + one-line description. This is the section the
+        // automation schema's `agent:` docs have pointed at ("get_capabilities
+        // lists them") since before this report had one — without it a harness
+        // could run `spawn_session agent:<id>` only by guessing the name.
+        // Reading through `list` also refreshes the shared name cache the spec
+        // builders use, so the two views can never disagree.
+        let subagents: Vec<Value> = crate::chat::subagents::list(&conn)
+            .iter()
+            .map(|a| {
+                json!({
+                    "name": a.name,
+                    "description": a.description,
+                    "builtin": a.builtin,
+                })
+            })
+            .collect();
         (
             credentialed.clone(),
             rows.iter()
@@ -213,6 +229,7 @@ pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
                 .into_iter()
                 .map(|(_, name, _)| name.to_string())
                 .collect::<Vec<_>>(),
+            subagents,
         )
     };
     drop(db);
@@ -275,6 +292,21 @@ pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
         // Derived from the bridge allowlist — one source of truth, so a new
         // bridged tool reports itself without a manual edit here.
         "relay_tools": crate::mcp_tools_bridge::ALLOWED_RELAY_TOOLS,
+
+        // The subagent registry — names you can pass to
+        // `spawn_session(agent="agent:<name>")` (or an automation's `agent`).
+        // `list_subagents` returns the full rows (prompt, allowlist, policies);
+        // this is the cheap index of what exists.
+        "subagents": subagents,
+        // The authoring surface, and its one limit. Stated here as well as in
+        // the bundle so a model that calls `get_capabilities` — or that hits
+        // the read-only rule on a create — can explain the boundary rather than
+        // concluding it has no write access at all.
+        "subagent_authoring": "create_subagent / update_subagent / delete_subagent — \
+            build a reusable agent when asked for one. Agents you create are badged \
+            'made by agent' in Settings → Agents → Subagents, and are created \
+            READ-ONLY: you can change what an agent does, but only the user can widen \
+            what it is allowed to do.",
 
         "skills": skills,
         "terminal": terminal_lifecycle_json(),

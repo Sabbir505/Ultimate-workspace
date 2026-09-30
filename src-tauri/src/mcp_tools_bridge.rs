@@ -24,7 +24,7 @@ use crate::chat::tools::{self, ToolCaps};
 /// no permission-mode gate, since this path intentionally runs the same
 /// ungated dispatcher the built-in chat uses (where the caller enforces the
 /// gate BEFORE reaching execute_tool).
-pub const ALLOWED_RELAY_TOOLS: [&str; 28] = [
+pub const ALLOWED_RELAY_TOOLS: [&str; 32] = [
     tools::GENERATE_DOCUMENT,
     tools::GENERATE_IMAGE,
     tools::PLAN_DOCUMENT,
@@ -47,6 +47,19 @@ pub const ALLOWED_RELAY_TOOLS: [&str; 28] = [
     tools::SEARCH_SESSIONS,
     tools::MESSAGE_SESSION,
     tools::SPAWN_SESSION,
+    // The subagent registry, whole family. A harness can RUN a subagent
+    // (`spawn_session` with `agent:<id>`) but had no way to find out what
+    // exists, and no way to author one when the user asked for a new agent —
+    // "create me a PR-review agent" came back "I don't have that tool".
+    //
+    // Authoring is bridged UNGATED, so it is gated in [`gate_relay_subagent_op`]
+    // instead: rows written from here are born read-only and badged
+    // agent-authored, and only the user can widen a permission scope. Same
+    // trade the automation family already makes.
+    tools::LIST_SUBAGENTS,
+    tools::CREATE_SUBAGENT,
+    tools::UPDATE_SUBAGENT,
+    tools::DELETE_SUBAGENT,
     // Vault CRUD — the harness's only write path into the bound vault
     // (harness CLIs have their own generic file tools, but these carry the
     // vault index + link-rewrite semantics they can't replicate).
@@ -259,6 +272,30 @@ async fn execute_relay_tool_inner(
     // of which chat is calling.
     if tools::is_mesh_tool(tool_name) {
         let text = crate::session_fabric::execute_mesh_tool(app, None, tool_name, args).await;
+        return Ok(json!({ "text": text, "artifact": Value::Null }));
+    }
+    // The subagent registry. The whole family dispatches through its own
+    // handler (AppHandle → DbState) rather than the provider-agnostic
+    // `execute_tool` below — the same split the automation family needs.
+    //
+    // TRUST GATE, same shape and same reasoning as the automations above: the
+    // built-in chat approval-cards every authoring call, and this path has no
+    // way to render that card, so a bridged create/update runs unconfirmed.
+    // `gate_relay_subagent_op` is what makes that acceptable — a row written
+    // from here is born read-only, badged as agent-authored, and cannot have
+    // its permission scope widened except by the user. See that function for
+    // the per-verb rules.
+    if tools::is_subagent_tool(tool_name) {
+        let text = match gate_relay_subagent_op(app, tool_name, args).await {
+            Err(text) => text,
+            Ok((args, note)) => {
+                let mut out = tools::execute_subagent_tool(app, tool_name, &args).await;
+                if let Some(note) = note {
+                    out.push_str(&note);
+                }
+                out
+            }
+        };
         return Ok(json!({ "text": text, "artifact": Value::Null }));
     }
     // Vault CRUD family: routed straight to the vault executor (same split
@@ -533,6 +570,126 @@ async fn gate_relay_automation_op(
     }
 }
 
+/// TRUST GATE for the subagent write trio on the relay bridge — the subagent
+/// counterpart of [`gate_relay_automation_op`], and the reason it is safe to
+/// bridge authoring at all.
+///
+/// The problem is the same one the automation gate documents: the built-in
+/// chat shows an approval card before any authoring call, and this path is
+/// ungated, so nothing is confirmed. The automations answer with "start
+/// disabled, a human turns it on". A subagent's analogue of *enabled* is its
+/// permission scope, so:
+///
+/// * **create** — the row is born `read_only`. The request's `sandbox_policy`
+///   is overridden rather than refused, because refusing would make the tool
+///   useless for exactly the case it exists for ("create a PR-review agent")
+///   while a read-only agent is perfectly runnable. The user widens it in the
+///   Subagent panel, where the change is visible. `create_subagent` already
+///   stamps `origin="agent"`, so the panel badges the row either way.
+/// * **update** — the content of a definition is the harness's to change
+///   (prompt, description, allowlist, model, budget), but it may not WIDEN the
+///   permission scope of a row that already exists. Widening is the user
+///   moving their own goalposts with no confirmation in front of them, and it
+///   is the one update that reduces safety. Dropping the key leaves the stored
+///   value untouched and the note says so, so the model learns rather than
+///   retrying.
+/// * **delete** — allowed, matching the automation policy. Every subagent is
+///   listable and re-creatable, and a bridge that could create but not clean
+///   up would accumulate orphans no user could remove from a harness session.
+///
+/// Narrowing, and every content field, pass through untouched.
+/// unlike the automation gate's `&'static str` notes, these name the fields
+/// they refused and so are built per call.
+async fn gate_relay_subagent_op<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    tool_name: &str,
+    args: &Value,
+) -> Result<(Value, Option<String>), String> {
+    use tauri::{Emitter, Manager};
+
+    if tool_name == tools::CREATE_SUBAGENT {
+        let mut gated = args.clone();
+        let mut forced = false;
+        if let Some(obj) = gated.as_object_mut() {
+            if obj
+                .get("sandbox_policy")
+                .and_then(|v| v.as_str())
+                .is_some_and(|p| p != "read_only")
+            {
+                forced = true;
+            }
+            obj.insert("sandbox_policy".into(), Value::String("read_only".into()));
+        }
+        // Best-effort visibility hook, same shape as the automation one: the
+        // row exists immediately, badged, and the user sees it in the panel.
+        let _ = app.emit(
+            "subagent:approval-request",
+            json!({
+                "source": "relay_bridge",
+                "name": args.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                "description": args.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+            }),
+        );
+        return Ok((
+            gated,
+            forced.then(|| {
+                " NOTE: created read-only. The user grants write access in \
+                 Settings → Agents → Subagents if this agent needs it."
+                    .to_string()
+            }),
+        ));
+    }
+
+    if tool_name == tools::UPDATE_SUBAGENT {
+        // Resolve the target so "may not widen" can be judged against what is
+        // actually stored, not against what the caller claims.
+        let agent_ref = args.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+        let existing = {
+            let db = app.state::<crate::DbState>();
+            let conn = db.0.lock();
+            crate::chat::subagents::resolve_by_id_or_name(&conn, agent_ref)
+        };
+        let Some(existing) = existing else {
+            // Unknown target: let the tool itself report the not-found, rather
+            // than answering a policy question about a row we cannot see.
+            return Ok((args.clone(), None));
+        };
+        let mut gated = args.clone();
+        let mut refused: Vec<&'static str> = Vec::new();
+        if let Some(obj) = gated.as_object_mut() {
+            // Ranks, loosest last: a policy may only move DOWN the scale.
+            if let Some(want) = obj.get("sandbox_policy").and_then(|v| v.as_str()) {
+                if want == "workspace_write" && existing.sandbox_policy == "read_only" {
+                    obj.remove("sandbox_policy");
+                    refused.push("sandbox_policy");
+                }
+            }
+            if let Some(want) = obj.get("approval_policy").and_then(|v| v.as_str()) {
+                let rank = |p: &str| match p {
+                    "on_request" => 0,
+                    "auto_edit" => 1,
+                    _ => 2,
+                };
+                if rank(want) > rank(&existing.approval_policy) {
+                    obj.remove("approval_policy");
+                    refused.push("approval_policy");
+                }
+            }
+        }
+        let note = (!refused.is_empty()).then(|| {
+            format!(
+                " NOTE: {} ignored — a harness session can change what an agent \
+                 does, but only the user can widen what it is ALLOWED to do. \
+                 Ask them to change it in Settings → Agents → Subagents.",
+                refused.join(" and ")
+            )
+        });
+        return Ok((gated, note));
+    }
+
+    Ok((args.clone(), None))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,13 +831,8 @@ mod tests {
         ("get_task_status", "Relay background-task engine is built-in-chat-only"),
         ("cancel_task", "Relay background-task engine is built-in-chat-only"),
         ("Task", "harness has its own subagent Task tool"),
-        // Subagent AUTHORING is built-in-chat-only (consent card + origin badge
-        // live in the main loop); harness agents still RUN subagents via
-        // spawn_session's agent: value, which IS bridged.
-        (tools::LIST_SUBAGENTS, "subagent authoring is built-in-chat-only; harness agents run subagents via spawn_session agent:<id>"),
-        (tools::CREATE_SUBAGENT, "subagent authoring is built-in-chat-only; harness agents run subagents via spawn_session agent:<id>"),
-        (tools::UPDATE_SUBAGENT, "subagent authoring is built-in-chat-only; harness agents run subagents via spawn_session agent:<id>"),
-        (tools::DELETE_SUBAGENT, "subagent authoring is built-in-chat-only; harness agents run subagents via spawn_session agent:<id>"),
+        // (the subagent family is bridged in full — see ALLOWED_RELAY_TOOLS and
+        //  gate_relay_subagent_op)
         // Plan tracking drives the built-in chat's plan-mode UI state.
         ("todo_write", "plan tracking is a built-in-chat UI surface"),
         ("enter_plan_mode", "plan tracking is a built-in-chat UI surface"),
@@ -769,6 +921,7 @@ mod tests {
         let intercepted = |name: &str| {
             name == tools::GET_CAPABILITIES
                 || name == tools::GENERATE_IMAGE
+                || tools::is_subagent_tool(name)
                 || tools::is_automation_tool(name)
                 || tools::is_mesh_tool(name)
                 || tools::is_vault_tool(name)
@@ -798,6 +951,218 @@ mod tests {
                  (or route it through an interception family).",
                 outcome.text
             );
+        }
+    }
+
+    /// The subagent write trio is bridged UNGATED, so the gate is the only
+    /// thing standing between a harness CLI and a permission scope the user
+    /// never approved. These pin each verb's rule.
+    ///
+    /// Each test builds a mock app over an in-memory DB seeded the way the real
+    /// one is — the `update` rules are judged against what is actually STORED,
+    /// so the fixture has to be a real registry.
+    #[test]
+    fn the_subagent_family_is_bridged_in_full() {
+        // A harness asked to "create an agent that reviews PRs" must not come
+        // back saying it has no such tool. This is the regression this list
+        // being complete is guarding.
+        for name in [
+            tools::LIST_SUBAGENTS,
+            tools::CREATE_SUBAGENT,
+            tools::UPDATE_SUBAGENT,
+            tools::DELETE_SUBAGENT,
+        ] {
+            assert!(
+                ALLOWED_RELAY_TOOLS.contains(&name),
+                "`{name}` must be bridged — a harness can run subagents but has to be \
+                 able to read, author and remove them too"
+            );
+            assert!(
+                !BRIDGE_EXCLUDED_TOOLS.iter().any(|(n, _)| *n == name),
+                "`{name}` is in both lists"
+            );
+        }
+    }
+
+    #[test]
+    fn create_from_the_bridge_is_forced_read_only() {
+        let app = tauri::test::mock_app().handle().clone();
+        // `db::mem()` is the full schema plus the post-schema migrations, so
+        // the `update` rules are judged against a registry shaped like the
+        // real one.
+        let conn = crate::db::mem();
+        crate::db::subagents::seed_builtin_subagents(&conn).unwrap();
+        app.manage(crate::DbState(std::sync::Arc::new(parking_lot::Mutex::new(conn))));
+
+        let (gated, note) = tauri::async_runtime::block_on(gate_relay_subagent_op(
+            &app,
+            tools::CREATE_SUBAGENT,
+            &json!({
+                "name": "pr-reviewer",
+                "prompt_md": "Review the diff.",
+                "sandbox_policy": "workspace_write",
+                "approval_policy": "full_access",
+            }),
+        ))
+        .unwrap();
+        // The widening request is overridden, not refused — the agent is still
+        // created, it just cannot write until the user says so.
+        assert_eq!(gated["sandbox_policy"], "read_only");
+        // And the model is told, rather than left to believe it got full access.
+        let note = note.expect("a forced downgrade must be reported");
+        assert!(note.contains("read-only"), "note was {note:?}");
+    }
+
+    #[test]
+    fn create_from_the_bridge_stays_quiet_when_nothing_was_downgraded() {
+        let app = tauri::test::mock_app().handle().clone();
+        // `db::mem()` is the full schema plus the post-schema migrations, so
+        // the `update` rules are judged against a registry shaped like the
+        // real one.
+        let conn = crate::db::mem();
+        crate::db::subagents::seed_builtin_subagents(&conn).unwrap();
+        app.manage(crate::DbState(std::sync::Arc::new(parking_lot::Mutex::new(conn))));
+
+        let (gated, note) = tauri::async_runtime::block_on(gate_relay_subagent_op(
+            &app,
+            tools::CREATE_SUBAGENT,
+            &json!({ "name": "pr-reviewer", "prompt_md": "Review." }),
+        ))
+        .unwrap();
+        assert!(note.is_none(), "nothing was downgraded, so nothing to say");
+        // The key is written even though the caller never mentioned it: the
+        // gate states read-only explicitly rather than leaning on the tool's
+        // default, so the guarantee survives a change to that default.
+        assert_eq!(gated["sandbox_policy"], "read_only");
+    }
+
+    #[test]
+    fn update_from_the_bridge_may_not_widen_permission_scope() {
+        let app = tauri::test::mock_app().handle().clone();
+        let conn = crate::db::mem();
+        crate::db::subagents::seed_builtin_subagents(&conn).unwrap();
+        crate::chat::subagents::create(
+            &conn,
+            &crate::chat::subagents::SubagentInput {
+                name: "pr-reviewer".into(),
+                description: String::new(),
+                prompt_md: "Review.".into(),
+                tools: None,
+                engine: None,
+                model: None,
+                effort: None,
+                sandbox_policy: "read_only".into(),
+                approval_policy: "on_request".into(),
+                worktree_policy: "inherit".into(),
+                max_rounds: 100,
+                max_concurrent: 2,
+            },
+        )
+        .unwrap();
+        app.manage(crate::DbState(std::sync::Arc::new(parking_lot::Mutex::new(conn))));
+
+        let (gated, note) = tauri::async_runtime::block_on(gate_relay_subagent_op(
+            &app,
+            tools::UPDATE_SUBAGENT,
+            &json!({
+                "agent_id": "pr-reviewer",
+                "prompt_md": "Review thoroughly, cite file:line.",
+                "sandbox_policy": "workspace_write",
+                "approval_policy": "full_access",
+            }),
+        ))
+        .unwrap();
+        // The CONTENT change passes — telling the model it was refused would
+        // be a lie about a different field.
+        assert_eq!(gated["prompt_md"], "Review thoroughly, cite file:line.");
+        // Both widening keys are dropped, so the stored values are untouched.
+        assert!(gated.get("sandbox_policy").is_none());
+        assert!(gated.get("approval_policy").is_none());
+        let note = note.expect("a refused widening must be reported");
+        assert!(note.contains("sandbox_policy") && note.contains("approval_policy"));
+    }
+
+    #[test]
+    fn update_from_the_bridge_may_still_narrow_and_still_rewrites_content() {
+        let app = tauri::test::mock_app().handle().clone();
+        let conn = crate::db::mem();
+        crate::db::subagents::seed_builtin_subagents(&conn).unwrap();
+        crate::chat::subagents::create(
+            &conn,
+            &crate::chat::subagents::SubagentInput {
+                name: "pr-reviewer".into(),
+                description: String::new(),
+                prompt_md: "Review.".into(),
+                tools: None,
+                engine: None,
+                model: None,
+                effort: None,
+                sandbox_policy: "workspace_write".into(),
+                approval_policy: "full_access".into(),
+                worktree_policy: "inherit".into(),
+                max_rounds: 100,
+                max_concurrent: 2,
+            },
+        )
+        .unwrap();
+        app.manage(crate::DbState(std::sync::Arc::new(parking_lot::Mutex::new(conn))));
+
+        let (gated, note) = tauri::async_runtime::block_on(gate_relay_subagent_op(
+            &app,
+            tools::UPDATE_SUBAGENT,
+            &json!({
+                "agent_id": "pr-reviewer",
+                "sandbox_policy": "read_only",
+                "approval_policy": "on_request",
+            }),
+        ))
+        .unwrap();
+        // Narrowing is always allowed, and is silent: it can only reduce risk.
+        assert_eq!(gated["sandbox_policy"], "read_only");
+        assert_eq!(gated["approval_policy"], "on_request");
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn update_of_an_unknown_agent_is_left_to_the_tool_to_report() {
+        let app = tauri::test::mock_app().handle().clone();
+        // `db::mem()` is the full schema plus the post-schema migrations, so
+        // the `update` rules are judged against a registry shaped like the
+        // real one.
+        let conn = crate::db::mem();
+        crate::db::subagents::seed_builtin_subagents(&conn).unwrap();
+        app.manage(crate::DbState(std::sync::Arc::new(parking_lot::Mutex::new(conn))));
+
+        let (gated, note) = tauri::async_runtime::block_on(gate_relay_subagent_op(
+            &app,
+            tools::UPDATE_SUBAGENT,
+            &json!({ "agent_id": "does-not-exist", "sandbox_policy": "workspace_write" }),
+        ))
+        .unwrap();
+        // No policy opinion is voiced about a row we cannot see; the tool's
+        // own "not found" is the honest answer.
+        assert!(note.is_none());
+        assert_eq!(gated["sandbox_policy"], "workspace_write");
+    }
+
+    #[test]
+    fn list_and_delete_pass_the_gate_untouched() {
+        let app = tauri::test::mock_app().handle().clone();
+        // `db::mem()` is the full schema plus the post-schema migrations, so
+        // the `update` rules are judged against a registry shaped like the
+        // real one.
+        let conn = crate::db::mem();
+        crate::db::subagents::seed_builtin_subagents(&conn).unwrap();
+        app.manage(crate::DbState(std::sync::Arc::new(parking_lot::Mutex::new(conn))));
+
+        for name in [tools::LIST_SUBAGENTS, tools::DELETE_SUBAGENT] {
+            let args = json!({ "agent_id": "anything" });
+            let (gated, note) = tauri::async_runtime::block_on(gate_relay_subagent_op(
+                &app, name, &args,
+            ))
+            .unwrap();
+            assert_eq!(gated, args, "`{name}` must pass through unmodified");
+            assert!(note.is_none());
         }
     }
 

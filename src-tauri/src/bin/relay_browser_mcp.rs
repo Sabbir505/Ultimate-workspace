@@ -1195,11 +1195,72 @@ fn static_relay_schemas() -> Vec<Value> {
                     "caller_session_id": { "type": "string", "description": "YOUR own Relay session id (stated in your Session Mesh context) — include it so the spawn tree is tracked." },
                     "task": { "type": "string", "description": "The new session's first instruction — a complete, self-contained task description." },
                     "title": { "type": "string", "description": "Short sidebar title (defaults to the task's first words)." },
-                    "agent": { "type": "string", "description": "Engine for the new session, e.g. \"claude_code\", \"opencode\", \"builtin\", \"local\" (defaults to yours). An \"agent:<id-or-name>\" value instead spawns a SUBAGENT agent — a user-defined subagent whose prompt, tool allowlist and permission scope apply to the child." },
+                    "agent": { "type": "string", "description": "Engine for the new session, e.g. \"claude_code\", \"opencode\", \"builtin\", \"local\" (defaults to yours). An \"agent:<id-or-name>\" value instead spawns a SUBAGENT agent — a user-defined subagent whose PROMPT and PERMISSION scope apply to the child (its tool allowlist does not transfer: a spawned session is a normal chat on the engine's own toolset). Call `list_subagents` for the names you can pass; if a name doesn't resolve the spawn still happens on your engine and says so." },
                     "model": { "type": "string", "description": "Model for the new session when it should differ from yours: bare model id keeps your provider; \"provider::model\" (e.g. \"anthropic::claude-haiku-4-5\") also switches provider for builtin engines. Omit to use the session-wide subagent model from Relay Settings, else your own model." },
                     "mode": { "type": "string", "enum": ["background", "wait"], "description": "\"background\" (default) returns the session id now; \"wait\" blocks for the first turn's output (bounded)." }
                 },
                 "required": ["task"]
+            }
+        }),
+        // The subagent registry, whole family. The live tools/list serves these
+        // from the app registry; the static copy carries the same names so a
+        // harness that is served the fallback still sees the authoring surface
+        // instead of answering "I don't have that tool". Descriptions can't be
+        // dynamic here, so the gate's own reply text is where the read-only
+        // rule is communicated.
+        json!({
+            "name": "list_subagents",
+            "description": "List the user's subagents (named reusable subagents): id, name, prompt, tool allowlist, engine/model, scope. This is how you learn the names that `spawn_session`'s `agent` parameter accepts as `agent:<id-or-name>`. Call it before create/update/delete, which take an id or name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "create_subagent",
+            "description": "Create a subagent: a named reusable subagent spawnable via Task, spawn_session or an automation. name (lowercase-hyphen), description, prompt_md (standing instructions), optional tools allowlist (omit = read-only default), engine/model, sandbox_policy. Use this when the user asks for a new reusable agent (e.g. 'make an agent that reviews PRs'). Rows you create are badged 'made by agent' in the panel and start read-only — only the user can widen their access.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Lowercase-hyphen name, unique in the registry." },
+                    "description": { "type": "string", "description": "One line, shown next to the name." },
+                    "prompt_md": { "type": "string", "description": "The standing instructions the agent runs under." },
+                    "tools": { "type": "array", "items": { "type": "string" }, "description": "Tool allowlist. Omit for the engine default." },
+                    "engine": { "type": "string", "description": "builtin | local | harness:<id> | acp:<id>. Omit to inherit." },
+                    "model": { "type": "string", "description": "model | provider::model | engine::model. Omit to inherit." },
+                    "sandbox_policy": { "type": "string", "enum": ["read_only", "workspace_write"], "description": "Forced to read_only for harness sessions." },
+                    "max_rounds": { "type": "integer", "description": "Rounds per run, 1-100." }
+                },
+                "required": ["name", "prompt_md"]
+            }
+        }),
+        json!({
+            "name": "update_subagent",
+            "description": "Update a subagent by id or name (from list_subagents). Only passed fields change. You can change what an agent does (prompt, description, tools, model, budget) but NOT widen what it is allowed to do — a widening request is ignored and reported; ask the user to make that change in Settings → Agents → Subagents.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Id or name from list_subagents." },
+                    "description": { "type": "string" },
+                    "prompt_md": { "type": "string" },
+                    "tools": { "type": "array", "items": { "type": "string" } },
+                    "engine": { "type": "string" },
+                    "model": { "type": "string" },
+                    "max_rounds": { "type": "integer" }
+                },
+                "required": ["agent_id"]
+            }
+        }),
+        json!({
+            "name": "delete_subagent",
+            "description": "Delete a subagent by id or name, permanently. Built-ins and agents with a run in flight are refused. Prefer update over delete when refining an existing agent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Id or name from list_subagents." }
+                },
+                "required": ["agent_id"]
             }
         }),
         // ---- Vault CRUD ----

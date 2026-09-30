@@ -520,19 +520,59 @@ describe("streaming read", () => {
     await tick();
     expect(calls).toHaveLength(1);
     expect(calls[0]).toBe("Tiny gpu streamed lead-in.");
-    // Later groups batch to the full budget: under it, held.
+    // A later group past the streaming size budget goes out on arrival —
+    // the next call must be REQUESTED while the current one still has audio
+    // to play, or the queue starves behind a spawn it never saw coming.
     const filler = Array.from({ length: 20 }, (_, i) => `Gpu filler clause ${i} here.`).join(" ");
     ttsPlayer.feedStream([{ text: filler, paragraphStart: false }]);
     await tick();
-    expect(calls).toHaveLength(1);
-    // endStream releases whatever was held short of the budget; the pump,
-    // mid-sentence, picks it up at the boundary.
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain("Gpu filler clause 19 here.");
+    // The model finished writing: close the feed so the drain finishes the read.
     ttsPlayer.endStream();
     ctx.sources[0].onended?.();
-    await vi.waitFor(() => expect(calls).toHaveLength(2));
-    expect(calls[1]).toContain("Gpu filler clause 19 here.");
+    await vi.waitFor(() => expect(ctx.started()).toHaveLength(2));
     ctx.sources[1].onended?.();
     await vi.waitFor(() => expect(useTtsStore.getState().phase).toBe("idle"));
+  });
+
+  it("flushes a small GPU hold once it ages out, so the queue never starves", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    try {
+      vi.mocked(ttsStatus).mockResolvedValue({
+        modelId: "gpu-model",
+        voice: "vf",
+        speed: 1,
+        device: "gpu",
+        voices: [],
+      } as unknown as TtsStatus);
+      ttsPlayer.beginStream("msg:s8:stream", "Answer");
+      const drain = async () => {
+        for (let i = 0; i < 6; i++) await vi.advanceTimersByTimeAsync(0);
+      };
+      await drain();
+      // The first feed IS the opener — out the door immediately. (Unique
+      // texts: the player caches synthesized sentences per model, and a
+      // shared string would be served from cache without an engine call.)
+      ttsPlayer.feedStream([{ text: "Tiny gpu aged-out lead-in.", paragraphStart: false }]);
+      await drain();
+      expect(calls).toHaveLength(1);
+      // A small sentence arrives well within the age window: held.
+      ttsPlayer.feedStream([{ text: "A short held gpu line.", paragraphStart: false }]);
+      await drain();
+      expect(calls).toHaveLength(1);
+      // The model keeps writing without filling the size budget — the hold
+      // must age out and go anyway.
+      await vi.advanceTimersByTimeAsync(2600);
+      ttsPlayer.feedStream([{ text: "One more short line.", paragraphStart: false }]);
+      await drain();
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toContain("A short held gpu line.");
+      expect(calls[1]).toContain("One more short line.");
+      ttsPlayer.endStream();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("plays the streaming opener without waiting to build a lead behind it", async () => {

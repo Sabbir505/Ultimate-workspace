@@ -50,6 +50,13 @@ function vlog(msg: string): void {
 /** Kept under the backend's own 1200-character guard (commands/tts.rs truncates
  *  there), which a group has to clear with its join spaces included. */
 const GPU_CHUNK_CHARS = 1100;
+/** Streaming GPU groups are smaller and TIME-based: the hold flushes when it
+ *  ages past this since the last flush, or fills past this many chars —
+ *  whichever comes first. The point is that the next call is REQUESTED while
+ *  the current one still has audio to play (its ~5 s process start then
+ *  overlaps playback) instead of waiting for the model to write a big batch. */
+const GPU_STREAM_CHUNK_CHARS = 250;
+const GPU_STREAM_FLUSH_MS = 2500;
 
 /** Budget for the FIRST GPU call. This one is on the critical path — the
  *  listener is waiting for the first word — so it stays near a sentence instead
@@ -915,11 +922,16 @@ class TtsPlayer {
   /** Chunks that arrived while setup was still running. */
   private streamQueue: SpeechChunk[] = [];
   /** GPU batching: sentences accumulate here until the group clears its
-   *  budget (GPU pays ~4.5 s of process start per call, so a call per
-   *  sentence would spend the whole turn booting CUDA). */
+   *  budget or ages out (GPU pays ~4.5 s of process start per call, so a
+   *  call per sentence would spend the whole turn booting CUDA). */
   private streamHold: SpeechChunk[] = [];
   private streamHoldChars = 0;
   private streamHoldFirst = true;
+  /** Wallclock of the last GPU streaming flush — the hold ages out on TIME,
+   *  not just on size. (Volume-only batching starved streaming reads: the
+   *  second call waited for the model to GENERATE 1100 chars before it could
+   *  even be requested, and the audio queue sat empty behind the opener.) */
+  private streamHoldAt = 0;
   /** True while a pump loop owns the queue — appending chunks while it runs
    *  needs no kick (the loop's next iteration sees them). */
   private pumping = false;
@@ -1026,6 +1038,7 @@ class TtsPlayer {
     this.streamHold = [];
     this.streamHoldChars = 0;
     this.streamHoldFirst = true;
+    this.streamHoldAt = performance.now();
     this.skipTarget = null;
     this.pausePending = false;
     this.stopSource("stopped");
@@ -1138,10 +1151,14 @@ class TtsPlayer {
       // The FIRST group goes out the moment it exists — time-to-first-audio
       // is the whole point of streaming, and the GPU's per-call process start
       // dominates whatever a bigger batch would save on the opener. Later
-      // groups batch to the full budget.
-      const budget = this.streamHoldFirst ? 0 : GPU_CHUNK_CHARS;
-      if (this.streamHoldChars < budget) return;
+      // groups flush on TIME (~2.5 s) or size (~250 chars): the call must be
+      // requested while the previous one still has audio to play, or the
+      // queue starves behind a spawn it never saw coming.
+      const budget = this.streamHoldFirst ? 0 : GPU_STREAM_CHUNK_CHARS;
+      const aged = performance.now() - this.streamHoldAt >= GPU_STREAM_FLUSH_MS;
+      if (this.streamHoldChars < budget && !aged) return;
       this.streamHoldFirst = false;
+      this.streamHoldAt = performance.now();
       chunks = this.joinHold();
     }
     this.appendChunks(chunks);

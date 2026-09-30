@@ -1,74 +1,77 @@
 // The barge-in decision gate is pure, so every transition is tested by
-// feeding RMS numbers — no microphone, no audio graph.
+// feeding RMS numbers — no microphone, no audio graph. The design these
+// encode: calibrate on the playback's own echo (no pausing — the old
+// pause-and-check chopped the read and eventually killed it on its own
+// echo), then confirm sustained speech ABOVE the speaker bleed.
 import { describe, expect, it } from "vitest";
 import { VoiceActivityGate } from "../lib/voiceActivity";
 
 const QUIET = 0.004; // under every threshold in use here
-const LOUD = 0.08; // a clear voice
+const ECHO = 0.08; // the TTS as the mic hears it through speakers
+const VOICE = 0.25; // a person talking at the microphone
 
 describe("VoiceActivityGate", () => {
-  it("stays silent in a quiet room", () => {
+  it("calibrates on the playback's own echo, deaf during calibration", () => {
     const gate = new VoiceActivityGate();
-    for (let i = 0; i < 40; i++) expect(gate.feed(QUIET)).toBeNull();
-    expect(gate.holdingPause).toBe(false);
+    // Five calibration chunks hear the speakers; nothing fires, ever.
+    for (let i = 0; i < 5; i++) expect(gate.feed(ECHO)).toBeNull();
+    // Armed: the same level that calibrated is now BELOW the voice
+    // threshold — the speakers cannot trigger their own death.
+    expect(gate.feed(ECHO)).toBeNull();
+    expect(gate.feed(ECHO)).toBeNull();
+    expect(gate.feed(ECHO)).toBeNull();
   });
 
-  it("adapts its threshold down toward a quieter room (quiet chunks only)", () => {
-    const gate = new VoiceActivityGate({ minThreshold: 0.008 });
+  it("confirms sustained speech above the calibrated bleed", () => {
+    const gate = new VoiceActivityGate();
+    for (let i = 0; i < 5; i++) gate.feed(ECHO);
+    expect(gate.feed(VOICE)).toBeNull(); // run 1 of 2
+    expect(gate.feed(VOICE)).toBe("confirm");
+    // Latched until reset — a barge-in is acted on exactly once.
+    expect(gate.feed(VOICE)).toBeNull();
+    gate.reset();
+    // Fresh episode recalibrates (deaf again, then re-armed).
+    expect(gate.threshold).toBe(Infinity);
+    for (let i = 0; i < 5; i++) gate.feed(ECHO);
+    expect(gate.feed(ECHO)).toBeNull();
+  });
+
+  it("resets its run on an intermittent quiet chunk", () => {
+    const gate = new VoiceActivityGate();
+    for (let i = 0; i < 5; i++) gate.feed(ECHO);
+    expect(gate.feed(VOICE)).toBeNull();
+    expect(gate.feed(QUIET)).toBeNull();
+    expect(gate.feed(VOICE)).toBeNull(); // run restarted at 1
+    expect(gate.feed(VOICE)).toBe("confirm");
+  });
+
+  it("adapts its floor down toward a quieter room (quiet chunks only)", () => {
+    const gate = new VoiceActivityGate({ echoGuard: false, minThreshold: 0.008 });
     const start = gate.threshold;
     for (let i = 0; i < 60; i++) gate.feed(0.001);
     expect(gate.threshold).toBeLessThan(start);
   });
 
   it("never lets a loud chunk raise the floor behind itself", () => {
-    const gate = new VoiceActivityGate({ minThreshold: 0.008 });
+    const gate = new VoiceActivityGate({ echoGuard: false });
     const before = gate.threshold;
-    gate.feed(0.5); // loud — must not touch the floor
+    gate.feed(VOICE); // loud — must not touch the floor
     expect(gate.threshold).toBe(before);
+  });
+
+  it("headphones: skips calibration and arms on the plain noise floor", () => {
+    const gate = new VoiceActivityGate({ echoGuard: false });
+    expect(gate.threshold).not.toBe(Infinity);
+    // Room noise sits well under the floor-based threshold; a voice clears
+    // it without any calibration window.
+    expect(gate.feed(VOICE)).toBeNull();
+    expect(gate.feed(VOICE)).toBe("confirm");
   });
 
   it("clamps the initial floor to a usable range", () => {
     const low = new VoiceActivityGate({}, 0.00001);
-    const high = new VoiceActivityGate({}, 0.5);
+    const high = new VoiceActivityGate({ echoGuard: false }, 0.5);
     expect(low.threshold).toBeGreaterThan(0);
     expect(high.threshold).toBeGreaterThanOrEqual(0.02 * 2.6);
-  });
-
-  describe("echo guard (speakers) — pause and check", () => {
-    it("suspects on the first spike, then clears when it was echo", () => {
-      const gate = new VoiceActivityGate();
-      for (let i = 0; i < 10; i++) expect(gate.feed(QUIET)).toBeNull();
-      expect(gate.feed(LOUD)).toBe("suspect");
-      expect(gate.holdingPause).toBe(true);
-      // Playback paused, the room went quiet: it was the speakers.
-      expect(gate.feed(QUIET)).toBe("clear");
-      expect(gate.holdingPause).toBe(false);
-    });
-
-    it("confirms when energy persists with playback paused", () => {
-      const gate = new VoiceActivityGate();
-      expect(gate.feed(LOUD)).toBe("suspect");
-      expect(gate.feed(LOUD)).toBe("confirm");
-      // Latched: nothing more until the caller resets after acting.
-      expect(gate.feed(LOUD)).toBeNull();
-      gate.reset();
-      expect(gate.feed(LOUD)).toBe("suspect");
-    });
-  });
-
-  describe("guard off (headphones) — sustained energy confirms", () => {
-    it("confirms after the configured run without a suspect round-trip", () => {
-      const gate = new VoiceActivityGate({ echoGuard: false });
-      expect(gate.feed(LOUD)).toBeNull(); // run 1 of 2
-      expect(gate.feed(LOUD)).toBe("confirm");
-    });
-
-    it("resets its run on an intermittent quiet chunk", () => {
-      const gate = new VoiceActivityGate({ echoGuard: false });
-      expect(gate.feed(LOUD)).toBeNull();
-      expect(gate.feed(QUIET)).toBeNull();
-      expect(gate.feed(LOUD)).toBeNull(); // run restarted at 1
-      expect(gate.feed(LOUD)).toBe("confirm");
-    });
   });
 });

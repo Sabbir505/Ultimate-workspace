@@ -6,21 +6,28 @@
 // synchronous, so the policy is unit-testable without a microphone: feed it
 // numbers, act on the events it returns.
 //
-// Two-stage design — the "pause-and-check" echo guard. With speakers, the mic
-// hears Relay's own TTS, so the first energy spike cannot be trusted as a
-// voice: on the first suspect chunk the caller PAUSES playback, and the gate
-// re-verifies against silence. Energy that persists with nothing playing was
-// a voice → confirm (barge in). Energy that dropped was echo → clear, and the
-// caller resumes playback from its remembered offset. With headphones the mic
-// never hears the TTS, so the guard can be disabled and sustained energy
-// confirms directly.
+// The failure this design replaces: a "pause-and-check" echo guard that
+// paused playback on the first spike and confirmed a barge-in if energy
+// lasted two more chunks (~0.5 s). Real speaker echo outlives 0.5 s, so
+// Relay kept hearing ITSELF, "confirming", and cutting its own read off a
+// few words in — while the pause/resume cycling chopped whatever audio got
+// out. Energy-only gating cannot tell a voice from an echo inside a single
+// second.
 //
-// Thresholds are adaptive: a slow noise floor (EMA over quiet chunks only —
-// loud chunks must not drag it up after them) times a multiplier, clamped
-// below by an absolute minimum. A fixed threshold either misses quiet voices
-// on good mics or self-triggers on loud rooms; the floor adapts per room.
-
-export type VoiceGateEvent = "suspect" | "confirm" | "clear";
+// What it does instead — ECHO CALIBRATION, no pausing, ever:
+//
+//  1. calibrate — the first moments of each playback episode measure the
+//     loudest the ROOM hears while nobody is talking (the speaker bleed).
+//  2. arm — the voice threshold sits well ABOVE that bleed (echoMultiplier).
+//     A human at the microphone is louder than speakers a meter away; the
+//     speakers cannot trigger their own death.
+//  3. confirm — sustained (confirmChunks) energy above the voice threshold.
+//     Never a pause, never a mid-read silence, never a stutter.
+//
+// Cost: barge-in takes ~calibration + one confirm window (~2 s). Worth it —
+// the alternative was the read dying mid-sentence. The quiet floor still
+// adapts per room exactly as before.
+export type VoiceGateEvent = "confirm";
 
 export interface VoiceGateConfig {
   /** Absolute minimum RMS that counts as sound at all. Typical mic noise
@@ -29,14 +36,17 @@ export interface VoiceGateConfig {
   minThreshold: number;
   /** Sound must clear `noiseFloor * floorMultiplier` on top of the minimum. */
   floorMultiplier: number;
-  /** Sustained-sound chunks needed to confirm with the guard off (~256 ms each). */
+  /** Sustained chunks above the voice threshold that confirm a barge-in
+   *  (~256 ms each). Two — half a second of loud speech. */
   confirmChunks: number;
-  /** Sustained-sound chunks needed to confirm while the pause-and-check is
-   *  running — measured against SILENCE now that playback is paused, so this
-   *  can be shorter than a headphone confirm. */
-  echoCheckChunks: number;
-  /** Pause playback on the first suspect chunk and re-verify against silence
-   *  (speakers). Off = trust sustained energy directly (headphones). */
+  /** Chunks of playback (with nobody speaking) measured before arming — the
+   *  echo-bleed estimate. Five ≈ 1.3 s. */
+  calibChunks: number;
+  /** The armed voice threshold: `max(minThreshold, echoPeak * multiplier,
+   *  floor * floorMultiplier)`. Above the speakers' bleed at the mic. */
+  echoMultiplier: number;
+  /** Headphones: the mic never hears the TTS, so calibration is skipped and
+   *  the threshold is the plain noise-floor rule — barge-in arms instantly. */
   echoGuard: boolean;
 }
 
@@ -44,7 +54,8 @@ export const DEFAULT_VOICE_GATE: VoiceGateConfig = {
   minThreshold: 0.016,
   floorMultiplier: 2.6,
   confirmChunks: 2,
-  echoCheckChunks: 2,
+  calibChunks: 5,
+  echoMultiplier: 1.7,
   echoGuard: true,
 };
 
@@ -55,90 +66,65 @@ const FLOOR_MAX = 0.02;
 
 export class VoiceActivityGate {
   private cfg: VoiceGateConfig;
-  private state: "idle" | "counting" | "checking" | "confirmed" = "idle";
+  private state: "calibrating" | "armed" | "confirmed" = "calibrating";
+  private calibLeft: number;
+  private echoPeak = 0;
   private run = 0;
   private floor: number;
-  /** True while the caller is holding playback paused for a check — the
-   *  caller owns the pause/resume actions; this only mirrors it so a reset()
-   *  after a confirm doesn't lose track. */
-  holdingPause = false;
 
   constructor(cfg: Partial<VoiceGateConfig> = {}, initialFloor = 0.004) {
     this.cfg = { ...DEFAULT_VOICE_GATE, ...cfg };
+    this.calibLeft = this.cfg.echoGuard ? this.cfg.calibChunks : 0;
+    if (this.calibLeft === 0) this.state = "armed";
     this.floor = Math.min(Math.max(initialFloor, FLOOR_MIN), FLOOR_MAX);
   }
 
-  /** Current sound threshold (exposed for tests and diagnostics). */
+  /** Current sound threshold (exposed for tests and diagnostics). While
+   *  calibrating it is deliberately impossible to clear — the estimate is
+   *  not in yet. */
   get threshold(): number {
-    return Math.max(this.cfg.minThreshold, this.floor * this.cfg.floorMultiplier);
+    if (this.state === "calibrating") return Infinity;
+    const byEcho = this.cfg.echoGuard ? this.echoPeak * this.cfg.echoMultiplier : 0;
+    return Math.max(this.cfg.minThreshold, byEcho, this.floor * this.cfg.floorMultiplier);
   }
 
   /** Forget everything. Call after acting on a confirm, or when playback
-   *  changes under the gate. `holdingPause` mirrors whether the caller is
-   *  currently holding playback paused for this gate. */
-  reset(holdingPause = false): void {
-    this.state = "idle";
+   *  changes under the gate — the next episode recalibrates. */
+  reset(): void {
+    this.state = this.cfg.echoGuard ? "calibrating" : "armed";
+    this.calibLeft = this.cfg.echoGuard ? this.cfg.calibChunks : 0;
+    this.echoPeak = 0;
     this.run = 0;
-    this.holdingPause = holdingPause;
   }
 
   /** Feed one chunk's RMS. Returns the event to act on, or null. */
   feed(rms: number): VoiceGateEvent | null {
     if (this.state === "confirmed") return null; // latched until reset()
-    const loud = rms >= this.threshold;
 
+    if (this.state === "calibrating") {
+      this.echoPeak = Math.max(this.echoPeak, rms);
+      this.calibLeft -= 1;
+      if (this.calibLeft <= 0) this.state = "armed";
+      return null;
+    }
+
+    const loud = rms >= this.threshold;
     if (!loud) {
       // Quiet chunk: the floor drifts toward it (EMA), clamped. Only quiet
       // chunks move the floor — a loud chunk must not raise the bar behind
       // itself, or sustained speech would silence the gate mid-word.
       this.floor += (Math.min(rms, this.floor) - this.floor) * 0.04;
       this.floor = Math.min(Math.max(this.floor, FLOOR_MIN), FLOOR_MAX);
-      if (this.state === "counting" || this.state === "checking") {
-        const wasChecking = this.state === "checking";
-        this.state = "idle";
-        this.run = 0;
-        if (wasChecking) {
-          this.holdingPause = false;
-          // The pause-and-check heard silence with playback stopped — that
-          // was echo, not a voice. Caller resumes playback.
-          return "clear";
-        }
-      }
+      this.run = 0;
       return null;
     }
 
-    // Loud chunk. The floor stays put (see above).
-    switch (this.state) {
-      case "idle":
-        this.run = 1;
-        if (this.cfg.echoGuard) {
-          // First spike while speaking — untrustworthy with speakers. The
-          // caller pauses playback; the next chunks decide voice vs echo.
-          this.state = "checking";
-          this.holdingPause = true;
-          return "suspect";
-        }
-        this.state = "counting";
-        return null;
-      case "counting":
-        this.run += 1;
-        if (this.run >= this.cfg.confirmChunks) {
-          this.state = "confirmed";
-          return "confirm";
-        }
-        return null;
-      case "checking":
-        // Playback is paused, so a LOUD chunk now is air the mic owns —
-        // a real voice in the room.
-        this.run += 1;
-        if (this.run >= this.cfg.echoCheckChunks) {
-          this.state = "confirmed";
-          return "confirm";
-        }
-        return null;
-      default:
-        return null;
+    this.run += 1;
+    if (this.run >= this.cfg.confirmChunks) {
+      this.state = "confirmed";
+      return "confirm";
     }
+    return null;
   }
 }
 

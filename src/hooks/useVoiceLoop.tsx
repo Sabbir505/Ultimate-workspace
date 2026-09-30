@@ -255,25 +255,26 @@ export function VoiceLoopController(): null {
 
   // The barge-in watcher (Phase A): mic open, energy-only, no transcription —
   // it exists to catch speech while Relay is talking. Armed exactly while the
-  // loop is in the speaking state.
+  // loop is in the speaking state. The gate calibrates on the playback's own
+  // echo first (no pausing — the old pause-and-check chopped the read and
+  // eventually killed it on its own echo), then confirms sustained speech
+  // above the speaker bleed.
   useEffect(() => {
     if (mode !== "handsfree" || phase !== "speaking") return;
     const gate = new VoiceActivityGate({ echoGuard: true });
     let dead = false;
     let stop: (() => void) | null = null;
+    const t0 = performance.now();
     void startMicLevelFeed((rms) => {
       if (dead) return;
       useVoiceLoopStore.getState().set({ level: Math.min(1, rms * 8) });
-      const ev = gate.feed(rms);
-      if (ev === "suspect") {
-        // Could be echo: pause-and-check. The player remembers its offset; a
-        // "clear" resumes exactly there.
-        ttsPlayer.pause();
-      } else if (ev === "confirm") {
+      if (gate.feed(rms) === "confirm") {
+        console.log(
+          `[voice] barge-in at +${Math.round(performance.now() - t0)}ms ` +
+            `(rms ${rms.toFixed(3)} ≥ threshold ${gate.threshold === Infinity ? "∞" : gate.threshold.toFixed(3)})`,
+        );
         gate.reset();
         bargeInRef.current();
-      } else if (ev === "clear") {
-        ttsPlayer.resume();
       }
     })
       .then((stopFn) => {

@@ -11,6 +11,7 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import { NextIcon, PauseIcon, PlayIcon, PrevIcon, SpeakerIcon, StopIcon } from "../../lib/icons";
 import { ttsPlayer } from "../../lib/tts";
 import { useTtsStore } from "../../state/tts";
+import { useVoiceLoopStore } from "../../state/voiceLoop";
 
 /** Rate steps: quarter-turns between half and double — enough spread to feel
  *  responsive, coarse enough to hit from the arrows without hunting. */
@@ -29,7 +30,12 @@ export function TtsPlayerBar() {
   const total = useTtsStore((s) => s.total);
   const error = useTtsStore((s) => s.error);
   const rate = useTtsStore((s) => s.rate);
+  // Hands-free owns playback UX: the loop's barge-in already answers "stop",
+  // and stacking a transport on top of the loop bar (the exact clutter the
+  // mode was reported for) duplicates it button for button.
+  const handsFree = useVoiceLoopStore((s) => s.mode === "handsfree");
 
+  if (handsFree) return null;
   if (phase === "idle" && !error) return null;
 
   const loading = phase === "loading";

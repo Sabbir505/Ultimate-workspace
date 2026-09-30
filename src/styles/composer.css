@@ -370,13 +370,14 @@
   background: rgba(46, 160, 67, 0.25);
 }
 
-/* Loop status bar — one slim row between the drafts area and the control
-   bar, only while an episode runs. The dot breathes green while listening
-   and amber while Relay holds the floor (thinking/speaking). */
+/* Loop status — one slim row between the drafts area and the control bar,
+   only while an episode runs. The wave is the whole UI: it lights with the
+   mic while listening, breathes slowly while Relay thinks, ripples while it
+   speaks. Green = your turn, amber = Relay's. */
 .voice-loop-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin: 6px 0 2px;
   padding: 5px 10px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -385,46 +386,65 @@
   font-size: 12px;
   min-width: 0;
 }
-.voice-loop-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex: none;
-  background: var(--success, #2ea043);
-  animation: mic-pulse 1.4s ease-in-out infinite;
-}
-.voice-loop-bar.phase-sending .voice-loop-dot,
-.voice-loop-bar.phase-waiting .voice-loop-dot,
-.voice-loop-bar.phase-speaking .voice-loop-dot {
-  background: #d29922;
-  animation: none;
-}
-.voice-loop-phase {
-  flex: none;
-  font-weight: 600;
-  color: var(--text);
-}
 .voice-loop-meter {
   display: inline-flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 2px;
-  height: 12px;
+  height: 16px;
   flex: none;
 }
 .voice-loop-meter-bar {
   width: 3px;
-  border-radius: 1px;
-  background: rgba(255, 255, 255, 0.12);
-  height: 4px;
-  transition: height 0.12s var(--ease), background 0.12s var(--ease);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.14);
+  transition: background 0.15s var(--ease), height 0.15s var(--ease);
+}
+.voice-loop-meter-bar:nth-child(1) { height: 5px; }
+.voice-loop-meter-bar:nth-child(2) { height: 9px; }
+.voice-loop-meter-bar:nth-child(3) { height: 13px; }
+.voice-loop-meter-bar:nth-child(4) { height: 16px; }
+.voice-loop-meter-bar:nth-child(5) { height: 11px; }
+.voice-loop-meter-bar:nth-child(6) { height: 16px; }
+.voice-loop-meter-bar:nth-child(7) { height: 13px; }
+.voice-loop-meter-bar:nth-child(8) { height: 9px; }
+.voice-loop-meter-bar:nth-child(9) { height: 5px; }
+
+/* Listening: the room drives the wave — a lit bar stands tall and green.
+   Still bars breathe gently so a silent room doesn't read as dead. */
+.phase-listening .voice-loop-meter-bar {
+  animation: voice-breathe 2.4s ease-in-out infinite;
 }
 .voice-loop-meter-bar[data-on="true"] {
   background: var(--success, #2ea043);
+  height: 16px;
+  animation: none;
 }
-.voice-loop-meter-bar:nth-child(2) { height: 7px; }
-.voice-loop-meter-bar:nth-child(3) { height: 10px; }
-.voice-loop-meter-bar:nth-child(4) { height: 7px; }
-.voice-loop-meter-bar:nth-child(5) { height: 4px; }
+
+/* Relay's floor — thinking and speaking glow amber. Thinking breathes slow
+   and shallow; speaking ripples like speech, staggered per bar. */
+.phase-sending .voice-loop-meter-bar,
+.phase-waiting .voice-loop-meter-bar,
+.phase-speaking .voice-loop-meter-bar {
+  background: #d29922;
+}
+.phase-sending .voice-loop-meter-bar,
+.phase-waiting .voice-loop-meter-bar {
+  animation: voice-breathe 2s ease-in-out infinite;
+}
+.phase-speaking .voice-loop-meter-bar {
+  animation: voice-speak 0.9s ease-in-out infinite;
+}
+
+@keyframes voice-breathe {
+  0%, 100% { transform: scaleY(0.55); }
+  50% { transform: scaleY(1); }
+}
+@keyframes voice-speak {
+  0%, 100% { transform: scaleY(0.45); }
+  35% { transform: scaleY(1.15); }
+  70% { transform: scaleY(0.7); }
+}
+
 .voice-loop-transcript {
   flex: 1;
   min-width: 0;

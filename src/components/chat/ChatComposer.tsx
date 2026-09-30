@@ -1559,41 +1559,34 @@ export const ChatComposer = memo(function ChatComposer({
           <div className="composer-footer-spacer" />
         </div>
         )}
-        {/* Hands-free loop status bar: only on the composer that owns the
-            loop, only while an episode is actually running (idle = hidden —
-            the toggle alone is enough UI for the off state). */}
+        {/* Hands-free loop status: only on the composer that owns the loop,
+            only while an episode runs. The wave IS the status — no text, no
+            dot, no transport: it reacts to the mic while listening, breathes
+            while Relay thinks, ripples while it speaks. Live transcript rides
+            beside it; the X ends the mode. */}
         {loopOwnsComposer && loopActive && (
           <div className={`voice-loop-bar phase-${loopPhase}`} role="status">
-            <span className="voice-loop-dot" aria-hidden="true" />
-            <span className="voice-loop-phase">
-              {loopPhase === "listening"
-                ? "Listening"
-                : loopPhase === "sending"
-                  ? "Sending"
-                  : loopPhase === "waiting"
-                    ? "Thinking"
-                    : "Speaking"}
-            </span>
             <span className="voice-loop-meter" aria-hidden="true">
-              {[1, 2, 3, 4, 5].map((bar) => (
+              {Array.from({ length: 9 }, (_, i) => i + 1).map((bar) => (
                 <span
                   key={bar}
                   className="voice-loop-meter-bar"
-                  data-on={loopPhase === "listening" && loopLevel * 5 >= bar}
+                  data-on={loopPhase === "listening" && loopLevel * 9 >= bar}
+                  style={{ animationDelay: `${(bar - 1) * 0.09}s` }}
                 />
               ))}
             </span>
             <span className="voice-loop-transcript">
-              {loopPhase === "listening" && loopTranscript ? loopTranscript : "…"}
+              {loopPhase === "listening" && loopTranscript ? loopTranscript : ""}
             </span>
             {loopError && <span className="voice-loop-error">{loopError}</span>}
-              <button
-                type="button"
-                className="voice-loop-stop"
-                title="Stop hands-free"
-                aria-label="Stop hands-free voice loop"
-                onClick={exitHandsFree}
-              >
+            <button
+              type="button"
+              className="voice-loop-stop"
+              title="Stop hands-free"
+              aria-label="Stop hands-free voice loop"
+              onClick={exitHandsFree}
+            >
               <X size={12} strokeWidth={2} aria-hidden />
             </button>
           </div>

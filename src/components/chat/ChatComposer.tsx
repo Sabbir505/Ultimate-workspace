@@ -846,6 +846,70 @@ export const ChatComposer = memo(function ChatComposer({
     useVoiceLoopStore.getState().setMode("off");
   }, []);
 
+  // The mic chip, shared by the send-wrap's states (voice-only row while the
+  // composer is empty; kept beside send while a dictation is mid-flight).
+  const micChip = (
+    <button
+      type="button"
+      className={`composer-mic-btn${recording ? " recording" : ""}`}
+      title={
+        loopActive
+          ? "Mic in use by hands-free mode"
+          : recording
+            ? "Stop recording"
+            : transcribing
+              ? "Transcribing…"
+              : "Record voice (or hold Alt)"
+      }
+      aria-label={recording ? "Stop recording" : "Record voice"}
+      disabled={transcribing || loopActive}
+      onClick={toggleRecording}
+    >
+      {transcribing ? (
+        <span className="composer-mic-spinner" />
+      ) : recording ? (
+        <span className="composer-mic-stop" />
+      ) : (
+        /* flexShrink: 0 — flex-shrink squeezed the svg into the
+           button's content box (invisible) whenever any padding
+           leaks in. */
+        <Mic size={14} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden />
+      )}
+    </button>
+  );
+  // Same for the hands-free toggle — it only ever shows in the voice-only row.
+  const handsFreeChip = loopOwnsComposer ? (
+    <button
+      type="button"
+      className={`composer-mic-btn handsfree${voiceMode === "handsfree" ? ` on phase-${loopPhase}` : ""}`}
+      title={
+        voiceMode === "handsfree"
+          ? loopError
+            ? `Hands-free: ${loopError}`
+            : loopPhase === "listening"
+              ? "Hands-free: listening — click to stop"
+              : loopPhase === "speaking"
+                ? "Hands-free: speaking (talk to interrupt) — click to stop"
+                : "Hands-free: thinking — click to stop"
+          : "Hands-free voice: talk, Relay answers aloud, keep going"
+      }
+      aria-pressed={voiceMode === "handsfree"}
+      aria-label="Toggle hands-free voice loop"
+      onClick={toggleHandsFree}
+    >
+      <AudioLines size={14} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden />
+      <span className="voice-btn-wave" aria-hidden="true">
+        {Array.from({ length: 5 }, (_, i) => i + 1).map((bar) => (
+          <span
+            key={bar}
+            className="voice-btn-wave-bar"
+            data-on={voiceMode === "handsfree" && loopPhase === "listening" && loopLevel * 5 >= bar}
+          />
+        ))}
+      </span>
+    </button>
+  ) : null;
+
   // Close the "+" popover on outside click.
   useEffect(() => {
     if (!attachMenuOpen) return;
@@ -1674,64 +1738,10 @@ export const ChatComposer = memo(function ChatComposer({
           <div className="composer-control-spacer" />
 
           <div className="composer-send-wrap">
-            {loopOwnsComposer && (
-              <button
-                type="button"
-                className={`composer-mic-btn handsfree${voiceMode === "handsfree" ? ` on phase-${loopPhase}` : ""}`}
-                title={
-                  voiceMode === "handsfree"
-                    ? loopError
-                      ? `Hands-free: ${loopError}`
-                      : loopPhase === "listening"
-                        ? "Hands-free: listening — click to stop"
-                        : loopPhase === "speaking"
-                          ? "Hands-free: speaking (talk to interrupt) — click to stop"
-                          : "Hands-free: thinking — click to stop"
-                    : "Hands-free voice: talk, Relay answers aloud, keep going"
-                }
-                aria-pressed={voiceMode === "handsfree"}
-                aria-label="Toggle hands-free voice loop"
-                onClick={toggleHandsFree}
-              >
-                <AudioLines size={14} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden />
-                <span className="voice-btn-wave" aria-hidden="true">
-                  {Array.from({ length: 5 }, (_, i) => i + 1).map((bar) => (
-                    <span
-                      key={bar}
-                      className="voice-btn-wave-bar"
-                      data-on={voiceMode === "handsfree" && loopPhase === "listening" && loopLevel * 5 >= bar}
-                    />
-                  ))}
-                </span>
-              </button>
-            )}
-            <button
-              type="button"
-              className={`composer-mic-btn${recording ? " recording" : ""}`}
-              title={
-                loopActive
-                  ? "Mic in use by hands-free mode"
-                  : recording
-                    ? "Stop recording"
-                    : transcribing
-                      ? "Transcribing…"
-                      : "Record voice (or hold Alt)"
-              }
-              aria-label={recording ? "Stop recording" : "Record voice"}
-              disabled={transcribing || loopActive}
-              onClick={toggleRecording}
-            >
-              {transcribing ? (
-                <span className="composer-mic-spinner" />
-              ) : recording ? (
-                <span className="composer-mic-stop" />
-              ) : (
-                /* flexShrink: 0 — flex-shrink squeezed the svg into the
-                   button's content box (invisible) whenever any padding
-                   leaks in. */
-                <Mic size={14} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden />
-              )}
-            </button>
+            {/* Three states, one slot: a running turn shows only Stop; a
+                composer with something in it shows only Send (plus the mic
+                chip while a dictation is mid-flight); an empty composer is
+                the voice row — hands-free toggle + mic — and nothing else. */}
             {streaming ? (
               <button
                 className="composer-send-btn stop"
@@ -1741,22 +1751,30 @@ export const ChatComposer = memo(function ChatComposer({
               >
                 ■
               </button>
+            ) : isEmpty && !recording && !transcribing ? (
+              <>
+                {handsFreeChip}
+                {micChip}
+              </>
             ) : (
-              <button
-                className="composer-send-btn"
-                onClick={handleSend}
-                disabled={isEmpty || disabled || needsModel || agentLocked}
-                title={
-                  agentLocked
-                    ? "Select an agent first"
-                    : needsModel
-                      ? "Select a model first"
-                      : "Send message"
-                }
-                aria-label="Send message"
-              >
-                ↑
-              </button>
+              <>
+                {(recording || transcribing) && micChip}
+                <button
+                  className="composer-send-btn"
+                  onClick={handleSend}
+                  disabled={isEmpty || disabled || needsModel || agentLocked}
+                  title={
+                    agentLocked
+                      ? "Select an agent first"
+                      : needsModel
+                        ? "Select a model first"
+                        : "Send message"
+                  }
+                  aria-label="Send message"
+                >
+                  ↑
+                </button>
+              </>
             )}
           </div>
         </div>

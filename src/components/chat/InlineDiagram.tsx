@@ -2,14 +2,17 @@
 //
 // Static diagrams (authored by `generate_diagram` as inline <svg>, or plain
 // SVG-only HTML) render in a sanitized, scripts-blocked iframe sized to the
-// diagram's intrinsic height — identical rendering to the export pipeline.
+// diagram's aspect at the chat width — identical rendering to the export
+// pipeline, except the frame is capped at INLINE_DIAGRAM_MAX_H so a very tall
+// artifact is scaled down into a fixed-height card instead of taking over the
+// conversation.
 //
 // Interactive visuals (HTML with scripts/forms/buttons — Claude-style custom
 // visuals) render LIVE: an allow-scripts sandboxed iframe (no same-origin, so
 // no parent/Tauri access) whose height auto-fits the content via a postMessage
-// handshake. A compact toolbar carries Download + "Open in tab" (full-size
-// preview) for both paths.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// handshake, clamped to the same bound. A compact toolbar carries Download +
+// "Open in tab" (full-size preview) for both paths.
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { readArtifactPreview, type ArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
@@ -19,31 +22,52 @@ import { DiagramLightbox } from "./DiagramLightbox";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
 
 /** Injected into the iframe document (display only) so the diagram scales down
- *  to the chat width instead of overflowing with a scrollbar. Export still uses
- *  the untouched `preview.text`, so downloads keep the original resolution. */
+ *  to the chat width — and down to the frame height when the artifact is too
+ *  tall to show inline at full size. Export still uses the untouched
+ *  `preview.text`, so downloads keep the original resolution. */
 /** Horizontal padding (px per side) inside the iframe so the diagram never
  *  touches the frame edge. */
 const FIT_PAD_X = 12;
 const FIT_PAD_Y = 8;
+/** Hard cap on an inline static artifact's height. Past this the frame holds
+ *  this height and the diagram scales down into it (the SVG keeps its
+ *  aspect ratio, so the drawing shrinks rather than clipping) — a 3000px
+ *  flowchart must not swallow the conversation. Sized to match the live-visual
+ *  clamp below so both inline artifact kinds occupy the same slot. */
+const INLINE_DIAGRAM_MAX_H = 520;
 const FIT_STYLE =
-  `<style>html{margin:0;overflow:hidden}body{margin:0;padding:${FIT_PAD_Y}px ${FIT_PAD_X}px;` +
+  `<style>html{margin:0;overflow:hidden;height:100%}` +
+  // box-sizing keeps the padding inside the 100% height, and overflow:hidden
+  // means an over-tall artifact is clipped by the frame rather than pushing
+  // the chat into an endless scroll.
+  `body{margin:0;padding:${FIT_PAD_Y}px ${FIT_PAD_X}px;box-sizing:border-box;height:100%;overflow:hidden;` +
   // No flex — flex collapses the body to the iframe height and breaks
   // scrollHeight measurement. Let the SVG flow as a block element.
   "background:#fff}" +
   // Force the SVG to shrink-to-fit the container width, preserving aspect ratio.
-  "svg{display:block;width:100%!important;height:auto!important;max-height:none!important}" +
+  // max-height:100% is the tall-artifact half of the fit: a short diagram
+  // still sizes to its width, a tall one is scaled down to the frame height
+  // and centered by the SVG's own preserveAspectRatio.
+  "svg{display:block;width:100%!important;height:auto!important;max-height:100%!important}" +
   // Also constrain wrapper divs so nothing overflows the frame.
   "body > div{max-width:100%!important}" +
   "</style>";
 
+/** Compose the frame document: the fit stylesheet FIRST, then the sanitized
+ *  artifact markup.
+ *
+ *  The order matters. The style is prepended AFTER sanitization because
+ *  DOMPurify runs in body-only mode: a `<style>` element sitting in the
+ *  parsed document's `<head>` is dropped with the rest of the head, so
+ *  injecting this stylesheet into the source markup (as an earlier version
+ *  did) silently threw it away for exactly the artifacts that need it most —
+ *  a bare `<svg>` diagram, whose markup has no `<head>` at all and whose
+ *  leading `<style>` the parser hoists into one. Prepending it to the
+ *  sanitized body content puts it back in front of the markup, where the
+ *  frame's parser hoists it into `<head>` where it belongs. FIT_STYLE is a
+ *  literal with no interpolated artifact content, so it needs no sanitizing. */
 function withFitStyle(html: string): string {
-  if (/<head[^>]*>/i.test(html)) {
-    return html.replace(/<head[^>]*>/i, (m) => m + FIT_STYLE);
-  }
-  if (/<html[^>]*>/i.test(html)) {
-    return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${FIT_STYLE}</head>`);
-  }
-  return FIT_STYLE + html;
+  return FIT_STYLE + sanitizeHtml(html);
 }
 
 // ---- Live inline visuals (interactive HTML) ----
@@ -105,7 +129,9 @@ export function InlineDiagram({
 }) {
   const [preview, setPreview] = useState<ArtifactPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [measuredH, setMeasuredH] = useState(0);
+  /** Rendered size of the diagram's root <svg> inside the measuring frame,
+   *  or null until the first measure lands. */
+  const [measured, setMeasured] = useState<{ w: number; h: number } | null>(null);
   const blockRef = useRef<HTMLDivElement>(null);
   const [containerW, setContainerW] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
@@ -206,7 +232,7 @@ export function InlineDiagram({
     let stale = false;
     setPreview(null);
     setError(null);
-    setMeasuredH(0);
+    setMeasured(null);
     void readArtifactPreview(artifact.path)
       .then((p) => {
         if (!stale) setPreview(p);
@@ -232,7 +258,7 @@ export function InlineDiagram({
   }, [preview]);
 
   const srcDoc = useMemo(
-    () => (preview?.text != null ? sanitizeHtml(withFitStyle(preview.text)) : ""),
+    () => (preview?.text != null ? withFitStyle(preview.text) : ""),
     [preview],
   );
   // Live-frame document, memoized so a parent re-render (token flushes while
@@ -244,7 +270,7 @@ export function InlineDiagram({
     [preview],
   );
 
-  // Measure the actual rendered height of the iframe content after it loads.
+  // Measure the actual rendered size of the iframe content after it loads.
   // Uses allow-same-origin sandbox (no allow-scripts) so we can read
   // contentDocument — same approach as ArtifactPreviewPane. We measure the
   // SVG element's bounding rect directly (more reliable than body.scrollHeight
@@ -254,18 +280,27 @@ export function InlineDiagram({
     const frame = blockRef.current?.querySelector<HTMLIFrameElement>(".chat-diagram-frame");
     const doc = frame?.contentDocument;
     if (!doc) return;
-    // Prefer the SVG element's rendered height — this is the actual content.
+    // Prefer the SVG element's rendered box — this is the actual content.
     const svg = doc.querySelector("svg");
     if (svg) {
       const rect = svg.getBoundingClientRect();
       if (rect.height > 0) {
-        setMeasuredH(Math.round(rect.height) + FIT_PAD_Y * 2);
+        const w = Math.round(rect.width);
+        const h = Math.round(rect.height);
+        // Keep the previous object identity when nothing moved, so the
+        // re-measure effect below doesn't retrigger itself forever.
+        setMeasured((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
         return;
       }
     }
     // Fallback: body scrollHeight (includes all content, not just SVG).
     const h = doc.body?.scrollHeight ?? doc.documentElement?.scrollHeight ?? 0;
-    if (h > 0) setMeasuredH(h);
+    if (h > 0) {
+      setMeasured((prev) => {
+        const next = { w: prev?.w ?? 0, h };
+        return prev && prev.h === next.h && prev.w === next.w ? prev : next;
+      });
+    }
   }, []);
 
   const onFrameLoad = useCallback(() => {
@@ -279,22 +314,63 @@ export function InlineDiagram({
 
   // Re-measure when the container width changes (responsive resize).
   useEffect(() => {
-    if (measuredH === 0) return;
+    if (!measured) return;
     // Defer to let the SVG re-layout at the new width.
     const t = setTimeout(measureFrame, 50);
     return () => clearTimeout(t);
-  }, [containerW, measureFrame, measuredH]);
+  }, [containerW, measureFrame, measured]);
 
-  // Fallback height from SVG dims while waiting for the load event.
-  const height = useMemo(() => {
-    if (measuredH > 0) return measuredH;
-    if (!preview?.text) return 320;
-    const d = svgDims(preview.text);
-    if (!d || d.w <= 0) return 320;
-    const avail = containerW - FIT_PAD_X * 2;
-    const ratio = avail > 0 && d.w > avail ? avail / d.w : 1;
-    return Math.max(Math.round(d.h * ratio) + FIT_PAD_Y * 2, 120);
-  }, [preview, containerW, measuredH]);
+  // The diagram's INTRINSIC pixel size (width/height attrs or viewBox).
+  const intrinsic = useMemo(
+    () => (preview?.text ? svgDims(preview.text) : null),
+    [preview],
+  );
+
+  // Frame sizing. This is deliberately a PURE function of the artifact's
+  // intrinsic size and the available width — never of a height measured from
+  // inside a frame that is itself already capped. A measurement taken from a
+  // capped frame reads back the cap, which would flip the cap decision on the
+  // next pass and oscillate the card between full-width and fitted.
+  const { height, fitWidth } = useMemo(() => {
+    // Content width the SVG gets inside the frame.
+    const availW = Math.max(containerW - FIT_PAD_X * 2, 1);
+    if (intrinsic && intrinsic.w > 0 && intrinsic.h > 0) {
+      const aspect = intrinsic.w / intrinsic.h;
+      // The fit style pins the SVG to width:100%, so the rendered height is
+      // always availW/aspect — a small diagram scales UP to the chat column
+      // (node text stays legible) exactly as it did before the height cap.
+      const naturalH = Math.round(availW / aspect) + FIT_PAD_Y * 2;
+      if (naturalH > INLINE_DIAGRAM_MAX_H) {
+        // Too tall at full chat width: hold a fixed height and narrow the card
+        // to the diagram's own aspect (minus the frame's padding) so the
+        // drawing fills the card instead of floating in white space. A
+        // max-width only ever NARROWS this block-level card, so a wide aspect
+        // in a narrow column simply keeps the column's width.
+        const fitted = Math.round((INLINE_DIAGRAM_MAX_H - FIT_PAD_Y * 2) * aspect) + FIT_PAD_X * 2;
+        return { height: INLINE_DIAGRAM_MAX_H, fitWidth: fitted };
+      }
+      return { height: Math.max(naturalH, 120), fitWidth: 0 };
+    }
+    // No intrinsic size (an HTML wrapper whose root <svg> has no
+    // width/height/viewBox): fall back to the measured box. A measurement
+    // sitting at the frame ceiling means the content is taller than the cap.
+    if (measured && measured.h > 0) {
+      const naturalH = measured.h + FIT_PAD_Y * 2;
+      // Pinned at the ceiling: the content is taller than the cap. Its
+      // measured aspect is distorted by the clamp, so the card keeps its
+      // natural width and the diagram centers itself inside the fixed frame.
+      if (measured.h >= INLINE_DIAGRAM_MAX_H - FIT_PAD_Y * 2) {
+        return { height: INLINE_DIAGRAM_MAX_H, fitWidth: 0 };
+      }
+      return { height: Math.max(naturalH, 120), fitWidth: 0 };
+    }
+    return { height: 320, fitWidth: 0 };
+  }, [intrinsic, containerW, measured]);
+
+  // Left-aligned at its natural size, centered once it's been fitted to the cap.
+  const blockStyle: CSSProperties | undefined = fitWidth
+    ? { maxWidth: `${fitWidth}px`, marginLeft: "auto", marginRight: "auto" }
+    : undefined;
 
   if (error) {
     return <div className="chat-diagram-error">Could not load diagram: {error}</div>;
@@ -331,12 +407,13 @@ export function InlineDiagram({
     );
   }
 
-  // Static diagrams render in the sanitized measuring frame. A transparent
-  // click-catcher sits above the iframe (same-origin frames swallow clicks,
-  // and diagrams are non-interactive anyway) so clicking opens the full-screen
-  // zoom/pan lightbox.
+  // Static diagrams render in the sanitized measuring frame, capped at
+  // INLINE_DIAGRAM_MAX_H with the diagram scaled to fit (see FIT_STYLE). A
+  // transparent click-catcher sits above the iframe (same-origin frames
+  // swallow clicks, and diagrams are non-interactive anyway) so clicking opens
+  // the full-screen zoom/pan lightbox.
   return (
-    <div className="chat-diagram-block" ref={blockRef}>
+    <div className="chat-diagram-block" ref={blockRef} style={blockStyle}>
       <iframe
         className="chat-diagram-frame"
         title={artifact.filename}

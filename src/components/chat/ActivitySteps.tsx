@@ -1675,7 +1675,16 @@ export function ChatImage({ src, alt }: { src: string; alt?: string }) {
   }, [src, isRemote, cachedUri]);
 
   if (isRemote || dataUri) {
-    return <img src={isRemote ? src : dataUri!} alt={alt ?? ""} />;
+    // max-width + max-height scale the whole picture down proportionally — a
+    // tall full-page screenshot must not push the message past the viewport.
+    // Only the caps are set (no fixed height), so nothing is letterboxed.
+    return (
+      <img
+        src={isRemote ? src : dataUri!}
+        alt={alt ?? ""}
+        style={{ maxWidth: "100%", maxHeight: 520 }}
+      />
+    );
   }
   if (failed) {
     return (

@@ -35,6 +35,10 @@ const MAX_SENTENCE_CHARS = 240;
  *  4.5s loading for every couple of seconds of audio, so GPU mode groups
  *  sentences into as few, as large, calls as the engine accepts. */
 const CPU_CHUNK_CHARS = MAX_SENTENCE_CHARS;
+/** Clause-boundary cap for the FIRST CPU chunk — the one being waited on.
+ *  ~110 characters ≈ 6–7 s of audio ≈ 4–5 s of synthesis at ~1.5× realtime:
+ *  the word "first" stops meaning "after a paragraph". */
+const CPU_FIRST_CHUNK_CHARS = 110;
 /** Kept under the backend's own 1200-character guard (commands/tts.rs truncates
  *  there), which a group has to clear with its join spaces included. */
 const GPU_CHUNK_CHARS = 1100;
@@ -785,6 +789,28 @@ function hardWrap(sentence: string, maxChars: number): string[] {
   return out.filter((s) => s.length > 0);
 }
 
+/** Cap the FIRST chunk so the critical-path synthesis is short.
+ *
+ *  The opening chunk is the one the listener waits on: CPU synthesis runs at
+ *  ~1.5× realtime, so a full 240-character opening sentence is ~16 s of audio
+ *  that must be synthesized before a single word sounds — the read feels
+ *  broken even though the rest is prefetched. `hardWrap` already knows how to
+ *  cut at a clause boundary, so the first chunk is re-split there (a
+ *  mid-clause break would sound like a stutter) and the remainder queues
+ *  behind it as ordinary chunks. GPU reads are left alone: their first call
+ *  is dominated by the ~4.5 s process start, which a smaller chunk does not
+ *  reduce (see GPU_WARMUP_CHARS). */
+export function splitFirstChunk(chunks: SpeechChunk[], firstMaxChars: number): SpeechChunk[] {
+  const first = chunks[0];
+  if (!first || first.text.length <= firstMaxChars) return chunks;
+  const pieces = hardWrap(first.text, firstMaxChars);
+  if (pieces.length <= 1) return chunks;
+  return [
+    ...pieces.map((text) => ({ text, paragraphStart: first.paragraphStart })),
+    ...chunks.slice(1),
+  ];
+}
+
 // ---- Playback ----
 
 export interface PlayTextOptions {
@@ -887,10 +913,15 @@ class TtsPlayer {
     // CPU voices in-process, where a call costs nothing — sentence-sized chunks
     // there keep skip/prev fine-grained. GPU pays a process per call, so it
     // fills each call with as many sentences as the budget holds.
-    const chunks =
+    let chunks =
       this.device === "gpu"
         ? groupSentences(sentences, GPU_CHUNK_CHARS, GPU_MIN_GROUP_CHARS, GPU_WARMUP_CHARS)
         : sentences;
+    // The opening chunk is on the critical path — cap it at a clause so the
+    // first word is not a full sentence's synthesis away (CPU only; the GPU
+    // path's first call is dominated by process start, which splitting does
+    // not reduce).
+    if (this.device !== "gpu") chunks = splitFirstChunk(chunks, CPU_FIRST_CHUNK_CHARS);
     if (chunks.length === 0) {
       store.set({ phase: "idle", key: null, label: null, error: "Nothing to read here" });
       return;

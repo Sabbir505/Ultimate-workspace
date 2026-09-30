@@ -79,7 +79,12 @@ impl HarnessAdapter for OmpAdapter {
 
     /// No filesystem probe: the session store layout is not a documented
     /// interface (config lives under `~/.omp/agent/`, sessions "on disk").
-    fn find_session_id_on_disk(&self, _cwd: &Path, _since: SystemTime) -> Option<String> {
+    fn find_session_id_on_disk(
+        &self,
+        _cwd: &Path,
+        _since: SystemTime,
+        _owner: &str,
+    ) -> Option<super::DiscoveredSessionId> {
         None
     }
 
@@ -160,7 +165,7 @@ mod tests {
     #[test]
     fn disk_probe_always_none() {
         assert!(OmpAdapter
-            .find_session_id_on_disk(Path::new("/nope"), SystemTime::UNIX_EPOCH)
+            .find_session_id_on_disk(Path::new("/nope"), SystemTime::UNIX_EPOCH, "test-pane")
             .is_none());
     }
 }

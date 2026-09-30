@@ -12,7 +12,10 @@
 //! the newest entry whose workDir matches the pane's cwd, created at/after
 //! spawn time. Output scraping is kept as a cheap first chance.
 
-use super::{parse_usage_common, CommandSpec, HarnessAdapter, SessionUsage, UsageInfo};
+use super::{
+    claim_session, is_claimed_by_other, parse_usage_common, CommandSpec, DiscoveredSessionId,
+    HarnessAdapter, SessionUsage, UsageInfo,
+};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::fs;
@@ -77,8 +80,13 @@ impl HarnessAdapter for KimiCodeAdapter {
             .map(|c| c[1].to_string())
     }
 
-    fn find_session_id_on_disk(&self, cwd: &Path, since: SystemTime) -> Option<String> {
-        find_newest_session_id(cwd, since)
+    fn find_session_id_on_disk(
+        &self,
+        cwd: &Path,
+        since: SystemTime,
+        owner: &str,
+    ) -> Option<DiscoveredSessionId> {
+        find_newest_session_id(cwd, since, owner)
     }
 
     fn usage_from_disk(&self, _cwd: &Path, harness_session_id: &str) -> Option<SessionUsage> {
@@ -101,39 +109,71 @@ fn normalize_work_dir(cwd: &Path) -> String {
     s.trim_end_matches('/').to_string()
 }
 
+/// Compare an index `workDir` against the normalized pane cwd. Windows paths
+/// are case-insensitive, and a pane cwd of `d:/projects/foo` would never match
+/// the index's `D:/Projects/foo` under a plain string compare — silently
+/// disabling session capture for that pane.
+fn work_dir_matches(stored: Option<&str>, want: &str) -> bool {
+    let Some(stored) = stored else { return false };
+    if stored == want {
+        return true;
+    }
+    if cfg!(windows) {
+        return stored.eq_ignore_ascii_case(want);
+    }
+    false
+}
+
 /// Filesystem fallback for session-id capture: the newest session_index.jsonl
 /// entry for this working directory whose session dir was touched at/after
 /// `since` (pane spawn time). Fully defensive: any IO/parse problem → None.
 ///
-/// Known limitation (logged in BUILD_LOG.md): two panes spawned in the SAME
-/// cwd within the probe window can cross-attribute the newest session entry.
-pub fn find_newest_session_id(cwd: &Path, since: SystemTime) -> Option<String> {
+/// Two panes in the SAME cwd are indistinguishable from the index alone — it
+/// records `workDir` but nothing tying an entry to the process that created it
+/// — so both would take the same "newest" line. Instead of handing that line to
+/// whoever polls first, this function honours the shared claim registry
+/// (see `super::session_claims`): an id another live pane already owns is
+/// skipped and the scan continues to the next candidate. `ambiguous` is set
+/// when a newer entry had to be stepped over, which is the signal the UI uses
+/// to flag the id as a guess.
+pub fn find_newest_session_id(cwd: &Path, since: SystemTime, owner: &str) -> Option<DiscoveredSessionId> {
     let index = crate::util::home_dir()?.join(".kimi-code").join("session_index.jsonl");
     let content = fs::read_to_string(index).ok()?;
     let want = normalize_work_dir(cwd);
-    // Append-only file: scan bottom-up, first match is the newest for this cwd.
+    let mut ambiguous = false;
+    // Append-only file: scan bottom-up, so the first match is the newest for
+    // this cwd.
     for line in content.lines().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if v.get("workDir").and_then(|w| w.as_str()) != Some(want.as_str()) {
+        if !work_dir_matches(v.get("workDir").and_then(|w| w.as_str()), &want) {
             continue;
         }
         // One malformed index line must not abort the probe — skip it.
         let Some(session_id) = v.get("sessionId").and_then(|s| s.as_str()) else {
             continue;
         };
-        // Guard against attributing a pre-existing session to this pane.
-        if let Some(dir) = v.get("sessionDir").and_then(|d| d.as_str()) {
-            if let Ok(meta) = fs::metadata(dir) {
-                if let Ok(mtime) = meta.modified() {
-                    if mtime < since {
-                        continue;
-                    }
-                }
-            }
+        // Guard against attributing a pre-existing session to this pane. The
+        // previous code treated the guard as best-effort (`if let Some(dir)`),
+        // so an index line without a sessionDir matched ANY historical session
+        // in that cwd. An unverifiable entry is not evidence of a new session.
+        let Some(dir) = v.get("sessionDir").and_then(|d| d.as_str()) else {
+            continue;
+        };
+        let Ok(meta) = fs::metadata(dir) else { continue };
+        let Ok(mtime) = meta.modified() else { continue };
+        if mtime < since {
+            continue;
         }
-        return Some(session_id.to_string());
+        // Another live pane already owns this session — it is almost certainly
+        // THAT pane's session, not ours. Keep looking.
+        if is_claimed_by_other(session_id, owner) {
+            ambiguous = true;
+            continue;
+        }
+        claim_session(session_id, owner);
+        return Some(DiscoveredSessionId::new(session_id.to_string(), ambiguous));
     }
     None
 }
@@ -201,6 +241,48 @@ pub fn parse_session_usage(harness_session_id: &str) -> Option<SessionUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes the tests that repoint HOME — every other test in the binary
+    /// would otherwise see a random temp dir as its home (see
+    /// installed_skills.rs, which uses the same guard).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Point HOME/USERPROFILE at `dir` and hand back a restore closure.
+    fn use_home(dir: &std::path::Path) -> impl Fn() {
+        let prev_home = std::env::var("HOME").ok();
+        let prev_profile = std::env::var("USERPROFILE").ok();
+        std::env::set_var("USERPROFILE", dir);
+        std::env::set_var("HOME", dir);
+        move || {
+            if let Some(v) = prev_home.clone() {
+                std::env::set_var("HOME", v);
+            }
+            if let Some(v) = prev_profile.clone() {
+                std::env::set_var("USERPROFILE", v);
+            }
+        }
+    }
+
+    /// Build `~/.kimi-code/session_index.jsonl` plus the session dirs it
+    /// points at, inside `home`. Kimi appends one line per session, so the
+    /// fixture mirrors that append order (older first).
+    fn write_index(home: &Path, entries: &[(&str, &str)]) -> std::path::PathBuf {
+        let kimi = home.join(".kimi-code");
+        std::fs::create_dir_all(kimi.join("sessions")).unwrap();
+        let mut lines = String::new();
+        for (session_id, dir_name) in entries {
+            let dir = kimi.join("sessions").join(dir_name);
+            std::fs::create_dir_all(&dir).unwrap();
+            lines.push_str(&format!(
+                "{{\"sessionId\":\"{session_id}\",\"sessionDir\":\"{}\",\"workDir\":\"D:/proj\"}}\n",
+                dir.to_string_lossy().replace('\\', "/")
+            ));
+        }
+        let index = kimi.join("session_index.jsonl");
+        std::fs::write(&index, lines).unwrap();
+        index
+    }
 
     #[test]
     fn resume_command_args() {
@@ -261,9 +343,97 @@ mod tests {
         let res = find_newest_session_id(
             Path::new("/definitely/not/a/real/path-xyz-123"),
             SystemTime::UNIX_EPOCH,
+            "pane-1",
         );
         assert!(res.is_none());
     }
+
+    #[test]
+    fn work_dir_match_is_case_insensitive_on_windows() {
+        assert!(work_dir_matches(Some("D:/Projects/foo"), "D:/Projects/foo"));
+        assert!(!work_dir_matches(None, "D:/Projects/foo"));
+        assert!(!work_dir_matches(Some("D:/Projects/bar"), "D:/Projects/foo"));
+        #[cfg(windows)]
+        assert!(work_dir_matches(Some("d:/projects/FOO"), "D:/Projects/foo"));
+    }
+
+    /// The documented two-pane failure: both panes spawn Kimi in `D:/proj`,
+    /// Kimi appends one index line per session, and both panes probe the same
+    /// store. The probe must not hand the newest entry to both — the second
+    /// pane skips it (marking the result ambiguous) and takes the next
+    /// candidate, so neither pane resumes or bills the other's session.
+    #[test]
+    fn two_panes_same_cwd_do_not_share_a_session_id() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        super::super::clear_claims();
+        let home = std::env::temp_dir().join(format!("relay-kimi-2pane-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let restore = use_home(&home);
+        // Append order matters: session_a is older, session_b is the newest.
+        write_index(&home, &[("session_a", "a"), ("session_b", "b")]);
+        // Both session dirs were touched after spawn, so the time filter
+        // passes for both — only the claim registry separates the panes.
+        let since = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+
+        let first = find_newest_session_id(Path::new("D:/proj"), since, "pane-1").expect("pane-1 gets a session");
+        assert_eq!(first.id, "session_b");
+        assert!(!first.ambiguous, "pane-1 took the newest entry cleanly");
+
+        let second =
+            find_newest_session_id(Path::new("D:/proj"), since, "pane-2").expect("pane-2 still finds a session");
+        assert_eq!(second.id, "session_a", "pane-2 must not take pane-1's session");
+        assert!(second.ambiguous, "pane-2 stepped over a newer claimed entry");
+
+        // A third pane in the same cwd has nothing left, and that is the
+        // correct outcome: no id beats a wrong id.
+        let third = find_newest_session_id(Path::new("D:/proj"), since, "pane-3");
+        assert!(third.is_none(), "every entry is claimed; pane-3 must get none");
+
+        // The same owner re-probing is idempotent, not blocked by its own claim.
+        let again = find_newest_session_id(Path::new("D:/proj"), since, "pane-1").expect("owner re-probe");
+        assert_eq!(again.id, "session_b");
+
+        // A different cwd is unaffected by the claims above.
+        std::fs::write(
+            home.join(".kimi-code").join("session_index.jsonl"),
+            format!(
+                "{{\"sessionId\":\"session_c\",\"sessionDir\":\"{}\",\"workDir\":\"D:/other\"}}\n",
+                home.join(".kimi-code/sessions/b").to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let other =
+            find_newest_session_id(Path::new("D:/other"), since, "pane-4").expect("other cwd unaffected");
+        assert_eq!(other.id, "session_c");
+
+        drop(restore);
+        super::super::clear_claims();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// An index line with no `sessionDir` cannot be dated, so it can never be
+    /// distinguished from a session that predates this pane. The previous code
+    /// treated it as a match — silently attributing a days-old session.
+    #[test]
+    fn index_entry_without_session_dir_is_ignored() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        super::super::clear_claims();
+        let home = std::env::temp_dir().join(format!("relay-kimi-nodir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(home.join(".kimi-code")).unwrap();
+        let restore = use_home(&home);
+        std::fs::write(
+            home.join(".kimi-code").join("session_index.jsonl"),
+            "{\"sessionId\":\"session_x\",\"workDir\":\"D:/proj\"}\n",
+        )
+        .unwrap();
+        let since = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        let res = find_newest_session_id(Path::new("D:/proj"), since, "pane-1");
+        assert!(res.is_none(), "undatable entry must not be attributed");
+        drop(restore);
+        super::super::clear_claims();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
 
     #[test]
     fn usage_passthrough() {

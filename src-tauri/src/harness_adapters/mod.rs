@@ -9,7 +9,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub mod claude_code;
 pub mod commandcode;
@@ -18,6 +18,115 @@ pub mod omp;
 pub mod opencode;
 pub mod pi;
 pub mod pricing;
+
+/// Where a harness session id came from, and therefore how much to trust it.
+///
+/// This is a *provenance* label, not a correctness claim: a disk probe is a
+/// heuristic that can be wrong, and the UI needs to be able to say so. It rides
+/// along with the id through the DB and the `session:harness-id` event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessIdSource {
+    /// Scraped from THIS pane's own pty output. Bound to the process that
+    /// produced it, so it cannot be cross-attributed.
+    Output,
+    /// The newest on-disk session in this pane's cwd created after spawn, and
+    /// nothing newer was already attributed to another live pane.
+    DiskProbe,
+    /// Same probe, but a NEWER candidate existed and was skipped because
+    /// another live pane already holds it. The id is still this pane's
+    /// best remaining candidate; the UI flags it as a guess.
+    DiskProbeAmbiguous,
+}
+
+impl HarnessIdSource {
+    /// Stable wire/storage token. Keep in sync with `HarnessIdSource` on the
+    /// TS side (src/types.ts).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Output => "output",
+            Self::DiskProbe => "disk_probe",
+            Self::DiskProbeAmbiguous => "disk_probe_ambiguous",
+        }
+    }
+}
+
+impl From<HarnessIdSource> for String {
+    fn from(s: HarnessIdSource) -> String {
+        s.as_str().to_string()
+    }
+}
+
+/// A harness session id recovered from an on-disk probe, plus whether the
+/// probe had to step over a newer session that another live pane already owns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredSessionId {
+    pub id: String,
+    pub ambiguous: bool,
+}
+
+impl DiscoveredSessionId {
+    pub fn new(id: String, ambiguous: bool) -> Self {
+        Self { id, ambiguous }
+    }
+    pub fn source(&self) -> HarnessIdSource {
+        if self.ambiguous {
+            HarnessIdSource::DiskProbeAmbiguous
+        } else {
+            HarnessIdSource::DiskProbe
+        }
+    }
+}
+
+/// Process-wide registry of harness session ids currently attributed to a live
+/// pane, mapped id → owning pane id.
+///
+/// The filesystem probe answers "what is the newest session in this cwd?", which
+/// two panes in the same cwd cannot distinguish — both resolve to the same
+/// line/file, so one pane resumes (and bills) the other's session. Nothing in
+/// Kimi's `session_index.jsonl` or Claude's per-project dir identifies the
+/// process that created the session, so the probe alone cannot fix this.
+///
+/// Claiming closes that hole from the outside: the first pane to take an id
+/// owns it, and a second pane skips it and keeps scanning backwards for the
+/// next unclaimed candidate. The failure mode becomes "this pane found no id"
+/// (resume button stays hidden, no cost attributed) instead of "two panes
+/// share one id" (wrong resume, double-billed tokens). `ambiguous` marks the
+/// ids reached this way so the UI can say so.
+static SESSION_CLAIMS: Lazy<Mutex<HashMap<String, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// True when `id` is already attributed to a pane other than `owner`.
+pub fn is_claimed_by_other(id: &str, owner: &str) -> bool {
+    SESSION_CLAIMS
+        .lock()
+        .map(|m| m.get(id).is_some_and(|o| o != owner))
+        .unwrap_or(false)
+}
+
+/// Record `id` as belonging to `owner`. Re-claiming for the same owner is a
+/// no-op; a different owner is refused (the caller must skip the id).
+pub fn claim_session(id: &str, owner: &str) {
+    if let Ok(mut m) = SESSION_CLAIMS.lock() {
+        m.entry(id.to_string()).or_insert_with(|| owner.to_string());
+    }
+}
+
+/// Drop every claim held by `owner`. Called when a pane exits so a later pane
+/// in the same cwd can pick the id up again.
+pub fn release_claims_for(owner: &str) {
+    if let Ok(mut m) = SESSION_CLAIMS.lock() {
+        m.retain(|_, o| o != owner);
+    }
+}
+
+/// Clear the whole registry. Tests only — a leaked claim would otherwise
+/// persist for the life of the process.
+#[cfg(test)]
+pub fn clear_claims() {
+    if let Ok(mut m) = SESSION_CLAIMS.lock() {
+        m.clear();
+    }
+}
 
 /// A command ready to be turned into a `portable_pty::CommandBuilder`.
 ///
@@ -92,8 +201,16 @@ pub trait HarnessAdapter: Send + Sync {
     /// on-disk session store for a session created in `cwd` at/after `since`
     /// (pane spawn time). Needed because neither harness reliably prints its
     /// session id in the TUI — Claude writes `~/.claude/projects/<slug>/*.jsonl`,
-    /// Kimi appends to `~/.kimi-code/session_index.jsonl`. Default: no probe.
-    fn find_session_id_on_disk(&self, _cwd: &std::path::Path, _since: std::time::SystemTime) -> Option<String> {
+    /// Kimi appends to `~/.kimi-code/session_index.jsonl`.
+    ///
+    /// `owner` identifies the calling pane. Implementations must never hand
+    /// the same id to two owners — see [`session_claims`].
+    fn find_session_id_on_disk(
+        &self,
+        _cwd: &std::path::Path,
+        _since: std::time::SystemTime,
+        _owner: &str,
+    ) -> Option<DiscoveredSessionId> {
         None
     }
     /// Scrape usage/cost info from stripped pty output. Conservative.

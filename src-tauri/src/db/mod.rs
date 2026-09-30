@@ -283,6 +283,22 @@ fn migrate_doc_corpora_chunk_version(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Provenance of a session's `harness_session_id` — how the id was obtained.
+/// A disk probe is a heuristic (see `harness_adapters::session_claims`): when
+/// two panes share a cwd the id may be a best-effort pick, and the UI should
+/// say so rather than present a guessed id as a confirmed one. Rows predating
+/// this column were all captured the same way, so they default to
+/// `disk_probe`, the coarser of the two sources.
+fn migrate_sessions_harness_id_source(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE sessions ADD COLUMN harness_session_id_source TEXT NOT NULL DEFAULT 'disk_probe'";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(not(windows))]
 fn migrate_unc_paths(_conn: &Connection) -> DbResult<()> {
     Ok(())
@@ -335,6 +351,9 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_session_origin(conn)?;
     migrate_doc_chunks_heading(conn)?;
     migrate_doc_corpora_chunk_version(conn)?;
+    // Provenance of a session's harness id (output scrape vs on-disk probe) —
+    // the UI flags a low-confidence id instead of presenting it as fact.
+    migrate_sessions_harness_id_source(conn)?;
     // Declarative subagents: the 7 builtin roles must exist in the registry
     // before any spawn surface resolves a name against it.
     migrate_subagents_seed(conn)?;
@@ -970,6 +989,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           project_id TEXT NOT NULL REFERENCES projects(id),
           harness TEXT NOT NULL,
           harness_session_id TEXT,
+          harness_session_id_source TEXT NOT NULL DEFAULT 'disk_probe',
           title TEXT,
           worktree_path TEXT,
           created_at INTEGER NOT NULL,

@@ -24,6 +24,10 @@ pub struct SessionRecord {
     pub project_id: String,
     pub harness: String,
     pub harness_session_id: Option<String>,
+    /// How `harness_session_id` was obtained — `output` (scraped from this
+    /// pane's own stream) vs the on-disk probe variants. The UI uses this to
+    /// flag a guessed id. See `harness_adapters::HarnessIdSource`.
+    pub harness_session_id_source: Option<String>,
     pub title: Option<String>,
     pub worktree_path: Option<String>,
     pub created_at: i64,
@@ -306,6 +310,11 @@ pub struct PtyStateEvent {
 pub struct SessionHarnessIdEvent {
     pub session_id: String,
     pub harness_session_id: String,
+    /// Provenance of the id: `output` (scraped from this pane's own stream),
+    /// `disk_probe`, or `disk_probe_ambiguous` (the probe stepped over a newer
+    /// session that another live pane already owns). Mirrors
+    /// `harness_adapters::HarnessIdSource::as_str`.
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

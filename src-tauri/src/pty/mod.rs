@@ -29,6 +29,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db;
 use crate::harness_adapters::{CommandSpec, HarnessAdapter, UsageInfo};
+use crate::harness_adapters::HarnessIdSource;
 use crate::types::{BrowserUrlDetectedEvent, CostUpdatedEvent, PtyCrashedEvent, PtyExitEvent, PtyOutputEvent, PtyStateEvent, SessionHarnessIdEvent};
 
 /// Downcast a panic payload to its message. Panics carry `&str` or `String`;
@@ -421,7 +422,7 @@ impl Pane {
         // Session-id capture (only for panes bound to a Relay session).
         if !self.harness_id_reported.load(Ordering::Relaxed) {
             if let Some(hid) = adapter.parse_session_id(&tail) {
-                self.report_harness_id(app, db, &hid);
+                self.report_harness_id(app, db, &hid, HarnessIdSource::Output);
             }
         }
 
@@ -576,7 +577,7 @@ impl Pane {
         }
     }
 
-    fn report_harness_id(&self, app: &AppHandle, db: &SharedDb, harness_id: &str) {
+    fn report_harness_id(&self, app: &AppHandle, db: &SharedDb, harness_id: &str, source: HarnessIdSource) {
         if self.harness_id_reported.swap(true, Ordering::Relaxed) {
             return; // already reported by a racing path (regex vs fs probe)
         }
@@ -584,13 +585,14 @@ impl Pane {
         if let Some(session_id) = &self.session_id {
             {
                 let conn = db.lock();
-                let _ = db::set_session_harness_id(&conn, session_id, harness_id);
+                let _ = db::set_session_harness_id(&conn, session_id, harness_id, source);
             }
             let _ = app.emit(
                 "session:harness-id",
                 SessionHarnessIdEvent {
                     session_id: session_id.clone(),
                     harness_session_id: harness_id.to_string(),
+                    source: source.as_str().to_string(),
                 },
             );
         }
@@ -1104,6 +1106,9 @@ impl PtyManager {
                     // kill_pane is covered too: the kill makes try_wait
                     // return, landing here.
                     session_to_pane.lock().retain(|_, v| *v != pane.id);
+                    // Hand this pane's harness-session claims back so a later
+                    // pane in the same cwd can be probed for them again.
+                    crate::harness_adapters::release_claims_for(&pane.id);
                 }
                 // Dropping the sender closes the writer thread's channel.
                 // Per-instance (this Arc), so always safe.
@@ -1399,10 +1404,17 @@ impl PtyManager {
                 }
                 if do_probe {
                     let adapter = pane.adapter.as_ref().unwrap();
-                    if let Some(hid) =
-                        adapter.find_session_id_on_disk(&pane.cwd, pane.spawned_at_system)
+                    // `owner` keeps the shared claim registry from handing the
+                    // same on-disk session to two panes in the same cwd.
+                    if let Some(found) =
+                        adapter.find_session_id_on_disk(&pane.cwd, pane.spawned_at_system, &pane.id)
                     {
-                        pane.report_harness_id(&mgr.app, &mgr.db, &hid);
+                        pane.report_harness_id(
+                            &mgr.app,
+                            &mgr.db,
+                            &found.id,
+                            found.source(),
+                        );
                     }
                 }
                 if do_sync {

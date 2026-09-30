@@ -12,6 +12,7 @@
 import { lazy, memo, Suspense } from "react";
 import { Minimize2 } from "lucide-react";
 import { usePanesStore, type Pane } from "../../state/panes";
+import { useProjectsStore } from "../../state/projects";
 import { harnessShortName } from "../../types";
 const BrowserPane = lazy(() => import("./BrowserPane").then((m) => ({ default: m.BrowserPane })));
 const TerminalPane = lazy(() => import("./TerminalPane").then((m) => ({ default: m.TerminalPane })));
@@ -83,6 +84,15 @@ export const PaneFrame = memo(function PaneFrame({
   const harness = pane.data.kind === "terminal" ? pane.data.harness : null;
   const activity = pane.activity;
 
+  // How this pane's harness session id was recovered. Selected per-pane so a
+  // provenance change re-renders only this header. Shell/login panes have no
+  // session and yield null.
+  const paneSessionId = pane.data.kind === "terminal" ? pane.data.sessionId : null;
+  const idSource = useProjectsStore((s) => {
+    if (!paneSessionId) return null;
+    return s.sessions.find((sess) => sess.id === paneSessionId)?.harnessSessionIdSource ?? null;
+  });
+
   return (
     <div
       className={`pane${focused ? " focused" : ""}${browserCollapsed ? " collapsed" : ""}${browserFullscreen ? " pane-fullscreen" : ""}`}
@@ -101,6 +111,15 @@ export const PaneFrame = memo(function PaneFrame({
           {index + 1} · {title}
         </span>
         {harness && <span className="harness-badge">{harnessShortName(harness)}</span>}
+        {idSource === "disk_probe_ambiguous" && (
+          <span
+            className="harness-id-guess"
+            role="status"
+            title="Session id is a guess: this pane's project folder also had a newer session that belongs to another open pane. Resume and cost figures may point at that one."
+          >
+            id?
+          </span>
+        )}
         {broadcast.enabled && isTerminal && (
           <label className="broadcast-check" title="Include in broadcast">
             <input

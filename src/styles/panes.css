@@ -253,6 +253,19 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
+/* Session-id provenance marker, shown beside the harness badge when the id
+   was recovered heuristically rather than scraped from the pane's own output.
+   Deliberately a warning shape, not a second colored pill: it must read as
+   "this id is a guess" without competing with the state dot. */
+.pane-header .harness-id-guess {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--state-waiting, #eab308) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--state-waiting, #eab308) 45%, transparent);
+  color: var(--state-waiting, #eab308);
+}
 .pane-header .pane-activity-chip {
   font-size: 10px;
   font-weight: 500;
@@ -488,51 +501,6 @@
   display: flex;
   position: relative;
   gap: 0;
-}
-.split-left {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  gap: 6px;
-}
-/* Stack container: fills remaining height in split-left, holds up to 2
- * terminal slots with an optional horizontal splitter between them. */
-.split-terminals-stack {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0; /* gap is handled by the splitter overlay */
-}
-/* Individual slot inside the stack â€” contains all terminals so the hidden/
- * visible toggle pattern works identically to the single-terminal layout. */
-.split-slot {
-  min-height: 0;
-  position: relative;
-  overflow: hidden;
-}
-.split-terminals-stack .split-slot .pane {
-  width: 100%;
-  height: 100%;
-}
-/* Legacy single-terminal container (kept for any non-split-layout uses). */
-.split-terminals {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-}
-.split-terminals .pane {
-  flex: 1;
-  min-width: 0;
-}
-.split-right {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-}
-.split-right .pane {
-  flex: 1;
-  min-width: 0;
 }
 .spotlight-bar {
   display: flex;
@@ -1019,38 +987,8 @@
 }
 
 /* ---------- Broadcast bar (Â§4.5) ---------- */
-.broadcast-bar {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 10px;
-  padding: 12px;
-  width: 220px;
-  flex-shrink: 0;
-  background: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-  border-radius: var(--radius);
-  box-shadow: var(--glass-rim), 0 0 24px -10px var(--accent-glow);
-  overflow-y: auto;
-}
-.broadcast-bar input.broadcast-input {
-  font-family: var(--font-mono);
-}
-.broadcast-bar .pane-checks {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-.broadcast-bar .pane-checks label {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  white-space: nowrap;
-}
+/* The broadcast bar markup was retired with the old pane tree; these rules
+   had no remaining .tsx consumer and were removed alongside it. */
 
 /* --- Terminal find bar + scrollback export (roadmap #13) --- */
 .terminal-find-bar {

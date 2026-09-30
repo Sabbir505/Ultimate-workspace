@@ -85,7 +85,12 @@ impl HarnessAdapter for PiAdapter {
 
     /// No filesystem probe: the session store layout is not a documented
     /// interface and changed across the mariozechner → earendil-works move.
-    fn find_session_id_on_disk(&self, _cwd: &Path, _since: SystemTime) -> Option<String> {
+    fn find_session_id_on_disk(
+        &self,
+        _cwd: &Path,
+        _since: SystemTime,
+        _owner: &str,
+    ) -> Option<super::DiscoveredSessionId> {
         None
     }
 
@@ -161,7 +166,7 @@ mod tests {
     #[test]
     fn disk_probe_always_none() {
         assert!(PiAdapter
-            .find_session_id_on_disk(Path::new("/nope"), SystemTime::UNIX_EPOCH)
+            .find_session_id_on_disk(Path::new("/nope"), SystemTime::UNIX_EPOCH, "test-pane")
             .is_none());
     }
 }

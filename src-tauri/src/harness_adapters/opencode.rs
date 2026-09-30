@@ -106,7 +106,12 @@ impl HarnessAdapter for OpenCodeAdapter {
 
     /// No filesystem probe: OpenCode stores sessions in a SQLite DB, not JSONL.
     /// Querying it risks locking/schema drift and is out of scope for v1.
-    fn find_session_id_on_disk(&self, _cwd: &Path, _since: SystemTime) -> Option<String> {
+    fn find_session_id_on_disk(
+        &self,
+        _cwd: &Path,
+        _since: SystemTime,
+        _owner: &str,
+    ) -> Option<super::DiscoveredSessionId> {
         None
     }
 
@@ -185,7 +190,7 @@ mod tests {
     #[test]
     fn disk_probe_always_none() {
         assert!(OpenCodeAdapter
-            .find_session_id_on_disk(Path::new("/nope"), SystemTime::UNIX_EPOCH)
+            .find_session_id_on_disk(Path::new("/nope"), SystemTime::UNIX_EPOCH, "test-pane")
             .is_none());
     }
 }

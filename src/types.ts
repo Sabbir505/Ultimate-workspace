@@ -11,11 +11,25 @@ export interface Project {
   lastOpenedAt: number | null;
 }
 
+/** How a session's `harnessSessionId` was obtained — and therefore how much
+ *  to trust it. Mirrors `HarnessIdSource::as_str` on the Rust side. */
+export type HarnessIdSource =
+  /** Scraped from this pane's own terminal output: bound to the process that
+   *  printed it, so it cannot belong to another pane. */
+  | "output"
+  /** Newest on-disk session in this pane's cwd created after spawn. A
+   *  heuristic — correct unless another pane shares the cwd. */
+  | "disk_probe"
+  /** Same probe, but a newer session existed and went to another live pane,
+   *  so this is the best remaining candidate rather than a clean match. */
+  | "disk_probe_ambiguous";
+
 export interface SessionRecord {
   id: string;
   projectId: string;
   harness: HarnessId;
   harnessSessionId: string | null;
+  harnessSessionIdSource: HarnessIdSource | null;
   title: string | null;
   worktreePath: string | null;
   createdAt: number;
@@ -206,6 +220,7 @@ export interface PtyStatePayload {
 export interface HarnessIdPayload {
   sessionId: string;
   harnessSessionId: string;
+  source: HarnessIdSource;
 }
 
 // Emitted when a URL is detected in a terminal pane's output (e.g. a CLI

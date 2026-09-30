@@ -15,7 +15,7 @@ import {
   renameProject,
   updateSessionTitle,
 } from "../lib/ipc";
-import type { GitStatusInfo, HarnessId, HarnessStatus, HarnessUpdateStatus, Project, SessionRecord } from "../types";
+import type { GitStatusInfo, HarnessId, HarnessIdSource, HarnessStatus, HarnessUpdateStatus, Project, SessionRecord } from "../types";
 
 interface ProjectsState {
   loaded: boolean;
@@ -48,7 +48,11 @@ interface ProjectsState {
   createSessionFor: (projectId: string, harness: HarnessId) => Promise<SessionRecord | null>;
   removeSession: (sessionId: string) => Promise<void>;
   setSessionTitle: (sessionId: string, title: string) => Promise<void>;
-  setHarnessSessionId: (sessionId: string, harnessSessionId: string) => void;
+  setHarnessSessionId: (
+    sessionId: string,
+    harnessSessionId: string,
+    source: HarnessIdSource,
+  ) => void;
   refreshGitStatus: () => Promise<void>;
   /** Targeted single-project refresh — used by the FS watcher listener
    *  to avoid re-querying every project when only one changed. */
@@ -172,9 +176,11 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     }));
   },
 
-  setHarnessSessionId: (sessionId, harnessSessionId) =>
+  setHarnessSessionId: (sessionId, harnessSessionId, source) =>
     set((s) => ({
-      sessions: s.sessions.map((sess) => (sess.id === sessionId ? { ...sess, harnessSessionId } : sess)),
+      sessions: s.sessions.map((sess) =>
+        sess.id === sessionId ? { ...sess, harnessSessionId, harnessSessionIdSource: source } : sess,
+      ),
     })),
 
   refreshGitStatus: async () => {

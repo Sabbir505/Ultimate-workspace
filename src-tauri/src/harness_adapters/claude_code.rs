@@ -13,7 +13,10 @@
 //!    This is the reliable path. All of it is defensive — missing dirs or
 //!    permission errors simply yield `None`, never a panic.
 
-use super::{parse_usage_common, CommandSpec, HarnessAdapter, SessionUsage, UsageInfo};
+use super::{
+    claim_session, is_claimed_by_other, parse_usage_common, CommandSpec, DiscoveredSessionId,
+    HarnessAdapter, SessionUsage, UsageInfo,
+};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::fs;
@@ -104,8 +107,13 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         None
     }
 
-    fn find_session_id_on_disk(&self, cwd: &Path, since: SystemTime) -> Option<String> {
-        find_newest_session_id(cwd, since)
+    fn find_session_id_on_disk(
+        &self,
+        cwd: &Path,
+        since: SystemTime,
+        owner: &str,
+    ) -> Option<DiscoveredSessionId> {
+        find_newest_session_id(cwd, since, owner)
     }
 
     fn usage_from_disk(&self, cwd: &Path, harness_session_id: &str) -> Option<SessionUsage> {
@@ -151,15 +159,26 @@ pub fn claude_projects_dir(cwd: &Path) -> Option<PathBuf> {
 
 /// Filesystem fallback for session-id capture: find the newest `.jsonl` file
 /// in Claude's per-project session dir modified at/after `since` (pane spawn
-/// time). Returns the file stem, which is the session id. Fully defensive:
-/// any IO problem returns None.
-pub fn find_newest_session_id(cwd: &Path, since: SystemTime) -> Option<String> {
+/// time). The file stem IS the session id. Fully defensive: any IO problem
+/// returns None.
+///
+/// Two panes in the same cwd are indistinguishable from the dir alone — it is
+/// keyed by cwd and the filenames carry no pid or pane marker — so "newest"
+/// means "whichever session wrote last", not "this pane's session". The shared
+/// claim registry (`super::session_claims`) makes the winner the first pane to
+/// ask and forces the loser onto the next candidate rather than onto a session
+/// it does not own.
+pub fn find_newest_session_id(
+    cwd: &Path,
+    since: SystemTime,
+    owner: &str,
+) -> Option<DiscoveredSessionId> {
     // Legacy DB rows may hold \\?\ extended-length paths; the slug must be
     // computed from the plain path or the projects dir will never match.
     let clean = crate::util::strip_unc_prefix(&cwd.to_string_lossy());
     let dir = claude_projects_dir(Path::new(&clean))?;
     let entries = fs::read_dir(dir).ok()?;
-    let mut best: Option<(SystemTime, String)> = None;
+    let mut candidates: Vec<(SystemTime, String)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -179,11 +198,20 @@ pub fn find_newest_session_id(cwd: &Path, since: SystemTime) -> Option<String> {
         if stem.is_empty() {
             continue;
         }
-        if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
-            best = Some((mtime, stem));
-        }
+        candidates.push((mtime, stem));
     }
-    best.map(|(_, stem)| stem)
+    // Newest first, then hand out the first candidate no other live pane owns.
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    for (rank, (_, stem)) in candidates.into_iter().enumerate() {
+        if is_claimed_by_other(&stem, owner) {
+            continue;
+        }
+        claim_session(&stem, owner);
+        // Landing past the first candidate means a newer session in this cwd
+        // went to another pane: this id is a best-effort pick, so flag it.
+        return Some(DiscoveredSessionId::new(stem, rank > 0));
+    }
+    None
 }
 
 /// Cumulative token totals for a Claude session, parsed from its on-disk
@@ -298,6 +326,7 @@ mod tests {
         let res = find_newest_session_id(
             Path::new("/definitely/not/a/real/path-xyz-123"),
             SystemTime::UNIX_EPOCH,
+            "pane-1",
         );
         assert!(res.is_none());
     }
@@ -323,9 +352,12 @@ mod live_probe_tests {
         let id = find_newest_session_id(
             Path::new(r"D:\Projects\Main project\Content flow\tubeforge"),
             since,
+            "live-probe",
         );
         eprintln!("probe result: {id:?}");
         assert!(id.is_some());
+        // Leave the registry clean for other tests in this binary.
+        super::super::release_claims_for("live-probe");
     }
 }
 

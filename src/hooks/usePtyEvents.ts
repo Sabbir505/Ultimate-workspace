@@ -200,8 +200,8 @@ export function usePtyEvents(): void {
     );
 
     unlistens.push(
-      safeListen<HarnessIdPayload>("session:harness-id", ({ sessionId, harnessSessionId }) => {
-        useProjectsStore.getState().setHarnessSessionId(sessionId, harnessSessionId);
+      safeListen<HarnessIdPayload>("session:harness-id", ({ sessionId, harnessSessionId, source }) => {
+        useProjectsStore.getState().setHarnessSessionId(sessionId, harnessSessionId, source);
       }),
     );
 

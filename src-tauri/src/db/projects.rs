@@ -121,6 +121,7 @@ fn map_session(row: &rusqlite::Row) -> rusqlite::Result<SessionRecord> {
         project_id: row.get("project_id")?,
         harness: row.get("harness")?,
         harness_session_id: row.get("harness_session_id")?,
+        harness_session_id_source: row.get("harness_session_id_source")?,
         title: row.get("title")?,
         worktree_path: row.get("worktree_path")?,
         created_at: row.get("created_at")?,
@@ -216,10 +217,11 @@ pub fn set_session_harness_id(
     conn: &Connection,
     session_id: &str,
     harness_session_id: &str,
+    source: crate::harness_adapters::HarnessIdSource,
 ) -> DbResult<()> {
     conn.execute(
-        "UPDATE sessions SET harness_session_id = ?2 WHERE id = ?1",
-        params![session_id, harness_session_id],
+        "UPDATE sessions SET harness_session_id = ?2, harness_session_id_source = ?3 WHERE id = ?1",
+        params![session_id, harness_session_id, source.as_str()],
     )?;
     Ok(())
 }
@@ -343,10 +345,18 @@ mod tests {
         assert_eq!(s.status, "idle");
         assert!(s.harness_session_id.is_none());
 
-        set_session_harness_id(&conn, &s.id, "harness-123").unwrap();
+        set_session_harness_id(
+            &conn,
+            &s.id,
+            "harness-123",
+            crate::harness_adapters::HarnessIdSource::DiskProbeAmbiguous,
+        )
+        .unwrap();
         update_session_title(&conn, &s.id, "my title").unwrap();
         let s2 = get_session(&conn, &s.id).unwrap().unwrap();
         assert_eq!(s2.harness_session_id.as_deref(), Some("harness-123"));
+        // The provenance rides along, so the UI can flag a guessed id.
+        assert_eq!(s2.harness_session_id_source.as_deref(), Some("disk_probe_ambiguous"));
         assert_eq!(s2.title.as_deref(), Some("my title"));
 
         let (s3, p3) = get_session_with_project(&conn, &s.id).unwrap().unwrap();

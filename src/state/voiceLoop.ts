@@ -49,7 +49,12 @@ export const useVoiceLoopStore = create<VoiceLoopStore>((set) => ({
   load: async () => {
     try {
       const stored = await getSetting(K_MODE);
-      if (stored === "handsfree" || stored === "off") set({ mode: stored });
+      if (stored === "handsfree") {
+        // Deliberately NOT re-armed: restoring a lit toggle over a loop that
+        // isn't running (the mic must never open without a click) reads as a
+        // dead button. Hands-free is per-run; the toggle's click re-arms it.
+        void setSetting(K_MODE, "off").catch(() => {});
+      }
     } catch {
       /* no backend (tests / browser dev) — mode stays off */
     }

@@ -825,16 +825,26 @@ export const ChatComposer = memo(function ChatComposer({
 
   // Hands-free toggle: turning ON persists the mode and pokes the root
   // controller to open the mic right away (this click is the user gesture
-  // the permission prompt hangs off); turning OFF asks it to wind the
-  // episode down. Only the composer owning the loop renders the button.
+  // the permission prompt hangs off); turning OFF winds the episode down and
+  // THEN flips the mode — the order matters, the stop handler's speaking
+  // branch needs the mode still on to land the latch cleanly, and a mode
+  // left "handsfree" with no episode made the toggle look dead (lit, but
+  // every click just re-requested the same stop).
   const toggleHandsFree = useCallback(() => {
     if (voiceMode === "handsfree") {
       requestVoiceLoopStop();
+      useVoiceLoopStore.getState().setMode("off");
       return;
     }
     useVoiceLoopStore.getState().setMode("handsfree");
     requestVoiceLoopStart();
   }, [voiceMode]);
+
+  // The loop bar's X — a full exit (same path as the toggle's off branch).
+  const exitHandsFree = useCallback(() => {
+    requestVoiceLoopStop();
+    useVoiceLoopStore.getState().setMode("off");
+  }, []);
 
   // Close the "+" popover on outside click.
   useEffect(() => {
@@ -1577,13 +1587,13 @@ export const ChatComposer = memo(function ChatComposer({
               {loopPhase === "listening" && loopTranscript ? loopTranscript : "…"}
             </span>
             {loopError && <span className="voice-loop-error">{loopError}</span>}
-            <button
-              type="button"
-              className="voice-loop-stop"
-              title="Stop hands-free"
-              aria-label="Stop hands-free voice loop"
-              onClick={requestVoiceLoopStop}
-            >
+              <button
+                type="button"
+                className="voice-loop-stop"
+                title="Stop hands-free"
+                aria-label="Stop hands-free voice loop"
+                onClick={exitHandsFree}
+              >
               <X size={12} strokeWidth={2} aria-hidden />
             </button>
           </div>

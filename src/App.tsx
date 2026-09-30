@@ -95,7 +95,6 @@ const VaultView = lazy(() => import("./components/vault/VaultView").then((m) => 
 // Subagent (declarative subagents — research doc §C.5 item 3 / Phase 2.5): the
 // agent registry plus the manual "Run" surface and run history. Real-view-swap
 // like automations/vault, lazily loaded.
-const SubagentsView = lazy(() => import("./components/subagents/SubagentsView").then((m) => ({ default: m.SubagentsView })));
 // Logs (local-model request log + gateway). Real-view-swap like subagent/vault,
 // lazily loaded so the log table never rides in the entry chunk.
 const LogsView = lazy(() => import("./components/logs/LogsView").then((m) => ({ default: m.LogsView })));
@@ -503,7 +502,7 @@ export default function App() {
     on every chat↔vault↔automations switch — killing browser webviews (full
     page reload on the way back) and churning terminal ptys. */}
         <div className={`grid-wrap chat-grid-wrap${baseView === "chat" && chatPaneTree ? " split-active" : ""}`}>
-          {baseView !== "automations" && baseView !== "vault" && baseView !== "subagents" && baseView !== "logs" ? (
+          {baseView !== "automations" && baseView !== "vault" && baseView !== "logs" ? (
             /* The split-chat pane tree (up to six full chat views, resizable
                 gutters, drag-a-session-onto-an-edge). With no splits open the
                 same renderer draws the single main pane — identical drop
@@ -512,11 +511,6 @@ export default function App() {
           ) : baseView === "automations" ? (
             <Suspense fallback={null}>
               <AutomationsView />
-            </Suspense>
-          ) : baseView === "subagents" ? (
-            /* Declarative subagents: registry + Run modal + run history. */
-            <Suspense fallback={null}>
-              <SubagentsView />
             </Suspense>
           ) : baseView === "logs" ? (
             /* Local-model request log: captured bodies + telemetry. */

@@ -51,6 +51,7 @@ import {
 } from "../../lib/ipc";
 import { AGENT_OPTIONS } from "../../lib/agents";
 import { SUBAGENT_NEW_KEY, useSubagentStore } from "../../state/subagents";
+import { NativeSubagents } from "./NativeSubagents";
 
 /** The editor's local shape. Unlike the row it keeps "inherit" as an empty
  *  string (so the selects can use "" as a real option) and carries the
@@ -438,7 +439,8 @@ export function SubagentsPanel({ onRun }: { onRun?: (agent: Subagent) => void } 
   };
 
   return (
-    <div className="subagent-section">
+    <>
+      <div className="subagent-section">
       <div className="subagent-section-head">
         <h3>Agents</h3>
         <span className="subagent-spacer" />
@@ -720,5 +722,10 @@ export function SubagentsPanel({ onRun }: { onRun?: (agent: Subagent) => void } 
         </div>
       )}
     </div>
+
+    {/* The native stores ride the panel (not the view): the registry and
+        its import affordance are one surface, settings or full page. */}
+    <NativeSubagents />
+    </>
   );
 }

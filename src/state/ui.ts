@@ -25,7 +25,6 @@ export type ActiveView =
   | "cost"
   | "automations"
   | "vault"
-  | "subagents"
   | "logs";
 
 /** Tabs in the right-side tool panel (mockups 01/03). */

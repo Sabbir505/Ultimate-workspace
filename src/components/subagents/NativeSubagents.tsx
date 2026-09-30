@@ -9,12 +9,14 @@
 // runs on the CLI it came from.
 //
 // The listing stays collapsed until asked for: each harness's walk is a
-// filesystem probe, and expanding is the user saying they want it. Collapsing
-// unmounts the per-harness blocks, so re-expanding refetches — honest and
-// cheap, since the backend's 30s TTL serves repeat expands.
+// filesystem probe, and expanding is the user saying they want it. The
+// disclosure animates open/closed (grid-rows height transition) while keeping
+// the freshness semantic — the per-harness blocks unmount once the collapse
+// animation settles, so re-expanding refetches (honest and cheap, since the
+// backend's 30s TTL serves repeat expands).
 
-import { Download, Wrench } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ChevronDown, Download, Wrench } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import {
   createSubagent,
   listHarnessSubagents,
@@ -213,6 +215,14 @@ function NativeHarnessBlock({
 
 export function NativeSubagents() {
   const [expanded, setExpanded] = useState(false);
+  /** Whether the per-harness blocks are mounted. Mounts instantly on expand
+   *  (the transition needs content to reveal), unmounts only AFTER the
+   *  collapse animation settles — unmounting at click time would cut the
+   *  animation and also skip the CSS transition entirely. The timer is the
+   *  deterministic unmount: a transitionend hook would never fire when
+   *  prefers-reduced-motion removes the transition. */
+  const [renderList, setRenderList] = useState(false);
+  const collapseTimer = useRef<number | null>(null);
   const agents = useSubagentStore((s) => s.agents);
   const refresh = useSubagentStore((s) => s.load);
   /** source_paths imported this session — a display-affordance only, never a
@@ -220,6 +230,31 @@ export function NativeSubagents() {
   const [imported, setImported] = useState<Set<string>>(() => new Set());
   const [importingPath, setImportingPath] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+
+  useEffect(
+    () => () => {
+      if (collapseTimer.current !== null) window.clearTimeout(collapseTimer.current);
+    },
+    [],
+  );
+
+  const toggle = () => {
+    if (collapseTimer.current !== null) {
+      window.clearTimeout(collapseTimer.current);
+      collapseTimer.current = null;
+    }
+    if (!expanded) {
+      setRenderList(true);
+      setExpanded(true);
+    } else {
+      setExpanded(false);
+      // Just past the 0.3s height transition in subagents.css.
+      collapseTimer.current = window.setTimeout(() => {
+        collapseTimer.current = null;
+        setRenderList(false);
+      }, 340);
+    }
+  };
 
   const importRow = async (harnessId: string, row: HarnessSubagentInfo) => {
     setImportError(null);
@@ -258,11 +293,17 @@ export function NativeSubagents() {
         <span className="subagent-spacer" />
         <button
           type="button"
-          className="ghost"
+          className="ghost subagent-native-toggle"
           aria-expanded={expanded}
-          onClick={() => setExpanded((v) => !v)}
+          onClick={toggle}
         >
           {expanded ? "Hide native stores" : "Show native stores"}
+          <ChevronDown
+            size={14}
+            strokeWidth={2}
+            aria-hidden="true"
+            className={`subagent-native-caret${expanded ? " open" : ""}`}
+          />
         </button>
       </div>
 
@@ -273,21 +314,31 @@ export function NativeSubagents() {
 
       {importError && <div className="settings-note subagent-error">{importError}</div>}
 
-      {expanded && (
-        <div className="subagent-native-list">
-          {NATIVE_STORES.map((h) => (
-            <NativeHarnessBlock
-              key={h.id}
-              harnessId={h.id}
-              label={h.label}
-              dir={h.dir}
-              imported={imported}
-              importingPath={importingPath}
-              onImport={(row) => void importRow(h.id, row)}
-            />
-          ))}
+      {/* Height-animated disclosure: the 0fr→1fr grid transition tracks the
+          content's real height (no measured max-height guess), and the inner
+          clip keeps the reveal edge clean while the rows fade in. */}
+      <div
+        className={`subagent-native-disclosure${expanded ? " open" : ""}`}
+        aria-hidden={!expanded}
+      >
+        <div className="subagent-native-clip">
+          {renderList && (
+            <div className="subagent-native-list">
+              {NATIVE_STORES.map((h) => (
+                <NativeHarnessBlock
+                  key={h.id}
+                  harnessId={h.id}
+                  label={h.label}
+                  dir={h.dir}
+                  imported={imported}
+                  importingPath={importingPath}
+                  onImport={(row) => void importRow(h.id, row)}
+                />
+              ))}
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

@@ -90,6 +90,12 @@
   letter-spacing: 0.04em;
   color: var(--text-dim);
 }
+.subagent-section-head .primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
 .subagent-section-head .subagent-spacer {
   flex: 1;
 }
@@ -551,6 +557,43 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+/* The disclosure: grid-template-rows 0fr→1fr animates to the content's real
+   height (a max-height guess would either clip long stores or lag short
+   ones). While closed the contents are visibility:hidden so nothing inside
+   stays keyboard-reachable; visibility flips at the END of the collapse
+   (delay matches the height) but immediately on open. */
+.subagent-native-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition: grid-template-rows 0.3s var(--ease), opacity 0.22s var(--ease),
+    visibility 0s linear 0.3s;
+}
+.subagent-native-disclosure.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition: grid-template-rows 0.3s var(--ease), opacity 0.22s var(--ease),
+    visibility 0s;
+}
+.subagent-native-clip {
+  overflow: hidden;
+  min-height: 0;
+}
+.subagent-native-toggle .subagent-native-caret {
+  margin-left: 2px;
+  transition: transform 0.3s var(--ease);
+}
+.subagent-native-toggle .subagent-native-caret.open {
+  transform: rotate(180deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .subagent-native-disclosure,
+  .subagent-native-toggle .subagent-native-caret {
+    transition: none;
+  }
 }
 .subagent-native-block {
   display: flex;

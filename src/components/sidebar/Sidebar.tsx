@@ -401,19 +401,6 @@ export function Sidebar() {
               <CalendarClock size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
               <span className="artifact-lib-title-label">Automations</span>
             </button>
-            {/* Subagent — declarative subagents: define an agent, run it by hand,
-                watch its run history. Same row/shape as Automations. */}
-            <button
-              type="button"
-              onClick={() => setActiveView("subagents")}
-              className={`artifact-lib-title ${activeView === "subagents" ? "is-active" : ""}`}
-              style={{ width: "100%" }}
-              title="Open subagent"
-              aria-label="Open subagent"
-            >
-              <Users size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
-              <span className="artifact-lib-title-label">Subagents</span>
-            </button>
             {/* Vault — the local markdown knowledge base (files on disk). */}
             <button
               type="button"

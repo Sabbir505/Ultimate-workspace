@@ -26,7 +26,7 @@ import { ImprovementsPanel } from "./ImprovementsPanel";
 import { SttPanel } from "./SttPanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { HooksPanel } from "./HooksPanel";
-import { SubagentsPanel } from "../subagents/SubagentsPanel";
+import { SubagentsSettingsSection } from "../subagents/SubagentsSettingsSection";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
 import { FontSettingsPanel } from "./FontSettingsPanel";
 import { SidebarArtPanel } from "./SidebarArtPanel";
@@ -216,14 +216,13 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
       { key: "apikeys", label: "API Keys", sub: "Chat provider keys" },
       { key: "websearch", label: "Web Search", sub: "Keyless or BYO-key engine" },
       { key: "localmodels", label: "Local Models", sub: "GGUF via llama-server" },
-      { key: "subagents", label: "Subagent model", sub: "Orchestration default" },
     ],
   },
   {
     title: "Agents",
     items: [
       { key: "harnesses", label: "Harnesses", sub: "CLI install & login" },
-      { key: "subagents", label: "Subagent", sub: "Declarative subagents" },
+      { key: "subagents", label: "Subagents", sub: "Registry & orchestration default" },
     ],
   },
   {
@@ -659,7 +658,7 @@ export function SettingsView() {
 
               {category === "subagents" && <SubagentModelPanel />}
 
-              {category === "subagents" && <SubagentsPanel />}
+              {category === "subagents" && <SubagentsSettingsSection />}
 
               {category === "apikeys" && <ApiKeysPanel />}
 

@@ -11,6 +11,7 @@ import { toggleReadAloud } from "../lib/tts";
 import { ttsStatus } from "../lib/ipc";
 import { useChatStore } from "../state/chat";
 import { useTtsStore } from "../state/tts";
+import { notifyVoiceTurnComplete, useVoiceLoopStore } from "../state/voiceLoop";
 
 /** Load the persisted setting once per app run. Without this, a turn finishing
  *  before Settings was ever opened would ignore auto-read — the store starts
@@ -31,11 +32,16 @@ export function useTtsAutoRead(): void {
   }, []);
 }
 
-/** Called after a turn is persisted. No-ops unless auto-read is enabled, the
- *  turn belongs to the visible session, and nothing is already being read. */
+/** Called after a turn is persisted. No-ops unless auto-read is enabled (or
+ *  hands-free voice mode is on, which implies read-aloud — the loop listens
+ *  again when playback ends), the turn belongs to the visible session, and
+ *  nothing is already being read. Also notifies the voice loop that the turn
+ *  it sent has its answer, regardless of the auto-read setting. */
 export function autoReadFinishedTurn(chatSessionId: string): void {
+  const voice = useVoiceLoopStore.getState();
+  notifyVoiceTurnComplete(chatSessionId);
   const tts = useTtsStore.getState();
-  if (!tts.autoRead) return;
+  if (!tts.autoRead && voice.mode !== "handsfree") return;
   // A read the user started by hand always wins over the automatic one.
   if (tts.phase !== "idle") return;
 

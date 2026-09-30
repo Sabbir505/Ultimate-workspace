@@ -12,7 +12,7 @@
 // the OS onto the composer card.
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUpToLine, GripVertical, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
+import { ArrowUpToLine, AudioLines, GripVertical, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { ArtifactTypeSelector } from "./ArtifactTypeSelector";
@@ -26,6 +26,11 @@ import { useChatStore } from "../../state/chat";
 import { findPaneForSession } from "../../state/chat/paneTree";
 import { useProjectsStore } from "../../state/projects";
 import { useVoiceDictation } from "./useVoiceDictation";
+import {
+  useVoiceLoopStore,
+  requestVoiceLoopStart,
+  requestVoiceLoopStop,
+} from "../../state/voiceLoop";
 import { TemplatePickerModal, BroadcastModal } from "./composerModals";
 import { PetStrip } from "../pet/PetStrip";
 import {
@@ -237,6 +242,18 @@ export const ChatComposer = memo(function ChatComposer({
   // pane's session, not the globally active one. The prop wins — same
   // precedence the send path uses.
   const effectiveSessionId = sessionIdProp ?? activeChatSessionId;
+  // Hands-free voice loop (hooks/useVoiceLoop.tsx): exactly one composer
+  // instance — the one bound to the globally active session — owns the
+  // toggle and the loop status bar; split-view clones for background panes
+  // render neither, or two toggles would fight over one mic.
+  const voiceMode = useVoiceLoopStore((s) => s.mode);
+  const loopPhase = useVoiceLoopStore((s) => s.phase);
+  const loopTranscript = useVoiceLoopStore((s) => s.transcript);
+  const loopLevel = useVoiceLoopStore((s) => s.level);
+  const loopError = useVoiceLoopStore((s) => s.error);
+  const loopOwnsComposer =
+    effectiveSessionId != null && effectiveSessionId === activeChatSessionId;
+  const loopActive = voiceMode === "handsfree" && loopPhase !== "idle";
   // Per-session draft: each conversation keeps its own unsent text. The
   // composer instance survives session switches (same tree position), so the
   // old component-local useState smeared the half-written prompt into every
@@ -805,6 +822,19 @@ export const ChatComposer = memo(function ChatComposer({
     contentRef,
     effectiveSessionId,
   });
+
+  // Hands-free toggle: turning ON persists the mode and pokes the root
+  // controller to open the mic right away (this click is the user gesture
+  // the permission prompt hangs off); turning OFF asks it to wind the
+  // episode down. Only the composer owning the loop renders the button.
+  const toggleHandsFree = useCallback(() => {
+    if (voiceMode === "handsfree") {
+      requestVoiceLoopStop();
+      return;
+    }
+    useVoiceLoopStore.getState().setMode("handsfree");
+    requestVoiceLoopStart();
+  }, [voiceMode]);
 
   // Close the "+" popover on outside click.
   useEffect(() => {
@@ -1519,6 +1549,45 @@ export const ChatComposer = memo(function ChatComposer({
           <div className="composer-footer-spacer" />
         </div>
         )}
+        {/* Hands-free loop status bar: only on the composer that owns the
+            loop, only while an episode is actually running (idle = hidden —
+            the toggle alone is enough UI for the off state). */}
+        {loopOwnsComposer && loopActive && (
+          <div className={`voice-loop-bar phase-${loopPhase}`} role="status">
+            <span className="voice-loop-dot" aria-hidden="true" />
+            <span className="voice-loop-phase">
+              {loopPhase === "listening"
+                ? "Listening"
+                : loopPhase === "sending"
+                  ? "Sending"
+                  : loopPhase === "waiting"
+                    ? "Thinking"
+                    : "Speaking"}
+            </span>
+            <span className="voice-loop-meter" aria-hidden="true">
+              {[1, 2, 3, 4, 5].map((bar) => (
+                <span
+                  key={bar}
+                  className="voice-loop-meter-bar"
+                  data-on={loopPhase === "listening" && loopLevel * 5 >= bar}
+                />
+              ))}
+            </span>
+            <span className="voice-loop-transcript">
+              {loopPhase === "listening" && loopTranscript ? loopTranscript : "…"}
+            </span>
+            {loopError && <span className="voice-loop-error">{loopError}</span>}
+            <button
+              type="button"
+              className="voice-loop-stop"
+              title="Stop hands-free"
+              aria-label="Stop hands-free voice loop"
+              onClick={requestVoiceLoopStop}
+            >
+              <X size={12} strokeWidth={2} aria-hidden />
+            </button>
+          </div>
+        )}
         <div className="composer-control-bar" role="toolbar" aria-label="Composer controls">
           <div className="composer-attach-wrap" ref={attachMenuRef}>
             <button
@@ -1630,12 +1699,36 @@ export const ChatComposer = memo(function ChatComposer({
           <div className="composer-control-spacer" />
 
           <div className="composer-send-wrap">
+            {loopOwnsComposer && (
+              <button
+                type="button"
+                className={`composer-mic-btn handsfree${voiceMode === "handsfree" ? " on" : ""}`}
+                title={
+                  voiceMode === "handsfree"
+                    ? "Hands-free voice: on — click to stop"
+                    : "Hands-free voice: talk, Relay answers aloud, keep going"
+                }
+                aria-pressed={voiceMode === "handsfree"}
+                aria-label="Toggle hands-free voice loop"
+                onClick={toggleHandsFree}
+              >
+                <AudioLines size={14} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden />
+              </button>
+            )}
             <button
               type="button"
               className={`composer-mic-btn${recording ? " recording" : ""}`}
-              title={recording ? "Stop recording" : transcribing ? "Transcribing…" : "Record voice (or hold Alt)"}
+              title={
+                loopActive
+                  ? "Mic in use by hands-free mode"
+                  : recording
+                    ? "Stop recording"
+                    : transcribing
+                      ? "Transcribing…"
+                      : "Record voice (or hold Alt)"
+              }
               aria-label={recording ? "Stop recording" : "Record voice"}
-              disabled={transcribing}
+              disabled={transcribing || loopActive}
               onClick={toggleRecording}
             >
               {transcribing ? (

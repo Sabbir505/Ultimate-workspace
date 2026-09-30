@@ -51,6 +51,7 @@ import { GitToolsSidebar } from "./components/chat/GitToolsSidebar";
 const CommandPalette = lazy(() => import("./components/command-palette/CommandPalette").then((m) => ({ default: m.CommandPalette })));
 import { useChatEvents } from "./hooks/useChatEvents";
 import { useTtsAutoRead } from "./hooks/useTtsAutoRead";
+import { VoiceLoopController } from "./hooks/useVoiceLoop";
 import { useAutomationEvents } from "./hooks/useAutomationEvents";
 import { useBudgetEvents } from "./hooks/useBudgetEvents";
 import { useMemoryEvents } from "./hooks/useMemoryEvents";
@@ -322,6 +323,9 @@ export default function App() {
       </Suspense>
       <ChatSelectionToolbar />
       <ToastHost />
+      {/* Hands-free voice loop (renders nothing; listens to the shared
+          voiceLoop store and drives the mic / TTS state machine). */}
+      <VoiceLoopController />
       <PetTicker />
       <PetCarrier />
       {/* Kept mounted so collapse/expand animates as a width slide instead

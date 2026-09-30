@@ -1,0 +1,16 @@
+<!doctype html>
+<!-- Dev-only harness (not part of the app build): renders the REAL
+     UpdateButton (sidebar "Update" word + its hover details popover) against
+     the last update payload, inside a facsimile of the sidebar header, so the
+     popover's placement can be inspected in a real engine. -->
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Update popover harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/dev/updatePopoverHarness.tsx"></script>
+  </body>
+</html>

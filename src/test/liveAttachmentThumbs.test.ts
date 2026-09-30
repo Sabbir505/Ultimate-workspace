@@ -49,6 +49,19 @@ describe("liveAttachmentsForMessage", () => {
     ).toBeUndefined();
   });
 
+  it("still matches across the optimistic→persisted content swap", () => {
+    // The client builds the optimistic content with the bare filename; the
+    // backend persists it with the `|<path>` the image was saved to. Without
+    // normalizing that suffix away, the just-sent thumbnail would be dropped
+    // the moment the refetch swapped the bubble for its persisted twin.
+    const optimistic = "look\n\n[Attached image: image.png]";
+    const persisted = "look\n\n[Attached image: image.png|C:/up/1756-image.png]";
+    rememberLiveAttachments("s-swap", optimistic, [pngAttachment]);
+    expect(
+      liveAttachmentsForMessage({ chatSessionId: "s-swap", content: persisted }),
+    ).toEqual([pngAttachment]);
+  });
+
   it("evicts the oldest entries beyond the cap instead of growing forever", () => {
     // Each image attachment holds its full base64 — the cache must stay
     // bounded. Fill past the cap (100) and check the FIRST entry fell out

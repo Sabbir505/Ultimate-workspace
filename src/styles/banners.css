@@ -108,6 +108,14 @@
      context. Only visual styles live here. */
   width: 300px;
   max-width: 78vw;
+  /* Bounded: a release with many bullets rendered a card taller than a short
+     window, so it ran off the bottom of the screen with the last items
+     unreachable. The card is capped (against the viewport too, so it can never
+     need escaping off-screen), the notes area scrolls, and the header + the
+     CTA stay pinned. */
+  max-height: min(520px, calc(100vh - 16px));
+  display: flex;
+  flex-direction: column;
   padding: 12px 14px;
   border-radius: 12px;
   background: #ffffff;
@@ -145,6 +153,8 @@
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 10px;
+  /* Pinned: the bounded card shrinks the notes, never the title row. */
+  flex: none;
 }
 .update-popover-titles {
   display: flex;
@@ -189,6 +199,12 @@
   flex-direction: column;
   gap: 8px;
   margin-bottom: 10px;
+  /* The scrolling half of the bounded card: min-height:0 lets this flex child
+     shrink below its content so overflow-y engages, instead of the card
+     growing past its max-height. */
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .update-popover-section-title {
   font-size: 10px;
@@ -281,6 +297,8 @@
   cursor: pointer;
   background: #10b981;
   color: #fff;
+  /* Pinned: the bounded card shrinks the NOTES, never the action below them. */
+  flex: none;
   transition: background 0.15s ease;
 }
 .update-popover-cta:hover:not(:disabled) { background: #059669; }

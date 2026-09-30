@@ -19,6 +19,7 @@ import {
   persistPartialChatMessage,
   toastError,
 } from "../../lib/ipc";
+import { stripImageMarkerPaths } from "../../lib/chatAttachments";
 import { useArtifactsStore } from "../artifacts";
 import { useProjectsStore } from "../projects";
 import { findPaneForSession } from "./paneTree";
@@ -333,7 +334,12 @@ function liveAttachmentKey(
   chatSessionId: string | null | undefined,
   content: string,
 ): string {
-  return `${chatSessionId}\u0000${content}`;
+  // The path suffix is normalized away: the client builds the optimistic
+  // content with the bare filename while the backend persists it with the
+  // `|<path on disk>` the image was saved to, so the two strings differ. The
+  // cache has to match across that swap or the just-sent thumbnail would drop
+  // mid-send (the card would fall back to re-reading the file over IPC).
+  return `${chatSessionId}\u0000${stripImageMarkerPaths(content)}`;
 }
 
 /** Remember the live (byte-carrying) attachments of a send under the exact

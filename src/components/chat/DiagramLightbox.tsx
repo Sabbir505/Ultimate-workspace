@@ -74,6 +74,21 @@ export function clampPanToView(
   return { x: cx - g.cx, y: cy - g.cy };
 }
 
+/** Layout offset of `el` inside `ancestor`, in untransformed pixels. Walks the
+ *  offsetParent chain, so the result is right whether or not an intermediate
+ *  element (the pan/zoom stage) is itself positioned. */
+function offsetWithin(el: HTMLElement, ancestor: HTMLElement): { x: number; y: number } {
+  let x = 0;
+  let y = 0;
+  let node: HTMLElement | null = el;
+  while (node && node !== ancestor) {
+    x += node.offsetLeft;
+    y += node.offsetTop;
+    node = node.offsetParent as HTMLElement | null;
+  }
+  return { x, y };
+}
+
 export function DiagramLightbox({
   html,
   filename,
@@ -140,14 +155,20 @@ export function DiagramLightbox({
     const vr = root.getBoundingClientRect();
     const chrome = toolbarRef.current?.offsetHeight ?? 0;
     if (vr.width < 2 || vr.height - chrome < 2) return null; // not laid out (jsdom / hidden)
-    const parent = (stage.offsetParent as HTMLElement | null) ?? root;
-    const pr = parent.getBoundingClientRect();
+    // Clamp against the CONTENT card, not the stage it sits on. For a bare
+    // SVG the card fills the paper (identical numbers), but an HTML document
+    // renders as a card NARROWER than the stage — clamping against the stage
+    // stopped the drag a fixed distance short of the right edge, the
+    // "invisible border I can't drag past" report. Only when zoomed below fit
+    // did the card shrink enough to reach the edge.
+    const box = svgHostRef.current ?? stage;
+    const off = box === stage ? offsetWithin(stage, root) : offsetWithin(box, root);
     return {
-      cx: pr.left + stage.offsetLeft + stage.offsetWidth / 2,
-      cy: pr.top + stage.offsetTop + stage.offsetHeight / 2,
+      cx: vr.left + off.x + box.offsetWidth / 2,
+      cy: vr.top + off.y + box.offsetHeight / 2,
       view: { left: vr.left, right: vr.right, top: vr.top + chrome, bottom: vr.bottom },
-      w: stage.offsetWidth,
-      h: stage.offsetHeight,
+      w: box.offsetWidth,
+      h: box.offsetHeight,
     };
   }, []);
 

@@ -4,7 +4,7 @@
 //   3. Interactive HTML renders the LIVE iframe (allow-scripts), static
 //      diagrams keep the sanitized frame.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 
 vi.mock("../lib/ipc", () => ({
   readArtifactPreview: vi.fn(),
@@ -105,6 +105,30 @@ describe("ArtifactPreviewPane kind routing", () => {
     const langLabel = container.querySelector(".doc-code-block .doc-code-lang");
     expect(langLabel).not.toBeNull();
     expect(langLabel!.textContent).toBe("js");
+  });
+
+  it("offers a labeled \"Open in default app\" action in the header", async () => {
+    // The capability existed behind a bare "↗" glyph with no label, which
+    // reads as "open the preview" — nothing on screen said the file goes to
+    // the OS. It must be a labelled control that calls openArtifact.
+    const { openArtifact } = await import("../lib/ipc");
+    const openMock = vi.mocked(openArtifact);
+    readMock.mockResolvedValue(
+      basePreview({ kind: "markdown", ext: "md", filename: "report.md", text: "# Hi" }) as never,
+    );
+    const { container } = render(
+      <ArtifactPreviewPane artifact={{ path: "D:/artifacts/report.md", filename: "report.md" }} onClose={() => {}} />,
+    );
+
+    const btn = await waitFor(() => {
+      const el = container.querySelector<HTMLButtonElement>(".artifact-preview-open-app-btn");
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    expect(btn.textContent).toContain("Open");
+    expect(btn.getAttribute("title")).toMatch(/default app/i);
+    fireEvent.click(btn);
+    expect(openMock).toHaveBeenCalledWith("D:/artifacts/report.md");
   });
 
   it("gives fenced markdown blocks a working Copy button", async () => {

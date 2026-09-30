@@ -41,6 +41,20 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+/** jsdom lays nothing out, so the frame-sizing code reads a column width of 0
+ *  and never leaves the "fits as-is" branch. Give the block a real width. */
+function stubChatColumnWidth(px: number): () => void {
+  const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+    configurable: true,
+    get: () => px,
+  });
+  return () => {
+    if (original) Object.defineProperty(HTMLElement.prototype, "clientWidth", original);
+    else delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientWidth;
+  };
+}
+
 describe("InlineDiagram", () => {
   it("renders static diagrams with the sanitized scripts-blocked frame", async () => {
     readMock.mockResolvedValue(
@@ -125,5 +139,67 @@ describe("InlineDiagram", () => {
     await waitFor(() => {
       expect(onFallback).toHaveBeenCalled();
     });
+  });
+
+  it("caps a too-tall inline artifact at a fixed height and fits it to the card", async () => {
+    // A tall flowchart: 600x3000 at the chat's ~456px content width would be
+    // ~2280px tall — taller than the viewport.
+    readMock.mockResolvedValue(
+      basePreview({
+        text: '<svg viewBox="0 0 600 3000" width="600" height="3000"><rect /></svg>',
+      }) as never,
+    );
+    const restore = stubChatColumnWidth(480);
+    try {
+      const { container } = render(
+        <InlineDiagram artifact={artifact} onFallback={() => <div>chip</div>} />,
+      );
+
+      const frame = await waitFor(() => {
+        const el = container.querySelector<HTMLElement>("iframe.chat-diagram-frame");
+        expect(el).not.toBeNull();
+        return el!;
+      });
+      // The first paint sizes from an unknown column width; the width effect
+      // settles the frame on the next commit.
+      await waitFor(() => expect(frame.style.height).toBe("520px"));
+      const h = parseInt(frame.style.height, 10);
+      expect(h).toBeGreaterThan(0);
+      expect(h).toBeLessThanOrEqual(520);
+      // The card narrows to the diagram's aspect so the scaled drawing fills
+      // it instead of floating in a full-width white box.
+      const block = container.querySelector<HTMLElement>(".chat-diagram-block")!;
+      expect(parseInt(block.style.maxWidth, 10)).toBeLessThan(480);
+      // …and the injected fit style caps the SVG's height so the diagram
+      // scales INTO the fixed frame rather than overflowing it.
+      expect(frame.getAttribute("srcdoc")).toContain("max-height:100%!important");
+    } finally {
+      restore();
+    }
+  });
+
+  it("leaves a short inline artifact at its natural height", async () => {
+    readMock.mockResolvedValue(
+      basePreview({ text: '<svg viewBox="0 0 400 200" width="400" height="200"><rect /></svg>' }) as never,
+    );
+    const restore = stubChatColumnWidth(480);
+    try {
+      const { container } = render(
+        <InlineDiagram artifact={artifact} onFallback={() => <div>chip</div>} />,
+      );
+      const frame = await waitFor(() => {
+        const el = container.querySelector<HTMLElement>("iframe.chat-diagram-frame");
+        expect(el).not.toBeNull();
+        return el!;
+      });
+      // Settles on the column's natural height (the pre-measure floor is 120).
+      await waitFor(() => expect(parseInt(frame.style.height, 10)).toBeGreaterThan(120));
+      // Landscape: fits the column without the cap kicking in.
+      expect(parseInt(frame.style.height, 10)).toBeLessThan(520);
+      // No fitted width: it stays as wide as the card allows.
+      expect(container.querySelector<HTMLElement>(".chat-diagram-block")!.style.maxWidth).toBe("");
+    } finally {
+      restore();
+    }
   });
 });

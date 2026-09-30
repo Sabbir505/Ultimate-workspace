@@ -33,10 +33,70 @@ fn attachment_doc_block(name: &str, text: Option<String>) -> String {
     }
 }
 
+/// Persist an uploaded image and return the path it was written to.
+///
+/// An image attachment's bytes only ever existed for the live turn — they
+/// ride along as vision content, and the persisted message kept just a
+/// marker. History could therefore never re-render the picture: every
+/// earlier message showed a placeholder glyph forever, which is exactly the
+/// "image is gone after a restart" report.
+///
+/// The file goes in the app-data dir, deliberately OUTSIDE any project or
+/// session worktree, for the same reason `generated-images` does: a turn's
+/// checkpoint/restore deletes files created during the turn.
+///
+/// Returns `None` on any failure (undecodable payload, unwritable dir) — the
+/// caller then emits the old marker-only form, so a storage problem degrades
+/// to the previous behaviour instead of failing the send.
+fn save_chat_image_upload(name: &str, media_type: &str, b64: &str) -> Option<String> {
+    let dir = crate::user_dirs::app_data_dir_default().join("chat-uploads");
+    save_chat_image_upload_in(&dir, name, media_type, b64)
+}
+
+/// [`save_chat_image_upload`] with the destination passed in, so the write can
+/// be exercised against a temp dir.
+fn save_chat_image_upload_in(
+    dir: &std::path::Path,
+    name: &str,
+    media_type: &str,
+    b64: &str,
+) -> Option<String> {
+    let bytes = decode_attachment_capped(b64)?;
+    std::fs::create_dir_all(dir).ok()?;
+    // Millisecond prefix: re-uploading the same filename in a later turn must
+    // not overwrite the copy an earlier turn's card still points at.
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut base = if name.trim().is_empty() {
+        // A pasted screenshot often arrives with no name at all.
+        "screenshot".to_string()
+    } else {
+        crate::chat::artifacts::sanitize_filename(name)
+    };
+    // `read_artifact_preview` classifies by extension, so a name that lost
+    // its extension in sanitizing (or never had one) must get it back from
+    // the declared media type.
+    if std::path::Path::new(&base).extension().is_none() {
+        let ext = match media_type.to_ascii_lowercase().as_str() {
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/bmp" => "bmp",
+            _ => "png",
+        };
+        base = format!("{base}.{ext}");
+    }
+    let path = dir.join(format!("{ms}-{base}"));
+    std::fs::write(&path, &bytes).ok()?;
+    Some(path.display().to_string())
+}
+
 /// Turn composer attachments into (extra message text, vision images). Text
 /// files and extracted document text are appended to the message body so they
 /// persist in history; images are collected separately to be sent as vision
-/// content on the live turn (a short placeholder is added to the body text).
+/// content on the live turn (a short marker is added to the body text).
 pub(crate) fn process_attachments(attachments: &[ChatAttachmentInput]) -> (String, Vec<ChatImage>) {
     let mut extra = String::new();
     let mut images: Vec<ChatImage> = Vec::new();
@@ -48,7 +108,16 @@ pub(crate) fn process_attachments(attachments: &[ChatAttachmentInput]) -> (Strin
                         media_type: media_type.clone(),
                         data: data.clone(),
                     });
-                    extra.push_str(&format!("\n\n[Attached image: {}]", a.name));
+                    // The saved path rides INSIDE the marker (after a `|`) so
+                    // the existing attachment regex keeps matching and old
+                    // history — which has no path — still parses. The frontend
+                    // splits it back off and re-reads the bytes over IPC.
+                    match save_chat_image_upload(&a.name, media_type, data) {
+                        Some(path) => {
+                            extra.push_str(&format!("\n\n[Attached image: {}|{}]", a.name, path))
+                        }
+                        None => extra.push_str(&format!("\n\n[Attached image: {}]", a.name)),
+                    }
                 }
             }
             "doc" => {
@@ -2236,6 +2305,44 @@ mod tests {
         // decoding at all.
         let b64_too_long = "A".repeat(MAX_ATTACHMENT_B64_LEN + 1);
         assert!(decode_attachment_capped(&b64_too_long).is_none());
+    }
+
+    /// An uploaded image must survive the turn: its bytes are written to disk
+    /// and the path is recoverable, which is the whole point (history used to
+    /// show nothing but a placeholder glyph after a restart).
+    #[test]
+    fn image_upload_is_written_to_disk_with_a_readable_path() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG-bytes");
+
+        let path = save_chat_image_upload_in(dir.path(), "shot.png", "image/png", &b64)
+            .expect("saved");
+        // The bytes on disk are the bytes that were sent.
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG-bytes");
+        // The filename is prefixed (so a re-upload can't clobber an earlier
+        // turn's copy) and KEEPS its extension — read_artifact_preview
+        // classifies by extension, and without one the card can't load it.
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(name.ends_with("shot.png"), "kept extension: {name}");
+        assert_ne!(name, "shot.png", "prefixed per turn: {name}");
+
+        // A name with no extension takes one from the media type.
+        let p2 = save_chat_image_upload_in(dir.path(), "pasted", "image/jpeg", &b64).unwrap();
+        assert!(p2.ends_with("pasted.jpg"), "{p2}");
+
+        // A name-less paste still lands on disk with a usable name.
+        let p3 = save_chat_image_upload_in(dir.path(), "", "image/png", &b64).unwrap();
+        assert!(p3.ends_with("screenshot.png"), "{p3}");
+
+        // An undecodable payload is refused rather than writing junk — the
+        // caller then falls back to the marker-only form.
+        assert!(save_chat_image_upload_in(dir.path(), "x.png", "image/png", "!!!not base64!!!")
+            .is_none());
     }
 
     /// The working-directory section must name the folder as THE current

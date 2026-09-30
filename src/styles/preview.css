@@ -169,6 +169,35 @@
   stroke: #fff;
 }
 
+/* "Open in the OS default app": a quiet secondary action beside the accent
+   Download button. It used to be a bare "↗" glyph with no label, which reads
+   as "open the preview" rather than "hand this file to the system" — the
+   capability existed, but nothing on screen said so. */
+.artifact-preview-open-app-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease),
+    border-color 0.12s var(--ease);
+}
+.artifact-preview-open-app-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--surface-1, var(--surface-2));
+}
+
 /* Per-artifact export menu (Copy / PNG / SVG-greyed / Download-original),
    shown in the preview header for diagram, html, and image kinds. */
 .artifact-export-menu {

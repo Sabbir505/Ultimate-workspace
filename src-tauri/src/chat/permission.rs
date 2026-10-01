@@ -478,6 +478,76 @@ pub fn classify_connector_tool(name: &str, description: Option<&str>) -> Connect
     ConnectorToolKind::Write
 }
 
+/// The MCP 2026 tool annotations that feed the permission ladder (§5.4).
+/// Relay-neutral shape — the two hints that map onto Read/Write. `idempotent`
+/// and `open_world` are informational only and deliberately not modeled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ToolHints {
+    /// `readOnlyHint` from the server: true = does not modify its environment.
+    pub read_only: Option<bool>,
+    /// `destructiveHint` from the server: true = may perform destructive
+    /// (non-additive) updates. Only meaningful when read_only is false.
+    pub destructive: Option<bool>,
+}
+
+impl ToolHints {
+    /// From the rmcp-typed `ToolAnnotations` (the client paths see these).
+    pub fn from_annotations(
+        read_only: Option<bool>,
+        destructive: Option<bool>,
+    ) -> Option<Self> {
+        (read_only.is_some() || destructive.is_some()).then(|| ToolHints {
+            read_only,
+            destructive,
+        })
+    }
+
+    /// Map an MCP `annotations` object (as a raw JSON value from any
+    /// tools/list response) into the neutral hints. Missing/None → None.
+    pub fn from_json(v: Option<&serde_json::Value>) -> Option<Self> {
+        let v = v?;
+        if !v.is_object() {
+            return None;
+        }
+        Some(ToolHints {
+            read_only: v.get("readOnlyHint").and_then(|x| x.as_bool()),
+            destructive: v.get("destructiveHint").and_then(|x| x.as_bool()),
+        })
+    }
+}
+
+/// Classify a remote tool when the server sent MCP tool annotations
+/// (`readOnlyHint` / `destructiveHint`). The server's EXPLICIT declaration
+/// wins over keyword heuristics; keywords remain the fallback for servers
+/// that send no hints (or hints that don't decide the outcome):
+///
+/// - `readOnlyHint = true` → Read (spec: does not modify its environment;
+///   this is the cheap-correctness win — keyword misreads like
+///   "get_or_create_page" no longer over-gate).
+/// - `destructiveHint = true` → Write (spec: may perform destructive
+///   updates; overrides even a read-looking name — "search" that warns it is
+///   destructive gets gated).
+/// - `readOnlyHint = false` → Write (spec: the tool DOES modify its
+///   environment; the conservative side is to gate it).
+/// - contradictory (`readOnly = true` + `destructive = true`) → Read wins:
+///   the spec says destructive is only meaningful when read_only is false.
+pub fn classify_connector_tool_annotated(
+    name: &str,
+    description: Option<&str>,
+    hints: Option<&ToolHints>,
+) -> ConnectorToolKind {
+    let Some(h) = hints else {
+        return classify_connector_tool(name, description);
+    };
+    if h.read_only == Some(true) {
+        return ConnectorToolKind::Read;
+    }
+    if h.destructive == Some(true) || h.read_only == Some(false) {
+        return ConnectorToolKind::Write;
+    }
+    classify_connector_tool(name, description)
+}
+
 /// The connector permission check. Reads auto-run in every posture. Writes
 /// follow the session's approval policy — the same posture as filesystem
 /// writes: `ReadOnly` sandbox never auto-runs (Write tools are also filtered
@@ -1248,6 +1318,90 @@ mod tests {
                 "{name} should classify as Read"
             );
         }
+    }
+
+    // ---- MCP tool annotations → permission ladder (§5.4) ----
+
+    #[test]
+    fn annotations_override_keyword_classification() {
+        // Server explicitly declares read-only: keyword noise ("get_or_create")
+        // no longer over-gates.
+        let hints = ToolHints { read_only: Some(true), destructive: None };
+        assert_eq!(
+            classify_connector_tool_annotated(
+                "get_or_create_page",
+                Some("Fetch a page, creating it if missing"),
+                Some(&hints),
+            ),
+            ConnectorToolKind::Read,
+            "readOnlyHint=true must win over keyword Write"
+        );
+
+        // Server explicitly declares destructive: a read-looking name gates.
+        let hints = ToolHints { read_only: Some(false), destructive: Some(true) };
+        assert_eq!(
+            classify_connector_tool_annotated("search", Some("Search (destructive)"), Some(&hints)),
+            ConnectorToolKind::Write,
+            "destructiveHint=true must gate even a read-named tool"
+        );
+
+        // readOnlyHint=false (modifies environment) → conservative Write.
+        let hints = ToolHints { read_only: Some(false), destructive: None };
+        assert_eq!(
+            classify_connector_tool_annotated("sync", None, Some(&hints)),
+            ConnectorToolKind::Write
+        );
+    }
+
+    #[test]
+    fn contradictory_annotations_read_only_wins() {
+        // Spec: destructiveHint is only meaningful when readOnlyHint is false.
+        let hints = ToolHints { read_only: Some(true), destructive: Some(true) };
+        assert_eq!(
+            classify_connector_tool_annotated("query", None, Some(&hints)),
+            ConnectorToolKind::Read
+        );
+    }
+
+    #[test]
+    fn missing_annotations_fall_back_to_keywords() {
+        assert_eq!(
+            classify_connector_tool_annotated("api_create_page", None, None),
+            classify_connector_tool("api_create_page", None)
+        );
+        // Hints present but not decisive → keyword fallback.
+        let hints = ToolHints { read_only: None, destructive: Some(false) };
+        assert_eq!(
+            classify_connector_tool_annotated("api_create_page", None, Some(&hints)),
+            ConnectorToolKind::Write
+        );
+        assert_eq!(
+            classify_connector_tool_annotated("search", None, Some(&hints)),
+            ConnectorToolKind::Read
+        );
+    }
+
+    #[test]
+    fn raw_annotations_json_maps_through_the_neutral_shape() {
+        // The exact tools/list JSON a 2026-07-28 server sends.
+        let v = serde_json::json!({
+            "title": "Delete page",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true
+        });
+        let hints = ToolHints::from_json(Some(&v)).expect("object parses");
+        assert_eq!(hints.read_only, Some(false));
+        assert_eq!(hints.destructive, Some(true));
+        // A read-only server entry.
+        let v = serde_json::json!({ "readOnlyHint": true });
+        let hints = ToolHints::from_json(Some(&v)).unwrap();
+        assert_eq!(hints.read_only, Some(true));
+        assert_eq!(hints.destructive, None);
+        // Missing/malformed annotations degrade to None (keyword fallback).
+        assert!(ToolHints::from_json(None).is_none());
+        assert!(ToolHints::from_json(Some(&serde_json::json!("x"))).is_none());
     }
 
     #[test]

@@ -128,6 +128,15 @@ pub struct ChatRequest {
     /// empty when the embedding sidecar isn't running or nothing matched.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub local_docs_retrieval: Vec<String>,
+    /// Native server-side web search for NATIVE OpenAI Chat Completions
+    /// (§4.3.7): injects `web_search_options` into the request body and
+    /// drops the client web_search tool (see ToolCaps.native_search_openai).
+    /// Opt-in (`chat.websearch.native_openai`) because the option is only
+    /// accepted by the search-preview models — plain `gpt-4o`/`gpt-5`
+    /// endpoints 400 on the unknown parameter. Never set for
+    /// OpenAI-compatible/OpenRouter/LocalGguf providers.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub web_search_options: bool,
     /// Memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11): a pre-rendered
     /// `<remembered_context>` block rendered as a synthetic user message
     /// AHEAD of the docs-retrieval message so durable user facts sit closest
@@ -1123,6 +1132,7 @@ mod tests {
             effort: None,
             thinking: None,
             local_docs_retrieval: Vec::new(),
+            web_search_options: false,
             memory_context: None,
         }
     }
@@ -1223,6 +1233,7 @@ mod tests {
             effort: None,
             thinking: None,
             local_docs_retrieval: Vec::new(),
+            web_search_options: false,
             memory_context: None,
         }
     }

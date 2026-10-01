@@ -14,7 +14,10 @@ import {
   listInstalledLoops,
   listInstalledSkills,
   installSkillFromUrl,
+  listSkillGallery,
   makeInstalledGlobal,
+  verifySkillGalleryEntry,
+  type SkillGalleryEntry,
   readInstalledSkill,
   saveInstalledSkill,
   toastError,
@@ -25,7 +28,7 @@ import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import type { InstalledSkill, Skill } from "../../types";
 
-type Tab = "skills" | "loops" | "templates";
+type Tab = "skills" | "loops" | "gallery" | "templates";
 
 export function SkillsLibrary() {
   const closeOverlay = useUiStore((s) => s.closeOverlay);
@@ -64,6 +67,7 @@ export function SkillsLibrary() {
               [
                 ["skills", "Skills"],
                 ["loops", "Loops"],
+                ["gallery", "Gallery"],
                 ["templates", "Prompt templates"],
               ] as Array<[Tab, string]>
             ).map(([key, label]) => (
@@ -82,9 +86,142 @@ export function SkillsLibrary() {
           <div className="library-panel">
             {tab === "skills" && <InstalledPanel kind="skill" />}
             {tab === "loops" && <InstalledPanel kind="loop" />}
+            {tab === "gallery" && <GalleryPanel onInstalled={() => setTab("skills")} />}
             {tab === "templates" && <TemplatesPanel />}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function GalleryPanel({ onInstalled }: { onInstalled: () => void }) {
+  const [entries, setEntries] = useState<SkillGalleryEntry[]>([]);
+  const [query, setQuery] = useState("");
+  const [installing, setInstalling] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  // url → "ok" | "stale" — lazily verified against the live GitHub contents
+  // API so a stale catalog entry says "unavailable" instead of failing at
+  // install time with a raw 404. 12 entries ≈ 12 anonymous req/h of the 60
+  // the contents API allows.
+  const [verified, setVerified] = useState<Record<string, "ok" | "stale">>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const list = (await listSkillGallery()) ?? [];
+      if (cancelled) return;
+      setEntries(list);
+      const results = await Promise.all(
+        list.map(async (e) => {
+          try {
+            await verifySkillGalleryEntry(e.url);
+            return [e.url, "ok"] as const;
+          } catch {
+            return [e.url, "stale"] as const;
+          }
+        }),
+      );
+      if (cancelled) return;
+      setVerified(Object.fromEntries(results));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const install = async (entry: SkillGalleryEntry) => {
+    if (installing) return;
+    setInstalling(entry.id);
+    try {
+      const r = await installSkillFromUrl(entry.url, "skill");
+      setNotice(`Installed /${r.slug}${r.version ? ` v${r.version}` : ""}`);
+      window.setTimeout(() => setNotice(null), 2500);
+      onInstalled();
+    } catch (err) {
+      toastError(`Couldn't install "${entry.name}"`, err);
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  const filtered = entries.filter(
+    (e) =>
+      e.name.toLowerCase().includes(query.toLowerCase()) ||
+      e.category.toLowerCase().includes(query.toLowerCase()) ||
+      e.description.toLowerCase().includes(query.toLowerCase()),
+  );
+  const categories = [...new Set(filtered.map((e) => e.category))];
+
+  return (
+    <div className="installed-panel">
+      <div className="installed-list">
+        <div className="installed-toolbar" style={{ marginBottom: 8 }}>
+          <input
+            className="installed-toolbar-search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search the gallery…"
+          />
+          <button title="Re-check every entry against GitHub right now" onClick={() => setVerified({})}>
+            ⟳
+          </button>
+        </div>
+        {notice && <p className="estimate-note">{notice}</p>}
+        {entries.length === 0 && (
+          <div className="empty-reserved small" style={{ margin: "8px 0" }}>
+            <span className="empty-icon">⌘</span>
+            <span className="empty-text">Loading the gallery…</span>
+          </div>
+        )}
+        <div className="installed-items">
+          {categories.map((cat) => (
+            <div key={cat}>
+              <div className="installed-item-desc" style={{ fontWeight: 600, margin: "10px 0 4px" }}>
+                {cat}
+              </div>
+              {filtered
+                .filter((e) => e.category === cat)
+                .map((entry) => (
+                  <div key={entry.id} className="installed-item" data-testid={`gallery-${entry.id}`}>
+                    <div className="installed-item-head">
+                      <span style={{ flex: 1 }}>{entry.name}</span>
+                      <span className="source-badge both">{entry.author}</span>
+                      <span
+                        className={`source-badge ${verified[entry.url] === "stale" ? "claude" : "both"}`}
+                        title={
+                          verified[entry.url] === "stale"
+                            ? "No longer resolves on GitHub — install will fail"
+                            : verified[entry.url] === "ok"
+                              ? "Live-verified on GitHub"
+                              : "Checking…"
+                        }
+                      >
+                        {verified[entry.url] === "stale" ? "unavailable" : verified[entry.url] === "ok" ? "✓ live" : "…"}
+                      </span>
+                      <button
+                        className="primary"
+                        disabled={verified[entry.url] === "stale" || installing !== null}
+                        onClick={() => void install(entry)}
+                      >
+                        {installing === entry.id ? "Installing…" : "Install"}
+                      </button>
+                    </div>
+                    <div className="installed-item-desc">{entry.description}</div>
+                  </div>
+                ))}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="installed-editor">
+        <h3>Gallery</h3>
+        <p className="estimate-note">
+          A curated starting set of well-known Agent Skills (SKILL.md). Installing writes into
+          both harness skill dirs through the same validated URL installer as <b>From URL</b> —
+          nothing here bypasses the normal path, and every installed skill stays a plain file you
+          can edit or delete.
+        </p>
       </div>
     </div>
   );

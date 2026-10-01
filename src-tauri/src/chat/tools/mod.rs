@@ -419,6 +419,12 @@ pub struct ToolCaps {
     /// (Chat Completions) has no equivalent, and compatible gateways would
     /// not parse the block.
     pub native_search: bool,
+    /// OpenAI half of native search (§4.3.7): drops the CLIENT web_search
+    /// tool from the OpenAI spec because the request body carries
+    /// `web_search_options` instead (search-preview models search
+    /// server-side). Kept separate from `native_search` (the Anthropic
+    /// server-tool block) so neither wire format can leak into the other.
+    pub native_search_openai: bool,
     /// True for providers whose code execution must stay inside the bundled
     /// local sandbox (LocalGguf). The tool loop consults this so a local
     /// model's `run_code` calls are constrained to the sandbox rather than
@@ -624,6 +630,7 @@ impl Default for ToolCaps {
             fs_roots: Vec::new(),
             web_search: true,
             native_search: false,
+            native_search_openai: false,
             requires_local_sandbox: false,
             attached_connectors: std::sync::Arc::new(Vec::new()),
             local_docs: false,

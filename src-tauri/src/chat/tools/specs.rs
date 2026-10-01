@@ -42,7 +42,12 @@ fn apply_allow_filter(specs: &mut Vec<Value>, caps: &ToolCaps, anthropic: bool) 
 
 pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) -> Vec<Value> {
     let mut specs: Vec<Value> = vec![];
-    if caps.web_search {
+    if caps.native_search_openai {
+        // Native server-side search (§4.3.7, OpenAI half): the request body
+        // carries `web_search_options`, so the client web_search tool is
+        // REMOVED to prevent double searching. No spec entry is added —
+        // Chat Completions has no server-tool block to push.
+    } else if caps.web_search {
         specs.push(openai_fn(
             WEB_SEARCH,
             WEB_SEARCH_DESC,
@@ -2664,6 +2669,7 @@ mod tests {
             raw_name: "search_nodes".into(),
             kind: ConnectorToolKind::Read,
             description: Some("Search the graph".into()),
+            hints: None,
         }];
         let mut caps = allow_caps(&[READ_FILE, "mcp_memory_search_nodes"]);
         caps.mcp_tools = std::sync::Arc::new(mcp);
@@ -2955,6 +2961,7 @@ mod tests {
                 raw_name: "search_nodes".into(),
                 kind: ConnectorToolKind::Read,
                 description: Some("Search the knowledge graph".into()),
+            hints: None,
             },
             McpToolEntry {
                 server_id: "memory".into(),
@@ -2963,6 +2970,7 @@ mod tests {
                 raw_name: "create_entities".into(),
                 kind: ConnectorToolKind::Write,
                 description: Some("Create entities".into()),
+            hints: None,
             },
         ];
 

@@ -1,16 +1,19 @@
-//! GitHub REST client for the Pulls surface (list / create / review PRs).
+//! GitHub REST client for the Pulls surface (list / create / review PRs;
+//! issues since §4.4.6).
 //!
-//! Auth uses the GitHub connector's stored OAuth token
-//! (`connectors::oauth::ensure_valid_access_token`) — the connector requests
-//! `repo` scope at authorize time, which covers pulls + reviews + check
-//! reads. The hosted GitHub MCP server is intentionally NOT used here: the
+//! Auth resolves in two steps: the GitHub connector's stored OAuth token
+//! (`connectors::oauth::ensure_valid_access_token`) first — the connector
+//! requests `repo` scope at authorize time, which covers pulls + reviews +
+//! check reads + issues — then a Personal Access Token from the OS keychain
+//! (`Settings → Pull Requests` field) for users who don't want the OAuth
+//! dance. The hosted GitHub MCP server is intentionally NOT used here: the
 //! panel needs typed, paginated REST shapes (files with patches, review
 //! submission), not MCP tool-call round-trips.
 //!
 //! All commands resolve the repo identity from the project's `origin` remote
 //! (SSH and HTTPS forms both parse). A project without a GitHub remote — or
-//! without a connected GitHub connector — returns the typed "unavailable"
-//! error string the panel renders as an empty/connect state.
+//! without either auth path — returns the typed "unavailable" error string
+//! the panel renders as an empty/connect state.
 
 use std::path::Path;
 use std::time::Duration;
@@ -89,13 +92,72 @@ async fn resolve_repo(
     .ok_or_else(|| "this project has no git remote".to_string())?;
     let (owner, repo) = parse_github_remote(&remote)
         .ok_or_else(|| format!("remote `{remote}` is not a GitHub repository"))?;
-    let token = crate::connectors::oauth::ensure_valid_access_token(app, "github")
-        .await
-        .map_err(|_| "GitHub connector is not connected — connect it in Settings → Connectors".to_string())?;
-    if token.is_empty() {
-        return Err("GitHub connector is not connected — connect it in Settings → Connectors".into());
-    }
+    let token = resolve_github_token(app, db, project_id).await?;
     Ok((owner, repo, token))
+}
+
+/// GitHub token resolution (§4.4.6 PAT fallback): OAuth connector first, then
+/// a Personal Access Token stored in the OS keychain (Settings → Pull
+/// Requests field). Covers EVERY panel command — issues, reviews, checks,
+/// PR CRUD — because it sits in the shared `resolve_repo` choke point.
+async fn resolve_github_token(
+    app: &AppHandle,
+    db: &DbState,
+    project_id: &str,
+) -> Result<String, String> {
+    if let Ok(token) = crate::connectors::oauth::ensure_valid_access_token(app, "github").await {
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+    // OAuth missing/expired/unusable → PAT from the keychain. Read under a
+    // short lock (spawn_blocking: keyring calls can block on IPC).
+    let db2 = std::sync::Arc::clone(&db.0);
+    let project = project_id.to_string();
+    let pat = tauri::async_runtime::spawn_blocking(move || {
+        let conn = db2.lock();
+        crate::secrets::platform_load(&conn, PAT_NAMESPACE, PAT_KEY)
+    })
+    .await
+    .map_err(|e| format!("keychain read failed: {e}"))?
+    .filter(|t| !t.trim().is_empty());
+    if let Some(pat) = pat {
+        return Ok(pat);
+    }
+    Err("GitHub is not connected — connect the connector in Settings → Connectors,          or paste a Personal Access Token in Settings → Pull Requests"
+        .to_string())
+}
+
+/// Keychain namespace/key for the GitHub PAT (HF-token pattern).
+const PAT_NAMESPACE: &str = "github";
+const PAT_KEY: &str = "pat";
+
+/// Store the PAT. Empty/whitespace is rejected — clearing is its own command.
+#[tauri::command(async)]
+pub fn github_set_pat(db: State<'_, DbState>, pat: String) -> CmdResult<()> {
+    let pat = pat.trim().to_string();
+    if pat.is_empty() {
+        return Err("token must not be empty".to_string());
+    }
+    let conn = db.0.lock();
+    crate::secrets::platform_store(&conn, PAT_NAMESPACE, PAT_KEY, &pat)
+        .map_err(|e| format!("keychain store failed: {e}"))
+}
+
+#[tauri::command(async)]
+pub fn github_clear_pat(db: State<'_, DbState>) -> CmdResult<()> {
+    let conn = db.0.lock();
+    crate::secrets::platform_remove(&conn, PAT_NAMESPACE, PAT_KEY);
+    Ok(())
+}
+
+/// Frontend only ever learns WHETHER a PAT is set — never the value.
+#[tauri::command(async)]
+pub fn github_has_pat(db: State<'_, DbState>) -> CmdResult<bool> {
+    let conn = db.0.lock();
+    let has = crate::secrets::platform_load(&conn, PAT_NAMESPACE, PAT_KEY)
+        .is_some_and(|t| !t.trim().is_empty());
+    Ok(has)
 }
 
 fn client(token: &str) -> Result<reqwest::Client, String> {
@@ -619,9 +681,267 @@ pub(crate) fn parse_pr_draft(raw: &str) -> PullRequestDraft {
     PullRequestDraft { title: title.trim().to_string(), body: body.trim().to_string() }
 }
 
+// ---- Issues (§4.4.6): the GitHub surface is no longer PR-only ----
+
+fn map_issue_summary(v: &Value) -> GitHubIssueSummary {
+    GitHubIssueSummary {
+        number: v["number"].as_i64().unwrap_or(0),
+        title: v["title"].as_str().unwrap_or("").to_string(),
+        state: v["state"].as_str().unwrap_or("open").to_string(),
+        author: v["user"]["login"].as_str().unwrap_or("").to_string(),
+        labels: v["labels"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| l["name"].as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        comments: v["comments"].as_i64().unwrap_or(0),
+        html_url: v["html_url"].as_str().unwrap_or("").to_string(),
+        created_at: v["created_at"].as_str().unwrap_or("").to_string(),
+        updated_at: v["updated_at"].as_str().unwrap_or("").to_string(),
+    }
+}
+
+/// List issues for the project's repo. `state`: "open" | "closed" | "all".
+/// PRs are filtered out (`pull_request` key present ⇒ PR) so this command is
+/// purely the issues half of the surface.
+#[tauri::command]
+pub async fn github_list_issues(
+    project_id: String,
+    state: Option<String>,
+    db: State<'_, DbState>,
+    app: AppHandle,
+) -> CmdResult<Vec<GitHubIssueSummary>> {
+    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
+    let state = state.as_deref().unwrap_or("open");
+    let resp = client(&token)?
+        .get(format!("{API}/repos/{owner}/{repo}/issues"))
+        .query(&[
+            ("state", state),
+            ("per_page", "50"),
+            ("sort", "updated"),
+            ("direction", "desc"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("GitHub list issues failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(gh_error(resp, "list").await);
+    }
+    let rows: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .filter(|v| v.get("pull_request").is_none())
+        .map(map_issue_summary)
+        .collect())
+}
+
+/// Issue detail: summary + markdown body.
+#[tauri::command]
+pub async fn github_get_issue(
+    project_id: String,
+    number: i64,
+    db: State<'_, DbState>,
+    app: AppHandle,
+) -> CmdResult<GitHubIssueDetail> {
+    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
+    let resp = client(&token)?
+        .get(format!("{API}/repos/{owner}/{repo}/issues/{number}"))
+        .send()
+        .await
+        .map_err(|e| format!("GitHub get issue failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(gh_error(resp, "get").await);
+    }
+    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(GitHubIssueDetail {
+        summary: map_issue_summary(&v),
+        body: v["body"].as_str().unwrap_or("").to_string(),
+    })
+}
+
+/// Create an issue. `labels` are optional (applying them needs a token with
+/// push scope; an OAuth `repo`-scoped token or a repo PAT has it).
+#[tauri::command]
+pub async fn github_create_issue(
+    project_id: String,
+    title: String,
+    body: String,
+    labels: Option<Vec<String>>,
+    db: State<'_, DbState>,
+    app: AppHandle,
+) -> CmdResult<GitHubIssueSummary> {
+    if title.trim().is_empty() {
+        return Err("title is required".to_string());
+    }
+    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
+    let mut payload = json!({ "title": title, "body": body });
+    if let Some(labels) = labels.filter(|l| !l.is_empty()) {
+        payload["labels"] = json!(labels);
+    }
+    let resp = client(&token)?
+        .post(format!("{API}/repos/{owner}/{repo}/issues"))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("GitHub create issue failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(gh_error(resp, "create").await);
+    }
+    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(map_issue_summary(&v))
+}
+
+/// Comment on an issue (or PR — same endpoint).
+#[tauri::command]
+pub async fn github_add_issue_comment(
+    project_id: String,
+    number: i64,
+    body: String,
+    db: State<'_, DbState>,
+    app: AppHandle,
+) -> CmdResult<GitHubIssueComment> {
+    if body.trim().is_empty() {
+        return Err("comment body is required".to_string());
+    }
+    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
+    let resp = client(&token)?
+        .post(format!("{API}/repos/{owner}/{repo}/issues/{number}/comments"))
+        .json(&json!({ "body": body }))
+        .send()
+        .await
+        .map_err(|e| format!("GitHub add comment failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(gh_error(resp, "comment").await);
+    }
+    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(GitHubIssueComment {
+        id: v["id"].as_i64().unwrap_or(0),
+        author: v["user"]["login"].as_str().unwrap_or("").to_string(),
+        body: v["body"].as_str().unwrap_or("").to_string(),
+        created_at: v["created_at"].as_str().unwrap_or("").to_string(),
+    })
+}
+
+/// Close or reopen an issue. `state`: "open" | "closed".
+#[tauri::command]
+pub async fn github_set_issue_state(
+    project_id: String,
+    number: i64,
+    state: String,
+    db: State<'_, DbState>,
+    app: AppHandle,
+) -> CmdResult<GitHubIssueSummary> {
+    let state = match state.as_str() {
+        "open" | "closed" => state,
+        other => return Err(format!("unknown issue state: {other}")),
+    };
+    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
+    let resp = client(&token)?
+        .patch(format!("{API}/repos/{owner}/{repo}/issues/{number}"))
+        .json(&json!({ "state": state }))
+        .send()
+        .await
+        .map_err(|e| format!("GitHub set issue state failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(gh_error(resp, "update").await);
+    }
+    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(map_issue_summary(&v))
+}
+
+/// List an issue's comments (newest 50, oldest first).
+#[tauri::command]
+pub async fn github_list_issue_comments(
+    project_id: String,
+    number: i64,
+    db: State<'_, DbState>,
+    app: AppHandle,
+) -> CmdResult<Vec<GitHubIssueComment>> {
+    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
+    let resp = client(&token)?
+        .get(format!("{API}/repos/{owner}/{repo}/issues/{number}/comments"))
+        .query(&[("per_page", "50")])
+        .send()
+        .await
+        .map_err(|e| format!("GitHub list comments failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(gh_error(resp, "comments").await);
+    }
+    let rows: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|v| GitHubIssueComment {
+            id: v["id"].as_i64().unwrap_or(0),
+            author: v["user"]["login"].as_str().unwrap_or("").to_string(),
+            body: v["body"].as_str().unwrap_or("").to_string(),
+            created_at: v["created_at"].as_str().unwrap_or("").to_string(),
+        })
+        .collect())
+}
+
+/// Live smoke: list the public Rust repo's issues anonymously (read-only).
+/// Run explicitly: cargo test -p relay github_issues_live -- --ignored
+#[tokio::test]
+#[ignore = "hits the live network (api.github.com, anonymous rate limit)"]
+async fn github_issues_live() {
+    let http = reqwest::Client::builder()
+        .user_agent("relay-desktop")
+        .timeout(Duration::from_secs(20))
+        .build()
+        .unwrap();
+    let resp = http
+        .get(format!("{API}/repos/rust-lang/rust/issues"))
+        .query(&[("state", "open"), ("per_page", "100")])
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status {}", resp.status());
+    let rows: Vec<Value> = resp.json().await.unwrap();
+    let issues: Vec<&Value> =
+        rows.iter().filter(|v| v.get("pull_request").is_none()).collect();
+    assert!(!issues.is_empty(), "expected at least one real issue");
+    let mapped = map_issue_summary(issues[0]);
+    assert!(mapped.number > 0);
+    assert!(!mapped.title.is_empty());
+    println!("live issue #{}: {}", mapped.number, mapped.title);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_github_remote;
+    use super::{map_issue_summary, parse_github_remote};
+    use serde_json::json;
+
+    #[test]
+    fn issue_mapper_extracts_labels_and_skips_prs() {
+        let v = json!({
+            "number": 42,
+            "title": "Crash on save",
+            "state": "open",
+            "user": { "login": "octocat" },
+            "labels": [ { "name": "bug" }, { "name": "P1" } ],
+            "comments": 3,
+            "html_url": "https://github.com/o/r/issues/42",
+            "created_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-02T00:00:00Z"
+        });
+        let issue = map_issue_summary(&v);
+        assert_eq!(issue.number, 42);
+        assert_eq!(issue.labels, vec!["bug".to_string(), "P1".to_string()]);
+        assert_eq!(issue.comments, 3);
+        assert_eq!(issue.author, "octocat");
+
+        // The PR filter: a payload carrying `pull_request` is excluded by
+        // github_list_issues's iterator (shape asserted here).
+        let pr_shaped = json!({ "number": 1, "pull_request": { "url": "x" } });
+        assert!(pr_shaped.get("pull_request").is_some());
+
+        // Missing/empty labels degrade to an empty vec, never a panic.
+        let bare = json!({ "number": 7 });
+        assert!(map_issue_summary(&bare).labels.is_empty());
+    }
 
     #[test]
     fn parses_ssh_and_https_remotes() {

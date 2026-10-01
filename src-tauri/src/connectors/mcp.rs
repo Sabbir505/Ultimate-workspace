@@ -24,6 +24,7 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use rmcp::{RoleClient, ServiceExt};
 use tauri::AppHandle;
 
+use crate::chat::permission::ToolHints;
 use crate::connectors::connector_by_id;
 use crate::connectors::oauth::ensure_valid_access_token;
 
@@ -44,6 +45,9 @@ pub struct RemoteTool {
     pub description: Option<String>,
     /// The raw `inputSchema` JSON from the server, as-is.
     pub input_schema: serde_json::Value,
+    /// MCP tool annotations (`readOnlyHint`/`destructiveHint`) when the
+    /// server sent them — they override keyword classification (§5.4).
+    pub hints: Option<crate::chat::permission::ToolHints>,
 }
 
 /// Connect (and initialize) an MCP session for a connector, refreshing the
@@ -104,6 +108,10 @@ impl McpSession {
                 description: t.description.as_ref().map(|d| d.to_string()),
                 input_schema: serde_json::to_value(&t.input_schema)
                     .unwrap_or(serde_json::Value::Object(Default::default())),
+                hints: ToolHints::from_annotations(
+                    t.annotations.as_ref().and_then(|a| a.read_only_hint),
+                    t.annotations.as_ref().and_then(|a| a.destructive_hint),
+                ),
             })
             .collect())
     }

@@ -510,6 +510,19 @@ impl ChatManager {
             effort,
             thinking,
             local_docs_retrieval: Vec::new(),
+            // Native OpenAI server-side search (§4.3.7): opt-in setting,
+            // NATIVE OpenAI provider only (OpenAI-compatible endpoints and
+            // OpenRouter reject the unknown parameter), and search-preview
+            // models only in practice — see the setting's description.
+            web_search_options: matches!(provider_id, ChatProviderId::OpenAI) && {
+                let db_state = app.state::<crate::DbState>();
+                let conn = db_state.0.lock();
+                db::get_setting(&conn, "chat.websearch.native_openai")
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                        == Some("true")
+            },
             memory_context: None,
         };
 
@@ -613,6 +626,21 @@ impl ChatManager {
                         let db_state = app.state::<crate::DbState>();
                         let conn = db_state.0.lock();
                         db::get_setting(&conn, "chat.websearch.native_anthropic")
+                            .ok()
+                            .flatten()
+                            .as_deref()
+                                == Some("true")
+                    },
+                // OpenAI half (§4.3.7): same opt-in posture, NATIVE OpenAI
+                // only. Removes the client web_search tool so the
+                // search-preview model doesn't double search; the request
+                // body carries `web_search_options` (see ChatRequest).
+                native_search_openai: pcaps.native_web_search
+                    && matches!(provider_id, ChatProviderId::OpenAI)
+                    && {
+                        let db_state = app.state::<crate::DbState>();
+                        let conn = db_state.0.lock();
+                        db::get_setting(&conn, "chat.websearch.native_openai")
                             .ok()
                             .flatten()
                             .as_deref()
@@ -2962,6 +2990,7 @@ mod tests {
             effort: None,
             thinking: None,
             local_docs_retrieval: Vec::new(),
+            web_search_options: false,
             memory_context: None,
         };
         let client = reqwest::Client::new();

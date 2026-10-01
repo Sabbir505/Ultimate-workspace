@@ -5,14 +5,23 @@
 // list is visible.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  githubAddIssueComment,
+  githubCreateIssue,
   githubCreatePr,
   githubDraftPrText,
+  githubGetIssue,
+  githubListIssueComments,
+  githubListIssues,
   githubLocalBranches,
+  githubSetIssueState,
   githubSubmitReview,
   gitPush,
   toastError,
   toastSuccess,
   type BranchOption,
+  type GitHubIssueComment,
+  type GitHubIssueDetail,
+  type GitHubIssueSummary,
   type PullRequestSummary,
 } from "../../lib/ipc";
 import { openInBrowserPane } from "../../lib/openBrowserPane";
@@ -23,7 +32,12 @@ import { useUiStore } from "../../state/ui";
 import { listAutomationTemplates } from "../../lib/ipc";
 import { relativeTime } from "../../lib/relativeTime";
 
-type View = { kind: "list" } | { kind: "detail"; number: number } | { kind: "create" };
+type View =
+  | { kind: "list" }
+  | { kind: "detail"; number: number }
+  | { kind: "create" }
+  | { kind: "issue"; number: number }
+  | { kind: "newIssue" };
 
 function toEpoch(iso: string): number {
   const ms = Date.parse(iso);
@@ -48,6 +62,8 @@ export function PullsPanel() {
   const gitStatus = projectId ? gitStatuses[projectId] : undefined;
 
   const [view, setView] = useState<View>({ kind: "list" });
+  // Top-level surface: pull requests (existing) or issues (4.4.6).
+  const [surface, setSurface] = useState<"prs" | "issues">("prs");
 
   if (!project || !projectId) {
     return (
@@ -69,11 +85,50 @@ export function PullsPanel() {
   return (
     <div className="pulls-panel">
       {view.kind === "list" && (
+        <div className="pulls-toolbar" style={{ gap: 6 }}>
+          {(["prs", "issues"] as const).map((k) => (
+            <button
+              key={k}
+              type="button"
+              className={`dev-diff-filter-item${surface === k ? " active" : ""}`}
+              style={{ borderRadius: 8 }}
+              onClick={() => {
+                setSurface(k);
+                setView({ kind: "list" });
+              }}
+            >
+              {k === "prs" ? "Pull requests" : "Issues"}
+            </button>
+          ))}
+        </div>
+      )}
+      {surface === "prs" && view.kind === "list" && (
         <PrList
           projectId={projectId}
           currentBranch={gitStatus.branch ?? ""}
           onOpen={(number) => setView({ kind: "detail", number })}
           onCreate={() => setView({ kind: "create" })}
+        />
+      )}
+      {surface === "issues" && view.kind === "list" && (
+        <IssueList
+          projectId={projectId}
+          onOpen={(number) => setView({ kind: "issue", number })}
+          onCreate={() => setView({ kind: "newIssue" })}
+        />
+      )}
+      {view.kind === "issue" && (
+        <IssueDetailView
+          projectId={projectId}
+          number={view.number}
+          onBack={() => setView({ kind: "list" })}
+        />
+      )}
+      {view.kind === "newIssue" && (
+        <NewIssueForm
+          projectId={projectId}
+          onCancel={() => setView({ kind: "list" })}
+          onCreated={(n) => setView({ kind: "issue", number: n })}
         />
       )}
       {view.kind === "detail" && (
@@ -621,6 +676,287 @@ function PrCreateForm({
           title={!valid ? "Title required; head and base must differ" : "Create the PR on GitHub"}
         >
           {busy === "create" ? "Creating…" : draft ? "Create draft PR" : "Create PR"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---- Issues surface (SS4.4.6) ----
+
+const ISSUE_STATE_LABEL: Record<string, string> = { open: "Open", closed: "Closed", all: "All" };
+
+function IssueList({
+  projectId,
+  onOpen,
+  onCreate,
+}: {
+  projectId: string;
+  onOpen: (number: number) => void;
+  onCreate: () => void;
+}) {
+  const [stateFilter, setStateFilter] = useState<"open" | "closed" | "all">("open");
+  const [issues, setIssues] = useState<GitHubIssueSummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const filterWrapRef = useRef<HTMLDivElement>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      setIssues(await githubListIssues(projectId, stateFilter));
+      setError(null);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId, stateFilter]);
+
+  useEffect(() => {
+    void refresh();
+    const t = window.setInterval(() => void refresh(), 30_000);
+    return () => window.clearInterval(t);
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!filterOpen) return;
+    const close = (e: MouseEvent) => {
+      if (filterWrapRef.current && !filterWrapRef.current.contains(e.target as Node)) setFilterOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setFilterOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [filterOpen]);
+
+  return (
+    <>
+      <div className="pulls-toolbar">
+        <div className="dev-diff-filter-wrap" ref={filterWrapRef}>
+          <button type="button" className="dev-diff-filter-btn" onClick={() => setFilterOpen((o) => !o)} aria-haspopup="menu" aria-expanded={filterOpen}>
+            {ISSUE_STATE_LABEL[stateFilter]}
+            <svg width={11} height={11} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polyline points="4 6 8 10 12 6" />
+            </svg>
+          </button>
+          {filterOpen && (
+            <div className="dev-diff-filter-menu" role="menu">
+              {(["open", "closed", "all"] as const).map((k) => (
+                <button key={k} role="menuitem" className={`dev-diff-filter-item${stateFilter === k ? " active" : ""}`} onClick={() => { setStateFilter(k); setFilterOpen(false); }}>
+                  <span className="dev-diff-filter-check">{stateFilter === k ? "\u2713" : ""}</span>
+                  {ISSUE_STATE_LABEL[k]}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="pulls-toolbar-spacer" />
+        <button type="button" className="ghost pulls-refresh" onClick={() => void refresh()} title="Refresh" disabled={loading}>
+          {loading ? <span className="pulls-spinner" aria-hidden="true" /> : "\u27f3"}
+        </button>
+        <button type="button" className="primary pulls-new" onClick={onCreate}>
+          New issue
+        </button>
+      </div>
+      {error && !issues ? (
+        <div className="pulls-empty">
+          <div className="pulls-empty-title">Couldn't load issues</div>
+          <div className="pulls-empty-hint">{error}</div>
+        </div>
+      ) : !issues ? (
+        <div className="pulls-empty">
+          <span className="pulls-spinner" aria-hidden="true" />
+          <div className="pulls-empty-hint">Loading...</div>
+        </div>
+      ) : issues.length === 0 ? (
+        <div className="pulls-empty">
+          <div className="pulls-empty-title">No {stateFilter} issues</div>
+          <div className="pulls-empty-hint">Hit New issue to file the first one.</div>
+        </div>
+      ) : (
+        <div className="pulls-list">
+          {issues.map((issue) => (
+            <button key={issue.number} type="button" className="pulls-row" onClick={() => onOpen(issue.number)}>
+              <span className="pulls-row-num">#{issue.number}</span>
+              <span className="pulls-row-main">
+                <span className="pulls-row-title">{issue.title}</span>
+                <span className="pulls-row-meta">
+                  {issue.author} - {relativeTime(toEpoch(issue.updatedAt))}
+                  {issue.comments > 0 ? ` - ${issue.comments} comment${issue.comments === 1 ? "" : "s"}` : ""}
+                  {issue.labels.length > 0 ? ` - ${issue.labels.join(", ")}` : ""}
+                </span>
+              </span>
+              {issue.state !== "open" && <span className="pulls-chip closed">{issue.state}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function IssueDetailView({ projectId, number, onBack }: { projectId: string; number: number; onBack: () => void }) {
+  const [issue, setIssue] = useState<GitHubIssueDetail | null>(null);
+  const [comments, setComments] = useState<GitHubIssueComment[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [d, c] = await Promise.all([githubGetIssue(projectId, number), githubListIssueComments(projectId, number)]);
+      setIssue(d);
+      setComments(c);
+      setError(null);
+    } catch (err) {
+      setError(String(err));
+    }
+  }, [projectId, number]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const postComment = async () => {
+    if (!comment.trim()) return;
+    setBusy("comment");
+    try {
+      await githubAddIssueComment(projectId, number, comment.trim());
+      setComment("");
+      await load();
+      toastSuccess("Comment posted");
+    } catch (err) {
+      toastError(String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleState = async () => {
+    if (!issue) return;
+    setBusy("state");
+    try {
+      const next = issue.state === "open" ? "closed" : "open";
+      const updated = await githubSetIssueState(projectId, number, next);
+      setIssue({ ...issue, ...updated });
+    } catch (err) {
+      toastError(String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (error && !issue) {
+    return (
+      <div className="pulls-empty">
+        <div className="pulls-empty-title">Couldn't load issue</div>
+        <div className="pulls-empty-hint">{error}</div>
+        <button type="button" className="ghost" onClick={onBack}>Back</button>
+      </div>
+    );
+  }
+  if (!issue) {
+    return (
+      <div className="pulls-empty">
+        <span className="pulls-spinner" aria-hidden="true" />
+        <div className="pulls-empty-hint">Loading...</div>
+      </div>
+    );
+  }
+  return (
+    <div className="pulls-detail">
+      <div className="pulls-detail-head">
+        <button type="button" className="ghost" onClick={onBack}>{String.fromCharCode(8592)}</button>
+        <span className="pulls-row-num">#{issue.number}</span>
+        <span className="pulls-row-title" style={{ flex: 1 }}>{issue.title}</span>
+        <button type="button" className="ghost" disabled={busy === "state"} onClick={() => void toggleState()}>
+          {issue.state === "open" ? "Close issue" : "Reopen"}
+        </button>
+      </div>
+      <div className="pulls-detail-meta">
+        {issue.state} - {issue.author} - {relativeTime(toEpoch(issue.updatedAt))}
+        {issue.labels.length > 0 ? ` - ${issue.labels.join(", ")}` : ""}
+      </div>
+      <div className="pulls-detail-body">{issue.body || "(no description)"}</div>
+      <div className="pulls-detail-comments">
+        {comments.map((c) => (
+          <div key={c.id} className="pulls-detail-comment">
+            <div className="pulls-detail-meta">
+              {c.author} - {relativeTime(toEpoch(c.createdAt))}
+            </div>
+            <div className="pulls-detail-body">{c.body}</div>
+          </div>
+        ))}
+      </div>
+      <div className="pulls-review-compose">
+        <textarea
+          rows={3}
+          value={comment}
+          onChange={(e) => setComment(e.target.value)}
+          placeholder="Write a comment..."
+        />
+        <button type="button" className="primary" disabled={!comment.trim() || busy === "comment"} onClick={() => void postComment()}>
+          {busy === "comment" ? "Posting..." : "Comment"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function NewIssueForm({
+  projectId,
+  onCancel,
+  onCreated,
+}: {
+  projectId: string;
+  onCancel: () => void;
+  onCreated: (number: number) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  const create = async () => {
+    setCreating(true);
+    try {
+      const issue = await githubCreateIssue(projectId, title.trim(), body);
+      toastSuccess(`Issue #${issue.number} created`);
+      onCreated(issue.number);
+    } catch (err) {
+      toastError(String(err));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div className="pulls-create">
+      <div className="pulls-detail-head">
+        <button type="button" className="ghost" onClick={onCancel}>{String.fromCharCode(8592)}</button>
+        <span className="pulls-row-title" style={{ flex: 1 }}>New issue</span>
+      </div>
+      <input
+        className="pulls-create-title"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        placeholder="Title"
+        autoFocus
+      />
+      <textarea
+        rows={8}
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        placeholder="Describe the problem or request (markdown supported by GitHub)"
+      />
+      <div className="pulls-create-actions">
+        <button type="button" onClick={onCancel}>Cancel</button>
+        <button type="button" className="primary" disabled={!title.trim() || creating} onClick={() => void create()}>
+          {creating ? "Creating..." : "Create issue"}
         </button>
       </div>
     </div>

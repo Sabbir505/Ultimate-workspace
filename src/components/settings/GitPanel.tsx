@@ -3,6 +3,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   deleteDownloadedModel,
+  githubClearPat,
+  githubHasPat,
+  githubSetPat,
   detectGpuPower,
   exportProjectZip,
   getChatDbPath,
@@ -50,7 +53,48 @@ import {
 export function GitPanel() {
   const worktreeDefault = useSettingsStore((s) => s.worktreeDefault);
   const setWorktreeDefault = useSettingsStore((s) => s.setWorktreeDefault);
-  const checkpointsEnabled = useSettingsStore((s) => s.checkpointsEnabled);
+    const [patDraft, setPatDraft] = useState("");
+  const [hasPat, setHasPat] = useState(false);
+  const [patLoaded, setPatLoaded] = useState(false);
+
+  useEffect(() => {
+    let stale = false;
+    void githubHasPat()
+      .then((v) => {
+        if (!stale) {
+          setHasPat(v === true);
+          setPatLoaded(true);
+        }
+      })
+      .catch(() => {
+        if (!stale) setPatLoaded(true);
+      });
+    return () => {
+      stale = true;
+    };
+  }, []);
+
+  const savePat = async () => {
+    try {
+      await githubSetPat(patDraft.trim());
+      setPatDraft("");
+      setHasPat(true);
+      toastSuccess("GitHub token saved to the keychain");
+    } catch (err) {
+      toastError("Couldn't save the token", err);
+    }
+  };
+
+  const clearPat = async () => {
+    try {
+      await githubClearPat();
+      setHasPat(false);
+    } catch (err) {
+      toastError("Couldn't clear the token", err);
+    }
+  };
+
+const checkpointsEnabled = useSettingsStore((s) => s.checkpointsEnabled);
   const setCheckpointsEnabled = useSettingsStore((s) => s.setCheckpointsEnabled);
   const [cmProvider, setCmProvider] = useState<ChatProvider | "">("");
   const [cmModel, setCmModel] = useState("");
@@ -188,6 +232,39 @@ export function GitPanel() {
             <span className="settings-toggle-name">Isolate new chats by default</span>
           </div>
           <ToggleSwitch checked={worktreeDefault} onChange={setWorktreeDefault} />
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">GitHub authentication</div>
+        <p className="settings-section-hint">
+          The Pull Requests and Issues panels use the GitHub OAuth connector
+          (Settings → Connectors) when it is connected. Without it, Relay falls
+          back to a Personal Access Token — paste one with <code>repo</code>
+          scope (classic) or <code>repo</code> + <code>issues</code> (fine-grained)
+          to cover pulls, reviews, checks, and issues. The value goes to the OS
+          keychain and never comes back to the UI.
+        </p>
+        <div className="settings-form-row settings-form-row-pair">
+          <div className="settings-form-field">
+            <label className="settings-form-label">Personal access token</label>
+            <div className="settings-form-control" style={{ display: "flex", gap: 8 }}>
+              <input
+                type="password"
+                value={patDraft}
+                placeholder={patLoaded ? (hasPat ? "Saved — paste a new one to replace" : "ghp_… or github_pat_…") : ""}
+                onChange={(e) => setPatDraft(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button className="primary" disabled={!patDraft.trim()} onClick={() => void savePat()}>
+                Save
+              </button>
+              <button disabled={!hasPat} onClick={() => void clearPat()}>
+                Clear
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 

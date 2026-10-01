@@ -114,7 +114,9 @@ mod connectors;
 pub mod db;
 mod download;
 mod docs_index;
+mod docs_watcher;
 mod exec_gate;
+mod skills_gallery;
 mod git;
 mod github;
 mod git_watcher;
@@ -271,6 +273,20 @@ pub fn run() {
             let shared_db = Arc::new(Mutex::new(conn));
             // Sweep artifacts past their 30-day retention window on startup.
             chat::commands::sweep_expired_artifacts(&shared_db);
+            // Exec-gate approvals (§4.1.4): drop legacy plain-"1" rows so a
+            // DB writer can no longer pre-allow execution by writing one.
+            // One pass per boot; valid seals survive untouched.
+            exec_gate::migrate_legacy(&shared_db.lock());
+            // Checkpoint pruning (§5.16): enforce checkpoints.max_per_session
+            // across every session and drop rows older than
+            // checkpoints.max_age_days (when set). Git ref deletion runs on a
+            // detached thread (see boot_prune).
+            checkpoints::boot_prune(&shared_db.lock());
+            // Bundled loops (§4.4.10): materialize the packaged Relay-native
+            // loop definitions into ~/.agents/loops exactly once per machine
+            // so the Skills Library's Loops tab is never empty on a fresh
+            // install. Tombstoned — user deletions and edits stick.
+            installed_skills::materialize_bundled_loops(&shared_db.lock());
             // Register the bundled, relocatable Python (shipped in
             // bundle.resources → resource_dir/python) so document generation
             // works on machines that have no system Python. Missing bundle
@@ -382,6 +398,10 @@ pub fn run() {
             // `useGitStatusPolling` / `DevDiffPanel` / `BranchDropdown`. See
             // src-tauri/src/git_watcher.rs for the design.
             app.manage(git_watcher::WatcherState::new());
+            // Knowledge corpus watcher (§5.25): file changes inside an enabled
+            // corpus folder re-run the incremental index without a manual
+            // Index press. Same deferred slot as the git watcher below.
+            app.manage(docs_watcher::DocsWatcherState::new());
             // Vault (local markdown knowledge base): root + fs watcher. The
             // index lives in the shared SQLite; the root re-binds lazily from
             // the DB setting (vault::current_root) so no boot hook is needed.
@@ -403,6 +423,9 @@ pub fn run() {
                     // enabled `file` automation. Same deferred slot as the git
                     // watcher — same reasons.
                     automation_triggers::sync_fs_watchers(&app_handle, &db_state.0);
+                    // Same deferred slot: corpus watchers need the frontend
+                    // listening for `docs:index:progress` before they fire.
+                    docs_watcher::install_all_enabled(&app_handle, &db_state);
                 });
             }
             // CLI harnesses' native subagent stores (`~/.claude/agents/*.md`):
@@ -683,6 +706,16 @@ pub fn run() {
             github::github_pr_checks,
             github::github_draft_pr_text,
             github::github_local_branches,
+            // github issues + PAT fallback (§4.4.6)
+            github::github_list_issues,
+            github::github_get_issue,
+            github::github_create_issue,
+            github::github_add_issue_comment,
+            github::github_set_issue_state,
+            github::github_list_issue_comments,
+            github::github_set_pat,
+            github::github_clear_pat,
+            github::github_has_pat,
             // user hooks (Settings → Hooks; config rides get/set_setting)
             commands::hooks_cmds::hooks_test,
             commands::hooks_cmds::hooks_import_claude,
@@ -791,6 +824,8 @@ pub fn run() {
             commands::skills_cmds::save_installed_skill,
             commands::skills_cmds::create_installed_skill,
             commands::skills_cmds::install_skill_from_url,
+            skills_gallery::list_skill_gallery,
+            skills_gallery::verify_skill_gallery_entry,
             commands::skills_cmds::delete_installed_skill,
             commands::skills_cmds::make_installed_global,
             commands::skills_cmds::list_chat_skills,

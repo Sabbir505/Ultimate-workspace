@@ -198,6 +198,9 @@ pub struct McpToolEntry {
     pub raw_name: String,
     pub kind: ConnectorToolKind,
     pub description: Option<String>,
+    /// MCP tool annotations from the server's tools/list (§5.4) — already
+    /// folded into `kind`, carried for the approval card's provenance note.
+    pub hints: Option<permission::ToolHints>,
 }
 
 /// Find a tool by wire name across the attached entries. Returns the index
@@ -240,8 +243,15 @@ impl GallerySession {
             .map(|t| {
                 let raw_name = t.name.to_string();
                 let description = t.description.as_ref().map(|d| d.to_string());
-                let kind =
-                    permission::classify_connector_tool(&raw_name, description.as_deref());
+                let hints = permission::ToolHints::from_annotations(
+                    t.annotations.as_ref().and_then(|a| a.read_only_hint),
+                    t.annotations.as_ref().and_then(|a| a.destructive_hint),
+                );
+                let kind = permission::classify_connector_tool_annotated(
+                    &raw_name,
+                    description.as_deref(),
+                    hints.as_ref(),
+                );
                 McpToolEntry {
                     server_id: def.id.clone(),
                     server_name: def.name.clone(),
@@ -249,6 +259,7 @@ impl GallerySession {
                     raw_name,
                     kind,
                     description,
+                    hints,
                 }
             })
             .collect())
@@ -1250,6 +1261,7 @@ mod tests {
             raw_name: "create_entities".into(),
             kind: ConnectorToolKind::Write,
             description: None,
+            hints: None,
         }];
         assert!(find_tool(&entries, "mcp_memory_create_entities").is_some());
         // The RAW name must not match — that's the whole point of prefixing.

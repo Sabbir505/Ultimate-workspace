@@ -1,0 +1,6 @@
+# winget version manifest template — see README.md in this directory.
+PackageIdentifier: Sabbir505.Relay
+PackageVersion: "{{VERSION}}"
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

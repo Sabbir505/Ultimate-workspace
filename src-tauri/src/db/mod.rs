@@ -1881,8 +1881,10 @@ pub use docs::{
 
 // chat checkpoints (per-turn git working-tree snapshots)
 pub use checkpoints::{
-    chat_session_repo_path, checkpoint_ref_paths, count_chat_checkpoints, get_checkpoint,
-    insert_checkpoint, latest_checkpoint, list_chat_checkpoints, set_checkpoint_ref,
+    checkpoint_ref_paths, checkpoint_session_ids, checkpoints_older_than,
+    chat_session_repo_path, count_chat_checkpoints, delete_checkpoint, get_checkpoint,
+    insert_checkpoint, latest_checkpoint, list_chat_checkpoints, oldest_turn_checkpoints,
+    set_checkpoint_ref,
 };
 
 // connector credentials (app-scoped OAuth tokens; values in keychain)

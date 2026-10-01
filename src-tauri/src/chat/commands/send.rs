@@ -2019,6 +2019,7 @@ pub(crate) async fn run_prompt_warmup(
         fs_roots: Vec::new(),
         web_search: pcaps.native_web_search,
         native_search: false,
+            native_search_openai: false,
         requires_local_sandbox: pcaps.requires_local_sandbox,
         // A fresh session's first send has no LIVE connector sessions yet
         // (AttachedConnector needs a connected McpSession — not fabricatable

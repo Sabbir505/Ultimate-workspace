@@ -1,0 +1,31 @@
+// Self-hosted brand fonts (§5.21): bundled via @fontsource packages so a
+// local-first app does not fetch Google Fonts from the network at cold
+// start. Imports mirror the families/weights the old fonts.googleapis.com
+// stylesheet loaded (index.html before 2026-10-01):
+//   Space Grotesk 400/500/600/700 · Space Mono 400/700 + italic 400 ·
+//   Inter 400/500/600/700 · IBM Plex Sans 400/500/600/700 ·
+//   Roboto 400/500/700 · Fraunces (variable opsz/wght) ·
+//   JetBrains Mono 400/700 · Fira Code 400/500
+@import "@fontsource/space-grotesk/400.css";
+@import "@fontsource/space-grotesk/500.css";
+@import "@fontsource/space-grotesk/600.css";
+@import "@fontsource/space-grotesk/700.css";
+@import "@fontsource/space-mono/400.css";
+@import "@fontsource/space-mono/400-italic.css";
+@import "@fontsource/space-mono/700.css";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-sans/700.css";
+@import "@fontsource/roboto/400.css";
+@import "@fontsource/roboto/500.css";
+@import "@fontsource/roboto/700.css";
+@import "@fontsource-variable/fraunces/index.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/700.css";
+@import "@fontsource/fira-code/400.css";
+@import "@fontsource/fira-code/500.css";

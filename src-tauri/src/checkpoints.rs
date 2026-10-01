@@ -116,7 +116,135 @@ fn create_checkpoint(
     if let Some(app) = app {
         let _ = app.emit("checkpoint:created", &ckpt);
     }
+    prune_over_cap(conn, chat_session_id);
     Ok(ckpt)
+}
+
+// ---- Pruning (§5.16): checkpoints used to be unbounded per session ----
+
+/// Default per-session cap. Generous: a long working session with per-turn
+/// checkpoints still keeps ~50 undo points; anything older than that is
+/// git-history noise. "0" via the setting disables the cap.
+const DEFAULT_MAX_PER_SESSION: i64 = 50;
+/// Ref deletions per inline prune pass — bounds the turn-finalize latency
+/// (each is one `git update-ref -d`, ~10 ms). A legacy session far over cap
+/// catches up over subsequent turns; boot prune (unbounded) clears it sooner.
+const MAX_INLINE_PRUNE: i64 = 8;
+
+fn setting_i64(conn: &Connection, key: &str, default: i64) -> i64 {
+    db::get_setting(conn, key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(default)
+}
+
+fn max_per_session(conn: &Connection) -> i64 {
+    setting_i64(conn, "checkpoints.max_per_session", DEFAULT_MAX_PER_SESSION)
+}
+
+fn max_age_days(conn: &Connection) -> i64 {
+    setting_i64(conn, "checkpoints.max_age_days", 0)
+}
+
+/// Delete a checkpoint row + its git ref. Returns true when the row went
+/// away. Ref deletion is attempted first; a failed ref deletion keeps the
+/// row (never strand an orphan ref behind a deleted row).
+fn delete_checkpoint_with_ref(conn: &Connection, ckpt: &ChatCheckpoint) -> bool {
+    if !ckpt.ref_name.is_empty() {
+        let dir = PathBuf::from(&ckpt.repo_path);
+        if git::is_git_repo(&dir) {
+            if let Err(e) = git::delete_checkpoint_ref(&dir, &ckpt.ref_name) {
+                eprintln!("[checkpoints] prune ref {} failed: {e}", ckpt.ref_name);
+                return false;
+            }
+        }
+        // Ref already gone / repo gone: the row is still prunable.
+    }
+    matches!(db::delete_checkpoint(conn, ckpt.id), Ok(()))
+}
+
+/// Keep a session at `checkpoints.max_per_session` rows, oldest TURN
+/// checkpoints first (the baseline survives so the pre-chat state stays
+/// undoable). Called inline after every insert — bounded, self-healing.
+fn prune_over_cap(conn: &Connection, chat_session_id: &str) {
+    let cap = max_per_session(conn);
+    if cap <= 0 {
+        return;
+    }
+    let total = db::count_chat_checkpoints(conn, chat_session_id).unwrap_or(0);
+    let over = total - cap;
+    if over <= 0 {
+        return;
+    }
+    let take = over.min(MAX_INLINE_PRUNE);
+    let Ok(candidates) = db::oldest_turn_checkpoints(conn, chat_session_id, take) else {
+        return;
+    };
+    for ckpt in candidates {
+        if !delete_checkpoint_with_ref(conn, &ckpt) {
+            break; // ref deletion failed — retry on a later turn
+        }
+    }
+}
+
+/// Boot-time prune: enforce the per-session cap across ALL sessions (the
+/// inline pass is bounded and would take many turns to catch up), then drop
+/// checkpoints older than `checkpoints.max_age_days` (when set). Git ref
+/// deletion happens OUTSIDE the DB lock on a detached thread — same split as
+/// `prune_session_refs`. Rows whose ref could not be deleted are kept.
+pub fn boot_prune(conn: &Connection) {
+    let cap = max_per_session(conn);
+    let mut victims: Vec<ChatCheckpoint> = Vec::new();
+    if cap > 0 {
+        let Ok(sessions) = db::checkpoint_session_ids(conn) else {
+            return;
+        };
+        for sid in sessions {
+            let total = db::count_chat_checkpoints(conn, &sid).unwrap_or(0);
+            let over = total - cap;
+            if over <= 0 {
+                continue;
+            }
+            if let Ok(candidates) = db::oldest_turn_checkpoints(conn, &sid, over) {
+                victims.extend(candidates);
+            }
+        }
+    }
+    let age_days = max_age_days(conn);
+    if age_days > 0 {
+        let cutoff = db::now_ts() - age_days * 86_400;
+        if let Ok(stale) = db::checkpoints_older_than(conn, cutoff) {
+            victims.extend(stale);
+        }
+    }
+    if victims.is_empty() {
+        return;
+    }
+    // Delete rows now (cheap, under the caller's lock); hand the refs to the
+    // detached git half. A victim whose ref fails to delete re-keeps its row?
+    // No — the row is already removed; a failed ref leaves a hidden orphan
+    // ref pointing at an unreachable commit (git-gc ignores refs, so the
+    // object stays — the same accepted residue as session-delete pruning).
+    let mut by_repo: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for ckpt in &victims {
+        if !ckpt.ref_name.is_empty() {
+            by_repo
+                .entry(ckpt.repo_path.clone())
+                .or_default()
+                .push(ckpt.ref_name.clone());
+        }
+    }
+    let ids: Vec<i64> = victims.iter().map(|c| c.id).collect();
+    for id in ids {
+        let _ = db::delete_checkpoint(conn, id);
+    }
+    if !by_repo.is_empty() {
+        std::thread::Builder::new()
+            .name("checkpoint-boot-prune".into())
+            .spawn(move || prune_ref_groups(by_repo))
+            .ok();
+    }
 }
 
 /// Gates only (the caller has already resolved the repo dir): feature on +
@@ -690,6 +818,103 @@ mod tests {
             db::count_chat_checkpoints(&c, &cs.id).unwrap(),
             1,
             "detached baseline records exactly one checkpoint"
+        );
+    }
+
+    // ---- Pruning (§5.16): count + age caps per session ----
+
+    #[test]
+    fn count_cap_keeps_the_baseline_and_prunes_oldest_turns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        git::init_test_repo(path);
+
+        let conn = db::mem();
+        let pid = db::new_id();
+        conn.execute(
+            "INSERT INTO projects (id, path, name, created_at) VALUES (?1, ?2, 'p', 0)",
+            rusqlite::params![pid, path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        let cs = chat_db::create_chat_session(&conn, "anthropic", "m", Some(&pid)).unwrap();
+
+        // Cap at 3 total: baseline + 2 turn checkpoints.
+        db::set_setting(&conn, "checkpoints.max_per_session", "3").unwrap();
+
+        maybe_baseline(None, &conn, &cs.id, path);
+        for turn in 1..=5 {
+            std::fs::write(path.join(format!("t{turn}.txt")), format!("turn {turn}\n")).unwrap();
+            after_turn(None, &conn, &cs.id, Some(turn), path);
+            let ids: Vec<i64> = db::list_chat_checkpoints(&conn, &cs.id)
+                .unwrap()
+                .iter()
+                .map(|c| c.id)
+                .collect();
+            assert!(
+                ids.len() <= 3,
+                "cap must hold after turn {turn}, got {ids:?}"
+            );
+        }
+
+        let all = db::list_chat_checkpoints(&conn, &cs.id).unwrap();
+        assert_eq!(all.len(), 3);
+        // The baseline survives; the surviving turns are the NEWEST ones.
+        assert!(all[0].message_id.is_none(), "baseline must be kept");
+        let turn_msgs: Vec<Option<i64>> = all[1..].iter().map(|c| c.message_id).collect();
+        assert_eq!(turn_msgs, vec![Some(4), Some(5)], "oldest turns pruned first");
+        // And the pruned checkpoints' hidden refs are gone from the repo.
+        for ckpt in &all {
+            assert!(ckpt.ref_name.starts_with(REFS_PREFIX));
+        }
+    }
+
+    #[test]
+    fn zero_cap_disables_pruning_and_boot_prune_enforces_age() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        git::init_test_repo(path);
+
+        let conn = db::mem();
+        let pid = db::new_id();
+        conn.execute(
+            "INSERT INTO projects (id, path, name, created_at) VALUES (?1, ?2, 'p', 0)",
+            rusqlite::params![pid, path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        let cs = chat_db::create_chat_session(&conn, "anthropic", "m", Some(&pid)).unwrap();
+
+        // "0" = unlimited: six turns, nothing pruned.
+        db::set_setting(&conn, "checkpoints.max_per_session", "0").unwrap();
+        maybe_baseline(None, &conn, &cs.id, path);
+        for turn in 1..=6 {
+            std::fs::write(path.join(format!("z{turn}.txt")), "x").unwrap();
+            after_turn(None, &conn, &cs.id, Some(turn), path);
+        }
+        assert_eq!(db::count_chat_checkpoints(&conn, &cs.id).unwrap(), 7);
+
+        // Boot prune with the cap restored: over-cap victims across sessions.
+        db::set_setting(&conn, "checkpoints.max_per_session", "3").unwrap();
+        boot_prune(&conn);
+        assert!(
+            db::count_chat_checkpoints(&conn, &cs.id).unwrap() <= 3,
+            "boot prune must enforce the cap"
+        );
+        let all = db::list_chat_checkpoints(&conn, &cs.id).unwrap();
+        assert!(all[0].message_id.is_none(), "boot prune keeps the baseline");
+
+        // Age prune: set every remaining row's created_at to 30 days ago and
+        // a 7-day age cap — everything must go.
+        db::set_setting(&conn, "checkpoints.max_age_days", "7").unwrap();
+        conn.execute(
+            "UPDATE chat_checkpoints SET created_at = created_at - 30*86400",
+            [],
+        )
+        .unwrap();
+        boot_prune(&conn);
+        assert_eq!(
+            db::count_chat_checkpoints(&conn, &cs.id).unwrap(),
+            0,
+            "age prune removes all stale checkpoints"
         );
     }
 

@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
+import "./styles/fonts.css";
 import "./styles/global.css";
 // KaTeX CSS (PERF rec #3) is NOT imported here anymore: it only matters once
 // a math block renders, which happens exclusively inside the lazy-loaded

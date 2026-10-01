@@ -1,0 +1,26 @@
+# winget locale manifest template — see README.md in this directory.
+PackageIdentifier: Sabbir505.Relay
+PackageVersion: "{{VERSION}}"
+PackageLocale: en-US
+Publisher: Relay
+PublisherUrl: https://github.com/Sabbir505/relay-releases
+PublisherSupportUrl: https://github.com/Sabbir505/relay-releases/issues
+PackageName: Relay
+PackageUrl: https://github.com/Sabbir505/relay-releases
+License: Proprietary
+ShortDescription: Local-first, multi-pane desktop shell for AI coding agents.
+Description: |-
+  Relay is a local-first desktop shell for AI coding agents: multi-pane chat
+  across Anthropic, OpenAI, OpenRouter and local GGUF models, PTY panes for
+  Claude Code / Kimi Code / OpenCode / Pi / OMP / CommandCode, agent-driven
+  native browser panes, a GGUF model market, Session Mesh, run-while-closed
+  automations, and per-turn checkpoints across every agent.
+Moniker: relay
+Tags:
+  - ai
+  - llm
+  - coding-agents
+  - local-first
+  - developer-tools
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

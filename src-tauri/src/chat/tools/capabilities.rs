@@ -570,6 +570,7 @@ mod tests {
                 raw_name: "store".into(),
                 kind: crate::chat::permission::ConnectorToolKind::Write,
                 description: None,
+            hints: None,
             },
             crate::mcp_gallery::McpToolEntry {
                 server_id: "memory".into(),
@@ -578,6 +579,7 @@ mod tests {
                 raw_name: "fetch".into(),
                 kind: crate::chat::permission::ConnectorToolKind::Read,
                 description: None,
+            hints: None,
             },
         ]);
         let v: Value = serde_json::from_str(&capabilities_report(&caps)).unwrap();

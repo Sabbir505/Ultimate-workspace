@@ -1190,6 +1190,13 @@ fn build_openai_body(
     if let Some(e) = &req.effort {
         body["reasoning_effort"] = json!(e);
     }
+    // Native server-side search (§4.3.7): opt-in, native OpenAI only. The
+    // search-preview models run the search themselves and return cited
+    // content inline; plain models 400 on the unknown parameter, which is
+    // why the setting is opt-in and names the model requirement.
+    if req.web_search_options {
+        body["web_search_options"] = json!({});
+    }
     // Local GGUF (llama.cpp) uses `chat_template_kwargs.enable_thinking`
     // for Qwen3 / DeepSeek-R1 thinking. Cloud OpenAI reasoning models
     // read `reasoning_effort` (above) and ignore this flag. Only emit
@@ -2364,6 +2371,7 @@ mod tests {
             effort: None,
             thinking,
             local_docs_retrieval: Vec::new(),
+            web_search_options: false,
             memory_context: None,
         }
     }
@@ -2595,6 +2603,7 @@ mod tests {
             effort: None,
             thinking: None,
             local_docs_retrieval: Vec::new(),
+            web_search_options: false,
             memory_context: None,
         }
     }
@@ -2679,5 +2688,40 @@ mod tests {
         // Other C0 controls and DEL go; multibyte text passes through whole.
         assert_eq!(sanitize_stream_text("x\u{7}\u{7f}日🎉y"), "x日🎉y");
         assert_eq!(sanitize_stream_text(""), "");
+    }
+}
+
+#[cfg(test)]
+mod web_search_options_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn req(ws: bool) -> crate::chat::providers::ChatRequest {
+        crate::chat::providers::ChatRequest {
+            model: "gpt-4o-search-preview".into(),
+            messages: vec![crate::chat::providers::ChatMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                images: vec![],
+            }],
+            max_tokens: Some(64),
+            system: None,
+            effort: None,
+            thinking: None,
+            local_docs_retrieval: Vec::new(),
+            web_search_options: ws,
+            memory_context: None,
+        }
+    }
+
+    #[test]
+    fn web_search_options_injects_and_omits() {
+        let on = build_openai_body(&req(true), &[], &[], false);
+        assert_eq!(on["web_search_options"], json!({}));
+        let off = build_openai_body(&req(false), &[], &[], false);
+        assert!(
+            off.get("web_search_options").is_none(),
+            "opt-in off must leave the body clean (plain models 400 on it)"
+        );
     }
 }

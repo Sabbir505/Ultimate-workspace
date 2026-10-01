@@ -9,6 +9,7 @@
 // memoized adapter), so the document — including the markdown parse — only
 // re-renders when the actual file content changes.
 import { useCallback, useEffect, useMemo, useRef, useState, memo, isValidElement } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { LazyReactMarkdown, defaultUrlTransform } from "../common/LazyMarkdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -155,6 +156,12 @@ function MarkdownDocument({ text }: { text: string }) {
   return rendered;
 }
 
+/// Rows above this count render through the windowed virtualizer (4.6.5);
+/// small tables keep the plain table so copy/select and tests stay simple.
+const CSV_VIRTUAL_THRESHOLD = 200;
+/// Estimated rendered height of one body row (the virtualizer re-measures).
+const CSV_ROW_ESTIMATE_PX = 32;
+
 function CsvTable({ text }: { text: string }) {
   const rows = useMemo(
     () =>
@@ -164,10 +171,31 @@ function CsvTable({ text }: { text: string }) {
         .map((line) => line.split(",")),
     [text],
   );
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const body = rows.length > 0 ? rows.slice(1) : [];
+  // Windowed rendering: a pasted 50k-row export used to mount every <tr> at
+  // once and freeze the pane. Same @tanstack/react-virtual shape as
+  // AutomationRunTable (initialRect seeds jsdom's zero-height viewport).
+  const rowVirtualizer = useVirtualizer({
+    count: body.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => CSV_ROW_ESTIMATE_PX,
+    overscan: 12,
+    initialRect: { width: 1000, height: 600 },
+  });
   if (rows.length === 0) return null;
-  const [head, ...body] = rows;
+  const [head, ...allBody] = rows;
+  const virtualized = allBody.length > CSV_VIRTUAL_THRESHOLD;
+  const pad = (r: string[]) => (r.length >= head.length ? r : [...r, ...Array<string>(head.length - r.length).fill("")]);
+  const virtualItems = virtualized ? rowVirtualizer.getVirtualItems() : [];
+  const topPad = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const last = virtualItems[virtualItems.length - 1];
+  const bottomPad = virtualItems.length > 0 ? allBody.length - (last.start + virtualItems.length) : 0;
+  const visibleBody = virtualized
+    ? virtualItems.map((vi) => ({ index: vi.index, cells: pad(allBody[vi.index]) }))
+    : allBody.map((r, i) => ({ index: i, cells: pad(r) }));
   return (
-    <div className="artifact-preview-table-wrap">
+    <div className="artifact-preview-table-wrap" ref={scrollRef} style={virtualized ? { overflowY: "auto", maxHeight: 600 } : undefined}>
       <table className="artifact-preview-table">
         <thead>
           <tr>
@@ -177,13 +205,15 @@ function CsvTable({ text }: { text: string }) {
           </tr>
         </thead>
         <tbody>
-          {body.map((r, i) => (
-            <tr key={i}>
-              {r.map((c, j) => (
+          {topPad > 0 && <tr style={{ height: topPad }} aria-hidden="true" />}
+          {visibleBody.map(({ index, cells }) => (
+            <tr key={index} style={virtualized ? { height: CSV_ROW_ESTIMATE_PX } : undefined}>
+              {cells.map((c, j) => (
                 <td key={j}>{c}</td>
               ))}
             </tr>
           ))}
+          {bottomPad > 0 && <tr style={{ height: bottomPad * CSV_ROW_ESTIMATE_PX }} aria-hidden="true" />}
         </tbody>
       </table>
     </div>

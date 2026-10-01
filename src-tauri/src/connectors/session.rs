@@ -100,7 +100,11 @@ pub async fn connect_all(
                 };
                 let mut map = HashMap::new();
                 for t in &tools {
-                    let kind = permission::classify_connector_tool(&t.name, t.description.as_deref());
+                    let kind = permission::classify_connector_tool_annotated(
+                        &t.name,
+                        t.description.as_deref(),
+                        t.hints.as_ref(),
+                    );
                     map.insert(t.name.clone(), (kind, t.description.clone()));
                 }
                 let mut fallback = std::collections::HashSet::new();

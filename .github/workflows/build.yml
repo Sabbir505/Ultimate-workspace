@@ -24,6 +24,14 @@
 #                                        on Sabbir505/relay-releases only (the
 #                                        built-in GITHUB_TOKEN cannot publish to
 #                                        another repository)
+# Optional (SS5.2 Authenticode / SmartScreen trust — signing is skipped, with
+# a loud notice, when either is unset):
+#   AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET
+#                                      - service principal with the Trusted
+#                                        Signing Certificate Profile Signer role
+#   AZURE_TRUSTED_SIGNING_ACCOUNT      - Trusted Signing account name
+#   AZURE_TRUSTED_SIGNING_PROFILE      - certificate profile name
+#   AZURE_KEY_VAULT_URI                - the account's vault URI
 
 name: Build & Release
 
@@ -195,6 +203,40 @@ jobs:
           mkdir -p src-tauri/target/release/bundle/nsis
           cp -r artifacts/windows/* src-tauri/target/release/bundle/nsis/ 2>/dev/null || true
           npm run release:latest-json -- --notes-file CHANGELOG.md --tag "${{ github.ref_name }}"
+
+      - name: Authenticode-sign the installer (Azure Trusted Signing)
+        # SS5.2: removes SmartScreen/AV friction for distribution. Runs only
+        # when ALL Trusted Signing secrets are configured; otherwise skipped
+        # so unsigned self-builds keep working unchanged.
+        if: >-
+          env.AZURE_TENANT_ID != '' && env.AZURE_CLIENT_ID != '' &&
+          env.AZURE_CLIENT_SECRET != '' && env.AZURE_TRUSTED_SIGNING_ACCOUNT != '' &&
+          env.AZURE_TRUSTED_SIGNING_PROFILE != ''
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          AZURE_KEY_VAULT_URI: ${{ secrets.AZURE_KEY_VAULT_URI }}
+        shell: pwsh
+        run: |
+          $missing = @('AZURE_TENANT_ID','AZURE_CLIENT_ID','AZURE_CLIENT_SECRET','AZURE_TRUSTED_SIGNING_ACCOUNT','AZURE_TRUSTED_SIGNING_PROFILE') | Where-Object { -not (Get-Item "env:$_" -ErrorAction SilentlyContinue) }
+          if ($missing) {
+            Write-Host "::warning::Authenticode signing skipped — missing secrets: $($missing -join ', ') (see packaging/winget/README.md)"
+            exit 0
+          }
+          dotnet tool install --global Azure.Signing --version ">=1.0.0" 2>$null
+          $exe = Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          azure-signing sign `
+            --account "$env:AZURE_TRUSTED_SIGNING_ACCOUNT" `
+            --certificate-profile "$env:AZURE_TRUSTED_SIGNING_PROFILE" `
+            --endpoint "$env:AZURE_KEY_VAULT_URI" `
+            --tenant-id "$env:AZURE_TENANT_ID" `
+            --client-id "$env:AZURE_CLIENT_ID" `
+            --client-secret "$env:AZURE_CLIENT_SECRET" `
+            --file $exe.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed" }
 
       - name: Extract release notes
         # Cross-repo releases can't use generate_release_notes (the tag has no

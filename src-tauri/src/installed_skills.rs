@@ -489,6 +489,83 @@ fn builtins() -> Vec<BuiltinSkill> {
     ]
 }
 
+/// Relay-native loop definitions shipped with the app (§4.4.10): recurring
+/// procedures the Skills Library's Loops tab can show on a fresh install.
+/// The Loops scanner only reads `loops/` directories, which no harness
+/// creates — so without packaging, the tab ships empty. These are
+/// materialized once per machine into `~/.agents/loops/<slug>/LOOP.md` by
+/// [`materialize_bundled_loops`], after which they are ordinary user files:
+/// editable in place, deletable, and shadowable by an on-disk loop of the
+/// same slug in any scanned root.
+fn bundled_loops() -> Vec<BuiltinSkill> {
+    vec![
+        BuiltinSkill {
+            slug: "repo-hygiene",
+            name: "Repo hygiene sweep",
+            body: include_str!("../../skills/loops/repo-hygiene.md"),
+        },
+        BuiltinSkill {
+            slug: "docs-refresh",
+            name: "Docs refresh pass",
+            body: include_str!("../../skills/loops/docs-refresh.md"),
+        },
+        BuiltinSkill {
+            slug: "deps-audit",
+            name: "Dependency audit",
+            body: include_str!("../../skills/loops/deps-audit.md"),
+        },
+    ]
+}
+
+/// Settings key that records the one-time materialization. A tombstone, not a
+/// re-sync: deleting a materialized loop is a real deletion and survives
+/// restarts (no resurrection), and edits are never overwritten.
+const LOOPS_MATERIALIZED_KEY: &str = "loops.bundled_materialized_v1";
+
+/// Write the bundled loops into `~/.agents/loops/<slug>/LOOP.md` (the
+/// Relay-owned user root) exactly once per machine. Skips a slug that already
+/// exists in ANY scanned loop root — user content always wins. Boot-time,
+/// best-effort: a failure logs and leaves the tab as-is.
+pub fn materialize_bundled_loops(conn: &rusqlite::Connection) {
+    if crate::db::get_setting(conn, LOOPS_MATERIALIZED_KEY)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1")
+    {
+        return;
+    }
+    let Some(home) = crate::util::home_dir() else {
+        return;
+    };
+    let agents_root = home.join(".agents").join("loops");
+    let existing: std::collections::HashSet<String> = scan("loops")
+        .into_iter()
+        .map(|s| s.slug)
+        .collect();
+    let mut wrote = 0usize;
+    for b in bundled_loops() {
+        if existing.contains(b.slug) {
+            continue;
+        }
+        let dir = agents_root.join(b.slug);
+        if let Err(e) = fs::create_dir_all(&dir) {
+            eprintln!("[loops] materialize mkdir {} failed: {e}", dir.display());
+            continue;
+        }
+        if let Err(e) = fs::write(dir.join("LOOP.md"), b.body) {
+            eprintln!("[loops] materialize write {} failed: {e}", dir.display());
+            continue;
+        }
+        wrote += 1;
+    }
+    if wrote > 0 {
+        invalidate_skill_cache();
+        eprintln!("[loops] materialized {wrote} bundled loop(s) into {}", agents_root.display());
+    }
+    let _ = crate::db::set_setting(conn, LOOPS_MATERIALIZED_KEY, "1");
+}
+
 /// Every skill the chat `/` menu can offer: on-disk harness skills merged with
 /// the built-ins. On a slug collision the on-disk copy wins, so a user can
 /// override a built-in by creating `~/.claude/skills/<slug>/SKILL.md`.
@@ -815,7 +892,7 @@ const MAX_ZIP_BYTES: usize = 30 * 1024 * 1024;
 const MAX_ARCHIVE_FILES: usize = 60;
 const MAX_ARCHIVE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
-fn install_http_client() -> Result<reqwest::Client, String> {
+pub(crate) fn install_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent("relay-desktop")
         .timeout(std::time::Duration::from_secs(30))
@@ -939,7 +1016,7 @@ async fn fetch_capped(
 
 /// List a GitHub directory via the contents API. Returns (path, download_url,
 /// is_dir) entries. Unauthenticated (60 req/h) is plenty for a skill dir.
-async fn github_list_dir(
+pub(crate) async fn github_list_dir(
     client: &reqwest::Client,
     git_ref: &GitHubRef,
 ) -> Result<Vec<(String, String, bool)>, String> {
@@ -1597,5 +1674,67 @@ mod tests {
         assert!(tmp.path().join(".claude").join("skills").join(&result.slug).join("SKILL.md").is_file());
     }
 
+
+    // ---- bundled loop materialization (§4.4.10) ----
+
+    #[test]
+    fn bundled_loops_materialize_once_and_respect_user_content() {
+        let _env = ENV_LOCK.lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let restore = use_home(dir.path());
+        let conn = crate::db::mem();
+
+        // First boot: all three bundled loops land in ~/.agents/loops.
+        materialize_bundled_loops(&conn);
+        let loops = scan("loops");
+        let slugs: std::collections::HashSet<&str> =
+            loops.iter().map(|s| s.slug.as_str()).collect();
+        for slug in ["repo-hygiene", "docs-refresh", "deps-audit"] {
+            assert!(slugs.contains(slug), "bundled loop {slug} must materialize");
+        }
+        assert!(
+            loops.iter().all(|s| s.kind == "loop"),
+            "every scanned entry here is a loop"
+        );
+        // And the scanner's public entry sees them for the Loops tab.
+        let listed = list_installed("loops");
+        assert!(listed.len() >= 3);
+
+        // User edits are never clobbered: mutate one and re-run.
+        let edited = dir
+            .path()
+            .join(".agents/loops/repo-hygiene/LOOP.md");
+        std::fs::write(&edited, "---
+name: mine
+description: mine
+---
+user edit").unwrap();
+        materialize_bundled_loops(&conn);
+        let content = std::fs::read_to_string(&edited).unwrap();
+        assert!(content.contains("user edit"), "edits must survive a re-materialize");
+
+        // Deletion sticks (tombstone, no resurrection).
+        std::fs::remove_file(&edited).unwrap();
+        materialize_bundled_loops(&conn);
+        assert!(
+            !dir.path().join(".agents/loops/repo-hygiene/LOOP.md").exists(),
+            "deleted bundled loops must not resurrect after the tombstone"
+        );
+        restore();
+    }
+
+    #[test]
+    fn bundled_loop_bodies_carry_usable_frontmatter() {
+        for b in bundled_loops() {
+            let (name, desc) = parse_frontmatter(b.body);
+            assert!(name.is_some(), "{} must carry a name", b.slug);
+            assert!(desc.is_some(), "{} must carry a description", b.slug);
+            assert!(
+                b.body.contains("LOOP_STATUS:"),
+                "{} must speak the loop protocol so it works under /goal",
+                b.slug
+            );
+        }
+    }
 
 }

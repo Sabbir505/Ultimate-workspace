@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { journalNotification } from '../lib/notificationJournal';
 import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getSecureRelayUrl, setSecureRelayUrl } from '../lib/secureStore';
 import { b64UrlToBytes, computePairProof, computePairProofWithNonce, deriveSessionKey, decryptFrame, encryptFrame } from '../lib/relayCrypto';
 
 /** The desktop relay binds loopback ONLY (127.0.0.1) on a persisted-but-random
@@ -564,9 +565,18 @@ const PAIR_CHALLENGE_TIMEOUT_MS = 2500;
 // the token under its own key — when the legacy URL carries no fragment, the
 // legacy token is spliced into the migrated URL's fragment (the fragment is
 // the one copy; no separate duplicate key is written).
-const _storedUrlReady: Promise<string | null> = AsyncStorage.getItem(RELAY_URL_STORAGE_KEY)
-  .then(async (stored) => {
-    if (stored) { _url = stored; _token = extractToken(stored); return stored; }
+// SS5.22: the pairing URL (which carries the token in its fragment) lives in
+// the OS keychain via expo-secure-store; getSecureRelayUrl migrates the
+// AsyncStorage copy one-way on first read. The pre-rebrand keys below stay
+// as the last fallback chain.
+const _storedUrlReady: Promise<string | null> = getSecureRelayUrl()
+  .then(async (secure) => {
+    if (secure) { _url = secure; _token = extractToken(secure); return secure; }
+    const stored = await AsyncStorage.getItem(RELAY_URL_STORAGE_KEY).catch(() => null);
+    if (stored) {
+      void setSecureRelayUrl(stored);
+      _url = stored; _token = extractToken(stored); return stored;
+    }
     const legacyUrl = await AsyncStorage.getItem(LEGACY_URL_STORAGE_KEY).catch(() => null);
     if (!legacyUrl) return null;
     const legacyToken = await AsyncStorage.getItem(LEGACY_TOKEN_STORAGE_KEY).catch(() => null);
@@ -575,7 +585,7 @@ const _storedUrlReady: Promise<string | null> = AsyncStorage.getItem(RELAY_URL_S
       : `${legacyUrl.split('#')[0]}#${legacyToken}`;
     _url = migrated;
     _token = extractToken(migrated) ?? legacyToken;
-    void AsyncStorage.setItem(RELAY_URL_STORAGE_KEY, migrated).catch(() => {});
+    void setSecureRelayUrl(migrated).catch(() => {});
     return migrated;
   })
   .catch(() => null);
@@ -981,7 +991,7 @@ function globalConnect(url?: string) {
     _url = url;
     _token = extractToken(url);
     resetReconnectBackoff();
-    void AsyncStorage.setItem(RELAY_URL_STORAGE_KEY, url).catch(() => {});
+    void setSecureRelayUrl(url).catch(() => {});
     _doConnect(url);
     return;
   }

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
 
 use crate::chat::{docs, docs_images, local_models};
@@ -285,7 +285,10 @@ pub async fn docs_start_reranker(
 
 #[tauri::command(async)]
 pub fn docs_add_corpus(
+    app: AppHandle,
     db: State<'_, DbState>,
+    local: State<'_, LocalModelState>,
+    registry: State<'_, Arc<IndexRegistry>>,
     path: String,
     name: Option<String>,
 ) -> CmdResult<docs_db::DocCorpus> {
@@ -302,17 +305,45 @@ pub fn docs_add_corpus(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| canonical.clone())
         });
-    let conn = db.0.lock();
-    if let Ok(Some(existing)) = docs_db::get_corpus_by_path(&conn, &canonical) {
-        return Err(format!("folder is already indexed as '{}'", existing.name));
-    }
-    docs_db::add_corpus(&conn, &canonical, &name).map_err(|e| e.to_string())
+    let corpus = {
+        let conn = db.0.lock();
+        if let Ok(Some(existing)) = docs_db::get_corpus_by_path(&conn, &canonical) {
+            return Err(format!("folder is already indexed as '{}'", existing.name));
+        }
+        docs_db::add_corpus(&conn, &canonical, &name).map_err(|e| e.to_string())?
+    };
+    // New corpora are watched immediately (§5.25) — enablement is checked at
+    // fire time, so even a disabled corpus's watcher is harmless.
+    crate::docs_watcher::install(
+        &app,
+        &app.state::<crate::docs_watcher::DocsWatcherState>(),
+        Arc::clone(&db.0),
+        Arc::clone(&local.0),
+        Arc::clone(&registry),
+        Path::new(&corpus.path),
+    );
+    Ok(corpus)
 }
 
 #[tauri::command(async)]
-pub fn docs_remove_corpus(db: State<'_, DbState>, corpus_id: String) -> CmdResult<()> {
-    let conn = db.0.lock();
-    docs_db::remove_corpus(&conn, &corpus_id).map_err(|e| e.to_string())
+pub fn docs_remove_corpus(
+    app: AppHandle,
+    db: State<'_, DbState>,
+    corpus_id: String,
+) -> CmdResult<()> {
+    let path = {
+        let conn = db.0.lock();
+        let corpus = docs_db::get_corpus(&conn, &corpus_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "corpus not found".to_string())?;
+        docs_db::remove_corpus(&conn, &corpus_id).map_err(|e| e.to_string())?;
+        corpus.path
+    };
+    crate::docs_watcher::uninstall(
+        &app.state::<crate::docs_watcher::DocsWatcherState>(),
+        Path::new(&path),
+    );
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -323,12 +354,35 @@ pub fn docs_list_corpora(db: State<'_, DbState>) -> CmdResult<Vec<docs_db::DocCo
 
 #[tauri::command(async)]
 pub fn docs_set_corpus_enabled(
+    app: AppHandle,
     db: State<'_, DbState>,
+    local: State<'_, LocalModelState>,
+    registry: State<'_, Arc<IndexRegistry>>,
     corpus_id: String,
     enabled: bool,
 ) -> CmdResult<()> {
-    let conn = db.0.lock();
-    docs_db::set_corpus_enabled(&conn, &corpus_id, enabled).map_err(|e| e.to_string())
+    let path = {
+        let conn = db.0.lock();
+        docs_db::set_corpus_enabled(&conn, &corpus_id, enabled).map_err(|e| e.to_string())?;
+        docs_db::get_corpus(&conn, &corpus_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "corpus not found".to_string())?
+            .path
+    };
+    let state = app.state::<crate::docs_watcher::DocsWatcherState>();
+    if enabled {
+        crate::docs_watcher::install(
+            &app,
+            &state,
+            Arc::clone(&db.0),
+            Arc::clone(&local.0),
+            Arc::clone(&registry),
+            Path::new(&path),
+        );
+    } else {
+        crate::docs_watcher::uninstall(&state, Path::new(&path));
+    }
+    Ok(())
 }
 
 /// Pin a corpus to a chat session so its documents are ALWAYS in that chat's
@@ -372,6 +426,28 @@ pub async fn docs_start_index(
     registry: State<'_, Arc<IndexRegistry>>,
     corpus_id: String,
 ) -> CmdResult<()> {
+    spawn_index_job(
+        app,
+        Arc::clone(&db.0),
+        Arc::clone(&local.0),
+        Arc::clone(&registry),
+        corpus_id,
+    )
+}
+
+/// Start a background index run for one corpus — the shared entry behind the
+/// `docs_start_index` command AND the filesystem watcher (§5.25): a file
+/// change inside an enabled corpus folder re-runs the incremental walk
+/// (mtime/size diff → only changed files re-embed) without a manual Index
+/// press. Errors are the command's user-facing strings; the watcher treats
+/// them as "skip + log".
+pub fn spawn_index_job(
+    app: AppHandle,
+    db: Arc<Mutex<Connection>>,
+    local: Arc<LocalModelRegistry>,
+    registry: Arc<IndexRegistry>,
+    corpus_id: String,
+) -> Result<(), String> {
     let (cancel_tx, cancel_rx) = oneshot::channel();
     {
         let mut reg = registry.active.lock();
@@ -387,9 +463,9 @@ pub async fn docs_start_index(
         );
     }
 
-    // Read everything we need up-front; State guards must not cross the spawn.
+    // Read everything we need up-front; the DB lock must not cross the spawn.
     let prepared = {
-        let conn = db.0.lock();
+        let conn = db.lock();
         let corpus = match docs_db::get_corpus(&conn, &corpus_id) {
             Ok(Some(c)) => c,
             Ok(None) => {
@@ -401,7 +477,7 @@ pub async fn docs_start_index(
                 return Err(e.to_string());
             }
         };
-        let gguf = if local.0.embedding_status().is_some() {
+        let gguf = if local.embedding_status().is_some() {
             None // sidecar already up; no model path needed
         } else {
             match find_embedding_gguf(&conn) {
@@ -415,13 +491,13 @@ pub async fn docs_start_index(
                 }
             }
         };
-        let caption_base = caption_base_url(&conn, &local.0);
+        let caption_base = caption_base_url(&conn, &local);
         (corpus, gguf, caption_base)
     };
     let (corpus, gguf_path, caption_base) = prepared;
 
-    let db_arc = Arc::clone(&db.0);
-    let local_arc = Arc::clone(&local.0);
+    let db_arc = Arc::clone(&db);
+    let local_arc = Arc::clone(&local);
     let registry_arc = Arc::clone(&registry);
     let app_for_task = app.clone();
     let corpus_id_for_task = corpus_id.clone();

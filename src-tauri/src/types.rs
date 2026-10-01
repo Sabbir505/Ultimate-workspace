@@ -1332,6 +1332,42 @@ pub struct PullRequestChecks {
     pub pending: i64,
 }
 
+/// One issue row in the list view (§4.4.6: the GitHub surface is no longer
+/// PR-only). PRs are excluded — GitHub's issues endpoint returns them too
+/// and the Pull Requests panel already covers that half.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubIssueSummary {
+    pub number: i64,
+    pub title: String,
+    pub state: String,
+    pub author: String,
+    pub labels: Vec<String>,
+    pub comments: i64,
+    pub html_url: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Issue detail view: the summary + markdown body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubIssueDetail {
+    #[serde(flatten)]
+    pub summary: GitHubIssueSummary,
+    pub body: String,
+}
+
+/// One comment on an issue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubIssueComment {
+    pub id: i64,
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+}
+
 /// Agent-drafted PR title + body (from the branch diff).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

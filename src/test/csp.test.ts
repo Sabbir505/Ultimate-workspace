@@ -32,12 +32,11 @@ describe("artifact preview CSP", () => {
     expect(directive("connect-src")).toContain("https://cdnjs.cloudflare.com");
   });
 
-  it("allows the Google Fonts stylesheet and font files (index.html brand fonts)", () => {
-    // index.html loads the brand stylesheet from fonts.googleapis.com, and
-    // that stylesheet points at the font binaries on fonts.gstatic.com. Both
-    // must be allowed or built apps silently fall back to Segoe UI.
-    expect(directive("style-src")).toContain("https://fonts.googleapis.com");
-    expect(directive("font-src")).toContain("https://fonts.gstatic.com");
+  it("no longer allows Google Fonts (brand fonts are self-hosted via @fontsource)", () => {
+    // 5.21: fonts.css bundles the brand families; the CSP must NOT re-open
+    // fonts.googleapis.com / fonts.gstatic.com.
+    expect(directive("style-src")).not.toContain("fonts.googleapis.com");
+    expect(directive("font-src")).not.toContain("fonts.gstatic.com");
   });
 
   it("keeps the sandbox lockdown intact", () => {

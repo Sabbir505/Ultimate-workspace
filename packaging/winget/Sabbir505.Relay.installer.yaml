@@ -1,0 +1,19 @@
+# winget installer manifest template — replace {{VERSION}} / {{SHA256}} before
+# submission (see README.md in this directory).
+PackageIdentifier: Sabbir505.Relay
+PackageVersion: "{{VERSION}}"
+Installers:
+  - InstallerLocale: en-US
+    Architecture: x64
+    InstallerType: nullsoft
+    InstallerUrl: https://github.com/Sabbir505/relay-releases/releases/download/v{{VERSION}}/Relay_{{VERSION}}_x64-setup.exe
+    InstallerSha256: "{{SHA256}}"
+    ProductCode: Relay
+    AppsAndFeaturesEntries:
+      - DisplayName: Relay
+        Publisher: Relay
+        ProductCode: Relay
+    Scope: user
+    UpgradeBehavior: install
+ManifestType: installer
+ManifestVersion: 1.6.0

@@ -76,6 +76,21 @@ export const installSkillFromUrl = (url: string, kind: string) =>
 export const makeInstalledGlobal = (kind: string) =>
   safeInvoke<number>("make_installed_global", { kind });
 
+// --- Skills gallery (§4.3.4): bundled curated catalog + live verification.
+// Install goes through the same installSkillFromUrl path — the gallery only
+// removes the "find a URL first" step. ---
+export interface SkillGalleryEntry {
+  id: string;
+  name: string;
+  description: string;
+  author: string;
+  category: string;
+  url: string;
+}
+export const listSkillGallery = () => safeInvoke<SkillGalleryEntry[]>("list_skill_gallery");
+export const verifySkillGalleryEntry = (url: string) =>
+  safeInvoke<void>("verify_skill_gallery_entry", { url });
+
 // --- Chat `/` menu: on-disk harness skills merged with the built-in
 // doc/pptx/pdf/diagram skills (on-disk wins on slug collision). ---
 export const listChatSkills = () =>

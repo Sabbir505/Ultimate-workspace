@@ -120,6 +120,49 @@ pub fn checkpoint_ref_paths(
     rows.collect()
 }
 
+/// Delete one checkpoint row (count/age pruning). The caller deletes the git
+/// ref first — this only drops the DB row.
+pub fn delete_checkpoint(conn: &Connection, id: i64) -> DbResult<()> {
+    conn.execute("DELETE FROM chat_checkpoints WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// The oldest TURN checkpoints for a session (baselines excluded — checkpoint
+/// 0 is the pre-chat state and must survive pruning so the first turn stays
+/// undoable), oldest first. `limit` bounds how many a single prune pass may
+/// take.
+pub fn oldest_turn_checkpoints(
+    conn: &Connection,
+    chat_session_id: &str,
+    limit: i64,
+) -> DbResult<Vec<ChatCheckpoint>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM chat_checkpoints
+         WHERE chat_session_id = ?1 AND message_id IS NOT NULL
+         ORDER BY id ASC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![chat_session_id, limit], map_checkpoint)?;
+    rows.collect()
+}
+
+/// Sessions that currently hold at least one checkpoint (boot prune walks
+/// these).
+pub fn checkpoint_session_ids(conn: &Connection) -> DbResult<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT chat_session_id FROM chat_checkpoints ORDER BY id")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// Checkpoints across ALL sessions created before `cutoff` (epoch seconds) —
+/// the boot age-prune set.
+pub fn checkpoints_older_than(conn: &Connection, cutoff: i64) -> DbResult<Vec<ChatCheckpoint>> {
+    let mut stmt =
+        conn.prepare("SELECT * FROM chat_checkpoints WHERE created_at < ?1 ORDER BY id ASC")?;
+    let rows = stmt.query_map(params![cutoff], map_checkpoint)?;
+    rows.collect()
+}
+
 /// The git repo directory a chat session's checkpoints live against.
 /// Worktree-isolated sessions snapshot the WORKTREE (their agent edits land
 /// there); everything else resolves `chat_sessions.project_id →

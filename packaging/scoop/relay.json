@@ -1,0 +1,27 @@
+{
+    "$schema": "https://raw.githubusercontent.com/lukesampson/scoop/master/schema.json",
+    "version": "{{VERSION}}",
+    "description": "Local-first, multi-pane desktop shell for AI coding agents.",
+    "homepage": "https://github.com/Sabbir505/relay-releases",
+    "license": "Proprietary",
+    "notes": "Unofficial install path — winget and the signed NSIS installer are the supported routes.",
+    "url": "https://github.com/Sabbir505/relay-releases/releases/download/v{{VERSION}}/Relay_{{VERSION}}_x64-setup.exe#/dl.7z",
+    "hash": "{{SHA256}}",
+    "installer": {
+        "script": "Expand-7zipArchive -Path \"$dir\dl.7z\" -DestinationPath \"$dir\" -Removal"
+    },
+    "bin": [],
+    "shortcuts": [
+        [
+            "Relay.exe",
+            "Relay"
+        ]
+    ],
+    "checkver": {
+        "url": "https://github.com/Sabbir505/relay-releases/releases/latest",
+        "regex": "/releases/tag/v([\d.]+)\""
+    },
+    "autoupdate": {
+        "url": "https://github.com/Sabbir505/relay-releases/releases/download/v$version/Relay_$version_x64-setup.exe#/dl.7z"
+    }
+}

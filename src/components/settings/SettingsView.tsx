@@ -849,6 +849,7 @@ function WebSearchPanel() {
   // out for the turn. Server-tool usage bills on Anthropic's side, so this
   // is opt-in. Anthropic-native chats only.
   const [nativeSearch, setNativeSearch] = useState(false);
+  const [nativeOpenAiSearch, setNativeOpenAiSearch] = useState(false);
   // Debounced persists for the key inputs: they fire per keystroke, and
   // out-of-order backend writes could persist an intermediate (shorter)
   // value over the final one. The latest typed value is mirrored per id so
@@ -874,11 +875,13 @@ function WebSearchPanel() {
       getSetting("search.tavily_key"),
       getSetting("search.brave_key"),
       getSetting("chat.websearch.native_anthropic"),
-    ]).then(([p, serper, tavily, brave, native]) => {
+      getSetting("chat.websearch.native_openai"),
+    ]).then(([p, serper, tavily, brave, native, nativeOai]) => {
       if (stale) return;
       setProvider(p ?? "");
       setKeys({ serper: serper ?? "", tavily: tavily ?? "", brave: brave ?? "" });
       setNativeSearch(native === "true");
+      setNativeOpenAiSearch(nativeOai === "true");
       setLoaded(true);
     }).catch(() => {
       // A rejected boot fetch must not leave the saved engine/key fields
@@ -975,6 +978,32 @@ function WebSearchPanel() {
         results inline (replaces Relay’s keyless scraping in Anthropic chats;
         usage bills on Anthropic’s side). Applies to native Anthropic API
         chats only — other providers keep the engine above.
+      </p>
+      <div className="settings-form-row settings-form-row-pair">
+        <div className="settings-form-field">
+          <div className="settings-form-control" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              id="native-openai-search"
+              checked={nativeOpenAiSearch}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setNativeOpenAiSearch(on);
+                void setSetting("chat.websearch.native_openai", on ? "true" : "false");
+              }}
+            />
+            <label htmlFor="native-openai-search" style={{ margin: 0 }}>
+              OpenAI server-side web search (native)
+            </label>
+          </div>
+        </div>
+      </div>
+      <p className="settings-section-hint">
+        Sends <code>web_search_options</code> on native OpenAI chat requests so
+        search-preview models (e.g. gpt-4o-search-preview) run the search on
+        OpenAI’s servers instead of Relay scraping. Plain OpenAI models reject
+        the parameter — keep this off unless your model is a search-preview
+        one. Compatible endpoints and OpenRouter keep the engine above.
       </p>
     </>
   );

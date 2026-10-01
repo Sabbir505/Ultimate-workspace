@@ -218,8 +218,6 @@ fn reindex_corpora_at(
 mod tests {
     use super::*;
     use crate::db::docs as docs_db;
-    #[allow(unused_imports)]
-    use crate::db;
 
     #[test]
     fn disabled_corpora_are_filtered_at_fire_time() {

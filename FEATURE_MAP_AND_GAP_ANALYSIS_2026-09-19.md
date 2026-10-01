@@ -34,7 +34,13 @@
 > exercised against the real OS keychain (including key-loss fail-closed).
 > Gates: `cargo test --lib` 1,568 passed (20 ignored), `cargo clippy -D
 > warnings` clean, vitest 213 files / 1,666 tests passed, `tsc --noEmit`
-> clean (app + mobile).
+> clean (app + mobile), and `vite build` verified (font bundling + CSP JSON).
+> An audit pass the same day then fixed three defects found in this wave's
+> own work: the restore-safety checkpoint no longer triggers the over-cap
+> prune (which could delete the checkpoint being restored to), the CSV
+> virtualizer's tail spacer mixed pixel offsets with row counts (scrollbar
+> corruption mid-scroll), and `fonts.css` used JS-style comments that broke
+> `vite build` — all covered by regression tests or a green build.
 >
 > **Third pass, 2026-10-01:** eight more gaps implemented end-to-end with live testing —
 > challenge-response pairing (§4.1.5), the prompt-injection content firewall (§4.1.8), the
@@ -270,7 +276,7 @@ Status re-verified against the code on **2026-09-30**: ✅ done · 🟡 partial 
 | # | Improvement | Why now | Effort | Impact | Status 2026-09-30 |
 |---|---|---|---|---|---|
 | 1 | Add `cargo test --lib`, `vitest`, `tsc --noEmit`, `cargo clippy -D warnings` to CI | Nothing prevents shipping regressions today | S | Critical | ✅ 42dad6f — `ci.yml` gates every push with all four |
-| 2 | Sign installer (Azure Artifact Signing or OV cert) + submit winget manifest | Distribution trust; every competitor signed | M | Critical | 🟡 2026-10-01 — Authenticode signing wired into `build.yml` (Azure Trusted Signing via `azure-signing`, gated on the five new secrets, loud skip-notice when absent) + `packaging/winget/` three-file manifest set and `packaging/scoop/relay.json` with submission READMEs. **Remaining are external actions:** acquire the Trusted Signing certificate profile, set the secrets, submit the winget PR. Updater minisign unchanged |
+| 2 | Sign installer (Azure Artifact Signing or OV cert) + submit winget manifest | Distribution trust; every competitor signed | M | Critical | 🟡 2026-10-01 — Authenticode signing wired into `build.yml` via the official `Azure/trusted-signing-action` (gated on five new secrets; a detect step keeps releases green with a notice when they're absent) + `packaging/winget/` three-file manifest set and `packaging/scoop/relay.json` with submission READMEs. **Remaining are external actions:** acquire the Trusted Signing certificate profile, set the secrets, submit the winget PR. Updater minisign unchanged |
 | 3 | Windows sandbox layer 1: Job Objects + write-restricted token for `run_code`/`run_shell` (Codex blueprint), graceful fallback banner | Unlocks honest `full_auto`; top safety gap | L–XL | Critical | ⬜ — `codeexec.rs` TODOs intact; only kill-on-close Job Objects (orphan cleanup) exist |
 | 4 | Map MCP tool annotations (readOnly/destructive hints + icons) into the permission ladder and approval cards | Cheap correctness win; aligns with 2026 MCP | M | High | ✅ 2026-10-01 — both MCP client paths (`mcp_gallery::GallerySession::tool_entries` + `connectors::mcp::RemoteTool`/`session.rs`) now read `annotations` from tools/list into the neutral `ToolHints {read_only, destructive}` (`chat/permission.rs::ToolHints`, rmcp-typed at the wire) and classify via `classify_connector_tool_annotated`: `readOnlyHint=true` → Read (keyword over-gating like "get_or_create" ends), `destructiveHint=true` or `readOnlyHint=false` → Write (server's explicit claim beats keywords; contradictory → Read wins per spec), missing hints → keyword fallback. Serde round-trip test pins the raw JSON shape. Icons not modeled (idempotent/open_world are informational) |
 | 5 | Hooks system (pre/post tool-call user scripts) via centralized `check_permission()` | Project's own Action_list says it's cheap; table stakes | M | High | ✅ 7ff4df6 — pre/post tool-use (deny/ask/rewrite) + lifecycle events, Settings → Hooks, Claude Code import |

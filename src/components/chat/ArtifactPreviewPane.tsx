@@ -188,9 +188,13 @@ function CsvTable({ text }: { text: string }) {
   const virtualized = allBody.length > CSV_VIRTUAL_THRESHOLD;
   const pad = (r: string[]) => (r.length >= head.length ? r : [...r, ...Array<string>(head.length - r.length).fill("")]);
   const virtualItems = virtualized ? rowVirtualizer.getVirtualItems() : [];
+  // `start` is the PIXEL offset of the row (used directly as the top spacer's
+  // height); the tail spacer counts ROWS past the window and multiplies by
+  // the row estimate — mixing the two units made the scrollbar shrink/jump
+  // mid-scroll (audit fix).
   const topPad = virtualItems.length > 0 ? virtualItems[0].start : 0;
   const last = virtualItems[virtualItems.length - 1];
-  const bottomPad = virtualItems.length > 0 ? allBody.length - (last.start + virtualItems.length) : 0;
+  const bottomRows = virtualItems.length > 0 ? allBody.length - (last.index + 1) : 0;
   const visibleBody = virtualized
     ? virtualItems.map((vi) => ({ index: vi.index, cells: pad(allBody[vi.index]) }))
     : allBody.map((r, i) => ({ index: i, cells: pad(r) }));
@@ -213,7 +217,7 @@ function CsvTable({ text }: { text: string }) {
               ))}
             </tr>
           ))}
-          {bottomPad > 0 && <tr style={{ height: bottomPad * CSV_ROW_ESTIMATE_PX }} aria-hidden="true" />}
+          {bottomRows > 0 && <tr style={{ height: bottomRows * CSV_ROW_ESTIMATE_PX }} aria-hidden="true" />}
         </tbody>
       </table>
     </div>

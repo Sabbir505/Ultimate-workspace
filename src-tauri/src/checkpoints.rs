@@ -57,6 +57,23 @@ fn create_checkpoint(
     dir: &Path,
     snapshot: git::CheckpointSnapshot,
 ) -> db::DbResult<ChatCheckpoint> {
+    create_checkpoint_inner(conn, app, chat_session_id, message_id, dir, snapshot, true)
+}
+
+/// `prune = false` skips the over-cap pass — used by the RESTORE safety
+/// snapshot: at cap, pruning the oldest turn checkpoints there would delete
+/// the very checkpoint the user just restored to (and its hidden ref),
+/// destroying the anchor for a re-restore. The next ordinary turn-finalize
+/// insert prunes as usual (audit fix).
+fn create_checkpoint_inner(
+    conn: &Connection,
+    app: Option<&AppHandle>,
+    chat_session_id: &str,
+    message_id: Option<i64>,
+    dir: &Path,
+    snapshot: git::CheckpointSnapshot,
+    prune: bool,
+) -> db::DbResult<ChatCheckpoint> {
     // Files changed vs the previous checkpoint (empty-tree base for the
     // baseline). Diff failure is non-fatal — restore only needs tree_sha.
     let prev_tree = db::latest_checkpoint(conn, chat_session_id)?
@@ -116,7 +133,9 @@ fn create_checkpoint(
     if let Some(app) = app {
         let _ = app.emit("checkpoint:created", &ckpt);
     }
-    prune_over_cap(conn, chat_session_id);
+    if prune {
+        prune_over_cap(conn, chat_session_id);
+    }
     Ok(ckpt)
 }
 
@@ -460,7 +479,7 @@ pub fn restore(
         .map_err(|e| format!("failed to snapshot current state before restore: {e}"))?;
     let safety = {
         let conn = db_conn.lock();
-        create_checkpoint(&conn, Some(app), &ckpt.chat_session_id, None, &dir, snap)
+        create_checkpoint_inner(&conn, Some(app), &ckpt.chat_session_id, None, &dir, snap, false)
             .map_err(|e| format!("failed to record safety checkpoint: {e:?}"))?
     };
     // No lock: restore the tree (a checkout of the snapshot).
@@ -915,6 +934,52 @@ mod tests {
             db::count_chat_checkpoints(&conn, &cs.id).unwrap(),
             0,
             "age prune removes all stale checkpoints"
+        );
+    }
+
+    /// Audit regression: at cap, the SAFETY checkpoint written during a
+    /// restore must not trigger the over-cap prune — otherwise restoring to
+    /// an OLD checkpoint deletes that very checkpoint (row + hidden ref) as
+    /// a side effect, destroying the re-restore anchor. The safety insert
+    /// skips pruning; ordinary turn-finalize inserts still prune.
+    #[test]
+    fn restore_safety_checkpoint_does_not_prune_the_restore_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        git::init_test_repo(path);
+
+        let conn = db::mem();
+        let pid = db::new_id();
+        conn.execute(
+            "INSERT INTO projects (id, path, name, created_at) VALUES (?1, ?2, 'p', 0)",
+            rusqlite::params![pid, path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        let cs = chat_db::create_chat_session(&conn, "anthropic", "m", Some(&pid)).unwrap();
+        db::set_setting(&conn, "checkpoints.max_per_session", "3").unwrap();
+
+        // Baseline + 3 turn checkpoints → at cap. Turn 3 is the oldest TURN
+        // checkpoint after the baseline.
+        maybe_baseline(None, &conn, &cs.id, path);
+        for turn in 1..=3 {
+            std::fs::write(path.join(format!("r{turn}.txt")), format!("turn {turn}
+")).unwrap();
+            after_turn(None, &conn, &cs.id, Some(turn), path);
+        }
+        let all = db::list_chat_checkpoints(&conn, &cs.id).unwrap();
+        assert_eq!(all.len(), 3);
+        let turn1_id = all[1].id;
+
+        // A restore to the OLDEST turn checkpoint writes a safety snapshot —
+        // without the fix, that insert pruned turn 1's row + ref.
+        let snap = git::snapshot_working_tree(path).unwrap();
+        create_checkpoint_inner(&conn, None, &cs.id, None, path, snap, false)
+            .expect("safety checkpoint records");
+        let after = db::list_chat_checkpoints(&conn, &cs.id).unwrap();
+        assert!(
+            after.iter().any(|c| c.id == turn1_id),
+            "restore safety insert must not prune the restore target; got {:?}",
+            after.iter().map(|c| c.id).collect::<Vec<_>>()
         );
     }
 

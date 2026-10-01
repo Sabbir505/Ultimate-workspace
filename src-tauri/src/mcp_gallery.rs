@@ -199,7 +199,8 @@ pub struct McpToolEntry {
     pub kind: ConnectorToolKind,
     pub description: Option<String>,
     /// MCP tool annotations from the server's tools/list (§5.4) — already
-    /// folded into `kind`, carried for the approval card's provenance note.
+    /// folded into `kind`; carried on the entry so a future approval card
+    /// can show annotation provenance (no UI consumes this yet).
     pub hints: Option<permission::ToolHints>,
 }
 

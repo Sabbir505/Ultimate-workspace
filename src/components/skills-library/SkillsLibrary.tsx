@@ -95,16 +95,39 @@ export function SkillsLibrary() {
   );
 }
 
+// Verify results are cached for the SESSION (module scope): every Gallery
+// open would otherwise spend 12 of the ~60 anonymous GitHub contents-API
+// requests per hour, and a 403 rate-limit response must read as "unknown"
+// (…), never as a false "unavailable" badge (audit fix).
+type GalleryVerify = "ok" | "stale" | "unknown";
+let galleryVerifyCache: Record<string, GalleryVerify> | null = null;
+
+async function verifyGalleryOnce(entries: SkillGalleryEntry[]): Promise<Record<string, GalleryVerify>> {
+  if (galleryVerifyCache) return galleryVerifyCache;
+  const results = await Promise.all(
+    entries.map(async (e): Promise<[string, GalleryVerify]> => {
+      try {
+        await verifySkillGalleryEntry(e.url);
+        return [e.url, "ok"];
+      } catch (err) {
+        const msg = String(err);
+        return [e.url, /403|429|rate/i.test(msg) ? "unknown" : "stale"];
+      }
+    }),
+  );
+  galleryVerifyCache = Object.fromEntries(results);
+  return galleryVerifyCache;
+}
+
 function GalleryPanel({ onInstalled }: { onInstalled: () => void }) {
   const [entries, setEntries] = useState<SkillGalleryEntry[]>([]);
   const [query, setQuery] = useState("");
   const [installing, setInstalling] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // url → "ok" | "stale" — lazily verified against the live GitHub contents
-  // API so a stale catalog entry says "unavailable" instead of failing at
-  // install time with a raw 404. 12 entries ≈ 12 anonymous req/h of the 60
-  // the contents API allows.
-  const [verified, setVerified] = useState<Record<string, "ok" | "stale">>({});
+  // url → "ok" | "stale" | "unknown" — verified against the live GitHub
+  // contents API so a stale catalog entry says "unavailable" instead of
+  // failing at install time with a raw 404.
+  const [verified, setVerified] = useState<Record<string, GalleryVerify>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -112,18 +135,9 @@ function GalleryPanel({ onInstalled }: { onInstalled: () => void }) {
       const list = (await listSkillGallery()) ?? [];
       if (cancelled) return;
       setEntries(list);
-      const results = await Promise.all(
-        list.map(async (e) => {
-          try {
-            await verifySkillGalleryEntry(e.url);
-            return [e.url, "ok"] as const;
-          } catch {
-            return [e.url, "stale"] as const;
-          }
-        }),
-      );
+      const results = await verifyGalleryOnce(list);
       if (cancelled) return;
-      setVerified(Object.fromEntries(results));
+      setVerified(results);
     })();
     return () => {
       cancelled = true;
@@ -163,7 +177,17 @@ function GalleryPanel({ onInstalled }: { onInstalled: () => void }) {
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search the gallery…"
           />
-          <button title="Re-check every entry against GitHub right now" onClick={() => setVerified({})}>
+          <button
+            title="Re-check every entry against GitHub right now (spends one anonymous API request per entry)"
+            onClick={() => {
+              galleryVerifyCache = null;
+              setEntries((current) => [...current]);
+              setVerified({});
+              void (async () => {
+                if (entries.length > 0) setVerified(await verifyGalleryOnce(entries));
+              })();
+            }}
+          >
             ⟳
           </button>
         </div>
@@ -194,7 +218,7 @@ function GalleryPanel({ onInstalled }: { onInstalled: () => void }) {
                             ? "No longer resolves on GitHub — install will fail"
                             : verified[entry.url] === "ok"
                               ? "Live-verified on GitHub"
-                              : "Checking…"
+                              : "Not checked (rate limit or pending)"
                         }
                       >
                         {verified[entry.url] === "stale" ? "unavailable" : verified[entry.url] === "ok" ? "✓ live" : "…"}

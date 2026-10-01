@@ -17,7 +17,7 @@
 //! live-checks the whole catalog behind `-- --ignored`.
 
 use serde::Serialize;
-use tauri::command;
+use tauri::{command, AppHandle};
 
 /// One curated gallery entry. `url` is a GitHub TREE URL understood by
 /// `installed_skills::install_from_url` (owner/repo/tree/ref/path).
@@ -178,8 +178,6 @@ mod tests {
         assert!(checked >= 10, "catalog should be non-trivially large");
     }
 }
-
-use tauri::AppHandle;
 
 /// Re-resolve one catalog entry's path via the GitHub contents API. Shared
 /// by the `#[ignore]` live test and the command below (which the UI calls

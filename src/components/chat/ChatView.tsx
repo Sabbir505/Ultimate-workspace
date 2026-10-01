@@ -1893,8 +1893,8 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         <div className="composer-approval-wrap">
           <ApprovalCard
             approval={pendingApprovals[activeChatSessionId]}
-            onResolve={(approved) =>
-              void resolveApproval(activeChatSessionId, approved)
+            onResolve={(approved, selected) =>
+              void resolveApproval(activeChatSessionId, approved, selected)
             }
           />
         </div>

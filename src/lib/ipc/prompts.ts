@@ -53,6 +53,21 @@ export const createInstalledSkill = (name: string, kind: string, content: string
 export const deleteInstalledSkill = (slug: string, kind: string) =>
   safeInvoke<void>("delete_installed_skill", { slug, kind });
 
+/** Install a skill from a user-pasted URL (raw SKILL.md, GitHub blob/tree,
+ *  or a .zip holding one skill). USER-initiated — Skills Library only. */
+export interface SkillInstallResult {
+  slug: string;
+  name: string;
+  description: string;
+  version: string | null;
+  allowedTools: string | null;
+  filesInstalled: number;
+  sourceUrl: string;
+  claudeDir: string;
+}
+export const installSkillFromUrl = (url: string, kind: string) =>
+  safeInvoke<SkillInstallResult>("install_skill_from_url", { url, kind });
+
 /**
  * Make every installed skill/loop global — i.e. readable by any harness.
  * Copies each entry that currently lives in only one harness dir into the

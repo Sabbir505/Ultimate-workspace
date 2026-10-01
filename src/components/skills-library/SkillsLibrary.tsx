@@ -13,6 +13,7 @@ import {
   deleteInstalledSkill,
   listInstalledLoops,
   listInstalledSkills,
+  installSkillFromUrl,
   makeInstalledGlobal,
   readInstalledSkill,
   saveInstalledSkill,
@@ -98,8 +99,31 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  // Install-from-URL (§4.3.4 marketplace v1): raw SKILL.md / GitHub
+  // blob|tree / .zip — user-initiated, backend caps size and structure.
+  const [showInstallUrl, setShowInstallUrl] = useState(false);
+  const [installUrl, setInstallUrl] = useState("");
+  const [installing, setInstalling] = useState(false);
   const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
   const setPendingArtifactFormData = useUiStore((s) => s.setPendingArtifactFormData);
+
+  const installFromUrl = async () => {
+    if (!installUrl.trim() || installing) return;
+    setInstalling(true);
+    try {
+      const r = await installSkillFromUrl(installUrl.trim(), kind);
+      flash(
+        `Installed /${r.slug}${r.version ? ` v${r.version}` : ""} (${r.filesInstalled} file${r.filesInstalled === 1 ? "" : "s"}) into both harnesses`
+      );
+      setInstallUrl("");
+      setShowInstallUrl(false);
+      await reload();
+    } catch (err) {
+      toastError("Couldn't install from that URL", err);
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   // Set form data — called by conversational artifact creation when "Edit" is clicked
   const setFormData = useCallback((data: any) => {
@@ -253,9 +277,9 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
   return (
     <div className="installed-panel">
       <div className="installed-list">
-        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        <div className="installed-toolbar" style={{ marginBottom: 8 }}>
           <input
-            style={{ flex: 1 }}
+            className="installed-toolbar-search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={`Search ${kind}s…`}
@@ -267,16 +291,22 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
             ⟳
           </button>
           <button
+            className="installed-toolbar-btn"
             title="Copy every single-source skill into the other harness so any harness can use it"
             disabled={!hasSingleSource}
             onClick={() => void makeAllGlobal()}
           >
-            {hasSingleSource
-              ? "Make all global"
-              : "All global"}
+            {hasSingleSource ? "Make all global" : "All global"}
           </button>
           <button
-            className="primary"
+            className={`installed-toolbar-btn${showInstallUrl ? " active" : ""}`}
+            title="Install from a URL: a raw SKILL.md, a GitHub blob/tree link, or a .zip holding one skill"
+            onClick={() => setShowInstallUrl((v) => !v)}
+          >
+            From URL
+          </button>
+          <button
+            className="installed-toolbar-btn primary"
             onClick={() => {
               setCreating(true);
               setSelected(null);
@@ -287,6 +317,22 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
             + New {kind}
           </button>
         </div>
+        {showInstallUrl && (
+          <div className="install-url-row" data-testid="install-url-row">
+            <input
+              style={{ flex: 1 }}
+              value={installUrl}
+              onChange={(e) => setInstallUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void installFromUrl();
+              }}
+              placeholder="https://github.com/…/skills/<name>  ·  …/SKILL.md  ·  ….zip"
+            />
+            <button className="primary" disabled={!installUrl.trim() || installing} onClick={() => void installFromUrl()}>
+              {installing ? "Installing…" : "Install"}
+            </button>
+          </div>
+        )}
         {items.length === 0 && (
           <div className="empty-reserved small" style={{ margin: "8px 0" }}>
             <span className="empty-icon">{kind === "loop" ? "🔁" : "✦"}</span>
@@ -306,6 +352,11 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
             >
               <div className="installed-item-head">
                 <span className="mono">/{item.slug}</span>
+                {item.version && (
+                  <span className="source-badge both" title={item.allowedTools ? `allowed-tools: ${item.allowedTools}` : undefined}>
+                    v{item.version}
+                  </span>
+                )}
                 <span className={`source-badge ${item.source}`}>{item.source}</span>
               </div>
               {item.description && <div className="installed-item-desc">{item.description}</div>}

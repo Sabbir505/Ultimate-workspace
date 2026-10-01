@@ -737,6 +737,12 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
         name: String,
         json: String,
         sig: String,
+        /// Server-executed tool blocks (native web_search, §4.3.7) arrive
+        /// COMPLETE at content_block_start with no deltas — captured whole
+        /// and echoed verbatim; the API 400s on the next round if they are
+        /// dropped from the echoed assistant content (same rule as thinking
+        /// blocks, but there is nothing to re-derive them from).
+        raw: Option<Value>,
     }
     let mut blocks: Vec<Blk> = Vec::new();
     let mut in_think = false;
@@ -817,9 +823,13 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
                         continue;
                     }
                     let cb = p.get("content_block");
-                    let kind = match cb.and_then(|c| c.get("type")).and_then(|t| t.as_str()) {
+                    let block_type = cb.and_then(|c| c.get("type")).and_then(|t| t.as_str());
+                    let kind = match block_type {
                         Some("tool_use") => 1,
                         Some("thinking") => 2,
+                        // Server-executed blocks (native web_search): kind 3 —
+                        // never a client round-trip, echoed verbatim.
+                        Some("server_tool_use") | Some("web_search_tool_result") => 3,
                         _ => 0,
                     };
                     let id = cb
@@ -840,11 +850,16 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
                             name: String::new(),
                             json: String::new(),
                             sig: String::new(),
+                            raw: None,
                         });
                     }
                     blocks[idx].kind = kind;
                     blocks[idx].id = id;
                     blocks[idx].name = name;
+                    // Server blocks are complete at start — snapshot verbatim.
+                    if kind == 3 {
+                        blocks[idx].raw = cb.cloned();
+                    }
                 }
                 "content_block_delta" => {
                     // First delta of any kind (text/thinking/tool-args JSON)
@@ -983,6 +998,9 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
                 Some(json!({ "type": "thinking", "thinking": b.text, "signature": b.sig }))
             }
             2 => None,
+            // Server-executed blocks (native web_search): echo verbatim —
+            // Anthropic validates their presence on follow-up rounds.
+            3 => b.raw,
             _ if !b.text.is_empty() => Some(json!({ "type": "text", "text": b.text })),
             _ => None,
         })
@@ -1767,6 +1785,16 @@ pub(crate) async fn run_anthropic_tool_loop(
         );
         total.add(round_usage);
 
+        // Native server-side search (§4.3.7): the model searched through
+        // Anthropic's own web_search tool — that IS live web use, so the
+        // search-first tripwire must not fire a bogus nudge round.
+        if content
+            .iter()
+            .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("server_tool_use"))
+        {
+            live_web_used = true;
+        }
+
         let tool_uses: Vec<&Value> = content
             .iter()
             .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
@@ -2119,6 +2147,61 @@ async fn openai_round_index_clamp_drops_hostile_far_indices() {
             .unwrap_or(true),
         "hostile far-index tool_call must be dropped, got: {message}"
     );
+}
+
+/// Native server-side web_search (§4.3.7): `server_tool_use` +
+/// `web_search_tool_result` blocks arrive COMPLETE (no deltas) and MUST be
+/// echoed verbatim into the returned assistant content — the API 400s on a
+/// follow-up round when they are dropped, which is what the old kind-mapping
+/// (everything non-tool/thinking → text) silently did. The mixed case (a
+/// server search AND a client tool call in one round) is the load-bearing
+/// one: the client tool round-trips while the server blocks ride along.
+#[tokio::test]
+async fn anthropic_round_echoes_server_tool_blocks_verbatim() {
+    let app = tauri::test::mock_app().handle().clone();
+    let client = reqwest::Client::new();
+    let url = spawn_sse_server(concat!(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtu_1\",\"name\":\"web_search\",\"input\":{\"query\":\"rust 2026 releases\"}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtu_1\",\"content\":[{\"type\":\"web_search_result\",\"title\":\"Rust Blog\",\"url\":\"https://blog.rust-lang.org\",\"encrypted_index\":\"eNq\"}]} }\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"Search says hi\"}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"read_file\",\"input\":{}}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    ))
+    .await;
+    let body = serde_json::json!({ "model": "test" });
+    let mut full = String::new();
+
+    let (content, _) = anthropic_stream_round(
+        &client, &url, "key", &body, &app, "sid-srvsearch", &mut full,
+        &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .expect("round succeeds");
+
+    let types: Vec<&str> = content
+        .iter()
+        .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
+        .collect();
+    assert_eq!(
+        types,
+        vec!["server_tool_use", "web_search_tool_result", "text", "tool_use"],
+        "server blocks must be echoed verbatim, in order, alongside the client call"
+    );
+    // Verbatim: the server block carries its full original payload.
+    let srv = &content[0];
+    assert_eq!(srv["id"], "srvtu_1");
+    assert_eq!(srv["input"]["query"], "rust 2026 releases");
+    let result = &content[1];
+    assert_eq!(result["tool_use_id"], "srvtu_1");
+    assert_eq!(result["content"][0]["url"], "https://blog.rust-lang.org");
+    // Streamed text + the client tool call still round-trip as before.
+    assert_eq!(full, "Search says hi");
+    assert_eq!(content[3]["name"], "read_file");
+    assert_eq!(content[3]["input"]["path"], "a.txt");
 }
 
 #[tokio::test]

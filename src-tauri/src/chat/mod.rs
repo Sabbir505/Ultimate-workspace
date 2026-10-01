@@ -143,6 +143,12 @@ pub struct ChatManager {
     /// protocol). Separate from `pending` because the resolution carries the
     /// user's ANSWERS, not a bool — the approval-card UI must not render it.
     pending_questions: Mutex<HashMap<String, PendingQuestion>>,
+    /// Confirm-edits posture (§4.2.5): occurrence indexes the user accepted
+    /// on a review card, parked per chat session until the paused tool loop
+    /// picks them up (see run_gated_fs_tool). Separate from `pending` — the
+    /// bool oneshot stays the pause/resume channel; this carries the PARTIAL
+    /// accept payload alongside it.
+    edit_selections: Mutex<HashMap<String, Vec<usize>>>,
     /// PERF (PERFORMANCE_AUDIT.md B11): memoized context-meter token counts.
     /// The frontend polls `count_context_tokens` every 2 s while a local
     /// session is idle, and each call used to re-send the ENTIRE active
@@ -202,6 +208,7 @@ impl ChatManager {
             streams: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             pending_questions: Mutex::new(HashMap::new()),
+            edit_selections: Mutex::new(HashMap::new()),
             context_token_cache: Mutex::new(HashMap::new()),
             late_attach: Mutex::new(HashMap::new()),
             child_tasks: Mutex::new(HashMap::new()),
@@ -340,6 +347,22 @@ impl ChatManager {
     /// or never existed) — the UI treats that as a no-op.
     pub(crate) fn take_pending_approval(&self, id: &str) -> Option<PendingApproval> {
         self.pending.lock().remove(id)
+    }
+
+    /// Confirm-edits posture (§4.2.5): the occurrence indexes the user
+    /// accepted on the review card, parked here by `resolve_tool_action`
+    /// until the paused tool loop picks them up. Keyed by chat session (one
+    /// paused card per session); a stale entry is simply overwritten by the
+    /// next decision.
+    pub(crate) fn remember_edit_selection(&self, chat_session_id: &str, selected: Vec<usize>) {
+        self.edit_selections
+            .lock()
+            .insert(chat_session_id.to_string(), selected);
+    }
+
+    /// Take (and clear) a parked edit selection for a session.
+    pub(crate) fn take_edit_selection(&self, chat_session_id: &str) -> Option<Vec<usize>> {
+        self.edit_selections.lock().remove(chat_session_id)
     }
 
     /// Non-consuming peek: (chat_session_id, tool) for an id, without taking
@@ -580,6 +603,21 @@ impl ChatManager {
                 code_exec: code_exec_enabled,
                 fs_roots,
                 web_search: pcaps.native_web_search,
+                // Native server-side web_search (§4.3.7): opt-in per
+                // settings (`chat.websearch.native_anthropic`), native
+                // Anthropic sessions only. Swaps the client web_search tool
+                // for Anthropic's server tool block in the spec builder.
+                native_search: pcaps.native_web_search
+                    && matches!(provider_id, ChatProviderId::Anthropic)
+                    && {
+                        let db_state = app.state::<crate::DbState>();
+                        let conn = db_state.0.lock();
+                        db::get_setting(&conn, "chat.websearch.native_anthropic")
+                            .ok()
+                            .flatten()
+                            .as_deref()
+                                == Some("true")
+                    },
                 requires_local_sandbox: pcaps.requires_local_sandbox,
                 attached_connectors: Arc::new(Vec::new()),
                 local_docs,
@@ -1574,6 +1612,7 @@ impl ChatManager {
         }
         self.abort_child_tasks(chat_session_id);
         self.drop_pending_for_session(chat_session_id);
+        self.edit_selections.lock().remove(chat_session_id);
         // A superseding `send` cancels first, THEN re-registers perf and the
         // late-attach slot — so clearing them here cannot hurt the new turn.
         crate::chat::turn_perf::unregister(chat_session_id);
@@ -1606,6 +1645,7 @@ impl ChatManager {
         for id in ids {
             self.pending.lock().remove(&id);
         }
+        self.edit_selections.lock().clear();
         let q_ids: Vec<String> = self.pending_questions.lock().keys().cloned().collect();
         for id in q_ids {
             self.pending_questions.lock().remove(&id);
@@ -1649,6 +1689,13 @@ pub(crate) async fn compute_docs_retrieval(
     let query_owned = query;
     let query_vec_owned = query_vec;
     let pinned_ids_owned: Vec<String> = pinned_ids.iter().cloned().collect();
+    // Prompt firewall (§4.1.8): excerpts become a synthetic "Retrieved
+    // context" user message on the wire — guard each one before that. Mode
+    // read up front: `db` moves into the spawn_blocking search below.
+    let firewall_mode = {
+        let conn = db.lock();
+        crate::prompt_firewall::mode_from_db(&conn)
+    };
     // Each leg is cut at 50 before fusion — the same width the future
     // reranker stage would consume.
     const LEG_LIMIT: usize = 50;
@@ -1718,6 +1765,7 @@ pub(crate) async fn compute_docs_retrieval(
             } else {
                 text
             };
+            let text = crate::prompt_firewall::guard(firewall_mode, &text);
             // Heading enrichment: `path · heading` first line when the chunk
             // carries a markdown heading trail.
             let locator = if heading.is_empty() {
@@ -2284,6 +2332,24 @@ async fn wait_for_stop(flag: &AtomicBool) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Confirm-edits (§4.2.5): the parked selection round-trips per session
+    /// and take clears it — a cancelled turn leaves nothing behind.
+    #[test]
+    fn edit_selection_parks_and_takes_per_session() {
+        let mgr = ChatManager::new();
+        assert!(mgr.take_edit_selection("cs-x").is_none());
+        mgr.remember_edit_selection("cs-x", vec![1, 3]);
+        mgr.remember_edit_selection("cs-y", vec![2]);
+        assert_eq!(mgr.take_edit_selection("cs-x"), Some(vec![1, 3]));
+        assert!(mgr.take_edit_selection("cs-x").is_none(), "take clears");
+        assert_eq!(mgr.take_edit_selection("cs-y"), Some(vec![2]));
+        // A cancel wipes any parked selection for the session.
+        mgr.remember_edit_selection("cs-z", vec![9]);
+        mgr.cancel("cs-z");
+        assert!(mgr.take_edit_selection("cs-z").is_none());
+    }
+
     use super::*;
 
     #[test]

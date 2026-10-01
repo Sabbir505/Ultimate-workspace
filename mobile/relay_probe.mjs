@@ -40,6 +40,18 @@ function computePairProof(token) {
   const mac = hmac(sha256, te.encode(token), te.encode('E2E'));
   return Array.from(mac, (b) => b.toString(16).padStart(2, '0')).join('');
 }
+// Challenge-bound proof (anti-replay, 2026-10-01) — mirrors
+// computePairProofWithNonce in mobile/src/lib/relayCrypto.ts.
+const PAIR_CHALLENGE_LABEL = 'E2E-NONCE-V1';
+function computePairProofWithNonce(token, challengeB64Url) {
+  const challenge = b64UrlToBytes(challengeB64Url);
+  const label = te.encode(PAIR_CHALLENGE_LABEL);
+  const msg = new Uint8Array(label.length + challenge.length);
+  msg.set(label); msg.set(challenge, label.length);
+  const mac = hmac(sha256, te.encode(token), msg);
+  return Array.from(mac, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+let pairChallenge = null;
 function counterNonce(counter) {
   const nonce = new Uint8Array(24);
   new DataView(nonce.buffer).setBigUint64(16, BigInt(counter));
@@ -111,13 +123,24 @@ function send(obj) {
 
 ws.binaryType = 'arraybuffer';
 ws.onopen = () => { console.log(JSON.stringify({ type: '__open' }));
-  ws.send(JSON.stringify({ type: 'Pair', proof: computePairProof(token) }));
+  // Wait briefly for the desktop's PairChallenge; fall back to the legacy
+  // static proof (pre-v2 desktop) after the timeout.
+  setTimeout(() => {
+    if (pairChallenge === null) {
+      ws.send(JSON.stringify({ type: 'Pair', v2: true, proof: computePairProof(token) }));
+    }
+  }, 2500);
 };
 
 ws.onmessage = (ev) => {
   let msg = null;
   if (typeof ev.data === 'string') {
     msg = JSON.parse(ev.data);
+    if (msg.type === 'PairChallenge') {
+      pairChallenge = msg.nonce;
+      ws.send(JSON.stringify({ type: 'Pair', v2: true, proof: computePairProofWithNonce(token, msg.nonce) }));
+      return;
+    }
     if (msg.type === 'PairOk') {
       key = deriveSessionKey(token, b64UrlToBytes(msg.salt));
       for (const p of pending.splice(0)) ws.send(encryptFrame(key, outCounter++, te.encode(p)));

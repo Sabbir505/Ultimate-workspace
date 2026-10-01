@@ -21,7 +21,7 @@ import {
   type MemoryStatusView,
 } from "../../lib/ipc";
 import { shortModelName } from "../../lib/modelLabel";
-import { toastError } from "../../lib/ipc";
+import { toastError, getSetting, setSetting } from "../../lib/ipc";
 import { AGENT_OPTIONS as EXTRACT_AGENT_OPTIONS } from "../../lib/agents";
 import { Modal } from "../common/Modal";
 
@@ -201,6 +201,28 @@ export function MemoryPanel() {
       toastError("Couldn't change the memory setting", err);
     } finally {
       setBusy(false);
+    }
+  };
+
+  // Prompt-injection firewall (backend `security.prompt_firewall`): scans
+  // memory/RAG content for instruction-override patterns right before it is
+  // injected into the model's context. Defaults to "flag" in Rust.
+  const [firewallMode, setFirewallMode] = useState<"flag" | "strip" | "off">("flag");
+  useEffect(() => {
+    void getSetting("security.prompt_firewall")
+      .then((v) => {
+        if (v === "strip" || v === "off") setFirewallMode(v);
+      })
+      .catch(() => undefined);
+  }, []);
+  const changeFirewallMode = async (mode: "flag" | "strip" | "off") => {
+    const prev = firewallMode;
+    setFirewallMode(mode);
+    try {
+      await setSetting("security.prompt_firewall", mode);
+    } catch (err) {
+      setFirewallMode(prev);
+      toastError("Couldn't change the content firewall setting", err);
     }
   };
 
@@ -429,6 +451,30 @@ export function MemoryPanel() {
           </span>
           <span>Remember across chats</span>
         </label>
+      </div>
+
+      {/* Prompt-injection firewall: last-line scanner over everything the
+          model sees from memory + the local document corpus. */}
+      <div className="settings-note" style={{ marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontWeight: 600, fontSize: 12 }}>Content firewall</span>
+          <select
+            aria-label="Content firewall mode"
+            value={firewallMode}
+            onChange={(e) => void changeFirewallMode(e.target.value as "flag" | "strip" | "off")}
+            style={{ fontSize: 12 }}
+          >
+            <option value="flag">Flag suspicious content (default)</option>
+            <option value="strip">Strip injection patterns</option>
+            <option value="off">Off</option>
+          </select>
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+          Scans retrieved memories and document excerpts for instruction-injection
+          patterns (e.g. “ignore previous instructions”) before they reach the
+          model. Flagging wraps the block in an untrusted-data warning; stripping
+          also redacts the matched phrases.
+        </div>
       </div>
 
       {/* ── The memory document: the store the assistant loads from ── */}

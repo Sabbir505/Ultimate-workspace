@@ -93,6 +93,20 @@ pub(super) fn harness_context_section(
     }
     if let Some(db) = app.try_state::<DbState>() {
         let conn = db.0.lock();
+        // AGENTS.md layering (§4.2.10): the bound project's AGENTS.md rides
+        // the bundle instructions, so CLIs that don't discover the file
+        // natively still honor the repo standard (and CLIs that do simply
+        // see it twice, harmlessly). Capped in agents_md.rs; absent when the
+        // project has no file, so the prompt prefix stays stable.
+        if let Some(pid) = project_id {
+            if let Some(project) = crate::db::get_project(&conn, pid).ok().flatten() {
+                if let Some(section) = crate::agents_md::prompt_section(&project.path) {
+                    if !section.trim().is_empty() {
+                        parts.push(section);
+                    }
+                }
+            }
+        }
         if crate::memory::memory_enabled(&conn) {
             // Static bundle → no per-turn query, so this carries the
             // standing identity core (or the stored document when no core

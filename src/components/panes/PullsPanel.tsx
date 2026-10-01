@@ -19,6 +19,8 @@ import { openInBrowserPane } from "../../lib/openBrowserPane";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
 import { prListCacheKey, usePullRequestsStore, type PrListState } from "../../state/pullRequests";
+import { useUiStore } from "../../state/ui";
+import { listAutomationTemplates } from "../../lib/ipc";
 import { relativeTime } from "../../lib/relativeTime";
 
 type View = { kind: "list" } | { kind: "detail"; number: number } | { kind: "create" };
@@ -123,6 +125,33 @@ function PrList({
     return () => window.clearInterval(t);
   }, [refresh]);
 
+  // Packaged PR review bot (§4.2.7): hand the template to the Automations
+  // form via the same pendingArtifactFormData channel the chat proposal
+  // cards use, then jump to the Automations view. The user still picks the
+  // project folder and confirms — templates prefill, they don't create.
+  const setPendingArtifactFormData = useUiStore((s) => s.setPendingArtifactFormData);
+  const setActiveView = useUiStore((s) => s.setActiveView);
+  const createReviewBot = useCallback(async () => {
+    try {
+      const templates = await listAutomationTemplates();
+      const t = templates.find((x) => x.id === "pr-review-bot");
+      if (!t) return;
+      setPendingArtifactFormData({
+        artifactType: "automation",
+        spec: {
+          name: t.name,
+          prompt: t.prompt,
+          harness: t.harness,
+          model: t.model ?? undefined,
+          trigger: { schedule: t.schedule },
+        },
+      });
+      setActiveView("automations");
+    } catch {
+      // Templates are a convenience — never block the PR list on them.
+    }
+  }, [setPendingArtifactFormData, setActiveView]);
+
   // Close the scope menu on any outside click / Escape.
   useEffect(() => {
     if (!filterOpen) return;
@@ -181,6 +210,14 @@ function PrList({
         <div className="pulls-toolbar-spacer" />
         <button type="button" className="ghost pulls-refresh" onClick={refresh} title="Refresh" disabled={loading}>
           {loading ? <span className="pulls-spinner" aria-hidden="true" /> : "⟳"}
+        </button>
+        <button
+          type="button"
+          className="ghost pulls-refresh"
+          onClick={() => void createReviewBot()}
+          title="Schedule an automated PR review bot for this repo (Automations)"
+        >
+          Review bot
         </button>
         <button
           type="button"

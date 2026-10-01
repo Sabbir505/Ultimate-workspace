@@ -327,7 +327,7 @@ export const updateChatSessionWatchMode = (
 export const updateChatSessionPolicies = (
   chatSessionId: string,
   sandbox: "read_only" | "workspace_write",
-  approval: "on_request" | "auto_edit" | "full_access",
+  approval: "on_request" | "confirm_edits" | "auto_edit" | "full_access",
 ) =>
   safeInvoke<void>("update_chat_session_policies", { chatSessionId, sandbox, approval });
 /** Update a chat session's agent selection from the composer's agent-then-model
@@ -350,8 +350,8 @@ export const cancelChatMessage = (chatSessionId: string) =>
 /** Resolve a pending per-action tool approval card. `approved` lets the paused
  *  tool loop (or the Claude Code control request) run the action; `false`
  *  injects a "user denied" tool result. */
-export const resolveToolAction = (pendingId: string, approved: boolean) =>
-  safeInvoke<void>("resolve_tool_action", { pendingId, approved });
+export const resolveToolAction = (pendingId: string, approved: boolean, selected?: number[]) =>
+  safeInvoke<void>("resolve_tool_action", { pendingId, approved, selected: selected ?? null });
 /** Persist the partial assistant reply of a cancelled stream, so the text the
  *  user already saw survives the cancel instead of vanishing. */
 export const persistPartialChatMessage = (chatSessionId: string, content: string) =>

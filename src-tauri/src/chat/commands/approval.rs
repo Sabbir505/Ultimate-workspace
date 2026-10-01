@@ -68,10 +68,16 @@ pub(super) fn grant_directory_for_approved_tool(
     );
 }
 
+/// Resolve a pending per-action approval card. Confirm-edits posture
+/// (§4.2.5): `selected` carries the occurrence indexes the user accepted on
+/// the review card — a non-empty list parks a partial acceptance alongside
+/// the approval (the paused edit_file loop applies only those); none/empty
+/// means accept everything.
 #[tauri::command(async)]
 pub fn resolve_tool_action(
     pending_id: String,
     approved: bool,
+    selected: Option<Vec<usize>>,
     chat_state: State<'_, crate::ChatState>,
     db: State<'_, DbState>,
 ) -> CmdResult<()> {
@@ -80,6 +86,11 @@ pub fn resolve_tool_action(
             // "Always allow" on an out-of-scope path can only ever work if the
             // directory itself becomes granted — persist it now.
             grant_directory_for_approved_tool(&db.0.lock(), &pending.tool, &pending.args);
+            if let Some(selected) = selected.filter(|s| !s.is_empty()) {
+                chat_state
+                    .0
+                    .remember_edit_selection(&pending.chat_session_id, selected);
+            }
         }
         // The receiver end lives in the paused tool loop. A send error means
         // the loop already ended (stream cancelled) — ignore it.

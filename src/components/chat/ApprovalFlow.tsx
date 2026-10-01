@@ -49,15 +49,100 @@ function targetPathFromArgs(tool: string, args: unknown): string | null {
 /** A compact approval card. Rendered inline where the model's tool call would
  *  appear. Codex-style: a plain-language task message with a Deny / Allow
  *  action row — no raw tool name, no payload dump, no side ribbon. */
+/** The confirm-edits preview payload the backend attaches to the card's
+ *  args under `__relayEditPreview` when the session is in the confirm-edits
+ *  posture (§4.2.5). Computed from the REAL file on the Rust side. */
+interface EditPreview {
+  kind: "edit" | "append" | "write";
+  path: string;
+  findChars?: number;
+  replaceChars?: number;
+  totalOccurrences?: number;
+  occurrences?: { index: number; line: number; context: string }[];
+  exists?: boolean;
+  lines?: number;
+  chars?: number;
+  preview?: string;
+  replace?: string;
+}
+
+/** Occurrence-review card body: one checkbox per match in the target file,
+ *  all checked by default — accepting a SUBSET applies only those. */
+function EditPreviewBody({
+  preview,
+  selected,
+  setSelected,
+}: {
+  preview: EditPreview;
+  selected: Set<number>;
+  setSelected: (next: Set<number>) => void;
+}) {
+  if (preview.kind === "write") {
+    return (
+      <div className="approval-card-preview" data-testid="edit-preview">
+        <div className="approval-preview-meta">
+          {preview.exists ? "Overwrites" : "Creates"} <code>{preview.path}</code> ·{" "}
+          {preview.lines} lines · {preview.chars} chars
+        </div>
+        {preview.preview && <pre className="approval-preview-body">{preview.preview}</pre>}
+      </div>
+    );
+  }
+  if (preview.kind === "append") {
+    return (
+      <div className="approval-card-preview" data-testid="edit-preview">
+        <div className="approval-preview-meta">
+          Appends {preview.replaceChars} chars to <code>{preview.path}</code>
+        </div>
+        {preview.replace && <pre className="approval-preview-body">{preview.replace}</pre>}
+      </div>
+    );
+  }
+  const occurrences = preview.occurrences ?? [];
+  return (
+    <div className="approval-card-preview" data-testid="edit-preview">
+      <div className="approval-preview-meta">
+        {preview.totalOccurrences} occurrence{preview.totalOccurrences === 1 ? "" : "s"} of the
+        find text in <code>{preview.path}</code> — untick any you don't want.
+      </div>
+      <div className="approval-preview-list">
+        {occurrences.map((o) => (
+          <label key={o.index} className="approval-preview-row">
+            <input
+              type="checkbox"
+              checked={selected.has(o.index)}
+              onChange={(e) => {
+                const next = new Set(selected);
+                if (e.target.checked) next.add(o.index);
+                else next.delete(o.index);
+                setSelected(next);
+              }}
+            />
+            <span className="approval-preview-line">L{o.line}</span>
+            <code className="approval-preview-context">{o.context}</code>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function ApprovalCard({
   approval,
   onResolve,
 }: {
   approval: PendingApproval;
-  onResolve: (approved: boolean) => void;
+  onResolve: (approved: boolean, selected?: number[]) => void;
 }) {
   const badge = actionBadge(approval.tool);
   const [alwaysAllow, setAlwaysAllow] = useState(false);
+  // Confirm-edits (§4.2.5): a structured preview turns this card into an
+  // occurrence-level review (accept all / some / none).
+  const preview = (approval.args as { __relayEditPreview?: EditPreview } | null)
+    ?.__relayEditPreview;
+  const [selected, setSelected] = useState<Set<number>>(
+    new Set((preview?.occurrences ?? []).map((o) => o.index)),
+  );
   // Path this card is about, if extractable — drives the "always allow" glob.
   const targetPath = targetPathFromArgs(approval.tool, approval.args);
 
@@ -100,7 +185,10 @@ export function ApprovalCard({
     >
       <span className="approval-badge">{badge}</span>
       <span className="approval-card-title">{approval.summary}</span>
-      {targetPath && (
+      {preview && (
+        <EditPreviewBody preview={preview} selected={selected} setSelected={setSelected} />
+      )}
+      {targetPath && !preview && (
         <label className="approval-card-always">
           <input
             type="checkbox"
@@ -114,9 +202,26 @@ export function ApprovalCard({
         <button type="button" className="approval-btn deny" onClick={() => onResolve(false)}>
           Deny
         </button>
-        <button type="button" className="approval-btn approve" onClick={() => void handleAllow()}>
-          Allow
-        </button>
+        {preview && preview.kind === "edit" && selected.size > 0 && selected.size < (preview.totalOccurrences ?? 0) ? (
+          <>
+            <button type="button" className="approval-btn approve" onClick={() => onResolve(true)}>
+              Apply all
+            </button>
+            <button
+              type="button"
+              className="approval-btn approve"
+              onClick={() =>
+                onResolve(true, Array.from(selected).sort((a, b) => a - b))
+              }
+            >
+              Apply selected ({selected.size})
+            </button>
+          </>
+        ) : (
+          <button type="button" className="approval-btn approve" onClick={() => void handleAllow()}>
+            Allow
+          </button>
+        )}
       </div>
     </div>
   );

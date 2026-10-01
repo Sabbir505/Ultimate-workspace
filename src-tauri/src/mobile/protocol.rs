@@ -31,6 +31,15 @@ pub enum MobileMessage {
         token: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proof: Option<String>,
+        /// Challenge-capable client marker (anti-replay, 2026-10-01): the
+        /// client understands `PairChallenge` and its `proof` is
+        /// `HMAC(token, "E2E-NONCE-V1" || this connection's nonce)`. When
+        /// true the desktop requires the nonce-bound proof and will NOT fall
+        /// back to the legacy static proof — so replaying a captured static
+        /// proof at a v2 client's identity fails. Old builds omit the field
+        /// (serde default) and keep the legacy path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        v2: Option<bool>,
     },
     /// Query the current state of all providers.
     ListAvailableProviders,
@@ -585,6 +594,15 @@ pub enum DesktopMessage {
     },
     /// Connection handshake / heartbeat.
     DesktopStatus { connected: bool },
+    /// Pairing challenge (anti-replay, 2026-10-01). Sent PLAINTEXT the moment
+    /// the WebSocket is accepted, BEFORE any Pair frame is read. Challenge-
+    /// capable clients answer with `Pair { v2: true, proof }` where proof =
+    /// `HMAC(key = token, "E2E-NONCE-V1" || nonce)` — bound to THIS
+    /// connection, so a captured Pair frame cannot be replayed. Clients that
+    /// never saw a challenge (pre-v2 builds) keep the legacy static proof;
+    /// `mobile.pairing.require_challenge` refuses it once the fleet is v2.
+    /// Base64url (no padding), 32 bytes.
+    PairChallenge { nonce: String },
     /// Pairing accepted. Sent PLAINTEXT immediately after a valid Pair proof
     /// and before any encrypted frame (same-socket ordering guarantees the
     /// phone processes it first). The salt is public: the session key is

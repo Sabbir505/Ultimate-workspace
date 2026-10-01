@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { journalNotification } from '../lib/notificationJournal';
 import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { b64UrlToBytes, computePairProof, deriveSessionKey, decryptFrame, encryptFrame } from '../lib/relayCrypto';
+import { b64UrlToBytes, computePairProof, computePairProofWithNonce, deriveSessionKey, decryptFrame, encryptFrame } from '../lib/relayCrypto';
 
 /** The desktop relay binds loopback ONLY (127.0.0.1) on a persisted-but-random
  *  port, so there is no universal default URL: physical devices connect via a
@@ -60,6 +60,7 @@ function toSession(s: SessionInfo): Session {
     starred: s.starred ?? false, unread: s.unread ?? false, effort: s.effort ?? null };
 }
 type DesktopMessage =
+  | { type: 'PairChallenge'; nonce: string }
   | { type: 'PairOk'; salt: string }
   | { type: 'AvailableProviders'; providers: ProviderInfo[]; harnesses?: HarnessInfo[]; default_provider?: string; default_model?: string }
   | { type: 'ArtifactLibrary'; artifacts: ArtifactLibraryEntry[] }
@@ -548,6 +549,16 @@ let _inCounter = 0;
 // connection because both counters reset at reconnect.
 let _pairingToken: string | null = null;
 let _pendingFrames: string[] = [];
+// Anti-replay pairing (2026-10-01): the desktop opens every connection with
+// a fresh `PairChallenge`; we answer with the nonce-bound proof (v2), which
+// only verifies on THIS connection — a captured Pair frame can't be replayed.
+// If no challenge arrives within the timeout we're talking to a pre-v2
+// desktop and fall back to the legacy static proof (sent with v2: true so a
+// challenge-capable desktop never accepts it by mistake).
+let _pairChallenge: string | null = null;
+let _pairSent = false;
+let _pairFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+const PAIR_CHALLENGE_TIMEOUT_MS = 2500;
 // Loaded once from AsyncStorage; connect() awaits this so a persisted URL
 // wins over the loopback default on cold start. Pre-rebuild builds stored
 // the token under its own key — when the legacy URL carries no fragment, the
@@ -688,6 +699,8 @@ function _doConnect(target: string) {
   _token = extractToken(target);
   _e2eKey = null; _outCounter = 0; _inCounter = 0;
   _pairingToken = null; _pendingFrames = [];
+  _pairChallenge = null; _pairSent = false;
+  if (_pairFallbackTimer) { clearTimeout(_pairFallbackTimer); _pairFallbackTimer = null; }
   _connecting = true;
   nconnecting(true);
   try {
@@ -710,7 +723,22 @@ function _doConnect(target: string) {
       // user sees the connect error state.
       if (_token) {
         _pairingToken = _token;
-        ws.send(JSON.stringify({ type: 'Pair', proof: computePairProof(_token) }));
+        // Wait briefly for the desktop's PairChallenge (it sends the fresh
+        // per-connection nonce the moment the socket is accepted) so the
+        // Pair proof binds to THIS connection — see 'PairChallenge' below.
+        // Pre-v2 desktops never send one; after the timeout the legacy
+        // static proof goes out with v2: true. A challenge-capable desktop
+        // always sends the challenge, so the fallback can only reach a
+        // pre-v2 desktop, which ignores the unknown v2 field.
+        _pairFallbackTimer = setTimeout(() => {
+          _pairFallbackTimer = null;
+          if (_pairSent || !_pairingToken) return;
+          const token = _pairingToken;
+          _pairSent = true;
+          try {
+            _ws?.send(JSON.stringify({ type: 'Pair', v2: true, proof: computePairProof(token) }));
+          } catch {}
+        }, PAIR_CHALLENGE_TIMEOUT_MS);
       }
       _send({ type: 'ListAvailableProviders' });
       _send({ type: 'ListSessions' });
@@ -742,6 +770,25 @@ function _doConnect(target: string) {
         }
         const msg = JSON.parse(text) as DesktopMessage;
         switch (msg.type) {
+          case 'PairChallenge': {
+            // Fresh per-connection nonce from the desktop: answer with the
+            // nonce-bound proof so the pairing is replay-proof. Only the
+            // FIRST Pair frame is read, so once a Pair is sent (race with
+            // the legacy fallback timer) later challenges are ignored.
+            if (!_pairSent && _pairingToken) {
+              _pairSent = true;
+              if (_pairFallbackTimer) { clearTimeout(_pairFallbackTimer); _pairFallbackTimer = null; }
+              const token = _pairingToken;
+              try {
+                _ws?.send(JSON.stringify({
+                  type: 'Pair',
+                  v2: true,
+                  proof: computePairProofWithNonce(token, msg.nonce),
+                }));
+              } catch {}
+            }
+            break;
+          }
           case 'PairOk': {
             // Per-connection key (audit C1): derive from the desktop's fresh
             // salt, then flush whatever queued between Pair and PairOk.
@@ -915,6 +962,7 @@ function _doConnect(target: string) {
     // target) so a URL change between close and reconnect wins (audit M8).
     ws.onclose = () => {
       _connecting = false; stopPolling(); nc(false); nconnecting(false); _ws = null;
+      if (_pairFallbackTimer) { clearTimeout(_pairFallbackTimer); _pairFallbackTimer = null; }
       if (_reconnectTimer === null) {
         const delay = _reconnectDelay;
         _reconnectDelay = Math.min(delay * 2, RECONNECT_MAX_MS);

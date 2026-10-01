@@ -148,6 +148,7 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             list_directory_parameters(),
         ),
         openai_fn(READ_FILE, READ_FILE_DESC, read_file_parameters()),
+        openai_fn(READ_AGENTS_MD, READ_AGENTS_MD_DESC, read_agents_md_parameters()),
         openai_fn(SEARCH_FILES, SEARCH_FILES_DESC, search_files_parameters()),
         openai_fn(
             SEARCH_CONTENT,
@@ -277,6 +278,11 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         specs.push(openai_fn(DELETE_FILE, DELETE_FILE_DESC, path_parameters()));
         specs.push(openai_fn(MOVE_FILE, MOVE_FILE_DESC, src_dest_parameters()));
         specs.push(openai_fn(COPY_FILE, COPY_FILE_DESC, src_dest_parameters()));
+        specs.push(openai_fn(
+            WRITE_AGENTS_MD,
+            WRITE_AGENTS_MD_DESC,
+            write_agents_md_parameters(),
+        ));
     }
     // System tools. The mutating ones (download_file, run_shell, open_file)
     // are stripped under read_only exactly like filesystem writes; the
@@ -460,7 +466,18 @@ fn specs_attach_tools_anthropic(caps: &ToolCaps, specs: &mut Vec<Value>) {
 /// Same read-only filtering as [`openai_tool_specs`].
 pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) -> Vec<Value> {
     let mut specs: Vec<Value> = vec![];
-    if caps.web_search {
+    if caps.native_search {
+        // Native server-side search (§4.3.7): Anthropic runs the search
+        // itself and returns cited results inline — no client round-trip.
+        // The client web_search tool is REMOVED so the model can't double
+        // search. The block is a `server tool` object (typed, no
+        // input_schema) — it rides the same untyped tools array.
+        specs.push(json!({
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5,
+        }));
+    } else if caps.web_search {
         specs.push(anthropic_fn(
             WEB_SEARCH,
             WEB_SEARCH_DESC,
@@ -559,6 +576,7 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             list_directory_parameters(),
         ),
         anthropic_fn(READ_FILE, READ_FILE_DESC, read_file_parameters()),
+        anthropic_fn(READ_AGENTS_MD, READ_AGENTS_MD_DESC, read_agents_md_parameters()),
         anthropic_fn(SEARCH_FILES, SEARCH_FILES_DESC, search_files_parameters()),
         anthropic_fn(
             SEARCH_CONTENT,
@@ -681,6 +699,11 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             COPY_FILE,
             COPY_FILE_DESC,
             src_dest_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            WRITE_AGENTS_MD,
+            WRITE_AGENTS_MD_DESC,
+            write_agents_md_parameters(),
         ));
     }
     if sandbox.allows_mutating_tools() {
@@ -2153,6 +2176,39 @@ fn read_file_parameters() -> Value {
     })
 }
 
+fn read_agents_md_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Directory to look in (project root recommended; discovery walks ancestors). Defaults to the working directory.",
+            }
+        },
+    })
+}
+
+fn write_agents_md_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Project root (AGENTS.md is created inside it) or the file itself. Defaults to the working directory.",
+            },
+            "content": {
+                "type": "string",
+                "description": "The content to write (or append when `append` is true).",
+            },
+            "append": {
+                "type": "boolean",
+                "description": "Append instead of overwrite. Default false.",
+            }
+        },
+        "required": ["content"],
+    })
+}
+
 fn search_files_parameters() -> Value {
     json!({
         "type": "object",
@@ -2768,6 +2824,10 @@ mod tests {
         // enum worth anything. With an empty subagent the enum is exactly today's
         // 7 values; a large subagent grows this spec, and the meta-tool escape
         // hatch is called out in `subagent_type_values`.
+        // RAISED 36_000→36_500 (2026-10-01): the AGENTS.md pair
+        // (read_agents_md / write_agents_md, §4.2.10) joined the default
+        // surface — two deliberate tools worth their ~1.3k chars; the
+        // descriptions are already trim-passed. Previous tightening below.
         // TIGHTENED 49_000→36_000 (2026-09-21, token-efficiency pass II):
         // the source ledger now rides `caps.research`, and Session Mesh /
         // automation writes / totp_code became family-locked attach-on-demand
@@ -2775,8 +2835,8 @@ mod tests {
         // chars (57 → 44 tools). Locked families return via one
         // attach_connector call; the manifest line keeps them discoverable.
         assert!(
-            total < 36_000,
-            "default tool specs total {total} chars (budget 36_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            total < 36_500,
+            "default tool specs total {total} chars (budget 36_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
         let all_on_caps = ToolCaps {
             browser: true,
@@ -2809,6 +2869,9 @@ mod tests {
         // Bumped 55_800→56_500 for browser_upload_file (P3): one gated
         // interaction tool (~0.6k) so agents can put a workspace file onto a
         // page's file input — downloads-then-upload flows work end to end.
+        // Bumped 56_500→57_500 for the AGENTS.md pair (§4.2.10, 2026-10-01):
+        // read_agents_md + write_agents_md (~1.3k) — the repo-standard
+        // instructions file, layered into prompts and authorable in-chat.
         // Bumped 53_500→55_800 for the subagent CRUD family (list/create/update/
         // delete_subagent, ~2.3k): the model can AUTHOR the user's
         // declarative subagents on request, not just run them — the same
@@ -2817,8 +2880,65 @@ mod tests {
         // surface is unaffected: the CRUD trio rides `caps.subagent_write` and is
         // stripped from the bridge/subagent registries (ToolCaps::default()).
         assert!(
-            all_on < 56_500,
-            "all-on tool specs total {all_on} chars (budget 56_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 57_500,
+            "all-on tool specs total {all_on} chars (budget 57_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+        );
+    }
+
+
+    /// Native server-side search (§4.3.7): with `native_search` on, the
+    /// ANTHROPIC spec swaps the client web_search tool for Anthropic's
+    /// server tool block — the model can't double search. The OpenAI path
+    /// is untouched (Chat Completions has no server tools).
+    #[test]
+    fn native_search_swaps_client_web_search_for_the_server_tool() {
+        let mut caps = ToolCaps::default();
+        caps.web_search = true;
+        caps.native_search = true;
+        let sandbox = crate::chat::permission::SandboxPolicy::WorkspaceWrite;
+
+        let ant = anthropic_tool_specs(&caps, sandbox);
+        let ant_names: Vec<&str> = ant.iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert!(
+            !ant_names.contains(&"web_search".to_string().as_str())
+                || ant.iter().any(|s| s.get("type").and_then(|t| t.as_str()) == Some("web_search_20250305")),
+            "a web_search entry exists but must be the SERVER tool block"
+        );
+        assert!(
+            ant_names.iter().any(|_| false)
+                || ant.iter().filter(|s| s["name"] == "web_search").count() == 1,
+            "exactly one web_search entry"
+        );
+        let server = ant
+            .iter()
+            .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("web_search_20250305"))
+            .expect("server tool block present");
+        assert_eq!(server["name"], "web_search");
+        assert!(server.get("max_uses").is_some());
+        // Client-fn shape must be gone: the server block has no input_schema.
+        assert!(server.get("input_schema").is_none());
+
+        // Off → the classic client function tool.
+        caps.native_search = false;
+        let ant_off = anthropic_tool_specs(&caps, sandbox);
+        assert!(
+            ant_off.iter().any(|s| s["name"] == "web_search"
+                && s.get("input_schema").is_some()),
+            "client web_search back when native_search is off"
+        );
+        // OpenAI specs never carry the server block; the client function
+        // tool stays (native_search is only ever set on Anthropic turns,
+        // but the wire builders must not leak the block across formats).
+        let oai = openai_tool_specs(&caps, sandbox);
+        assert!(
+            oai.iter().any(|s| s.pointer("/function/name").and_then(|n| n.as_str()) == Some("web_search")),
+            "openai keeps the client function tool"
+        );
+        assert!(
+            oai.iter().all(|s| {
+                s.get("type").and_then(|t| t.as_str()) != Some("web_search_20250305")
+            }),
+            "openai specs must not carry the server tool block"
         );
     }
 
@@ -3201,7 +3321,8 @@ mod tests {
             ATTACH_CONNECTOR, ATTACH_MCP_SERVER,
             // fs
             LIST_DIRECTORY, READ_FILE, SEARCH_FILES, SEARCH_CONTENT, SEARCH_DOCS,
-            WRITE_FILE, EDIT_FILE, DELETE_FILE, MOVE_FILE, COPY_FILE,
+            READ_AGENTS_MD,
+            WRITE_FILE, EDIT_FILE, DELETE_FILE, MOVE_FILE, COPY_FILE, WRITE_AGENTS_MD,
             // vault
             VAULT_LIST, VAULT_READ, VAULT_SEARCH, VAULT_WRITE, VAULT_MOVE, VAULT_DELETE,
             // system

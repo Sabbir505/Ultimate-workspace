@@ -455,7 +455,7 @@ pub fn update_chat_session_policies(
         other => return Err(format!("unknown sandbox_policy: {other}")),
     };
     let approval = match approval.as_str() {
-        "on_request" | "auto_edit" | "full_access" => approval,
+        "on_request" | "confirm_edits" | "auto_edit" | "full_access" => approval,
         other => return Err(format!("unknown approval_policy: {other}")),
     };
     let conn = db.0.lock();

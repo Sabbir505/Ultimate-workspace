@@ -20,6 +20,7 @@ vi.mock("../lib/ipc", () => ({
   automationNextFire: (...a: unknown[]) => mockNextFire(...a),
   automationWebhookInfo: (id: string) => mockWebhookInfo(id),
   isSubagentAutomation: (harness: string) => /^agent:[^\s]+/.test(harness),
+  listAutomationTemplates: vi.fn().mockResolvedValue([]),
   listAutomationRuns: vi.fn().mockResolvedValue([]),
   listChatModels: vi.fn().mockResolvedValue([]),
   scanLocalModels: vi.fn().mockResolvedValue([]),

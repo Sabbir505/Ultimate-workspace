@@ -41,8 +41,10 @@ import {
   testAutomationWebhook,
   toastError,
   toastSuccess,
+  listAutomationTemplates,
   type Automation,
   type AutomationInput,
+  type AutomationTemplate,
   type AutomationNextFire,
   type AutomationRun,
   type HarnessModelConfig,
@@ -67,6 +69,40 @@ import {
   STOPPED_STATUS,
   type AutomationStateKey,
 } from "./shared";
+
+/** Packaged automation templates (§4.2.7): compact chips that prefill the
+ *  standard form. Rendered in the empty state and behind a header toggle. */
+function TemplatePicker({
+  templates,
+  onPick,
+}: {
+  templates: AutomationTemplate[];
+  onPick: (t: AutomationTemplate) => void;
+}) {
+  if (templates.length === 0) return null;
+  return (
+    <div className="automation-templates" data-testid="automation-templates">
+      <div className="automation-templates-head">
+        <span className="automation-templates-label">Start from a template</span>
+        <span className="automation-templates-hint">One click prefills the form — you pick the project and confirm.</span>
+      </div>
+      <div className="automation-templates-row">
+        {templates.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className="automation-template-chip"
+            title={t.description}
+            onClick={() => onPick(t)}
+          >
+            <strong>{t.name}</strong>
+            <span>{t.description}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 const AutomationRunTable = lazy(() =>
   import("./AutomationRunTable").then((m) => ({ default: m.AutomationRunTable }))
@@ -254,8 +290,35 @@ export function AutomationsView() {
   const load = useAutomationsStore((s) => s.load);
   const runningNow = useAutomationsStore((s) => s.runningNow);
   const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
+  const setPendingArtifactFormData = useUiStore((s) => s.setPendingArtifactFormData);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showNewForm, setShowNewForm] = useState(false);
+  const [templates, setTemplates] = useState<AutomationTemplate[]>([]);
+  const [showTemplates, setShowTemplates] = useState(false);
+
+  // Packaged templates (§4.2.7): one click hands the template to the standard
+  // form via the same pendingArtifactFormData channel the chat proposal cards
+  // use — no separate write path, the user still confirms everything.
+  useEffect(() => {
+    let cancelled = false;
+    void listAutomationTemplates()
+      .then((t) => { if (!cancelled) setTemplates(t ?? []); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  const applyTemplate = useCallback((t: AutomationTemplate) => {
+    setPendingArtifactFormData({
+      artifactType: "automation",
+      spec: {
+        name: t.name,
+        prompt: t.prompt,
+        harness: t.harness,
+        model: t.model ?? undefined,
+        trigger: { schedule: t.schedule },
+      },
+    });
+  }, [setPendingArtifactFormData]);
 
   useEffect(() => {
     if (!loaded) void load();
@@ -328,6 +391,13 @@ export function AutomationsView() {
             <NotifySettingsButton />
             <button
               className="automations-btn ghost"
+              onClick={() => setShowTemplates((v) => !v)}
+              title="Start from a packaged template (PR review bot, …)"
+            >
+              Templates
+            </button>
+            <button
+              className="automations-btn ghost"
               onClick={() => { void load(); }}
               title="Refresh"
             >
@@ -336,6 +406,12 @@ export function AutomationsView() {
           </div>
         </div>
       </ToolbarHeader>
+
+      {showTemplates && automations.length > 0 && (
+        <div style={{ padding: "8px 20px 0" }}>
+          <TemplatePicker templates={templates} onPick={applyTemplate} />
+        </div>
+      )}
 
       {/* Body */}
       {loaded && automations.length === 0 && !showNewForm ? (
@@ -350,6 +426,7 @@ export function AutomationsView() {
           >
             <Plus size={16} strokeWidth={2} /> Create your first automation
           </button>
+          <TemplatePicker templates={templates} onPick={applyTemplate} />
         </div>
       ) : (
         <div className="automations-body">
@@ -1153,7 +1230,14 @@ function AutomationForm({
     // Accept the legacy { type, spec } wrapper some persisted proposals carry.
     const s = spec && typeof spec.spec === "object" ? { ...spec.spec, type: spec.type } : (spec ?? {});
     setName(s.name || "");
-    setPrompt(buildAutomationRunPrompt(s));
+    // Templates (and any caller that already has the exact run text) win over
+    // compilation — buildAutomationRunPrompt would wrap the packaged prompt
+    // in a Goal/steps scaffold it was never written for.
+    setPrompt(
+      typeof s.prompt === "string" && s.prompt.trim()
+        ? s.prompt
+        : buildAutomationRunPrompt(s)
+    );
     if (s.harness) setAgentId(s.harness);
     if (s.model) setModel(s.model);
     if (s.trigger?.schedule) {

@@ -41,6 +41,13 @@ pub struct InstalledSkill {
     pub project_path: Option<String>,
     /// "skill" | "loop"
     pub kind: String,
+    /// SKILL.md frontmatter metadata (§4.3.4 progressive disclosure): shown
+    /// in the library list without loading the body. Absent when the file
+    /// doesn't declare them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<String>,
 }
 
 /// A skill surfaced to the chat `/` menu — either an on-disk harness skill or
@@ -186,7 +193,70 @@ fn doc_file(dir: &PathBuf) -> Option<PathBuf> {
 /// the frontmatter-stripped body. Simple line parsing — no yaml dependency
 /// for two keys. If there is no leading `---` block, returns the whole
 /// content as the body with `None` name/desc.
+/// Frontmatter metadata for one skill — the progressive-disclosure layer
+/// (§4.3.4): `list_all_skills` carries this WITHOUT the body, and the library
+/// list renders it without opening the file.
+#[derive(Debug, Clone, Default)]
+pub struct SkillFrontmatter {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub version: Option<String>,
+    pub allowed_tools: Option<String>,
+}
+
+/// Split `content` into (body, metadata). The metadata-aware form of
+/// [`strip_frontmatter`].
+fn split_frontmatter(content: &str) -> (String, SkillFrontmatter) {
+    let (body, name, desc) = strip_frontmatter_inner(content);
+    // version/allowed-tools ride the same line scan; re-derive them cheaply
+    // from the frontmatter head (bounded: stop at the body start).
+    let mut version = None;
+    let mut allowed_tools = None;
+    for line in content.lines() {
+        let t = line.trim();
+        if t == "---" && version.is_none() && allowed_tools.is_none() {
+            continue;
+        }
+        let unquote = |v: &str| {
+            v.trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string()
+        };
+        if version.is_none() {
+            if let Some(v) = t.strip_prefix("version:") {
+                version = Some(unquote(v));
+                continue;
+            }
+        }
+        if allowed_tools.is_none() {
+            if let Some(v) = t.strip_prefix("allowed-tools:") {
+                allowed_tools = Some(unquote(v));
+                continue;
+            }
+        }
+        // Only the frontmatter head carries metadata — once a line arrives
+        // that is neither a known key nor `key: value`, the body has started.
+        if !t.starts_with("name:") && !t.starts_with("description:") && !t.contains(": ") {
+            break;
+        }
+    }
+    (
+        body,
+        SkillFrontmatter {
+            name,
+            description: desc,
+            version,
+            allowed_tools,
+        },
+    )
+}
+
 fn strip_frontmatter(content: &str) -> (String, Option<String>, Option<String>) {
+    strip_frontmatter_inner(content)
+}
+
+fn strip_frontmatter_inner(content: &str) -> (String, Option<String>, Option<String>) {
     let mut name = None;
     let mut desc = None;
     let mut in_fm = false;
@@ -262,9 +332,18 @@ fn scan_with_projects(kind: &str, projects: &[PathBuf]) -> Vec<InstalledSkill> {
             }
             let Some(doc) = doc_file(&dir) else { continue };
             let slug = entry.file_name().to_string_lossy().into_owned();
-            let (name, desc) = fs::read_to_string(&doc)
-                .map(|c| parse_frontmatter(&c))
-                .unwrap_or((None, None));
+            let (name, desc, version, allowed_tools) = fs::read_to_string(&doc)
+                .map(|c| {
+                    let (body, fm) = split_frontmatter(&c);
+                    let _ = body;
+                    (
+                        fm.name.clone(),
+                        fm.description.clone(),
+                        fm.version.clone(),
+                        fm.allowed_tools.clone(),
+                    )
+                })
+                .unwrap_or((None, None, None, None));
             let path_str = doc.to_string_lossy().into_owned();
             let e = by_slug.entry(slug.clone()).or_insert_with(|| InstalledSkill {
                 slug: slug.clone(),
@@ -275,6 +354,8 @@ fn scan_with_projects(kind: &str, projects: &[PathBuf]) -> Vec<InstalledSkill> {
                 kimi_path: None,
                 project_path: None,
                 kind: kind.trim_end_matches('s').to_string(),
+                version: version.clone(),
+                allowed_tools: allowed_tools.clone(),
             });
             match harness {
                 // `get_or_insert`, not `= Some(..)`: `name`/`description` come
@@ -568,10 +649,11 @@ pub fn create_installed(name: &str, kind: &str, content: &str) -> Result<Install
         }
     }
     invalidate_skill_cache();
+    let fm = split_frontmatter(&body).1;
     Ok(InstalledSkill {
         slug: slug.clone(),
         name: slug,
-        description: String::new(),
+        description: fm.description.unwrap_or_default(),
         source: "both".into(),
         claude_path,
         kimi_path,
@@ -579,6 +661,8 @@ pub fn create_installed(name: &str, kind: &str, content: &str) -> Result<Install
         // this in if the slug also exists inside a project.
         project_path: None,
         kind: kind.trim_end_matches('s').to_string(),
+        version: fm.version,
+        allowed_tools: fm.allowed_tools,
     })
 }
 
@@ -689,6 +773,410 @@ pub fn slugify(name: &str) -> String {
         }
     }
     out.trim_end_matches('-').to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Install-from-URL (§4.3.4 — skills marketplace v1)
+//
+// The user pastes a URL into the Skills Library; Relay fetches and installs:
+//   * a raw SKILL.md / gist / raw.githubusercontent URL (single file),
+//   * a GitHub `blob/...` URL (single file via raw),
+//   * a GitHub `tree/...` URL (the whole directory, via the contents API),
+//   * a .zip archive (a single `<dir>/SKILL.md` becomes a skill, with its
+//     sibling files — scripts/references — preserved).
+//
+// This is a USER-initiated UI action (not a model tool): the fetch target is
+// whatever the user pasted, so there is deliberately no agent-SSRF guard
+// here — the same reason the user's own browser has none. Size caps bound
+// memory anyway.
+// ---------------------------------------------------------------------------
+
+/// Result of one install-from-URL.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallResult {
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    pub version: Option<String>,
+    pub allowed_tools: Option<String>,
+    pub files_installed: usize,
+    pub source_url: String,
+    /// Where the installed copy lives (first harness root) — surfaced so the
+    /// UI can point at it.
+    pub claude_dir: String,
+}
+
+/// Single-file fetch cap.
+const MAX_MD_BYTES: usize = 2 * 1024 * 1024;
+/// Archive cap.
+const MAX_ZIP_BYTES: usize = 30 * 1024 * 1024;
+/// Per-archive file/size guards.
+const MAX_ARCHIVE_FILES: usize = 60;
+const MAX_ARCHIVE_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+fn install_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent("relay-desktop")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("http client: {e}"))
+}
+
+/// A parsed GitHub `blob`/`tree` URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitHubRef {
+    pub owner: String,
+    pub repo: String,
+    pub git_ref: String,
+    /// Path inside the repo (file for blob, directory for tree).
+    pub path: String,
+    /// "blob" (single file) or "tree" (directory).
+    pub kind: String,
+}
+
+/// Parse `github.com/{owner}/{repo}/(blob|tree)/{ref}/{path...}` URLs (the
+/// forms the GitHub web UI hands out from the "Raw" and "Copy path" actions).
+pub(crate) fn parse_github_url(url: &str) -> Option<GitHubRef> {
+    let rest = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))?;
+    let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 5 {
+        return None;
+    }
+    let kind = match parts[2] {
+        "blob" => "blob",
+        "tree" => "tree",
+        _ => return None,
+    };
+    Some(GitHubRef {
+        owner: parts[0].to_string(),
+        repo: parts[1].to_string(),
+        git_ref: parts[3].to_string(),
+        path: parts[4..].join("/"),
+        kind: kind.to_string(),
+    })
+}
+
+fn slug_from_frontmatter_or(content: &str, fallback: &str) -> (String, SkillFrontmatter) {
+    let fm = split_frontmatter(content).1;
+    let slug = fm
+        .name
+        .as_deref()
+        .map(slugify)
+        .filter(|slug| !slug.is_empty())
+        .unwrap_or_else(|| slugify(fallback));
+    (slug, fm)
+}
+
+/// Install one skill's files (doc + siblings) into BOTH user harness roots.
+/// `files` paths are relative to the skill dir.
+fn write_skill_tree(
+    kind: &str,
+    slug: &str,
+    files: &[(String, Vec<u8>)],
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let roots = roots(kind);
+    if roots.len() < 2 {
+        return Err("harness skill roots unavailable (no home dir?)".into());
+    }
+    let mut written: Vec<std::path::PathBuf> = Vec::new();
+    for (_, root) in roots.iter().take(2) {
+        let dir = root.join(slug);
+        fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+        for (rel, bytes) in files {
+            // Zip-slip guard: reject absolute paths and `..` segments before
+            // they touch the filesystem.
+            let rel_path = std::path::Path::new(rel);
+            if rel_path.is_absolute()
+                || rel.split('/').any(|seg| seg == "..")
+            {
+                return Err(format!("unsafe archive path: {rel}"));
+            }
+            let target = dir.join(rel_path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            }
+            fs::write(&target, bytes)
+                .map_err(|e| format!("write {}: {e}", target.display()))?;
+        }
+        written.push(dir);
+    }
+    invalidate_skill_cache();
+    let second = written.pop().unwrap_or_default();
+    let first = written.pop().unwrap_or_default();
+    Ok((first, second))
+}
+
+/// Fetch a URL as bytes with a size cap.
+async fn fetch_capped(
+    client: &reqwest::Client,
+    url: &str,
+    cap: usize,
+) -> Result<Vec<u8>, String> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("fetch {url}: HTTP {}", resp.status()));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read {url}: {e}"))?;
+    if bytes.len() > cap {
+        return Err(format!(
+            "{url} is {} MiB — over the install size cap",
+            bytes.len() / (1024 * 1024)
+        ));
+    }
+    Ok(bytes.to_vec())
+}
+
+/// List a GitHub directory via the contents API. Returns (path, download_url,
+/// is_dir) entries. Unauthenticated (60 req/h) is plenty for a skill dir.
+async fn github_list_dir(
+    client: &reqwest::Client,
+    git_ref: &GitHubRef,
+) -> Result<Vec<(String, String, bool)>, String> {
+    let api = format!(
+        "https://api.github.com/repos/{}/{}/contents/{}?ref={}",
+        git_ref.owner, git_ref.repo, git_ref.path, git_ref.git_ref
+    );
+    let bytes = fetch_capped(client, &api, MAX_MD_BYTES).await?;
+    let entries: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("github contents API: {e}"))?;
+    let arr = entries
+        .as_array()
+        .ok_or_else(|| "github contents API returned no array (bad path?)".to_string())?;
+    let mut out = Vec::new();
+    for e in arr {
+        let path = e.get("path").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let dl = e.get("download_url").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let is_dir = e.get("type").and_then(|v| v.as_str()) == Some("dir");
+        out.push((path, dl, is_dir));
+    }
+    Ok(out)
+}
+
+/// Install from a user-pasted URL. See the section doc for the accepted
+/// forms. `kind` is "skills" or "loops".
+pub async fn install_from_url(url: &str, kind: &str) -> Result<SkillInstallResult, String> {
+    let url = url.trim();
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("Install from an http(s) URL.".into());
+    }
+    // Accept both plural ("skills") and singular ("skill") forms — the
+    // same normalization the commands layer applies.
+    let kind = kind.trim().to_lowercase();
+    let kind = if kind == "skill" || kind == "skills" {
+        "skills"
+    } else if kind == "loop" || kind == "loops" {
+        "loops"
+    } else {
+        return Err(format!("unknown skill kind: {kind}"));
+    };
+    let client = install_http_client()?;
+
+    // GitHub tree → directory install via the contents API.
+    if let Some(git_ref) = parse_github_url(url).filter(|g| g.kind == "tree") {
+        return install_github_tree(&client, &git_ref, &kind, url).await;
+    }
+
+    // Single-file candidates: raw .md URLs and GitHub blob URLs.
+    let file_url: String = if let Some(git_ref) =
+        parse_github_url(url).filter(|g| g.kind == "blob")
+    {
+        format!(
+            "https://raw.githubusercontent.com/{}/{}/{}/{}",
+            git_ref.owner, git_ref.repo, git_ref.git_ref, git_ref.path
+        )
+    } else {
+        url.to_string()
+    };
+
+    let lower = file_url.split(['?', '#']).next().unwrap_or("").to_lowercase();
+    if lower.ends_with(".zip") {
+        return install_zip(&client, &file_url, &kind, url).await;
+    }
+    // Everything else installs as a single markdown document.
+    let bytes = fetch_capped(&client, &file_url, MAX_MD_BYTES).await?;
+    let content = String::from_utf8(bytes)
+        .map_err(|_| "not valid UTF-8 — is this a SKILL.md?".to_string())?;
+    if content.trim().is_empty() {
+        return Err("The fetched file is empty.".into());
+    }
+    let fallback = file_url
+        .rsplit('/')
+        .next()
+        .unwrap_or("installed-skill")
+        .trim_end_matches(".md");
+    let (slug, fm) = slug_from_frontmatter_or(&content, fallback);
+    if slug.is_empty() {
+        return Err(
+            "Could not derive a slug — give the skill a `name:` in its frontmatter.".into(),
+        );
+    }
+    let doc_name = if kind == "loops" { "LOOP.md" } else { "SKILL.md" };
+    let (claude_dir, _) =
+        write_skill_tree(&kind, &slug, &[(doc_name.to_string(), content.into_bytes())])?;
+    Ok(SkillInstallResult {
+        slug,
+        name: fm.name.unwrap_or_else(|| fallback.to_string()),
+        description: fm.description.unwrap_or_default(),
+        version: fm.version,
+        allowed_tools: fm.allowed_tools,
+        files_installed: 1,
+        source_url: url.to_string(),
+        claude_dir: claude_dir.to_string_lossy().into_owned(),
+    })
+}
+
+/// Install a skill from a GitHub directory: the SKILL.md plus its siblings
+/// (one level + subdirectory children, caps bound both).
+async fn install_github_tree(
+    client: &reqwest::Client,
+    git_ref: &GitHubRef,
+    kind: &str,
+    source_url: &str,
+) -> Result<SkillInstallResult, String> {
+    let entries = github_list_dir(client, git_ref).await?;
+    if entries.is_empty() {
+        return Err("The GitHub directory is empty (or the path is wrong).".into());
+    }
+    // The SKILL.md anchors the skill: its frontmatter names the slug.
+    let skill_doc = entries
+        .iter()
+        .find(|(path, _, is_dir)| !is_dir && path.rsplit('/').next() == Some("SKILL.md"))
+        .ok_or_else(|| {
+            "No SKILL.md in that directory — a skill needs a SKILL.md with frontmatter."
+                .to_string()
+        })?;
+    let doc_bytes = fetch_capped(client, &skill_doc.1, MAX_MD_BYTES).await?;
+    let doc_text =
+        String::from_utf8(doc_bytes).map_err(|_| "SKILL.md is not valid UTF-8".to_string())?;
+    let dir_name = git_ref.path.rsplit('/').next().unwrap_or("skill").to_string();
+    let (slug, fm) = slug_from_frontmatter_or(&doc_text, &dir_name);
+    if slug.is_empty() {
+        return Err(
+            "Could not derive a slug — add a `name:` to the SKILL.md frontmatter.".into(),
+        );
+    }
+    let base = git_ref.path.rsplit('/').next().unwrap_or("");
+    let mut files: Vec<(String, Vec<u8>)> = vec![("SKILL.md".to_string(), doc_text.into_bytes())];
+    for (path, dl, is_dir) in &entries {
+        if *is_dir || *path == skill_doc.0 {
+            continue;
+        }
+        let rel = path
+            .strip_suffix(base)
+            .map(|p| p.trim_start_matches('/').to_string())
+            .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path).to_string());
+        let bytes = fetch_capped(client, dl, MAX_ARCHIVE_FILE_BYTES as usize).await?;
+        files.push((rel, bytes));
+        if files.len() >= MAX_ARCHIVE_FILES {
+            break;
+        }
+    }
+    let (claude_dir, _) = write_skill_tree(kind, &slug, &files)?;
+    Ok(SkillInstallResult {
+        slug,
+        name: fm.name.unwrap_or(dir_name),
+        description: fm.description.unwrap_or_default(),
+        version: fm.version,
+        allowed_tools: fm.allowed_tools,
+        files_installed: files.len(),
+        source_url: source_url.to_string(),
+        claude_dir: claude_dir.to_string_lossy().into_owned(),
+    })
+}
+
+/// Install the single `<dir>/SKILL.md` skill in a .zip archive (with its
+/// sibling files).
+async fn install_zip(
+    client: &reqwest::Client,
+    zip_url: &str,
+    kind: &str,
+    source_url: &str,
+) -> Result<SkillInstallResult, String> {
+    let bytes = fetch_capped(client, zip_url, MAX_ZIP_BYTES).await?;
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("open zip: {e}"))?;
+    let mut skill_dirs: Vec<String> = Vec::new();
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip entry {i}: {e}"))?;
+        let name = entry.name().to_string();
+        if name.ends_with("SKILL.md") && entry.size() <= MAX_ARCHIVE_FILE_BYTES {
+            let dir = name
+                .trim_end_matches("SKILL.md")
+                .trim_end_matches('/')
+                .to_string();
+            if !dir.is_empty() && !skill_dirs.contains(&dir) {
+                skill_dirs.push(dir);
+            }
+        }
+    }
+    if skill_dirs.is_empty() {
+        return Err("No SKILL.md found anywhere in that archive.".into());
+    }
+    if skill_dirs.len() > 1 {
+        return Err(format!(
+            "That archive holds {} skills — install them one at a time (a URL pointing at a single skill directory).",
+            skill_dirs.len()
+        ));
+    }
+    let dir = &skill_dirs[0];
+    let prefix = format!("{dir}/");
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip entry {i}: {e}"))?;
+        let name = entry.name().to_string();
+        if !name.starts_with(&prefix) || name == prefix || entry.is_dir() {
+            continue;
+        }
+        if entry.size() > MAX_ARCHIVE_FILE_BYTES {
+            continue;
+        }
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        std::io::Read::read_to_end(&mut entry, &mut buf)
+            .map_err(|e| format!("read {name}: {e}"))?;
+        files.push((name[prefix.len()..].to_string(), buf));
+        if files.len() >= MAX_ARCHIVE_FILES {
+            break;
+        }
+    }
+    let doc = files
+        .iter()
+        .find(|(rel, _)| rel == "SKILL.md")
+        .ok_or_else(|| "No SKILL.md found anywhere in that archive.".to_string())?;
+    let doc_text =
+        String::from_utf8(doc.1.clone()).map_err(|_| "SKILL.md is not valid UTF-8".to_string())?;
+    let dir_name = dir.rsplit('/').next().unwrap_or("skill").to_string();
+    let (slug, fm) = slug_from_frontmatter_or(&doc_text, &dir_name);
+    if slug.is_empty() {
+        return Err(
+            "Could not derive a slug — add a `name:` to the SKILL.md frontmatter.".into(),
+        );
+    }
+    let (claude_dir, _) = write_skill_tree(kind, &slug, &files)?;
+    Ok(SkillInstallResult {
+        slug,
+        name: fm.name.unwrap_or(dir_name),
+        description: fm.description.unwrap_or_default(),
+        version: fm.version,
+        allowed_tools: fm.allowed_tools,
+        files_installed: files.len(),
+        source_url: source_url.to_string(),
+        claude_dir: claude_dir.to_string_lossy().into_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -930,4 +1418,184 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
         std::fs::remove_dir_all(&root).ok();
     }
+
+    // ---- Install-from-URL (§4.3.4) ----
+
+    /// Serve one HTTP response on a loopback port; returns the URL. Raw TCP —
+    /// reqwest only needs a plain HTTP/1.1 response for these tests.
+    fn serve_once(path: &'static str, body: Vec<u8>, content_type: &'static str) -> String {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = std::io::Read::read(&mut sock, &mut buf);
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(hdr.as_bytes());
+                let _ = sock.write_all(&body);
+                let _ = sock.flush();
+            }
+        });
+        format!("http://{addr}{path}")
+    }
+
+    #[test]
+    fn parse_github_url_accepts_blob_tree_and_rejects_other_forms() {
+        let blob = parse_github_url(
+            "https://github.com/acme/skills/blob/main/deep-dir/my-skill/SKILL.md",
+        )
+        .expect("blob");
+        assert_eq!(blob.owner, "acme");
+        assert_eq!(blob.repo, "skills");
+        assert_eq!(blob.git_ref, "main");
+        assert_eq!(blob.path, "deep-dir/my-skill/SKILL.md");
+        assert_eq!(blob.kind, "blob");
+
+        let tree = parse_github_url("https://github.com/acme/skills/tree/v2/research-pack")
+            .expect("tree");
+        assert_eq!(tree.git_ref, "v2");
+        assert_eq!(tree.path, "research-pack");
+        assert_eq!(tree.kind, "tree");
+
+        assert!(parse_github_url("https://github.com/acme/skills").is_none());
+        assert!(parse_github_url("https://gitlab.com/acme/skills/blob/main/x").is_none());
+        assert!(parse_github_url("https://github.com/acme/skills/wiki/blob/main/x").is_none());
+    }
+
+    #[test]
+    fn frontmatter_metadata_layer_parses_version_and_allowed_tools() {
+        let doc = "---\nname: pdf-master\ndescription: Merge and split PDFs.\nversion: 1.4.2\nallowed-tools: read_file, generate_file\n---\n\nDo PDF things.";
+        let fm = split_frontmatter(doc).1;
+        assert_eq!(fm.name.as_deref(), Some("pdf-master"));
+        assert_eq!(fm.description.as_deref(), Some("Merge and split PDFs."));
+        assert_eq!(fm.version.as_deref(), Some("1.4.2"));
+        assert_eq!(fm.allowed_tools.as_deref(), Some("read_file, generate_file"));
+        // No frontmatter → no metadata.
+        let bare = split_frontmatter("Just some instructions.").1;
+        assert!(bare.version.is_none());
+        assert!(bare.allowed_tools.is_none());
+    }
+
+    /// LIVE fetch path: a real loopback HTTP server serving a SKILL.md; the
+    /// installer fetches, parses the metadata, and writes BOTH harness roots.
+    #[tokio::test]
+    async fn install_from_url_installs_markdown_into_both_roots() {
+        let doc = "---\nname: meeting-notes\ndescription: Turn raw notes into action items.\nversion: 0.3.0\n---\n\nSummarize the meeting.";
+        let url = serve_once("/skill.md", doc.as_bytes().to_vec(), "text/markdown");
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _env = ENV_LOCK.lock();
+        let _restore = use_home(tmp.path());
+
+        let result = install_from_url(&url, "skills").await.expect("install");
+        assert_eq!(result.slug, "meeting-notes");
+        assert_eq!(result.name, "meeting-notes");
+        assert_eq!(result.description, "Turn raw notes into action items.");
+        assert_eq!(result.version.as_deref(), Some("0.3.0"));
+        assert_eq!(result.files_installed, 1);
+
+        // Both user roots have the file; the next scan lists it with metadata.
+        let claude = tmp.path().join(".claude").join("skills").join("meeting-notes").join("SKILL.md");
+        let agents = tmp.path().join(".agents").join("skills").join("meeting-notes").join("SKILL.md");
+        assert_eq!(std::fs::read_to_string(&claude).unwrap(), doc);
+        assert_eq!(std::fs::read_to_string(&agents).unwrap(), doc);
+        let list = list_installed_with_projects("skills", &[]);
+        let row = list.iter().find(|s| s.slug == "meeting-notes").expect("scanned");
+        assert_eq!(row.version.as_deref(), Some("0.3.0"));
+        assert_eq!(row.source, "both");
+    }
+
+    /// LIVE zip path: a real archive fetched over HTTP; the skill dir and its
+    /// sibling script land in both roots, structure preserved.
+    #[tokio::test]
+    async fn install_from_url_installs_zip_with_sibling_files() {
+        let doc = "---\nname: zip-skill\ndescription: From an archive.\n---\n\nBody here.";
+        let mut zip_buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut zip_buf);
+            let opts =
+                zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("pack-1.0/zip-skill/SKILL.md", opts).unwrap();
+            std::io::Write::write_all(&mut w, doc.as_bytes()).unwrap();
+            w.start_file("pack-1.0/zip-skill/scripts/run.sh", opts).unwrap();
+            std::io::Write::write_all(&mut w, b"echo hi\n").unwrap();
+            w.finish().unwrap();
+        }
+        let url = serve_once("/pack.zip", zip_buf.into_inner(), "application/zip");
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _env = ENV_LOCK.lock();
+        let _restore = use_home(tmp.path());
+
+        let result = install_from_url(&url, "skills").await.expect("zip install");
+        assert_eq!(result.slug, "zip-skill");
+        assert_eq!(result.files_installed, 2);
+        let script = tmp
+            .path()
+            .join(".claude").join("skills").join("zip-skill").join("scripts").join("run.sh");
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), "echo hi\n");
+        let agents_doc = tmp
+            .path()
+            .join(".agents").join("skills").join("zip-skill").join("SKILL.md");
+        assert_eq!(std::fs::read_to_string(&agents_doc).unwrap(), doc);
+    }
+
+    /// Zip-slip: an archive entry with `..` must be refused, not written.
+    #[tokio::test]
+    async fn zip_slip_paths_are_refused() {
+        let doc = "---\nname: evil\ndescription: d\n---\nbody";
+        let mut zip_buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut zip_buf);
+            let opts =
+                zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("evil/SKILL.md", opts).unwrap();
+            std::io::Write::write_all(&mut w, doc.as_bytes()).unwrap();
+            w.start_file("evil/../outside.txt", opts).unwrap();
+            std::io::Write::write_all(&mut w, b"pwn").unwrap();
+            w.finish().unwrap();
+        }
+        let url = serve_once("/evil.zip", zip_buf.into_inner(), "application/zip");
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _env = ENV_LOCK.lock();
+        let _restore = use_home(tmp.path());
+
+        let err = install_from_url(&url, "skills").await.expect_err("must refuse");
+        assert!(err.contains("unsafe archive path"), "{err}");
+        assert!(!tmp.path().join("outside.txt").exists());
+    }
+
+    /// Non-http URLs are refused up front.
+    #[tokio::test]
+    async fn install_from_url_refuses_non_http() {
+        let err = install_from_url("file:///C:/Windows/system32/x.md", "skills")
+            .await
+            .expect_err("file URL must be refused");
+        assert!(err.contains("http"));
+    }
+
+    /// LIVE: the real GitHub raw endpoint, exercising TLS + GitHub's CDN.
+    /// #[ignore]d so CI never depends on the network; run explicitly with
+    /// `cargo test --lib install_from_url_live -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn install_from_url_live_github_raw() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _env = ENV_LOCK.lock();
+        let _restore = use_home(tmp.path());
+        // Anthropic's public skills repo (the Agent Skills standard
+        // showcase): a full TREE install — contents API + raw fetches.
+        let result = install_from_url(
+            "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines",
+            "skills",
+        )
+        .await
+        .expect("live install");
+        assert!(!result.slug.is_empty());
+        assert!(tmp.path().join(".claude").join("skills").join(&result.slug).join("SKILL.md").is_file());
+    }
+
+
 }

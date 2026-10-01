@@ -226,6 +226,8 @@ export const policiesToPermissionMode = (
   switch (approval) {
     case "on_request":
       return "manual";
+    case "confirm_edits":
+      return "confirm_edits";
     case "auto_edit":
       return "auto_edit";
     case "full_access":
@@ -238,13 +240,20 @@ export const policiesToPermissionMode = (
 /** Compatibility mapping from legacy permissionMode to dual policies (used by
  *  db migration and by UI elements that still show the legacy mode name). */
 export const permissionModeToPolicies = (
-  mode: "read_only" | "manual" | "auto_edit" | "full_auto"
+  mode:
+    | "read_only"
+    | "manual"
+    | "confirm_edits"
+    | "auto_edit"
+    | "full_auto"
 ): { sandbox: SandboxPolicy; approval: ApprovalPolicy } => {
   switch (mode) {
     case "read_only":
       return { sandbox: "read_only", approval: "on_request" };
     case "manual":
       return { sandbox: "workspace_write", approval: "on_request" };
+    case "confirm_edits":
+      return { sandbox: "workspace_write", approval: "confirm_edits" };
     case "auto_edit":
       return { sandbox: "workspace_write", approval: "auto_edit" };
     case "full_auto":

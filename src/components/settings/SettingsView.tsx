@@ -844,6 +844,11 @@ function WebSearchPanel() {
   const [provider, setProvider] = useState("");
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [loaded, setLoaded] = useState(false);
+  // Native server-side search (§4.3.7): Anthropic runs web_search itself and
+  // returns cited results inline — Relay's client scraping tool is swapped
+  // out for the turn. Server-tool usage bills on Anthropic's side, so this
+  // is opt-in. Anthropic-native chats only.
+  const [nativeSearch, setNativeSearch] = useState(false);
   // Debounced persists for the key inputs: they fire per keystroke, and
   // out-of-order backend writes could persist an intermediate (shorter)
   // value over the final one. The latest typed value is mirrored per id so
@@ -868,10 +873,12 @@ function WebSearchPanel() {
       getSetting("search.serper_key"),
       getSetting("search.tavily_key"),
       getSetting("search.brave_key"),
-    ]).then(([p, serper, tavily, brave]) => {
+      getSetting("chat.websearch.native_anthropic"),
+    ]).then(([p, serper, tavily, brave, native]) => {
       if (stale) return;
       setProvider(p ?? "");
       setKeys({ serper: serper ?? "", tavily: tavily ?? "", brave: brave ?? "" });
+      setNativeSearch(native === "true");
       setLoaded(true);
     }).catch(() => {
       // A rejected boot fetch must not leave the saved engine/key fields
@@ -944,6 +951,31 @@ function WebSearchPanel() {
       {provider !== "" && SEARCH_PROVIDER_HELP[provider] && (
         <p className="settings-section-hint">{SEARCH_PROVIDER_HELP[provider]}</p>
       )}
+      <div className="settings-form-row settings-form-row-pair">
+        <div className="settings-form-field">
+          <div className="settings-form-control" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              id="native-anthropic-search"
+              checked={nativeSearch}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setNativeSearch(on);
+                void setSetting("chat.websearch.native_anthropic", on ? "true" : "false");
+              }}
+            />
+            <label htmlFor="native-anthropic-search" style={{ margin: 0 }}>
+              Anthropic server-side web search (native)
+            </label>
+          </div>
+        </div>
+      </div>
+      <p className="settings-section-hint">
+        Lets Anthropic run web searches on its own servers and return cited
+        results inline (replaces Relay’s keyless scraping in Anthropic chats;
+        usage bills on Anthropic’s side). Applies to native Anthropic API
+        chats only — other providers keep the engine above.
+      </p>
     </>
   );
 }

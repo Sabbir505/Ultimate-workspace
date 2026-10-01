@@ -170,3 +170,57 @@
   color: #b58bd4;
   border-color: #b58bd466;
 }
+
+/* ---------------------------------------------------------------------------
+ * Installed-panel toolbar (search + actions). Buttons must never wrap — the
+ * longer labels ("Make all global", "From URL") used to break onto two lines
+ * and give the row a ragged, uneven height.
+ * ------------------------------------------------------------------------- */
+.installed-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.installed-toolbar-search {
+  flex: 1;
+  min-width: 0;
+}
+.installed-toolbar button {
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 11px;
+  font-size: 12px;
+  border-radius: var(--radius-xs, 6px);
+}
+.installed-toolbar button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Install-from-URL row: fades + slides down when the toolbar toggle opens it. */
+.install-url-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  animation: install-url-in 0.22s cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+@keyframes install-url-in {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .install-url-row {
+    animation: none;
+  }
+}

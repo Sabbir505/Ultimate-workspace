@@ -15,14 +15,16 @@ use super::relay::{handle_chat_turn, handle_mid_turn_frame, send_msg, transcript
 use crate::chat::ChatManager;
 use crate::db;
 
-/// Drive the pairing handshake: load the expected token, require the first
-/// frame to be a `Pair`, and verify it via the E2E proof — exclusively. The
-/// legacy raw-token compare was removed once every client had the E2E path:
-/// a proof is HMAC over the token (so the token itself never crosses the
-/// wire) and both sides derive a session key from it, which the read loop
-/// then enforces on every frame. Sends the error frame and returns `Err` on
-/// every rejection path. Always returns `true` (B-24 `used_e2e`), which the
-/// read loop still enforces defensively.
+/// Drive the pairing handshake: load the expected token, send a fresh
+/// per-connection challenge (`PairChallenge`), require the first frame to be
+/// a `Pair`, and verify it — challenge-bound proof for v2 clients, legacy
+/// static proof for pre-v2 clients (refused when
+/// `mobile.pairing.require_challenge` is set). A proof is HMAC over the
+/// token (so the token itself never crosses the wire) and both sides derive
+/// a session key from it, which the read loop then enforces on every frame.
+/// Sends the error frame and returns `Err` on every rejection path. Always
+/// returns `true` (B-24 `used_e2e`), which the read loop still enforces
+/// defensively.
 pub(super) async fn verify_pairing<R>(
     db: &Arc<Mutex<Connection>>,
     write: &super::relay_ws::SharedWsWrite,
@@ -31,11 +33,127 @@ pub(super) async fn verify_pairing<R>(
 where
     R: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
-    let expected_token = {
+    let (expected_token, require_challenge) = {
         let conn = db.lock();
-        super::relay::current_pairing_token(&conn).unwrap_or_default()
+        (
+            super::relay::current_pairing_token(&conn).unwrap_or_default(),
+            crate::db::get_setting(&conn, "mobile.pairing.require_challenge")
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some("true"),
+        )
     };
+    // Anti-brute-force: without a throttle an attacker can reconnect and
+    // re-present captured/guessed proofs indefinitely. Five consecutive
+    // failures lock pairing for 60s (success resets the counter).
+    if let Err(remaining) = {
+        let mut t = PAIR_ATTEMPTS.lock().expect("pairing tracker mutex");
+        t.check()
+    } {
+        let err = DesktopMessage::ChatError {
+            chat_session_id: "pair".into(),
+            error: format!(
+                "pairing failed: too many attempts — retry in {}s",
+                remaining.as_secs()
+            ),
+        };
+        let _ = send_msg(&write, &err).await;
+        return Err(format!("pairing locked out for {remaining:?} after repeated failures"));
+    }
+    let result = pair_handshake(&expected_token, require_challenge, write, read).await;
+    match &result {
+        Ok(_) => {
+            if let Ok(mut t) = PAIR_ATTEMPTS.lock() {
+                t.note_success();
+            }
+        }
+        Err(e) if e.contains("invalid") || e.contains("refused") => {
+            if let Ok(mut t) = PAIR_ATTEMPTS.lock() {
+                t.note_failure();
+            }
+        }
+        Err(_) => {}
+    }
+    result
+}
 
+/// Consecutive-failure lockout state for pairing attempts. The logic is
+/// unit-testable on its own; the process-global instance lives in
+/// [`PAIR_ATTEMPTS`].
+pub(super) struct PairAttemptTracker {
+    consecutive_failures: u32,
+    locked_until: Option<std::time::Instant>,
+}
+
+/// Five consecutive failed proofs trip the lockout.
+pub(super) const PAIR_MAX_CONSECUTIVE_FAILURES: u32 = 5;
+/// Lockout window once tripped.
+pub(super) const PAIR_LOCKOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl PairAttemptTracker {
+    pub(super) fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            locked_until: None,
+        }
+    }
+
+    /// `Err(remaining)` while locked out.
+    pub(super) fn check(&self) -> Result<(), std::time::Duration> {
+        match self.locked_until {
+            Some(until) if until > std::time::Instant::now() => {
+                Err(until - std::time::Instant::now())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(super) fn note_failure(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.consecutive_failures >= PAIR_MAX_CONSECUTIVE_FAILURES {
+            self.locked_until =
+                Some(std::time::Instant::now() + PAIR_LOCKOUT);
+        }
+    }
+
+    pub(super) fn note_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.locked_until = None;
+    }
+}
+
+static PAIR_ATTEMPTS: std::sync::Mutex<PairAttemptTracker> = std::sync::Mutex::new(
+    PairAttemptTracker {
+        consecutive_failures: 0,
+        locked_until: None,
+    },
+);
+
+/// The connection-level handshake, split out of [`verify_pairing`] so tests
+/// can drive it with a known token (the production entry loads the token
+/// from the OS keychain, which a test process cannot do).
+pub(super) async fn pair_handshake<R>(
+    expected_token: &str,
+    require_challenge: bool,
+    write: &super::relay_ws::SharedWsWrite,
+    read: &mut R,
+) -> Result<bool, String>
+where
+    R: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    // Challenge FIRST: the phone cannot prove possession of the token in a
+    // connection-bound way until it holds this connection's nonce. Sent
+    // plaintext (E2E is not enabled yet); pre-v2 clients ignore the unknown
+    // message type and fall back to the legacy static proof.
+    let challenge = super::relay_crypto::random_challenge();
+    {
+        use base64::Engine as _;
+        let challenge_frame = DesktopMessage::PairChallenge {
+            nonce: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge),
+        };
+        let _ = send_msg(write, &challenge_frame).await;
+    }
     let first = match tokio::time::timeout(PAIRING_TIMEOUT, read.next()).await {
         Ok(Some(Ok(msg))) => msg,
         Ok(Some(Err(e))) => return Err(format!("ws read failed before pairing: {e}")),
@@ -69,8 +187,8 @@ where
             return Err(format!("malformed Pair frame: {e}"));
         }
     };
-    let (legacy_token, proof) = match paired {
-        MobileMessage::Pair { token, proof } => (token, proof),
+    let (legacy_token, proof, v2) = match paired {
+        MobileMessage::Pair { token, proof, v2 } => (token, proof, v2),
         _ => {
             let err = DesktopMessage::ChatError {
                 chat_session_id: "pair".into(),
@@ -96,7 +214,7 @@ where
     {
         // S-1: fail closed when no pairing token is configured — with an
         // empty token the proof is HMAC("") and publicly computable.
-        // (verify_pair_proof now also rejects empty tokens itself; this
+        // (The verify helpers also reject empty tokens themselves; this
         // check just gives the honest error message.)
         if expected_token.is_empty() {
             let err = DesktopMessage::ChatError {
@@ -106,13 +224,39 @@ where
             let _ = send_msg(&write, &err).await;
             return Err("pairing failed: no pairing token configured".into());
         }
-        if !super::relay_crypto::verify_pair_proof(&expected_token, &p) {
+        // Challenge-bound proof (v2 clients): verifies only against THIS
+        // connection's nonce, so a Pair frame captured on an earlier
+        // connection cannot be replayed here.
+        let nonce_bound =
+            super::relay_crypto::verify_pair_proof_with_nonce(expected_token, &challenge, &p);
+        let v2_client = v2 == Some(true);
+        // Legacy fallback: pre-v2 clients (no `v2` flag) may present the
+        // static proof. A v2 client never may — its proof must bind the
+        // challenge — and neither may anyone once
+        // `mobile.pairing.require_challenge` is set (post-upgrade fleet).
+        let legacy_ok = !nonce_bound
+            && !require_challenge
+            && !v2_client
+            && super::relay_crypto::verify_pair_proof(expected_token, &p);
+        if !nonce_bound && !legacy_ok {
+            let reason = if v2_client {
+                "pairing failed: invalid challenge proof"
+            } else if require_challenge {
+                "pairing failed: this server requires challenge-response pairing — update the mobile app"
+            } else {
+                "pairing failed: invalid E2E proof"
+            };
             let err = DesktopMessage::ChatError {
                 chat_session_id: "pair".into(),
-                error: "pairing failed: invalid E2E proof".into(),
+                error: reason.into(),
             };
             let _ = send_msg(&write, &err).await;
-            return Err("pairing failed: invalid E2E proof".into());
+            return Err(reason.to_string());
+        }
+        if legacy_ok {
+            eprintln!(
+                "[mobile-relay] paired via LEGACY static proof (pre-v2 client) — replay protection inactive for this connection"
+            );
         }
         // Per-connection key (audit C1): a fresh salt per pairing makes the
         // session key unique per connection, so the counters that reset on
@@ -128,7 +272,7 @@ where
             };
             let _ = send_msg(write, &pair_ok).await;
         }
-        let key = super::relay_crypto::derive_session_key_with_salt(&expected_token, &salt);
+        let key = super::relay_crypto::derive_session_key_with_salt(expected_token, &salt);
         super::relay_ws::enable_e2e(&write, key).await;
         eprintln!("[mobile-relay] paired (E2E encrypted, per-connection key); processing commands");
     }

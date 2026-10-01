@@ -158,7 +158,12 @@ pub fn on_demand_injection(
         let mut injected: Vec<String> = hits.iter().map(|h| h.record.id.clone()).collect();
         injected.extend(core.iter().map(|m| m.id.clone()));
         let _ = crate::db::bump_memory_access(conn, &injected);
-        return crate::memory::render::render_on_demand_block(&core, &hits, now, recall_hint);
+        // Prompt firewall (§4.1.8): memory content is stored data — a memory
+        // extracted from a hostile document can carry injection text. Fence /
+        // strip before it reaches the prompt (the recall-hint block below is
+        // Relay's own text and needs no guard).
+        return crate::memory::render::render_on_demand_block(&core, &hits, now, recall_hint)
+            .map(|block| crate::prompt_firewall::guard_db(conn, &block));
     }
     // Nothing qualified this turn — fall back to the stored document (a
     // hand-typed profile may be the ONLY memory there is), then to the
@@ -167,7 +172,7 @@ pub fn on_demand_injection(
     // a full record load.
     if let Some(doc) = crate::memory::document::stored_document(conn) {
         if let Some(block) = crate::memory::render::render_document_fallback(&doc) {
-            return Some(block);
+            return Some(crate::prompt_firewall::guard_db(conn, &block));
         }
     }
     let any_in_scope = conn

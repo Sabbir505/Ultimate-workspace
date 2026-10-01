@@ -337,16 +337,49 @@ async fn run_gated_fs_tool(
     sid: &str,
     name: &str,
     args: &Value,
+    confirm_edits: bool,
 ) -> String {
     let summary = fs_tool_summary(name, args);
-    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
+    // Confirm-edits posture (§4.2.5): the card carries a structured preview
+    // of the ACTUAL change (occurrences read from the current file — not the
+    // model's claimed args), letting the user accept all of it, a subset, or
+    // none. The preview rides a `__relayEditPreview` key on the CARD's args
+    // copy; the executed args stay verbatim.
+    let mut card_args = args.clone();
+    if confirm_edits {
+        if let Some(preview) = build_edit_preview(name, args) {
+            card_args["__relayEditPreview"] = preview;
+        }
+    }
+    if !run_approval_gate(mgr, app, sid, name, &card_args, summary).await {
+        // Deny (or a cancelled stream) — also drop any stale selection.
+        mgr.take_edit_selection(sid);
         return format!(
             "The user denied the {name} action. Do not retry it unless the user explicitly asks."
         );
     }
 
+    // Approved. A parked partial selection means the user accepted a SUBSET
+    // of the edit's occurrences on the review card — rewrite the args into a
+    // selected-occurrences edit instead of the model's original all-or-nothing.
+    let selection = if confirm_edits { mgr.take_edit_selection(sid) } else { None };
+    let effective_args: Value = match selection.as_deref() {
+        Some(selected) if !selected.is_empty() && name == tools::EDIT_FILE => {
+            let mut a = args.clone();
+            a["__selectedOccurrences"] = serde_json::to_value(selected).unwrap_or_default();
+            a
+        }
+        _ => args.clone(),
+    };
+
     // Approved — execute the tool now and return its real result.
-    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app), Some(sid)).await;
+    let outcome = if name == tools::EDIT_FILE
+        && effective_args.get("__selectedOccurrences").is_some()
+    {
+        tools::fs_edit_file_selected(&effective_args, selection.as_deref().unwrap_or(&[]))
+    } else {
+        tools::execute_tool(client, artifacts_dir, caps, name, &effective_args, Some(app), Some(sid)).await
+    };
     if let Some(a) = outcome.artifact {
         {
             let db = app.state::<crate::DbState>();
@@ -355,6 +388,79 @@ async fn run_gated_fs_tool(
         }
     }
     outcome.text
+}
+
+/// Build the confirm-edits card preview for a write/edit call: the real
+/// state of the target file crossed with the model's proposed change.
+/// `None` = no preview (the card falls back to the plain summary).
+fn build_edit_preview(name: &str, args: &Value) -> Option<Value> {
+    let path = args.get("path").and_then(|v| v.as_str())?;
+    match name {
+        tools::EDIT_FILE => {
+            let find = args.get("find").and_then(|v| v.as_str()).unwrap_or("");
+            let replace = args.get("replace").and_then(|v| v.as_str()).unwrap_or("");
+            let append = args
+                .get("append")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if append || find.is_empty() {
+                return Some(serde_json::json!({
+                    "kind": "append",
+                    "path": path,
+                    "replace": replace,
+                    "replaceChars": replace.chars().count(),
+                }));
+            }
+            let content = std::fs::read_to_string(path).ok()?;
+            // Occurrences: 1-based indexes + the line each match starts on
+            // (capped — a pathological find-everywhere edit degrades to the
+            // plain card instead of a 10k-row checkbox list).
+            const MAX_LISTED: usize = 50;
+            let mut occurrences = Vec::new();
+            let mut consumed = 0usize;
+            for (i, (pos, _)) in content.match_indices(find).enumerate() {
+                if i >= MAX_LISTED {
+                    break;
+                }
+                let line = content[..pos].matches('\n').count() + 1;
+                let context: String = content[pos..]
+                    .chars()
+                    .take(160)
+                    .collect();
+                occurrences.push(serde_json::json!({
+                    "index": i + 1,
+                    "line": line,
+                    "context": context.trim_end(),
+                }));
+                consumed += 1;
+            }
+            if consumed == 0 {
+                return None;
+            }
+            Some(serde_json::json!({
+                "kind": "edit",
+                "path": path,
+                "findChars": find.chars().count(),
+                "replaceChars": replace.chars().count(),
+                "totalOccurrences": content.match_indices(find).count(),
+                "occurrences": occurrences,
+            }))
+        }
+        tools::WRITE_FILE => {
+            let content = args.get("content").and_then(|v| v.as_str())?;
+            let exists = std::path::Path::new(path).is_file();
+            let preview: Vec<&str> = content.lines().take(40).collect();
+            Some(serde_json::json!({
+                "kind": "write",
+                "path": path,
+                "exists": exists,
+                "lines": content.lines().count(),
+                "chars": content.chars().count(),
+                "preview": preview.join("\n"),
+            }))
+        }
+        _ => None,
+    }
 }
 
 /// Execute a connector-originated tool that the permission gate flagged for
@@ -2898,7 +3004,11 @@ async fn run_tool_inner(
             permission::check_permission(sandbox, approval, name, &target, &caps.fs_roots)
         };
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
-            return run_gated_fs_tool(client, artifacts_dir, caps, mgr, app, sid, name, args).await;
+            return run_gated_fs_tool(
+                client, artifacts_dir, caps, mgr, app, sid, name, args,
+                approval == permission::ApprovalPolicy::ConfirmEdits,
+            )
+            .await;
         }
         // AutoRun: a mutating tool call still has to lie within a granted
         // root. The check below is the hard scope gate that turns
@@ -3632,6 +3742,14 @@ pub(crate) async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Va
                 == Some("true")
         };
 
+    // Prompt firewall (§4.1.8): indexed documents are untrusted content —
+    // guard each excerpt individually before it becomes a tool result. Mode
+    // is read up front: `db` moves into the spawn_blocking search below.
+    let firewall_mode = {
+        let conn = db.lock();
+        crate::prompt_firewall::mode_from_db(&conn)
+    };
+
     let hits = match tokio::task::spawn_blocking(move || {
         let conn = db.lock();
         crate::db::search_chunks_hybrid(
@@ -3723,6 +3841,7 @@ pub(crate) async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Va
             } else {
                 hit.content.clone()
             };
+            let content = crate::prompt_firewall::guard(firewall_mode, &content);
             format!(
                 "[{}] {}  ·  {}  ·  score={:.3}\n{}",
                 i + 1,
@@ -3746,6 +3865,60 @@ pub(crate) async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Va
 
 #[cfg(test)]
 mod tests {
+
+    /// Confirm-edits (§4.2.5): the card preview is computed from the REAL
+    /// file, not the model's claims — occurrences carry 1-based indexes and
+    /// the line each match starts on.
+    #[test]
+    fn edit_preview_lists_occurrences_with_line_numbers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("code.rs");
+        std::fs::write(&path, "fn one() {}\nlet x = TODO;\nfn two() {}\nlet y = TODO;").unwrap();
+        let preview = build_edit_preview(
+            "edit_file",
+            &serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "find": "TODO",
+                "replace": "done()",
+            }),
+        )
+        .expect("edit preview");
+        assert_eq!(preview["kind"], "edit");
+        assert_eq!(preview["totalOccurrences"], 2);
+        let occ = preview["occurrences"].as_array().unwrap();
+        assert_eq!(occ.len(), 2);
+        assert_eq!(occ[0]["index"], 1);
+        assert_eq!(occ[0]["line"], 2);
+        assert_eq!(occ[1]["index"], 2);
+        assert_eq!(occ[1]["line"], 4);
+        assert!(occ[0]["context"].as_str().unwrap().contains("TODO"));
+
+        // write_file preview: exists-flag + bounded content preview.
+        let preview = build_edit_preview(
+            "write_file",
+            &serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "content": "l1\nl2\nl3",
+            }),
+        )
+        .expect("write preview");
+        assert_eq!(preview["kind"], "write");
+        assert_eq!(preview["exists"], true);
+        assert_eq!(preview["lines"], 3);
+        assert!(preview["preview"].as_str().unwrap().starts_with("l1"));
+
+        // A find with no matches yields no preview (plain card fallback).
+        assert!(build_edit_preview(
+            "edit_file",
+            &serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "find": "nope-not-there",
+                "replace": "x",
+            }),
+        )
+        .is_none());
+    }
+
     use super::*;
 
     /// CHARACTERIZATION (written before the subagent refactor, pinned against the

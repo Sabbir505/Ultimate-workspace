@@ -40,13 +40,19 @@ export type SandboxPolicy = "read_only" | "workspace_write";
 /** Per-session approval posture. "on_request" gates every mutating tool; "auto_edit"
  *  auto-runs writes/edits but gates deletes/moves/copies; "full_access" bypasses
  *  prompts entirely. */
-export type ApprovalPolicy = "on_request" | "auto_edit" | "full_access";
+export type ApprovalPolicy = "on_request" | "confirm_edits" | "auto_edit" | "full_access";
 
 /** Tool permission mode for chat sessions. "plan" is the plan-mode posture:
  *  the model must propose a plan via `present_plan` and the user approves
  *  before any mutation; the session's real policies are preserved underneath
  *  and resume when the plan is approved (or the mode is switched off). */
-export type PermissionMode = "read_only" | "plan" | "manual" | "auto_edit" | "full_auto";
+export type PermissionMode =
+  | "read_only"
+  | "plan"
+  | "manual"
+  | "confirm_edits"
+  | "auto_edit"
+  | "full_auto";
 
 /** A CLI harness's OWN permission postures. Harness sessions show these in
  *  the mode menu instead of the built-in ones — no mapping, the harness's
@@ -593,7 +599,9 @@ export interface ChatState {
   /** Dismiss the full_access confirmation modal without switching. */
   cancelFullAccessConfirm: () => void;
   /** Resolve the session's pending approval card (Approve/Deny). */
-  resolveApproval: (chatSessionId: string, approved: boolean) => Promise<void>;
+  /** `selected` = confirm-edits partial accept (§4.2.5): the occurrence
+   *  indexes kept on the review card. Omitted = accept everything. */
+  resolveApproval: (chatSessionId: string, approved: boolean, selected?: number[]) => Promise<void>;
   saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string, displayName?: string, kind?: string) => Promise<void>;
   clearApiKey: (provider: string) => Promise<void>;
 

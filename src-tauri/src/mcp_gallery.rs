@@ -676,7 +676,16 @@ pub fn mcp_gallery_install(
         }
         (None, None) => return Err("provide catalogId or custom".into()),
     };
-    // Unique id: prefer the plain slug, then slug_2, slug_3, …
+    persist_new_def(&app, &mut defs, &mut def)
+}
+
+/// Assign a unique id (plain slug, then slug_2, slug_3, …), append, save.
+/// Shared by the gallery install and the registry install.
+fn persist_new_def(
+    app: &AppHandle,
+    defs: &mut Vec<McpServerDef>,
+    def: &mut McpServerDef,
+) -> Result<McpServerDef, String> {
     if defs.iter().any(|d| d.id == def.id) {
         let mut n = 2;
         while defs.iter().any(|d| d.id == format!("{}_{n}", def.id)) {
@@ -685,8 +694,8 @@ pub fn mcp_gallery_install(
         def.id = format!("{}_{n}", def.id);
     }
     defs.push(def.clone());
-    save_defs(&app, &defs);
-    Ok(def)
+    save_defs(app, defs);
+    Ok(def.clone())
 }
 
 /// Remove an installed server and kill its child process (if live).
@@ -781,6 +790,404 @@ pub async fn mcp_gallery_connect(app: AppHandle, id: String) -> Result<McpConnec
 pub fn mcp_gallery_disconnect(app: AppHandle, id: String) {
     disconnect_server(&app, &id);
 }
+
+
+// ---------------------------------------------------------------------------
+// Official MCP registry (§4.3.3) — registry.modelcontextprotocol.io
+//
+// The hand-curated gallery above stays the zero-config set; the REGISTRY is
+// the open index. Search hits list with their registry status (the
+// "verified"-pattern badge: status active + isLatest), and one-click install
+// maps the entry's stdio package onto the same McpServerDef shape the custom
+// form produces — command assembled from runtimeHint + identifier, env keys
+// prefilled from environmentVariables. Installed defs get `from_gallery:
+// false`, so spawning still routes through the exec gate exactly like a
+// user-typed custom server: the registry is open, unverified content ships
+// through the same consent path.
+// ---------------------------------------------------------------------------
+
+/// The registry's base URL (v0 API). A const so tests can pin the shape.
+pub const MCP_REGISTRY_URL: &str = "https://registry.modelcontextprotocol.io";
+
+/// One `environmentVariables` entry of a registry package.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RegistryEnvVar {
+    pub name: String,
+    pub description: Option<String>,
+    pub required: bool,
+    pub secret: bool,
+}
+
+/// One stdio `packages[]` entry, reduced to what an install needs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RegistryPackage {
+    pub registry_type: String,
+    pub identifier: String,
+    pub version: Option<String>,
+    /// The launcher (`npx`, `docker`, `uvx`, …) — becomes the def command.
+    pub runtime_hint: Option<String>,
+    /// Positional runtime arguments (e.g. `-y`), in order.
+    pub runtime_args: Vec<String>,
+    pub env_vars: Vec<RegistryEnvVar>,
+}
+
+/// One search result: the `server` object reduced + the registry `_meta`
+/// status flattened for the badge.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RegistryServerEntry {
+    /// Registry name (`com.acme/tool`) — the stable id.
+    pub name: String,
+    pub title: Option<String>,
+    pub description: String,
+    pub version: Option<String>,
+    pub repository_url: Option<String>,
+    /// Registry status ("active" | "deleted").
+    pub status: String,
+    /// True when this row is the newest version of the server.
+    pub is_latest: bool,
+    /// True when the entry has NO stdio package (remote-only → connectors
+    /// territory, not installable here; the UI says so instead of failing).
+    pub remote_only: bool,
+    pub packages: Vec<RegistryPackage>,
+}
+
+fn parse_registry_entry(value: &serde_json::Value) -> Option<RegistryServerEntry> {
+    let server = value.get("server")?;
+    let name = server.get("name")?.as_str()?.to_string();
+    let description = server
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let title = server
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let version = server
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let repository_url = server
+        .get("repository")
+        .and_then(|r| r.get("url"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let mut packages = Vec::new();
+    if let Some(list) = server.get("packages").and_then(|v| v.as_array()) {
+        for p in list {
+            let registry_type = p
+                .get("registryType")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let Some(identifier) = p.get("identifier").and_then(|v| v.as_str()).map(str::to_string)
+            else {
+                continue;
+            };
+            // Stdio-only: the gallery spawns child processes. A package with
+            // a non-stdio transport is recorded but marks the entry
+            // remote-only when nothing stdio remains.
+            let transport = p.get("transport").and_then(|v| v.as_str()).unwrap_or("stdio");
+            if transport != "stdio" && transport != "stdio " {
+                continue;
+            }
+            let runtime_args = p
+                .get("runtimeArguments")
+                .and_then(|v| v.as_array())
+                .map(|args| {
+                    args.iter()
+                        .filter_map(|a| a.get("value").and_then(|v| v.as_str()))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let env_vars = p
+                .get("environmentVariables")
+                .and_then(|v| v.as_array())
+                .map(|vars| {
+                    vars.iter()
+                        .filter_map(|v| {
+                            let name = v.get("name").and_then(|n| n.as_str())?;
+                            Some(RegistryEnvVar {
+                                name: name.to_string(),
+                                description: v.get("description").and_then(|d| d.as_str()).map(str::to_string),
+                                required: v.get("isRequired").and_then(|r| r.as_bool()).unwrap_or(false),
+                                secret: v.get("isSecret").and_then(|r| r.as_bool()).unwrap_or(false),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            packages.push(RegistryPackage {
+                registry_type,
+                identifier,
+                version: p.get("version").and_then(|v| v.as_str()).map(str::to_string),
+                runtime_hint: p.get("runtimeHint").and_then(|v| v.as_str()).map(str::to_string),
+                runtime_args,
+                env_vars,
+            });
+        }
+    }
+    // A package whose transport object is `{type: "stdio"}` parses above; an
+    // entry with packages but NONE stdio (or only `remotes`) is remote-only.
+    let has_packages = server
+        .get("packages")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    let remote_only = packages.is_empty() && has_packages
+        || server.get("packages").is_none() && server.get("remotes").is_some();
+
+    let meta = value
+        .get("_meta")
+        .and_then(|m| m.get("io.modelcontextprotocol.registry/official"));
+    let status = meta
+        .and_then(|m| m.get("status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let is_latest = meta
+        .and_then(|m| m.get("isLatest"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    Some(RegistryServerEntry {
+        name,
+        title,
+        description,
+        version,
+        repository_url,
+        status,
+        is_latest,
+        remote_only,
+        packages,
+    })
+}
+
+/// Search the official registry. Only the newest version of each server
+/// (isLatest) is returned, `deleted` rows are dropped.
+#[tauri::command(async)]
+pub async fn mcp_registry_search(
+    query: String,
+    limit: Option<u32>,
+) -> Result<Vec<RegistryServerEntry>, String> {
+    let query = query.trim();
+    let limit = limit.unwrap_or(40).clamp(1, 100);
+    let client = reqwest::Client::builder()
+        .user_agent("relay-desktop")
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let mut url = format!(
+        "{MCP_REGISTRY_URL}/v0/servers?limit={limit}&version=latest"
+    );
+    if !query.is_empty() {
+        url.push_str(&format!("&search={}", urlencoding::encode(query)));
+    }
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("registry search failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("registry returned HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("registry body: {e}"))?;
+    let mut out = Vec::new();
+    if let Some(servers) = body.get("servers").and_then(|v| v.as_array()) {
+        for value in servers {
+            if let Some(entry) = parse_registry_entry(value) {
+                if entry.status == "deleted" {
+                    continue;
+                }
+                out.push(entry);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Launchers an install may map to a local command. `npx`/`bunx`/`deno`
+/// fetch npm packages, `uvx` Python, `docker` oci images — all present on
+/// developer machines; anything else is refused rather than guessed.
+const REGISTRY_RUNTIME_ALLOWLIST: &[&str] = &["npx", "bunx", "deno", "uvx", "uvx.exe", "docker"];
+
+/// Build the installable def for a registry entry: first stdio package →
+/// `command = runtimeHint (default npx)`, `args = runtimeArgs… +
+/// identifier[@version]`, env keys prefilled (empty values; the user fills
+/// them in the servers list before connecting).
+pub fn registry_def_from_entry(entry: &RegistryServerEntry) -> Result<McpServerDef, String> {
+    let package = entry
+        .packages
+        .first()
+        .ok_or_else(|| {
+            if entry.remote_only {
+                "This server is remote-only (streamable HTTP) — connect it through Connectors, not the gallery."
+            } else {
+                "This registry entry has no installable stdio package."
+            }
+        })?
+        .clone();
+    let command = package
+        .runtime_hint
+        .clone()
+        .unwrap_or_else(|| "npx".to_string());
+    let command_base = command
+        .split(['\\', '/'])
+        .last()
+        .unwrap_or(&command)
+        .to_lowercase();
+    if !REGISTRY_RUNTIME_ALLOWLIST.contains(&command_base.as_str()) {
+        return Err(format!(
+            "registry package launches via `{command}` — not in the allowed runtimes ({}). Install it manually.",
+            REGISTRY_RUNTIME_ALLOWLIST.join(", ")
+        ));
+    }
+    let mut args = package.runtime_args.clone();
+    let identifier = match &package.version {
+        Some(v) if !v.is_empty() => format!("{}@{}", package.identifier, v),
+        _ => package.identifier.clone(),
+    };
+    args.push(identifier);
+    let mut env = HashMap::new();
+    for var in &package.env_vars {
+        env.insert(var.name.clone(), String::new());
+    }
+    Ok(McpServerDef {
+        id: slugify(&entry.name),
+        name: entry.title.clone().unwrap_or_else(|| entry.name.clone()),
+        description: entry.description.clone(),
+        command,
+        args,
+        env,
+        enabled: true,
+        // NOT from_gallery: registry content is open and unverified — the
+        // exec gate confirms on first spawn exactly like a custom server.
+        from_gallery: false,
+    })
+}
+
+/// One-click install from the registry: build the def (validated, stdio
+/// only, allowlisted launcher) and persist it with the same uniqueness +
+/// save path as every other install.
+#[tauri::command]
+pub fn mcp_registry_install(
+    app: AppHandle,
+    entry: RegistryServerEntry,
+) -> Result<McpServerDef, String> {
+    let mut def = registry_def_from_entry(&entry)?;
+    let mut defs = load_defs(&app);
+    persist_new_def(&app, &mut defs, &mut def)
+}
+
+
+    // ---- Official MCP registry (§4.3.3) ----
+
+    /// Fixture pinned against a LIVE registry.modelcontextprotocol.io response
+    /// (captured 2026-10-01, /v0/servers?search=filesystem). The parser must
+    /// keep accepting exactly this shape.
+    fn registry_fixture() -> serde_json::Value {
+        serde_json::json!({
+            "server": {
+                "name": "com.pulsemcp/remote-filesystem",
+                "description": "MCP server for remote filesystem operations on cloud storage (Google Cloud Storage).",
+                "repository": {"url": "https://github.com/pulsemcp/mcp-servers", "source": "github", "subfolder": "experimental/remote-filesystem"},
+                "version": "0.1.3",
+                "packages": [{
+                    "registryType": "npm",
+                    "registryBaseUrl": "https://registry.npmjs.org",
+                    "identifier": "remote-filesystem-mcp-server",
+                    "version": "0.1.3",
+                    "runtimeHint": "npx",
+                    "transport": {"type": "stdio"},
+                    "runtimeArguments": [{"value": "-y", "type": "positional"}],
+                    "environmentVariables": [
+                        {"description": "GCS bucket name.", "isRequired": true, "name": "GCS_BUCKET"},
+                        {"description": "Service account key.", "isRequired": false, "isSecret": true, "name": "GCS_PRIVATE_KEY"}
+                    ]
+                }]
+            },
+            "_meta": {"io.modelcontextprotocol.registry/official": {
+                "status": "active", "isLatest": true,
+                "publishedAt": "2026-05-18T13:28:59.991989Z"
+            }}
+        })
+    }
+
+    #[test]
+    fn registry_entry_parses_packages_env_and_meta() {
+        let entry = parse_registry_entry(&registry_fixture()).expect("parses");
+        assert_eq!(entry.name, "com.pulsemcp/remote-filesystem");
+        assert!(entry.description.contains("remote filesystem"));
+        assert_eq!(entry.status, "active");
+        assert!(entry.is_latest);
+        assert!(!entry.remote_only);
+        assert_eq!(entry.repository_url.as_deref(), Some("https://github.com/pulsemcp/mcp-servers"));
+        let pkg = &entry.packages[0];
+        assert_eq!(pkg.registry_type, "npm");
+        assert_eq!(pkg.identifier, "remote-filesystem-mcp-server");
+        assert_eq!(pkg.runtime_hint.as_deref(), Some("npx"));
+        assert_eq!(pkg.runtime_args, vec!["-y".to_string()]);
+        assert_eq!(pkg.env_vars.len(), 2);
+        assert!(pkg.env_vars[0].required);
+        assert!(pkg.env_vars[1].secret);
+    }
+
+    #[test]
+    fn registry_remote_only_entry_is_flagged() {
+        let remote_only = serde_json::json!({
+            "server": {
+                "name": "ac.inference.sh/mcp",
+                "description": "Remote server",
+                "remotes": [{"type": "streamable-http", "url": "https://sh.inference.ac"}]
+            },
+            "_meta": {"io.modelcontextprotocol.registry/official": {"status": "active", "isLatest": true}}
+        });
+        let entry = parse_registry_entry(&remote_only).expect("parses");
+        assert!(entry.remote_only);
+        assert!(registry_def_from_entry(&entry).is_err());
+    }
+
+    #[test]
+    fn registry_def_builds_npx_command_with_pinned_version_and_env_keys() {
+        let entry = parse_registry_entry(&registry_fixture()).unwrap();
+        let def = registry_def_from_entry(&entry).expect("def");
+        assert_eq!(def.command, "npx");
+        assert_eq!(def.args, vec!["-y".to_string(), "remote-filesystem-mcp-server@0.1.3".to_string()]);
+        // Env keys prefilled EMPTY — the user fills values before connecting.
+        assert!(def.env.contains_key("GCS_BUCKET"));
+        assert_eq!(def.env.get("GCS_BUCKET").unwrap(), "");
+        // Registry installs are NOT gallery-trusted: the exec gate confirms
+        // the first spawn, exactly like a user-typed custom server.
+        assert!(!def.from_gallery);
+        assert_eq!(def.id, "com_pulsemcp_remote_filesystem");
+    }
+
+    #[test]
+    fn registry_def_refuses_unknown_runtime() {
+        let mut entry = parse_registry_entry(&registry_fixture()).unwrap();
+        entry.packages[0].runtime_hint = Some("powershell".to_string());
+        let err = registry_def_from_entry(&entry).expect_err("must refuse");
+        assert!(err.contains("allowed runtimes"), "{err}");
+    }
+
+    /// LIVE: the real registry over TLS. #[ignore]d for CI; run explicitly:
+    /// `cargo test --lib mcp_registry_search_live -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn mcp_registry_search_live() {
+        let results = mcp_registry_search("filesystem".to_string(), Some(10))
+            .await
+            .expect("live search");
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|r| r.status != "deleted"));
+        // At least one result must be installable (stdio package + allowlisted runtime).
+        assert!(results.iter().any(|r| registry_def_from_entry(r).is_ok()));
+    }
 
 #[cfg(test)]
 mod tests {

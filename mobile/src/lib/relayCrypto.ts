@@ -68,6 +68,29 @@ export function computePairProof(token: string): string {
   return Array.from(mac, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * Domain-separation label for the challenge-bound pairing proof — mirrors
+ * `PAIR_CHALLENGE_LABEL` in `src-tauri/src/mobile/relay_crypto.rs`.
+ */
+export const PAIR_CHALLENGE_LABEL = 'E2E-NONCE-V1';
+
+/**
+ * Compute the challenge-bound pairing proof:
+ * hex(HMAC-SHA256(key = token, msg = "E2E-NONCE-V1" || challenge)).
+ * `challengeB64Url` is the desktop's per-connection `PairChallenge` nonce
+ * (base64url, no padding). The proof only verifies on the connection whose
+ * challenge it binds, so a captured Pair frame cannot be replayed.
+ */
+export function computePairProofWithNonce(token: string, challengeB64Url: string): string {
+  const challenge = b64UrlToBytes(challengeB64Url);
+  const label = te.encode(PAIR_CHALLENGE_LABEL);
+  const msg = new Uint8Array(label.length + challenge.length);
+  msg.set(label);
+  msg.set(challenge, label.length);
+  const mac = hmac(sha256, te.encode(token), msg);
+  return Array.from(mac, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 function counterNonce(counter: number): Uint8Array {
   const nonce = new Uint8Array(24);
   new DataView(nonce.buffer).setBigUint64(16, BigInt(counter));

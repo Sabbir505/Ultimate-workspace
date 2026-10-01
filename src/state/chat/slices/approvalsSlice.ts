@@ -51,16 +51,18 @@ function answerDisplayText(
 
 export function createApprovalsSlice(set: ChatStoreSet, get: ChatStoreGet) {
   return {
-    resolveApproval: async (chatSessionId: string, approved: boolean) => {
+    resolveApproval: async (chatSessionId: string, approved: boolean, selected?: number[]) => {
       // Optimistic removal avoids a flicker if the backend's
-      // `chat:approval-resolved` event is slow.
+      // `chat:approval-resolved` event is slow. `selected` is the
+      // confirm-edits partial accept (§4.2.5): the occurrence indexes the
+      // user kept on the review card — omitted = accept everything.
       await resolvePendingCard(
         get,
         set,
         "pendingApprovals",
         chatSessionId,
         "Couldn't deliver the approval decision",
-        (pending) => resolveToolAction(pending.pendingId, approved),
+        (pending) => resolveToolAction(pending.pendingId, approved, selected),
       );
     },
 

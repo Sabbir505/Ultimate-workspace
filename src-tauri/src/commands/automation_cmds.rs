@@ -97,6 +97,13 @@ fn redacted(rows: Vec<Automation>) -> Vec<Automation> {
         .collect()
 }
 
+/// Packaged automation presets (automation_templates.rs) — the Automations
+/// UI renders these as one-click starting points (PR review bot etc.).
+#[tauri::command(async)]
+pub fn list_automation_templates() -> Vec<crate::automation_templates::AutomationTemplate> {
+    crate::automation_templates::templates()
+}
+
 #[tauri::command(async)]
 pub fn list_automations(db: State<'_, DbState>) -> Result<Vec<Automation>, String> {
     let conn = db.0.lock();

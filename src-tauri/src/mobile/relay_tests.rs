@@ -327,3 +327,397 @@ fn temp_chat_session_cleanup_deletes_session_and_messages() {
     assert_eq!(sessions, 0);
     assert_eq!(messages, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Pairing handshake: challenge-bound proofs (anti-replay, 2026-10-01)
+// ---------------------------------------------------------------------------
+
+/// A loopback WebSocket pair for pairing tests: the server's sink is wrapped
+/// as `SharedWsWrite` (E2E disabled — pre-pair) and the server's READ half is
+/// returned for `pair_handshake`; the client half is the "phone".
+async fn pairing_ws_pair() -> (
+    crate::mobile::relay_ws::SharedWsWrite,
+    futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+) {
+    use futures_util::StreamExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(stream).await.unwrap()
+    });
+    let (client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+        .await
+        .unwrap();
+    let server = server.await.unwrap();
+    let (sink, read) = server.split();
+    let write: crate::mobile::relay_ws::SharedWsWrite = Arc::new(tokio::sync::Mutex::new(
+        crate::mobile::relay_ws::SinkState {
+            sink,
+            e2e: crate::mobile::relay_ws::RelayE2E::default(),
+        },
+    ));
+    (write, read, client)
+}
+
+/// Phone-side: read the next plaintext Text frame (pre-pair) and parse it.
+async fn phone_recv_text(
+    client: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> crate::mobile::protocol::DesktopMessage {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+        .await
+        .expect("desktop frame timed out")
+        .expect("socket closed")
+        .expect("ws read error");
+    let Message::Text(t) = frame else {
+        panic!("pre-pair desktop frames must be Text, got {frame:?}");
+    };
+    serde_json::from_str(t.as_str()).expect("desktop frame must parse")
+}
+
+/// Phone-side: send one plaintext Text frame.
+async fn phone_send_text(
+    client: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    msg: &crate::mobile::protocol::MobileMessage,
+) {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    client
+        .send(Message::text(serde_json::to_string(msg).unwrap()))
+        .await
+        .unwrap();
+}
+
+/// Phone-side: send a RAW text frame (for replaying a captured handshake).
+async fn phone_send_raw(
+    client: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    text: String,
+) {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    client.send(Message::text(text)).await.unwrap();
+}
+
+fn b64url_decode(s: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).unwrap()
+}
+
+/// Live v2 handshake proving BOTH directions encrypt: full challenge →
+/// nonce-bound proof → PairOk, then an encrypted phone frame the server
+/// receives as Binary and an encrypted desktop frame the phone decrypts
+/// with the key it derived from the PairOk salt.
+#[tokio::test]
+async fn challenge_handshake_both_directions_encrypted() {
+    use crate::mobile::protocol::{DesktopMessage, MobileMessage};
+    use crate::mobile::relay_crypto;
+    use crate::mobile::relay_requests::pair_handshake;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let token = "pair-e2e-token-000000000000000000000000";
+    let (write, mut server_read, client) = pairing_ws_pair().await;
+
+    let phone = tokio::spawn(async move {
+        let mut client = client;
+        let challenge = match phone_recv_text(&mut client).await {
+            DesktopMessage::PairChallenge { nonce } => b64url_decode(&nonce),
+            other => panic!("expected PairChallenge, got {other:?}"),
+        };
+        let proof = relay_crypto::compute_pair_proof_with_nonce(token, &challenge);
+        phone_send_text(
+            &mut client,
+            &MobileMessage::Pair {
+                token: None,
+                proof: Some(proof),
+                v2: Some(true),
+            },
+        )
+        .await;
+        let key = match phone_recv_text(&mut client).await {
+            DesktopMessage::PairOk { salt } => {
+                relay_crypto::derive_session_key_with_salt(token, &b64url_decode(&salt))
+            }
+            other => panic!("expected PairOk, got {other:?}"),
+        };
+        // Phone → desktop encrypted frame at counter 0.
+        client
+            .send(Message::Binary(relay_crypto::encrypt(
+                &key,
+                0,
+                &serde_json::to_vec(&MobileMessage::ListSessions).unwrap(),
+            )))
+            .await
+            .unwrap();
+        // Desktop → phone encrypted frame at counter 0.
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+            .await
+            .unwrap()
+            .expect("socket closed")
+            .expect("ws read error");
+        let Message::Binary(bytes) = frame else {
+            panic!("post-pair desktop frames must be Binary");
+        };
+        let plain = relay_crypto::decrypt(&key, 0, &bytes).expect("desktop frame decrypts");
+        let msg: DesktopMessage = serde_json::from_slice(&plain).unwrap();
+        assert!(matches!(msg, DesktopMessage::DesktopStatus { connected: true }));
+    });
+
+    let ok = pair_handshake(token, false, &write, &mut server_read)
+        .await
+        .expect("v2 handshake must succeed");
+    assert!(ok);
+
+    // Desktop is keyed: an API-level send must leave as an encrypted Binary
+    // frame, and the phone's ListSessions must arrive as Binary on the
+    // server read half.
+    crate::mobile::relay::send_msg(&write, &DesktopMessage::DesktopStatus { connected: true })
+        .await
+        .unwrap();
+    let next = tokio::time::timeout(std::time::Duration::from_secs(5), server_read.next())
+        .await
+        .unwrap()
+        .expect("socket closed")
+        .expect("ws read error");
+    assert!(
+        matches!(next, Message::Binary(_)),
+        "phone post-pair frames must be Binary"
+    );
+    phone.await.unwrap();
+}
+
+/// Replay: the exact Pair frame captured on connection A must be rejected on
+/// connection B (fresh challenge → the bound proof no longer verifies).
+#[tokio::test]
+async fn captured_pair_frame_cannot_be_replayed_on_a_new_connection() {
+    use crate::mobile::protocol::{DesktopMessage, MobileMessage};
+    use crate::mobile::relay_crypto;
+    use crate::mobile::relay_requests::pair_handshake;
+
+    let token = "pair-replay-token-0000000000000000000000";
+
+    // Connection A: complete a v2 handshake, capturing the exact Pair text.
+    let (write_a, mut read_a, client_a) = pairing_ws_pair().await;
+    let capture = tokio::spawn(async move {
+        let mut client = client_a;
+        let challenge = match phone_recv_text(&mut client).await {
+            DesktopMessage::PairChallenge { nonce } => b64url_decode(&nonce),
+            other => panic!("expected PairChallenge, got {other:?}"),
+        };
+        let proof = relay_crypto::compute_pair_proof_with_nonce(token, &challenge);
+        let pair = MobileMessage::Pair {
+            token: None,
+            proof: Some(proof),
+            v2: Some(true),
+        };
+        let text = serde_json::to_string(&pair).unwrap();
+        phone_send_raw(&mut client, text.clone()).await;
+        assert!(matches!(
+            phone_recv_text(&mut client).await,
+            DesktopMessage::PairOk { .. }
+        ));
+        text
+    });
+    pair_handshake(token, false, &write_a, &mut read_a)
+        .await
+        .expect("connection A must pair");
+    let captured = capture.await.unwrap();
+
+    // Connection B: a fresh challenge is sent; the attacker replays the
+    // captured Pair verbatim and must be rejected.
+    let (write_b, mut read_b, client_b) = pairing_ws_pair().await;
+    let replay = tokio::spawn(async move {
+        let mut client = client_b;
+        // The attacker ignores the challenge entirely.
+        assert!(matches!(
+            phone_recv_text(&mut client).await,
+            DesktopMessage::PairChallenge { .. }
+        ));
+        phone_send_raw(&mut client, captured).await;
+        phone_recv_text(&mut client).await
+    });
+    let result = pair_handshake(token, false, &write_b, &mut read_b).await;
+    assert!(result.is_err(), "replayed Pair frame must not pair");
+    let err = replay.await.unwrap();
+    assert!(
+        matches!(err, DesktopMessage::ChatError { .. }),
+        "rejection must send an error frame, got {err:?}"
+    );
+}
+
+/// A v2 client (claims the flag) can never fall back to the static proof —
+/// that would re-open the replay hole to anyone with a captured legacy frame.
+#[tokio::test]
+async fn v2_client_cannot_fall_back_to_static_proof() {
+    use crate::mobile::protocol::{DesktopMessage, MobileMessage};
+    use crate::mobile::relay_crypto;
+    use crate::mobile::relay_requests::pair_handshake;
+
+    let token = "pair-v2strict-token-000000000000000000000";
+    let (write, mut server_read, client) = pairing_ws_pair().await;
+    let phone = tokio::spawn(async move {
+        let mut client = client;
+        assert!(matches!(
+            phone_recv_text(&mut client).await,
+            DesktopMessage::PairChallenge { .. }
+        ));
+        phone_send_text(
+            &mut client,
+            &MobileMessage::Pair {
+                token: None,
+                proof: Some(relay_crypto::compute_pair_proof(token)),
+                v2: Some(true),
+            },
+        )
+        .await;
+        phone_recv_text(&mut client).await
+    });
+    let result = pair_handshake(token, false, &write, &mut server_read).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("invalid challenge proof"));
+    assert!(matches!(
+        phone.await.unwrap(),
+        DesktopMessage::ChatError { .. }
+    ));
+}
+
+/// Compat: a pre-v2 client (no `v2` flag) still pairs with the static proof.
+#[tokio::test]
+async fn legacy_static_proof_still_pairs() {
+    use crate::mobile::protocol::{DesktopMessage, MobileMessage};
+    use crate::mobile::relay_crypto;
+    use crate::mobile::relay_requests::pair_handshake;
+
+    let token = "pair-legacy-token-00000000000000000000000";
+    let (write, mut server_read, client) = pairing_ws_pair().await;
+    let phone = tokio::spawn(async move {
+        let mut client = client;
+        assert!(matches!(
+            phone_recv_text(&mut client).await,
+            DesktopMessage::PairChallenge { .. }
+        ));
+        phone_send_text(
+            &mut client,
+            &MobileMessage::Pair {
+                token: None,
+                proof: Some(relay_crypto::compute_pair_proof(token)),
+                v2: None,
+            },
+        )
+        .await;
+        phone_recv_text(&mut client).await
+    });
+    pair_handshake(token, false, &write, &mut server_read)
+        .await
+        .expect("legacy static proof must still pair (compat)");
+    assert!(matches!(
+        phone.await.unwrap(),
+        DesktopMessage::PairOk { .. }
+    ));
+}
+
+/// With `mobile.pairing.require_challenge` set (post-upgrade fleet), the
+/// legacy static proof is refused outright.
+#[tokio::test]
+async fn require_challenge_refuses_legacy_proof() {
+    use crate::mobile::protocol::{DesktopMessage, MobileMessage};
+    use crate::mobile::relay_crypto;
+    use crate::mobile::relay_requests::pair_handshake;
+
+    let token = "pair-strict-token-00000000000000000000000";
+    let (write, mut server_read, client) = pairing_ws_pair().await;
+    let phone = tokio::spawn(async move {
+        let mut client = client;
+        assert!(matches!(
+            phone_recv_text(&mut client).await,
+            DesktopMessage::PairChallenge { .. }
+        ));
+        phone_send_text(
+            &mut client,
+            &MobileMessage::Pair {
+                token: None,
+                proof: Some(relay_crypto::compute_pair_proof(token)),
+                v2: None,
+            },
+        )
+        .await;
+        phone_recv_text(&mut client).await
+    });
+    let result = pair_handshake(token, true, &write, &mut server_read).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("challenge-response"));
+    assert!(matches!(
+        phone.await.unwrap(),
+        DesktopMessage::ChatError { .. }
+    ));
+}
+
+/// Lockout tracker: N-1 consecutive failures still allow an attempt, the
+/// Nth trips a lockout, and a success resets everything.
+#[test]
+fn pairing_attempt_tracker_locks_after_repeated_failures() {
+    use crate::mobile::relay_requests::{
+        PairAttemptTracker, PAIR_LOCKOUT, PAIR_MAX_CONSECUTIVE_FAILURES,
+    };
+
+    let mut t = PairAttemptTracker::new();
+    for _ in 0..PAIR_MAX_CONSECUTIVE_FAILURES - 1 {
+        assert!(t.check().is_ok());
+        t.note_failure();
+    }
+    assert!(t.check().is_ok(), "below the threshold there is no lockout");
+    t.note_failure();
+    let remaining = t.check().expect_err("threshold reached must lock out");
+    assert!(remaining <= PAIR_LOCKOUT);
+    t.note_success();
+    assert!(t.check().is_ok());
+}
+
+/// Wrong token: the challenge proof verifies against the EXPECTED token, so
+/// an attacker with a different token fails even with the fresh challenge.
+#[tokio::test]
+async fn challenge_proof_with_wrong_token_is_rejected() {
+    use crate::mobile::protocol::{DesktopMessage, MobileMessage};
+    use crate::mobile::relay_crypto;
+    use crate::mobile::relay_requests::pair_handshake;
+
+    let token = "pair-correct-token-0000000000000000000000";
+    let (write, mut server_read, client) = pairing_ws_pair().await;
+    let phone = tokio::spawn(async move {
+        let mut client = client;
+        let challenge = match phone_recv_text(&mut client).await {
+            DesktopMessage::PairChallenge { nonce } => b64url_decode(&nonce),
+            other => panic!("expected PairChallenge, got {other:?}"),
+        };
+        // The attacker proves a DIFFERENT token.
+        let proof = relay_crypto::compute_pair_proof_with_nonce("attacker-token", &challenge);
+        phone_send_text(
+            &mut client,
+            &MobileMessage::Pair {
+                token: None,
+                proof: Some(proof),
+                v2: Some(true),
+            },
+        )
+        .await;
+        phone_recv_text(&mut client).await
+    });
+    let result = pair_handshake(token, false, &write, &mut server_read).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("invalid challenge proof"));
+    assert!(matches!(
+        phone.await.unwrap(),
+        DesktopMessage::ChatError { .. }
+    ));
+}

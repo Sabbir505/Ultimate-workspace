@@ -27,8 +27,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::tools::{
-    COPY_FILE, DELETE_FILE, EDIT_FILE, LIST_DIRECTORY, MOVE_FILE, READ_FILE, SEARCH_FILES,
-    WRITE_FILE,
+    COPY_FILE, DELETE_FILE, EDIT_FILE, LIST_DIRECTORY, MOVE_FILE, READ_AGENTS_MD, READ_FILE,
+    SEARCH_FILES, WRITE_AGENTS_MD, WRITE_FILE,
 };
 
 /// Sandbox scope: which tools are *visible* to the model (what it can do).
@@ -85,6 +85,13 @@ pub enum ApprovalPolicy {
     /// Every mutating action pauses for approval (the safe default). New
     /// sessions start here. Equivalent to the legacy `manual` posture.
     OnRequest,
+    /// Inline edit review (§4.2.5, the "confirm edits" middle posture):
+    /// writes/edits pause like OnRequest, but the approval card carries a
+    /// structured edit preview — the actual occurrences in the target file —
+    /// and the user can accept ALL of the change, a SUBSET of the
+    /// occurrences, or reject it. Delete/move/copy/shell gate exactly like
+    /// OnRequest (no partial semantics for them).
+    ConfirmEdits,
     /// Writes/edits within granted roots auto-run; delete, move and copy
     /// still require per-action approval. Equivalent to legacy `auto_edit`.
     AutoEdit,
@@ -98,6 +105,7 @@ pub enum ApprovalPolicy {
 impl ApprovalPolicy {
     pub fn from_db(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
+            "confirm_edits" => ApprovalPolicy::ConfirmEdits,
             "auto_edit" => ApprovalPolicy::AutoEdit,
             "full_access" => ApprovalPolicy::FullAccess,
             _ => ApprovalPolicy::OnRequest, // "on_request", "", unknown
@@ -107,6 +115,7 @@ impl ApprovalPolicy {
     pub fn as_db(self) -> &'static str {
         match self {
             ApprovalPolicy::OnRequest => "on_request",
+            ApprovalPolicy::ConfirmEdits => "confirm_edits",
             ApprovalPolicy::AutoEdit => "auto_edit",
             ApprovalPolicy::FullAccess => "full_access",
         }
@@ -181,7 +190,7 @@ pub enum PermissionDecision {
 pub fn is_mutating_fs_tool(name: &str) -> bool {
     matches!(
         name,
-        WRITE_FILE | EDIT_FILE | DELETE_FILE | MOVE_FILE | COPY_FILE
+        WRITE_FILE | EDIT_FILE | DELETE_FILE | MOVE_FILE | COPY_FILE | WRITE_AGENTS_MD
     )
 }
 
@@ -269,7 +278,9 @@ pub fn check_system_permission(
                 PermissionDecision::NeedsApproval
             } else {
                 match approval {
-                    ApprovalPolicy::OnRequest => PermissionDecision::NeedsApproval,
+                    ApprovalPolicy::OnRequest | ApprovalPolicy::ConfirmEdits => {
+                        PermissionDecision::NeedsApproval
+                    }
                     ApprovalPolicy::AutoEdit | ApprovalPolicy::FullAccess => {
                         PermissionDecision::AutoRun
                     }
@@ -348,12 +359,16 @@ pub fn check_permission(
         };
     }
 
-    // write_file / edit_file: gated under OnRequest; auto-run within granted
-    // roots under AutoEdit and FullAccess.
+    // write_file / edit_file: gated under OnRequest/ConfirmEdits; auto-run
+    // within granted roots under AutoEdit and FullAccess.
     if is_mutating_fs_tool(tool) {
         return match approval {
-            // Every mutating action pauses.
-            ApprovalPolicy::OnRequest => PermissionDecision::NeedsApproval,
+            // Every mutating action pauses. ConfirmEdits pauses too — the
+            // difference is the structured edit preview + partial accept on
+            // the card (run_gated_fs_tool), not the gating decision here.
+            ApprovalPolicy::OnRequest | ApprovalPolicy::ConfirmEdits => {
+                PermissionDecision::NeedsApproval
+            }
             // Auto-edit / full-access auto-run writes/edits WITHIN granted
             // roots; outside granted roots, still gate them.
             ApprovalPolicy::AutoEdit | ApprovalPolicy::FullAccess => {
@@ -480,7 +495,9 @@ pub fn check_connector_permission(
                 PermissionDecision::NeedsApproval
             } else {
                 match approval {
-                    ApprovalPolicy::OnRequest => PermissionDecision::NeedsApproval,
+                    ApprovalPolicy::OnRequest | ApprovalPolicy::ConfirmEdits => {
+                        PermissionDecision::NeedsApproval
+                    }
                     ApprovalPolicy::AutoEdit | ApprovalPolicy::FullAccess => {
                         PermissionDecision::AutoRun
                     }
@@ -792,6 +809,61 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// Confirm-edits posture (§4.2.5): writes/edits pause like manual — the
+    /// difference is the preview + partial accept on the card, not the gate.
+    #[test]
+    fn confirm_edits_gates_writes_and_round_trips_the_db_value() {
+        let sandbox = SandboxPolicy::WorkspaceWrite;
+        let approval = ApprovalPolicy::ConfirmEdits;
+
+        // In-root writes still pause (that's the point of the posture).
+        assert_eq!(
+            check_permission(
+                sandbox,
+                approval,
+                "write_file",
+                "/proj/src/a.txt",
+                &["/proj".to_string()],
+            ),
+            PermissionDecision::NeedsApproval
+        );
+        // Shell + delete keep gating (no partial semantics for them).
+        assert_eq!(
+            check_system_permission(sandbox, approval, "run_shell"),
+            PermissionDecision::NeedsApproval
+        );
+        assert_eq!(
+            check_permission(
+                sandbox,
+                approval,
+                "delete_file",
+                "/proj/src/a.txt",
+                &["/proj".to_string()],
+            ),
+            PermissionDecision::NeedsApproval
+        );
+        // Reads stay auto-run.
+        assert_eq!(
+            check_permission(
+                sandbox,
+                approval,
+                "read_file",
+                "/proj/src/a.txt",
+                &["/proj".to_string()],
+            ),
+            PermissionDecision::AutoRun
+        );
+
+        // DB round trip + unknown-string fail-safe (manual, NOT confirm).
+        assert_eq!(ApprovalPolicy::from_db("confirm_edits"), ApprovalPolicy::ConfirmEdits);
+        assert_eq!(ApprovalPolicy::ConfirmEdits.as_db(), "confirm_edits");
+        assert_eq!(
+            ApprovalPolicy::from_db("  Confirm_Edits "),
+            ApprovalPolicy::ConfirmEdits
+        );
+    }
+
     use super::*;
 
     const ROOTS: &[&str] = &["C:/projects/alpha", "C:\\projects\\beta"];

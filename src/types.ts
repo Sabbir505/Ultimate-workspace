@@ -237,6 +237,9 @@ export interface InstalledSkill {
   name: string;
   description: string;
   source: "claude" | "kimi" | "both";
+  /** SKILL.md frontmatter metadata (progressive disclosure — shown without loading the body). */
+  version?: string;
+  allowedTools?: string;
   claudePath: string | null;
   kimiPath: string | null;
   kind: "skill" | "loop";

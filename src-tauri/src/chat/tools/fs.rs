@@ -416,8 +416,134 @@ pub(super) fn fs_copy_file(args: &Value) -> ToolOutcome {
     }
 }
 
+
+/// Apply an edit_file change to ONLY the occurrences the user accepted on a
+/// confirm-edits review card (§4.2.5): `selected` holds 1-based occurrence
+/// indexes (the same numbering the card showed). Unselected occurrences stay
+/// untouched in the file — the model is told exactly what ran so it can
+/// follow up on the remainder. Distinct from [`fs_edit_file`], which is
+/// all-or-nothing.
+pub(crate) fn fs_edit_file_selected(args: &Value, selected: &[usize]) -> ToolOutcome {
+    let path = arg_str(args, "path");
+    let find = args.get("find").and_then(|v| v.as_str()).unwrap_or("");
+    let replace = args.get("replace").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() || find.is_empty() {
+        return ToolOutcome::text("Error: edit_file requires \"path\" and \"find\".");
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => return ToolOutcome::text(format!("edit_file: cannot read {path}: {e}")),
+    };
+    let mut out = String::with_capacity(content.len());
+    let mut last = 0usize;
+    let mut replaced = 0usize;
+    let total = content.matches(find).count();
+    for (i, (pos, _)) in content.match_indices(find).enumerate() {
+        let occurrence = i + 1;
+        out.push_str(&content[last..pos]);
+        if selected.contains(&occurrence) {
+            out.push_str(replace);
+            replaced += 1;
+        } else {
+            out.push_str(find);
+        }
+        last = pos + find.len();
+    }
+    out.push_str(&content[last..]);
+    match std::fs::write(&path, out) {
+        Ok(_) => ToolOutcome::text(format!(
+            "Applied the edit at {replaced} of the {total} occurrence(s) in the file \
+             ({selected_len} accepted on the review card, {skipped} left UNCHANGED — \
+             the user rejected them; do not re-edit those without asking.",
+            selected_len = selected.len(),
+            skipped = total.saturating_sub(replaced),
+        )),
+        Err(e) => ToolOutcome::text(format!("edit_file failed: {e}")),
+    }
+}
+
+/// Read the AGENTS.md agent-instructions file governing a directory — the
+/// de-facto repo standard Relay now layers into harness bundles and the
+/// built-in chat prompt. Discovery walks ancestors (the standard's lookup),
+/// so a subdirectory path still finds the repo-root file. Read-only.
+pub(super) fn fs_agents_md_read(args: &Value) -> ToolOutcome {
+    let dir = arg_str(args, "path");
+    let root = if dir.is_empty() { "." } else { dir.as_str() };
+    match crate::agents_md::read(root) {
+        Some((path, content)) => {
+            ToolOutcome::text(format!("{}:\n\n{content}", path.display()))
+        }
+        None => ToolOutcome::text(format!(
+            "No AGENTS.md found at or above {root}. If the user wants project \
+             instructions recorded, create one with write_agents_md — it is the \
+             standard repo-instructions file every coding agent reads."
+        )),
+    }
+}
+
+/// Create/update a project's AGENTS.md. `path` may be the file itself or a
+/// directory (its AGENTS.md is used); `append: true` adds a section instead
+/// of overwriting. Mutating — the permission ladder gates it like write_file
+/// (same tool family via is_mutating_fs_tool).
+pub(super) fn fs_agents_md_write(args: &Value) -> ToolOutcome {
+    let path = arg_str(args, "path");
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let append = args.get("append").and_then(|v| v.as_bool()).unwrap_or(false);
+    if content.trim().is_empty() {
+        return ToolOutcome::text("Error: write_agents_md requires non-empty \"content\".");
+    }
+    let mut target = std::path::PathBuf::from(if path.is_empty() { "." } else { path.as_str() });
+    if target.is_dir() {
+        target = target.join(crate::agents_md::FILE_NAME);
+    }
+    let result = if append && target.is_file() {
+        match std::fs::read_to_string(&target) {
+            Ok(existing) => std::fs::write(&target, format!("{existing}
+{content}")),
+            Err(e) => Err(e),
+        }
+    } else {
+        std::fs::write(&target, content)
+    };
+    match result {
+        Ok(_) => ToolOutcome::text(format!(
+            "Wrote {} ({} chars) to {}. Coding agents read this file at the              repo root — keep it to durable project instructions.",
+            if append { "appended" } else { "AGENTS.md" },
+            content.chars().count(),
+            target.display()
+        )),
+        Err(e) => ToolOutcome::text(format!("write_agents_md failed: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn edit_file_selected_applies_only_chosen_occurrences() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("multi.txt");
+        std::fs::write(&path, "alpha beta alpha beta alpha").unwrap();
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "find": "alpha",
+            "replace": "X",
+        });
+        // Accept occurrences 1 and 3; 2 stays untouched.
+        let out = fs_edit_file_selected(&args, &[1, 3]);
+        assert!(
+            out.text.contains("at 2 of the 3 occurrence(s)")
+                && out.text.contains("2 accepted")
+                && out.text.contains("1 left UNCHANGED"),
+            "report must state what ran: {}",
+            out.text
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "X beta alpha beta X");
+        // The untouched occurrence must be reported as rejected.
+        assert!(out.text.contains("UNCHANGED"), "{}", out.text);
+    }
+
     use super::*;
     use serde_json::json;
 

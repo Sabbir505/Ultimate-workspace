@@ -56,8 +56,13 @@ mod imagegen;
 use imagegen::generate_image_tool;
 
 mod fs;
+/// The confirm-edits partial-apply entry point (§4.2.5) — dispatch's gated
+/// tool path calls it directly when the user accepted a SUBSET of an edit's
+/// occurrences on the review card.
+pub(crate) use fs::fs_edit_file_selected;
 use fs::{
-    fs_copy_file, fs_delete_file, fs_edit_file, fs_list_directory, fs_move_file, fs_read_file,
+    fs_agents_md_read, fs_agents_md_write, fs_copy_file, fs_delete_file, fs_edit_file,
+    fs_list_directory, fs_move_file, fs_read_file,
     fs_search_files, fs_write_file,
 };
 mod search_content;
@@ -381,6 +386,12 @@ pub const DELETE_FILE: &str = "delete_file";
 pub const MOVE_FILE: &str = "move_file";
 /// Copy a file. Mutating.
 pub const COPY_FILE: &str = "copy_file";
+/// Read the project's AGENTS.md (the standard repo-instructions file) with
+/// ancestor discovery. Read-only.
+pub const READ_AGENTS_MD: &str = "read_agents_md";
+/// Create/update/append to a project's AGENTS.md. Mutating — gated like
+/// write_file (it IS a file write; the same permission ladder applies).
+pub const WRITE_AGENTS_MD: &str = "write_agents_md";
 
 /// Which tool capabilities are enabled for a turn. Web search, file generation
 /// and URL fetching are considered safe and are always on when tools are
@@ -400,6 +411,14 @@ pub struct ToolCaps {
     /// (LocalGguf) don't have this capability — they ride the same
     /// OpenAI tool loop but get a stripped schema.
     pub web_search: bool,
+    /// Native SERVER-side search (§4.3.7): Anthropic's Messages API runs
+    /// `web_search` itself (server_tool_use + cited results, no client
+    /// round-trip). When set, the ANTHROPIC spec builder swaps the client
+    /// `web_search` tool for the server block. Only ever true for native
+    /// Anthropic sessions with the opt-in setting on — the OpenAI wire path
+    /// (Chat Completions) has no equivalent, and compatible gateways would
+    /// not parse the block.
+    pub native_search: bool,
     /// True for providers whose code execution must stay inside the bundled
     /// local sandbox (LocalGguf). The tool loop consults this so a local
     /// model's `run_code` calls are constrained to the sandbox rather than
@@ -604,6 +623,7 @@ impl Default for ToolCaps {
             code_exec: false,
             fs_roots: Vec::new(),
             web_search: true,
+            native_search: false,
             requires_local_sandbox: false,
             attached_connectors: std::sync::Arc::new(Vec::new()),
             local_docs: false,
@@ -798,6 +818,10 @@ const LIST_DIRECTORY_DESC: &str = "List the immediate children of a directory \
 const READ_FILE_DESC: &str = "Read a file's text contents and return them \
     (truncated to a reasonable length). Pass an absolute path. Read-only. Best \
     for text/code files; binary files are not decoded.";
+
+const READ_AGENTS_MD_DESC: &str = "Read the project's AGENTS.md (the standard     repo-instructions file: build/test commands, house rules). Pass a directory;     discovery walks up to the nearest file. Read-only.";
+
+const WRITE_AGENTS_MD_DESC: &str = "Create or update a project's AGENTS.md.     `path` = project root (file created inside) or the file itself; `append:     true` adds a section. Keep content to durable project instructions.     Mutating.";
 
 const SEARCH_FILES_DESC: &str = "Recursively find LOCAL files under a directory \
     whose path/name contains a substring (case-insensitive); returns matching \
@@ -1437,6 +1461,11 @@ pub async fn execute_tool(
         DELETE_FILE => run_blocking_tool(args, fs_delete_file).await,
         MOVE_FILE => run_blocking_tool(args, fs_move_file).await,
         COPY_FILE => run_blocking_tool(args, fs_copy_file).await,
+        // AGENTS.md: the standard repo-instructions file. Read walks
+        // ancestors (the standard's discovery); write is gated like
+        // write_file via is_mutating_fs_tool.
+        READ_AGENTS_MD => run_blocking_tool(args, fs_agents_md_read).await,
+        WRITE_AGENTS_MD => run_blocking_tool(args, fs_agents_md_write).await,
         other => ToolOutcome::text(format!("Error: unknown tool \"{other}\".")),
     }
 }
@@ -2013,10 +2042,113 @@ mod tests {
         assert!(!names.contains(&DELETE_FILE.to_string()));
         assert!(!names.contains(&MOVE_FILE.to_string()));
         assert!(!names.contains(&COPY_FILE.to_string()));
+        // write_agents_md is a file write (same mutating family).
+        assert!(
+            !names.contains(&WRITE_AGENTS_MD.to_string()),
+            "write_agents_md must be absent under read_only"
+        );
         // Read-only FS tools are still present.
         assert!(names.contains(&LIST_DIRECTORY.to_string()));
         assert!(names.contains(&READ_FILE.to_string()));
         assert!(names.contains(&SEARCH_FILES.to_string()));
+        assert!(names.contains(&READ_AGENTS_MD.to_string()));
+    }
+
+    // ---- AGENTS.md tools (§4.2.10) — live dispatch through execute_tool ----
+
+    #[test]
+    fn agents_md_tools_write_read_discover_and_append() {
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_str().unwrap().to_string();
+
+        // Write into a directory path → AGENTS.md created inside it.
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            &ToolCaps::default(),
+            WRITE_AGENTS_MD,
+            &json!({ "path": root, "content": "# House rules\nUse pnpm." }),
+            None,
+            None,
+        ));
+        assert!(out.text.contains("Wrote AGENTS.md"), "{}", out.text);
+        let file = tmp.path().join("AGENTS.md");
+        assert!(file.is_file());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# House rules\nUse pnpm.");
+
+        // Read via a SUBDIRECTORY path → ancestor discovery finds the root file.
+        let sub = tmp.path().join("crates").join("app");
+        std::fs::create_dir_all(&sub).unwrap();
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            &ToolCaps::default(),
+            READ_AGENTS_MD,
+            &json!({ "path": sub.to_str().unwrap() }),
+            None,
+            None,
+        ));
+        assert!(out.text.contains("Use pnpm."), "{}", out.text);
+        assert!(out.text.contains("AGENTS.md"));
+
+        // Append → new section after the original content.
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            &ToolCaps::default(),
+            WRITE_AGENTS_MD,
+            &json!({ "path": root, "content": "Never touch main.", "append": true }),
+            None,
+            None,
+        ));
+        assert!(out.text.contains("appended"), "{}", out.text);
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.starts_with("# House rules"));
+        assert!(content.contains("Never touch main."));
+
+        // Read at the project root reflects the append.
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            &ToolCaps::default(),
+            READ_AGENTS_MD,
+            &json!({ "path": root }),
+            None,
+            None,
+        ));
+        assert!(out.text.contains("Never touch main."));
+
+        // Empty content is refused.
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            &ToolCaps::default(),
+            WRITE_AGENTS_MD,
+            &json!({ "path": root, "content": "  " }),
+            None,
+            None,
+        ));
+        assert!(out.text.starts_with("Error:"));
+    }
+
+    #[test]
+    fn read_agents_md_reports_missing_file_with_guidance() {
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            &ToolCaps::default(),
+            READ_AGENTS_MD,
+            &json!({ "path": tmp.path().to_str().unwrap() }),
+            None,
+            None,
+        ));
+        assert!(out.text.contains("No AGENTS.md found"));
+        assert!(out.text.contains("write_agents_md"));
     }
 
     #[test]

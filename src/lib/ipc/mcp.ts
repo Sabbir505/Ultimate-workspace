@@ -51,6 +51,37 @@ export const mcpGalleryList = () =>
 export const mcpGalleryInstall = (catalogId?: string, custom?: Partial<McpServerDef>) =>
   safeInvoke<McpServerDef | null>("mcp_gallery_install", { catalogId, custom });
 
+// ── Official MCP registry (§4.3.3) — registry.modelcontextprotocol.io ─────
+export interface RegistryEnvVar {
+  name: string;
+  description: string | null;
+  required: boolean;
+  secret: boolean;
+}
+export interface RegistryPackage {
+  registryType: string;
+  identifier: string;
+  version: string | null;
+  runtimeHint: string | null;
+  runtimeArgs: string[];
+  envVars: RegistryEnvVar[];
+}
+export interface RegistryServerEntry {
+  name: string;
+  title: string | null;
+  description: string;
+  version: string | null;
+  repositoryUrl: string | null;
+  status: string;
+  isLatest: boolean;
+  remoteOnly: boolean;
+  packages: RegistryPackage[];
+}
+export const mcpRegistrySearch = (query: string, limit?: number) =>
+  safeInvoke<RegistryServerEntry[]>("mcp_registry_search", { query, limit });
+export const mcpRegistryInstall = (entry: RegistryServerEntry) =>
+  safeInvoke<McpServerDef | null>("mcp_registry_install", { entry });
+
 export const mcpGalleryRemove = (id: string) =>
   safeInvoke<null>("mcp_gallery_remove", { id });
 

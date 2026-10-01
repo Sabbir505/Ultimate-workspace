@@ -90,6 +90,16 @@ pub fn create_installed_skill(name: String, kind: String, content: String) -> Cm
     installed_skills::create_installed(&name, &kind_key(&kind), &content)
 }
 
+/// Install a skill from a user-pasted http(s) URL (§4.3.4 marketplace v1):
+/// a raw SKILL.md, a GitHub blob/tree URL, or a .zip holding one skill.
+/// USER-initiated (the Skills Library) — the fetch target is the user's own
+/// paste, so no agent-SSRF guard applies. Network work runs on this async
+/// command's worker thread.
+#[tauri::command(async)]
+pub async fn install_skill_from_url(url: String, kind: String) -> CmdResult<installed_skills::SkillInstallResult> {
+    installed_skills::install_from_url(&url, &kind).await
+}
+
 #[tauri::command(async)]
 pub fn delete_installed_skill(
     slug: String,

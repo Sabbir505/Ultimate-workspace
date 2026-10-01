@@ -34,10 +34,13 @@ import {
   mcpGalleryList,
   mcpGalleryRemove,
   mcpGallerySetEnabled,
+  mcpRegistryInstall,
+  mcpRegistrySearch,
   type McpCatalogEntry,
   type McpConnectResult,
   type McpGalleryList,
   type McpServerDef,
+  type RegistryServerEntry,
   type McpToolView,
 } from "../../lib/ipc";
 import { toastError } from "../../lib/ipc";
@@ -108,6 +111,13 @@ export function McpGalleryPanel() {
   const [customEnv, setCustomEnv] = useState("");
   const [customOpen, setCustomOpen] = useState(false);
   const [customBusy, setCustomBusy] = useState(false);
+  // Official MCP registry (§4.3.3): lazy search + one-click install. Kept
+  // lazy so the panel paints instantly; a search only fires on demand.
+  const [registryQuery, setRegistryQuery] = useState("");
+  const [registryResults, setRegistryResults] = useState<RegistryServerEntry[]>([]);
+  const [registrySearching, setRegistrySearching] = useState(false);
+  const [registrySearched, setRegistrySearched] = useState(false);
+  const [registryInstalling, setRegistryInstalling] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -149,7 +159,56 @@ export function McpGalleryPanel() {
     [refresh],
   );
 
-  const removeServer = useCallback(
+  const searchRegistry = useCallback(async (q: string) => {
+    setRegistrySearching(true);
+    try {
+      const results = await mcpRegistrySearch(q, 30);
+      setRegistryResults(results ?? []);
+      setRegistrySearched(true);
+    } catch (err) {
+      // A failed search still counts as "answered" — the empty state below
+      // must render, not leave the previous results (or nothing) hanging.
+      setRegistryResults([]);
+      setRegistrySearched(true);
+      toastError("Registry search failed", err);
+    } finally {
+      setRegistrySearching(false);
+    }
+  }, []);
+
+  // Auto-search: fires DEBOUNCED as the user types (400ms) — no Search
+  // button to press. Cleared input clears the results; stale in-flight
+  // responses are discarded so a fast typist never sees an older query's
+  // results land under a newer one.
+  useEffect(() => {
+    const q = registryQuery.trim();
+    if (!q) {
+      setRegistryResults([]);
+      setRegistrySearched(false);
+      return;
+    }
+    const t = window.setTimeout(() => {
+      void searchRegistry(q);
+    }, 400);
+    return () => window.clearTimeout(t);
+  }, [registryQuery, searchRegistry]);
+
+  const installFromRegistry = useCallback(
+    async (entry: RegistryServerEntry) => {
+      setRegistryInstalling(entry.name);
+      try {
+        await mcpRegistryInstall(entry);
+        await refresh();
+      } catch (err) {
+        toastError("Registry install failed", err);
+      } finally {
+        setRegistryInstalling(null);
+      }
+    },
+    [refresh],
+  );
+
+    const removeServer = useCallback(
     async (def: McpServerDef) => {
       if (!window.confirm(`Remove "${def.name}"? Its process will be stopped.`)) return;
       setBusyId(def.id);
@@ -402,6 +461,73 @@ export function McpGalleryPanel() {
                     </button>
                   </>
                 )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Official registry (§4.3.3): open index, status-badged, one-click.
+          Installed defs are NOT gallery-trusted (fromGallery=false) — the
+          exec gate still confirms the first spawn. */}
+      <h3 className="mcp-gallery-subhead">Registry</h3>
+      <div className={`mcp-registry-search${registrySearching ? " searching" : ""}`}>
+        <input
+          placeholder="Search the official MCP registry — filesystem, github, sqlite…"
+          value={registryQuery}
+          aria-label="Search the official MCP registry"
+          onChange={(e) => setRegistryQuery(e.target.value)}
+        />
+        {registrySearching && <span className="mcp-spinner" aria-label="Searching" />}
+      </div>
+      {registrySearching && registryResults.length === 0 && (
+        <div className="mcp-registry-loading" role="status">
+          <span className="mcp-spinner" />
+          Searching the registry…
+        </div>
+      )}
+      {registrySearched && registryResults.length === 0 && !registrySearching && (
+        <p className="muted">No registry servers matched.</p>
+      )}
+      <div className="mcp-gallery-grid">
+        {registryResults.map((entry) => {
+          const first = entry.packages[0];
+          const installable = !entry.remoteOnly && entry.packages.length > 0;
+          const verified = entry.status === "active" && entry.isLatest;
+          return (
+            <div key={entry.name} className="mcp-gallery-card" data-testid="registry-result">
+              <div className="mcp-gallery-card-head">
+                <strong title={entry.name}>{entry.title || entry.name}</strong>
+                <span
+                  className={`mcp-badge ${verified ? "mcp-badge-on" : ""}`}
+                  title={`Registry status: ${entry.status}${entry.isLatest ? " (latest version)" : ""}`}
+                >
+                  {verified ? "registry ✓" : entry.status}
+                </span>
+              </div>
+              <code className="mcp-gallery-card-cmd">{entry.name}</code>
+              <div className="mcp-gallery-card-desc">{entry.description}</div>
+              <div className="mcp-gallery-card-foot">
+                {first && (
+                  <code className="mcp-gallery-card-cmd">
+                    {first.registryType}
+                    {entry.version ?? first.version ? ` · v${entry.version ?? first.version}` : ""}
+                    {first.envVars.length > 0 ? ` · env: ${first.envVars.map((v) => v.name).join(", ")}` : ""}
+                  </code>
+                )}
+                {entry.remoteOnly ? (
+                  <span className="mcp-badge" title="This server is streamable-HTTP only — connect it through Settings → Connectors.">
+                    remote-only
+                  </span>
+                ) : installable ? (
+                  <button
+                    className="primary"
+                    disabled={registryInstalling === entry.name}
+                    onClick={() => void installFromRegistry(entry)}
+                  >
+                    {registryInstalling === entry.name ? "Installing" : "Install"}
+                  </button>
+                ) : null}
               </div>
             </div>
           );

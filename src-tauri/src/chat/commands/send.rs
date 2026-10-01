@@ -572,7 +572,7 @@ pub async fn send_chat_message(
     let content = format!("{content}{extra_text}");
     let chat_mgr = &chat_state.0;
     // 1. Look up the session — provider/model/permission policies for this turn.
-    let (provider_str, model_str, sandbox_str, approval_str, mode_label, session_auto) = {
+    let (provider_str, model_str, sandbox_str, approval_str, mode_label, session_auto, session_project_id) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
@@ -584,6 +584,7 @@ pub async fn send_chat_message(
             cs.approval_policy,
             cs.permission_mode,
             cs.auto_model,
+            cs.project_id,
         )
     };
     let sandbox = crate::chat::permission::SandboxPolicy::from_db(&sandbox_str);
@@ -1130,6 +1131,20 @@ pub async fn send_chat_message(
             manifest.as_deref(),
             None,
         );
+        // AGENTS.md layering (§4.2.10): the bound project's AGENTS.md rides
+        // the system prompt. It changes only when the file is edited, so the
+        // prompt-prefix caches keep working — and the section is capped in
+        // agents_md.rs. The same layering happens for harness CLIs in
+        // agent_sessions::bundle (their instructions.md), so both surfaces
+        // honor the repo standard.
+        let agents_md_section = session_project_id.as_ref().and_then(|pid| {
+            let conn = db.0.lock();
+            db::get_project(&conn, pid)
+                .ok()
+                .flatten()
+                .and_then(|p| crate::agents_md::prompt_section(&p.path))
+        });
+        let built = crate::agents_md::append_to_system(built, agents_md_section);
         // Session Mesh (SESSION_MESH_DESIGN_ARCHITECTURE.md §4.3) is ON
         // DEMAND now: the registry block used to ride the system prompt
         // EVERY turn, and its relative ages ("idle 3m") + peer reply tails
@@ -2003,6 +2018,7 @@ pub(crate) async fn run_prompt_warmup(
         code_exec,
         fs_roots: Vec::new(),
         web_search: pcaps.native_web_search,
+        native_search: false,
         requires_local_sandbox: pcaps.requires_local_sandbox,
         // A fresh session's first send has no LIVE connector sessions yet
         // (AttachedConnector needs a connected McpSession — not fabricatable

@@ -825,6 +825,11 @@ mod tests {
         // Relay's pipeline for these is built-in-chat-specific.
         ("web_search", "harness CLIs search the web natively"),
         ("fetch_url", "harness CLIs fetch pages natively"),
+        // AGENTS.md: harness CLIs read/author the file with their own native
+        // file tools, and Relay layers the project's AGENTS.md into every
+        // bundle's instructions — the registry tools are built-in-chat-only.
+        ("read_agents_md", "harness CLIs read AGENTS.md natively; the bundle layers it"),
+        ("write_agents_md", "harness CLIs write files natively; layering is bundle-side"),
         ("run_shell", "harness has its own shell — Relay's ungated shell must not be bridge-reachable"),
         ("run_code", "harness runs code with its own runtime"),
         ("download_file", "Relay background-task engine is built-in-chat-only; harness downloads via its own shell"),

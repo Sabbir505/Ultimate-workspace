@@ -104,6 +104,7 @@ mod acp;
 mod acp_agents;
 mod automation_task;
 pub mod automations;
+pub mod automation_templates;
 pub mod automation_triggers;
 pub mod automation_webhook;
 pub mod artifacts;
@@ -139,6 +140,8 @@ mod pty;
 mod secrets;
 mod session_fabric;
 mod types;
+pub mod agents_md;
+pub mod prompt_firewall;
 pub mod user_dirs;
 pub mod vault;
 mod util;
@@ -705,6 +708,7 @@ pub fn run() {
             commands::git_cmds::uninstall_git_watcher,
             commands::git_cmds::refresh_git_watchers,
             // automations (scheduled headless agent runs)
+            commands::automation_cmds::list_automation_templates,
             commands::automation_cmds::list_automations,
             commands::automation_cmds::create_automation,
             commands::automation_cmds::update_automation,
@@ -786,6 +790,7 @@ pub fn run() {
             commands::skills_cmds::read_installed_skill,
             commands::skills_cmds::save_installed_skill,
             commands::skills_cmds::create_installed_skill,
+            commands::skills_cmds::install_skill_from_url,
             commands::skills_cmds::delete_installed_skill,
             commands::skills_cmds::make_installed_global,
             commands::skills_cmds::list_chat_skills,
@@ -1033,6 +1038,8 @@ pub fn run() {
             commands::llama_build::llama_install_cuda,
             commands::worktree_cmds::ensure_chat_session_worktree,
             commands::worktree_cmds::set_chat_session_worktree,
+            mcp_gallery::mcp_registry_search,
+            mcp_gallery::mcp_registry_install,
             mcp_gallery::mcp_gallery_list,
             mcp_gallery::mcp_gallery_install,
             mcp_gallery::mcp_gallery_remove,

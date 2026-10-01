@@ -3,10 +3,14 @@
 //! **Design:** the 256-bit pairing token is a genuine pre-shared secret (it
 //! travels out-of-band in the pairing URL/QR fragment and is NEVER sent over the
 //! wire). Both sides derive a 32-byte XChaCha20 session key from it via
-//! HKDF-SHA256. The phone proves token possession with
-//! `Hex(HMAC-SHA256(token, "E2E"))` in the Pair frame instead of sending the raw
-//! token, and every post-pair frame is then AEAD-encrypted with
-//! XChaCha20-Poly1305 (24-byte nonce, 16-byte tag).
+//! HKDF-SHA256. The phone proves token possession with `Hex(HMAC-SHA256(token,
+//! "E2E"))` in the Pair frame instead of sending the raw token — or, since
+//! 2026-10-01, with `Hex(HMAC-SHA256(token, "E2E-NONCE-V1" || challenge))`
+//! where `challenge` is a fresh 32-byte nonce the desktop sends in a
+//! `PairChallenge` frame when the connection opens, binding the proof to THAT
+//! connection so a captured proof cannot be replayed (the legacy static proof
+//! remains the pre-v2-client fallback). Every post-pair frame is then
+//! AEAD-encrypted with XChaCha20-Poly1305 (24-byte nonce, 16-byte tag).
 //!
 //! - **No pubkey exchange needed** — the token is a genuine PSK.
 //! - **No plaintext token on the wire** — a passive LAN observer cannot derive
@@ -89,6 +93,56 @@ pub fn verify_pair_proof(expected_token: &str, presented: &str) -> bool {
     }
     let ours = compute_pair_proof(expected_token);
     // Constant-time compare via subtle.
+    ours.as_bytes().ct_eq(presented.as_bytes()).into()
+}
+
+// ---------------------------------------------------------------------------
+// Challenge-bound pairing proof (2026-10-01 anti-replay upgrade)
+//
+// The static proof above is constant for the lifetime of the token, so a
+// proof captured once (malicious LAN peer, shared network, leaked frame) can
+// be replayed indefinitely. The fix: the desktop opens every connection by
+// sending a fresh 32-byte challenge (the plaintext `PairChallenge` frame),
+// and challenge-capable clients prove possession with
+// `HMAC(key = token, "E2E-NONCE-V1" || challenge)` — a proof that only
+// verifies on the connection it was minted for. The legacy static proof
+// remains the fallback for old clients; `mobile.pairing.require_challenge`
+// flips the desktop to refuse it once every client is upgraded.
+// ---------------------------------------------------------------------------
+
+/// Domain-separation label for the challenge-bound proof. Distinct from the
+/// legacy `"E2E"` message so a challenge-bound proof can never be confused
+/// with (or replayed as) a static one, and vice versa.
+pub const PAIR_CHALLENGE_LABEL: &[u8] = b"E2E-NONCE-V1";
+
+/// Fresh random per-connection pairing challenge (32 bytes).
+pub fn random_challenge() -> [u8; 32] {
+    use rand::RngCore;
+    let mut challenge = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut challenge);
+    challenge
+}
+
+/// Compute the challenge-bound pairing proof:
+/// lowercase-hex `HMAC-SHA256(key = token, data = "E2E-NONCE-V1" || challenge)`.
+pub fn compute_pair_proof_with_nonce(token: &str, challenge: &[u8]) -> String {
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(token.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(PAIR_CHALLENGE_LABEL);
+    mac.update(challenge);
+    let out = mac.finalize().into_bytes();
+    out.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Verify a challenge-bound pairing proof in constant time against the
+/// desktop's own derivation for the expected token + THIS connection's
+/// challenge. Fails closed on an empty expected token (S-1, same reasoning
+/// as [`verify_pair_proof`]).
+pub fn verify_pair_proof_with_nonce(expected_token: &str, challenge: &[u8], presented: &str) -> bool {
+    if expected_token.is_empty() {
+        return false;
+    }
+    let ours = compute_pair_proof_with_nonce(expected_token, challenge);
     ours.as_bytes().ct_eq(presented.as_bytes()).into()
 }
 
@@ -193,6 +247,45 @@ mod tests {
     }
 
     #[test]
+    fn challenge_proof_roundtrip_and_wrong_challenge() {
+        let token = "challenge-token-000000000000000000000";
+        let c1 = random_challenge();
+        let c2 = random_challenge();
+        let proof = compute_pair_proof_with_nonce(token, &c1);
+        assert!(verify_pair_proof_with_nonce(token, &c1, &proof));
+        assert!(
+            !verify_pair_proof_with_nonce(token, &c2, &proof),
+            "a proof bound to one connection's challenge must not verify on another"
+        );
+        assert!(!verify_pair_proof_with_nonce("other-token", &c1, &proof));
+        // The two domains are separate: a challenge-bound proof is never a
+        // valid static proof and vice versa.
+        assert!(!verify_pair_proof(token, &proof), "nonce proof must not pass the static check");
+        let static_proof = compute_pair_proof(token);
+        assert!(
+            !verify_pair_proof_with_nonce(token, &c1, &static_proof),
+            "static proof must not pass the challenge check"
+        );
+    }
+
+    #[test]
+    fn challenge_proof_fails_closed_on_empty_token() {
+        let proof = compute_pair_proof_with_nonce("attacker", b"challenge");
+        assert!(!verify_pair_proof_with_nonce("", b"challenge", &proof));
+    }
+
+    #[test]
+    fn challenge_proof_is_deterministic_and_64_hex() {
+        let token = "det-token-00000000000000000000000000";
+        let challenge = [7u8; 32];
+        let a = compute_pair_proof_with_nonce(token, &challenge);
+        let b = compute_pair_proof_with_nonce(token, &challenge);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
     fn encrypt_decrypt_roundtrip() {
         let key = derive_session_key("roundtrip-token-000000000000000000");
         let pt = b"hello encrypted relay";
@@ -246,6 +339,16 @@ mod tests {
         assert_eq!(
             compute_pair_proof(token),
             "f0ad7888264ad65376e1a0739476a08580837db7cbac0ecd5103184bb70a3070"
+        );
+        // Challenge-bound proof (anti-replay, 2026-10-01), pinned against the
+        // same @noble/hashes TS implementation: HMAC(token, "E2E-NONCE-V1" ||
+        // [7u8; 32]) for the token above. Verified live against the mobile
+        // node_modules copy of @noble/hashes; if either side changes its
+        // derivation the two ends can no longer pair.
+        let challenge = [7u8; 32];
+        assert_eq!(
+            compute_pair_proof_with_nonce(token, &challenge),
+            "46ac63c28989019d0a2ed8c922629745af78fce99524eb45170e845e0e9f1ce2"
         );
         // The plaintext below is part of the test vector: the expected frame is
         // precomputed against it (and the noble TS implementation) — do not rebrand.

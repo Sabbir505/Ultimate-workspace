@@ -54,6 +54,19 @@ export interface AutomationInput {
 export const listAutomations = () => safeInvoke<Automation[]>("list_automations");
 export const createAutomation = (input: AutomationInput) =>
   safeInvoke<Automation>("create_automation", { input });
+/** Packaged automation presets (PR review bot etc.) — form prefills, not a
+ *  separate write path; the user confirms via the standard form. */
+export interface AutomationTemplate {
+  id: string;
+  name: string;
+  description: string;
+  harness: string;
+  model: string | null;
+  schedule: string;
+  prompt: string;
+}
+export const listAutomationTemplates = () =>
+  safeInvoke<AutomationTemplate[]>("list_automation_templates");
 export const updateAutomation = (automationId: string, input: AutomationInput) =>
   safeInvoke<void>("update_automation", { automationId, input });
 export const deleteAutomation = (automationId: string) =>

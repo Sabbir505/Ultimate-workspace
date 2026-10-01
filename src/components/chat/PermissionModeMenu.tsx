@@ -38,6 +38,12 @@ export const PERMISSION_MODES: ModeOption[] = [
     description: "Every mutating action pauses for approval. (Default)",
   },
   {
+    value: "confirm_edits",
+    label: "Confirm Edits",
+    description:
+      "Writes & edits pause with a diff card — accept all of it, just some occurrences, or none.",
+  },
+  {
     value: "auto_edit",
     label: "Auto-Edit",
     description: "Reads & writes in granted roots auto-run. Delete/move/copy still gated.",
@@ -53,6 +59,7 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
   plan: "Plan",
   read_only: "Read Only",
   manual: "Manual",
+  confirm_edits: "Confirm Edits",
   auto_edit: "Auto-Edit",
   full_auto: "Full Auto",
 };

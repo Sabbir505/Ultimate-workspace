@@ -22,7 +22,11 @@ import {
   regenMobilePairingToken,
   type MobilePairingInfo,
 } from "../../lib/ipc";
-import { toastError, toastSuccess } from "../../lib/ipc";
+import { toastError, toastSuccess, getSetting, setSetting } from "../../lib/ipc";
+
+// Anti-replay pairing: when "true", the desktop refuses the legacy static
+// pairing proof — only challenge-bound (v2) phones can pair.
+const REQUIRE_CHALLENGE_KEY = "mobile.pairing.require_challenge";
 
 export function RemotePanel() {
   const [info, setInfo] = useState<MobilePairingInfo | null>(null);
@@ -31,6 +35,7 @@ export function RemotePanel() {
   const [tsLoginInProgress, setTsLoginInProgress] = useState(false);
   const [localQr, setLocalQr] = useState<string>("");
   const [tsQr, setTsQr] = useState<string>("");
+  const [requireChallenge, setRequireChallenge] = useState(false);
   const refreshTimer = useRef<number | null>(null);
   // Guard: only auto-start/auto-serve once per panel open (not on every refresh).
   const didAutoStart = useRef(false);
@@ -57,6 +62,12 @@ export function RemotePanel() {
       if (refreshTimer.current) window.clearInterval(refreshTimer.current);
     };
   }, [refresh]);
+
+  useEffect(() => {
+    void getSetting(REQUIRE_CHALLENGE_KEY)
+      .then((v) => setRequireChallenge(v === "true"))
+      .catch(() => undefined);
+  }, []);
 
   // ── Auto-start relay + auto-serve on mount ──────────────────────────────
   useEffect(() => {
@@ -306,6 +317,36 @@ export function RemotePanel() {
                 >
                   New token
                 </button>
+              </div>
+            </div>
+            <div className="field" style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <label className="corpus-toggle">
+                  <input
+                    type="checkbox"
+                    aria-label="Require challenge-response pairing"
+                    checked={requireChallenge}
+                    onChange={async (e) => {
+                      const on = e.target.checked;
+                      setRequireChallenge(on);
+                      try {
+                        await setSetting(REQUIRE_CHALLENGE_KEY, on ? "true" : "false");
+                      } catch (err) {
+                        setRequireChallenge(!on);
+                        toastError("Failed to save pairing strictness", err);
+                      }
+                    }}
+                  />
+                </label>
+                <span style={{ fontWeight: 600, fontSize: 12 }}>
+                  Strict pairing (reject pre-update phones)
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                Pairing proofs are bound to a per-connection challenge, so a
+                captured proof can't be replayed. Older phone builds still send
+                the legacy static proof — leave this off until every paired
+                device has updated, then enable it to refuse them.
               </div>
             </div>
             {isServing && tsQr && (

@@ -188,6 +188,20 @@ fn reindex_corpora_at(
             }
         }
     };
+    // A watcher-fired re-index must never COLD-START the embedding sidecar:
+    // `spawn_index_job` → `run_index` → `start_embedding` is the only path
+    // that launches it, and an unattended file change spinning up a
+    // multi-GB GPU model (which then stays resident) reads as "llama.cpp is
+    // running while I'm not doing anything". The manual Index button keeps
+    // its auto-start (deliberate user intent); the watcher only rides along
+    // when the sidecar is already up, and otherwise logs and waits.
+    if local.embedding_status().is_none() {
+        eprintln!(
+            "[docs_watcher] embedding sidecar is down — skipping re-index of {} (press Index to run it manually)",
+            canon.display()
+        );
+        return;
+    }
     for corpus in corpora {
         match spawn_index_job(
             app.clone(),

@@ -167,86 +167,87 @@ function GalleryPanel({ onInstalled }: { onInstalled: () => void }) {
   );
   const categories = [...new Set(filtered.map((e) => e.category))];
 
+  // Full-width grid (mirrors the MCP registry layout): the old two-column
+  // installed-panel layout left the whole right side blank because gallery
+  // cards have no detail editor — everything the user needs (badges +
+  // Install) lives on the card itself.
   return (
-    <div className="installed-panel">
-      <div className="installed-list">
-        <div className="installed-toolbar" style={{ marginBottom: 8 }}>
-          <input
-            className="installed-toolbar-search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search the gallery…"
-          />
-          <button
-            title="Re-check every entry against GitHub right now (spends one anonymous API request per entry)"
-            onClick={() => {
-              galleryVerifyCache = null;
-              setEntries((current) => [...current]);
-              setVerified({});
-              void (async () => {
-                if (entries.length > 0) setVerified(await verifyGalleryOnce(entries));
-              })();
-            }}
-          >
-            ⟳
-          </button>
+    <div className="gallery-panel">
+      <div className="installed-toolbar" style={{ marginBottom: 10 }}>
+        <input
+          className="installed-toolbar-search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search the gallery…"
+        />
+        <button
+          title="Re-check every entry against GitHub right now (spends one anonymous API request per entry)"
+          onClick={() => {
+            galleryVerifyCache = null;
+            setVerified({});
+            void (async () => {
+              if (entries.length > 0) setVerified(await verifyGalleryOnce(entries));
+            })();
+          }}
+        >
+          ⟳
+        </button>
+      </div>
+      {notice && <p className="estimate-note">{notice}</p>}
+      {entries.length === 0 && (
+        <div className="empty-reserved small" style={{ margin: "8px 0" }}>
+          <span className="empty-icon">⌘</span>
+          <span className="empty-text">Loading the gallery…</span>
         </div>
-        {notice && <p className="estimate-note">{notice}</p>}
-        {entries.length === 0 && (
-          <div className="empty-reserved small" style={{ margin: "8px 0" }}>
-            <span className="empty-icon">⌘</span>
-            <span className="empty-text">Loading the gallery…</span>
-          </div>
-        )}
-        <div className="installed-items">
-          {categories.map((cat) => (
-            <div key={cat}>
-              <div className="installed-item-desc" style={{ fontWeight: 600, margin: "10px 0 4px" }}>
-                {cat}
-              </div>
-              {filtered
-                .filter((e) => e.category === cat)
-                .map((entry) => (
-                  <div key={entry.id} className="installed-item" data-testid={`gallery-${entry.id}`}>
-                    <div className="installed-item-head">
-                      <span style={{ flex: 1 }}>{entry.name}</span>
-                      <span className="source-badge both">{entry.author}</span>
-                      <span
-                        className={`source-badge ${verified[entry.url] === "stale" ? "claude" : "both"}`}
-                        title={
-                          verified[entry.url] === "stale"
-                            ? "No longer resolves on GitHub — install will fail"
-                            : verified[entry.url] === "ok"
-                              ? "Live-verified on GitHub"
-                              : "Not checked (rate limit or pending)"
-                        }
-                      >
-                        {verified[entry.url] === "stale" ? "unavailable" : verified[entry.url] === "ok" ? "✓ live" : "…"}
-                      </span>
-                      <button
-                        className="primary"
-                        disabled={verified[entry.url] === "stale" || installing !== null}
-                        onClick={() => void install(entry)}
-                      >
-                        {installing === entry.id ? "Installing…" : "Install"}
-                      </button>
-                    </div>
-                    <div className="installed-item-desc">{entry.description}</div>
+      )}
+      {categories.map((cat) => (
+        <div key={cat} className="gallery-category">
+          <div className="gallery-category-title">{cat}</div>
+          <div className="mcp-gallery-grid">
+            {filtered
+              .filter((e) => e.category === cat)
+              .map((entry) => (
+                <div key={entry.id} className="mcp-gallery-card" data-testid={`gallery-${entry.id}`}>
+                  <div className="mcp-gallery-card-head">
+                    <strong title={entry.name}>{entry.name}</strong>
+                    <span className="mcp-badge" title={`Published by ${entry.author}`}>
+                      {entry.author}
+                    </span>
+                    <span
+                      className={`mcp-badge ${verified[entry.url] === "ok" ? "mcp-badge-on" : ""}`}
+                      title={
+                        verified[entry.url] === "stale"
+                          ? "No longer resolves on GitHub — install will fail"
+                          : verified[entry.url] === "ok"
+                            ? "Live-verified on GitHub"
+                            : "Not checked (rate limit or pending)"
+                      }
+                    >
+                      {verified[entry.url] === "stale" ? "unavailable" : verified[entry.url] === "ok" ? "✓ live" : "…"}
+                    </span>
                   </div>
-                ))}
-            </div>
-          ))}
+                  <div className="mcp-gallery-card-desc">{entry.description}</div>
+                  <div className="mcp-gallery-card-foot">
+                    <code className="mcp-gallery-card-cmd">{entry.url.replace("https://github.com/", "")}</code>
+                    <button
+                      className="primary"
+                      disabled={verified[entry.url] === "stale" || installing !== null}
+                      onClick={() => void install(entry)}
+                    >
+                      {installing === entry.id ? "Installing…" : "Install"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+          </div>
         </div>
-      </div>
-      <div className="installed-editor">
-        <h3>Gallery</h3>
-        <p className="estimate-note">
-          A curated starting set of well-known Agent Skills (SKILL.md). Installing writes into
-          both harness skill dirs through the same validated URL installer as <b>From URL</b> —
-          nothing here bypasses the normal path, and every installed skill stays a plain file you
-          can edit or delete.
-        </p>
-      </div>
+      ))}
+      <p className="estimate-note" style={{ marginTop: 10 }}>
+        A curated starting set of well-known Agent Skills (SKILL.md). Installing writes into both
+        harness skill dirs through the same validated URL installer as <b>From URL</b> — nothing
+        here bypasses the normal path, and every installed skill stays a plain file you can edit
+        or delete.
+      </p>
     </div>
   );
 }

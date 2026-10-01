@@ -59,6 +59,18 @@ export function SidebarHeader() {
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
   const { back: navBack, forward: navForward, canBack, canForward } = useViewNav();
+  const activeView = useUiStore((s) => s.activeView);
+  const setActiveView = useUiStore((s) => s.setActiveView);
+  // Full-page views (logs / automations / vault) swap the back/forward pair
+  // for ONE back arrow — on those pages the only place to go is back to what
+  // you were reading (navBack also restores the previous chat selection), so
+  // Forward is dead weight and the pair just added noise.
+  const inFullPageView =
+    activeView === "logs" || activeView === "automations" || activeView === "vault";
+  const exitFullPageView = () => {
+    if (canBack) navBack();
+    else setActiveView("chat"); // deep-linked straight into the view: go to chat
+  };
   const headerArt = useAppearanceStore((s) => s.artData);
   // Load once per app boot; the Appearance panel refreshes the store after
   // an import/clear so this picks the change up without a remount.
@@ -105,26 +117,40 @@ export function SidebarHeader() {
         </span>
         <span className="flex items-center flex-shrink-0">
           <UpdateButton />
-          <button
-            type="button"
-            className="sidebar-nav-btn"
-            onClick={navBack}
-            disabled={!canBack}
-            title="Back"
-            aria-label="Back"
-          >
-            <ArrowLeft size={14} strokeWidth={1.8} />
-          </button>
-          <button
-            type="button"
-            className="sidebar-nav-btn"
-            onClick={navForward}
-            disabled={!canForward}
-            title="Forward"
-            aria-label="Forward"
-          >
-            <ArrowRight size={14} strokeWidth={1.8} />
-          </button>
+          {inFullPageView ? (
+            <button
+              type="button"
+              className="sidebar-nav-btn"
+              onClick={exitFullPageView}
+              title="Back to chat"
+              aria-label="Back to chat"
+            >
+              <ArrowLeft size={14} strokeWidth={1.8} />
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="sidebar-nav-btn"
+                onClick={navBack}
+                disabled={!canBack}
+                title="Back"
+                aria-label="Back"
+              >
+                <ArrowLeft size={14} strokeWidth={1.8} />
+              </button>
+              <button
+                type="button"
+                className="sidebar-nav-btn"
+                onClick={navForward}
+                disabled={!canForward}
+                title="Forward"
+                aria-label="Forward"
+              >
+                <ArrowRight size={14} strokeWidth={1.8} />
+              </button>
+            </>
+          )}
         </span>
       </div>
       {/* Companion pet — strolls along its strip directly above the search

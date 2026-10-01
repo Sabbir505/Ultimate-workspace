@@ -224,3 +224,39 @@
     animation: none;
   }
 }
+
+/* Gallery tab: full-width card grid (mirrors the MCP registry's
+   .mcp-gallery-grid, whose classes the cards reuse). The two-column
+   installed-panel layout fit skills/loops (list + editor); gallery cards
+   carry everything on-card, so a side editor was pure blank space. */
+.gallery-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.gallery-category {
+  margin-bottom: 14px;
+}
+.gallery-category-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin: 4px 0 8px;
+}
+/* In a gallery card foot, the Install button pins right (the repo path
+   code fills the rest) — matches the MCP card footer shape. */
+.gallery-panel .mcp-gallery-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+.gallery-panel .mcp-gallery-card-foot code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

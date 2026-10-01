@@ -2107,6 +2107,18 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Any badge in a card head (registry ✓ / runtime / status) sits at the FAR
+   edge regardless of how long the title is — the title truncates, the badge
+   never moves. */
+.mcp-gallery-card-head .mcp-badge {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+/* Equal card heights per grid row: the footer pins to the card bottom so
+   rows with short descriptions align with rows with long ones. */
+.mcp-gallery-card .mcp-gallery-card-foot {
+  margin-top: auto;
+}
 
 .mcp-runtime {
   margin-left: auto;

@@ -115,6 +115,7 @@ pub mod db;
 mod download;
 mod docs_index;
 mod docs_watcher;
+mod sidecar_sweep;
 mod exec_gate;
 mod skills_gallery;
 mod git;
@@ -287,6 +288,28 @@ pub fn run() {
             // so the Skills Library's Loops tab is never empty on a fresh
             // install. Tombstoned — user deletions and edits stick.
             installed_skills::materialize_bundled_loops(&shared_db.lock());
+            // Orphaned sidecar sweep: kill llama-server / whisper-server /
+            // sd-server processes managed by a PREVIOUS instance (parent
+            // dead) before this instance starts any sidecar of its own. A
+            // dev restart (Ctrl+C) or crash skips the graceful-exit cleanup,
+            // and each orphan holds a CUDA context + model memory forever.
+            // The live embedding/STT/image sidecars of THIS instance (or a
+            // concurrently running second instance) have a live parent and
+            // are spared.
+            {
+                let bin_root = user_dirs::app_data_dir_default().join("bin");
+                if bin_root.is_dir() {
+                    match bin_root.canonicalize() {
+                        Ok(canon) => {
+                            let killed = sidecar_sweep::sweep(&canon);
+                            if killed > 0 {
+                                eprintln!("[relay] sidecar sweep: reaped {killed} orphaned sidecar(s) at boot");
+                            }
+                        }
+                        Err(e) => eprintln!("[relay] sidecar sweep skipped (canonicalize failed): {e}"),
+                    }
+                }
+            }
             // Register the bundled, relocatable Python (shipped in
             // bundle.resources → resource_dir/python) so document generation
             // works on machines that have no system Python. Missing bundle

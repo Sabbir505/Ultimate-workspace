@@ -292,7 +292,19 @@
   font-family: ui-monospace, monospace;
   font-size: 12px;
   word-break: break-all;
+}
+/* The model name rides in the detail header (it left the stat grid: a local
+   GGUF entry is a filesystem path and clipped in a 110px tile). Wraps freely
+   so even a long GGUF file name stays readable; the tooltip holds the raw
+   path. */
+.logs-detail-model {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-all;
   flex: 1;
+  min-width: 0;
+  cursor: help;
 }
 .logs-copy-btn {
   background: transparent;
@@ -346,6 +358,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Values that matter in full (Sizes "53.7 KB -> 42.1 KB") wrap to a second
+   line instead of ellipsizing away the response size. */
+.logs-stat-value.wrap {
+  white-space: normal;
+  word-break: break-word;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .logs-truncation {

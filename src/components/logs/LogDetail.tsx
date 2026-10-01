@@ -26,13 +26,31 @@ function bytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(2)} MB`;
 }
 
-function Stat({ label, value }: { label: string; value: string | number | null | undefined }) {
+function Stat({
+  label,
+  value,
+  wrap,
+}: {
+  label: string;
+  value: string | number | null | undefined;
+  wrap?: boolean;
+}) {
   return (
     <div className="logs-stat">
       <span className="logs-stat-label">{label}</span>
-      <span className="logs-stat-value">{value ?? "—"}</span>
+      <span className={`logs-stat-value${wrap ? " wrap" : ""}`}>{value ?? "—"}</span>
     </div>
   );
+}
+
+/// Display name for the model: local GGUF entries arrive as full filesystem
+/// paths — show just the file name without the .gguf extension (the header
+/// carries it in full; the raw value stays on the tooltip). Cloud model ids
+/// pass through unchanged.
+function modelDisplayName(model: string | null | undefined): string | null {
+  if (!model) return null;
+  const base = model.split(/[\\/]/).pop() ?? model;
+  return base.replace(/\.gguf$/i, "") || model;
 }
 
 /**
@@ -151,6 +169,11 @@ export function LogDetail({ id }: { id: string }) {
         <code className="logs-detail-path">
           {detail.method} {detail.path}
         </code>
+        {modelDisplayName(detail.model) && (
+          <code className="logs-detail-model" title={detail.model ?? undefined}>
+            {modelDisplayName(detail.model)}
+          </code>
+        )}
         <CopyButton text={`${detail.method} ${detail.path}`} />
       </div>
 
@@ -163,13 +186,16 @@ export function LogDetail({ id }: { id: string }) {
 
       <div className="logs-stats">
         <Stat label="Status" value={detail.upstreamStatus ?? "—"} />
-        <Stat label="Model" value={detail.model} />
         <Stat label="Duration" value={detail.durationMs != null ? `${detail.durationMs} ms` : null} />
         <Stat label="TTFT" value={detail.ttftMs != null ? `${detail.ttftMs} ms` : null} />
         <Stat label="Input" value={detail.inputTokens} />
         <Stat label="Output" value={detail.outputTokens} />
         <Stat label="Throughput" value={tps} />
-        <Stat label="Sizes" value={`${bytes(detail.requestBytes)} → ${bytes(detail.responseBytes)}`} />
+        <Stat
+          label="Sizes"
+          wrap
+          value={`${bytes(detail.requestBytes)} → ${bytes(detail.responseBytes)}`}
+        />
       </div>
 
       {detail.truncated && (

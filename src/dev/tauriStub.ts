@@ -39,6 +39,59 @@ const STUB_VAULT_NOTES = [
   },
 ];
 
+
+/** Two request-log rows so the Logs page renders in harnesses: one local
+ *  GGUF call (filesystem-path model name — exercises the header-chip basename
+ *  display) and one cloud call. */
+const STUB_LLM_LOG_ROWS = [
+  {
+    id: "log1",
+    rowId: 2,
+    createdAt: Math.floor(now / 1000) - 120,
+    origin: "relay" as const,
+    target: "http://127.0.0.1:52076",
+    method: "POST",
+    path: "/v1/chat/completions",
+    model: "D:/local models/models/rag/nomic-embed-text-v1.5.Q8_0.gguf",
+    upstreamStatus: 200,
+    error: null,
+    durationMs: 19539,
+    ttftMs: 14355,
+    inputTokens: 13931,
+    outputTokens: 142,
+    tokensPerSecond: 27.2,
+    requestBytes: 55_010,
+    responseBytes: 43_110,
+    truncated: false,
+    requestBody: JSON.stringify({ model: "nomic", messages: [{ role: "user", content: "hi" }] }),
+    responseBody: '{"choices":[{"message":{"role":"assistant","content":"ok"}}]}',
+    timingsJson: null,
+  },
+  {
+    id: "log2",
+    rowId: 1,
+    createdAt: Math.floor(now / 1000) - 600,
+    origin: "relay" as const,
+    target: "https://api.anthropic.com",
+    method: "POST",
+    path: "/v1/messages",
+    model: "claude-sonnet-4-5",
+    upstreamStatus: 200,
+    error: null,
+    durationMs: 4210,
+    ttftMs: 610,
+    inputTokens: 812,
+    outputTokens: 344,
+    tokensPerSecond: 81.9,
+    requestBytes: 21_300,
+    responseBytes: 9_880,
+    truncated: false,
+    requestBody: JSON.stringify({ model: "claude-sonnet-4-5", messages: [] }),
+    responseBody: '{"content":[{"type":"text","text":"ok"}]}',
+    timingsJson: null,
+  },
+];
+
 const stubArtifacts: StubArtifactRecord[] = [
   { id: "a1", chatSessionId: "s1", chatMessageId: 12, filename: "memory-system.md", path: "C:/artifacts/memory-system.md", kind: "md", createdAt: now - 2 * HOUR, expiresAt: now + 30 * 24 * HOUR },
   { id: "a2", chatSessionId: "s1", chatMessageId: 14, filename: "traffic-graph.svg", path: "C:/artifacts/traffic-graph.svg", kind: "svg", createdAt: now - 5 * HOUR, expiresAt: now + 30 * 24 * HOUR },
@@ -242,6 +295,30 @@ export function installTauriStub(): void {
               : [],
           );
         }
+        case "llm_log_list": {
+          const f = (args as { origin?: string | null }) ?? {};
+          const rows = STUB_LLM_LOG_ROWS.filter((r) => !f.origin || r.origin === f.origin);
+          return Promise.resolve(rows);
+        }
+        case "llm_log_get": {
+          const id = String((args as { id?: string })?.id ?? "");
+          return Promise.resolve(STUB_LLM_LOG_ROWS.find((r) => r.id === id) ?? null);
+        }
+        case "llm_log_stats":
+          return Promise.resolve({
+            total: STUB_LLM_LOG_ROWS.length,
+            errorCount: 0,
+            inputTokens: STUB_LLM_LOG_ROWS.reduce((a, r) => a + (r.inputTokens ?? 0), 0),
+            outputTokens: STUB_LLM_LOG_ROWS.reduce((a, r) => a + (r.outputTokens ?? 0), 0),
+            avgTtftMs: 7482,
+            avgTokensPerSecond: 54.5,
+            oldestAt: STUB_LLM_LOG_ROWS[STUB_LLM_LOG_ROWS.length - 1]?.createdAt ?? null,
+            newestAt: STUB_LLM_LOG_ROWS[0]?.createdAt ?? null,
+          });
+        case "llm_log_config":
+          return Promise.resolve({ enabled: true, retentionDays: 30, maxRows: 5000, maxBodyKb: 512 });
+        case "llm_log_gateway_status":
+          return Promise.resolve({ port: 0, running: false, requireAuth: false, token: "", knownTargets: [] });
         case "vault_read_note": {
           const p = String((args as { path?: string })?.path ?? "");
           const hit = STUB_VAULT_NOTES.find((n) => n.path.toLowerCase() === p.toLowerCase());

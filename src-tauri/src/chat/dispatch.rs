@@ -695,6 +695,25 @@ fn system_tool_summary(name: &str, args: &Value) -> String {
                 format!("Run shell command: {shown}")
             }
         }
+        // The card is the only thing standing between a model-authored snippet
+        // and the host, so it must show the snippet — a bare "Run code" would
+        // ask the user to approve something they cannot see.
+        tools::RUN_CODE => {
+            let lang = args
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("code")
+                .trim();
+            let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let shown: String = code.chars().take(200).collect();
+            if shown.is_empty() {
+                format!("Run a {lang} snippet")
+            } else if shown.len() < code.len() {
+                format!("Run {lang} (no OS sandbox — runs as you): {shown}…")
+            } else {
+                format!("Run {lang} (no OS sandbox — runs as you): {shown}")
+            }
+        }
         _ => name.to_string(),
     }
 }
@@ -733,8 +752,16 @@ pub fn capability_probe_refusal(command: &str) -> Option<String> {
 /// against the background TaskManager. The permission gate has already
 /// decided (or the user approved); these calls either start a task, or read/
 /// cancel an existing one, and return text for the model.
-async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -> String {
-    use tools::{CANCEL_TASK, DOWNLOAD_FILE, DOWNLOAD_PROGRESS, GET_TASK_STATUS, RUN_SHELL, TASK};
+async fn execute_system_tool(
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+    caps: &tools::ToolCaps,
+) -> String {
+    use tools::{
+        CANCEL_TASK, DOWNLOAD_FILE, DOWNLOAD_PROGRESS, GET_TASK_STATUS, RUN_CODE, RUN_SHELL, TASK,
+    };
     let tasks = app.state::<crate::TaskState>();
     let task_id = args
         .get("task_id")
@@ -839,6 +866,33 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
             })
             .await
             .unwrap_or_else(|e| format!("shell task failed: {e}"))
+        }
+        RUN_CODE => {
+            // `run_code` reaches this function only after BOTH gates have run:
+            // the system-tool permission gate in `run_tool_inner` (new — it
+            // used to fall straight through to `execute_tool`, bypassing
+            // approval entirely) and the composer's `code_exec` capability,
+            // re-checked here from the live caps so the two can't drift.
+            if !caps.code_exec {
+                return "Error: code execution is disabled for this chat. The user must \
+                        enable it (the composer's code-execution toggle) before run_code \
+                        can be used."
+                    .to_string();
+            }
+            let language = args
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let code = args
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if code.trim().is_empty() {
+                return "Error: run_code requires non-empty \"code\".".to_string();
+            }
+            crate::chat::codeexec::run_code(&language, &code).await
         }
         TASK => {
             // Two modes (June-2026 Claude Code pattern). Foreground (default):
@@ -2226,6 +2280,7 @@ async fn run_gated_system_tool(
     sid: &str,
     name: &str,
     args: &Value,
+    caps: &tools::ToolCaps,
 ) -> String {
     let summary = system_tool_summary(name, args);
     if !run_approval_gate(mgr, app, sid, name, args, summary).await {
@@ -2234,7 +2289,7 @@ async fn run_gated_system_tool(
         );
     }
 
-    execute_system_tool(app, sid, name, args).await
+    execute_system_tool(app, sid, name, args, caps).await
 }
 
 /// Human-facing summary for an automation tool approval card. The card is the
@@ -2962,6 +3017,14 @@ async fn run_tool_inner(
         return execute_mcp_tool(app, entry, args).await;
     }
 
+    // Relay self-control: drive the app's OWN UI through the DOM. Intercepted
+    // here, alongside the browser family and before the generic dispatcher,
+    // because it needs an AppHandle to reach the main window (the same reason
+    // `run_browser_tool` sits at this point in the ladder).
+    if let Some(text) = run_app_ui_tool(app, name, args).await {
+        return text;
+    }
+
     // System tools (background downloads + native shell). `download_file` is
     // gated like a connector write (approval under read_only/manual, auto-run
     // under auto_edit/full_auto); `run_shell` is ALWAYS gated (native code
@@ -2991,9 +3054,9 @@ async fn run_tool_inner(
             );
         }
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
-            return run_gated_system_tool(mgr, app, sid, name, args).await;
+            return run_gated_system_tool(mgr, app, sid, name, args, caps).await;
         }
-        return execute_system_tool(app, sid, name, args).await;
+        return execute_system_tool(app, sid, name, args, caps).await;
     }
 
     // Filesystem tools route through the central permission gate. Every FS
@@ -3099,10 +3162,125 @@ async fn run_tool_inner(
     outcome.text
 }
 
-/// Dispatch the agentic browser tools (`browser_read`/`browser_click`/
-/// `browser_type`/`browser_scroll`/`browser_screenshot`) against the active
-/// browser-pane webview. Returns `None` for any other tool name so the caller
-/// falls through to the normal tool dispatcher.
+/// Dispatch the Relay self-control tools (`app_snapshot` / `app_click` /
+/// `app_type` / `app_press_key` / `app_select_option`).
+///
+/// Returns `None` for any other tool name so the caller falls through to the
+/// normal dispatcher.
+///
+/// The tool name maps 1:1 onto a bridge op, and the bridge does the real work
+/// in the renderer against the live DOM. What lives here is argument shaping
+/// and the error surface — in particular, turning a stale ref into a message
+/// that tells the model to re-read rather than try a neighbouring number,
+/// which is the failure mode that makes coordinate-ish retry loops dangerous.
+async fn run_app_ui_tool(app: &AppHandle, name: &str, args: &Value) -> Option<String> {
+    use tools::{APP_CLICK, APP_PRESS_KEY, APP_SELECT_OPTION, APP_SNAPSHOT, APP_TYPE};
+    let op = match name {
+        APP_SNAPSHOT => "snapshot",
+        APP_CLICK => "click",
+        APP_TYPE => "type",
+        APP_PRESS_KEY => "press_key",
+        APP_SELECT_OPTION => "select_option",
+        _ => return None,
+    };
+
+    // Argument shaping + bounds, all here so the bridge only ever sees values
+    // it can trust: the renderer is injected code running in our own window,
+    // and while it is not attacker-controlled, an unbounded string still ends
+    // up in a `type` action and in the tool transcript.
+    let bridge_args = match op {
+        "snapshot" => {
+            let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            serde_json::json!({ "query": q.chars().take(200).collect::<String>() })
+        }
+        "click" => {
+            let Some(r) = args.get("ref").and_then(|v| v.as_i64()) else {
+                return Some(
+                    "Error: app_click requires an integer \"ref\" from app_snapshot.".to_string(),
+                );
+            };
+            serde_json::json!({ "ref": r })
+        }
+        "type" => {
+            let Some(r) = args.get("ref").and_then(|v| v.as_i64()) else {
+                return Some(
+                    "Error: app_type requires an integer \"ref\" from app_snapshot.".to_string(),
+                );
+            };
+            let Some(text) = args.get("text").and_then(|v| v.as_str()) else {
+                return Some("Error: app_type requires a \"text\".".to_string());
+            };
+            if text.len() > 100 * 1024 {
+                return Some(
+                    "Error: app_type text is too long (max 100 KiB). Use a file tool for \
+                     content of that size."
+                        .to_string(),
+                );
+            }
+            serde_json::json!({ "ref": r, "text": text })
+        }
+        "press_key" => {
+            let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if key.is_empty() {
+                return Some("Error: app_press_key requires a non-empty \"key\".".to_string());
+            }
+            if key.len() > 32 {
+                return Some(
+                    "Error: app_press_key \"key\" is too long (max 32 chars).".to_string(),
+                );
+            }
+            serde_json::json!({ "key": key })
+        }
+        "select_option" => {
+            let Some(r) = args.get("ref").and_then(|v| v.as_i64()) else {
+                return Some(
+                    "Error: app_select_option requires an integer \"ref\" from app_snapshot."
+                        .to_string(),
+                );
+            };
+            let Some(value) = args.get("value").and_then(|v| v.as_str()) else {
+                return Some(
+                    "Error: app_select_option requires a \"value\" (an option's value or its \
+                     visible text)."
+                        .to_string(),
+                );
+            };
+            serde_json::json!({ "ref": r, "value": value })
+        }
+        _ => serde_json::json!({}),
+    };
+
+    match crate::app_ui::call(app, op, bridge_args).await {
+        // The bridge returns a JSON-encoded `{ok, text, …}`. Render its text
+        // for the model either way, but surface a failure as an error so the
+        // transcript distinguishes "did it" from "did not".
+        Ok(payload) => {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+            let text = parsed
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("The self-UI bridge returned no message.");
+            if parsed.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                Some(text.to_string())
+            } else {
+                Some(format!("{name} failed: {text}"))
+            }
+        }
+        Err(e) => Some(format!("{name} failed: {e}")),
+    }
+}
+
+/// Dispatch the agentic browser tools against the active browser-pane webview.
+/// Returns `None` for any other tool name so the caller falls through to the
+/// normal tool dispatcher.
+///
+/// The family is the whole agentic surface: reads (`browser_read`,
+/// `browser_observe`, `browser_find`, `browser_extract`), the vision
+/// fallbacks (`browser_screenshot`, `browser_zoom`), the direct semantic
+/// actions (`browser_click`, `browser_type`, `browser_fill_form`,
+/// `browser_select_option`, `browser_press_key`, `browser_scroll`,
+/// `browser_upload_file`), and `browser_batch`, which composes the rest.
 async fn run_browser_tool(
     app: &AppHandle,
     name: &str,
@@ -3111,8 +3289,9 @@ async fn run_browser_tool(
     sid: &str,
 ) -> Option<String> {
     use tools::{
-        BROWSER_CLICK, BROWSER_EXTRACT, BROWSER_OBSERVE, BROWSER_READ, BROWSER_SCREENSHOT,
-        BROWSER_SCROLL, BROWSER_TYPE, BROWSER_UPLOAD_FILE,
+        BROWSER_BATCH, BROWSER_CLICK, BROWSER_EXTRACT, BROWSER_FILL_FORM, BROWSER_FIND,
+        BROWSER_OBSERVE, BROWSER_PRESS_KEY, BROWSER_READ, BROWSER_SCREENSHOT, BROWSER_SCROLL,
+        BROWSER_SELECT_OPTION, BROWSER_TYPE, BROWSER_UPLOAD_FILE, BROWSER_ZOOM,
     };
     if !matches!(
         name,
@@ -3124,6 +3303,12 @@ async fn run_browser_tool(
             | BROWSER_OBSERVE
             | BROWSER_EXTRACT
             | BROWSER_UPLOAD_FILE
+            | BROWSER_FIND
+            | BROWSER_ZOOM
+            | BROWSER_PRESS_KEY
+            | BROWSER_FILL_FORM
+            | BROWSER_SELECT_OPTION
+            | BROWSER_BATCH
     ) {
         return None;
     }
@@ -3178,6 +3363,71 @@ async fn run_browser_tool(
         ));
     }
 
+    // `browser_zoom` is the same capture path with a clip rect, so it shares
+    // the blocking main-thread CDP roundtrip and the artifacts-dir write —
+    // but a crop is the agent's own scaffolding too, so it gets the same
+    // deliberate non-registration as the full shot (no Artifacts entry, no
+    // canvas popup) and a distinct filename prefix so a crop never shadows a
+    // full capture in the dir listing.
+    if name == BROWSER_ZOOM {
+        let num = |k: &str| args.get(k).and_then(|v| v.as_f64());
+        let (Some(x), Some(y), Some(w), Some(h)) = (num("x"), num("y"), num("width"), num("height"))
+        else {
+            return Some(
+                "browser_zoom requires numeric \"x\", \"y\", \"width\" and \"height\" \
+                 (viewport CSS pixels from the pane's top-left)."
+                    .to_string(),
+            );
+        };
+        if !(w.is_finite() && h.is_finite()) || w <= 0.0 || h <= 0.0 {
+            return Some(
+                "browser_zoom requires a positive, finite \"width\" and \"height\".".to_string(),
+            );
+        }
+        let scale = num("scale").unwrap_or(2.0);
+        let mgr2 = std::sync::Arc::clone(&mgr);
+        let png = match tokio::task::spawn_blocking(move || mgr2.zoom_active(x, y, w, h, scale))
+            .await
+        {
+            Ok(Some(png)) => png,
+            Ok(None) => {
+                return Some("browser_zoom failed: capture unavailable (no page is open in the browser pane, or the platform doesn't support capture — this is Windows-only today).".to_string())
+            }
+            Err(e) => return Some(format!("browser_zoom failed: {e}")),
+        };
+        let _ = std::fs::create_dir_all(artifacts_dir);
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = artifacts_dir.join(format!("browser-zoom-{millis}.png"));
+        if let Err(e) = std::fs::write(&path, &png) {
+            return Some(format!("browser_zoom failed: could not save PNG: {e}"));
+        }
+        let path_str = path.to_string_lossy().into_owned();
+        return Some(format!(
+            "Zoomed region ({w}x{h} at {x},{y}, scale {scale}) saved to {path_str}. \
+             Embed it as ![zoom]({path_str}) to show it inline. Note the coordinates you \
+             send next are still full-page viewport pixels — zooming does not move anything."
+        ));
+    }
+
+    // `browser_batch` composes the rest of the family, so it recurses back
+    // into this function rather than taking an arm in the match below. The
+    // `Box::pin` breaks the async recursion cycle for the compiler
+    // (run_browser_tool -> run_browser_batch -> run_browser_tool), the same
+    // way the relay-browser MCP `batch` op does; the runtime guard in
+    // `run_browser_batch` is what actually rejects a nested batch, so the
+    // recursion is genuinely one level deep.
+    //
+    // The contract that makes it safe to let the model rely on: EVERY step
+    // gets a result line, including the ones after a failure. Stopping output
+    // at the failure would leave the model unable to tell which steps actually
+    // ran — the reason a batch is more than a latency optimisation.
+    if name == BROWSER_BATCH {
+        return Some(Box::pin(run_browser_batch(app, args, artifacts_dir, sid)).await);
+    }
+
     let result = match name {
         BROWSER_READ => {
             let mode_str = args.get("mode").and_then(|v| v.as_str()).unwrap_or("full");
@@ -3189,16 +3439,38 @@ async fn run_browser_tool(
             let selector = args.get("selector").and_then(|v| v.as_str());
             mgr.read_page(mode, selector).await
         }
-        BROWSER_CLICK => match args.get("ref").and_then(|v| v.as_i64()) {
-            Some(r) => mgr.click_ref(r).await,
-            None => Err("browser_click requires an integer \"ref\" from browser_read.".to_string()),
+        BROWSER_CLICK => match browser_target(args) {
+            Some(BrowserTarget::Ref(r)) => mgr.click_ref(r).await,
+            Some(BrowserTarget::Point(x, y)) => mgr.click_at_xy(x, y).await,
+            None => Err(
+                "browser_click requires either an integer \"ref\" from browser_read, or \
+                 \"x\" and \"y\" viewport CSS pixels (coordinate targeting, for what the \
+                 element tree can't name — canvas, charts, embedded media)."
+                    .to_string(),
+            ),
         },
         BROWSER_TYPE => {
-            let r = args.get("ref").and_then(|v| v.as_i64());
             let text = args.get("text").and_then(|v| v.as_str());
-            match (r, text) {
-                (Some(r), Some(text)) => mgr.type_into(r, text).await,
-                _ => Err("browser_type requires an integer \"ref\" and \"text\".".to_string()),
+            match (browser_target(args), text) {
+                // Coordinate targeting for type is FOCUS, not click: a model
+                // that saw a textbox in a screenshot and wants to type there
+                // must not submit or toggle the control by clicking it.
+                (Some(BrowserTarget::Point(x, y)), Some(text)) => {
+                    match mgr.focus_at_xy(x, y).await {
+                        Ok(focus_msg) => match mgr.type_into_at_focus(text).await {
+                            Ok(typed) => Ok(format!("{focus_msg} {typed}")),
+                            Err(e) => Err(e),
+                        },
+                        Err(e) => Err(e),
+                    }
+                }
+                (Some(BrowserTarget::Ref(r)), Some(text)) => mgr.type_into(r, text).await,
+                (_, None) => Err("browser_type requires a \"text\".".to_string()),
+                (None, _) => Err(
+                    "browser_type requires either an integer \"ref\" from browser_read, or \
+                     \"x\" and \"y\" viewport CSS pixels, plus a \"text\"."
+                        .to_string(),
+                ),
             }
         }
         BROWSER_SCROLL => {
@@ -3244,12 +3516,299 @@ async fn run_browser_tool(
                 mgr.extract_active(&prompt, max_chars).await
             }
         }
+        // Substring search over the same census browser_observe lists, so the
+        // refs it returns act directly — no follow-up read needed to learn
+        // what "Sign in" is element 12.
+        BROWSER_FIND => {
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if query.is_empty() {
+                Err("browser_find requires a non-empty \"query\".".to_string())
+            } else {
+                mgr.find_active(&query).await
+            }
+        }
+        BROWSER_PRESS_KEY => {
+            let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if key.is_empty() {
+                Err("browser_press_key requires a non-empty \"key\".".to_string())
+            } else if key.len() > 32 {
+                Err("browser_press_key \"key\" is too long (max 32 chars).".to_string())
+            } else {
+                mgr.press_key_active(key).await
+            }
+        }
+        BROWSER_SELECT_OPTION => match (
+            args.get("ref").and_then(|v| v.as_i64()),
+            args.get("value").and_then(|v| v.as_str()),
+        ) {
+            (Some(r), Some(value)) => mgr.select_option_active(r, value).await,
+            (None, _) => {
+                Err("browser_select_option requires an integer \"ref\" from browser_read.".to_string())
+            }
+            (_, None) => Err(
+                "browser_select_option requires a \"value\" (the option's value or visible text)."
+                    .to_string(),
+            ),
+        },
+        BROWSER_FILL_FORM => match run_browser_fill_form(args) {
+            Ok(fields_json) => mgr.fill_form_active(&fields_json).await,
+            Err(e) => Err(e),
+        },
         _ => unreachable!("guarded by matches! above"),
     };
     Some(match result {
         Ok(text) => text,
         Err(e) => format!("{name} failed: {e}"),
     })
+}
+
+/// What a `browser_click` / `browser_type` call is aiming at.
+///
+/// The two modes exist because they fail differently and the model is better
+/// at one than the other for different content. A **ref** names an element the
+/// tree identified, so it survives a layout shift and costs no guessing — it
+/// is right for anything the element tree can see. A **point** is a viewport
+/// pixel, and is the only option for what the tree cannot name at all:
+/// canvas, charts, maps, embedded video, and cross-origin iframes. Guessing a
+/// pixel is much weaker than naming an element, so coordinate mode is the
+/// fallback, not the default — but without it those surfaces are unreachable.
+#[derive(Debug, Clone, Copy)]
+enum BrowserTarget {
+    Ref(i64),
+    Point(f64, f64),
+}
+
+/// Parse a dual-mode target out of a tool's arguments.
+///
+/// Accepts either `{"ref": N}` or `{"x": px, "y": py}` (and the explicit
+/// tagged form `{"type": "coordinate", "x": …, "y": …}` / `{"type": "ref",
+/// "ref": …}` for models that prefer to be explicit). A `ref` wins when both
+/// are present: it is the stronger signal, and silently preferring the pixel
+/// would make a partially-correct call land somewhere the model did not intend.
+fn browser_target(args: &Value) -> Option<BrowserTarget> {
+    if let Some(r) = args.get("ref").and_then(|v| v.as_i64()) {
+        return Some(BrowserTarget::Ref(r));
+    }
+    let x = args.get("x").and_then(|v| v.as_f64())?;
+    let y = args.get("y").and_then(|v| v.as_f64())?;
+    // A NaN coordinate reaches the DOM as elementFromPoint(NaN, NaN), which
+    // throws in some engines. The injected JS re-checks this too; rejecting
+    // here keeps the error a clean argument message instead of a JS failure.
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    Some(BrowserTarget::Point(x, y))
+}
+
+/// Max steps in one `browser_batch`. Generous enough for a real form flow
+/// (read → fill 4 fields → select → submit → verify) and small enough that a
+/// malformed call can't hold the turn open across dozens of CDP round trips.
+const MAX_BROWSER_BATCH_STEPS: usize = 15;
+
+/// Validate a `browser_fill_form` argument into the `[{"ref":N,"text":"..."}]`
+/// JSON the bridge expects. Bounds mirror the relay-browser MCP `fill_form`
+/// op exactly (25 fields, 10 KiB each): the array is model-authored, so its
+/// length and each string's size are both attacker-controlled and both need a
+/// ceiling before they reach an injected JS string literal.
+///
+/// Pure — takes no manager — so the bounds are unit-testable without a live
+/// WebView, which is the only way this contract can actually be pinned.
+fn run_browser_fill_form(args: &Value) -> Result<String, String> {
+    let fields = args.get("fields").and_then(|v| v.as_array()).ok_or_else(|| {
+        "browser_fill_form requires \"fields\": [{\"ref\": N, \"text\": \"...\"}].".to_string()
+    })?;
+    if fields.is_empty() {
+        return Err("browser_fill_form \"fields\" is empty.".to_string());
+    }
+    if fields.len() > 25 {
+        return Err(format!(
+            "browser_fill_form supports at most 25 fields per call (got {}).",
+            fields.len()
+        ));
+    }
+    let mut clean: Vec<Value> = Vec::with_capacity(fields.len());
+    for (i, f) in fields.iter().enumerate() {
+        let r = f
+            .get("ref")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| format!("browser_fill_form field {i} needs an integer \"ref\"."))?;
+        // Non-string values are stringified rather than rejected: a model that
+        // sends a number for a numeric field should not lose the whole call.
+        let text = f.get("text").map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+        let text = text.unwrap_or_default();
+        if text.len() > 10 * 1024 {
+            return Err(format!(
+                "browser_fill_form field {i} text is too long (max 10 KiB)."
+            ));
+        }
+        clean.push(serde_json::json!({ "ref": r, "text": text }));
+    }
+    serde_json::to_string(&clean)
+        .map_err(|e| format!("browser_fill_form: could not serialize fields: {e}"))
+}
+
+/// Ops a `browser_batch` step may name.
+///
+/// Deliberately excludes `browser_batch` itself (no nesting — the depth of
+/// recursion would be a function of model-authored JSON) and `open_url` (a
+/// navigation mid-batch invalidates every ref the later steps were written
+/// against, turning the whole batch into silent no-ops). Also excludes the
+/// non-browser tools entirely: a batch is for browser steps, and letting it
+/// reach `write_file` or `run_shell` would route those around the permission
+/// gate that intercepts them one call at a time.
+const BROWSER_BATCH_ALLOWED_OPS: [&str; 13] = [
+    tools::BROWSER_READ,
+    tools::BROWSER_CLICK,
+    tools::BROWSER_TYPE,
+    tools::BROWSER_FILL_FORM,
+    tools::BROWSER_SELECT_OPTION,
+    tools::BROWSER_PRESS_KEY,
+    tools::BROWSER_SCROLL,
+    tools::BROWSER_FIND,
+    tools::BROWSER_OBSERVE,
+    tools::BROWSER_EXTRACT,
+    tools::BROWSER_SCREENSHOT,
+    tools::BROWSER_ZOOM,
+    tools::BROWSER_UPLOAD_FILE,
+];
+
+/// Validate a batch's step list up front, before any step executes.
+///
+/// This runs ahead of the whole batch on purpose. Discovering a typo in step 9
+/// *after* step 0 has already clicked something is strictly worse than
+/// refusing the call: a rejected call is safe to retry, a half-applied one is
+/// not. Pure, so the contract is unit-testable without a WebView.
+fn validate_browser_batch_ops(args: &Value) -> Result<Vec<String>, String> {
+    let steps = match args.get("actions").and_then(|v| v.as_array()) {
+        Some(a) if !a.is_empty() => a,
+        _ => {
+            return Err(
+                "browser_batch requires a non-empty \"actions\" array of \
+                 {\"op\": \"<browser tool>\", ...args} steps."
+                    .to_string(),
+            )
+        }
+    };
+    if steps.len() > MAX_BROWSER_BATCH_STEPS {
+        return Err(format!(
+            "browser_batch supports at most {MAX_BROWSER_BATCH_STEPS} steps per call (got {}).",
+            steps.len()
+        ));
+    }
+    let mut ops = Vec::with_capacity(steps.len());
+    for (i, step) in steps.iter().enumerate() {
+        let op = step.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        if op == tools::BROWSER_BATCH {
+            return Err(format!(
+                "browser_batch step {i} is itself a browser_batch — a batch cannot nest. \
+                 Flatten the steps into one array."
+            ));
+        }
+        if !BROWSER_BATCH_ALLOWED_OPS.contains(&op) {
+            return Err(format!(
+                "browser_batch step {i} names \"{op}\", which is not allowed inside a batch \
+                 (a batch may only compose browser steps). Allowed: {}. Run anything else as \
+                 its own call.",
+                BROWSER_BATCH_ALLOWED_OPS.join(", ")
+            ));
+        }
+        ops.push(op.to_string());
+    }
+    Ok(ops)
+}
+
+/// Run a `browser_batch`: several browser steps in one round trip.
+///
+/// Two properties define it, and the second is the one that matters for
+/// correctness:
+///
+/// 1. **It is a latency optimisation.** A fill-then-submit flow is three model
+///    rounds as separate calls and one as a batch.
+/// 2. **Every step reports.** Steps run in order and halt at the first failure,
+///    but the output still carries a line for each step, with the un-run ones
+///    marked `Not executed: an earlier browser action in this turn failed.` A
+///    model that can't tell which steps ran will retry the whole sequence — so
+///    a silent halt would be worse than the extra round trips.
+///
+/// `browser_batch` itself is refused as a step op: a nested batch would make
+/// the depth of recursion depend on model-authored JSON, and the flatten is
+/// trivial for the caller anyway.
+async fn run_browser_batch(
+    app: &AppHandle,
+    args: &Value,
+    artifacts_dir: &std::path::Path,
+    sid: &str,
+) -> String {
+    let ops = match validate_browser_batch_ops(args) {
+        Ok(ops) => ops,
+        Err(e) => return format!("Error: {e}"),
+    };
+    let steps = args
+        .get("actions")
+        .and_then(|v| v.as_array())
+        .map_or(&[][..], |v| v.as_slice());
+
+    let mut lines: Vec<String> = Vec::with_capacity(steps.len());
+    let mut failed_at: Option<(usize, String)> = None;
+    for (i, step) in steps.iter().enumerate() {
+        let op = ops[i].as_str();
+        if let Some((idx, failed_op)) = &failed_at {
+            lines.push(format!(
+                "  step {i} [{op}]: Not executed — an earlier browser action failed \
+                 (step {idx}, {failed_op})."
+            ));
+            continue;
+        }
+        let step_args = step.get("args").cloned().unwrap_or(Value::Null);
+        // `run_browser_tool` returns Some for every op in
+        // BROWSER_BATCH_ALLOWED_OPS (the validator rejected the rest), so the
+        // None arm is unreachable in practice — handled rather than unwrapped
+        // so a future edit to either list degrades to an error, not a panic.
+        match run_browser_tool(app, op, &step_args, artifacts_dir, sid).await {
+            Some(out) => {
+                // A failed step is signalled by the same "{name} failed: {err}"
+                // / "Error: ..." shape every other tool arm uses, so the batch
+                // halts on it rather than reporting it as progress.
+                if out.starts_with("Error:") || out.contains(" failed:") {
+                    failed_at = Some((i, op.to_string()));
+                    lines.push(format!("  step {i} [{op}]: FAILED — {out}"));
+                } else {
+                    // Truncate each step's payload: a browser_read mid-batch can
+                    // be thousands of chars, and a batch exists to save tokens.
+                    let brief: String = out.chars().take(400).collect();
+                    let more = if brief.len() < out.len() { "…" } else { "" };
+                    lines.push(format!("  step {i} [{op}]: {brief}{more}"));
+                }
+            }
+            None => {
+                let msg = format!("step {i} [{op}] was not a recognised browser step");
+                failed_at = Some((i, op.to_string()));
+                lines.push(format!("  step {i} [{op}]: FAILED — {msg}"));
+            }
+        }
+    }
+    match failed_at {
+        None => format!(
+            "browser_batch: all {} step(s) completed.\n{}",
+            steps.len(),
+            lines.join("\n")
+        ),
+        Some((idx, op)) => format!(
+            "browser_batch: HALTED at step {idx} of {} ({op}) — {idx} step(s) ran, the rest were \
+             not executed.\n  Re-read the page (browser_read or browser_find) for fresh refs \
+             before retrying; refs from before the failure are no longer trustworthy.\n{}",
+            steps.len(),
+            lines.join("\n")
+        ),
+    }
 }
 
 /// Escalation chain for a degraded `web_search`: the keyless SERP engines are
@@ -3873,6 +4432,119 @@ pub(crate) async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Va
 
 #[cfg(test)]
 mod tests {
+
+    // ---- browser_batch argument contract ----
+    //
+    // The batch's whole value rests on two properties the model depends on:
+    // it must not half-execute a batch it could have refused up front, and it
+    // must report every step. Both are checkable without a browser, so they
+    // are pinned here rather than left to end-to-end luck.
+
+    /// A batch naming an unknown/typo'd op must be REFUSED BEFORE any step
+    /// runs. Validating lazily (step 0 clicks, step 9 is a typo) would leave
+    /// the page half-changed by a call the model thought had been rejected.
+    #[test]
+    fn browser_batch_validates_every_op_before_running_any_step() {
+        let args = serde_json::json!({
+            "actions": [
+                {"op": "browser_click", "args": {"ref": 1}},
+                {"op": "browser_clik", "args": {"ref": 2}}, // typo
+                {"op": "browser_type", "args": {"ref": 3, "text": "x"}},
+            ]
+        });
+        // Reuse the real validator's contract: the bad op is named back with
+        // its step index, and the allowed set is listed so the model can fix
+        // it without a second guessing round trip.
+        let msg = validate_browser_batch_ops(&args).expect_err("typo must be refused");
+        assert!(msg.contains("step 1"), "must name the offending step: {msg}");
+        assert!(msg.contains("browser_clik"), "must echo the bad op: {msg}");
+        assert!(
+            msg.contains("browser_click"),
+            "must list the allowed ops: {msg}"
+        );
+    }
+
+    /// Nesting is refused: a batch inside a batch would make recursion depth
+    /// a function of model-authored JSON.
+    #[test]
+    fn browser_batch_refuses_to_nest() {
+        let args = serde_json::json!({
+            "actions": [
+                {"op": "browser_click", "args": {"ref": 1}},
+                {"op": "browser_batch", "args": {"actions": []}},
+            ]
+        });
+        let msg = validate_browser_batch_ops(&args).expect_err("nesting must be refused");
+        assert!(msg.contains("nest"), "must explain why: {msg}");
+    }
+
+    /// `open_url` is excluded on purpose: a navigation mid-batch invalidates
+    /// every ref the later steps were written against.
+    #[test]
+    fn browser_batch_excludes_navigation_ops() {
+        let args = serde_json::json!({
+            "actions": [{"op": "open_url", "args": {"url": "https://example.com"}}]
+        });
+        assert!(
+            validate_browser_batch_ops(&args).is_err(),
+            "a navigation inside a batch must be refused — later refs would be stale"
+        );
+    }
+
+    #[test]
+    fn browser_batch_accepts_the_whole_allowed_family() {
+        let args = serde_json::json!({
+            "actions": [
+                {"op": "browser_read"},
+                {"op": "browser_click", "args": {"ref": 1}},
+                {"op": "browser_type", "args": {"ref": 2, "text": "a"}},
+                {"op": "browser_fill_form", "args": {"fields": []}},
+                {"op": "browser_select_option", "args": {"ref": 3, "value": "x"}},
+                {"op": "browser_press_key", "args": {"key": "Enter"}},
+                {"op": "browser_scroll", "args": {"amount": 400}},
+                {"op": "browser_find", "args": {"query": "Sign in"}},
+                {"op": "browser_observe"},
+                {"op": "browser_extract", "args": {"prompt": "pricing"}},
+                {"op": "browser_screenshot"},
+                {"op": "browser_zoom", "args": {"x": 0, "y": 0, "width": 10, "height": 10}},
+                {"op": "browser_upload_file", "args": {"ref": 4, "path": "/tmp/x"}},
+            ]
+        });
+        assert!(
+            validate_browser_batch_ops(&args).is_ok(),
+            "every advertised step op must pass its own validation: {:?}",
+            validate_browser_batch_ops(&args)
+        );
+    }
+
+    /// The fill-form bounds mirror the relay-browser MCP op: the array is
+    /// model-authored, so both its length and each string need a ceiling
+    /// before they reach an injected JS string literal.
+    #[test]
+    fn browser_fill_form_bounds_match_the_mcp_op() {
+        let too_many: serde_json::Value = serde_json::Value::Array(
+            (0..26)
+                .map(|i| serde_json::json!({"ref": i, "text": "x"}))
+                .collect(),
+        );
+        let err = run_browser_fill_form(&serde_json::json!({ "fields": too_many }))
+            .expect_err("26 fields must be refused");
+        assert!(err.contains("at most 25"), "must name the bound: {err}");
+
+        let long_text = serde_json::json!({"fields": [
+            {"ref": 1, "text": "x".repeat(10 * 1024 + 1)}
+        ]});
+        let err = run_browser_fill_form(&long_text).expect_err("an oversized field must be refused");
+        assert!(err.contains("too long"), "must name the bound: {err}");
+
+        // A non-string value is stringified, not rejected: a model that sends
+        // a number for a numeric field should not lose the whole call.
+        let coerced = run_browser_fill_form(&serde_json::json!({
+            "fields": [{"ref": 7, "text": 42}]
+        }))
+        .expect("a numeric value must be accepted");
+        assert!(coerced.contains("\"42\""), "numeric text must coerce: {coerced}");
+    }
 
     /// Confirm-edits (§4.2.5): the card preview is computed from the REAL
     /// file, not the model's claims — occurrences carry 1-based indexes and

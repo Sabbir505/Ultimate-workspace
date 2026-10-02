@@ -94,6 +94,7 @@
 #![allow(clippy::err_expect)] // 1
 #![allow(clippy::manual_is_multiple_of)] // 1
 
+mod app_ui;
 mod browser;
 mod browser_js;
 mod browser_mcp;
@@ -365,6 +366,10 @@ pub fn run() {
             )));
             app.manage(TaskState(Arc::new(chat::tasks::TaskManager::new())));
             app.manage(chat::plan::PlanState::default());
+            // Pending self-UI requests awaiting the renderer's reply. Empty by
+            // construction at startup: a request only lives between a tool call
+            // and the bridge answering it (or its timeout).
+            app.manage(app_ui::SelfUiPending::default());
             app.manage(MobileRelayState(Arc::new(mobile::relay::MobileRelayState::new())));
             app.manage(OAuthFlowsState(Arc::new(
                 connectors::oauth::OAuthFlows::default(),
@@ -676,9 +681,13 @@ pub fn run() {
         //   * `async fn` + `tokio::task::spawn_blocking` for the blocking part —
         //     right answer for subprocess/file/network work.
         // Note `State<..>` args must be written `State<'_, ..>` either way.
-        .invoke_handler(tauri::generate_handler![
+.invoke_handler(tauri::generate_handler![
+            // Relay self-control: the injected self-UI bridge reports each
+            // result here, resolving the pending request for the tool call
+            // that asked for it. `async` so it never runs on the UI thread.
+            app_ui::app_ui_result,
             // OS toast under the app identity (Windows; dev runs only —
-            // installed builds get this from the plugin's own AUMID path).
+            // installed builds get it from the plugin's own AUMID path).
             os_toast::os_toast,
             // projects / sessions
             commands::projects::list_projects,

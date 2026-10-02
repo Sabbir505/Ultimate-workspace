@@ -256,6 +256,143 @@ return 'Scrolled by {dy}px. scrollY=' + Math.round(window.scrollY) +
     )
 }
 
+/// Click the element at viewport pixel (`x`, `y`) — the coordinate half of the
+/// dual-mode target.
+///
+/// The point of hit-testing rather than synthesizing a raw mouse event at the
+/// pixel: `document.elementFromPoint` resolves the coordinate to the SAME
+/// element object a ref would have named, so the action still runs through
+/// the element's own `.click()` and the result can report WHICH element was
+/// hit. That matters because a coordinate click is the mode the model gets
+/// wrong — if it misjudges the pixel, the model needs to be told what it
+/// actually hit rather than just "clicked".
+///
+/// The coordinate space is viewport CSS pixels, the same space `browser_zoom`
+/// crops in and the same space element rects are reported in — so a rect from
+/// a read, or a crop from a zoom, maps straight onto this without conversion.
+pub(crate) fn click_at_xy_js(x: f64, y: f64) -> String {
+    format!(
+        r#"
+var x = {x}, y = {y};
+// elementFromPoint is viewport-relative, which is exactly the space the
+// caller is sending. Guard NaN/non-finite before it reaches the DOM: an
+// elementFromPoint(NaN, NaN) throws in some engines and silently returns
+// null in others.
+if (!isFinite(x) || !isFinite(y)) {{
+    return 'ERROR: coordinate click needs finite x and y (got ' + x + ', ' + y + ').';
+}}
+var el = document.elementFromPoint(x, y);
+// Walk up to the nearest element that is actually actionable: elementFromPoint
+// commonly returns a <span>/<svg>/<path> INSIDE the control the model meant,
+// and clicking that does nothing on a real page the way it looks like it
+// should. Only climb while the node is not itself interactive.
+function isInteractive(n) {{
+    if (!n || n.nodeType !== 1) return false;
+    var t = (n.tagName || '').toLowerCase();
+    if (t === 'a' || t === 'button' || t === 'input' || t === 'textarea' || t === 'select' || t === 'option' || t === 'label' || t === 'summary') return true;
+    if (n.hasAttribute && (n.hasAttribute('onclick') || n.hasAttribute('role'))) return true;
+    if (n.getAttribute && (n.getAttribute('role') === 'button' || n.getAttribute('role') === 'link' || n.getAttribute('role') === 'menuitem' || n.getAttribute('role') === 'checkbox' || n.getAttribute('role') === 'tab')) return true;
+    return false;
+}}
+var hit = el;
+while (hit && hit.nodeType === 1 && !isInteractive(hit)) {{
+    hit = hit.parentElement;
+}}
+// No interactive ancestor at all (a blank region, a <div> wrapper): click the
+// literal hit target rather than refusing — some pages handle clicks on
+// non-semantic containers via delegated listeners.
+if (!hit) hit = el;
+if (!hit) {{
+    return 'ERROR: nothing at (' + Math.round(x) + ', ' + Math.round(y) + ') — the point is outside the page or over empty space. Use browser_read to get current element positions, or browser_zoom to look closer before clicking.';
+}}
+function describe(n) {{
+    var t = (n.tagName || '?').toLowerCase();
+    var lbl = (n.getAttribute && (n.getAttribute('aria-label') || n.getAttribute('title'))) || (n.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    return t + (lbl ? ' "' + lbl + '"' : '');
+}}
+function doClickAt() {{
+    hit.scrollIntoView({{block: 'center'}});
+    hit.click();
+    return 'Clicked at (' + Math.round(x) + ', ' + Math.round(y) + ') → ' + describe(hit) + '. Current URL: ' + location.href + '. Call browser_read to see the resulting page (or browser_find to re-locate the element by name).';
+}}
+if (typeof __relay_tweenCursor !== 'function') {{ return doClickAt(); }}
+var rect = hit.getBoundingClientRect();
+__relay_highlight(rect);
+return __relay_tweenCursor(x, y, 150).then(function() {{
+    __relay_showRipple(x, y);
+    return doClickAt();
+}}).then(function(msg) {{
+    setTimeout(function() {{ __relay_fadeHighlight(); }}, 250);
+    return msg;
+}});
+"#
+    )
+}
+
+/// Type `text` into whatever currently holds focus — the second half of
+/// coordinate targeting for `browser_type` (the first half is
+/// `focus_at_xy_js`).
+///
+/// Split from `type_js` because the ref-based body resolves its target by
+/// `data-relay-ref` attribute, which a coordinate click has no way to
+/// produce. Operating on `document.activeElement` also means this works for
+/// any element the user (or a prior step) focused, not just one this tool
+/// hit-tested.
+///
+/// Dispatches real per-character key events so React/Vue controlled inputs
+/// register the change exactly as they would from a human — the same reason
+/// `type_js` does it rather than assigning `.value` once.
+pub(crate) fn type_at_focus_js(text: &str) -> String {
+    let js_text = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"
+var el = document.activeElement;
+if (!el || el === document.body) {{
+    return 'ERROR: nothing is focused — browser_type by coordinate must focus the field first (it does that for you), or act on the field\'s ref from browser_read.';
+}}
+var text = {js_text};
+el.focus();
+// Native value setter, so React/Vue controlled inputs register the change.
+// Deliberately NO Enter keydown here: typing must not submit the form it is
+// filling. Submission is browser_press_key's job, as a separate deliberate act.
+var proto = (el instanceof HTMLTextAreaElement) ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+if (setter && setter.set && 'value' in el) {{ setter.set.call(el, text); }} else if ('value' in el) {{ el.value = text; }} else {{ el.textContent = text; }}
+el.dispatchEvent(new Event('input', {{bubbles: true}}));
+el.dispatchEvent(new Event('change', {{bubbles: true}}));
+return 'Typed into the focused ' + (el.tagName || '?').toLowerCase() + '. Call browser_read to confirm the value landed, or browser_press_key to submit.';
+"#
+    )
+}
+
+/// Focus the element at viewport pixel (`x`, `y`) so a subsequent
+/// `browser_type` or `browser_press_key` lands on it. Split from
+/// `click_at_xy_js` because typing into a coordinate-targeted field is the
+/// common case (the model reads a screenshot, sees a textbox, wants to type)
+/// and a full click would submit or toggle the control it is aiming at.
+pub(crate) fn focus_at_xy_js(x: f64, y: f64) -> String {
+    format!(
+        r#"
+var x = {x}, y = {y};
+if (!isFinite(x) || !isFinite(y)) {{
+    return 'ERROR: coordinate focus needs finite x and y (got ' + x + ', ' + y + ').';
+}}
+var el = document.elementFromPoint(x, y);
+while (el && el.nodeType === 1) {{
+    var t = (el.tagName || '').toLowerCase();
+    if (t === 'input' || t === 'textarea' || t === 'select' || (el.isContentEditable)) break;
+    el = el.parentElement;
+}}
+if (!el) {{
+    return 'ERROR: no text field at (' + Math.round(x) + ', ' + Math.round(y) + '). Use browser_read to find the input and act on its ref, or browser_zoom to look closer.';
+}}
+el.scrollIntoView({{block: 'center'}});
+el.focus();
+return 'Focused the field at (' + Math.round(x) + ', ' + Math.round(y) + ') (' + (el.tagName || '?').toLowerCase() + '). Now call browser_press_key, or browser_type with this element\'s ref.';
+"#
+    )
+}
+
 /// Hover (dispatch true mouseover/mouseenter/mousemove) over the element tagged
 /// with `data-relay-ref="{r}"`. Needed for CSS-`:hover` menus and dropdowns
 /// that reveal on hover before a click is possible. Real MouseEvents with

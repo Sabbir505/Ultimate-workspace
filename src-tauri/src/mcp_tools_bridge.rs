@@ -871,6 +871,27 @@ mod tests {
         ("browser_observe", "harness uses the relay-browser MCP browser family"),
         ("browser_extract", "harness uses the relay-browser MCP browser family"),
         ("browser_upload_file", "harness uses the relay-browser MCP browser family"),
+        // Promoted from MCP-only to first-class chat tools in the Phase-1
+        // parity pass. Still excluded here for the same reason as the rest of
+        // the family: the harness drives relay-browser MCP directly, and its
+        // `zoom`/`press_key`/`fill_form`/`select_option`/`find`/`batch` ops
+        // are the same implementations with per-op pane targeting.
+        ("browser_find", "harness uses the relay-browser MCP browser family"),
+        ("browser_zoom", "harness uses the relay-browser MCP browser family"),
+        ("browser_press_key", "harness uses the relay-browser MCP browser family"),
+        ("browser_fill_form", "harness uses the relay-browser MCP browser family"),
+        ("browser_select_option", "harness uses the relay-browser MCP browser family"),
+        ("browser_batch", "harness uses the relay-browser MCP browser family"),
+        // Relay self-control. App-window bound in the strongest sense: these
+        // drive the MAIN window's DOM, so they are meaningless from a harness
+        // process with no main window — and a harness has its own UI (its
+        // terminal), which is exactly the surface we exclude from the agent's
+        // census anyway. Same reason as open_url/open_file below.
+        ("app_snapshot", "app-window bound — drives the main window's DOM, which a harness has no equivalent of"),
+        ("app_click", "app-window bound — drives the main window's DOM, which a harness has no equivalent of"),
+        ("app_type", "app-window bound — drives the main window's DOM, which a harness has no equivalent of"),
+        ("app_press_key", "app-window bound — drives the main window's DOM, which a harness has no equivalent of"),
+        ("app_select_option", "app-window bound — drives the main window's DOM, which a harness has no equivalent of"),
         // FS tools are sandboxed per-turn (fs_roots) in the built-in chat; the
         // bridge path is ungated, so exposing them would bypass permissions.
         // Harnesses read/write the project with their own FS tools.

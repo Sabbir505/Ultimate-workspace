@@ -177,6 +177,11 @@ export function ApprovalCard({
       className={`approval-card approval-card-${badge.toLowerCase()}`}
       role="dialog"
       aria-label={`Allow ${approval.tool}`}
+      // Self-control exclusion (Phase 2): this card IS the model's leash, so
+      // the whole dialog is withheld from the agent's element census. Without
+      // it a confused or prompt-injected model would be handed refs for its
+      // own Allow/Deny buttons. Enforced in bridge_selfui.js.
+      data-relay-agent-exclude=""
       tabIndex={0}
       onKeyDown={(e) => {
         if (e.key === "Enter") void handleAllow();

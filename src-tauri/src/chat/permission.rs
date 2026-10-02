@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use super::tools::{
     COPY_FILE, DELETE_FILE, EDIT_FILE, LIST_DIRECTORY, MOVE_FILE, READ_AGENTS_MD, READ_FILE,
-    SEARCH_FILES, WRITE_AGENTS_MD, WRITE_FILE,
+    RUN_CODE, SEARCH_FILES, WRITE_AGENTS_MD, WRITE_FILE,
 };
 
 /// Sandbox scope: which tools are *visible* to the model (what it can do).
@@ -244,7 +244,13 @@ use super::tools::{
 pub fn is_system_tool(name: &str) -> bool {
     matches!(
         name,
-        DOWNLOAD_FILE | DOWNLOAD_PROGRESS | RUN_SHELL | GET_TASK_STATUS | CANCEL_TASK | TASK
+        DOWNLOAD_FILE
+            | DOWNLOAD_PROGRESS
+            | RUN_SHELL
+            | RUN_CODE
+            | GET_TASK_STATUS
+            | CANCEL_TASK
+            | TASK
     )
 }
 
@@ -266,6 +272,19 @@ pub fn check_system_permission(
         // shell commands may run without per-action cards (Claude Code's
         // bypassPermissions / Codex full-access work the same way).
         RUN_SHELL => match approval {
+            ApprovalPolicy::FullAccess => PermissionDecision::AutoRun,
+            _ => PermissionDecision::NeedsApproval,
+        },
+        // Arbitrary code in an interpreter. Same posture as `run_shell`, and
+        // deliberately so: `run_code` executes a model-authored snippet with
+        // NO OS-level sandbox (`codeexec::sandbox_available` is hardcoded
+        // false — `apply_sandbox` is a documented no-op on every platform),
+        // which makes `pip install pyautogui` / a one-line screenshot an
+        // ungated path to the same OS control the browser tools now expose
+        // through a gate. Two gated doors and one open one is not a
+        // permission model, so `run_code` goes through the same door as the
+        // shell it is trivially equivalent to.
+        RUN_CODE => match approval {
             ApprovalPolicy::FullAccess => PermissionDecision::AutoRun,
             _ => PermissionDecision::NeedsApproval,
         },
@@ -1591,6 +1610,53 @@ mod tests {
                 RUN_SHELL
             ),
             PermissionDecision::AutoRun
+        );
+    }
+
+    #[test]
+    fn run_code_is_gated_exactly_like_run_shell() {
+        // Regression: `run_code` was NOT in `is_system_tool`, so it fell
+        // straight through `run_tool_inner` to the `execute_tool` fallback and
+        // ran with NO approval card in any posture — while executing a
+        // model-authored snippet with no OS sandbox at all
+        // (`codeexec::sandbox_available` is hardcoded false). That made it an
+        // ungated path to exactly the host control the browser tools now
+        // expose through a gate: `pip install pyautogui` and go.
+        //
+        // It must therefore answer the permission question identically to
+        // `run_shell`, which it is trivially equivalent to.
+        for approval in [
+            ApprovalPolicy::OnRequest,
+            ApprovalPolicy::ConfirmEdits,
+            ApprovalPolicy::AutoEdit,
+        ] {
+            for sandbox in [SandboxPolicy::ReadOnly, SandboxPolicy::WorkspaceWrite] {
+                assert_eq!(
+                    check_system_permission(sandbox, approval, RUN_CODE),
+                    check_system_permission(sandbox, approval, RUN_SHELL),
+                    "run_code must track run_shell under {sandbox:?} + {approval:?}"
+                );
+                assert_eq!(
+                    check_system_permission(sandbox, approval, RUN_CODE),
+                    PermissionDecision::NeedsApproval,
+                    "run_code must be gated under {sandbox:?} + {approval:?}"
+                );
+            }
+        }
+        assert_eq!(
+            check_system_permission(
+                SandboxPolicy::WorkspaceWrite,
+                ApprovalPolicy::FullAccess,
+                RUN_CODE
+            ),
+            PermissionDecision::AutoRun,
+            "Full Access is the one-time explicit consent that unsandboxed code runs"
+        );
+        // And it must be routed through the gate in the first place — this is
+        // the half of the fix that a check_system_permission test can't see.
+        assert!(
+            is_system_tool(RUN_CODE),
+            "run_code must be a system tool or the gate above is never consulted"
         );
     }
 

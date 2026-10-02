@@ -15,6 +15,7 @@
     "site:preview": "vite preview --config vite.site.config.ts",
     "tauri": "tauri",
     "test": "vitest run",
+    "test:selfui": "node src-tauri/src/bridge_selfui.test.mjs",
     "release:latest-json": "node scripts/make-latest-json.mjs",
     "tauri:build:staging": "tauri build --config src-tauri/tauri.staging.conf.json",
     "release:latest-json:staging": "node scripts/release-staging.mjs --latest-json-only",

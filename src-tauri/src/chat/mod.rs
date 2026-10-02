@@ -2512,8 +2512,31 @@ mod tests {
         // Measured baseline 44.2k chars (system 9.2k + specs 35.0k) vs the
         // old 58.9k — a ~25% cut in the fixed per-turn overhead. The budget
         // keeps ~4% headroom so re-bloat fails here, not in production.
+        //
+        // Re-baselined 46.0k → 49.5k for Relay self-control (the five `app_*`
+        // tools, ~2.8k). Unlike the browser interaction family — which rides
+        // `caps.browser` and costs nothing until a page is open — this is a
+        // REAL tax on EVERY turn. It was re-baselined rather than gated
+        // deliberately, and the trade is worth stating for whoever revisits it:
+        //
+        //   Gating it off by default would cost zero tokens per turn and make
+        //   the capability effectively dead — a model that cannot see the tools
+        //   never reaches for them, so "drive Relay's own UI" would not be
+        //   end-to-end. Ungating is what makes the model AWARE it can, which is
+        //   the entire point of the phase.
+        //
+        // Ungating is considered safe because these tools are the FALLBACK, not
+        // the main path: their descriptions spend most of their words steering
+        // the model to the purpose-built tools first (list_automations over
+        // clicking the Automations sidebar, open_file over clicking a file
+        // row), and the mutating four are plan-mode gated like any other state
+        // change.
+        //
+        // If a future pass finds this too expensive, the right move is a
+        // `ToolCaps` flag defaulting OFF with a Settings toggle — not deleting
+        // the tools.
         assert!(
-            total < 46_000,
+            total < 49_500,
             "fresh-turn baseline over fixed-cost budget: {total} chars"
         );
     }

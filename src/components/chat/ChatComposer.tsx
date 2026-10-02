@@ -1769,6 +1769,11 @@ export const ChatComposer = memo(function ChatComposer({
                   onClick={onStop}
                   title="Stop generating"
                   aria-label="Stop generating"
+                  // Self-control exclusion (Phase 2): Stop is the user's kill
+                  // switch for the agent. Exposing it as a clickable ref would
+                  // let a confused or prompt-injected model end its own turn
+                  // — the same reason Claude Code keeps its Esc out of reach.
+                  data-relay-agent-exclude=""
                 >
                   ■
                 </button>

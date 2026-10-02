@@ -29,19 +29,29 @@ use crate::chat::providers::{
 };
 use crate::chat::{permission, tools, ChatManager};
 
-/// Tool-loop round cap. The model⇄tool round-trip limit was removed by
-/// request: a single turn may now chain as many tool calls as the task needs.
-/// The constant survives as usize::MAX because the loop and the search-nudge
-/// headroom check (`round + 2 < cap`) are written against it — with no cap the
-/// headroom check is always true, which is exactly the unbounded semantic.
-/// The "stopped after reaching the tool-call limit" exit below is therefore
-/// unreachable in practice; per-round safety nets still apply (the SSE stall
-/// detector MAX_PARSE_FAILURES and the provider/socket timeouts).
-const MAX_TOOL_ITERS: usize = usize::MAX;
+/// Tool-loop round cap. Generous on purpose: a single turn must still be able
+/// to chain as many tool calls as a long task legitimately needs (a large
+/// refactor or a deep research pass routinely runs 100+ rounds), so this is a
+/// runaway backstop rather than a budget — the model is never asked to wrap up
+/// early because of it.
+///
+/// It is deliberately NOT `usize::MAX`. The loop and the search-nudge headroom
+/// check (`round + 2 < cap`) are written against this constant, so an unbounded
+/// value makes the headroom check vacuously true AND leaves the "stopped after
+/// reaching the tool-call limit" exit below unreachable. That mattered little
+/// while every tool was a read or a file write; it matters a great deal now
+/// that the browser tools can move a cursor and click real UI, where a confused
+/// or looping model clicks real things on the user's machine.
+///
+/// Per-round safety nets still apply underneath (the SSE stall detector
+/// MAX_PARSE_FAILURES and the provider/socket timeouts); this bounds the number
+/// of ROUNDS, not the length of any single round.
+const MAX_TOOL_ITERS: usize = 500;
 
-/// Research mode shares the same unbounded cap since the limit's removal —
-/// the distinction only mattered when the caps were finite (45 / 96).
-const RESEARCH_MAX_TOOL_ITERS: usize = usize::MAX;
+/// Research mode gets a larger ceiling — the ledger workflow (add_source_note /
+/// check_sufficiency) legitimately runs long multi-source sweeps, the workflow
+/// most likely to need more rounds than an ordinary turn.
+const RESEARCH_MAX_TOOL_ITERS: usize = 1000;
 
 /// Consecutive SSE JSON parse failures before treating the stream as stalled.
 /// A single malformed line is normal (partial chunk); sustained failures mean

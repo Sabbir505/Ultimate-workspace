@@ -44,5 +44,17 @@ export default defineConfig(async () => ({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
+    // `bridge_selfui.test.mjs` is a standalone node/jsdom script for the
+    // Rust-injected self-UI bridge, NOT a vitest suite — it declares no
+    // `test()` calls and drives the bridges by hand through jsdom. Vitest's
+    // default glob sweeps it up under src-tauri and fails the whole run on a
+    // missing suite. Run it separately: `npm run test:selfui`.
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/src-tauri/**",
+      "**/.playwright-mcp/**",
+      "**/target/**",
+    ],
   },
 }));

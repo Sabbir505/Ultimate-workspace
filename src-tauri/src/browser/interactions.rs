@@ -9,6 +9,27 @@ impl BrowserManager {
         self.run_action(&click_js(r, None)).await
     }
 
+    /// Click whatever sits at viewport pixel (`x`, `y`). The coordinate half
+    /// of the dual-mode target — see [`click_at_xy_js`] for why this hit-tests
+    /// rather than synthesizing a raw event at the pixel.
+    pub async fn click_at_xy(&self, x: f64, y: f64) -> Result<String, String> {
+        self.run_action(&click_at_xy_js(x, y)).await
+    }
+
+    /// Focus the text field at viewport pixel (`x`, `y`) so a following
+    /// `browser_press_key` or ref-based `browser_type` lands on it.
+    pub async fn focus_at_xy(&self, x: f64, y: f64) -> Result<String, String> {
+        self.run_action(&focus_at_xy_js(x, y)).await
+    }
+
+    /// Type into whatever currently holds focus. Used for the coordinate half
+    /// of `browser_type` (focus the field by pixel, then type) — the ref-based
+    /// path can't be reused because a coordinate click never produces a
+    /// `data-relay-ref`.
+    pub async fn type_into_at_focus(&self, text: &str) -> Result<String, String> {
+        self.run_action(&type_at_focus_js(text)).await
+    }
+
     pub async fn type_into(&self, r: i64, text: &str) -> Result<String, String> {
         self.run_action(&type_js(r, text, None)).await
     }
@@ -158,6 +179,51 @@ impl BrowserManager {
     /// Press a key (Enter/Escape/arrows/…) on the focused element.
     pub async fn press_key_for_pane(&self, label: &str, key: &str) -> Result<String, String> {
         self.run_action_for_pane(label, &press_key_js(key)).await
+    }
+
+    // ---- Active-pane wrappers -------------------------------------------
+    //
+    // The built-in chat's `browser_*` tools act on whatever pane the user is
+    // looking at, so they resolve the label here rather than each arm in
+    // `run_browser_tool` repeating the lookup (mirrors `read_page` /
+    // `observe_active` / `extract_active` in actions.rs). The `*_for_pane`
+    // forms above stay the shared implementation — the MCP sidecar calls
+    // those with an explicit pane id.
+
+    /// Substring search over the interactive census, same ref numbering as
+    /// `browser_read`. Backs the chat-side `browser_find`.
+    pub async fn find_active(&self, query: &str) -> Result<String, String> {
+        let label = self.active_label()?;
+        self.snapshot_for_pane(&label, Some(query)).await
+    }
+
+    /// Region capture of the ACTIVE pane, at up to 4x. Backs `browser_zoom`.
+    pub fn zoom_active(
+        &self,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        scale: f64,
+    ) -> Option<Vec<u8>> {
+        let label = self.active_label().ok()?;
+        self.capture_pane_png_clipped(&label, x, y, width, height, scale)
+    }
+
+    pub async fn press_key_active(&self, key: &str) -> Result<String, String> {
+        let label = self.active_label()?;
+        self.press_key_for_pane(&label, key).await
+    }
+
+    /// `fields_json` is a validated `[{"ref":N,"text":"..."}]` array.
+    pub async fn fill_form_active(&self, fields_json: &str) -> Result<String, String> {
+        let label = self.active_label()?;
+        self.fill_form_for_pane(&label, fields_json).await
+    }
+
+    pub async fn select_option_active(&self, r: i64, value: &str) -> Result<String, String> {
+        let label = self.active_label()?;
+        self.select_option_for_pane(&label, r, value).await
     }
 
     /// Read the diagnostics ring buffer ("console" | "network") incrementally.

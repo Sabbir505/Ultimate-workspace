@@ -107,6 +107,19 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         // point to whatever page is open); the interaction tools need a live
         // page and are gated on caps.browser below.
         openai_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
+        // Relay self-control. Ungated, unlike the browser interaction tools:
+        // those need a live page, but this reaches Relay's OWN window, which is
+        // always there. It costs ~1.6k on every turn, which is the deliberate
+        // price of letting the agent drive the app it is running inside.
+        openai_fn(APP_SNAPSHOT, APP_SNAPSHOT_DESC, app_snapshot_parameters()),
+        openai_fn(APP_CLICK, APP_CLICK_DESC, app_click_parameters()),
+        openai_fn(APP_TYPE, APP_TYPE_DESC, app_type_parameters()),
+        openai_fn(APP_PRESS_KEY, APP_PRESS_KEY_DESC, app_press_key_parameters()),
+        openai_fn(
+            APP_SELECT_OPTION,
+            APP_SELECT_OPTION_DESC,
+            app_select_option_parameters(),
+        ),
         // Research source ledger — rides caps.research: the research
         // scaffolding is the only prompt text that references these tools,
         // so an ordinary turn doesn't pay ~0.9k tokens for an unreachable
@@ -224,6 +237,28 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
                 BROWSER_UPLOAD_FILE_DESC,
                 browser_upload_file_parameters(),
             ),
+            // The Phase-1 parity family: these all existed as relay-browser
+            // MCP ops but were unreachable from a chat turn, so the model
+            // could see a pane and not be able to zoom into it, press a key,
+            // fill a second field, or pick a dropdown option.
+            openai_fn(BROWSER_FIND, BROWSER_FIND_DESC, browser_find_parameters()),
+            openai_fn(BROWSER_ZOOM, BROWSER_ZOOM_DESC, browser_zoom_parameters()),
+            openai_fn(
+                BROWSER_PRESS_KEY,
+                BROWSER_PRESS_KEY_DESC,
+                browser_press_key_parameters(),
+            ),
+            openai_fn(
+                BROWSER_FILL_FORM,
+                BROWSER_FILL_FORM_DESC,
+                browser_fill_form_parameters(),
+            ),
+            openai_fn(
+                BROWSER_SELECT_OPTION,
+                BROWSER_SELECT_OPTION_DESC,
+                browser_select_option_parameters(),
+            ),
+            openai_fn(BROWSER_BATCH, BROWSER_BATCH_DESC, browser_batch_parameters()),
         ]);
     }
     // Persistent memory (MEMORY_DESIGN_ARCHITECTURE.md §12.1) — gated by the
@@ -551,6 +586,16 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         // point to whatever page is open); the interaction tools need a live
         // page and are gated on caps.browser below.
         anthropic_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
+        // Relay self-control — mirror of the OpenAI block above (ungated).
+        anthropic_fn(APP_SNAPSHOT, APP_SNAPSHOT_DESC, app_snapshot_parameters()),
+        anthropic_fn(APP_CLICK, APP_CLICK_DESC, app_click_parameters()),
+        anthropic_fn(APP_TYPE, APP_TYPE_DESC, app_type_parameters()),
+        anthropic_fn(APP_PRESS_KEY, APP_PRESS_KEY_DESC, app_press_key_parameters()),
+        anthropic_fn(
+            APP_SELECT_OPTION,
+            APP_SELECT_OPTION_DESC,
+            app_select_option_parameters(),
+        ),
         // Research source ledger — rides caps.research (mirror of the
         // OpenAI block): only research turns reference these tools, so
         // ordinary turns don't carry them.
@@ -648,6 +693,25 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
                 BROWSER_UPLOAD_FILE_DESC,
                 browser_upload_file_parameters(),
             ),
+            // Phase-1 parity family — mirror of the OpenAI block above.
+            anthropic_fn(BROWSER_FIND, BROWSER_FIND_DESC, browser_find_parameters()),
+            anthropic_fn(BROWSER_ZOOM, BROWSER_ZOOM_DESC, browser_zoom_parameters()),
+            anthropic_fn(
+                BROWSER_PRESS_KEY,
+                BROWSER_PRESS_KEY_DESC,
+                browser_press_key_parameters(),
+            ),
+            anthropic_fn(
+                BROWSER_FILL_FORM,
+                BROWSER_FILL_FORM_DESC,
+                browser_fill_form_parameters(),
+            ),
+            anthropic_fn(
+                BROWSER_SELECT_OPTION,
+                BROWSER_SELECT_OPTION_DESC,
+                browser_select_option_parameters(),
+            ),
+            anthropic_fn(BROWSER_BATCH, BROWSER_BATCH_DESC, browser_batch_parameters()),
         ]);
     }
     // Persistent memory — mirror of the OpenAI block's caps.memory gate.
@@ -1355,33 +1419,57 @@ fn browser_upload_file_parameters() -> Value {
     })
 }
 
+/// `browser_click`'s dual-mode target. `ref` is the primary mode and the one
+/// to reach for; `x`/`y` exist so the canvas/chart/map/video surfaces the
+/// element tree cannot name stay reachable. Making both optional rather than
+/// declaring a `oneOf` keeps the schema cheap — providers handle the
+/// constraint fine in prose, and the dispatcher reports the exact requirement
+/// when neither is present.
 fn browser_ref_parameters() -> Value {
     json!({
         "type": "object",
         "properties": {
             "ref": {
                 "type": "integer",
-                "description": "The element's ref number from the latest browser_read.",
+                "description": "The element's ref number from the latest browser_read. PREFER THIS — a ref survives layout shifts and needs no pixel guessing. Required unless x/y are given.",
+            },
+            "x": {
+                "type": "number",
+                "description": "Viewport CSS pixels from the pane's top-left. Coordinate fallback, for content the element tree cannot name (canvas, charts, maps, embedded video, cross-origin iframes). Ignored when `ref` is present."
+            },
+            "y": {
+                "type": "number",
+                "description": "Viewport CSS pixels from the pane's top-left. Coordinate fallback — see `x`. Ignored when `ref` is present."
             }
         },
-        "required": ["ref"],
     })
 }
 
+/// `browser_type`: same dual-mode target as click. With `x`/`y` the field at
+/// that pixel is FOCUSED and then typed into — deliberately not clicked, since
+/// clicking a textbox the model wants to type into can submit or toggle it.
 fn browser_type_parameters() -> Value {
     json!({
         "type": "object",
         "properties": {
             "ref": {
                 "type": "integer",
-                "description": "The input's ref number from the latest browser_read.",
+                "description": "The input's ref number from the latest browser_read. PREFER THIS. Required unless x/y are given.",
+            },
+            "x": {
+                "type": "number",
+                "description": "Viewport CSS pixels from the pane's top-left. Coordinate fallback: focuses the field at that pixel and types into it (does not click it). Ignored when `ref` is present."
+            },
+            "y": {
+                "type": "number",
+                "description": "Viewport CSS pixels from the pane's top-left. Coordinate fallback — see `x`. Ignored when `ref` is present."
             },
             "text": {
                 "type": "string",
                 "description": "The text to type into the field.",
             }
         },
-        "required": ["ref", "text"],
+        "required": ["text"],
     })
 }
 
@@ -1394,6 +1482,176 @@ fn browser_scroll_parameters() -> Value {
                 "description": "Pixels to scroll vertically; negative scrolls up. Default 600.",
             }
         },
+    })
+}
+
+/// `browser_find`: substring search over the interactive-element census.
+/// Same ref numbering as browser_read — the whole point is that the model can
+/// act on what comes back without a second full read.
+fn browser_find_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Substring to look for. Matched case-insensitively against each element's label, aria-label, placeholder, id and value.",
+            }
+        },
+        "required": ["query"],
+    })
+}
+
+/// `browser_zoom`: the region crop. Coordinates are viewport CSS pixels from
+/// the pane's top-left — the same space the element rects in browser_read's
+/// interactive mode are expressed in, so a ref's rect maps straight across.
+fn browser_zoom_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "x": { "type": "number", "description": "Left edge of the region, in viewport CSS pixels from the pane's top-left." },
+            "y": { "type": "number", "description": "Top edge of the region, in viewport CSS pixels from the pane's top-left." },
+            "width": { "type": "number", "description": "Region width in CSS pixels." },
+            "height": { "type": "number", "description": "Region height in CSS pixels." },
+            "scale": { "type": "number", "description": "Upsample factor for the crop. Default 2, max 4 (min 0.5)." },
+        },
+        "required": ["x", "y", "width", "height"],
+    })
+}
+
+/// `browser_press_key`: key names mirror the DOM `KeyboardEvent.key` values
+/// the page's own handlers will see.
+fn browser_press_key_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "key": {
+                "type": "string",
+                "description": "Key to send: 'Enter', 'Escape', 'Tab', 'ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Backspace', 'Delete', 'Space', or a combination like 'Control+A'.",
+            }
+        },
+        "required": ["key"],
+    })
+}
+
+/// `browser_fill_form`: bounded like every other untrusted-JSON argument here
+/// (25 fields, 10 KiB each) — the numbers are model-authored and the array
+/// length is not.
+fn browser_fill_form_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "fields": {
+                "type": "array",
+                "description": "Fields to set, in order. Max 25; text max 10 KiB each.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "ref": { "type": "integer", "description": "The input's ref number from the latest browser_read." },
+                        "text": { "type": "string", "description": "Value to set. An empty string clears the field." }
+                    },
+                    "required": ["ref", "text"]
+                }
+            }
+        },
+        "required": ["fields"],
+    })
+}
+
+fn browser_select_option_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": { "type": "integer", "description": "The <select>'s ref number from the latest browser_read." },
+            "value": { "type": "string", "description": "The option's value attribute OR its visible text. If it matches neither, the error lists the available options." }
+        },
+        "required": ["ref", "value"],
+    })
+}
+
+/// `app_snapshot`: `query` filters the LISTING without changing numbering, so
+/// a filtered result's refs are still directly actionable.
+fn app_snapshot_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Substring filter over each element's label, id, placeholder and role. Narrows the listing only — refs keep their numbering. Omit for everything."
+            }
+        },
+    })
+}
+
+fn app_click_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": { "type": "integer", "description": "The element's ref from the latest app_snapshot." }
+        },
+        "required": ["ref"],
+    })
+}
+
+fn app_type_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": { "type": "integer", "description": "The field's ref from the latest app_snapshot." },
+            "text": { "type": "string", "description": "The text to set in the field." }
+        },
+        "required": ["ref", "text"],
+    })
+}
+
+fn app_press_key_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "key": {
+                "type": "string",
+                "description": "Key to send: 'Enter', 'Escape', 'Tab', 'ArrowDown', or a combination like 'Control+K'."
+            }
+        },
+        "required": ["key"],
+    })
+}
+
+fn app_select_option_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": { "type": "integer", "description": "The <select>'s ref from the latest app_snapshot." },
+            "value": { "type": "string", "description": "The option's value OR its visible text. A mismatch returns the available options." }
+        },
+        "required": ["ref", "value"],
+    })
+}
+
+/// `browser_batch`: the step schema is deliberately loose (op + free-form
+/// args) because each op validates its own arguments at dispatch — a union of
+/// every step's schema would be both enormous and wrong for the other ops.
+/// The op allowlist is enforced in the dispatcher, not advertised here, so the
+/// description carries the list the model needs.
+fn browser_batch_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "actions": {
+                "type": "array",
+                "description": "Steps to run in order. Max 15. Each is {\"op\": \"<tool name>\", ...that tool's own arguments}. Steps run sequentially and halt at the first failure.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "op": {
+                            "type": "string",
+                            "description": "The browser tool to run for this step: browser_click, browser_type, browser_fill_form, browser_select_option, browser_press_key, browser_scroll, browser_read, browser_find, browser_observe, browser_extract, browser_screenshot, browser_zoom or browser_upload_file.",
+                        }
+                    },
+                    "required": ["op"]
+                }
+            }
+        },
+        "required": ["actions"],
     })
 }
 
@@ -2893,6 +3151,14 @@ mod tests {
         // (read_agents_md / write_agents_md, §4.2.10) joined the default
         // surface — two deliberate tools worth their ~1.3k chars; the
         // descriptions are already trim-passed. Previous tightening below.
+        // RAISED 36_500→39_500 (Relay self-control): the five `app_*` tools
+        // (~2.6k) joined the default surface ungated. Same trade as the
+        // fresh-turn re-baseline in chat/mod.rs — see the full rationale
+        // there. Short version: gating them would make them invisible, and a
+        // model that cannot see "drive Relay's own UI" never does it, so the
+        // phase would not actually be end-to-end. They are the fallback path
+        // (descriptions steer to purpose-built tools first) and the mutating
+        // four are plan-mode gated, which is what makes the ungating safe.
         // TIGHTENED 49_000→36_000 (2026-09-21, token-efficiency pass II):
         // the source ledger now rides `caps.research`, and Session Mesh /
         // automation writes / totp_code became family-locked attach-on-demand
@@ -2900,8 +3166,8 @@ mod tests {
         // chars (57 → 44 tools). Locked families return via one
         // attach_connector call; the manifest line keeps them discoverable.
         assert!(
-            total < 36_500,
-            "default tool specs total {total} chars (budget 36_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            total < 39_500,
+            "default tool specs total {total} chars (budget 39_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
         let all_on_caps = ToolCaps {
             browser: true,
@@ -2944,9 +3210,26 @@ mod tests {
         // identical always-carded consent posture. The default fresh-turn
         // surface is unaffected: the CRUD trio rides `caps.subagent_write` and is
         // stripped from the bridge/subagent registries (ToolCaps::default()).
+        // Bumped 57_500→64_000 for the browser Phase-1 parity family
+        // (browser_find / browser_zoom / browser_press_key / browser_fill_form /
+        // browser_select_option / browser_batch, ~6.4k). All six existed as
+        // relay-browser MCP ops but were UNREACHABLE from a chat turn — the
+        // model could open a pane and not be able to zoom into it, press a key,
+        // fill a second field, or pick a dropdown option. Raising the registry
+        // budget rather than trimming is the deliberate call here because the
+        // gap was a missing capability, not prose bloat: browser_click/type
+        // already tell the model refs expire, browser_zoom tells it a tree read
+        // usually costs fewer tokens, and browser_find exists precisely to make
+        // browser_read rarer. As with browser_upload_file above, the default
+        // fresh-turn surface is unaffected — the family rides `caps.browser`,
+        // which is sticky-per-session and only set once a page is open.
+        // Bumped 64_000→67_500 for Relay self-control (the five `app_*` tools,
+        // ~2.8k): the same family that re-baselined the default budget above,
+        // carrying its ~2.8k onto this aggregate too. Both bumps are one
+        // decision — ungated self-control — recorded once in chat/mod.rs.
         assert!(
-            all_on < 57_500,
-            "all-on tool specs total {all_on} chars (budget 57_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 67_500,
+            "all-on tool specs total {all_on} chars (budget 64_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 
@@ -3144,6 +3427,211 @@ mod tests {
             });
             assert!(found, "{name} tool specs must advertise browser_screenshot");
         }
+    }
+
+    /// The Phase-1 parity family: six ops that existed as relay-browser MCP
+    /// ops but were unreachable from a chat turn. The schema-drift failure
+    /// mode this guards is the exact one `browser_screenshot` already had —
+    /// dispatchable in the dispatcher, absent from the spec builders, so the
+    /// model never learns the tool exists.
+    #[test]
+    fn browser_parity_family_advertised_in_both_wire_formats() {
+        let caps = ToolCaps {
+            browser: true,
+            ..ToolCaps::default()
+        };
+        for (name, specs) in [
+            (
+                "openai",
+                openai_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite),
+            ),
+            (
+                "anthropic",
+                anthropic_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite),
+            ),
+        ] {
+            for tool in [
+                BROWSER_FIND,
+                BROWSER_ZOOM,
+                BROWSER_PRESS_KEY,
+                BROWSER_FILL_FORM,
+                BROWSER_SELECT_OPTION,
+                BROWSER_BATCH,
+            ] {
+                let found = specs.iter().any(|s| {
+                    s["function"]["name"].as_str().or_else(|| s["name"].as_str()) == Some(tool)
+                });
+                assert!(found, "{name} tool specs must advertise {tool}");
+            }
+        }
+    }
+
+    /// The parity family rides the same `caps.browser` gate as the tools it
+    /// joins — an idle session must not pay for a zoom it has no pane to zoom.
+    #[test]
+    fn browser_parity_family_is_gated_by_caps_browser() {
+        let off = ToolCaps::default();
+        let specs = openai_tool_specs(&off, permission::SandboxPolicy::WorkspaceWrite);
+        for tool in [
+            BROWSER_FIND,
+            BROWSER_ZOOM,
+            BROWSER_PRESS_KEY,
+            BROWSER_FILL_FORM,
+            BROWSER_SELECT_OPTION,
+            BROWSER_BATCH,
+        ] {
+            assert!(
+                !specs.iter().any(|s| {
+                    s.pointer("/function/name").and_then(|n| n.as_str()) == Some(tool)
+                }),
+                "{tool} must stay unadvertised until a page is open"
+            );
+        }
+    }
+
+    /// Coordinate targeting is opt-in: `ref` stays the primary documented mode
+    /// on both click and type, and a model must still be able to call either
+    /// tool with a ref alone. The regression this pins is a schema that
+    /// declares `required: ["ref"]` — which would make the coordinate
+    /// fallback unreachable despite the dispatcher supporting it.
+    #[test]
+    fn browser_click_and_type_accept_ref_alone_and_document_the_coordinate_fallback() {
+        for (label, params) in [
+            ("click", browser_ref_parameters()),
+            ("type", browser_type_parameters()),
+        ] {
+            let required = params["required"].as_array().cloned().unwrap_or_default();
+            assert!(
+                !required.iter().any(|v| v == "ref"),
+                "browser_{label} must not REQUIRE ref — that would make coordinate \
+                 targeting unreachable even though the dispatcher supports it"
+            );
+            for key in ["ref", "x", "y"] {
+                assert!(
+                    params["properties"][key].is_object(),
+                    "browser_{label} must document `{key}`"
+                );
+            }
+            assert!(
+                params["properties"]["x"]["description"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("Viewport CSS pixels")),
+                "browser_{label}'s x must state its coordinate space — a pixel \
+                 target is unusable if the model doesn't know which space it is in"
+            );
+        }
+        // browser_type still requires its payload: dropping `text` from
+        // required would let a coordinate-focus call through with nothing to type.
+        assert!(
+            browser_type_parameters()["required"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|v| v == "text")),
+            "browser_type must still require text"
+        );
+    }
+
+    #[test]
+    fn browser_batch_declares_its_steps_and_caps_them() {
+        let p = browser_batch_parameters();
+        assert!(
+            p["required"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|v| v == "actions")),
+            "browser_batch must require actions"
+        );
+        let op_desc = p["properties"]["actions"]["items"]["properties"]["op"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        // The op allowlist is enforced in the dispatcher, so the model can only
+        // learn it from here. Every allowed op must be named, or the model
+        // guesses and eats a rejection round trip.
+        for tool in [
+            BROWSER_READ,
+            BROWSER_CLICK,
+            BROWSER_TYPE,
+            BROWSER_FILL_FORM,
+            BROWSER_SELECT_OPTION,
+            BROWSER_PRESS_KEY,
+            BROWSER_SCROLL,
+            BROWSER_FIND,
+            BROWSER_OBSERVE,
+            BROWSER_EXTRACT,
+            BROWSER_SCREENSHOT,
+            BROWSER_ZOOM,
+            BROWSER_UPLOAD_FILE,
+        ] {
+            assert!(op_desc.contains(tool), "browser_batch must advertise {tool}");
+        }
+        assert!(
+            !op_desc.contains(BROWSER_BATCH),
+            "browser_batch must not advertise itself as a step op — nesting is refused"
+        );
+    }
+
+    /// Relay self-control is ungated in BOTH wire formats. The gate is
+    /// deliberate and asymmetric with the browser family: those need a live
+    /// page, but self-control reaches Relay's own window, which is always
+    /// there — so there is nothing to gate on, and gating it would mean the
+    /// agent could not look at the UI it is running inside.
+#[test]
+    fn app_ui_tools_advertised_ungated_in_both_wire_formats() {
+        // ToolCaps::default() — deliberately NOT the browser-gated state.
+        for (name, specs) in [
+            (
+                "openai",
+                openai_tool_specs(&ToolCaps::default(), permission::SandboxPolicy::WorkspaceWrite),
+            ),
+            (
+                "anthropic",
+                anthropic_tool_specs(&ToolCaps::default(), permission::SandboxPolicy::WorkspaceWrite),
+            ),
+        ] {
+            for tool in [
+                APP_SNAPSHOT,
+                APP_CLICK,
+                APP_TYPE,
+                APP_PRESS_KEY,
+                APP_SELECT_OPTION,
+            ] {
+                let found = specs.iter().any(|s| {
+                    s["function"]["name"].as_str().or_else(|| s["name"].as_str()) == Some(tool)
+                });
+                assert!(found, "{name} tool specs must advertise {tool} with no caps set");
+            }
+        }
+    }
+
+    /// `app_snapshot`'s whole economy is that a filtered listing costs a
+    /// fraction of a full one. It must stay optional — declaring it required
+    /// would force a full census on every call and undo that.
+    #[test]
+    fn app_snapshot_query_is_optional_but_every_other_app_tool_requires_its_args() {
+        let snap = app_snapshot_parameters();
+        assert!(
+            snap.get("required").is_none(),
+            "app_snapshot must take no required argument — an empty snapshot is the common case"
+        );
+        assert!(snap["properties"]["query"].is_object());
+        for (label, params, required) in [
+            ("app_click", app_click_parameters(), "ref"),
+            ("app_type", app_type_parameters(), "text"),
+            ("app_press_key", app_press_key_parameters(), "key"),
+            ("app_select_option", app_select_option_parameters(), "value"),
+        ] {
+            assert!(
+                params["required"]
+                    .as_array()
+                    .is_some_and(|r| r.iter().any(|v| v == required)),
+                "{label} must require `{required}`"
+            );
+        }
+        // app_type needs BOTH the target and the payload.
+        assert!(
+            app_type_parameters()["required"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|v| v == "ref")),
+            "app_type must require ref as well as text"
+        );
     }
 
     #[test]

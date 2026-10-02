@@ -376,6 +376,28 @@ pub(crate) fn is_mutating_tool(name: &str) -> bool {
             | "generate_image"
             | "browser_type"
             | "browser_click"
+            // The Phase-1 parity family, split the same way: the ones that
+            // CHANGE page state are mutating, the ones that only move the
+            // viewport or look at it are not.
+            //
+            // `browser_batch` is mutating by definition — it can contain any
+            // mutating op, and refusing to reason about its contents would
+            // make it a plan-mode bypass.
+            | "browser_fill_form"
+            | "browser_select_option"
+            | "browser_press_key"
+            | "browser_batch"
+            | "browser_upload_file"
+            // Relay self-control: everything except the pure read is
+            // mutating. A click, a typed field, a submitted form, or a changed
+            // dropdown all alter the user's app — which is exactly what plan
+            // mode's "no changes until the user approves" contract forbids.
+            // `app_snapshot` stays allowed so the agent can still RESEARCH
+            // the UI it is planning against.
+            | "app_click"
+            | "app_type"
+            | "app_press_key"
+            | "app_select_option"
             | "attach_connector"
             | "attach_mcp_server"
     )

@@ -344,7 +344,7 @@ Status re-verified against the code on **2026-09-30**: ✅ done · 🟡 partial 
 27. **Share links** (static HTML export of a session trace, sanitized) or `.relaytrace` export for bug reports. *Effort: M.* [research]
 28. **i18n layer + RTL audit + a11y pass.** *Effort: XL, incremental.* [code]
 29. **Secret redaction** in logs/export/snapshots (regex + entropy scan before write). *Effort: M.* [research]
-30. **Computer use (OS control)** — strategic watch item: Relay's browser panes cover the web; full OS control is where Claude Cowork/Codex are going. Decide whether to compete (browser-first + selective OS actions via connectors) or stay scoped. *Decision item.* [research]
+30. **Computer use** — *DECIDED 2026-10-02: build it, DOM-first, in tiers.* Browser-pane parity and **Relay self-control** (the agent driving Relay's OWN UI through the real DOM — Relay's interface is React in a WebView2, so a ref beats a pixel) are **shipped**; see `docs/research/COMPUTER_USE_PLAN_2026-10-02.md` §12. OS-level control of *other* desktop apps stays an unstarted Phase 3: the reliability ceiling is real (OSWorld 2.0 binary completion ~20% for the best model, and the failures are long-horizon state management, not clicking), so it is scoped as a gated later phase, not a headline.
 
 ### Explicit non-goals to re-confirm (PRD §2/§14, unchanged)
 Cloud execution/VMs (see Tier-1 #4 for the local alternative), IDE/autocomplete, enterprise SSO/SCIM, free frontier-model access, web client. Each is a documented decision, not an oversight — revisit only if positioning changes.

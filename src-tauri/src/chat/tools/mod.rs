@@ -151,6 +151,52 @@ pub const BROWSER_EXTRACT: &str = "browser_extract";
 /// Put a local file (allowlist: the workspace roots) onto a page's file
 /// input — the agentic upload path (DevTools `DOM.setFileInputFiles`).
 pub const BROWSER_UPLOAD_FILE: &str = "browser_upload_file";
+/// Capture a REGION of the pane as an upscaled PNG — the vision fallback for
+/// what the ref tree can't represent: canvas, charts, maps, embedded video,
+/// and small/dense text. Without it the only visual tool is a whole-page
+/// screenshot, which is both expensive and often illegible after downscale.
+pub const BROWSER_ZOOM: &str = "browser_zoom";
+/// Send a key to the focused element (Enter/Escape/arrows/Tab). The escape
+/// hatch for widgets no semantic action reaches — a `<div role=combobox>`,
+/// a custom dropdown, a shortcut.
+pub const BROWSER_PRESS_KEY: &str = "browser_press_key";
+/// Set several fields at once, by ref, in one call. React/Vue-safe (native
+/// value setter), so it is both far faster and far more reliable than a
+/// browser_type per field.
+pub const BROWSER_FILL_FORM: &str = "browser_fill_form";
+/// Pick an `<option>` by value or visible text. The direct semantic action
+/// that fixes the classic "clicked the `<select>` and it didn't change"
+/// failure a coordinate click cannot fix.
+pub const BROWSER_SELECT_OPTION: &str = "browser_select_option";
+/// Substring search across every interactive element's label/aria/
+/// placeholder/id/value, returning the same ref numbering browser_read uses.
+/// Reaches a control without paying for the whole page read — the difference
+/// between ~200 tokens and several thousand when you only need one button.
+pub const BROWSER_FIND: &str = "browser_find";
+/// Run several browser actions in ONE round trip, in order. Every step in the
+/// batch gets a result even after one fails (the skipped ones are marked),
+/// which is what lets a multi-step flow (fill form → press Enter → wait)
+/// complete in a single model round instead of one round per action.
+pub const BROWSER_BATCH: &str = "browser_batch";
+
+/// ---- Relay self-control (app_*) ----
+///
+/// Drive Relay's OWN UI through the DOM. Not OS-level computer use: Relay is
+/// a Tauri app whose interface is React in a WebView2, so the agent can
+/// address that DOM directly with the same ref contract the browser pane
+/// uses. A ref into the real DOM survives a layout shift and can be verified
+/// by reading the element back — the properties a pixel-based screenshot loop
+/// spends its entire reliability budget on, obtained here for free.
+///
+/// The rule these follow: every capability gets a typed command FIRST and a
+/// UI click only as the fallback. `list_automations` beats clicking a sidebar;
+/// a generic click tool is what you reach for when nothing purpose-built
+/// exists, not the default way to do anything.
+pub const APP_SNAPSHOT: &str = "app_snapshot";
+pub const APP_CLICK: &str = "app_click";
+pub const APP_TYPE: &str = "app_type";
+pub const APP_PRESS_KEY: &str = "app_press_key";
+pub const APP_SELECT_OPTION: &str = "app_select_option";
 
 // ---- System tools (background downloads + native shell) ----
 //
@@ -905,12 +951,19 @@ const BROWSER_READ_DESC: &str = "Inspect the page currently open in the app's \
 const BROWSER_CLICK_DESC: &str = "Click an element in the built-in browser pane \
     by its `ref` number (from the most recent browser_read). Use for links, \
     buttons, and submit controls. The ref map changes when the page changes, so \
-    always browser_read again afterwards.";
+    always browser_read again afterwards. Coordinate fallback: pass `x` and `y` \
+    (viewport CSS pixels) instead of a ref ONLY for what the element tree cannot \
+    name — canvas, charts, maps, embedded video, cross-origin iframes. A ref is \
+    strongly preferred: it survives layout shifts, whereas a pixel is a guess.";
 
 const BROWSER_TYPE_DESC: &str = "Type text into an input/textarea in the \
     built-in browser pane by its `ref` number (from the most recent \
     browser_read). Sets the field value and fires input/change events. Follow \
-    with a browser_click on the search/submit button (or another browser_read).";
+    with a browser_click on the search/submit button (or another browser_read). \
+    Coordinate fallback: pass `x` and `y` instead of a ref to type into the \
+    field at that viewport pixel — it FOCUSES that field and types into it \
+    without clicking it, so it cannot accidentally submit. For several fields \
+    at once prefer browser_fill_form.";
 
 const BROWSER_SCROLL_DESC: &str = "Scroll the page in the built-in browser pane \
     vertically by `amount` pixels (negative scrolls up). Use to reveal content \
@@ -926,7 +979,94 @@ const BROWSER_SCREENSHOT_DESC: &str = "Screenshot the page currently open in the
 const BROWSER_OBSERVE_DESC: &str = "List what is actionable on the page currently open in \
     the browser pane: one line per interactive element — ref, tag, label, and the \
     input extras (type/placeholder/aria) — with NO page text. The cheap way to \
-    decide what to click or type; use browser_read when you need the content.";
+    decide what to click or type; use browser_read when you need the content. \
+    To search instead of list, use browser_find.";
+
+/// `browser_find`: reach ONE control without paying for a whole-page read —
+/// the biggest token saving in the browser family.
+const BROWSER_FIND_DESC: &str = "Search the page's interactive elements by substring \
+    (label, aria-label, placeholder, id, value) and return the matches with the SAME \
+    ref numbers browser_read assigns, so you can act on them directly. Use this \
+    instead of browser_read when you roughly know what the control is called — a find \
+    costs a fraction of a full read. Then browser_read to refresh the refs.";
+
+/// `browser_zoom`: the vision fallback. A full-page screenshot is expensive and,
+/// once downscaled, small text is often illegible; a crop is both cheaper and
+/// actually readable.
+const BROWSER_ZOOM_DESC: &str = "Capture a REGION of the browser pane as an upscaled \
+    PNG — the vision fallback for what the element tree cannot represent (canvas, \
+    charts, maps, embedded video, small/dense text). Coordinates are viewport CSS \
+    pixels from the pane's top-left; `scale` upsamples (default 2, max 4). Prefer \
+    browser_read/browser_find when they can answer. Windows-only today.";
+
+/// `browser_press_key`: the escape hatch for widgets with no semantic action —
+/// a custom listbox, a keyboard-shortcut handler, a div-built combobox.
+const BROWSER_PRESS_KEY_DESC: &str = "Send a key to the focused element — 'Enter', \
+    'Escape', 'Tab', 'ArrowDown', 'Backspace', or a combination like 'Control+A'. Use \
+    it to submit a form, dismiss a dialog, or drive a custom dropdown the element tree \
+    can't act on semantically. Enter on a focused form also submits it.";
+
+/// `browser_fill_form`: many fields, one call. Per-field browser_type is both
+/// slow and fragile on React-controlled inputs; the native setter is what those
+/// frameworks actually observe.
+const BROWSER_FILL_FORM_DESC: &str = "Set MULTIPLE form fields at once by ref, in one \
+    call. Faster and more reliable than a browser_type per field: sets each value \
+    through the native setter and fires input/change, so React/Vue inputs register it. \
+    Pass `fields` as [{\"ref\": N, \"text\": \"...\"}] (empty string clears a field). \
+    Prefer this whenever the page has more than one field to fill.";
+
+/// `browser_select_option`: the fix for the classic dropdown failure. Clicking a
+/// `<select>` at the right coordinates often opens nothing or changes nothing.
+const BROWSER_SELECT_OPTION_DESC: &str = "Select an option in a <select> by `ref` and \
+    by the option's `value` OR visible text. Use this INSTEAD of clicking a dropdown — \
+    clicking a <select> often opens a native popup the page can't see or leaves the \
+    value unchanged, while this sets it directly. On a value mismatch the error lists \
+    the available options.";
+
+/// `browser_batch`: the round-trip saver, and a correctness contract — every
+/// step reports, so the model always knows which ones ran.
+const BROWSER_BATCH_DESC: &str = "Run several browser actions in ONE round trip from a \
+    single `actions` array of {\"op\": ..., ...args} steps. Sequential, HALT at the first \
+    failure; every step still returns a result, later ones marked \"Not executed\". Use \
+    it for multi-step flows that would otherwise cost a round each. Allowed ops: \
+    browser_read, browser_click, browser_type, browser_fill_form, \
+    browser_select_option, browser_press_key, browser_scroll, browser_find, \
+    browser_observe, browser_extract, browser_screenshot, browser_zoom, \
+    browser_upload_file. Cannot nest.";
+
+// ---- Relay self-control descriptions ------------------------------------
+//
+// Tight, deliberately. This family is UNGATED, so unlike the browser tools it
+// taxes every single turn — and its largest risk is not that the model won't
+// find it, but that it reaches for it too readily. Almost everything in Relay
+// has a purpose-built tool (list_automations, vault_read, open_file) that is
+// cheaper and exact. Each description below spends its words steering the
+// model to THOSE first, which is what makes ungating safe.
+
+const APP_SNAPSHOT_DESC: &str = "Inspect RELAY'S OWN UI: its interactive elements, with \
+    `ref` numbers for app_click/app_type. Last resort — almost everything has a \
+    purpose-built tool (list_automations over clicking the Automations sidebar, \
+    open_file over clicking a file row). Filter with `query` to keep it cheap. Refs \
+    last until the UI changes. Relay's own agent controls (Send, Stop, Approve/Deny) \
+    are excluded, so you cannot click your own leash.";
+
+const APP_CLICK_DESC: &str = "Click an element in RELAY'S OWN UI by its `ref` from the \
+    latest app_snapshot. Only for interface actions no purpose-built tool covers. Refs \
+    expire when the UI re-renders: a stale ref returns an explicit error, so re-snapshot \
+    rather than guessing a neighbouring number.";
+
+const APP_TYPE_DESC: &str = "Type into a field in RELAY'S OWN UI by its `ref` from the \
+    latest app_snapshot (settings, command-palette search, a filter box). Sets the value \
+    through the native setter so React inputs register it.";
+
+const APP_PRESS_KEY_DESC: &str = "Send a key to the focused element in RELAY'S OWN UI — \
+    'Enter', 'Escape', 'Tab', 'ArrowDown', or a combination like 'Control+K'. For \
+    keyboard-driven surfaces a click cannot reach (command palette, list navigation). \
+    Enter submits a focused form; Escape blurs.";
+
+const APP_SELECT_OPTION_DESC: &str = "Select an option in a <select> in RELAY'S OWN UI by \
+    `ref` and by its value or visible text. Use instead of clicking a dropdown — clicking \
+    opens a native popup the app cannot drive, so the value silently fails to change.";
 
 /// `browser_upload_file`: put a workspace file onto a page's file input so
 /// downloads-then-upload flows and form submissions work end to end.

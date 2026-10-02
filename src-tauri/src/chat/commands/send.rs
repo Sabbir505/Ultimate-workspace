@@ -1145,6 +1145,28 @@ pub async fn send_chat_message(
                 .and_then(|p| crate::agents_md::prompt_section(&p.path))
         });
         let built = crate::agents_md::append_to_system(built, agents_md_section);
+        // Project-wiki layering (§6.15): the wiki's page INDEX rides the
+        // system prompt beside AGENTS.md (capped in wiki/mod.rs, firewalled
+        // like every injected block); the pages themselves stay behind the
+        // search_wiki / read_wiki_page tools — retrieved, never prefixed.
+        // Gated on Settings → Wiki ("layer index"), default on; absent when
+        // the project has no wiki, so the prompt prefix stays stable.
+        let wiki_section = session_project_id.as_ref().and_then(|pid| {
+            let conn = db.0.lock();
+            let layer = db::get_setting(&conn, "wiki.layer_index")
+                .ok()
+                .flatten()
+                .map(|v| v.trim() != "false")
+                .unwrap_or(true);
+            if !layer {
+                return None;
+            }
+            db::get_project(&conn, pid)
+                .ok()
+                .flatten()
+                .and_then(|p| crate::wiki::index_prompt_section(&conn, &p.path))
+        });
+        let built = crate::agents_md::append_to_system(built, wiki_section);
         // Session Mesh (SESSION_MESH_DESIGN_ARCHITECTURE.md §4.3) is ON
         // DEMAND now: the registry block used to ride the system prompt
         // EVERY turn, and its relative ages ("idle 3m") + peer reply tails
@@ -2020,6 +2042,15 @@ pub(crate) async fn run_prompt_warmup(
         web_search: pcaps.native_web_search,
         native_search: false,
             native_search_openai: false,
+        // Mirror the turn gate: the working dir the next send would resolve.
+        wiki: working_dir
+            .and_then(|root| {
+                let db_state = app.state::<crate::DbState>();
+                let conn = db_state.0.lock();
+                crate::wiki::has_pages(&conn, root)
+                    .then_some(true)
+            })
+            .unwrap_or(false),
         requires_local_sandbox: pcaps.requires_local_sandbox,
         // A fresh session's first send has no LIVE connector sessions yet
         // (AttachedConnector needs a connected McpSession — not fabricatable

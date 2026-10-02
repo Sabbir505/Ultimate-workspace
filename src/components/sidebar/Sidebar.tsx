@@ -36,6 +36,7 @@ import {
   ScrollText,
 } from "lucide-react";
 import { VaultIcon } from "../../lib/icons";
+import { BookOpen } from "lucide-react";
 import { useProjectsStore } from "../../state/projects";
 import { useProjectsSidebarStore } from "../../state/projectsSidebar";
 import { useChatStore } from "../../state/chat";
@@ -66,7 +67,10 @@ export function SidebarHeader() {
   // you were reading (navBack also restores the previous chat selection), so
   // Forward is dead weight and the pair just added noise.
   const inFullPageView =
-    activeView === "logs" || activeView === "automations" || activeView === "vault";
+    activeView === "logs" ||
+    activeView === "automations" ||
+    activeView === "vault" ||
+    activeView === "wiki";
   const exitFullPageView = () => {
     if (canBack) navBack();
     else setActiveView("chat"); // deep-linked straight into the view: go to chat
@@ -431,6 +435,20 @@ export function Sidebar() {
             >
               <VaultIcon size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
               <span className="artifact-lib-title-label">Vault</span>
+            </button>
+            {/* Wiki — the GENERATED per-project knowledge base (§6.15). The
+                per-project wiki list lives on the view's own left rail
+                (wiki.css .wiki-rail-projects), not nested under this row. */}
+            <button
+              type="button"
+              onClick={() => setActiveView("wiki")}
+              className={`artifact-lib-title ${activeView === "wiki" ? "is-active" : ""}`}
+              style={{ width: "100%" }}
+              title="Open project wiki"
+              aria-label="Open project wiki"
+            >
+              <BookOpen size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
+              <span className="artifact-lib-title-label">Wiki</span>
             </button>
             {/* Projects — toggles the nested projects panel that opens beside
                 this sidebar (state in useProjectsSidebarStore, persisted). */}

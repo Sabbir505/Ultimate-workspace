@@ -117,6 +117,7 @@ mod docs_index;
 mod docs_watcher;
 mod sidecar_sweep;
 mod exec_gate;
+pub mod wiki;
 mod skills_gallery;
 mod git;
 mod github;
@@ -416,6 +417,8 @@ pub fn run() {
             // and on app exit.
             app.manage(commands::tts::TtsState::default());
             app.manage(std::sync::Arc::new(docs_index::IndexRegistry::default()));
+            // Project wiki (§6.15): per-project build/update job slots.
+            app.manage(std::sync::Arc::new(wiki::WikiJobRegistry::default()));
             // Git filesystem watcher — drives the `project:fs-changed` Tauri
             // event that replaces the 4-8s polling loops in
             // `useGitStatusPolling` / `DevDiffPanel` / `BranchDropdown`. See
@@ -451,6 +454,11 @@ pub fn run() {
                     docs_watcher::install_all_enabled(&app_handle, &db_state);
                 });
             }
+            // Project wiki freshness task (§6.15): re-checks every wiki's
+            // HEAD each minute and runs the update pass when it moved (no-op
+            // costs one git rev-parse; the model is only called for pages
+            // whose cited evidence changed).
+            wiki::spawn_freshness_task(app.handle().clone());
             // CLI harnesses' native subagent stores (`~/.claude/agents/*.md`):
             // watch the user-level dirs, then start reacting to the change
             // events so an agent a harness authors — or a prompt a human edits
@@ -988,6 +996,13 @@ pub fn run() {
             docs_index::docs_add_corpus,
             docs_index::docs_remove_corpus,
             docs_index::docs_list_corpora,
+            wiki::commands::wiki_list_all,
+            wiki::commands::wiki_get,
+            wiki::commands::wiki_build_start,
+            wiki::commands::wiki_cancel,
+            wiki::commands::wiki_update,
+            wiki::commands::wiki_read_page,
+            wiki::commands::wiki_remove,
             docs_index::docs_set_corpus_enabled,
             docs_index::docs_attach_corpus_to_chat,
             docs_index::docs_detach_corpus_from_chat,

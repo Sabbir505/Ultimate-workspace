@@ -28,9 +28,10 @@ mod secrets;
 mod settings;
 mod skills;
 mod source_ledger;
+mod wiki;
 mod workspaces;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -1789,12 +1790,224 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           attached_at INTEGER NOT NULL,
           PRIMARY KEY (chat_session_id, corpus_id)
         );
+
+        -- Project wiki (§6.15): one generated knowledge base per bound
+        -- project. schema_version stamps the page-format (builder prompts +
+        -- claim shape) the wiki was last built with; when it lags behind
+        -- WIKI_SCHEMA_VERSION (db/wiki.rs) the next build re-generates
+        -- EVERY page — mtime-style diffs can't see prompt-format changes.
+        CREATE TABLE IF NOT EXISTS wiki_projects (
+          id TEXT PRIMARY KEY,
+          path TEXT NOT NULL UNIQUE,
+          head_sha TEXT,
+          schema_version INTEGER NOT NULL DEFAULT 0,
+          built_at INTEGER,
+          last_update_at INTEGER,
+          build_model TEXT
+        );
+
+        -- Pages carry their builder brief + evidence file set (files_json)
+        -- so the update pass can re-derive a single stale page instead of
+        -- rebuilding the whole wiki.
+        CREATE TABLE IF NOT EXISTS wiki_pages (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          slug TEXT NOT NULL,
+          title TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'module',
+          summary TEXT NOT NULL DEFAULT '',
+          body TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'fresh',
+          stale_reason TEXT,
+          brief TEXT NOT NULL DEFAULT '',
+          files_json TEXT NOT NULL DEFAULT '[]',
+          generated_at INTEGER NOT NULL DEFAULT 0,
+          generated_by TEXT,
+          UNIQUE (project_id, slug)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_wiki_pages_project ON wiki_pages(project_id);
+
+        -- Grounded Claims (the OpenWiki `.claims/` sidecar, relational):
+        -- every material fact carries repo-relative evidence (path + line
+        -- range) and the blob SHA the file had at generation time. The
+        -- freshness engine joins `git diff --name-status` output against
+        -- evidence_path — staleness is computed, never guessed.
+        CREATE TABLE IF NOT EXISTS wiki_claims (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          page_id TEXT NOT NULL,
+          claim TEXT NOT NULL,
+          evidence_path TEXT NOT NULL,
+          line_start INTEGER,
+          line_end INTEGER,
+          blob_sha TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_wiki_claims_page ON wiki_claims(page_id);
+        CREATE INDEX IF NOT EXISTS idx_wiki_claims_path ON wiki_claims(evidence_path);
+
+        -- Keyword leg for the search_wiki tool. External-content table over
+        -- wiki_pages (title/summary/body) — wiki_pages stays the source of
+        -- truth and the triggers keep the index in sync, mirroring
+        -- doc_chunks_fts. No embedding leg: pages are short, curated and
+        -- keyword-dense; raw file content stays in the RAG corpora.
+        -- content_rowid is the IMPLICIT integer rowid, not wiki_pages.id:
+        -- page ids are TEXT UUIDs (house style) and an external-content FTS5
+        -- index requires an integer rowid — a TEXT rowid fails every write
+        -- with SQLITE_TYPE_MISMATCH ("datatype mismatch").
+        CREATE VIRTUAL TABLE IF NOT EXISTS wiki_pages_fts USING fts5(
+          title, summary, body,
+          content='wiki_pages',
+          content_rowid='rowid',
+          tokenize='unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS wiki_pages_fts_ai AFTER INSERT ON wiki_pages BEGIN
+          INSERT INTO wiki_pages_fts(rowid, title, summary, body)
+            VALUES (new.rowid, new.title, new.summary, new.body);
+        END;
+        CREATE TRIGGER IF NOT EXISTS wiki_pages_fts_ad AFTER DELETE ON wiki_pages BEGIN
+          INSERT INTO wiki_pages_fts(wiki_pages_fts, rowid, title, summary, body)
+            VALUES('delete', old.rowid, old.title, old.summary, old.body);
+        END;
+        CREATE TRIGGER IF NOT EXISTS wiki_pages_fts_au AFTER UPDATE OF title, summary, body ON wiki_pages BEGIN
+          INSERT INTO wiki_pages_fts(wiki_pages_fts, rowid, title, summary, body)
+            VALUES('delete', old.rowid, old.title, old.summary, old.body);
+          INSERT INTO wiki_pages_fts(rowid, title, summary, body)
+            VALUES (new.rowid, new.title, new.summary, new.body);
+        END;
         "#,
     )?;
     // Vault (local markdown knowledge base) — derived index over the bound
     // folder's markdown files (see vault/index.rs). A deletable cache.
     crate::vault::index::ensure_schema(conn)?;
+    migrate_wiki_pages_fts(conn)?;
     Ok(())
+}
+
+/// The wiki FTS table shipped briefly with `content_rowid='id'` — but
+/// wiki_pages.id is a TEXT UUID, and an external-content FTS5 index needs an
+/// INTEGER rowid, so every INSERT/UPDATE/DELETE died with SQLITE_TYPE_
+/// MISMATCH ("datatype mismatch") and, via the freshness tick, looped the
+/// build forever. CREATE VIRTUAL TABLE IF NOT EXISTS never upgrades an
+/// existing table, so installs that booted on the old DDL keep it: detect
+/// the old definition from sqlite_master and rebuild the index in place.
+///
+/// Two ways a wiki ends up with pages that can never be found again are both
+/// covered, because the DDL-text guard alone catches neither once it has
+/// fired:
+///
+///   1. The rebuild used to run as three separate batches, so a crash
+///      between "drop the table" and "VALUES('rebuild')" left the FTS table
+///      present but unindexed. The next boot hit `CREATE VIRTUAL TABLE IF
+///      NOT EXISTS`, the guard below saw the CURRENT DDL, and never rebuilt
+///      — permanently. It is now ONE transaction (SQLite DDL is
+///      transactional, so a crash rolls back whole).
+///   2. An index that has drifted from its content table is detected by
+///      FTS5's own `integrity-check` and repaired, so a DB that reached that
+///      state by any other route heals itself.
+///
+/// The repair check is deliberately not a `count(*)` against the content
+/// table: on an external-content FTS5 table that reads the CONTENT table and
+/// reports a healthy number even when the index is empty — the exact state
+/// that must be detected.
+fn migrate_wiki_pages_fts(conn: &Connection) -> DbResult<()> {
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wiki_pages_fts'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let needs_rebuild = if sql.is_empty() {
+        // No FTS table at all — init_schema's CREATE runs first, so this is
+        // only reachable on an unusual boot order. Rebuild is the safe answer.
+        true
+    } else if sql.contains("content_rowid='rowid'") {
+        wiki_fts_index_drifted(conn)?
+    } else {
+        true
+    };
+    if !needs_rebuild {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "DROP TRIGGER IF EXISTS wiki_pages_fts_ai;
+         DROP TRIGGER IF EXISTS wiki_pages_fts_ad;
+         DROP TRIGGER IF EXISTS wiki_pages_fts_au;
+         DROP TABLE IF EXISTS wiki_pages_fts;",
+    )?;
+    tx.execute_batch(
+        "CREATE VIRTUAL TABLE wiki_pages_fts USING fts5(
+           title, summary, body,
+           content='wiki_pages',
+           content_rowid='rowid',
+           tokenize='unicode61'
+         );
+         CREATE TRIGGER wiki_pages_fts_ai AFTER INSERT ON wiki_pages BEGIN
+           INSERT INTO wiki_pages_fts(rowid, title, summary, body)
+             VALUES (new.rowid, new.title, new.summary, new.body);
+         END;
+         CREATE TRIGGER wiki_pages_fts_ad AFTER DELETE ON wiki_pages BEGIN
+           INSERT INTO wiki_pages_fts(wiki_pages_fts, rowid, title, summary, body)
+             VALUES('delete', old.rowid, old.title, old.summary, old.body);
+         END;
+         CREATE TRIGGER wiki_pages_fts_au AFTER UPDATE OF title, summary, body ON wiki_pages BEGIN
+           INSERT INTO wiki_pages_fts(wiki_pages_fts, rowid, title, summary, body)
+             VALUES('delete', old.rowid, old.title, old.summary, old.body);
+           INSERT INTO wiki_pages_fts(rowid, title, summary, body)
+             VALUES (new.rowid, new.title, new.summary, new.body);
+         END;",
+    )?;
+    // Reindex every existing page (external-content rebuild reads the
+    // content table — no data moves, only the index is rebuilt).
+    tx.execute_batch("INSERT INTO wiki_pages_fts(wiki_pages_fts) VALUES('rebuild');")?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// True when the wiki FTS index holds nothing while its content table has
+/// indexable text — the "table present, index empty" state that makes a wiki
+/// permanently unsearchable.
+///
+/// The obvious checks are both useless here, and were both verified against
+/// SQLite rather than assumed:
+///   * `count(*) FROM wiki_pages_fts` reads the CONTENT table on an
+///     external-content index, so it reports a healthy 1 for an index that
+///     matches nothing.
+///   * FTS5's own `integrity-check` also passes on an empty index — it
+///     verifies internal index consistency, and with an external content
+///     table there is nothing to compare against.
+///
+/// `fts5vocab` is the one view that reflects the real index: its term count
+/// goes to zero exactly when the index is emptied. It is created in `temp`
+/// so no schema residue is left behind. Any failure is read as drift — a
+/// rebuild is always safe, a silently unsearchable wiki is not.
+fn wiki_fts_index_drifted(conn: &Connection) -> DbResult<bool> {
+    let has_content: i64 = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wiki_pages
+                       WHERE body <> '' OR title <> '' OR summary <> '')",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_content == 0 {
+        return Ok(false);
+    }
+    let probe = conn.execute_batch(
+        "CREATE VIRTUAL TABLE temp.fts_drift_vocab USING fts5vocab(wiki_pages_fts, 'row');",
+    );
+    if probe.is_err() {
+        return Ok(true);
+    }
+    let terms: i64 = conn
+        .query_row("SELECT count(*) FROM temp.fts_drift_vocab", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0);
+    let _ = conn.execute_batch("DROP TABLE IF EXISTS temp.fts_drift_vocab;");
+    Ok(terms == 0)
 }
 
 // ---- re-exports (so all existing callers using `crate::db::<fn>` still compile) ----
@@ -1812,6 +2025,23 @@ pub use projects::{
 
 // settings
 pub use settings::{delete_setting, get_setting, set_setting};
+
+// project wiki (§6.15)
+pub use wiki::{
+    clear_build_stamp as wiki_clear_build_stamp, clear_pages as wiki_clear_pages,
+    ensure_project as wiki_ensure_project, evidence_paths as wiki_evidence_paths,
+    get_page_full as wiki_get_page_full,
+    get_project_by_path as wiki_get_project_by_path, list_pages as wiki_list_pages,
+    list_project_summaries as wiki_list_project_summaries,
+    list_projects as wiki_list_projects, mark_pages_rebuilding as wiki_mark_pages_rebuilding,
+    page_brief as wiki_page_brief, page_count as wiki_page_count,
+    pages_without_evidence as wiki_pages_without_evidence, remove_wiki as wiki_remove_wiki,
+    remove_wiki_by_path_prefix as wiki_remove_wiki_by_path_prefix,
+    replace_page as wiki_replace_page, search_pages as wiki_search_pages,
+    set_page_status as wiki_set_page_status, stamp_build as wiki_stamp_build,
+    stamp_update as wiki_stamp_update, WikiClaim, WikiPage, WikiPageFull, WikiProject,
+    WikiProjectSummary, WikiSearchHit, WIKI_SCHEMA_VERSION,
+};
 
 // skills
 pub use skills::{create_skill, delete_skill, list_skills, update_skill};

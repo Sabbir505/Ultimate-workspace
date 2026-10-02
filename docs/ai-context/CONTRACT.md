@@ -432,6 +432,16 @@ Commands:
 - `docs_embedding_status(corpusId) -> DocsEmbeddingStatus`
 - `docs_attach_corpus_to_chat(chatSessionId, corpusId)` / `docs_detach_corpus_from_chat(chatSessionId, corpusId)` / `docs_attached_corpus_ids(chatSessionId) -> string[]`
 
+## Project wiki (§6.15)
+
+One generated, per-project knowledge base (pages + Grounded Claims) in `wiki_projects` / `wiki_pages` / `wiki_claims`; FTS via `wiki_pages_fts`. Engine: `src-tauri/src/wiki/` (build = repo analysis → outline → per-page generation; freshness = `git diff old..new` joined against claim evidence). Commands:
+- `wiki_get(path) -> WikiStatus` — `{ project, pages, autoUpdate, layerIndex, hasModel }`; `project` null = no wiki yet.
+- `wiki_build_start(path) -> ()` — background build; progress rides `wiki:build:progress` (`{ path, mode: 'build'|'update', state, phase, pageSlug, pagesDone, pagesTotal, error, step }`).
+- `wiki_cancel(path) -> bool` / `wiki_update(path) -> WikiUpdateReport` (`{ status: 'updated'|'up_to_date'|'rebuilt'|'not_git'|'no_wiki', pagesRefreshed, changedPaths }`).
+- `wiki_read_page(path, slug) -> WikiPageFull | null` — body + brief + files + claims. `wiki_remove(path) -> bool`.
+- Settings keys: `wiki.build_provider` (+ `wiki.build_model`; harness engine ids route through the CLI one-shot with the CLI's own auth), `wiki.auto_update`, `wiki.layer_index`, `wiki.max_pages`.
+- Agent tools: `search_wiki` / `read_wiki_page` (read-only, gated per turn by `ToolCaps.wiki`; bridged to harness CLIs via `ALLOWED_RELAY_TOOLS`). Frontend: `lib/ipc/wiki.ts` + `state/wiki.ts` + `components/wiki/*` + `SettingsView` → `wiki`.
+
 ## MCP gallery
 
 Commands:

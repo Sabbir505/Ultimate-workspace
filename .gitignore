@@ -64,3 +64,7 @@ scripts/__tmp_*
 # scripts/copy-pdfjs-wasm.mjs (pdf.js fetches them by literal filename, so
 # they cannot be hashed ?url imports). Regenerated on postinstall/dev/build.
 public/pdfjs-wasm/
+
+# Parallel agent builds redirect CARGO_TARGET_DIR into per-agent target-agentN/
+# directories at the repo root and under src-tauri/. Build output, not source.
+target-agent*/

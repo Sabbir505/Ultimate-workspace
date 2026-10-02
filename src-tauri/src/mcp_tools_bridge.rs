@@ -24,7 +24,11 @@ use crate::chat::tools::{self, ToolCaps};
 /// no permission-mode gate, since this path intentionally runs the same
 /// ungated dispatcher the built-in chat uses (where the caller enforces the
 /// gate BEFORE reaching execute_tool).
-pub const ALLOWED_RELAY_TOOLS: [&str; 32] = [
+pub const ALLOWED_RELAY_TOOLS: [&str; 34] = [
+    // Project wiki (§6.15): the wiki tools search Relay's generated
+    // project knowledge — read-only, DB-only, no model calls.
+    tools::SEARCH_WIKI,
+    tools::READ_WIKI_PAGE,
     tools::GENERATE_DOCUMENT,
     tools::GENERATE_IMAGE,
     tools::PLAN_DOCUMENT,
@@ -100,6 +104,7 @@ pub fn relay_tool_schemas<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<V
     // a test pinning every allowlisted tool to a live registry spec.
     let caps = ToolCaps {
         local_docs: true,
+        wiki: true,
         ..ToolCaps::unlocked_registry()
     };
     let all = tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite);
@@ -893,6 +898,7 @@ mod tests {
         // attach hop, so family-locked built-ins must still render here.
         let caps = ToolCaps {
             local_docs: true,
+            wiki: true,
             ..ToolCaps::unlocked_registry()
         };
         let all = tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite);
@@ -1180,6 +1186,7 @@ mod tests {
         // surfaces the compiler can't check.
         let caps = ToolCaps {
             local_docs: true,
+            wiki: true,
             browser: true,
             ..Default::default()
         };

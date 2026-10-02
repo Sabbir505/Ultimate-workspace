@@ -261,6 +261,19 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             search_docs_parameters(),
         ));
     }
+    // Project wiki (§6.15) — exposed when the bound project has pages.
+    if caps.wiki {
+        specs.push(openai_fn(
+            SEARCH_WIKI,
+            SEARCH_WIKI_DESC,
+            search_wiki_parameters(),
+        ));
+        specs.push(openai_fn(
+            READ_WIKI_PAGE,
+            READ_WIKI_PAGE_DESC,
+            read_wiki_page_parameters(),
+        ));
+    }
     // Mutating filesystem tools — stripped from the schema under read_only.
     if sandbox.allows_mutating_tools() {
         specs.push(openai_fn(
@@ -666,6 +679,19 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             SEARCH_DOCS,
             SEARCH_DOCS_DESC,
             search_docs_parameters(),
+        ));
+    }
+    // Project wiki (§6.15) — exposed when the bound project has pages.
+    if caps.wiki {
+        specs.push(anthropic_fn(
+            SEARCH_WIKI,
+            SEARCH_WIKI_DESC,
+            search_wiki_parameters(),
+        ));
+        specs.push(anthropic_fn(
+            READ_WIKI_PAGE,
+            READ_WIKI_PAGE_DESC,
+            read_wiki_page_parameters(),
         ));
     }
     if sandbox.allows_mutating_tools() {
@@ -1106,6 +1132,39 @@ fn vault_delete_parameters() -> Value {
             }
         },
         "required": ["path"]
+    })
+}
+
+fn search_wiki_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Keywords or a natural-language question about                     the project (architecture, modules, workflows). Phrase it                     the way the answer would be written."
+            },
+            "top_k": {
+                "type": "integer",
+                "description": "How many top hits to return. Defaults to 5.                     The server caps this at 20.",
+                "minimum": 1,
+                "maximum": 20,
+                "default": 5,
+            },
+        },
+    })
+}
+
+fn read_wiki_page_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["slug"],
+        "properties": {
+            "slug": {
+                "type": "string",
+                "description": "The page slug from search_wiki results (the                     `code` token), e.g. 'overview' or 'session-mesh'."
+            }
+        },
     })
 }
 
@@ -3304,6 +3363,7 @@ mod tests {
             &ToolCaps {
                 browser: true,
                 local_docs: true,
+                wiki: true,
                 code_exec: true,
                 memory: true,
                 attachable_connectors: std::sync::Arc::new(vec![(
@@ -3329,6 +3389,7 @@ mod tests {
             ATTACH_CONNECTOR, ATTACH_MCP_SERVER,
             // fs
             LIST_DIRECTORY, READ_FILE, SEARCH_FILES, SEARCH_CONTENT, SEARCH_DOCS,
+            SEARCH_WIKI, READ_WIKI_PAGE,
             READ_AGENTS_MD,
             WRITE_FILE, EDIT_FILE, DELETE_FILE, MOVE_FILE, COPY_FILE, WRITE_AGENTS_MD,
             // vault

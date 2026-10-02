@@ -649,6 +649,16 @@ impl ChatManager {
                 requires_local_sandbox: pcaps.requires_local_sandbox,
                 attached_connectors: Arc::new(Vec::new()),
                 local_docs,
+                // Project wiki (§6.15): tools appear when the session's
+                // bound project has a built wiki — one indexed lookup per turn.
+                wiki: {
+                    let conn = db.lock();
+                    db::get_session_with_project(&conn, &sid)
+                        .ok()
+                        .flatten()
+                        .map(|(_, project)| crate::wiki::has_pages(&conn, &project.path))
+                        .unwrap_or(false)
+                },
                 mcp_tools: Arc::new(Vec::new()),
                 fs_rules,
                 attachable_connectors: Arc::new(attachable_c),

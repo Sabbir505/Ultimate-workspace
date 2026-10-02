@@ -20,6 +20,7 @@ import { useArtifactsStore } from "../../state/artifacts";
 import { ModelMarket, FitBadge } from "./ModelMarket";
 import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { KnowledgePanel } from "./KnowledgePanel";
+import { WikiPanel } from "./WikiPanel";
 import { MemoryPanel } from "./MemoryPanel";
 import { SubagentModelPanel } from "./SubagentModelPanel";
 import { MeshPanel } from "./MeshPanel";
@@ -105,6 +106,7 @@ import {
   EyeOff,
   Plus,
   Library,
+  BookOpen,
   Brain,
   Shield,
   Webhook,
@@ -131,6 +133,7 @@ type Category =
   | "websearch"
   | "connectors"
   | "knowledge"
+  | "wiki"
   | "memory"
   | "mcpgallery"
   | "permissions"
@@ -153,6 +156,7 @@ const CATEGORY_KEYS: Category[] = [
   "websearch",
   "connectors",
   "knowledge",
+  "wiki",
   "memory",
   "mcpgallery",
   "permissions",
@@ -185,6 +189,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "connectors": return <Plug {...props} />;
     case "mcpgallery": return <Blocks {...props} />;
     case "knowledge": return <Library {...props} />;
+    case "wiki": return <BookOpen {...props} />;
     case "memory": return <Brain {...props} />;
     case "permissions": return <Shield {...props} />;
     case "hooks": return <Webhook {...props} />;
@@ -245,6 +250,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
       { key: "connectors", label: "Connectors", sub: "Notion & more (OAuth)" },
       { key: "mcpgallery", label: "MCP Servers", sub: "Gallery + custom MCP" },
       { key: "knowledge", label: "Knowledge", sub: "Local folders (RAG)" },
+      { key: "wiki", label: "Wiki", sub: "Generated project knowledge" },
       { key: "memory", label: "Memory", sub: "What the assistant remembers" },
       { key: "remote", label: "Remote", sub: "Mobile pairing + Tailscale" },
     ],
@@ -673,6 +679,7 @@ export function SettingsView() {
               {category === "connectors" && <ConnectorsPanel />}
 
               {category === "knowledge" && <KnowledgePanel />}
+              {category === "wiki" && <WikiPanel />}
               {category === "memory" && <MemoryPanel />}
 
               {category === "improvements" && <ImprovementsPanel />}

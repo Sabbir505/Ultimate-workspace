@@ -2893,6 +2893,14 @@ async fn run_tool_inner(
         return run_search_docs_tool(app, name, args).await;
     }
 
+    // Project-wiki tools (§6.15): read-only, DB-only, handled outside
+    // execute_tool because they need the AppHandle. Gated at the schema
+    // level via ToolCaps.wiki; a call on a wiki-less project gets a clear
+    // error rather than a schema ghost.
+    if tools::is_wiki_tool(name) {
+        return crate::wiki::tools_impl::run_wiki_tool(app, name, args).await;
+    }
+
     // Persistent-memory tools (MEMORY_DESIGN_ARCHITECTURE.md §12.1): DB +
     // session state via the AppHandle, like search_docs above. `memory_save`
     // is async (judge LLM call); recall/forget are sync. Always registered in

@@ -291,7 +291,7 @@ pub async fn app_capabilities_report(app: &tauri::AppHandle) -> String {
         },
         // Derived from the bridge allowlist — one source of truth, so a new
         // bridged tool reports itself without a manual edit here.
-        "relay_tools": crate::mcp_tools_bridge::ALLOWED_RELAY_TOOLS,
+        "relay_tools": crate::mcp_tools_bridge::ALLOWED_RELAY_TOOLS.to_vec(),
 
         // The subagent registry — names you can pass to
         // `spawn_session(agent="agent:<name>")` (or an automation's `agent`).

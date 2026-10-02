@@ -25,7 +25,8 @@ export type ActiveView =
   | "cost"
   | "automations"
   | "vault"
-  | "logs";
+  | "logs"
+  | "wiki";
 
 /** Tabs in the right-side tool panel (mockups 01/03). */
 export type ToolPanelTab =

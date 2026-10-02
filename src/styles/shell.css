@@ -245,6 +245,7 @@
 :root[data-wallpaper] .automations-view,
 :root[data-wallpaper] .vault-view,
 :root[data-wallpaper] .subagent-view,
+:root[data-wallpaper] .wiki-view,
 :root[data-wallpaper] .popout-chat-root {
   background: color-mix(in srgb, var(--bg-tint) var(--wallpaper-canvas-tint, 76%), transparent);
 }
@@ -347,7 +348,8 @@
 .toolbar .automations-header,
 .toolbar .subagent-header,
 .toolbar .vault-header,
-.toolbar .logs-header {
+.toolbar .logs-header,
+.toolbar .wiki-header {
   flex: 1;
   min-width: 0;
   flex-wrap: nowrap;
@@ -355,7 +357,8 @@
   border-bottom: none;
 }
 .toolbar .automations-header-left,
-.toolbar .vault-header-left {
+.toolbar .vault-header-left,
+.toolbar .wiki-header-left {
   min-width: 0;
 }
 .toolbar .automations-header-left h1 {
@@ -368,7 +371,8 @@
    only applies inside the toolbar. */
 .toolbar .automations-header-left h1,
 .toolbar .subagent-header h1,
-.toolbar .logs-header h1 {
+.toolbar .logs-header h1,
+.toolbar .wiki-header-left h1 {
   font-size: 14px;
   font-weight: 650;
 }

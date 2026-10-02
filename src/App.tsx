@@ -88,6 +88,7 @@ import { useOcclusion } from "./hooks/useOcclusion";
 const SettingsView = lazy(() => import("./components/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
 const SkillsLibrary = lazy(() => import("./components/skills-library/SkillsLibrary").then((m) => ({ default: m.SkillsLibrary })));
 const CostDashboard = lazy(() => import("./components/cost-dashboard/CostDashboard").then((m) => ({ default: m.CostDashboard })));
+const WikiView = lazy(() => import("./components/wiki/WikiView").then((m) => ({ default: m.WikiView })));
 const AutomationsView = lazy(() => import("./components/automations/AutomationsView").then((m) => ({ default: m.AutomationsView })));
 // Vault (markdown knowledge base) — same real-view-swap shape as
 // automations, lazily loaded (CodeMirror + the markdown pipeline stay out
@@ -504,7 +505,10 @@ export default function App() {
     on every chat↔vault↔automations switch — killing browser webviews (full
     page reload on the way back) and churning terminal ptys. */}
         <div className={`grid-wrap chat-grid-wrap${baseView === "chat" && chatPaneTree ? " split-active" : ""}`}>
-          {baseView !== "automations" && baseView !== "vault" && baseView !== "logs" ? (
+          {baseView !== "automations" &&
+          baseView !== "vault" &&
+          baseView !== "logs" &&
+          baseView !== "wiki" ? (
             /* The split-chat pane tree (up to six full chat views, resizable
                 gutters, drag-a-session-onto-an-edge). With no splits open the
                 same renderer draws the single main pane — identical drop
@@ -513,6 +517,12 @@ export default function App() {
           ) : baseView === "automations" ? (
             <Suspense fallback={null}>
               <AutomationsView />
+            </Suspense>
+          ) : baseView === "wiki" ? (
+            /* Project wiki (§6.15) — a REAL view like automations/vault:
+               fills the center area, sidebar + tool panel stay put. */
+            <Suspense fallback={null}>
+              <WikiView />
             </Suspense>
           ) : baseView === "logs" ? (
             /* Local-model request log: captured bodies + telemetry. */

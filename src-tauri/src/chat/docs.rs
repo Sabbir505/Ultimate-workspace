@@ -20,8 +20,9 @@ pub const TEXT_EXTENSIONS: &[&str] = &[
 /// (OCR + optional vision caption, see docs_images.rs).
 pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
 
-/// Directories never descended into.
-const SKIP_DIRS: &[&str] = &[
+/// Directories never descended into. `pub(crate)` so the project-wiki repo
+/// walk (wiki/mod.rs) shares one ignore list with the RAG corpus walk.
+pub(crate) const SKIP_DIRS: &[&str] = &[
     ".git",
     "node_modules",
     "target",

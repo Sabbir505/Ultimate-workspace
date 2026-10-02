@@ -107,6 +107,28 @@ pub(super) fn harness_context_section(
                 }
             }
         }
+        // Project-wiki layering (§6.15): the page index rides the bundle
+        // beside AGENTS.md, so every CLI sees what the wiki knows and pulls
+        // pages via the relay-tools bridge (search_wiki / read_wiki_page).
+        // Capped + firewalled in wiki/mod.rs; gated on wiki.layer_index.
+        if let Some(pid) = project_id {
+            if let Some(project) = crate::db::get_project(&conn, pid).ok().flatten() {
+                let layer = crate::db::get_setting(&conn, "wiki.layer_index")
+                    .ok()
+                    .flatten()
+                    .map(|v| v.trim() != "false")
+                    .unwrap_or(true);
+                if layer {
+                    if let Some(section) =
+                        crate::wiki::index_prompt_section(&conn, &project.path)
+                    {
+                        if !section.trim().is_empty() {
+                            parts.push(section);
+                        }
+                    }
+                }
+            }
+        }
         if crate::memory::memory_enabled(&conn) {
             // Static bundle → no per-turn query, so this carries the
             // standing identity core (or the stored document when no core

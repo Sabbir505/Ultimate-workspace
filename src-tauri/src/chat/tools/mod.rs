@@ -356,6 +356,12 @@ pub const SEARCH_CONTENT: &str = "search_content";
 /// only while the embedding sidecar is reachable and at least one corpus has
 /// been indexed — gated per turn by `ToolCaps.local_docs`.
 pub const SEARCH_DOCS: &str = "search_docs";
+/// Search the auto-generated project wiki (§6.15). FTS over generated page
+/// bodies; read-only, DB-only. Gated per turn by `ToolCaps.wiki`.
+pub const SEARCH_WIKI: &str = "search_wiki";
+/// Read one full project-wiki page (body + evidence ledger) by slug.
+/// Gated per turn by `ToolCaps.wiki`.
+pub const READ_WIKI_PAGE: &str = "read_wiki_page";
 /// Save an explicit fact about the user to persistent memory (MEMORY_DESIGN_
 /// ARCHITECTURE.md §12.1). Routed through the same consolidation judge as
 /// background extraction: duplicates merge, contradictions supersede.
@@ -375,6 +381,10 @@ pub const TOTP_CODE: &str = "totp_code";
 /// mutate the local memory store only (reversible — supersession history).
 pub fn is_memory_tool(name: &str) -> bool {
     matches!(name, MEMORY_SAVE | MEMORY_RECALL | MEMORY_FORGET)
+}
+/// The two project-wiki tools (§6.15) — both read-only.
+pub fn is_wiki_tool(name: &str) -> bool {
+    matches!(name, SEARCH_WIKI | READ_WIKI_PAGE)
 }
 /// Create or overwrite a file. Mutating — gated by the permission mode.
 pub const WRITE_FILE: &str = "write_file";
@@ -452,6 +462,10 @@ pub struct ToolCaps {
     /// answers keyword-only with the embedding sidecar down, so the sidecar
     /// no longer gates the tool. Computed per turn in chat/mod.rs from DB.
     pub local_docs: bool,
+    /// Whether the project-wiki tools (`search_wiki`/`read_wiki_page`) are
+    /// exposed this turn. True when the bound project has a built wiki —
+    /// computed per turn in chat/mod.rs (`wiki::has_pages`).
+    pub wiki: bool,
     /// MCP-gallery servers attached to this turn (§3.2.14): every ENABLED
     /// installed server's tools, under prefixed wire names (`mcp_<server>_
     /// <tool>`). Unlike connectors these are global (not per-conversation)
@@ -634,6 +648,7 @@ impl Default for ToolCaps {
             requires_local_sandbox: false,
             attached_connectors: std::sync::Arc::new(Vec::new()),
             local_docs: false,
+            wiki: false,
             mcp_tools: std::sync::Arc::new(Vec::new()),
             fs_rules: Vec::new(),
             attachable_connectors: std::sync::Arc::new(Vec::new()),
@@ -700,6 +715,19 @@ const SEARCH_DOCS_DESC: &str = "Search the user's locally-indexed document folde
     embedding sidecar is off. Hits: path, heading, type, score, excerpt; image \
     hits return the path only. If nothing matches, say so rather than inventing \
     content.";
+
+/// Descriptions for the project-wiki tools (§6.15). Project-scoped content,
+/// global tools: hits are labeled with their project.
+const SEARCH_WIKI_DESC: &str = "Search the auto-generated project wiki (Relay's generated \
+    knowledge base of the codebase). Returns ranked page hits with title, project, status and \
+    a matching excerpt. Prefer this over re-reading source files for 'how does this project \
+    work' questions — but respect a hit's status: a stale page may lag the code. If nothing \
+    matches, say so rather than inventing content.";
+
+const READ_WIKI_PAGE_DESC: &str = "Read one full page of the project wiki by its slug \
+    (from search_wiki). Returns the page markdown plus its evidence ledger — the source files \
+    and line ranges each load-bearing claim is grounded in, so you can verify against the code \
+    yourself.";
 
 const MEMORY_SAVE_DESC: &str = "Save a durable fact about the user to persistent \
 memory so future conversations remember it. ONLY stable, reusable facts: \
@@ -1220,6 +1248,19 @@ pub async fn execute_tool(
             }
             None => ToolOutcome::text(
                 "Error: search_docs needs the app runtime, which is unavailable here.",
+            ),
+        },
+        // Project-wiki tools (§6.15). THE PARITY ARM, same contract as
+        // SEARCH_DOCS above: the relay-tools bridge advertises both in its
+        // tools/list and routes calls through THIS dispatcher. The built-in
+        // chat never reaches this arm (dispatch.rs intercepts wiki tools
+        // earlier); headless and bridge callers land here.
+        name if crate::chat::tools::is_wiki_tool(name) => match app {
+            Some(app) => {
+                ToolOutcome::text(crate::wiki::tools_impl::run_wiki_tool(app, name, args).await)
+            }
+            None => ToolOutcome::text(
+                "Error: the wiki tools need the app runtime, which is unavailable here.",
             ),
         },
         FETCH_URL => {
@@ -1754,6 +1795,7 @@ mod tests {
         // On when the local-docs capability is set.
         let on = ToolCaps {
             local_docs: true,
+            wiki: true,
             ..Default::default()
         };
         assert!(openai_names(&on, SandboxPolicy::WorkspaceWrite).contains(&SEARCH_DOCS.to_string()));

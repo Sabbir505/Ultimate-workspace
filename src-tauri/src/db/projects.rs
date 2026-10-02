@@ -83,6 +83,20 @@ pub fn remove_project(conn: &Connection, project_id: &str) -> DbResult<()> {
     )?;
     // Chat messages cascade off chat_sessions via FK ON DELETE CASCADE.
     super::chat::delete_chat_sessions_for_project(&tx, project_id)?;
+    // Wikis key on the bound FOLDER PATH, not on projects.id, so they carry
+    // no FK to cascade from. Without this the freshness sweep kept running
+    // `git rev-parse` against a project that had been deleted — the wiki
+    // surface's own remove action was the only way to clear one.
+    if let Some(path) = tx
+        .query_row(
+            "SELECT path FROM projects WHERE id = ?1",
+            params![project_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        super::wiki::remove_wiki_by_path_prefix(&tx, &path)?;
+    }
     tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
     tx.commit()?;
     Ok(())

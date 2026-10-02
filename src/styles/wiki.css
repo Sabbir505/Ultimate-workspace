@@ -1,0 +1,909 @@
+/* wiki — Project wiki overlay (§6.15) + its tool-panel tab.
+   Imported from global.css (cascade order matters — do not reorder imports). */
+
+/* ---------- Wiki view (REAL view, like automations/vault) ----------
+   Fills the center area between the sidebar and the tool panel; the
+   sidebar stays visible. Opaque reading surface by default; shell.css
+   swaps this for a tinted canvas when an app wallpaper is set. */
+.wiki-view {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  color: var(--text);
+  /* Clear the floating title bar (the header PORTALS into it). */
+  padding-top: var(--toolbar-h, 37px);
+  /* Same smooth open as the other full-page views. */
+  animation: wiki-view-in 0.22s var(--ease);
+}
+
+@keyframes wiki-view-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wiki-view {
+    animation: none;
+  }
+}
+
+/* Title-bar scale for the portaled header (mirrors .automations-header and
+   .vault-header). The h1 sits at the vault's 14px caption label; shell.css
+   re-applies that inside the toolbar, so the two stay in step. The caption
+   carries the title alone — project, page count and build model all live in
+   the rails, where they are actionable. */
+.wiki-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 16px;
+  flex-shrink: 0;
+}
+
+.wiki-header-left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  color: var(--text-dim);
+}
+
+.wiki-header-left h1 {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+  margin: 0;
+  white-space: nowrap;
+}
+
+/* The control group. This needs a real wrapper: the buttons are siblings of
+   the left group, so without one `justify-content: space-between` would
+   spread them across the whole caption instead of clustering them at the
+   right edge beside the window controls. */
+.wiki-header-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+/* Add-project menu. Portaled to <body> and viewport-anchored by the
+   component (see .agent-model-popup for why a nested menu can't frost): the
+   caption is itself a backdrop-filter surface, so anything positioned inside
+   it can only sample the caption's paint. The recipe below is the composer
+   card's liquid glass, copied verbatim so the two read as the same material. */
+.wiki-add-menu {
+  position: fixed;
+  width: 260px;
+  max-width: calc(100vw - 16px);
+  max-height: min(320px, calc(100vh - 32px));
+  overflow-y: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), var(--glass-drop);
+  /* Above all caption/view chrome, same as the popups it mirrors. */
+  z-index: 2100;
+}
+
+/* Light theme: a touch more body so rows keep contrast on bright backdrops. */
+:root[data-theme="light"] .wiki-add-menu {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
+}
+
+/* Rows match .model-effort-item: flat until hover, no per-row fill. */
+.wiki-add-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  text-align: left;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.wiki-add-menu-item:hover {
+  background: var(--surface-2);
+}
+
+.wiki-add-menu-item.is-current {
+  color: var(--text-dim);
+}
+
+.wiki-add-menu-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wiki-add-menu-state {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--accent, var(--text-dim));
+}
+
+.wiki-add-menu-state.is-built {
+  color: var(--text-dim);
+  opacity: 0.8;
+}
+
+.wiki-add-menu-empty {
+  padding: 8px 10px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+/* Icon-only buttons, sized like .vault-header-actions button: transparent by
+   default so they read as marks in the caption, not page-scale buttons. */
+.wiki-header-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.wiki-header-actions button:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.wiki-header-actions button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Build progress in the caption. Same recipe as .model-download-indicator
+   (App.tsx) so every background job reads as the same pill: accent text on an
+   accent-soft fill, a 10px ring spinner, and a 40x3 bar. Must stay inside the
+   caption's 28px content box or it pushes past --toolbar-h. */
+.wiki-titlebar-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--accent);
+  padding: 2px 10px;
+  border-radius: var(--radius-xs);
+  background: var(--accent-soft);
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: default;
+  flex: 0 0 auto;
+}
+
+.wiki-titlebar-spinner {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border: 2px solid var(--accent-soft);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: browser-spin 0.8s linear infinite;
+}
+
+.wiki-titlebar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wiki-titlebar-bar {
+  width: 40px;
+  height: 3px;
+  flex: none;
+  background: var(--surface-2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.wiki-titlebar-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* The store keeps the terminal progress event, so the pill is animated out
+   instead of being yanked from the DOM mid-transition. */
+.wiki-titlebar-progress.is-fading {
+  opacity: 0;
+  transform: translateY(-3px);
+  transition: opacity 300ms ease, transform 300ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wiki-titlebar-spinner {
+    animation: none;
+  }
+  .wiki-titlebar-bar-fill {
+    transition: none;
+  }
+}
+
+.wiki-spin {
+  animation: wiki-spin 0.9s linear infinite;
+}
+
+@keyframes wiki-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wiki-spin {
+    animation: none;
+  }
+}
+
+.wiki-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* LEFT RAIL: the projects. Always present, so the view always says which
+   wikis exist even before one is picked. */
+.wiki-projects {
+  width: 208px;
+  flex: 0 0 auto;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* RIGHT RAIL: the selected project's pages. Only rendered once a project is
+   selected (see WikiView), so it needs no empty state. */
+.wiki-pages {
+  width: 240px;
+  flex: 0 0 auto;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wiki-page-row {
+  display: flex;
+  align-items: center;
+  padding: 7px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  text-align: left;
+  background: none;
+  color: inherit;
+  font: inherit;
+}
+
+.wiki-page-row:hover {
+  background: var(--hover);
+}
+
+.wiki-page-row.selected {
+  background: var(--active);
+  border-color: var(--border);
+}
+
+.wiki-page-row-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  min-width: 0;
+}
+
+/* Rail labels + rows. */
+.wiki-rail-empty {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  padding: 4px 9px;
+  opacity: 0.75;
+}
+
+.wiki-rail-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+  padding: 4px 9px 2px;
+}
+
+/* Row = a container (select button + hover delete), not a button itself. */
+.wiki-rail-project {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--text-dim);
+}
+
+.wiki-rail-project:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.wiki-rail-project.is-active {
+  background: var(--active);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.wiki-rail-project-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 9px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wiki-rail-project-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wiki-rail-project-count {
+  font-size: 10.5px;
+  opacity: 0.75;
+}
+
+/* Delete sits where the page count was and takes its place on hover. It is
+   absolutely positioned so it never reflows the row, and :focus-visible keeps
+   it reachable by keyboard even though it is hidden at rest. */
+.wiki-rail-project-delete {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s, background-color 0.12s, color 0.12s;
+  /* The app resets outlines on inputs but NOT on buttons, so a mouse click
+     left the UA focus ring flashing on this glyph — the only control in the
+     rail that surfaced it. Mouse focus stays silent; keyboard focus gets the
+     same accent ring the inputs use. */
+  outline: none;
+}
+
+.wiki-rail-project:hover .wiki-rail-project-delete,
+.wiki-rail-project-delete:focus-visible {
+  opacity: 1;
+}
+
+.wiki-rail-project-delete:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.wiki-rail-project-delete:hover {
+  background: rgba(255, 107, 107, 0.14);
+  color: var(--red, #ff6b6b);
+}
+
+/* Armed: stays visible once the pointer leaves, and reads as "click again". */
+.wiki-rail-project-delete.is-armed {
+  opacity: 1;
+  background: rgba(255, 107, 107, 0.2);
+  color: var(--red, #ff6b6b);
+}
+
+/* The count yields to the delete on hover. */
+.wiki-rail-project:hover .wiki-rail-project-count {
+  visibility: hidden;
+}
+
+.wiki-chip {
+  font-size: 9.5px;
+  padding: 1px 6px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+
+.wiki-chip.fresh {
+  color: var(--success, #3fb950);
+  border-color: var(--success, #3fb950);
+}
+
+.wiki-chip.stale {
+  color: var(--warning, #d29922);
+  border-color: var(--warning, #d29922);
+}
+
+.wiki-chip.kind {
+  text-transform: capitalize;
+}
+
+/* Right: reader. The bottom pad was 40vh — enough to leave a screen of dead
+   space under the evidence ledger on a long page. There is no floating
+   composer to clear here, so a fixed tail is all it needs. */
+.wiki-reader {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 14px 22px 56px;
+  min-width: 0;
+}
+
+.wiki-reader h1 {
+  font-size: 21px;
+  margin: 0 0 4px;
+}
+
+/* Vault reading-mode typography: same size, leading and measure. */
+.wiki-reader .chat-markdown {
+  font-size: 14px;
+  line-height: 1.65;
+  max-width: 760px;
+  margin: 0;
+}
+
+.wiki-stale-banner {
+  margin: 0 0 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--warning, #d29922);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--warning, #d29922);
+  background: color-mix(in srgb, var(--warning, #d29922) 8%, transparent);
+}
+
+.wiki-claims {
+  margin-top: 22px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.wiki-claims h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin: 0 0 8px;
+}
+
+.wiki-claim-row {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  padding: 3px 0;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.wiki-claim-row code {
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Empty state + progress */
+.wiki-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-dim);
+  padding: 30px;
+  text-align: center;
+}
+
+.wiki-empty h2 {
+  font-size: 15px;
+  color: var(--text);
+  margin: 0;
+}
+
+.wiki-progress {
+  padding: 6px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.wiki-progress-bar {
+  flex: 1 1 auto;
+  height: 4px;
+  border-radius: 99px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.wiki-progress-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent, #5865f2);
+  transition: width 0.3s ease;
+}
+
+/* ---------- Tool-panel Wiki tab ---------- */
+.wiki-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.wiki-tab-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.wiki-tab-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+}
+
+.wiki-tab-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin-right: auto;
+}
+
+.wiki-tab-model {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wiki-tab-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.wiki-tab-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  line-height: 1;
+}
+
+.wiki-tab-actions button svg {
+  display: block;
+}
+
+.wiki-tab-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.wiki-tab-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.wiki-tab-empty {
+  padding: 18px 16px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+}
+
+.wiki-tab-empty p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.wiki-tab-agents {
+  font-size: 11px;
+}
+
+.wiki-tab-hint {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+/* Project rows — pages live UNDER their project. */
+.wiki-project {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.wiki-project-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.wiki-project-row:hover,
+.wiki-project-row.open {
+  background: var(--hover);
+}
+
+.wiki-project-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wiki-project-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+.wiki-project-pages {
+  border-top: 1px solid var(--border);
+  padding: 4px 6px 6px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.wiki-page-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wiki-page-line:hover {
+  background: var(--hover);
+}
+
+.wiki-page-line-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Page cards (tab list) */
+.wiki-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wiki-card:hover {
+  background: var(--hover);
+  border-color: var(--border);
+}
+
+.wiki-card-icon {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+}
+
+.wiki-card-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.wiki-card-title {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.wiki-card-summary {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Live build feed (shared tab + overlay) ---------- */
+.wiki-feed {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.wiki-feed-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+
+.wiki-feed-title {
+  font-weight: 500;
+  margin-right: auto;
+}
+
+.wiki-feed-count {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+.wiki-feed-spinner {
+  animation: wiki-spin 1s linear infinite;
+  color: var(--accent, #5865f2);
+  flex: 0 0 auto;
+}
+
+@keyframes wiki-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.wiki-feed-icon.done {
+  color: var(--success, #3fb950);
+}
+
+.wiki-feed-icon.failed {
+  color: var(--danger, #f85149);
+}
+
+.wiki-feed-steps {
+  max-height: 168px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: 2px;
+}
+
+.wiki-feed.compact .wiki-feed-steps {
+  max-height: 200px;
+}
+
+.wiki-feed-step {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.wiki-feed-step[data-state="running"] {
+  color: var(--text);
+}
+
+.wiki-feed-step .wiki-feed-icon,
+.wiki-feed-step .wiki-feed-spinner {
+  transform: translateY(2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wiki-feed-spinner {
+    animation: none;
+  }
+}

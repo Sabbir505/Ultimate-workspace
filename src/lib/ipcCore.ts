@@ -35,12 +35,28 @@ export async function safeListen<T>(
   event: string,
   handler: (payload: T) => void,
 ): Promise<UnlistenFn> {
+  const unlisten = await safeListenChecked<T>(event, handler);
+  return unlisten ?? (() => {});
+}
+
+/** Like `safeListen`, but distinguishes "subscribed" from "failed to
+ *  subscribe" by resolving to null on failure. `safeListen` returns a no-op
+ *  unlisten on error, which makes a failed registration indistinguishable
+ *  from a successful one — so a caller that latches a "already subscribed"
+ *  flag on the returned promise stays latched forever after one transient
+ *  failure and never receives another event. Use this when the caller needs
+ *  to retry.
+ */
+export async function safeListenChecked<T>(
+  event: string,
+  handler: (payload: T) => void,
+): Promise<UnlistenFn | null> {
   if (!tauriAvailable()) return () => {};
   try {
     return await listen<T>(event, (e) => handler(e.payload));
   } catch (err) {
     console.warn(`[relay] listen("${event}") failed`, err);
-    return () => {};
+    return null;
   }
 }
 

@@ -169,7 +169,13 @@ pub async fn fetch_provider_model_windows(
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .map_err(|e| e.to_string())?;
-            let mut req = client.get(format!("{}/models", base.trim_end_matches('/')));
+            // App-wide base-URL convention: the stored base EXCLUDES /v1 and
+            // paths append it (providers.rs `{base}/v1/chat/completions`,
+            // send.rs `{base}/v1/models`). Probing the bare `/models` hit the
+            // wrong path for the only base configuration under which chat
+            // itself works, so dynamic windows silently never loaded for
+            // openai_compatible relays (audit M: selection probe).
+            let mut req = client.get(format!("{}/v1/models", base.trim_end_matches('/')));
             if let Some(k) = key.filter(|k| !k.trim().is_empty()) {
                 req = req.bearer_auth(k.trim());
             }

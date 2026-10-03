@@ -291,3 +291,10 @@ export async function fileToAttachment(file: File): Promise<ChatAttachment> {
   }
   return { name: file.name, size: file.size, kind: "text", text };
 }
+
+/** The extended-thinking tri-state cycle shared by the composer's inline
+ *  toggle and its attach-menu entry: null (provider default) → on → off →
+ *  null. Each press applies to the NEXT message only. */
+export function nextThinkingValue(value: boolean | null): boolean | null {
+  return value === null ? true : value === true ? false : null;
+}

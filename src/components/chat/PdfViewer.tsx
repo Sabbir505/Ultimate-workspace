@@ -261,6 +261,10 @@ export function PdfViewer({
       const needle = query.trim().toLowerCase();
       const found: SearchHit[] = [];
       for (let p = 1; p <= pdf.numPages; p++) {
+        // Superseded searches must stop scanning — a large PDF otherwise
+        // keeps paying the per-page getTextContent cost after the user
+        // already typed a new query or closed the viewer.
+        if (gen !== searchGenRef.current) return;
         const page = await pdf.getPage(p);
         const content = await page.getTextContent();
         const text = content.items

@@ -90,15 +90,16 @@ pub fn interpreter() -> String {
     if let Some(cached) = RESOLVED.get() {
         return cached.clone();
     }
+    // No bundle (or it vanished): probe the system ONCE. The old form left
+    // total probe failure UNCACHED, so on a machine with no Python every
+    // run_code / generate_document call re-spawned two blocking `--version`
+    // probes on the async runtime (audit M: python cache). "No Python" is
+    // cached as the first candidate's NAME — the caller's spawn fails with
+    // the same clear "not found" error as before; a Python installed later
+    // is picked up after an app restart.
     let resolved = match bundled_interpreter() {
         Some(exe) => exe.to_string_lossy().into_owned(),
-        // No bundle (or it vanished): probe the system. A candidate that
-        // answers is cached; total probe failure stays uncached (see the
-        // RESOLVED doc above).
-        None => match system_interpreter_found() {
-            Some(name) => name.to_string(),
-            None => return system_interpreter(),
-        },
+        None => system_interpreter(),
     };
     // Lost the race against a concurrent first call → its answer wins; ours
     // is identical in practice and returned just the same for this call.

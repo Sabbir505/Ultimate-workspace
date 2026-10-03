@@ -150,7 +150,8 @@ export interface CostTotals {
   rawTokenCostUsd: number;
   providerReportedUsd: number;
   estimatedUsd: number;
-  unpricedUsd: number;
+  // `unpricedUsd` was removed from the Rust CostTotals — the quality view
+  // reads CostQuality.unpricedPct instead.
 }
 export interface ProviderCostRollup {
   provider: string;

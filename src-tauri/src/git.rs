@@ -232,6 +232,31 @@ pub fn worktree_dir_exists(path: &Path) -> bool {
     path.is_dir()
 }
 
+/// The worktrees linked to `project_path`, as `git worktree list --porcelain`
+/// reports them (absolute paths, canonicalized best-effort so 8.3/UNC forms
+/// compare equal to their canonical spellings).
+///
+/// Used to PROVE a renderer-supplied worktree pointer belongs to this repo
+/// before it is persisted (audit C4) — the pointer feeds the file-read
+/// allowlist, so "under the right parent directory" is not sufficient.
+pub fn list_worktrees(project_path: &Path) -> Result<Vec<String>, String> {
+    let out = run_git(project_path, &["worktree", "list", "--porcelain"])?;
+    let mut paths = Vec::new();
+    for line in out.lines() {
+        let Some(rest) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest.is_empty() {
+            continue;
+        }
+        let p = Path::new(rest);
+        let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        paths.push(canon.to_string_lossy().into_owned());
+    }
+    Ok(paths)
+}
+
 /// `git worktree remove --force <path>` run from the project root (git needs
 /// to resolve the worktree's registration in the main repo). `--force` prunes
 /// uncommitted changes in the worktree — safe to use on chat-owned worktrees
@@ -810,25 +835,10 @@ pub struct BranchInfo {
 /// Format: `%(refname:short)|%(objectname:short)|%(contents:subject)` per
 /// line, prefixed with `*` for the current branch and `remotes/` for remote.
 pub fn list_branches(path: &Path) -> Result<Vec<BranchInfo>, String> {
-    let _format = "%(refname:short)|%(objectname:short)|%(contents:subject)";
-    // Use --format with a marker for the current branch.
-    let out = git_command(
-        path,
-        &[
-            "branch",
-            "--all",
-            "--format=%(HEAD)%(refname:short)\u{1f}",
-        ],
-        &[],
-    )
-    .map_err(|e| format!("failed to run git branch: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-
-    // We need the format with sha + subject too — do a second call with the
-    // full format and match by name. Simpler: one call with everything.
+    // One `for-each-ref` call carries everything (HEAD marker, name, sha,
+    // subject). A first `git branch --all` used to run before it whose output
+    // was then DISCARDED (`let _ = stdout;`) — every branch listing paid
+    // double subprocess latency for zero value (audit M: list_branches).
     let detailed = run_git(
         path,
         &[
@@ -869,8 +879,6 @@ pub fn list_branches(path: &Path) -> Result<Vec<BranchInfo>, String> {
             last_commit_message: msg.to_string(),
         });
     }
-    // Suppress unused warning for the first stdout parse.
-    let _ = stdout;
     Ok(branches)
 }
 

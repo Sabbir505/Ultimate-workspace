@@ -33,8 +33,8 @@ use super::codeexec;
 mod search;
 use search::web_search;
 pub(crate) use search::{
-    configured_provider, fetch_url, render_search_results, serp_via_reader, web_search_with_status,
-    SearchOutcome,
+    configured_provider, fetch_url, render_search_results, search_api_key, serp_via_reader,
+    web_search_with_status, SearchOutcome,
 };
 /// Re-exported so `download_task` (chat/tasks.rs) can reuse the SSRF guard
 /// (host_blocked / is_blocked_ip) instead of duplicating it.
@@ -1360,7 +1360,7 @@ pub async fn execute_tool(
             }
         }
         GENERATE_FILE => generate_file(artifacts_dir, args),
-        GENERATE_DOCUMENT => generate_document(app, artifacts_dir, args).await,
+        GENERATE_DOCUMENT => generate_document(app, artifacts_dir, args, caps).await,
         PLAN_DOCUMENT => {
             crate::chat::docdesign::plan::plan_document(app, artifacts_dir, args).await
         }

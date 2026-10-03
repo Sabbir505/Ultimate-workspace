@@ -142,20 +142,32 @@ export function DataPanel() {
   };
 
   const pickArtifactsDir = async () => {
-    const picked = await open({
-      directory: true,
-      title: "Choose where to store artifacts",
-    });
-    if (typeof picked !== "string") return;
-    await setSetting("storage.artifactsDir", picked);
-    setNote(`Artifacts will be stored in ${picked}`);
-    refresh();
+    let picked: string | null = null;
+    try {
+      const result = await open({
+        directory: true,
+        title: "Choose where to store artifacts",
+      });
+      if (typeof result !== "string") return;
+      picked = result;
+      await setSetting("storage.artifactsDir", picked);
+      setNote(`Artifacts will be stored in ${picked}`);
+      refresh();
+    } catch (err) {
+      toastError("Couldn't change the artifacts folder", err);
+      refresh(); // re-sync with whatever the backend actually has
+    }
   };
 
   const resetArtifactsDir = async () => {
-    await setSetting("storage.artifactsDir", "");
-    setNote("Artifacts will be stored in the default location");
-    refresh();
+    try {
+      await setSetting("storage.artifactsDir", "");
+      setNote("Artifacts will be stored in the default location");
+      refresh();
+    } catch (err) {
+      toastError("Couldn't reset the artifacts folder", err);
+      refresh();
+    }
   };
 
   const runDelete = async () => {

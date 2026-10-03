@@ -180,7 +180,10 @@ export function useLocalModelSidecar({
         // just means the first send pays the normal cold-start cost.
         try {
           const s = useChatStore.getState();
-          const sid = s.activeChatSessionId;
+          // Key off THIS pane's session (the hook param), not the global
+          // store's active one — in split view the pane the user picked the
+          // model in may not be the globally active chat.
+          const sid = activeChatSessionId;
           const session = sid ? s.sessions.find((x) => x.id === sid) : undefined;
           const projects = useProjectsStore.getState();
           const boundProject = sid
@@ -213,7 +216,7 @@ export function useLocalModelSidecar({
         setLocalLoading(false);
       }
     },
-    [],
+    [activeChatSessionId],
   );
 
   // Re-warm the prompt cache when the active chat changes (while a local
@@ -228,8 +231,19 @@ export function useLocalModelSidecar({
     if (activeChatSessionId && activeChatSessionId in s.streaming) return;
     // Only fresh conversations need a warmup: a session with completed turns
     // already has its real prefix cached from the last turn, and a synthetic
-    // warmup would just churn the GPU queue behind live traffic.
-    if (activeChatSessionId && s.messages.some((m) => m.role === "assistant")) return;
+    // warmup would just churn the GPU queue behind live traffic. Read the
+    // buffer that actually displays THIS pane's session (the mirror of
+    // bufferTargetFor) — the global `messages` array belongs to the active
+    // chat, which in split view is not necessarily the pane's.
+    const paneMessages = (() => {
+      if (!activeChatSessionId) return s.messages;
+      if (s.activeChatSessionId === activeChatSessionId) return s.messages;
+      return (
+        Object.values(s.paneBuffers).find((b) => b.sessionId === activeChatSessionId)?.messages ??
+        []
+      );
+    })();
+    if (activeChatSessionId && paneMessages.some((m) => m.role === "assistant")) return;
     const session = activeChatSessionId
       ? s.sessions.find((x) => x.id === activeChatSessionId)
       : undefined;

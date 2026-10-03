@@ -9,7 +9,7 @@
 // redesign is the presentation: an engine card with the kill switch as a real
 // toggle, proposal cards with status accenting, and artifact rows that expand
 // into a version timeline.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ChevronDown,
@@ -70,6 +70,9 @@ export function ImprovementsPanel() {
   const [busy, setBusy] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [tiers, setTiers] = useState<Record<string, "manual" | "auto" | "canary">>({});
+  // Previous tier per artifact — captured before each optimistic write so a
+  // failed save can revert (audit M: optimistic writes with no rollback).
+  const prevTierRef = useRef<Record<string, "manual" | "auto" | "canary">>({});
   // P3: cross-artifact pack health + per-artifact eval cases (quarantine UI).
   const [health, setHealth] = useState<ImprovePackHealth[]>([]);
   const [cases, setCases] = useState<Record<string, ImproveEvalCase[]>>({});
@@ -200,10 +203,16 @@ export function ImprovementsPanel() {
   };
 
   const changeTier = async (artifactId: string, tier: "manual" | "auto" | "canary") => {
-    setTiers((prev) => ({ ...prev, [artifactId]: tier }));
+    setTiers((prev) => {
+      prevTierRef.current = { ...prevTierRef.current, [artifactId]: prev[artifactId] };
+      return { ...prev, [artifactId]: tier };
+    });
     try {
       await setImproveAutonomy(artifactId, tier);
     } catch (err) {
+      // Revert the optimistic tier write on failure.
+      const previous = prevTierRef.current[artifactId];
+      setTiers((prev) => ({ ...prev, [artifactId]: previous ?? "manual" }));
       toastError("Could not save the autonomy tier", err);
     }
   };

@@ -86,21 +86,33 @@ pub fn ensure_artifact(
     }
     let id = new_id();
     let now = now_ts();
-    conn.execute(
-        "INSERT INTO improve_artifacts (id, kind, ref_key, name, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, kind, ref_key, name, now],
-    )?;
-    conn.execute(
-        "INSERT INTO improve_versions (id, artifact_id, version, body, origin, created_at)
-         VALUES (?1, ?2, 1, ?3, 'import', ?4)",
-        params![new_id(), id, body, now],
-    )?;
-    conn.execute(
-        "INSERT INTO improve_channels (artifact_id, channel, version, updated_at)
-         VALUES (?1, 'active', 1, ?2)",
-        params![id, now],
-    )?;
+    // One logical write: registry row + v1 seed + active channel. Bare
+    // autocommitted statements let a partial failure (SQLITE_BUSY is real
+    // here — the headless `relay_automation` binary opens the same DB) leave
+    // the artifact row with NO v1 body and no active channel, and the early
+    // return above means no later call ever repairs it: `start_run`'s
+    // `unwrap_or(1)` then points runs at a nonexistent version forever
+    // (audit H16). Same fix shape as `delete_chat_session` /
+    // `replace_file_chunks` / `remove_corpus`.
+    {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO improve_artifacts (id, kind, ref_key, name, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, kind, ref_key, name, now],
+        )?;
+        tx.execute(
+            "INSERT INTO improve_versions (id, artifact_id, version, body, origin, created_at)
+             VALUES (?1, ?2, 1, ?3, 'import', ?4)",
+            params![new_id(), id, body, now],
+        )?;
+        tx.execute(
+            "INSERT INTO improve_channels (artifact_id, channel, version, updated_at)
+             VALUES (?1, 'active', 1, ?2)",
+            params![id, now],
+        )?;
+        tx.commit()?;
+    }
     Ok(ImproveArtifact {
         id,
         kind: kind.to_string(),
@@ -693,9 +705,22 @@ pub fn quarantine_flaky_cases(conn: &Connection, artifact_id: &str) -> DbResult<
         if results.len() < 2 {
             continue;
         }
-        let (b2, c2, ok2) = results[results.len() - 1];
-        let (b1, c1, ok1) = results[results.len() - 2];
-        if b1 == b2 && c1 == c2 && ok1 != ok2 {
+        // Compare the last two results OF THE SAME (base, candidate) PAIR —
+        // the globally-last two could be different pairs, hiding a real flip:
+        // (v2,fail), (v3,pass), (v2,pass) used to look stable even though v2
+        // flipped, letting the flaky case keep vetoing candidates (audit M:
+        // quarantine pairing).
+        let last = results[results.len() - 1];
+        let Some((b1, c1, ok1)) = results[..results.len() - 1]
+            .iter()
+            .rev()
+            .find(|(b, c, _)| *b == last.0 && *c == last.1)
+            .map(|(b, c, ok)| (*b, *c, *ok))
+        else {
+            continue;
+        };
+        let (b2, c2, ok2) = last;
+        if ok1 != ok2 {
             let reason = format!(
                 "flaky: pass/fail flipped across two identical eval runs \
                  (base {b1:?}, candidate {c2:?}) — parked out of gating; \

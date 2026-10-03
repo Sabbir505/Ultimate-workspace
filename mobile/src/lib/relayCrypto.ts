@@ -41,6 +41,33 @@ export function deriveSessionKey(token: string, salt?: Uint8Array): Uint8Array {
   );
 }
 
+/**
+ * Bind the public PairOk salt to this connection's challenge:
+ * `SHA256(challenge || salt)`.
+ *
+ * The PairOk frame is unauthenticated plaintext, so a relay MITM can record
+ * connection N's salt and replay it on connection N+1. Deriving from the RAW
+ * salt then re-derives connection N's key while both per-direction counters
+ * restart at 0 — XChaCha20 keystream reuse (XOR recovery of the phone's
+ * plaintext) and Poly1305 one-time-key reuse (tag forgery). Folding in the
+ * FRESH per-connection challenge makes a replayed salt produce a different
+ * key; the caller additionally refuses a replayed challenge (audit C9, v3
+ * pairing). Mirrors `relay_crypto::bind_salt_to_challenge` exactly.
+ */
+export function bindSaltToChallenge(
+  challenge: Uint8Array,
+  salt: Uint8Array,
+): Uint8Array {
+  return sha256(concatBytes(challenge, salt));
+}
+
+function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
 /** Decode base64url (no padding) — the PairOk salt encoding. */
 export function b64UrlToBytes(s: string): Uint8Array {
   const table = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';

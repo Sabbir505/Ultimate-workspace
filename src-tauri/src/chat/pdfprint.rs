@@ -36,6 +36,33 @@ const POLL_INTERVAL: Duration = Duration::from_millis(150);
 /// fully self-contained and offline.
 const PAGED_JS: &str = include_str!("paged.polyfill.min.js");
 
+/// CSP for the hidden print document (audit H8).
+///
+/// The window navigates to a `file://` temp file containing MODEL-authored
+/// HTML, and that window is reused across renders. A `file://` document in
+/// WebView2 may embed OTHER local files as subresources — an
+/// `<iframe src="file:///C:/Users/me/.ssh/id_rsa">` renders the victim's
+/// private key into the produced PDF, a local-file READ channel that
+/// bypasses the permission-gated `read_file` tooling entirely. It may also
+/// `fetch()` anywhere, so model JS could exfiltrate what it read.
+///
+/// The renderer is fully self-contained (Paged.js + CSS inlined above), so
+/// nothing legitimate needs external loads: inline scripts/styles stay
+/// allowed, remote images/fonts stay allowed (fidelity), and the dangerous
+/// vectors — frames, objects, forms, and any script-initiated network —
+/// are refused.
+const PRINT_CSP: &str = "default-src * data: blob:; \
+script-src 'unsafe-inline'; \
+style-src 'unsafe-inline'; \
+img-src * data: blob:; \
+font-src * data: blob:; \
+connect-src 'none'; \
+frame-src 'none'; \
+child-src 'none'; \
+object-src 'none'; \
+form-action 'none'; \
+base-uri 'none'";
+
 /// Base print CSS, generated from the shared docdesign tokens (default
 /// theme) — fonts, sizes, margins and colors all come from
 /// `src/lib/docdesign/tokens.json`, not from hand-written constants here.
@@ -79,7 +106,7 @@ window.addEventListener('load', function () {
 /// because each render uses a fresh temp file.
 pub(crate) fn compose_print_document(model_html: &str, title: &str) -> String {
     let head_inject = format!(
-        "<title>{}</title>\n<style>{}</style>\n<script>{BOOTSTRAP_JS}</script>\n<script>{PAGED_JS}</script>\n<script>{FALLBACK_JS}</script>\n",
+        "<title>{}</title>\n<meta http-equiv=\"Content-Security-Policy\" content=\"{PRINT_CSP}\">\n<style>{}</style>\n<script>{BOOTSTRAP_JS}</script>\n<script>{PAGED_JS}</script>\n<script>{FALLBACK_JS}</script>\n",
         html_escape(title),
         base_css(),
     );
@@ -231,13 +258,21 @@ fn print_via_webview(
         .map_err(|e| format!("could not write the print document: {e}"))?;
     let file_url = format!("file:///{}", temp_html.to_string_lossy().replace('\\', "/"));
 
+    let core = unsafe { webview.controller().CoreWebView2() }
+        .map_err(|e| format!("webview core unavailable: {e}"))?;
+
+    // Cleanup runs on EVERY exit path (success, render error, timeout): drop
+    // the temp file AND reset the reused hidden window to about:blank
+    // (audit H8). The window outlives the render, so leaving the model's
+    // document loaded kept its JS running and left a persistent hidden page on
+    // a `file://` origin — able to navigate itself anywhere and to retain
+    // whatever it had already loaded.
     let cleanup = |result: Result<(), String>| -> Result<(), String> {
+        let blank = HSTRING::from("about:blank");
+        let _ = unsafe { core.Navigate(&blank) };
         let _ = std::fs::remove_file(&temp_html);
         result
     };
-
-    let core = unsafe { webview.controller().CoreWebView2() }
-        .map_err(|e| format!("webview core unavailable: {e}"))?;
 
     // Navigate. Result arrives asynchronously; the first polls below may run
     // against the previous (about:blank) document — they just report "working".
@@ -344,7 +379,7 @@ fn print_via_webview(
         .cast::<ICoreWebView2_7>()
         .map_err(|e| format!("missing ICoreWebView2_7 (WebView2 runtime too old): {e}"))?;
     let out_target = HSTRING::from(out_path);
-    PrintToPdfCompletedHandler::wait_for_async_operation(
+    let printed = PrintToPdfCompletedHandler::wait_for_async_operation(
         {
             let core7 = core7.clone();
             let settings = settings.clone();
@@ -364,14 +399,14 @@ fn print_via_webview(
                 ))) // E_FAIL
             }
         }),
-    )
-    // Through `cleanup` like every other error path: a failed PrintToPdf
+    );
+    // Through the same teardown as every other exit path: a failed PrintToPdf
     // used to leave the multi-MB relay-print-*.html in the user's temp dir
-    // (audit L-8).
-    .map_err(|e| {
-        let _ = std::fs::remove_file(&temp_html);
-        format!("PrintToPdf failed: {e}")
-    })?;
+    // (audit L-8) — and must also blank the window (audit H8), so route the
+    // error through `cleanup` instead of removing only the file.
+    if let Err(e) = printed {
+        return cleanup(Err(format!("PrintToPdf failed: {e}")));
+    }
 
     if !std::path::Path::new(out_path).is_file() {
         return cleanup(Err("PrintToPdf completed but produced no file.".to_string()));

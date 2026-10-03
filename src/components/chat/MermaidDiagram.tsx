@@ -430,7 +430,10 @@ export function MermaidDiagramInner({ code, onFix }: MermaidDiagramProps) {
     const observer = new MutationObserver(() => {
       setThemeAttr(root.getAttribute("data-theme"));
     });
-    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    // Custom themes swap CSS custom properties under <style> / style="" on
+    // the root rather than always flipping data-theme — watch both or a
+    // token-only swap leaves the old palette mounted.
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme", "style"] });
     return () => observer.disconnect();
   }, []);
 

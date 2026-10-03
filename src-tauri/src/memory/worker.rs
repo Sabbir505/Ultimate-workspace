@@ -263,50 +263,9 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         return Ok(());
     }
 
-    // The running local sidecar, read once here: it is the ground truth for
-    // which model llama-server has loaded and which port serves it.
-    let live_local = app
-        .try_state::<crate::chat::local_models::LocalModelState>()
-        .and_then(|s| s.0.status());
-
-    // LLM resolution: same provider/model/key plumbing as generate_chat_title.
-    let (provider_str, model, api_key, base_url) = {
-        let conn = db.0.lock();
-        let cs = db::get_chat_session(&conn, chat_session_id)
-            .map_err(|e| e_tostring(e))?
-            .ok_or("chat session not found")?;
-        let key = crate::secrets::get_chat_api_key(&conn, &cs.provider).unwrap_or_default();
-        let base = db::get_setting(&conn, &format!("chat.{}.base_url", cs.provider))
-            .map_err(|e| e_tostring(e))?;
-        // Dedicated extraction model override (cheap local/cloud model) —
-        // honored by every memory stage (judge + document merge included).
-        let session_model = if cs.model.trim().is_empty() {
-            db::get_setting(&conn, &format!("chat.{}.model", cs.provider)).unwrap_or(None)
-        } else {
-            Some(cs.model.clone())
-        };
-        // local_gguf: the chat's `model` column is the GGUF DISPLAY name, which
-        // llama-server rejects with HTTP 400 (it only serves the model it was
-        // started with) — the send path has always swapped it for the wire
-        // model, the memory worker did not, so extraction on a local chat
-        // failed every call and its chunk retried forever. The sidecar is also
-        // the endpoint, so take its live port rather than the persisted one.
-        let (session_model, base) = if cs.provider == "local_gguf" {
-            (
-                crate::chat::local_models::resolve_request_model(
-                    &conn,
-                    &cs.provider,
-                    session_model,
-                    live_local.as_ref(),
-                ),
-                crate::chat::local_models::local_base_url(&conn, live_local.as_ref()),
-            )
-        } else {
-            (session_model, base)
-        };
-        let model = resolve_memory_model(&conn, session_model);
-        (cs.provider, model, key, base)
-    };
+    // LLM resolution: shared pipeline (audit M: worker DRY).
+    let (provider_str, model, api_key, base_url, _project_id) =
+        resolve_pipeline_model(app, &db, chat_session_id)?;
     let (provider_str, model, api_key, base_url) =
         maybe_apply_extract_override(app, provider_str, model, api_key, base_url);
     if model.trim().is_empty() || (api_key.is_empty() && provider_str != "local_gguf") {
@@ -711,6 +670,57 @@ fn e_tostring(e: rusqlite::Error) -> String {
     e.to_string()
 }
 
+/// Shared LLM resolution for the two memory pipelines (audit M: worker DRY —
+/// extract_session and save_memory carried ~55 near-verbatim lines: session
+/// lookup, chat key, base-URL setting, session-model fallback, the local_gguf
+/// wire-model + live-port swap, then `resolve_memory_model`). Returns
+/// `(provider, model, api_key, base_url, project_id)`; the caller applies its
+/// own extract-override and sidecar guards.
+fn resolve_pipeline_model(
+    app: &AppHandle,
+    db: &crate::DbState,
+    chat_session_id: &str,
+) -> Result<(String, String, String, Option<String>, Option<String>), String> {
+    let live_local = app
+        .try_state::<crate::chat::local_models::LocalModelState>()
+        .and_then(|s| s.0.status());
+    let conn = db.0.lock();
+    let cs = db::get_chat_session(&conn, chat_session_id)
+        .map_err(e_tostring)?
+        .ok_or("chat session not found")?;
+    let key = crate::secrets::get_chat_api_key(&conn, &cs.provider).unwrap_or_default();
+    let base = db::get_setting(&conn, &format!("chat.{}.base_url", cs.provider))
+        .map_err(e_tostring)?;
+    // Dedicated extraction model override (cheap local/cloud model) —
+    // honored by every memory stage (judge + document merge included).
+    let session_model = if cs.model.trim().is_empty() {
+        db::get_setting(&conn, &format!("chat.{}.model", cs.provider)).unwrap_or(None)
+    } else {
+        Some(cs.model.clone())
+    };
+    // local_gguf: the chat's `model` column is the GGUF DISPLAY name, which
+    // llama-server rejects with HTTP 400 (it only serves the model it was
+    // started with) — the send path has always swapped it for the wire
+    // model, the memory worker did not, so extraction on a local chat
+    // failed every call and its chunk retried forever. The sidecar is also
+    // the endpoint, so take its live port rather than the persisted one.
+    let (session_model, base) = if cs.provider == "local_gguf" {
+        (
+            crate::chat::local_models::resolve_request_model(
+                &conn,
+                &cs.provider,
+                session_model,
+                live_local.as_ref(),
+            ),
+            crate::chat::local_models::local_base_url(&conn, live_local.as_ref()),
+        )
+    } else {
+        (session_model, base)
+    };
+    let model = resolve_memory_model(&conn, session_model);
+    Ok((cs.provider, model, key, base, cs.project_id))
+}
+
 /// Comparison fetch for the judge (§10.1 step 1): vector top-s when the
 /// sidecar is up, else FTS on the candidate's own keywords. Must be called
 /// while holding the DB lock.
@@ -800,42 +810,9 @@ pub async fn save_memory(
         );
     };
 
-    let live_local = app
-        .try_state::<crate::chat::local_models::LocalModelState>()
-        .and_then(|s| s.0.status());
-    let (provider_str, model, api_key, base_url, project_id) = {
-        let conn = db.0.lock();
-        let cs = db::get_chat_session(&conn, chat_session_id)
-            .map_err(|e| e.to_string())?
-            .ok_or("chat session not found")?;
-        let key = crate::secrets::get_chat_api_key(&conn, &cs.provider).unwrap_or_default();
-        let base = db::get_setting(&conn, &format!("chat.{}.base_url", cs.provider))
-            .map_err(|e| e.to_string())?;
-        // Same cheap-model override as background extraction — the judge and
-        // the document merge never silently fall back to the chat model.
-        let session_model = if cs.model.trim().is_empty() {
-            db::get_setting(&conn, &format!("chat.{}.model", cs.provider)).unwrap_or(None)
-        } else {
-            Some(cs.model.clone())
-        };
-        // local_gguf: wire model (llama-server rejects the display name) and
-        // the live sidecar's port — same rule as the extraction path above.
-        let (session_model, base) = if cs.provider == "local_gguf" {
-            (
-                crate::chat::local_models::resolve_request_model(
-                    &conn,
-                    &cs.provider,
-                    session_model,
-                    live_local.as_ref(),
-                ),
-                crate::chat::local_models::local_base_url(&conn, live_local.as_ref()),
-            )
-        } else {
-            (session_model, base)
-        };
-        let model = resolve_memory_model(&conn, session_model);
-        (cs.provider, model, key, base, cs.project_id)
-    };
+    // LLM resolution: shared pipeline (audit M: worker DRY).
+    let (provider_str, model, api_key, base_url, project_id) =
+        resolve_pipeline_model(app, &db, chat_session_id)?;
     let (provider_str, model, api_key, base_url) =
         maybe_apply_extract_override(app, provider_str, model, api_key, base_url);
     if model.trim().is_empty() || (api_key.is_empty() && provider_str != "local_gguf") {

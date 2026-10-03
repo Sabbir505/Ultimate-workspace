@@ -461,14 +461,10 @@ pub(super) fn read_acp_stream(
     // can fail the turn); later turns' ids live in request_id_cell.
     let mut pending_request_id: Option<u64> = None;
     let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
-            Err(_) => break,
-        }
+    let mut raw: Vec<u8> = Vec::new();
+    // Shared lossy + capped line reader (audit H20): `read_line` treated
+    // one invalid-UTF-8 byte as EOF and killed the turn.
+    while let Some(line) = crate::agent_sessions::next_harness_line(&mut reader, &mut raw) {
         if cancelled.load(Ordering::SeqCst) {
             break;
         }

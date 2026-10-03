@@ -40,6 +40,16 @@ pub enum MobileMessage {
         /// (serde default) and keep the legacy path.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         v2: Option<bool>,
+        /// Salt-binding client marker (audit C9, 2026-10-03): the client binds
+        /// the public `PairOk` salt to this connection's challenge
+        /// (`SHA256(challenge || salt)`) before deriving its session key and
+        /// refuses a replayed challenge, so a relay MITM replaying a recorded
+        /// `PairOk` salt cannot re-derive a previous connection's key (whose
+        /// counter nonces restart at 0 → keystream + one-time-key reuse). The
+        /// desktop derives the SAME bound salt when this flag is set; pre-v3
+        /// clients keep the raw-salt derivation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        v3: Option<bool>,
     },
     /// Query the current state of all providers.
     ListAvailableProviders,

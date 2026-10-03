@@ -691,6 +691,34 @@
   color: var(--text);
 }
 
+/* Small inline action beside a settings input (Web Search "Clear": revokes a
+   key that lives in the OS keychain and therefore can't be shown re-typed). */
+.settings-inline-btn {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.settings-inline-btn:hover {
+  color: var(--text);
+  background: var(--surface-1, var(--surface-2));
+}
+/* When a key input sits next to the clear button, they share one row. */
+.settings-form-control:has(.settings-inline-btn) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.settings-form-control:has(.settings-inline-btn) input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 /* ---- Custom theme gallery (roadmap #19) ---- */
 .theme-gallery {
   display: grid;

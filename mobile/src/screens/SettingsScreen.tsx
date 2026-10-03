@@ -11,6 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import Constants from 'expo-constants';
 // M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
 // bundle of every icon); Ionicons is a glyph font already bundled with the
 // app. These wrappers preserve the lucide call-sites' (size, color) props.
@@ -24,6 +25,13 @@ import { useAfterPaint } from '../lib/afterPaint';
 import { tapLight } from '../lib/haptics';
 import ConnectionIndicator from '../components/ConnectionIndicator';
 import QrScanModal from './QrScanModal';
+import {
+  authenticate,
+  appLockPlatformName,
+  deviceCanAuthenticate,
+  isAppLockEnabled,
+  setAppLockEnabled,
+} from '../lib/appLock';
 
 // Desktop SettingsView parity: the agent harness families, with install
 // state — the same registry the desktop Settings → Harnesses panel lists.
@@ -206,6 +214,30 @@ export default function SettingsScreen() {
   // `wss://host/#token` URL emitted by the desktop's Remote settings panel.
   const [qrScanning, setQrScanning] = useState(false);
 
+  // App lock toggle (audit H39): the biometric gate existed (App.tsx arms it
+  // on background / cold start) but NOTHING could ever enable it — no UI
+  // wrote the flag, so `isAppLockEnabled()` was permanently false and the
+  // whole lock was dead code. Toggle + a capability check (a device without
+  // enrolled biometrics shows the row dimmed).
+  const [appLockEnabled, setAppLockEnabledState] = useState(false);
+  const [appLockAvailable, setAppLockAvailable] = useState(false);
+  useEffect(() => {
+    void isAppLockEnabled().then(setAppLockEnabledState);
+    void deviceCanAuthenticate().then(setAppLockAvailable);
+  }, []);
+  const toggleAppLock = useCallback((on: boolean) => {
+    void (async () => {
+      if (on) {
+        // Prove the user can actually unlock before arming the gate —
+        // otherwise they enable it and are immediately locked out.
+        const ok = await authenticate(`Enable ${appLockPlatformName}`);
+        if (!ok) return;
+      }
+      await setAppLockEnabled(on);
+      setAppLockEnabledState(on);
+    })();
+  }, []);
+
   // Progressive render: the first paint carries the header plus the sections
   // that fit in the viewport; the rest arrive after that frame is on screen.
   // Settings is ~2x the node count of every other screen, and painting all of
@@ -370,11 +402,36 @@ export default function SettingsScreen() {
         </Section>
         ) : null}
 
+        {showRest ? (
+        <Section
+          title="Security"
+          hint={`Lock Relay behind ${appLockPlatformName} when you return after 30s away. The phone can approve shell commands on the desktop.`}
+        >
+          <SettingRow
+            icon={<Ionicons name="lock-closed-outline" size={18} color={c.textSecondary} />}
+            title="App lock"
+            subtitle={
+              appLockAvailable
+                ? appLockEnabled
+                  ? 'On — you will be asked to unlock after leaving the app'
+                  : 'Off'
+                : 'Requires biometrics or a device passcode to be enrolled'
+            }
+            value={appLockEnabled}
+            onValueChange={toggleAppLock}
+            switchDisabled={!appLockAvailable}
+            dimmed={!appLockAvailable}
+          />
+        </Section>
+        ) : null}
+
         {/* ---- About ---- */}
         <Section title="About">
           <View style={styles.aboutRow}>
             <Text style={[styles.aboutLabel, { color: c.text }]}>Version</Text>
-            <Text style={[styles.aboutValue, { color: c.textSecondary }]}>1.0.0</Text>
+            <Text style={[styles.aboutValue, { color: c.textSecondary }]}>
+              {Constants.expoConfig?.version ?? 'dev'}
+            </Text>
           </View>
           <View style={[styles.divider, { backgroundColor: c.border }]} />
           <View style={styles.aboutRow}>

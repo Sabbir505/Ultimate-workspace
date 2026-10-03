@@ -29,7 +29,12 @@ pub fn run_one_shot(
     // with nothing to cancel it.
     cancel: Option<&Arc<AtomicBool>>,
 ) -> Result<(), String> {
-    {
+    // The user row is persisted up front so the turn shows in the transcript
+    // immediately; it is removed again if the run fails BEFORE the reader
+    // starts (spec assembly / spawn), mirroring `AgentSessionManager::send`'s
+    // invariant — otherwise a failed automation spawn leaves a permanent user
+    // bubble with no reply (audit H22).
+    let user_message_id = {
         let conn = db.lock();
         crate::db::add_chat_message(
             &conn,
@@ -40,8 +45,20 @@ pub fn run_one_shot(
                 ..Default::default()
             },
         )
-        .map_err(|e| e.to_string())?;
-    }
+        .map_err(|e| e.to_string())?
+        .id
+    };
+    // Remove the just-written user row after an early failure. Best-effort:
+    // a failure to delete leaves the orphan bubble, never a broken turn.
+    let drop_orphan_user_row = || {
+        let conn = db.lock();
+        if let Err(e) = crate::db::delete_chat_message(&conn, user_message_id) {
+            eprintln!(
+                "[agent] failed to remove the user message of a failed one-shot spawn \
+                 (session {chat_session_id}): {e}"
+            );
+        }
+    };
 
     // Persona + bundle instructions + custom system prompt, then the prompt
     // (prefix joined with blank lines, then the `---` separator before the
@@ -127,7 +144,13 @@ pub fn run_one_shot(
         (effective, bundle)
     };
 
-    let (mut spec, prompt_env, prompt_via_stdin) = one_shot_spec(harness, &effective, model)?;
+    let (mut spec, prompt_env, prompt_via_stdin) = match one_shot_spec(harness, &effective, model) {
+        Ok(spec) => spec,
+        Err(e) => {
+            drop_orphan_user_row();
+            return Err(e);
+        }
+    };
     // Bundle args for the adapters that take them on the command line; the
     // bundle was resolved above only when an app handle exists.
     let mut opencode_cfg_env: Option<(String, String)> = None;
@@ -182,8 +205,15 @@ pub fn run_one_shot(
         .map(|(dir, broad)| DirWatch::new(dir, broad))
         .collect();
     no_console_window(&mut cmd);
-    let mut child = spawn_harness_child(&mut cmd)
-        .map_err(|e| format!("failed to spawn {} CLI: {e}", spec.program))?;
+    let mut child = match spawn_harness_child(&mut cmd) {
+        Ok(c) => c,
+        Err(e) => {
+            // Spawn failed before the reader started — drop the orphan user
+            // row (audit H22).
+            drop_orphan_user_row();
+            return Err(format!("failed to spawn {} CLI: {e}", spec.program));
+        }
+    };
     if prompt_via_stdin {
         // Write the prompt and close the pipe — EOF tells the CLI the prompt
         // is complete. A write failure must kill the child, otherwise the

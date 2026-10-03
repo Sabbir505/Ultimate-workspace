@@ -650,22 +650,25 @@ export function VaultGraph({
         setHoverCard(null);
       }
       if (hoverRef.current !== prev) {
-        // Diagnostics (dev builds): everything needed to audit a wrong pick —
-        // cursor in corrected layout px, the world point it maps to, the
-        // active view transform, the canvas box, DPR + the CSS-zoom scale,
-        // and what was picked where.
-        const wpt = toWorld(p.x, p.y);
-        console.debug("[vault-graph] hover", {
-          cursorCss: { x: +p.x.toFixed(1), y: +p.y.toFixed(1) },
-          world: { x: +wpt.x.toFixed(1), y: +wpt.y.toFixed(1) },
-          view: { x: +viewRef.current.x.toFixed(1), y: +viewRef.current.y.toFixed(1), k: +viewRef.current.k.toFixed(3) },
-          canvasScale: +p.scale.toFixed(3),
-          dpr: window.devicePixelRatio,
-          picked: n
-            ? { id: n.id, world: { x: +n.x.toFixed(1), y: +n.y.toFixed(1) }, r: +nodeRadius(n).toFixed(1) }
-            : null,
-          prev,
-        });
+        // Diagnostics (dev builds only — don't spam the prod console on every
+        // hover): everything needed to audit a wrong pick — cursor in
+        // corrected layout px, the world point it maps to, the active view
+        // transform, the canvas box, DPR + the CSS-zoom scale, and what was
+        // picked where.
+        if (import.meta.env.DEV) {
+          const wpt = toWorld(p.x, p.y);
+          console.debug("[vault-graph] hover", {
+            cursorCss: { x: +p.x.toFixed(1), y: +p.y.toFixed(1) },
+            world: { x: +wpt.x.toFixed(1), y: +wpt.y.toFixed(1) },
+            view: { x: +viewRef.current.x.toFixed(1), y: +viewRef.current.y.toFixed(1), k: +viewRef.current.k.toFixed(3) },
+            canvasScale: +p.scale.toFixed(3),
+            dpr: window.devicePixelRatio,
+            picked: n
+              ? { id: n.id, world: { x: +n.x.toFixed(1), y: +n.y.toFixed(1) }, r: +nodeRadius(n).toFixed(1) }
+              : null,
+            prev,
+          });
+        }
       }
       if (hoverRef.current !== prev) repaintRef.current();
     };

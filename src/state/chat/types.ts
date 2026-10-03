@@ -216,6 +216,13 @@ export interface ChatState {
    *  prefers the live buffer but falls back here when the restarted attempt
    *  produced nothing (see the `reconnect_restart` branch in onStatus). */
   supersededPartial: Record<string, string>;
+  /** Sessions whose NEXT terminal event (`chat:done` / `chat:error`) belongs to
+   *  an already-cancelled turn and must be consumed silently (audit H36): a
+   *  harness/ACP cancel is a process kill whose terminal event can arrive
+   *  after the replacement turn created a fresh streaming entry — acting on it
+   *  deleted the live turn's state and dropped all of its tokens. Cleared by
+   *  the first token of the replacement turn or by the first terminal event. */
+  staleTerminalFor: Record<string, true>;
   config: ChatConfigPayload | null;
   /** Last committed composer pick (every selection kind — builtin, harness,
    *  ACP, local). Loaded with the config; new chats seed from it so reopening
@@ -600,8 +607,15 @@ export interface ChatState {
   cancelFullAccessConfirm: () => void;
   /** Resolve the session's pending approval card (Approve/Deny). */
   /** `selected` = confirm-edits partial accept (§4.2.5): the occurrence
-   *  indexes kept on the review card. Omitted = accept everything. */
-  resolveApproval: (chatSessionId: string, approved: boolean, selected?: number[]) => Promise<void>;
+   *  indexes kept on the review card. Omitted = accept everything.
+   *  `always` = the card's "always allow" tick; only that variant persists a
+   *  directory grant backend-side (audit H6). */
+  resolveApproval: (
+    chatSessionId: string,
+    approved: boolean,
+    selected?: number[],
+    always?: boolean,
+  ) => Promise<void>;
   saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string, displayName?: string, kind?: string) => Promise<void>;
   clearApiKey: (provider: string) => Promise<void>;
 

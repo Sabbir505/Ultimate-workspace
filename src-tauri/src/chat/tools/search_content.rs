@@ -325,9 +325,7 @@ pub(super) fn fs_search_content(args: &Value) -> ToolOutcome {
         let mut out = format!("No matches for \"{query}\" under {path_str}.");
         if !notes.is_empty() {
             out.push_str("\n\nNotes:\n");
-            for n in &notes {
-                out.push_str(&format!("  - {n}\n"));
-            }
+            append_notes_capped(&mut out, &notes);
         }
         out.push_str(&format!(
             "\nScanned {files_scanned} files (skipped {files_skipped}). Try a broader query, set case_insensitive: true, or remove the glob filter."
@@ -370,11 +368,27 @@ pub(super) fn fs_search_content(args: &Value) -> ToolOutcome {
     }
     if !notes.is_empty() {
         out.push_str("\nNotes:\n");
-        for n in &notes {
-            out.push_str(&format!("  - {n}\n"));
-        }
+        append_notes_capped(&mut out, &notes);
     }
     ToolOutcome::text(out)
+}
+
+/// Notes are one line PER SKIPPED FILE, unbounded: SKIP_DIRS omits `bin` /
+/// `obj` / `Pods` / `packages`, so one search over a .NET or iOS repo emitted
+/// thousands of "skipped (binary file…)" lines into the context — the match
+/// list is capped, the noise wasn't (audit M: search_content notes). Keep the
+/// first 20 and summarize the rest.
+fn append_notes_capped(out: &mut String, notes: &[String]) {
+    const MAX_NOTES: usize = 20;
+    for n in notes.iter().take(MAX_NOTES) {
+        out.push_str(&format!("  - {n}\n"));
+    }
+    if notes.len() > MAX_NOTES {
+        out.push_str(&format!(
+            "  - … and {} more skipped files (matches the cap)\n",
+            notes.len() - MAX_NOTES
+        ));
+    }
 }
 
 /// Search one file with the streaming searcher. Returns Ok(true) if scanned,

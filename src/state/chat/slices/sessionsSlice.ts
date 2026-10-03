@@ -139,14 +139,14 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
     selectSession: async (chatSessionId: string, opts?: { recordNav?: boolean }) => {
       // Ignore selects for sessions deleted this run (stale sidebar row, in-
       // flight click). The tombstone is the source of truth until restart.
-      if (isDeletedSession(chatSessionId)) return;
+      if (isDeletedSession(chatSessionId)) { console.error("[probe] tombstoned", chatSessionId); return; }
       const tree = get().chatPaneTree;
       // Uniqueness invariant: a session pinned in a split pane is ALREADY on
       // screen — selecting it focuses that pane (shared chrome follows) and
       // leaves the active session alone. Copying it into the main view would
       // mirror one chat — and its live agent turn — into two panes.
       const pinnedPaneId = findPaneForSession(tree, chatSessionId);
-      if (pinnedPaneId) {
+      if (pinnedPaneId) { console.error("[probe] pinned pane", chatSessionId, pinnedPaneId);
         get().setFocusedPane(pinnedPaneId);
         return;
       }
@@ -544,6 +544,7 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         // clears them via clearSessionState).
         composerDrafts: {},
         supersededPartial: {},
+        staleTerminalFor: {},
       }));
       return count;
     },

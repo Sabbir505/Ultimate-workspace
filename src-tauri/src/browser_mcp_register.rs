@@ -283,6 +283,38 @@ fn commandcode_bridge_marker_path(data_dir: &Path, project_slug: &str) -> PathBu
     data_dir.join("mcp").join(format!("commandcode_bridge_{safe}.json"))
 }
 
+/// Run one `commandcode` CLI subcommand to completion, bounded. The npm shim
+/// is a `.cmd` invoked through cmd.exe; `status()` here would otherwise
+/// inherit stdin and wait forever on a wedged CLI, stalling the session
+/// spawn. Deliberately detached thread + bounded channel recv (mirrors
+/// `probe_llama_version`): expiry leaves the child running but the caller
+/// unblocked, and a bounded wait must never become an unconditional join.
+fn run_commandcode(args: &[&str], cwd: &Path) -> bool {
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel();
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let cwd = cwd.to_path_buf();
+    std::thread::spawn(move || {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C")
+            .arg("commandcode")
+            .args(&args)
+            .current_dir(&cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = tx.send(cmd.status().map(|s| s.success()).unwrap_or(false));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap_or(false)
+}
+
 /// True when commandcode's config already carries a current bridge
 /// registration for this project (marker read only — no CLI spawn).
 pub fn commandcode_bridge_current(
@@ -363,21 +395,11 @@ pub fn ensure_commandcode_bridge(
     // run only when the token/port actually changed (once per app run per
     // project); a missing/failing CLI leaves the marker unwritten so the
     // next turn retries and callers keep advertising nothing.
-    let run = |args: &[&str]| -> bool {
-        let mut cmd = Command::new("cmd");
-        cmd.arg("/C").arg("commandcode").args(args).current_dir(cwd);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        cmd.status().map(|s| s.success()).unwrap_or(false)
-    };
-    let _ = run(&["mcp", "remove", "relay-tools", "-s", "local"]);
-    let ok = run(&["mcp", "add-json", "relay-tools", "-s", "local", &server_json]);
+    let _ = run_commandcode(&["mcp", "remove", "relay-tools", "-s", "local"], cwd);
+    let ok = run_commandcode(
+        &["mcp", "add-json", "relay-tools", "-s", "local", &server_json],
+        cwd,
+    );
     if !ok {
         eprintln!("[relay:mcp] commandcode bridge registration failed — its sessions keep CLI-native tools only");
         return false;
@@ -431,27 +453,18 @@ pub fn register_commandcode_connectors(
     cwd: &Path,
     connectors: &[crate::connectors::HarnessMcpServer],
 ) -> usize {
-    let run = |args: &[&str]| -> bool {
-        let mut cmd = Command::new("cmd");
-        cmd.arg("/C").arg("commandcode").args(args).current_dir(cwd);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        cmd.status().map(|s| s.success()).unwrap_or(false)
-    };
+    let run = |args: &[&str]| -> bool { run_commandcode(args, cwd) };
     let mut ok = 0usize;
     for c in connectors {
         let Some(server_json) = commandcode_connector_json(&c.url, c.bearer_token.as_deref())
         else {
             continue;
         };
-        let _ = run(&["mcp", "remove", &c.name, "-s", "local"]);
-        if run(&["mcp", "add-json", &c.name, "-s", "local", &server_json.to_string()]) {
+        let _ = run_commandcode(&["mcp", "remove", &c.name, "-s", "local"], cwd);
+        if run_commandcode(
+            &["mcp", "add-json", &c.name, "-s", "local", &server_json.to_string()],
+            cwd,
+        ) {
             ok += 1;
         } else {
             eprintln!(

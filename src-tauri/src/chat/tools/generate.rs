@@ -182,6 +182,7 @@ pub(super) async fn generate_document(
     app: Option<&tauri::AppHandle>,
     artifacts_dir: &Path,
     args: &Value,
+    caps: &super::ToolCaps,
 ) -> ToolOutcome {
     let format = args
         .get("format")
@@ -196,6 +197,21 @@ pub(super) async fn generate_document(
         Some("python" | "py") => "python",
         _ => default_language(&format),
     };
+
+    // Code-execution gate (audit H7): every engine here EXECUTES the model's
+    // program — the Python engine spawns the interpreter with full user
+    // privileges, the JS engine runs in the in-app runner, and the HTML engine
+    // renders it in the hidden WebView2. `run_code` has always required the
+    // user's `code_exec` opt-in; this path did not check caps at all despite
+    // its header claiming "Security posture (identical to codeexec)", so a
+    // prompt-injected page steering the model into a document generation got
+    // unsandboxed execution the user never opted into.
+    if !caps.code_exec {
+        return ToolOutcome::text(
+            "Error: code execution is disabled. Generating a document runs the program's \
+             code, so the user must enable code execution for this chat first.",
+        );
+    }
 
     let supported = matches!(format.as_str(), "docx" | "pptx" | "xlsx" | "pdf");
     if !supported {
@@ -303,6 +319,15 @@ pub(super) async fn generate_document(
                     != "generated with the in-app JavaScript engine (docx / PptxGenJS)"
             {
                 text.push_str(&format!("\n\nGenerator output:\n{}", file.log));
+            }
+            // Same no-sandbox disclosure `run_code` emits — this path executes
+            // model code with full user privileges too (audit H7).
+            if !crate::chat::codeexec::sandbox_available() {
+                text.push_str(
+                    "\n⚠ No OS-level sandbox is enforced — the document program ran with full \
+                     user privileges (including network). Enable code execution only for trusted \
+                     prompts.",
+                );
             }
             ToolOutcome {
                 text,

@@ -437,7 +437,6 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                 *d.cost_by_provider.entry(prov_label).or_insert(0.0) += c;
                 totals.cache_savings_usd_via_helper += cache_savings(&usage, key, &overrides);
             } else {
-                totals.unpriced_usd += reported.unwrap_or(0.0);
                 unpriced_rows += 1;
             }
             if let Some(r) = reported {
@@ -587,7 +586,6 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
             totals.raw_token_cost_usd += c;
             totals.estimated_usd += c;
             if cost.is_none() {
-                totals.unpriced_usd += c;
                 unpriced_rows += 1;
             }
             let entry = by_provider.entry(grouped.clone()).or_insert((0.0, 0));

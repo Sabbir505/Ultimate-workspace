@@ -50,6 +50,15 @@ pub(super) fn fs_list_directory(args: &Value) -> ToolOutcome {
         items.push(if is_dir { format!("{name}/") } else { name });
     }
     items.sort();
+    // Cap the output: every neighboring read-only tool bounds its result
+    // (FS_READ_MAX, search_files' 100) — an uncapped listing of WinSxS or a
+    // node_modules folder returned megabytes in one tool result (audit M).
+    const MAX_LISTED: usize = 500;
+    if items.len() > MAX_LISTED {
+        let hidden = items.len() - MAX_LISTED;
+        items.truncate(MAX_LISTED);
+        items.push(format!("… ({hidden} more entries)"));
+    }
     if items.is_empty() {
         return ToolOutcome::text(format!("(empty directory) {path}"));
     }
@@ -105,6 +114,13 @@ pub(super) fn fs_search_files(args: &Value) -> ToolOutcome {
     let mut stack = vec![std::path::PathBuf::from(&path)];
     const MAX_RESULTS: usize = 100;
     while let Some(dir) = stack.pop() {
+        // Result cap reached: stop the WHOLE walk, not just this directory —
+        // the old inner-only break kept read_dir-ing every remaining directory
+        // in the tree (minutes of disk on a drive root) after the 100th match
+        // (audit M: fs_search_files).
+        if matches.len() >= MAX_RESULTS {
+            break;
+        }
         let rd = match std::fs::read_dir(&dir) {
             Ok(r) => r,
             Err(_) => continue,

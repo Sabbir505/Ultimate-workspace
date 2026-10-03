@@ -512,6 +512,20 @@ pub fn remove_wiki(conn: &Connection, project_id: &str) -> DbResult<()> {
 /// a project folder containing `_` is a `LIKE` single-char wildcard that
 /// would match a sibling it must never touch.
 pub fn remove_wiki_by_path_prefix(conn: &Connection, root: &str) -> DbResult<usize> {
+    let doomed = wiki_ids_under(conn, root)?;
+    if doomed.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.unchecked_transaction()?;
+    delete_wiki_rows(&tx, &doomed)?;
+    tx.commit()?;
+    Ok(doomed.len())
+}
+
+/// The `wiki_projects` ids whose stored path is `root` or below it. Shared by
+/// the standalone delete and the project-removal caller (which is already
+/// inside a transaction).
+pub(crate) fn wiki_ids_under(conn: &Connection, root: &str) -> DbResult<Vec<String>> {
     let root = root.trim_end_matches(['/', '\\']);
     let candidates: Vec<(String, String)> = {
         let mut stmt = conn.prepare("SELECT id, path FROM wiki_projects")?;
@@ -526,29 +540,33 @@ pub fn remove_wiki_by_path_prefix(conn: &Connection, root: &str) -> DbResult<usi
                 .strip_prefix(root)
                 .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
     };
-    let doomed: Vec<String> = candidates
+    Ok(candidates
         .into_iter()
         .filter(|(_, path)| under(path))
         .map(|(id, _)| id)
-        .collect();
-    if doomed.is_empty() {
-        return Ok(0);
-    }
-    let tx = conn.unchecked_transaction()?;
-    for id in &doomed {
-        tx.execute(
+        .collect())
+}
+
+/// Delete claims/pages/project rows for `ids` using the caller's connection
+/// OR transaction. Split out so a caller already inside a transaction (project
+/// removal — `db/projects.rs`) can reuse these statements: `unchecked_transaction`
+/// issues a plain `BEGIN`, so a nested one fails with "cannot start a
+/// transaction within a transaction", erroring and rolling back the WHOLE
+/// project delete — any project with a wiki was undeletable (audit H14).
+pub(crate) fn delete_wiki_rows(conn: &Connection, ids: &[String]) -> DbResult<()> {
+    for id in ids {
+        conn.execute(
             "DELETE FROM wiki_claims WHERE page_id IN
              (SELECT id FROM wiki_pages WHERE project_id = ?1)",
             params![id],
         )?;
-        tx.execute(
+        conn.execute(
             "DELETE FROM wiki_pages WHERE project_id = ?1",
             params![id],
         )?;
-        tx.execute("DELETE FROM wiki_projects WHERE id = ?1", params![id])?;
+        conn.execute("DELETE FROM wiki_projects WHERE id = ?1", params![id])?;
     }
-    tx.commit()?;
-    Ok(doomed.len())
+    Ok(())
 }
 
 /// Per-wiki rollup for the tool-panel's project list (one row per wiki,
@@ -604,27 +622,11 @@ pub struct WikiSearchHit {
     pub rank: f64,
 }
 
-/// FTS5-safe quoting: strip to alphanumerics, double-quote each term, OR the
-/// prefix terms together — same discipline as db/docs.rs `fts_match_query`
-/// (kept per-module like the memories keyword leg). Returns None when
+/// FTS5-safe quoting — shared implementation in db/mod.rs (audit M: FTS DRY;
+/// the private copy here drifted risk-free only by luck). Returns None when
 /// nothing searchable remains.
 fn fts_match_query(query: &str) -> Option<String> {
-    let safe: String = query
-        .split_whitespace()
-        .map(|t| {
-            t.chars()
-                .filter(|c| c.is_alphanumeric())
-                .collect::<String>()
-        })
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\"*"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    if safe.is_empty() {
-        None
-    } else {
-        Some(safe)
-    }
+    super::fts_prefix_query(query, super::FtsTerms::OrAlnum)
 }
 
 /// Keyword search over wiki pages, bm25-ranked (column weights: title 8,

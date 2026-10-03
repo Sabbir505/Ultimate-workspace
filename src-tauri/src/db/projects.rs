@@ -95,7 +95,12 @@ pub fn remove_project(conn: &Connection, project_id: &str) -> DbResult<()> {
         )
         .optional()?
     {
-        super::wiki::remove_wiki_by_path_prefix(&tx, &path)?;
+        // Inside OUR transaction already: reuse the statement helper instead of
+        // calling `remove_wiki_by_path_prefix`, which opens a second (plain)
+        // BEGIN and fails with "cannot start a transaction within a
+        // transaction" — rolling back the whole project delete (audit H14).
+        let doomed = super::wiki::wiki_ids_under(&tx, &path)?;
+        super::wiki::delete_wiki_rows(&tx, &doomed)?;
     }
     tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
     tx.commit()?;

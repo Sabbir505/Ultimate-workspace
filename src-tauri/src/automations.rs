@@ -49,6 +49,11 @@ static RUNNING: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::
 /// turn made the automation look "already running" to every later tick and
 /// it silently stopped firing until the app restarted.
 const MAX_RUN_SECS: u64 = 2 * 60 * 60;
+/// Age gate for the boot sweep of runs left `running` by an exited process
+/// (audit H23). Matches MAX_RUN_SECS: a live run cannot be older than its
+/// own ceiling, so anything past it belongs to a dead process (and a
+// concurrently running second instance is untouched).
+pub const STALE_RUNNING_SECS: i64 = MAX_RUN_SECS as i64;
 
 /// Status recorded for a run the user stopped. Deliberately NOT a failure:
 /// the Past Runs table badges it neutrally, the failure banner stays down,
@@ -124,7 +129,22 @@ pub fn start(app: AppHandle, db: Arc<Mutex<Connection>>) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             interval.tick().await;
-            tick(Some(&app), &db);
+            // The pass is BLOCKING work — it polls `git rev-parse` child
+            // processes with `thread::sleep` (up to 5s per git automation on a
+            // hung repo / network drive, exactly the case that bound
+            // anticipates) and holds the DB lock across it. Running it
+            // inline pegged a tokio worker every 30s, starving the same
+            // runtime that serves every async `#[tauri::command]` and the
+            // webhook listener's accept loop (audit H24). `github.rs` already
+            // wraps its git subprocesses in spawn_blocking — same discipline.
+            {
+                let app_for_tick = app.clone();
+                let db_for_tick = db.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    tick(Some(&app_for_tick), &db_for_tick);
+                })
+                .await;
+            }
             // Gmail triggers ride the same 30s cadence but need async HTTP
             // (DB-backed token refresh + profile poll), so they evaluate
             // OUTSIDE the sync tick — per-automation tasks are spawned and

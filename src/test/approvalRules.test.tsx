@@ -65,7 +65,7 @@ describe("ApprovalCard always-allow capture", () => {
     fireEvent.click(screen.getByLabelText(/always allow edit_file/i));
     fireEvent.click(screen.getByText("Allow"));
 
-    await waitFor(() => expect(onResolve).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(onResolve).toHaveBeenCalledWith(true, undefined, expect.anything()));
     await waitFor(() => expect(setPermissionsRulesMock).toHaveBeenCalledTimes(1));
     const saved = setPermissionsRulesMock.mock.calls[0][0] as ApprovalRule[];
     // Appends to the existing rules; pattern anchors to the file's directory.
@@ -91,7 +91,7 @@ describe("ApprovalCard always-allow capture", () => {
     const onResolve = vi.fn();
     render(<ApprovalCard approval={approval()} onResolve={onResolve} />);
     fireEvent.click(screen.getByText("Allow"));
-    await waitFor(() => expect(onResolve).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(onResolve).toHaveBeenCalledWith(true, undefined, expect.anything()));
     expect(setPermissionsRulesMock).not.toHaveBeenCalled();
   });
 
@@ -110,7 +110,7 @@ describe("ApprovalCard always-allow capture", () => {
     render(<ApprovalCard approval={approval()} onResolve={onResolve} />);
     fireEvent.click(screen.getByLabelText(/always allow edit_file/i));
     fireEvent.click(screen.getByText("Allow"));
-    await waitFor(() => expect(onResolve).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(onResolve).toHaveBeenCalledWith(true, undefined, expect.anything()));
   });
 
   it("uses the dest path for move/copy cards", async () => {

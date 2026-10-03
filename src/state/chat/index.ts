@@ -75,6 +75,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streamingChatSessionId: null,
   chatStatus: {},
   supersededPartial: {},
+  // Stale-terminal guard map (audit H36): sessions whose next chat:done / chat:error
+  // belongs to an already-cancelled turn and must be consumed silently.
+  staleTerminalFor: {},
   config: null,
   lastSelection: null,
   error: null,

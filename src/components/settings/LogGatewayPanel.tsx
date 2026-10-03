@@ -13,6 +13,7 @@ import {
   llmLogConfigGet,
   llmLogConfigSet,
   gatewayProbe,
+  toastError,
 } from "../../lib/ipc";
 import type { GatewayStatus, LogConfig } from "../../types";
 import { GlassSelect, type SelectOption } from "../common/GlassSelect";
@@ -47,6 +48,13 @@ export function LogGatewayPanel() {
     void load();
   }, [load]);
 
+  // A failed write leaves the panel showing a value the backend rejected —
+  // re-fetch the live config and surface the error instead.
+  const onWriteFailed = useCallback((what: string, err: unknown) => {
+    toastError(`Couldn't change ${what}`, err);
+    void load().catch(() => {});
+  }, [load]);
+
   // Probe each runtime so the user can tell "not running" from "misconfigured"
   // without leaving settings.
   useEffect(() => {
@@ -77,7 +85,11 @@ export function LogGatewayPanel() {
       <Field label="Record requests" hint="Turning this off stops new rows; existing ones are kept.">
         <ToggleSwitch
           checked={cfg.enabled}
-          onChange={(v) => void llmLogConfigSet({ enabled: v }).then((c) => setCfg(c))}
+          onChange={(v) =>
+            void llmLogConfigSet({ enabled: v })
+              .then((c) => setCfg(c))
+              .catch((err) => onWriteFailed("the request-log setting", err))
+          }
         />
       </Field>
 
@@ -86,7 +98,9 @@ export function LogGatewayPanel() {
           className="llm-log-select"
           value={cfg.retentionDays}
           onChange={(e) =>
-            void llmLogConfigSet({ retentionDays: Number(e.target.value) }).then((c) => setCfg(c))
+            void llmLogConfigSet({ retentionDays: Number(e.target.value) })
+              .then((c) => setCfg(c))
+              .catch((err) => onWriteFailed("the retention setting", err))
           }
         >
           <option value={1}>1 day</option>
@@ -101,7 +115,9 @@ export function LogGatewayPanel() {
           className="llm-log-select"
           value={cfg.maxRows}
           onChange={(e) =>
-            void llmLogConfigSet({ maxRows: Number(e.target.value) }).then((c) => setCfg(c))
+            void llmLogConfigSet({ maxRows: Number(e.target.value) })
+              .then((c) => setCfg(c))
+              .catch((err) => onWriteFailed("the row limit", err))
           }
         >
           <option value={1000}>1,000</option>
@@ -118,7 +134,9 @@ export function LogGatewayPanel() {
           className="llm-log-select"
           value={cfg.maxBodyKb}
           onChange={(e) =>
-            void llmLogConfigSet({ maxBodyKb: Number(e.target.value) }).then((c) => setCfg(c))
+            void llmLogConfigSet({ maxBodyKb: Number(e.target.value) })
+              .then((c) => setCfg(c))
+              .catch((err) => onWriteFailed("the body-size limit", err))
           }
         >
           <option value={64}>64 KB</option>
@@ -165,7 +183,11 @@ export function LogGatewayPanel() {
         <GlassSelect<string>
           value={gw.defaultTarget ?? ""}
           options={targets}
-          onChange={(v) => void gatewaySetDefaultTarget(v || null).then(load)}
+          onChange={(v) =>
+            void gatewaySetDefaultTarget(v || null)
+              .then(load)
+              .catch((err) => onWriteFailed("the default gateway runtime", err))
+          }
           title="Default gateway runtime"
         />
       </Field>
@@ -176,7 +198,11 @@ export function LogGatewayPanel() {
       >
         <ToggleSwitch
           checked={gw.requireAuth}
-          onChange={(v) => void gatewaySetRequireAuth(v).then(load)}
+          onChange={(v) =>
+            void gatewaySetRequireAuth(v)
+              .then(load)
+              .catch((err) => onWriteFailed("the gateway token requirement", err))
+          }
         />
       </Field>
 

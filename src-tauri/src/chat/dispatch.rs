@@ -347,7 +347,17 @@ async fn run_gated_fs_tool(
     // copy; the executed args stay verbatim.
     let mut card_args = args.clone();
     if confirm_edits {
-        if let Some(preview) = build_edit_preview(name, args) {
+        // Off the async worker (audit M: build_edit_preview): the preview
+        // reads the whole target file — a multi-hundred-MB target pinned a
+        // tokio worker for the whole read. The two tests at the bottom call
+        // it synchronously, so the spawn_blocking lives at THIS (async) call
+        // site rather than inside the pure function.
+        let preview_task = {
+            let name = name.to_string();
+            let args = args.clone();
+            tokio::task::spawn_blocking(move || build_edit_preview(&name, &args))
+        };
+        if let Ok(Some(preview)) = preview_task.await {
             card_args["__relayEditPreview"] = preview;
         }
     }
@@ -414,13 +424,17 @@ fn build_edit_preview(name: &str, args: &Value) -> Option<Value> {
             let content = std::fs::read_to_string(path).ok()?;
             // Occurrences: 1-based indexes + the line each match starts on
             // (capped — a pathological find-everywhere edit degrades to the
-            // plain card instead of a 10k-row checkbox list).
+            // plain card instead of a 10k-row checkbox list). The loop counts
+            // ALL matches in the same pass it lists the first 50 — the old
+            // code ran a second full match_indices pass just to count
+            // (audit M: build_edit_preview).
             const MAX_LISTED: usize = 50;
             let mut occurrences = Vec::new();
-            let mut consumed = 0usize;
+            let mut total = 0usize;
             for (i, (pos, _)) in content.match_indices(find).enumerate() {
+                total += 1;
                 if i >= MAX_LISTED {
-                    break;
+                    continue;
                 }
                 let line = content[..pos].matches('\n').count() + 1;
                 let context: String = content[pos..]
@@ -432,9 +446,8 @@ fn build_edit_preview(name: &str, args: &Value) -> Option<Value> {
                     "line": line,
                     "context": context.trim_end(),
                 }));
-                consumed += 1;
             }
-            if consumed == 0 {
+            if total == 0 {
                 return None;
             }
             Some(serde_json::json!({
@@ -442,7 +455,7 @@ fn build_edit_preview(name: &str, args: &Value) -> Option<Value> {
                 "path": path,
                 "findChars": find.chars().count(),
                 "replaceChars": replace.chars().count(),
-                "totalOccurrences": content.match_indices(find).count(),
+                "totalOccurrences": total,
                 "occurrences": occurrences,
             }))
         }
@@ -463,6 +476,36 @@ fn build_edit_preview(name: &str, args: &Value) -> Option<Value> {
     }
 }
 
+/// The shared gate→execute spine behind every `run_gated_*` wrapper (audit
+/// M: gated DRY — seven wrappers duplicated this dance and the deny copy had
+/// already drifted between two of them): register the pending approval, emit
+/// the card, pause on the oneshot until the UI resolves, then run `exec`.
+/// A denial (or a dropped sender on stream cancel) returns `deny_text`.
+async fn run_gated<F, Fut>(
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+    summary: String,
+    deny_text: String,
+    exec: F,
+) -> String
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = String>,
+{
+    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
+        return deny_text;
+    }
+    exec().await
+}
+
+/// Standard deny wording shared by most gated families (`name` substituted).
+fn gated_deny_text(name: &str) -> String {
+    format!("The user denied the {name} action. Do not retry it unless the user explicitly asks.")
+}
+
 /// Execute a connector-originated tool that the permission gate flagged for
 /// approval (a Write-kind connector action under read_only/manual). Mirrors
 /// `run_gated_fs_tool`:
@@ -479,13 +522,17 @@ async fn run_gated_connector_tool(
     args: &Value,
 ) -> String {
     let summary = connector_tool_summary(attached, idx, name, args);
-    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
-        return format!(
-            "The user denied the {name} action. Do not retry it unless the user explicitly asks."
-        );
-    }
-
-    execute_connector_tool(attached, app, idx, name, args).await
+    run_gated(
+        mgr,
+        app,
+        sid,
+        name,
+        args,
+        summary,
+        gated_deny_text(name),
+        || async { execute_connector_tool(attached, app, idx, name, args).await },
+    )
+    .await
 }
 
 /// MCP-gallery Write tool flagged for approval: register a pending approval,
@@ -508,14 +555,20 @@ async fn run_gated_mcp_tool(
             String::new()
         }
     );
-    if !run_approval_gate(mgr, app, sid, &entry.wire_name, args, summary).await {
-        return format!(
+    run_gated(
+        mgr,
+        app,
+        sid,
+        &entry.wire_name,
+        args,
+        summary,
+        format!(
             "The user denied the {} action ({}). Do not retry it unless the user explicitly asks.",
             entry.raw_name, entry.server_name
-        );
-    }
-
-    execute_mcp_tool(app, entry, args).await
+        ),
+        || async { execute_mcp_tool(app, entry, args).await },
+    )
+    .await
 }
 
 /// Forward a tool call to a gallery MCP server (self-healing the child
@@ -1667,7 +1720,11 @@ fn subagent_fs_scope_refusal(
 ) -> Option<String> {
     let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").trim();
     let paths: Vec<&str> = match name {
-        tools::MOVE_FILE | tools::COPY_FILE => vec![arg("source"), arg("destination")],
+        // `src`/`dest` are the tool schema's real keys (specs.rs
+        // `src_dest_parameters`; tools/fs.rs `arg_str(args, "src"/"dest")`).
+        // Reading `source`/`destination` here made both extracts empty, and
+        // the `p.is_empty()` arm below then skipped the WHOLE gate — audit C2.
+        tools::MOVE_FILE | tools::COPY_FILE => vec![arg("src"), arg("dest")],
         tools::WRITE_FILE | tools::EDIT_FILE | tools::DELETE_FILE => vec![arg("path")],
         _ => Vec::new(),
     };
@@ -1935,7 +1992,13 @@ async fn run_subagent_loop(
                             return Err(format!("provider error: {msg}"));
                         }
                         Some("content_block_delta") => {
-                            let idx = v.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
+                            // Clamp the block index like the main round and the OpenAI branch do:
+                            // a hostile endpoint sending one block per distinct index would grow
+                            // `ant_think`/`ant_calls` without limit (audit H5).
+                            let idx = match v.get("index").and_then(|i| i.as_i64()) {
+                                Some(i) if i >= 0 && (i as usize) <= crate::chat::streaming::MAX_STREAM_BLOCK_INDEX => i,
+                                _ => 0,
+                            };
                             let dtype = v.pointer("/delta/type").and_then(|x| x.as_str());
                             if dtype == Some("thinking_delta") {
                                 // Extended-thinking delta: open the <think>
@@ -1992,6 +2055,9 @@ async fn run_subagent_loop(
                             }
                             if dtype == Some("input_json_delta") {
                                 if let Some(idx) = v.get("index").and_then(|i| i.as_i64()) {
+                                    if idx < 0 || idx as usize > crate::chat::streaming::MAX_STREAM_BLOCK_INDEX {
+                                        continue;
+                                    }
                                     let piece = v
                                         .pointer("/delta/partial_json")
                                         .and_then(|x| x.as_str())
@@ -2012,6 +2078,9 @@ async fn run_subagent_loop(
                                 == Some("tool_use")
                             {
                                 if let Some(idx) = v.get("index").and_then(|i| i.as_i64()) {
+                                    if idx < 0 || idx as usize > crate::chat::streaming::MAX_STREAM_BLOCK_INDEX {
+                                        continue;
+                                    }
                                     let id = block
                                         .and_then(|b| b.get("id"))
                                         .and_then(|x| x.as_str())
@@ -2283,13 +2352,17 @@ async fn run_gated_system_tool(
     caps: &tools::ToolCaps,
 ) -> String {
     let summary = system_tool_summary(name, args);
-    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
-        return format!(
-            "The user denied the {name} action. Do not retry it unless the user explicitly asks."
-        );
-    }
-
-    execute_system_tool(app, sid, name, args, caps).await
+    run_gated(
+        mgr,
+        app,
+        sid,
+        name,
+        args,
+        summary,
+        gated_deny_text(name),
+        || async { execute_system_tool(app, sid, name, args, caps).await },
+    )
+    .await
 }
 
 /// Human-facing summary for an automation tool approval card. The card is the
@@ -2330,13 +2403,17 @@ async fn run_gated_automation_tool(
     args: &Value,
 ) -> String {
     let summary = automation_tool_summary(name, args);
-    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
-        return format!(
-            "The user denied the {name} action. Do not retry it unless the user explicitly asks."
-        );
-    }
-
-    tools::execute_automation_tool(app, name, args).await
+    run_gated(
+        mgr,
+        app,
+        sid,
+        name,
+        args,
+        summary,
+        gated_deny_text(name),
+        || async { tools::execute_automation_tool(app, name, args).await },
+    )
+    .await
 }
 
 /// One-line card summary for a gated subagent call.
@@ -2367,13 +2444,17 @@ async fn run_gated_subagent_tool(
     args: &Value,
 ) -> String {
     let summary = subagent_tool_summary(name, args);
-    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
-        return format!(
-            "The user denied the {name} action. Do not retry it unless the user explicitly asks."
-        );
-    }
-
-    tools::execute_subagent_tool(app, name, args).await
+    run_gated(
+        mgr,
+        app,
+        sid,
+        name,
+        args,
+        summary,
+        gated_deny_text(name),
+        || async { tools::execute_subagent_tool(app, name, args).await },
+    )
+    .await
 }
 
 /// Approval-card wrapper for the mesh write pair (`message_session` /
@@ -2388,13 +2469,17 @@ async fn run_gated_mesh_tool(
     args: &Value,
 ) -> String {
     let summary = mesh_tool_summary(name, args);
-    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
-        return format!(
-            "The user denied the {name} action. Do not retry it unless the user explicitly asks."
-        );
-    }
-
-    crate::session_fabric::execute_mesh_tool(app, Some(sid), name, args).await
+    run_gated(
+        mgr,
+        app,
+        sid,
+        name,
+        args,
+        summary,
+        gated_deny_text(name),
+        || async { crate::session_fabric::execute_mesh_tool(app, Some(sid), name, args).await },
+    )
+    .await
 }
 
 /// Approval-card wrapper for the vault write trio — mirrors
@@ -2408,12 +2493,17 @@ async fn run_gated_vault_tool(
     args: &Value,
 ) -> String {
     let summary = vault_tool_summary(name, args);
-    if !run_approval_gate(mgr, app, sid, name, args, summary).await {
-        return format!(
-            "The user denied the {name} action. Do not retry it unless the user explicitly asks."
-        );
-    }
-    tools::execute_vault_tool(app, name, args).await
+    run_gated(
+        mgr,
+        app,
+        sid,
+        name,
+        args,
+        summary,
+        gated_deny_text(name),
+        || async { tools::execute_vault_tool(app, name, args).await },
+    )
+    .await
 }
 
 /// One-line card summary for a gated vault call.
@@ -2797,8 +2887,11 @@ async fn run_tool_inner(
     // Agentic browser tools act on the live browser-pane webview, so they run
     // here (where the AppHandle -> BrowserState is available) rather than in
     // the provider-agnostic execute_tool dispatcher.
-    if let Some(text) = run_browser_tool(app, name, args, artifacts_dir, sid).await {
-        return text;
+    if let Some(res) = run_browser_tool(app, name, args, artifacts_dir, sid).await {
+        return match res {
+            Ok(text) => text,
+            Err(e) => format!("{name} failed: {e}"),
+        };
     }
 
     // Attach-on-demand meta-tools: connect a connector / MCP server mid-turn
@@ -3287,7 +3380,7 @@ async fn run_browser_tool(
     args: &Value,
     artifacts_dir: &std::path::Path,
     sid: &str,
-) -> Option<String> {
+    ) -> Option<Result<String, String>> {
     use tools::{
         BROWSER_BATCH, BROWSER_CLICK, BROWSER_EXTRACT, BROWSER_FILL_FORM, BROWSER_FIND,
         BROWSER_OBSERVE, BROWSER_PRESS_KEY, BROWSER_READ, BROWSER_SCREENSHOT, BROWSER_SCROLL,
@@ -3336,9 +3429,9 @@ async fn run_browser_tool(
         {
             Ok(Some(png)) => png,
             Ok(None) => {
-                return Some("browser_screenshot failed: capture unavailable (no page is open in the browser pane, or the platform doesn't support capture).".to_string())
+                return Some(Err("browser_screenshot failed: capture unavailable (no page is open in the browser pane, or the platform doesn't support capture).".to_string()))
             }
-            Err(e) => return Some(format!("browser_screenshot failed: {e}")),
+            Err(e) => return Some(Err(format!("browser_screenshot failed: {e}"))),
         };
         let _ = std::fs::create_dir_all(artifacts_dir);
         let millis = std::time::SystemTime::now()
@@ -3348,9 +3441,9 @@ async fn run_browser_tool(
         let filename = format!("browser-shot-{millis}.png");
         let path = artifacts_dir.join(&filename);
         if let Err(e) = std::fs::write(&path, &png) {
-            return Some(format!(
+            return Some(Err(format!(
                 "browser_screenshot failed: could not save PNG: {e}"
-            ));
+            )));
         }
         let path_str = path.to_string_lossy().into_owned();
         // Deliberately NOT registered as an artifact (is_temp_like_artifact
@@ -3358,9 +3451,9 @@ async fn run_browser_tool(
         // scaffolding, so it never enters the Artifacts library or pops open
         // the canvas. Embedding it in the reply still works — the inline
         // image reads the file by path.
-        return Some(format!(
+        return Some(Ok(format!(
             "Screenshot saved to {path_str}. To show it inline, embed it in your reply as ![screenshot]({path_str})."
-        ));
+        )));
     }
 
     // `browser_zoom` is the same capture path with a clip rect, so it shares
@@ -3373,16 +3466,16 @@ async fn run_browser_tool(
         let num = |k: &str| args.get(k).and_then(|v| v.as_f64());
         let (Some(x), Some(y), Some(w), Some(h)) = (num("x"), num("y"), num("width"), num("height"))
         else {
-            return Some(
+            return Some(Err(
                 "browser_zoom requires numeric \"x\", \"y\", \"width\" and \"height\" \
                  (viewport CSS pixels from the pane's top-left)."
                     .to_string(),
-            );
+            ));
         };
         if !(w.is_finite() && h.is_finite()) || w <= 0.0 || h <= 0.0 {
-            return Some(
+            return Some(Err(
                 "browser_zoom requires a positive, finite \"width\" and \"height\".".to_string(),
-            );
+            ));
         }
         let scale = num("scale").unwrap_or(2.0);
         let mgr2 = std::sync::Arc::clone(&mgr);
@@ -3391,9 +3484,9 @@ async fn run_browser_tool(
         {
             Ok(Some(png)) => png,
             Ok(None) => {
-                return Some("browser_zoom failed: capture unavailable (no page is open in the browser pane, or the platform doesn't support capture — this is Windows-only today).".to_string())
+                return Some(Err("browser_zoom failed: capture unavailable (no page is open in the browser pane, or the platform doesn't support capture — this is Windows-only today).".to_string()))
             }
-            Err(e) => return Some(format!("browser_zoom failed: {e}")),
+            Err(e) => return Some(Err(format!("browser_zoom failed: {e}"))),
         };
         let _ = std::fs::create_dir_all(artifacts_dir);
         let millis = std::time::SystemTime::now()
@@ -3402,14 +3495,16 @@ async fn run_browser_tool(
             .unwrap_or(0);
         let path = artifacts_dir.join(format!("browser-zoom-{millis}.png"));
         if let Err(e) = std::fs::write(&path, &png) {
-            return Some(format!("browser_zoom failed: could not save PNG: {e}"));
+            return Some(Err(format!(
+                "browser_zoom failed: could not save PNG: {e}"
+            )));
         }
         let path_str = path.to_string_lossy().into_owned();
-        return Some(format!(
+        return Some(Ok(format!(
             "Zoomed region ({w}x{h} at {x},{y}, scale {scale}) saved to {path_str}. \
              Embed it as ![zoom]({path_str}) to show it inline. Note the coordinates you \
              send next are still full-page viewport pixels — zooming does not move anything."
-        ));
+        )));
     }
 
     // `browser_batch` composes the rest of the family, so it recurses back
@@ -3425,7 +3520,9 @@ async fn run_browser_tool(
     // at the failure would leave the model unable to tell which steps actually
     // ran — the reason a batch is more than a latency optimisation.
     if name == BROWSER_BATCH {
-        return Some(Box::pin(run_browser_batch(app, args, artifacts_dir, sid)).await);
+        // The batch reports each step's failure inline, so its aggregate text
+        // is a RESULT from the structured caller's perspective.
+        return Some(Ok(Box::pin(run_browser_batch(app, args, artifacts_dir, sid)).await));
     }
 
     let result = match name {
@@ -3561,10 +3658,11 @@ async fn run_browser_tool(
         },
         _ => unreachable!("guarded by matches! above"),
     };
-    Some(match result {
-        Ok(text) => text,
-        Err(e) => format!("{name} failed: {e}"),
-    })
+    // Structured result (audit M: browser_batch heuristic): callers get
+    // Ok/Err instead of re-deriving failure from the rendered text — page
+    // content can legitimately contain " failed:" or start with "Error:",
+    // which made the batch halt on successful reads.
+    Some(result)
 }
 
 /// What a `browser_click` / `browser_type` call is aiming at.
@@ -3773,19 +3871,24 @@ async fn run_browser_batch(
         // None arm is unreachable in practice — handled rather than unwrapped
         // so a future edit to either list degrades to an error, not a panic.
         match run_browser_tool(app, op, &step_args, artifacts_dir, sid).await {
-            Some(out) => {
-                // A failed step is signalled by the same "{name} failed: {err}"
-                // / "Error: ..." shape every other tool arm uses, so the batch
-                // halts on it rather than reporting it as progress.
-                if out.starts_with("Error:") || out.contains(" failed:") {
-                    failed_at = Some((i, op.to_string()));
-                    lines.push(format!("  step {i} [{op}]: FAILED — {out}"));
-                } else {
-                    // Truncate each step's payload: a browser_read mid-batch can
-                    // be thousands of chars, and a batch exists to save tokens.
-                    let brief: String = out.chars().take(400).collect();
-                    let more = if brief.len() < out.len() { "…" } else { "" };
-                    lines.push(format!("  step {i} [{op}]: {brief}{more}"));
+            Some(res) => {
+                // Structured Ok/Err (audit M: browser_batch heuristic): the
+                // old substring sniff (`starts_with("Error:")`, `contains("
+                // failed:")`) tripped on successful page text — a browser_read
+                // of an error page or a changelog halted the batch and lied
+                // to the model about which steps ran.
+                match res {
+                    Err(err) => {
+                        failed_at = Some((i, op.to_string()));
+                        lines.push(format!("  step {i} [{op}]: FAILED — {err}"));
+                    }
+                    Ok(out) => {
+                        // Truncate each step's payload: a browser_read mid-batch can
+                        // be thousands of chars, and a batch exists to save tokens.
+                        let brief: String = out.chars().take(400).collect();
+                        let more = if brief.len() < out.len() { "…" } else { "" };
+                        lines.push(format!("  step {i} [{op}]: {brief}{more}"));
+                    }
                 }
             }
             None => {
@@ -4799,9 +4902,16 @@ Use one of the listed read-only tools instead.",
         assert!(refusal.contains("outside it"), "{refusal}");
         // No project bound -> no roots -> every write is refused.
         assert!(subagent_fs_scope_refusal(tools::WRITE_FILE, &inside, &[]).is_some());
-        // move/copy check BOTH ends.
-        let escape = json!({"source": "C:/work/repo/a.txt", "destination": "C:/tmp/a.txt"});
+        // move/copy check BOTH ends (real schema keys: src/dest — the old
+        // test used `source`/`destination` and passed vacuously; audit C2).
+        let escape = json!({"src": "C:/work/repo/a.txt", "dest": "C:/tmp/a.txt"});
         assert!(subagent_fs_scope_refusal(tools::MOVE_FILE, &escape, &roots).is_some());
+        // …and an in-scope move stays allowed.
+        let ok_move = json!({"src": "C:/work/repo/a.txt", "dest": "C:/work/repo/b.txt"});
+        assert!(subagent_fs_scope_refusal(tools::MOVE_FILE, &ok_move, &roots).is_none());
+        // A move whose SOURCE escapes is refused too (rename out = delete in).
+        let escape_src = json!({"src": "C:/Windows/System32/etc/hosts", "dest": "C:/work/repo/x"});
+        assert!(subagent_fs_scope_refusal(tools::MOVE_FILE, &escape_src, &roots).is_some());
         // Reads stay unscoped (the documented read exemption).
         assert!(subagent_fs_scope_refusal(tools::READ_FILE, &outside, &roots).is_none());
     }

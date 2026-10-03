@@ -3,7 +3,7 @@
 // panel is that surface: master switch, what the mesh does, its hard caps,
 // and where the P4 hook events live (Settings → Hooks).
 import { useEffect, useState } from "react";
-import { getSetting, setSetting } from "../../lib/ipc";
+import { getSetting, setSetting, toastError } from "../../lib/ipc";
 import { useUiStore } from "../../state/ui";
 
 const ENABLED_KEY = "sessionMesh.enabled";
@@ -20,9 +20,15 @@ export function MeshPanel() {
   }, []);
 
   const toggle = async () => {
+    const prev = enabled;
     const next = !(enabled ?? true);
     setEnabled(next);
-    await setSetting(ENABLED_KEY, next ? "true" : "false");
+    try {
+      await setSetting(ENABLED_KEY, next ? "true" : "false");
+    } catch (err) {
+      setEnabled(prev); // revert the optimistic write on failure
+      toastError("Couldn't change the Session Mesh setting", err);
+    }
   };
 
   return (

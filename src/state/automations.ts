@@ -17,6 +17,8 @@ import {
 
 interface AutomationsState {
   loaded: boolean;
+  /** Last load() failure — the view renders a retry banner for it. */
+  error: string | null;
   automations: Automation[];
   /** id -> a run was just kicked off via run-now (button spinner). */
   runningNow: Record<string, boolean>;
@@ -34,13 +36,25 @@ interface AutomationsState {
 
 export const useAutomationsStore = create<AutomationsState>((set, get) => ({
   loaded: false,
+  error: null,
   automations: [],
   runningNow: {},
   stoppingNow: {},
 
   load: async () => {
-    const automations = await listAutomations();
-    set({ loaded: true, automations: automations ?? [] });
+    try {
+      const automations = await listAutomations();
+      set({ loaded: true, automations: automations ?? [], error: null });
+    } catch (err) {
+      // An unhandled rejection used to leave the view silently empty (the
+      // Refresh button read as dead) — surface the failure instead.
+      // `loaded` stays FALSE on failure: it means "holds a trusted snapshot",
+      // and consumers rely on that — the empty-harness-chat sweep in
+      // sessionsSlice skips deletion when the automation list is unknown, so
+      // claiming loaded here would delete run-log chats the sweep could not
+      // rule out (regression found by automationRunLog.test).
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
   },
 
   create: async (input) => {

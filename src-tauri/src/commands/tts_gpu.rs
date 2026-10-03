@@ -673,10 +673,24 @@ pub async fn synthesize_gpu(
     }
 
     let t0 = std::time::Instant::now();
-    let output = cmd
-        .output()
+    // Bounded wait (audit M: tts_gpu): the 1800s HTTP timeout only bounds
+    // downloads — an unbounded `cmd.output().await` on the synthesis child
+    // let a wedged engine (driver hang) park every GPU read-aloud forever
+    // AND leak the temp WAV. 10 minutes covers the documented worst-case
+    // batch synthesis with margin.
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(600), cmd.output())
         .await
-        .map_err(|e| format!("could not start the GPU engine: {e}"))?;
+    {
+        Ok(r) => r.map_err(|e| format!("could not start the GPU engine: {e}"))?,
+        Err(_) => {
+            let _ = std::fs::remove_file(&out);
+            return Err(
+                "GPU synthesis timed out after 600s — the engine appears wedged; \
+                 try the onnx engine or restart the app."
+                    .to_string(),
+            );
+        }
+    };
     if !output.status.success() {
         // The interesting part of a CUDA failure is at the end of stderr (the
         // provider's own error), so keep the tail rather than the header.

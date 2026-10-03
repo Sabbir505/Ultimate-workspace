@@ -241,20 +241,10 @@ pub fn search_memories_fts(
     // prefix term ORed together (bm25 ranks docs matching more terms
     // higher — AND semantics were too strict for the judge's comparison
     // fetch, which must find a contradictee that shares only one keyword).
-    let safe: String = query
-        .split_whitespace()
-        .map(|t| {
-            t.chars()
-                .filter(|c| c.is_alphanumeric())
-                .collect::<String>()
-        })
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\"*"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    if safe.is_empty() {
+    // Shared sanitizer (audit M: FTS DRY).
+    let Some(safe) = super::fts_prefix_query(query, super::FtsTerms::OrAlnum) else {
         return Ok(Vec::new());
-    }
+    };
     let sql = format!(
         "SELECT m.* FROM memories m JOIN memories_fts f ON f.rowid = m.rowid \
          WHERE memories_fts MATCH ?1 AND m.profile = ?2 AND m.status = 'active' \

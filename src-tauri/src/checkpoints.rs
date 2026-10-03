@@ -477,10 +477,33 @@ pub fn restore(
     // the whole working tree).
     let snap = git::snapshot_working_tree(&dir)
         .map_err(|e| format!("failed to snapshot current state before restore: {e}"))?;
+    // The safety snapshot carries the session's CURRENT message high-water
+    // mark (audit M: safety checkpoint rollback): with `message_id = None` a
+    // later restore TO this safety checkpoint with `rollbackMessages: true`
+    // deleted the ENTIRE conversation (delete_chat_messages_after(None) wipes
+    // all rows) instead of only messages past the snapshot. The high-water
+    // bound makes the safety checkpoint behave like any other: restore keeps
+    // everything up to the moment it was taken.
     let safety = {
         let conn = db_conn.lock();
-        create_checkpoint_inner(&conn, Some(app), &ckpt.chat_session_id, None, &dir, snap, false)
-            .map_err(|e| format!("failed to record safety checkpoint: {e:?}"))?
+        let high_water: Option<i64> = conn
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM chat_messages WHERE chat_session_id = ?1",
+                rusqlite::params![ckpt.chat_session_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| if v == 0 { None } else { Some(v) })
+            .unwrap_or(None);
+        create_checkpoint_inner(
+            &conn,
+            Some(app),
+            &ckpt.chat_session_id,
+            high_water,
+            &dir,
+            snap,
+            false,
+        )
+        .map_err(|e| format!("failed to record safety checkpoint: {e:?}"))?
     };
     // No lock: restore the tree (a checkout of the snapshot).
     git::restore_checkpoint_tree(&dir, &ckpt.tree_sha)

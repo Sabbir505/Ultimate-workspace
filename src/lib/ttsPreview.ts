@@ -11,6 +11,7 @@ import { create } from "zustand";
 import { ttsSpeak } from "./ipc";
 import { sharedAudioContext } from "./sound";
 import { useTtsStore } from "../state/tts";
+import { base64ToBytes } from "./tts";
 
 /** Sample sentence. Long enough to hear the timbre and the pace, short enough
  *  that previewing a dozen voices does not take a minute. */
@@ -38,13 +39,6 @@ export const useVoicePreviewStore = create<VoicePreviewState>((set) => ({
   error: null,
   set: (patch) => set(patch),
 }));
-
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
-  return out;
-}
 
 class VoicePreview {
   private source: AudioBufferSourceNode | null = null;

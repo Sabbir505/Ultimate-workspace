@@ -653,6 +653,59 @@ fn validate_nav_url(url: &str) -> Result<tauri::Url, String> {
     Ok(parsed)
 }
 
+/// The roots a pane may read via `file://` navigation: the bound project's
+/// folder plus the artifacts dir (where built/generated documents land). An
+/// unbound pane gets just the artifacts dir. Best-effort — a DB hiccup
+/// narrows the scope rather than widening it (audit H28).
+impl BrowserManager {
+    fn pane_scope_roots(&self, project_id: Option<&str>) -> Vec<String> {
+        let mut roots: Vec<String> = Vec::new();
+        roots.push(
+            crate::chat::dispatch::artifacts_dir(&self.app)
+                .to_string_lossy()
+                .to_string(),
+        );
+        if let Some(pid) = project_id {
+            if let Some(db) = self.app.try_state::<crate::DbState>() {
+                let conn = db.0.lock();
+                if let Ok(Some(project)) = crate::db::get_project(&conn, pid) {
+                    roots.push(project.path);
+                }
+            }
+        }
+        roots
+    }
+}
+
+/// Scheme check PLUS containment for `file://` targets (audit H28).
+///
+/// `file://` stays allowed for previewing locally built apps, but only
+/// INSIDE the pane's scope (the bound project's path and the artifacts dir).
+/// Unscoped, the MCP `navigate` op — whose own schema coaches the model
+/// toward `file:///C:/path/index.html` previews — was an arbitrary local-file
+/// READ channel (`file:///C:/Users/<u>/.aws/credentials` renders fine and
+/// `read_page`/`evaluate` return it; `evaluate` can then POST the contents
+/// out, a CORS-simple request the null origin fires without a preflight). It
+/// also bypassed the permission-gated `read_file` tooling entirely. This is
+/// the same containment `upload_file` already applies.
+fn validate_nav_url_in_scope(url: &str, roots: &[String]) -> Result<tauri::Url, String> {
+    let parsed = validate_nav_url(url)?;
+    if parsed.scheme() == "file" {
+        let path = parsed
+            .to_file_path()
+            .unwrap_or_else(|_| std::path::PathBuf::from(parsed.path()));
+        let path_str = path.to_string_lossy().to_string();
+        if !crate::chat::permission::path_within_scope(&path_str, roots) {
+            return Err(format!(
+                "file:// navigation refused: {} is outside this pane's scope \
+                 (project folder and artifacts dir only)",
+                path_str
+            ));
+        }
+    }
+    Ok(parsed)
+}
+
 fn ensure_supported() -> Result<(), String> {
     Ok(())
 }
@@ -2130,9 +2183,10 @@ impl BrowserManager {
             }
         }
 
-        // Validate the target URL up front (scheme allowlist — see
-        // validate_nav_url).
-        let _parsed = validate_nav_url(url).map_err(|e| {
+        // Validate the target URL up front (scheme allowlist, plus
+        // `file://` containment in the pane's scope — see validate_nav_url).
+        let scope_roots = self.pane_scope_roots(project_id);
+        let _parsed = validate_nav_url_in_scope(url, &scope_roots).map_err(|e| {
             eprintln!("[relay:browser] url validation FAILED: {e}");
             e
         })?;

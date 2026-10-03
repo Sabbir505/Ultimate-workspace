@@ -78,8 +78,15 @@ export function parseRelayConnectLink(rawUrl: string): ParsedRelayLink | null {
 
   const host = hostParam?.trim();
   if (host && /^(wss?|https?):\/\//i.test(host)) {
-    // Already a connect URL — keep its scheme/host/port, re-attach the token.
-    return { url: `${host.split('#')[0]}#${token}`, token };
+    // Already a connect URL — normalize the scheme to ws/wss (audit H41):
+    // an `https://` host used to be returned VERBATIM as the connect URL.
+    // `new WebSocket('https://…')` throws synchronously, and `globalConnect`
+    // persisted the URL BEFORE connecting — so one tapped tailscale-share
+    // link (`relay://connect?host=https://machine.ts.net/#token`) left the
+    // phone permanently un-paired, failing on every cold start until the
+    // user manually re-entered a URL.
+    const normalized = host.replace(/^http:\/\//i, 'ws://').replace(/^https:\/\//i, 'wss://');
+    return { url: `${normalized.split('#')[0]}#${token}`, token };
   }
   if (host && /^[\w.-]+(:\d+)?$/.test(host)) {
     // Bare host[:port] — default to the ws scheme.

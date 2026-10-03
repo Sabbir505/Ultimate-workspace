@@ -533,8 +533,28 @@ async fn run_hook_gated<R: tauri::Runtime>(
     .await;
     match waited {
         Ok(Ok(out)) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            // Output cap (audit M: hook output unbounded): a post-hook that
+            // cats a huge file ballooned memory before the JSON scan ever saw
+            // it. The tool-result side truncates at RESULT_SNIPPET_CHARS; the
+            // hook's own output now gets the same treatment (keep the head,
+            // marker notes the cut).
+            let cap = |mut b: Vec<u8>| -> String {
+                const MAX_HOOK_OUTPUT: usize = 1024 * 1024;
+                let truncated = b.len() > MAX_HOOK_OUTPUT;
+                if truncated {
+                    b.truncate(MAX_HOOK_OUTPUT);
+                    while !b.is_empty() && (b[b.len() - 1] & 0xC0) == 0x80 {
+                        b.pop();
+                    }
+                }
+                let mut s = String::from_utf8_lossy(&b).into_owned();
+                if truncated {
+                    s.push_str("\n… (output truncated at 1 MiB)");
+                }
+                s
+            };
+            let stdout = cap(out.stdout);
+            let stderr = cap(out.stderr);
             let exit_code = out.status.code();
             let parse = parse_hook_output(&stdout);
             HookOutcome {

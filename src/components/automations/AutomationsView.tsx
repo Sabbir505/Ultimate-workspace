@@ -287,6 +287,7 @@ const EDIT_PREFIX = "__edit__:";
 export function AutomationsView() {
   const automations = useAutomationsStore((s) => s.automations);
   const loaded = useAutomationsStore((s) => s.loaded);
+  const loadError = useAutomationsStore((s) => s.error);
   const load = useAutomationsStore((s) => s.load);
   const runningNow = useAutomationsStore((s) => s.runningNow);
   const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
@@ -406,6 +407,15 @@ export function AutomationsView() {
           </div>
         </div>
       </ToolbarHeader>
+
+      {loadError && (
+        <div className="automation-detail-error" style={{ margin: "8px 20px 0" }}>
+          Couldn&apos;t load automations: {loadError}{" "}
+          <button className="automations-btn ghost" onClick={() => void load()}>
+            Retry
+          </button>
+        </div>
+      )}
 
       {showTemplates && automations.length > 0 && (
         <div style={{ padding: "8px 20px 0" }}>
@@ -760,22 +770,31 @@ function AutomationDetail({
   const harnessMissing = harnessNeedsInstall(automation.harness, harnesses);
   const missingHarnessName = harnesses.find((h) => h.id === automation.harness)?.displayName;
 
+  // Runs fetch ownership: switching automations while a fetch is in flight
+  // must not let the old automation's rows land in the new detail view (same
+  // open-request guard as the skills library editor).
+  const runsOwnerRef = useRef<string | null>(null);
+
   const refreshRuns = useCallback(async (background = false) => {
     // Background polls (the 5s interval) must not flash the table spinner or
     // rebuild the rows when nothing changed — the detail view otherwise
     // re-renders fully every 5 s for the lifetime of the screen.
+    runsOwnerRef.current = automation.id;
+    const ownerId = automation.id;
     if (!background) setRunsLoading(true);
     setRunError(null);
     try {
       const r = await listAutomationRuns(automation.id, 100);
+      if (runsOwnerRef.current !== ownerId) return; // the view moved to another automation
       const next = r ?? [];
       setRuns((prev) =>
         JSON.stringify(prev) === JSON.stringify(next) ? prev : next,
       );
     } catch (e) {
+      if (runsOwnerRef.current !== ownerId) return;
       setRunError(String(e));
     } finally {
-      if (!background) setRunsLoading(false);
+      if (!background && runsOwnerRef.current === ownerId) setRunsLoading(false);
     }
   }, [automation.id]);
 
@@ -1500,7 +1519,13 @@ function AutomationForm({
               <input type="text" value={model} onChange={(e) => setModel(e.target.value)}
                 placeholder="Subagent's model (leave empty to use it)" />
             ) : availableModels.length > 0 ? (
-              <select value={model} onChange={(e) => setModel(e.target.value)}>
+              // A stale saved model (no longer in the fetched list) must not
+              // sit in state while the select shows the blank default — the
+              // submit would then send a nonexistent model id.
+              <select
+                value={availableModels.some((m) => m.id === model) ? model : ""}
+                onChange={(e) => setModel(e.target.value)}
+              >
                 <option value="">{isHarness ? "Harness default" : isLocal ? "Auto-detect" : "Provider default"}</option>
                 {availableModels.map((m) => (
                   <option key={m.id} value={m.id}>{m.label}</option>

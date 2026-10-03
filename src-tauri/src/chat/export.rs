@@ -118,7 +118,17 @@ pub fn slug(s: &str) -> String {
     let mut last_dash = false;
     for ch in s.chars() {
         if ch.is_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
-            out.push(ch);
+            // A run of dots (`.`, `..`, `...`) collapses to `_`: a chat titled
+            // `..` produced zip entries like `chats/../chat.json` — harmless
+            // to Relay's own by-name reader, but path TRAVERSAL to every
+            // standard extractor (Explorer, 7-Zip) the user opens the export
+            // with (audit M: slug dots).
+            if ch == '.' && out.ends_with('.') {
+                out.pop();
+                out.push('_');
+            } else {
+                out.push(ch);
+            }
             last_dash = false;
         } else if ch.is_whitespace() {
             if !last_dash {
@@ -314,7 +324,10 @@ pub async fn export_chat_zip(
 ) -> Result<(), String> {
     let db = db.0.clone();
     // DB rows under the lock; artifact file reads + deflate happen after it
-    // is released (DbState rule: the lock guards SQL only).
+    // is released (DbState rule: the lock guards SQL only) — and those
+    // blocking phases run on the BLOCKING POOL (audit M: export IO): a
+    // multi-hundred-MB export used to read + deflate + write inline on an
+    // async worker, stalling other commands for the whole compress.
     let (manifest, chat, artifact_paths) = {
         let conn = db.lock();
         let session = crate::db::get_chat_session(&conn, &session_id)
@@ -332,8 +345,14 @@ pub async fn export_chat_zip(
         };
         (manifest, chat, artifact_paths)
     };
-    let chat = finish_serialize_chat(chat, artifact_paths);
-    let zip_bytes = build_zip(&manifest, std::slice::from_ref(&chat))?;
+    let (chat, zip_bytes) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let chat = finish_serialize_chat(chat, artifact_paths);
+            let bytes = build_zip(&manifest, std::slice::from_ref(&chat))?;
+            Ok::<_, String>((chat, bytes))
+        })
+        .await
+        .map_err(|e| format!("export task failed: {e}"))??;
     write_zip(PathBuf::from(&dest), zip_bytes)
 }
 
@@ -372,27 +391,58 @@ pub async fn export_project_zip(
         };
         (manifest, chats, path_batch)
     };
-    let chats = chats
-        .into_iter()
-        .zip(path_batch)
-        .map(|(chat, artifact_paths)| finish_serialize_chat(chat, artifact_paths))
-        .collect::<Vec<_>>();
-    let zip_bytes = build_zip(&manifest, &chats)?;
+    // Blocking serialize+deflate on the pool (audit M: export IO) — same as
+    // export_chat_zip above.
+    let zip_bytes = tauri::async_runtime::spawn_blocking(move || {
+        let chats = chats
+            .into_iter()
+            .zip(path_batch)
+            .map(|(chat, artifact_paths)| finish_serialize_chat(chat, artifact_paths))
+            .collect::<Vec<_>>();
+        build_zip(&manifest, &chats)
+    })
+    .await
+    .map_err(|e| format!("export task failed: {e}"))??;
     write_zip(PathBuf::from(&dest), zip_bytes)
 }
 
 // ---- Import ----
 
-/// Read one `path` entry back from the archive as bytes.
+/// Per-entry / whole-archive caps for IMPORTED zips (audit H12). A chat
+/// export is a file the user RECEIVED — a zip bomb, or simply a very large
+/// archive from someone else's backup, used to inflate without bound: every
+/// matching entry was read via `read_to_end` and ALL decompressed artifact
+/// bytes were retained simultaneously, killing the process. Exports carry
+/// documents, so the caps are generous but finite.
+const IMPORT_MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024; // 64 MB per entry
+const IMPORT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024; // 1 GB decompressed
+
+/// Read one `path` entry back from the archive as bytes, bounded per entry.
+/// The declared `size()` is rejected up front (cheap), and the actual read is
+/// hard-capped with `take()` so a lying header cannot exceed the cap either.
 fn read_zip_entry<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     path: &str,
 ) -> Result<Vec<u8>, String> {
     match archive.by_name(path) {
         Ok(mut f) => {
+            if f.size() > IMPORT_MAX_ENTRY_BYTES {
+                return Err(format!(
+                    "entry {path} declares {} bytes — over the {IMPORT_MAX_ENTRY_BYTES}-byte import cap",
+                    f.size()
+                ));
+            }
             let mut buf = Vec::new();
-            f.read_to_end(&mut buf)
+            // +1 so "exactly at the cap" stays distinguishable from "over it".
+            let read = (&mut f)
+                .take(IMPORT_MAX_ENTRY_BYTES + 1)
+                .read_to_end(&mut buf)
                 .map_err(|e| format!("read {path}: {e}"))?;
+            if read as u64 > IMPORT_MAX_ENTRY_BYTES {
+                return Err(format!(
+                    "entry {path} exceeds the {IMPORT_MAX_ENTRY_BYTES}-byte import cap"
+                ));
+            }
             Ok(buf)
         }
         Err(zip::result::ZipError::FileNotFound) => Err(format!("missing entry {path}")),
@@ -415,9 +465,22 @@ pub async fn import_chat_zip(
     let parsed = parse_zip_export(&bytes)?;
     // Artifact FILE writes happen after the lock is released below — disk
     // I/O never spans the global DB mutex.
+    // Pre-existing artifact filenames: collected BEFORE the lock (audit M:
+    // export lock scope — see import_parsed_chats' `used` block).
+    let preexisting: std::collections::HashSet<String> = {
+        let mut u = std::collections::HashSet::new();
+        if let Ok(rd) = std::fs::read_dir(&artifacts_dir) {
+            for f in rd.flatten() {
+                if let Some(name) = f.file_name().to_str() {
+                    u.insert(name.to_string());
+                }
+            }
+        }
+        u
+    };
     let (imported, pending_writes) = {
         let conn = db.0.lock();
-        import_parsed_chats(&conn, parsed, &artifacts_dir)?
+        import_parsed_chats(&conn, parsed, &artifacts_dir, preexisting)?
     };
     write_imported_artifacts(pending_writes)?;
     Ok(imported)
@@ -430,7 +493,19 @@ fn import_zip_bytes(
     artifacts_dir: &std::path::Path,
 ) -> Result<Vec<String>, String> {
     let parsed = parse_zip_export(bytes)?;
-    let (imported, pending_writes) = import_parsed_chats(conn, parsed, artifacts_dir)?;
+    let preexisting: std::collections::HashSet<String> = {
+        let mut u = std::collections::HashSet::new();
+        if let Ok(rd) = std::fs::read_dir(artifacts_dir) {
+            for f in rd.flatten() {
+                if let Some(name) = f.file_name().to_str() {
+                    u.insert(name.to_string());
+                }
+            }
+        }
+        u
+    };
+    let (imported, pending_writes) =
+        import_parsed_chats(conn, parsed, artifacts_dir, preexisting)?;
     write_imported_artifacts(pending_writes)?;
     Ok(imported)
 }
@@ -501,6 +576,10 @@ fn parse_zip_export(bytes: &[u8]) -> Result<Vec<ParsedChatExport>, String> {
         // and pulling the next entry each time.
         let art_prefix = format!("{dir}artifacts/");
         let mut art_entries: Vec<(String, Vec<u8>)> = Vec::new();
+        // Running decompressed total across ALL chats' artifacts — the
+        // per-entry cap alone still allows N×64MB retained simultaneously
+        // (audit H12).
+        let mut total_bytes: u64 = 0;
         for i in 0..archive.len() {
             let name = match archive.name_for_index(i) {
                 Some(n) => n.to_string(),
@@ -511,6 +590,13 @@ fn parse_zip_export(bytes: &[u8]) -> Result<Vec<ParsedChatExport>, String> {
                 && !name.ends_with('/')
             {
                 if let Ok(bytes) = read_zip_entry(&mut archive, &name) {
+                    total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+                    if total_bytes > IMPORT_MAX_TOTAL_BYTES {
+                        return Err(format!(
+                            "archive exceeds the {} MB decompressed import cap",
+                            IMPORT_MAX_TOTAL_BYTES / (1024 * 1024)
+                        ));
+                    }
                     art_entries.push((name, bytes));
                 }
             }
@@ -530,6 +616,7 @@ fn import_parsed_chats(
     conn: &Connection,
     parsed: Vec<ParsedChatExport>,
     artifacts_dir: &std::path::Path,
+    preexisting_artifact_names: std::collections::HashSet<String>,
 ) -> Result<(Vec<String>, Vec<(String, std::path::PathBuf, Vec<u8>)>), String> {
     let mut imported = Vec::with_capacity(parsed.len());
     let mut pending_writes: Vec<(String, std::path::PathBuf, Vec<u8>)> = Vec::new();
@@ -631,17 +718,11 @@ fn import_parsed_chats(
         }
 
         // Files already present in the artifacts dir, to dedupe on write.
-        let mut used = {
-            let mut u = std::collections::HashSet::new();
-            if let Ok(rd) = std::fs::read_dir(artifacts_dir) {
-                for f in rd.flatten() {
-                    if let Some(name) = f.file_name().to_str() {
-                        u.insert(name.to_string());
-                    }
-                }
-            }
-            u
-        };
+        // Passed IN by the caller (audit M: export lock scope): the
+        // directory listing used to run under the shared DB mutex, and with
+        // thousands of artifact entries every DB consumer stalled behind
+        // it — the module's own "the lock guards SQL only" rule.
+        let mut used = preexisting_artifact_names.clone();
 
         let mut art_iter = art_entries.into_iter();
         for msg in &chat.messages {

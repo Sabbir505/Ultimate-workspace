@@ -524,7 +524,20 @@ pub(crate) fn apply_patches(plan: &mut Value, patches: &[Value]) -> Result<usize
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| format!("{why}: slide patch needs \"slot\" (or \"notes\")"))?;
             let value = value.ok_or_else(|| format!("{why}: missing \"value\""))?;
-            slide["slots"][slot] = value.clone();
+            // Resolve the slot map explicitly: `slide["slots"][slot]` uses
+            // serde_json mutable indexing, which PANICS ("cannot access key …
+            // in JSON string") when `slots` is not an object — reachable
+            // because the sidecar is model-authored (the model can write
+            // `{"slots": "oops"}` itself via generate_file) and the sanity
+            // check only verifies `kind` + non-empty slides. A panic here kills
+            // the async tool dispatch with no clean error surfaced (audit H9).
+            let slots = slide
+                .get_mut("slots")
+                .ok_or_else(|| format!("{why}: slide \"{slide_id}\" has no slots object"))?;
+            let slots = slots.as_object_mut().ok_or_else(|| {
+                format!("{why}: slide \"{slide_id}\" slots must be an object")
+            })?;
+            slots.insert(slot.to_string(), value.clone());
             applied += 1;
             continue;
         }
@@ -638,14 +651,10 @@ pub fn complete(
 }
 
 fn planned_path(dir: &Path, format: &str, filename: &str) -> PathBuf {
-    let ext = artifacts::canonical_ext(format);
-    let base = artifacts::sanitize_filename(filename);
-    let name = if base.to_lowercase().ends_with(&format!(".{ext}")) {
-        base
-    } else {
-        format!("{base}.{ext}")
-    };
-    dir.join(name)
+    // Shared with jsdocgen (audit M: DRY — the private copy here had to be
+    // fixed in lockstep with the generator copies every time the sanitizer
+    // or extension handling changed).
+    crate::chat::jsdocgen::planned_path(dir, format, filename)
 }
 
 fn format_failure(error: &str, errors: &[String], warnings: &[String]) -> String {

@@ -840,9 +840,18 @@ function LocalElectricitySettings() {
   };
 
   const save = async () => {
-    await setSetting("localModels.electricityRateUsdPerKwh", elecRate);
-    await setSetting("localModels.gpuPowerWatts", gpuWatts);
-    toastSuccess("Electricity settings saved");
+    const prevRate = elecRate;
+    const prevWatts = gpuWatts;
+    try {
+      await setSetting("localModels.electricityRateUsdPerKwh", elecRate);
+      await setSetting("localModels.gpuPowerWatts", gpuWatts);
+      toastSuccess("Electricity settings saved");
+    } catch (err) {
+      // Revert the inputs so they show what the backend actually has.
+      setElecRate(prevRate);
+      setGpuWatts(prevWatts);
+      toastError("Couldn't save the electricity settings", err);
+    }
   };
 
   if (!loaded) return null;

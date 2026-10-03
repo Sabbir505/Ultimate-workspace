@@ -14,6 +14,8 @@ import { Platform } from 'react-native';
  */
 
 const APP_LOCK_ENABLED_KEY = 'security.appLockEnabled';
+/** When the app was last backgrounded — PERSISTED (audit H39). */
+const APP_LOCK_AWAY_KEY = 'security.appLockAwayAt';
 /** How long the app may be backgrounded before re-locking (ms). */
 const RELOCK_GRACE_MS = 30_000;
 
@@ -59,23 +61,47 @@ export async function authenticate(reason: string): Promise<boolean> {
   }
 }
 
+// The away-stamp lives in module memory AND AsyncStorage (audit H39):
+// module memory is wiped when the OS kills the backgrounded process, so a
+// force-quit + relaunch never fired the gate — `shouldLockOnResume` saw
+// `null` and returned false, and the lock could be bypassed by simply
+// killing the app first.
 let backgroundedAt: number | null = null;
 
 /** Call from AppState 'background' — stamps when the app went away. */
 export function markBackgrounded(): void {
-  backgroundedAt = Date.now();
+  const now = Date.now();
+  backgroundedAt = now;
+  void AsyncStorage.setItem(APP_LOCK_AWAY_KEY, String(now)).catch(
+    () => { /* storage unavailable — the in-memory stamp still covers a
+               background→foreground cycle */ },
+  );
+}
+
+/** Clear both away stamps (lock satisfied — the app is unlocked again). */
+export function clearAwayStamp(): void {
+  backgroundedAt = null;
+  void AsyncStorage.removeItem(APP_LOCK_AWAY_KEY).catch(() => {});
 }
 
 /**
  * Call from AppState 'active'. Returns true when the lock gate should show
- * (app lock on + was away longer than the grace window).
+ * (app lock on + was away longer than the grace window). Reads the persisted
+ * stamp too, so a force-quit while backgrounded (or an OS process kill)
+ * still locks on relaunch — the exact bypass the memory-only stamp allowed.
  */
 export async function shouldLockOnResume(): Promise<boolean> {
-  const away = backgroundedAt;
-  backgroundedAt = null;
   if (!(await isAppLockEnabled())) return false;
-  if (away === null) return false;
-  return Date.now() - away > RELOCK_GRACE_MS;
+  const now = Date.now();
+  let away = backgroundedAt;
+  if (away === null) {
+    const stored = await AsyncStorage.getItem(APP_LOCK_AWAY_KEY).catch(() => null);
+    away = stored ? Number(stored) : null;
+  }
+  backgroundedAt = null;
+  await AsyncStorage.removeItem(APP_LOCK_AWAY_KEY).catch(() => {});
+  if (away === null || Number.isNaN(away)) return false;
+  return now - away > RELOCK_GRACE_MS;
 }
 
 export const appLockPlatformName = Platform.OS === 'ios' ? 'Face ID' : 'Biometrics';

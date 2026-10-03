@@ -785,6 +785,23 @@ fn cache_key(model_id: &str, voice: &str, speed: f32, text: &str) -> String {
 }
 
 /// Evict oldest cache entries until the directory fits the cap. Best-effort:
+/// Write a cache entry atomically: temp file in the same dir, then rename
+/// (audit M: tts cache). A plain write to the final path left a TRUNCATED
+/// `<key>.wav` in the cache when the app died mid-write — and the next
+/// `tts_speak` for that sentence served it as `cached: true` with broken
+/// playback until the 512 MB cap evicted it.
+fn write_cache_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 /// a file that cannot be removed (locked, already gone) is skipped rather than
 /// failing the synthesis that triggered the prune.
 fn prune_cache(dir: &Path) {
@@ -942,7 +959,7 @@ pub async fn tts_speak(
         let bytes = super::tts_gpu::synthesize_gpu(&root, &model_dir, &text, sid, speed).await?;
         // Cache write is best-effort: a read-only or full disk must still let
         // the audio play, it just costs a re-synthesis next time.
-        if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&cached_path, &bytes).is_ok() {
+        if std::fs::create_dir_all(&dir).is_ok() && write_cache_atomic(&cached_path, &bytes).is_ok() {
             prune_cache(&dir);
         }
         let rate = wav_sample_rate(&bytes).unwrap_or(24_000);
@@ -956,7 +973,7 @@ pub async fn tts_speak(
         })
         .await
         .map_err(|e| format!("synthesis task failed: {e}"))??;
-        if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&cached_path, &bytes).is_ok() {
+        if std::fs::create_dir_all(&dir).is_ok() && write_cache_atomic(&cached_path, &bytes).is_ok() {
             prune_cache(&dir);
         }
         (bytes, false, engine.tts.sample_rate())
@@ -1376,6 +1393,30 @@ struct HfTreeEntry {
     kind: String,
     #[serde(default)]
     size: Option<u64>,
+    /// LFS metadata (present when the listing requests `expand=lfs`): the
+    /// `oid` is `sha256:<hex>` for LFS-backed files — the integrity check the
+    /// old size-only skip could not provide (audit M: TTS bundle hashes).
+    #[serde(default)]
+    lfs: Option<HfLfsInfo>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct HfLfsInfo {
+    #[serde(default)]
+    oid: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+impl HfTreeEntry {
+    /// The expected sha256 hex digest for LFS-backed files, if the listing
+    /// carried one.
+    fn lfs_sha256(&self) -> Option<&str> {
+        self.lfs
+            .as_ref()
+            .and_then(|l| l.oid.as_deref())
+            .and_then(|oid| oid.strip_prefix("sha256:"))
+    }
 }
 
 /// List every file in a HF repo at `main`.
@@ -1384,7 +1425,9 @@ async fn hf_tree(
     repo: &str,
     token: Option<&str>,
 ) -> CmdResult<Vec<HfTreeEntry>> {
-    let url = format!("https://huggingface.co/api/models/{repo}/tree/main?recursive=true");
+    // `expand=lfs` makes the listing carry each LFS object's sha256, which
+    // `hf_download_file` verifies after download (audit M: TTS bundle hashes).
+    let url = format!("https://huggingface.co/api/models/{repo}/tree/main?recursive=true&expand=lfs");
     let mut req = client.get(&url);
     if let Some(token) = token {
         req = req.bearer_auth(token);
@@ -1410,10 +1453,13 @@ async fn hf_tree(
 /// concurrently with its siblings. Returns the bytes pulled so the caller's
 /// progress counter can advance.
 ///
-/// Skipping is by size: an install interrupted halfway resumes by re-listing
-/// the repo and finding the files already complete. Downloads land in a
-/// `.part` sibling and are renamed on success, so a cancelled or failed file is
-/// never mistaken for a complete one on the next attempt.
+/// Skipping is by size (an install interrupted halfway resumes by re-listing
+/// the repo and finding the files already complete); VERIFICATION is by the
+/// LFS sha256 the expanded listing carries — a file that downloads to the
+/// wrong bytes fails instead of being finalized into the bundle (audit M:
+/// TTS bundle hashes). Downloads land in a `.part` sibling and are renamed on
+/// success, so a cancelled or failed file is never mistaken for a complete
+/// one on the next attempt.
 async fn hf_download_file(
     client: &reqwest::Client,
     repo: &str,
@@ -1449,11 +1495,18 @@ async fn hf_download_file(
         .await
         .map_err(|e| format!("could not write {}: {e}", part.display()))?;
     let mut stream = resp.bytes_stream();
+    // Hash while streaming (audit M: TTS bundle hashes): a corrupted or
+    // wrong-revision file of the right size used to be treated as complete
+    // (the old check was size-only) and surfaced later as an opaque
+    // "download may be corrupt" engine-load error.
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
             let _ = std::fs::remove_file(&part);
             format!("{}: {e}", entry.path)
         })?;
+        hasher.update(&chunk);
         if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await {
             let _ = std::fs::remove_file(&part);
             return Err(format!("could not write {}: {e}", part.display()));
@@ -1462,6 +1515,21 @@ async fn hf_download_file(
     }
     let _ = tokio::io::AsyncWriteExt::flush(&mut file).await;
     drop(file);
+    // Verify when the listing carried an LFS sha256: a mismatch deletes the
+    // part and fails the file (the install retries it on the next attempt)
+    // instead of finalizing a corrupt asset into the bundle.
+    if let Some(expected_hex) = entry.lfs_sha256() {
+        use sha2::Digest as _;
+        let actual = format!("{:x}", hasher.finalize());
+        if !actual.eq_ignore_ascii_case(expected_hex) {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!(
+                "{}: sha256 mismatch (expected {expected_hex}, got {actual}) — the download \
+                 was corrupt and will be retried",
+                entry.path
+            ));
+        }
+    }
     std::fs::rename(&part, &dest).map_err(|e| {
         let _ = std::fs::remove_file(&part);
         format!("could not finalize {}: {e}", entry.path)
@@ -1523,12 +1591,24 @@ pub async fn tts_install_model(
 
         // Registered so the panel's Cancel button (cancelModelDownload) can stop
         // an in-flight install — the same slot the Model Market uses, keyed by
-        // catalog id.
+        // catalog id. Check-and-refuse under the lock (audit M: tts install
+        // guard): a bare insert let a DOUBLE-CLICK overwrite the first
+        // install's slot, so Cancel cancelled nothing while two installs
+        // wrote the same files concurrently.
         let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
-        registry
-            .active
-            .lock()
-            .insert(entry.id.clone(), crate::commands::local_model_market::DownloadSlot { cancel: Some(tx) });
+        {
+            let mut active = registry.active.lock();
+            if active.contains_key(&entry.id) {
+                return Err(format!(
+                    "download already in progress for {}",
+                    entry.id
+                ));
+            }
+            active.insert(
+                entry.id.clone(),
+                crate::commands::local_model_market::DownloadSlot { cancel: Some(tx) },
+            );
+        }
 
         let progress = std::sync::atomic::AtomicU64::new(0);
         let repo = entry.hf_repo.clone();

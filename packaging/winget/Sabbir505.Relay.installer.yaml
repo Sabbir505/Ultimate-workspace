@@ -13,7 +13,10 @@ Installers:
       - DisplayName: Relay
         Publisher: Relay
         ProductCode: Relay
-    Scope: user
+    # Matches the NSIS bundle's installMode: perMachine (tauri.conf.json) —
+    # a user-scope manifest here made winget upgrades run the per-machine
+    # installer in the wrong hive (audit M: winget scope mismatch).
+    Scope: machine
     UpgradeBehavior: install
 ManifestType: installer
 ManifestVersion: 1.6.0

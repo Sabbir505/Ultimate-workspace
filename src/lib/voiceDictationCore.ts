@@ -188,6 +188,14 @@ export function useVoiceDictationCore({
   // a "released while the mic was still opening" latch (push-to-talk during
   // the first-run permission prompt).
   const recordingRef = useRef(false);
+  // True from the first line of `beginVoiceRecording` until the graph is
+  // built and `recordingRef` flips (or the attempt fails). `recordingRef`
+  // alone is set too late to gate a SECOND concurrent start — see audit C8.
+  const openingRef = useRef(false);
+  // Monotonic start token: incremented on entry to every start and on every
+  // stop, so an in-flight start that was stopped mid-await can detect it and
+  // abandon its own capture (audit C8).
+  const startSeqRef = useRef(0);
   const pendingStopRef = useRef(false);
   const captureCtxRef = useRef<AudioContext | null>(null);
   const captureNodesRef = useRef<{
@@ -199,6 +207,12 @@ export function useVoiceDictationCore({
 
   const stopCapture = useCallback(() => {
     recordingRef.current = false;
+    // Invalidate any START still in flight (a push-to-talk release while
+    // getUserMedia is still pending): that start re-checks the sequence after
+    // its await and tears its own half-built capture down instead of writing
+    // into this stopped state. `openingRef` is cleared by THAT path (or by the
+    // normal success/failure paths) so the next start isn't blocked.
+    startSeqRef.current += 1;
     pendingStopRef.current = false;
     if (partialTimerRef.current !== null) {
       window.clearInterval(partialTimerRef.current);
@@ -450,11 +464,48 @@ export function useVoiceDictationCore({
   }, [flushVoiceSegment, renderVoiceText, stopCapture]);
 
   const beginVoiceRecording = useCallback(async () => {
-    if (recordingRef.current || transcribing) return;
+    if (recordingRef.current || openingRef.current || transcribing) return;
+    // Latch SYNCHRONOUSLY at entry: `recordingRef` only flips after the
+    // getUserMedia await + graph build, so a second activation during that
+    // window (double-click on the still-enabled mic button, or a second Alt
+    // press while the OS permission prompt is up) used to start a SECOND
+    // capture that overwrote the refs below — leaking the first mic track
+    // (indicator on until app exit), its AudioContext, and its 1.5s partial
+    // interval, which kept issuing transcriptions forever (audit C8).
+    openingRef.current = true;
+    const mySeq = ++startSeqRef.current;
+    // Defensive: if anything somehow is still armed, tear it down before
+    // overwriting the refs (this is what the re-entrant call used to skip).
+    try {
+      if (partialTimerRef.current !== null) {
+        window.clearInterval(partialTimerRef.current);
+        partialTimerRef.current = null;
+      }
+      if (captureNodesRef.current) {
+        captureNodesRef.current.processor.onaudioprocess = null;
+        try {
+          captureNodesRef.current.source.disconnect();
+          captureNodesRef.current.processor.disconnect();
+          captureNodesRef.current.sink.disconnect();
+        } catch {
+          /* already torn down */
+        }
+        captureNodesRef.current = null;
+      }
+      captureStreamRef.current?.getTracks().forEach((t) => t.stop());
+      captureStreamRef.current = null;
+      if (captureCtxRef.current && captureCtxRef.current.state !== "closed") {
+        void captureCtxRef.current.close().catch(() => undefined);
+      }
+      captureCtxRef.current = null;
+    } catch {
+      /* teardown is best-effort */
+    }
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
+      openingRef.current = false;
       // getUserMedia fails when: the host (WebView2) hasn't granted mic
       // permission, the device has no mic, or the user denied the prompt.
       // Surface the reason instead of dying silently — this is the #1 cause
@@ -471,6 +522,13 @@ export function useVoiceDictationCore({
       } else {
         toastError("Could not start microphone.", e);
       }
+      return;
+    }
+    // Stopped while the permission prompt was up: abandon this capture rather
+    // than arming a second one into the stopped state (audit C8).
+    if (startSeqRef.current !== mySeq) {
+      openingRef.current = false;
+      stream.getTracks().forEach((t) => t.stop());
       return;
     }
     try {
@@ -537,6 +595,7 @@ export function useVoiceDictationCore({
       commitFailedRef.current = false;
       partialInFlightRef.current = false;
       recordingRef.current = true;
+      openingRef.current = false;
       setRecording(true);
 
       // Live partials: re-transcribe the un-committed segment every tick and
@@ -591,6 +650,7 @@ export function useVoiceDictationCore({
     } catch (e) {
       // Tear down whatever half-built graph exists — stopping only the stream
       // tracks could leak the AudioContext/processor wiring created above.
+      openingRef.current = false;
       stopCapture();
       stream.getTracks().forEach((t) => t.stop());
       toastError("Could not initialize audio recorder.", e);

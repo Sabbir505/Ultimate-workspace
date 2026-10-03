@@ -861,16 +861,25 @@ pub async fn github_list_issue_comments(
     app: AppHandle,
 ) -> CmdResult<Vec<GitHubIssueComment>> {
     let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
+    // NEWEST first (audit M: issue-comments ordering): GitHub's default for
+    // this endpoint is ascending, so page 1 was the OLDEST 50 — issues with
+    // more than 50 comments never showed their recent ones. Reversed after
+    // the fetch so callers keep rendering oldest-first.
     let resp = client(&token)?
         .get(format!("{API}/repos/{owner}/{repo}/issues/{number}/comments"))
-        .query(&[("per_page", "50")])
+        .query(&[
+            ("per_page", "50"),
+            ("sort", "created"),
+            ("direction", "desc"),
+        ])
         .send()
         .await
         .map_err(|e| format!("GitHub list comments failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "comments").await);
     }
-    let rows: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
+    let mut rows: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
+    rows.reverse();
     Ok(rows
         .iter()
         .map(|v| GitHubIssueComment {

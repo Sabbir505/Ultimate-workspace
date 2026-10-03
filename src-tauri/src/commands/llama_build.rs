@@ -102,7 +102,15 @@ pub async fn llama_install_cuda(
         let force = force == Some(true);
         let install_dir = llama_cuda_dir(&app);
         let exe_path = llama_cuda_exe(&install_dir);
-        let fresh = force || !exe_path.is_file();
+        // The CUDA-DLL check participates in `fresh` (audit M: llama_build):
+        // an install that previously failed the DLL verification left the exe
+        // in place, so `fresh` was false on retry — the check never ran again,
+        // the setting pointed at a CPU-falling-back build, and the second
+        // Install click reported Done. Only a complete install counts as
+        // installed.
+        let fresh = force
+            || !exe_path.is_file()
+            || require_cuda_runtime_dlls(&install_dir, &app).is_err();
         if fresh {
             // A running llama-server holds its image (and its DLLs) open —
             // stop the sidecars before the files underneath them are

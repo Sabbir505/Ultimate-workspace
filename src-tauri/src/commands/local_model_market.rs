@@ -1028,6 +1028,21 @@ pub async fn start_model_download(
     .await
 }
 
+/// Sanitize an HF-served filename for the local filesystem: path separators
+/// and control chars become `_`. Shared by the model download and the mmproj
+/// download — the mmproj copy used to drift independently of this one
+/// (audit M: DRY).
+fn sanitize_hf_filename(filename: &str) -> String {
+    filename
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
+            c if (c as u32) < 0x20 => '_',
+            c => c,
+        })
+        .collect()
+}
+
 /// Owned-state core of `start_model_download` so other commands (the image
 /// package installer) can queue downloads through the same engine without
 /// juggling Tauri State re-entry.
@@ -1159,16 +1174,9 @@ pub async fn start_model_download_inner(
     }
 
     // Sanitize the filename (HF allows a wide range of chars; the OS
-    // may reject some). Replace any path-separator / control char with
-    // `_`.
-    let safe_filename: String = filename
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
-            c if (c as u32) < 0x20 => '_',
-            c => c,
-        })
-        .collect();
+    // may reject some). Shared helper (audit M: DRY — download_mmproj
+    // carried a drifted copy).
+    let safe_filename = sanitize_hf_filename(&filename);
     let final_path = dest_dir.join(&safe_filename);
     let partial_path = dest_dir.join(format!("{safe_filename}.partial"));
     let meta_path = partial_path.with_extension("partial.meta");
@@ -1770,16 +1778,8 @@ pub async fn download_mmproj(
     }
 
 
-    // Use the safe_filename routine via the same logic.
-    let safe_filename: String = sibling
-        .rfilename
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
-            c if (c as u32) < 0x20 => '_',
-            c => c,
-        })
-        .collect();
+    // Same sanitizer as the model download (audit M: DRY).
+    let safe_filename = sanitize_hf_filename(&sibling.rfilename);
     let final_path = dest_dir.join(&safe_filename);
     let partial_path = dest_dir.join(format!("{safe_filename}.partial"));
     let meta_path = partial_path.with_extension("partial.meta");

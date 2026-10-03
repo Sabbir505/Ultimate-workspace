@@ -92,6 +92,9 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
   // was unreachable — renders an offline hint instead of an error.
   const [staleCatalog, setStaleCatalog] = useState(false);
   const [tokenDirty, setTokenDirty] = useState(false);
+  // Which settings mutation is in flight ("dir" | "save-token" | "clear-token")
+  // — disables its button so a double-click can't double-apply.
+  const [settingsBusy, setSettingsBusy] = useState<string | null>(null);
   const [downloads, setDownloads] = useState<Record<string, PerDownload>>({});
   // Bump on every successful fetch so effect deps stay cheap.
   const [fetchTick, setFetchTick] = useState(0);
@@ -254,29 +257,50 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
   };
 
   const onPickDir = async () => {
-    const picked = await pickModelsDirectory();
-    if (picked) {
-      await setModelsDirectory(picked);
-      const s = await getMarketSettings();
-      setSettings(s);
+    setSettingsBusy("dir");
+    try {
+      const picked = await pickModelsDirectory();
+      if (picked) {
+        await setModelsDirectory(picked);
+        const s = await getMarketSettings();
+        setSettings(s);
+      }
+    } catch (err) {
+      toastError("Couldn't change the models folder", err);
+    } finally {
+      setSettingsBusy(null);
     }
   };
 
   const onSaveToken = async () => {
     if (!tokenInput.trim()) return;
-    await setHuggingFaceToken(tokenInput.trim());
-    setTokenInput("");
-    setTokenDirty(false);
-    const s = await getMarketSettings();
-    setSettings(s);
-    void doFetch(query, sort);
+    setSettingsBusy("save-token");
+    try {
+      await setHuggingFaceToken(tokenInput.trim());
+      setTokenInput("");
+      setTokenDirty(false);
+      const s = await getMarketSettings();
+      setSettings(s);
+      void doFetch(query, sort);
+    } catch (err) {
+      toastError("Couldn't save the Hugging Face token", err);
+    } finally {
+      setSettingsBusy(null);
+    }
   };
 
   const onClearToken = async () => {
-    await clearHuggingFaceToken();
-    const s = await getMarketSettings();
-    setSettings(s);
-    void doFetch(query, sort);
+    setSettingsBusy("clear-token");
+    try {
+      await clearHuggingFaceToken();
+      const s = await getMarketSettings();
+      setSettings(s);
+      void doFetch(query, sort);
+    } catch (err) {
+      toastError("Couldn't clear the Hugging Face token", err);
+    } finally {
+      setSettingsBusy(null);
+    }
   };
 
   const doDownload = (e: CatalogEntry) => {
@@ -394,7 +418,11 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
             <code className="model-market-path" title={settings?.modelsDir ?? ""}>
               {settings?.modelsDir ?? settings?.defaultModelsDir ?? "—"}
             </code>
-            <button className="ghost" onClick={() => void onPickDir()}>
+            <button
+              className="ghost"
+              onClick={() => void onPickDir()}
+              disabled={settingsBusy !== null}
+            >
               Change…
             </button>
           </div>
@@ -403,7 +431,11 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
             {settings?.hasHuggingFaceToken ? (
               <>
                 <span className="model-market-badge">Configured</span>
-                <button className="ghost" onClick={() => void onClearToken()}>
+                <button
+                  className="ghost"
+                  onClick={() => void onClearToken()}
+                  disabled={settingsBusy !== null}
+                >
                   Clear
                 </button>
               </>
@@ -421,7 +453,7 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
                 <button
                   className="ghost"
                   onClick={() => void onSaveToken()}
-                  disabled={!tokenDirty || !tokenInput.trim()}
+                  disabled={!tokenDirty || !tokenInput.trim() || settingsBusy !== null}
                 >
                   Save
                 </button>

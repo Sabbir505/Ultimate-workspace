@@ -10,7 +10,7 @@ import { useChatStore, selectContextSessionId } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { useProjectsStore } from "../../state/projects";
 import { BranchDropdown } from "./BranchDropdown";
-import { FolderIcon, pathBasename } from "./composerShared";
+import { FolderIcon, nextThinkingValue, pathBasename } from "./composerShared";
 
 /** One stacked queued message inside the composer notch (Cursor-style): the
  *  grip drag-reorders via POINTER events (HTML5 drag-and-drop proved dead
@@ -496,7 +496,7 @@ export function ThinkingToggle({
 }) {
   const on = value === true;
   const off = value === false;
-  const next: boolean | null = value === null ? true : value === true ? false : null;
+  const next = nextThinkingValue(value);
   const title = value === null
     ? "Extended thinking: provider default. Click to force ON."
     : value === true

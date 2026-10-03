@@ -4,6 +4,7 @@
 //! process-step components that consume it; MessageBubble imports the
 //! pieces it renders.
 import { Fragment, createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { Components } from "react-markdown";
 import { Brain as BrainIcon, Pencil } from "lucide-react";
 // The parser + plugin family load on first use (see common/LazyMarkdown), so
 // the entry chunk no longer carries the ~700 KB markdown pipeline.
@@ -827,7 +828,9 @@ export function StepCodeHighlighter({ code, language }: { code: string; language
   // (useSyntaxTheme returns a fresh object each recompute — stringifying it
   // would never invalidate).
   const themeKey = typeof document !== "undefined" ? document.documentElement.dataset.theme ?? "dark" : "dark";
-  return cachedMarkdown(`hl:${themeKey}:${language}:${code}`, () => (
+  // Hash the code into the key (same shape as the md cache below): embedding
+  // full code strings here pinned ~46MB worst case in the shared 240-entry LRU.
+  return cachedMarkdown(`hl:${themeKey}:${language}:${hashCode(code)}:${code.length}`, () => (
     <SyntaxHighlighter
       style={theme}
       language={language}
@@ -1735,6 +1738,131 @@ export function Markdown({
 }) {
   const hasSources = !!sources && sources.length > 0;
   const fingerprint = sourcesFingerprint(sources);
+  // Reference-stable renderer map (audit H30): with `cache={false}` — the LIVE
+  // streaming path — this object used to be rebuilt inside build() on every
+  // token flush, so react-markdown saw brand-new element types each flush and
+  // React unmounted/remounted every code block and mermaid subtree (the
+  // highlighter re-initialised and flashed its plain <pre> fallback, CopyButton
+  // state reset). Memoised on the only values it closes over, so flushes
+  // reconcile instead of remount.
+  const mdComponents = useMemo<Components>(
+    () => ({
+        table: MarkdownTable,
+        pre({ children }) {
+          // Marks the subtree so `code` below knows it is a fenced block
+          // (see InsidePreContext above). The <pre> itself stays in the DOM.
+          return (
+            <InsidePreContext.Provider value={true}>
+              <pre>{children}</pre>
+            </InsidePreContext.Provider>
+          );
+        },
+        code({ className, children, ...props }) {
+          const match = /language-(\w+)/.exec(className || "");
+          const rawCode = String(children).replace(/\n$/, "");
+          // Cap the code string before handing it to the highlighter so a
+          // misbehaving model can't ship a pathologically large payload
+          // that amplifies any parser cost in the (historically
+          // vulnerable) highlighter dep tree. Truncate cleanly.
+          const codeString =
+            rawCode.length > MAX_CODE_BLOCK_BYTES
+              ? rawCode.slice(0, MAX_CODE_BLOCK_BYTES) + "\n… (truncated)"
+              : rawCode;
+
+          // Inline code: no language class and not inside a fenced block.
+          const insidePre = useContext(InsidePreContext);
+          if (!match && !insidePre) {
+            return (
+              <code style={inlineCodeStyle} {...props}>
+                {children}
+              </code>
+            );
+          }
+
+          // Mermaid diagrams render as inline SVG, not as highlighted text.
+          if (match && match[1] === "mermaid") {
+            return (
+              <Suspense fallback={<pre className="chat-markdown-mermaid-fallback">{codeString}</pre>}>
+                <MermaidDiagram
+                  code={codeString}
+                  // A diagram that failed to parse offers a one-click fix:
+                  // send the source + error back to the agent in this
+                  // session (queued automatically if a stream is running).
+                  onFix={
+                    chatSessionId
+                      ? (source, error) => {
+                          const clipped =
+                            source.length > 4096
+                              ? source.slice(0, 4096) + "\n%% …(truncated)"
+                              : source;
+                          void useChatStore
+                            .getState()
+                            .sendMessage(
+                              `The mermaid diagram in your previous message failed to render with this error: ${error}\n\nBroken source:\n\`\`\`mermaid\n${clipped}\n\`\`\`\nReply with the corrected diagram as a single \`\`\`mermaid block — no other commentary.`,
+                              undefined,
+                              false,
+                              chatSessionId,
+                            );
+                        }
+                      : undefined
+                  }
+                />
+              </Suspense>
+            );
+          }
+          // React/JSX artifacts open as a live preview in the side pane
+          // (rendered by ArtifactPreviewPane), not inline in the chat.
+          if (match && (match[1] === "jsx" || match[1] === "tsx")) {
+            return (
+              <JsxArtifactChip
+                code={codeString}
+                lang={match[1] as "jsx" | "tsx"}
+                onPreviewArtifact={onPreviewArtifact}
+              />
+            );
+          }
+
+          // Code block with language.
+          return (
+            <div className="chat-code-block">
+              <div className="chat-code-header">
+                <span className="chat-code-lang">
+                  <CodeLangIcon />
+                  {match ? match[1] : "text"}
+                </span>
+                <CopyButton code={codeString} />
+              </div>
+              <StepCodeHighlighter code={codeString} language={match ? match[1] : "text"} />
+            </div>
+          );
+        },
+        // Images: remote URLs render as-is; local file paths (agent-saved
+        // screenshots/images) are loaded over IPC into a data URI — see
+        // ChatImage for why a bare path can never render in this webview.
+        img({ src, alt }) {
+          return <ChatImage src={typeof src === "string" ? src : ""} alt={alt} />;
+        },
+        // Links open in the built-in browser pane, NOT the system browser:
+        // in a Tauri webview a target=_blank navigation falls through to the
+        // OS default handler. Intercept the click and route it to the pane.
+        // `cite:` targets are rewritten citation markers ([1] / (1,2)) and
+        // render as interactive source chips instead of plain links.
+        a({ href, children }) {
+          if (hasSources && href?.startsWith("cite:")) {
+            const nums = href
+              .slice("cite:".length)
+              .split(",")
+              .map((x) => parseInt(x, 10))
+              .filter((n) => Number.isFinite(n));
+            const citation = <ChatCitation nums={nums} sources={sources!} />;
+            if (citation) return citation;
+          }
+          return <MdLink href={href}>{children}</MdLink>;
+        },
+    }),
+    [chatSessionId, onPreviewArtifact, sources],
+  );
+
   const build = () => {
     const body = hasSources ? linkCitations(content, sources!) : content;
     return (
@@ -1743,120 +1871,7 @@ export function Markdown({
         // is configured inside common/LazyMarkdown so it loads with the parser
         // instead of being hoisted into the entry chunk.
         urlTransform={citeUrlTransform}
-        components={{
-          table: MarkdownTable,
-          pre({ children }) {
-            // Marks the subtree so `code` below knows it is a fenced block
-            // (see InsidePreContext above). The <pre> itself stays in the DOM.
-            return (
-              <InsidePreContext.Provider value={true}>
-                <pre>{children}</pre>
-              </InsidePreContext.Provider>
-            );
-          },
-          code({ className, children, ...props }) {
-            const match = /language-(\w+)/.exec(className || "");
-            const rawCode = String(children).replace(/\n$/, "");
-            // Cap the code string before handing it to the highlighter so a
-            // misbehaving model can't ship a pathologically large payload
-            // that amplifies any parser cost in the (historically
-            // vulnerable) highlighter dep tree. Truncate cleanly.
-            const codeString =
-              rawCode.length > MAX_CODE_BLOCK_BYTES
-                ? rawCode.slice(0, MAX_CODE_BLOCK_BYTES) + "\n… (truncated)"
-                : rawCode;
-
-            // Inline code: no language class and not inside a fenced block.
-            const insidePre = useContext(InsidePreContext);
-            if (!match && !insidePre) {
-              return (
-                <code style={inlineCodeStyle} {...props}>
-                  {children}
-                </code>
-              );
-            }
-
-            // Mermaid diagrams render as inline SVG, not as highlighted text.
-            if (match && match[1] === "mermaid") {
-              return (
-                <Suspense fallback={<pre className="chat-markdown-mermaid-fallback">{codeString}</pre>}>
-                  <MermaidDiagram
-                    code={codeString}
-                    // A diagram that failed to parse offers a one-click fix:
-                    // send the source + error back to the agent in this
-                    // session (queued automatically if a stream is running).
-                    onFix={
-                      chatSessionId
-                        ? (source, error) => {
-                            const clipped =
-                              source.length > 4096
-                                ? source.slice(0, 4096) + "\n%% …(truncated)"
-                                : source;
-                            void useChatStore
-                              .getState()
-                              .sendMessage(
-                                `The mermaid diagram in your previous message failed to render with this error: ${error}\n\nBroken source:\n\`\`\`mermaid\n${clipped}\n\`\`\`\nReply with the corrected diagram as a single \`\`\`mermaid block — no other commentary.`,
-                                undefined,
-                                false,
-                                chatSessionId,
-                              );
-                          }
-                        : undefined
-                    }
-                  />
-                </Suspense>
-              );
-            }
-            // React/JSX artifacts open as a live preview in the side pane
-            // (rendered by ArtifactPreviewPane), not inline in the chat.
-            if (match && (match[1] === "jsx" || match[1] === "tsx")) {
-              return (
-                <JsxArtifactChip
-                  code={codeString}
-                  lang={match[1] as "jsx" | "tsx"}
-                  onPreviewArtifact={onPreviewArtifact}
-                />
-              );
-            }
-
-            // Code block with language.
-            return (
-              <div className="chat-code-block">
-                <div className="chat-code-header">
-                  <span className="chat-code-lang">
-                    <CodeLangIcon />
-                    {match ? match[1] : "text"}
-                  </span>
-                  <CopyButton code={codeString} />
-                </div>
-                <StepCodeHighlighter code={codeString} language={match ? match[1] : "text"} />
-              </div>
-            );
-          },
-          // Images: remote URLs render as-is; local file paths (agent-saved
-          // screenshots/images) are loaded over IPC into a data URI — see
-          // ChatImage for why a bare path can never render in this webview.
-          img({ src, alt }) {
-            return <ChatImage src={typeof src === "string" ? src : ""} alt={alt} />;
-          },
-          // Links open in the built-in browser pane, NOT the system browser:
-          // in a Tauri webview a target=_blank navigation falls through to the
-          // OS default handler. Intercept the click and route it to the pane.
-          // `cite:` targets are rewritten citation markers ([1] / (1,2)) and
-          // render as interactive source chips instead of plain links.
-          a({ href, children }) {
-            if (hasSources && href?.startsWith("cite:")) {
-              const nums = href
-                .slice("cite:".length)
-                .split(",")
-                .map((x) => parseInt(x, 10))
-                .filter((n) => Number.isFinite(n));
-              const citation = <ChatCitation nums={nums} sources={sources!} />;
-              if (citation) return citation;
-            }
-            return <MdLink href={href}>{children}</MdLink>;
-          },
-        }}
+        components={mdComponents}
       >
         {body}
       </ChatMarkdown>

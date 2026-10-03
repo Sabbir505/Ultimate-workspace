@@ -18,7 +18,8 @@ import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useShallow } from "zustand/react/shallow";
 
-import { toastError, toastSuccess, exportChatZip, getMobilePairingInfo, type MobilePairingInfo } from "../../lib/ipc";
+import { toastError, toastSuccess, getMobilePairingInfo, type MobilePairingInfo } from "../../lib/ipc";
+import { useChatRowActions } from "./chatRowActions";
 import {
   ArrowLeft,
   ArrowRight,
@@ -281,62 +282,18 @@ export function Sidebar() {
 
   const handleNewChat = useNewChatAction();
 
-  const handleSelectChat = useCallback(
-    (id: string) => {
-      void selectSession(id).catch((err) => toastError("Couldn't open that chat", err));
-      setActiveView("chat");
-    },
-    [selectSession, setActiveView],
-  );
-
-  const handleDeleteChat = useCallback(
-    (id: string) => {
-      deleteChat(id).catch((e) => toastError("Couldn't delete the chat", e));
-    },
-    [deleteChat],
-  );
-
-  const handleRenameChat = useCallback(
-    (id: string, title: string) => {
-      void renameChat(id, title);
-    },
-    [renameChat],
-  );
-
-  const handleToggleStar = useCallback(
-    (id: string, starred: boolean) => {
-      void setStarred(id, starred);
-    },
-    [setStarred],
-  );
-
-  const handleSetUnread = useCallback(
-    (id: string, unread: boolean) => {
-      void setUnread(id, unread);
-    },
-    [setUnread],
-  );
-
-  const handleExportChat = useCallback((id: string) => {
-    exportChatZip(id)
-      .then((saved) => {
-        if (saved) toastSuccess("Chat exported to .zip");
-      })
-      .catch((err) => toastError("Chat export failed", err));
-  }, []);
-
-  // Open the chat in a NEW split pane beside the focused one; clicking the
-  // item for a chat that's already pinned in a pane closes that pane (toggle
-  // — decided inside the store action).
-  const handleOpenSplitChat = useCallback((id: string) => {
-    void useChatStore.getState().openChatSplit(id);
-  }, []);
-
-  // Fork the chat into N side-by-side panes — the dialog picks the count,
-  // the store action does the copying + pinning.
-  const handleForkChat = useCallback((id: string) => {
-    useUiStore.getState().openForkChatModal(id);
-  }, []);
+  // Shared with ProjectsSidebar (audit M: DRY) — the eight row actions and
+  // their toasts lived twice and drifted.
+  const {
+    handleSelectChat,
+    handleDeleteChat,
+    handleRenameChat,
+    handleToggleStar,
+    handleSetUnread,
+    handleExportChat,
+    handleOpenSplitChat,
+    handleForkChat,
+  } = useChatRowActions();
 
   useEffect(() => {
     if (!chatLoaded) {
@@ -358,7 +315,8 @@ export function Sidebar() {
             : null;
           const overridePath = cwdOverrides[s.id] ?? null;
           const folderName = overridePath
-            ? overridePath.split(/[\/]/).filter(Boolean).pop() ?? null
+            // Windows paths use backslashes — split on both separators.
+            ? overridePath.split(/[\\/]/).filter(Boolean).pop() ?? null
             : null;
           const branchName = s.worktreePath
             ? `relay/${s.id}` // isolated-worktree branch naming (P0 §3.1.1)

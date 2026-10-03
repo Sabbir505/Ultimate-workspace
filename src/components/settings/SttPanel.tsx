@@ -43,6 +43,10 @@ export function SttPanel() {
     let unlisten: (() => void) | null = null;
     void onModelDownloadProgress((p) => {
       if (stale) return;
+      // Only react to this panel's own speech-model downloads (catalog ids
+      // "stt/…"); the stream is shared with the market/TTS/Knowledge, and an
+      // unrelated download finishing must not toast "Speech model installed".
+      if (!p.id.startsWith("stt/")) return;
       setDownloads((prev) => ({
         ...prev,
         [p.id]: { state: p.state, downloaded: p.downloadedBytes, total: p.totalBytes ?? null },

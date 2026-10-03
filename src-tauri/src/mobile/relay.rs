@@ -665,6 +665,15 @@ const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(25);
 /// TCP connection is half-open and the handler tears down.
 const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
 
+/// Evict a connection after this many CONSECUTIVE undecryptable frames
+/// (audit H43). A replayed legacy pairing proof pairs but can never decrypt,
+/// and the old answer-and-continue path let such a zombie hold
+/// `phones_disconnected`'s map open forever — permanently suppressing push
+/// notifications to the real phone. Five is far above any legitimate client's
+/// tolerance (every decrypt failure is a counter desync, not a transient)
+/// and far below the <75s junk-frame drip a replay needs.
+const AEAD_FAILURE_EVICT_THRESHOLD: u64 = 5;
+
 /// One copy of the dispatch-and-reply block that a dozen op arms shared
 /// verbatim (`match dispatch_mobile(...) { Ok(msgs) => send each,
 /// Err(e) => ChatError("session-chat") }`). Arms that must register the
@@ -767,6 +776,9 @@ async fn handle_connection(
     let ws_stream = tokio_tungstenite::accept_async(stream)
         .await
         .map_err(|e| format!("ws handshake failed: {e}"))?;
+    // Consecutive-undecryptable-frame counter (audit H43): zeroed by any
+    // frame that decrypts, evicting the connection at the threshold.
+    let aead_failures = std::sync::atomic::AtomicU64::new(0);
     let (sink, mut read) = ws_stream.split();
     // Share the write half with the per-connection owner-channel pump: the
     // request loop writes request/response messages directly while streaming
@@ -891,11 +903,41 @@ async fn handle_connection(
             }
             Message::Binary(b) => {
                 let plain = match super::relay_ws::decrypt_binary(&write, &b).await {
-                    Some(p) => p,
+                    Some(p) => {
+                        // A frame that decrypts proves this connection holds
+                        // the real session key — reset the eviction counter
+                        // (audit H43).
+                        aead_failures.store(0, Ordering::SeqCst);
+                        p
+                    }
                     None => {
                         // E2E not enabled (protocol violation) or tag
                         // mismatch. The inbound counter already advanced, so
                         // later frames stay decryptable — report and move on.
+                        //
+                        // But a connection that KEEPS failing verification is
+                        // not a legitimate client having a bad day: a replayed
+                        // static pairing proof pairs successfully (the legacy
+                        // path) yet cannot decrypt anything, and this relay
+                        // used to answer-and-continue forever. That left a
+                        // permanently "paired" zombie in `conns`, and
+                        // `phones_disconnected` trusts exactly that map — so
+                        // ONE junk frame per <75s permanently suppressed
+                        // approval/turn-done pushes to the real phone (audit
+                        // H43). Evict after a short run of consecutive
+                        // failures; a genuine client recovers by reconnecting
+                        // (fresh PairOk, fresh salt).
+                        let fails = aead_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                        if fails >= AEAD_FAILURE_EVICT_THRESHOLD {
+                            eprintln!(
+                                "[mobile-relay] evicting connection after {fails} consecutive \
+                                 undecryptable frames (replay / broken client)"
+                            );
+                            // Ending the handler drops the socket and unregisters
+                            // the connection — the zombie no longer holds the
+                            // push-suppression map (audit H43).
+                            return Ok(());
+                        }
                         let err = DesktopMessage::ChatError {
                             chat_session_id: "unknown".to_string(),
                             error: "undecryptable frame (E2E not enabled or tag mismatch)".into(),

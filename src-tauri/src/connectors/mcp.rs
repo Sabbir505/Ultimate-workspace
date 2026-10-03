@@ -26,6 +26,15 @@ use tauri::AppHandle;
 
 use crate::chat::permission::ToolHints;
 use crate::connectors::connector_by_id;
+
+// Wall-clock bounds for the MCP HTTP transport (audit H27). rmcp's default
+// client sets no request timeout at all, so a vendor endpoint that accepts
+// the TCP connection and then goes silent parked the turn forever (the
+// spinner never cleared). Generous enough for slow tools — a Canva-style
+// render can take a minute — but finite.
+const MCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MCP_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MCP_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 use crate::connectors::oauth::ensure_valid_access_token;
 
 /// A live MCP client session connected to a connector's remote server.
@@ -80,10 +89,19 @@ pub async fn connect(app: &AppHandle, connector_id: &str) -> Result<McpSession, 
         Implementation::new("relay", env!("CARGO_PKG_VERSION")),
     );
 
-    let svc = client_info
-        .serve(transport)
-        .await
-        .map_err(|e| format!("mcp initialize failed: {e}"))?;
+    let svc = tokio::time::timeout(
+        MCP_CONNECT_TIMEOUT,
+        client_info.serve(transport),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "mcp initialize timed out after {}s — the server accepted the connection but \
+             never completed the handshake",
+            MCP_CONNECT_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|e| format!("mcp initialize failed: {e}"))?;
 
     Ok(McpSession {
         connector_id: connector.id.to_string(),
@@ -95,10 +113,20 @@ impl McpSession {
     /// List the remote server's tools. Called once per turn (per attached
     /// connector) to merge into the LLM request's tool set.
     pub async fn list_tools(&self) -> Result<Vec<RemoteTool>, String> {
-        let result = self
-            .svc
-            .list_tools(None)
+        // Bounded (audit H27): rmcp's default HTTP client sets NO request
+        // timeout — verified in the vendored source (only
+        // `pool_max_idle_per_host(0)` + `redirect::Policy::none()`). A vendor
+        // endpoint that accepts the connection and then goes quiet parked
+        // this call (and the whole turn) forever. Same failure class as the
+        // OAuth fix in oauth.rs.
+        let result = tokio::time::timeout(MCP_LIST_TIMEOUT, self.svc.list_tools(None))
             .await
+            .map_err(|_| {
+                format!(
+                    "mcp tools/list timed out after {}s",
+                    MCP_LIST_TIMEOUT.as_secs()
+                )
+            })?
             .map_err(|e| format!("mcp tools/list failed: {e}"))?;
         Ok(result
             .tools
@@ -129,10 +157,14 @@ impl McpSession {
         if let serde_json::Value::Object(map) = args {
             params = params.with_arguments(map.clone());
         }
-        let result = self
-            .svc
-            .call_tool(params)
+        let result = tokio::time::timeout(MCP_CALL_TIMEOUT, self.svc.call_tool(params))
             .await
+            .map_err(|_| {
+                format!(
+                    "mcp tools/call `{name}` timed out after {}s",
+                    MCP_CALL_TIMEOUT.as_secs()
+                )
+            })?
             .map_err(|e| format!("mcp tools/call `{name}` failed: {e}"))?;
 
         // Flatten text blocks into a single string; non-text blocks become a

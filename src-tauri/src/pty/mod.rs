@@ -333,6 +333,52 @@ struct PaneLive {
     last_usage_sync: Instant,
 }
 
+/// Delta two CUMULATIVE usage snapshots (audit M: pty usage DRY — the ~35-line
+/// field-by-field zip lived verbatim in both record_usage and
+/// record_usage_on_disk; a future field added to one zip and forgotten in the
+/// other silently corrupted the on-disk cost path). `None` baseline = first
+/// observation, so the snapshot IS the delta.
+fn usage_delta(prev: Option<UsageInfo>, cur: UsageInfo) -> UsageInfo {
+    match prev {
+        Some(p) => UsageInfo {
+            input_tokens: cur
+                .input_tokens
+                .zip(p.input_tokens)
+                .map(|(a, b)| (a - b).max(0)),
+            output_tokens: cur
+                .output_tokens
+                .zip(p.output_tokens)
+                .map(|(a, b)| (a - b).max(0)),
+            cache_creation_input_tokens: cur
+                .cache_creation_input_tokens
+                .zip(p.cache_creation_input_tokens)
+                .map(|(a, b)| (a - b).max(0)),
+            cache_read_input_tokens: cur
+                .cache_read_input_tokens
+                .zip(p.cache_read_input_tokens)
+                .map(|(a, b)| (a - b).max(0)),
+            reasoning_output_tokens: cur
+                .reasoning_output_tokens
+                .zip(p.reasoning_output_tokens)
+                .map(|(a, b)| (a - b).max(0)),
+            cost_usd: cur.cost_usd.zip(p.cost_usd).map(|(a, b)| (a - b).max(0.0)),
+        },
+        None => cur,
+    }
+}
+
+/// A delta is only "zero" when EVERY field is zero — including cache/reasoning
+/// (a turn served purely from cache has input=0, output=0 but nonzero
+/// cache_read, and must still be recorded).
+fn usage_is_zero(delta: &UsageInfo) -> bool {
+    delta.input_tokens.unwrap_or(0) == 0
+        && delta.output_tokens.unwrap_or(0) == 0
+        && delta.cache_creation_input_tokens.unwrap_or(0) == 0
+        && delta.cache_read_input_tokens.unwrap_or(0) == 0
+        && delta.reasoning_output_tokens.unwrap_or(0) == 0
+        && delta.cost_usd.unwrap_or(0.0) == 0.0
+}
+
 impl Pane {
     /// The spawned child's OS process id, if still resolvable. Used by the
     /// dev-mode memory counter (`pane_memory`) to look up the process's RSS
@@ -443,43 +489,9 @@ impl Pane {
             let mut last = self.last_usage.lock();
             let prev = *last;
             *last = Some(usage);
-            match prev {
-                Some(p) => UsageInfo {
-                    input_tokens: usage
-                        .input_tokens
-                        .zip(p.input_tokens)
-                        .map(|(a, b)| (a - b).max(0)),
-                    output_tokens: usage
-                        .output_tokens
-                        .zip(p.output_tokens)
-                        .map(|(a, b)| (a - b).max(0)),
-                    cache_creation_input_tokens: usage
-                        .cache_creation_input_tokens
-                        .zip(p.cache_creation_input_tokens)
-                        .map(|(a, b)| (a - b).max(0)),
-                    cache_read_input_tokens: usage
-                        .cache_read_input_tokens
-                        .zip(p.cache_read_input_tokens)
-                        .map(|(a, b)| (a - b).max(0)),
-                    reasoning_output_tokens: usage
-                        .reasoning_output_tokens
-                        .zip(p.reasoning_output_tokens)
-                        .map(|(a, b)| (a - b).max(0)),
-                    cost_usd: usage.cost_usd.zip(p.cost_usd).map(|(a, b)| (a - b).max(0.0)),
-                },
-                None => usage,
-            }
+            usage_delta(prev, usage)
         };
-        // A delta is only "zero" when EVERY field is zero — including
-        // cache/reasoning (a turn served purely from cache has input=0,
-        // output=0 but nonzero cache_read, and must still be recorded).
-        let is_zero = delta.input_tokens.unwrap_or(0) == 0
-            && delta.output_tokens.unwrap_or(0) == 0
-            && delta.cache_creation_input_tokens.unwrap_or(0) == 0
-            && delta.cache_read_input_tokens.unwrap_or(0) == 0
-            && delta.reasoning_output_tokens.unwrap_or(0) == 0
-            && delta.cost_usd.unwrap_or(0.0) == 0.0;
-        if is_zero {
+        if usage_is_zero(&delta) {
             return;
         }
         // reported_cost_usd = what the harness itself printed (may be None).
@@ -521,43 +533,9 @@ impl Pane {
             let mut last = self.last_usage_on_disk.lock();
             let prev = *last;
             *last = Some(usage);
-            match prev {
-                Some(p) => UsageInfo {
-                    input_tokens: usage
-                        .input_tokens
-                        .zip(p.input_tokens)
-                        .map(|(a, b)| (a - b).max(0)),
-                    output_tokens: usage
-                        .output_tokens
-                        .zip(p.output_tokens)
-                        .map(|(a, b)| (a - b).max(0)),
-                    cache_creation_input_tokens: usage
-                        .cache_creation_input_tokens
-                        .zip(p.cache_creation_input_tokens)
-                        .map(|(a, b)| (a - b).max(0)),
-                    cache_read_input_tokens: usage
-                        .cache_read_input_tokens
-                        .zip(p.cache_read_input_tokens)
-                        .map(|(a, b)| (a - b).max(0)),
-                    reasoning_output_tokens: usage
-                        .reasoning_output_tokens
-                        .zip(p.reasoning_output_tokens)
-                        .map(|(a, b)| (a - b).max(0)),
-                    cost_usd: usage.cost_usd.zip(p.cost_usd).map(|(a, b)| (a - b).max(0.0)),
-                },
-                None => usage,
-            }
+            usage_delta(prev, usage)
         };
-        // A delta is only "zero" when EVERY field is zero — including
-        // cache/reasoning (a turn served purely from cache has input=0,
-        // output=0 but nonzero cache_read, and must still be recorded).
-        let is_zero = delta.input_tokens.unwrap_or(0) == 0
-            && delta.output_tokens.unwrap_or(0) == 0
-            && delta.cache_creation_input_tokens.unwrap_or(0) == 0
-            && delta.cache_read_input_tokens.unwrap_or(0) == 0
-            && delta.reasoning_output_tokens.unwrap_or(0) == 0
-            && delta.cost_usd.unwrap_or(0.0) == 0.0;
-        if is_zero {
+        if usage_is_zero(&delta) {
             return;
         }
         // reported_cost_usd = what the harness itself printed (usually None —
@@ -1012,41 +990,26 @@ impl PtyManager {
                                 frame_started = Some(Instant::now());
                             }
                             frame.extend_from_slice(&buf[..n]);
-                            // Force a flush if the byte limit is reached,
-                            // otherwise wait for the next read to see if
-                            // more data is on the way before flushing.
-                            if frame.len() >= FRAME_BYTE_LIMIT {
-                                flush_frame!();
-                            } else if let Some(started) = frame_started {
-                                // If 16 ms have elapsed since the first byte
-                                // of this frame, flush now.
-                                if started.elapsed() >= FRAME_BUDGET {
-                                    flush_frame!();
-                                }
-                            }
+                            // Flush every read that lands. Coalescing across
+                            // reads is not available through the `dyn Read`
+                            // pty handle (no non-blocking probe), and the old
+                            // loop's alternative — sleep out the 16 ms budget
+                            // after EVERY read — capped each pane at one 8KB
+                            // frame per 16 ms (~512KB/s) while making the 64KB
+                            // FRAME_BYTE_LIMIT dead code: an output-heavy
+                            // command (`cargo build`, test runs) then blocked
+                            // on ConPTY backpressure and the transcript lagged
+                            // minutes behind (audit H2). Immediate flush is
+                            // strictly faster and never throttles; the byte
+                            // limit stays as the frame-extraction safety cap.
+                            flush_frame!();
                         }
                         Err(_) => {
                             flush_frame!();
                             break;
                         }
                     }
-                    // Realize the documented 16 ms coalescing budget: wait
-                    // out the remainder with ONE deadline-based sleep (the
-                    // old loop spun in 3 ms slices — several spurious
-                    // wakeups per frame for no benefit), THEN flush. Reads
-                    // that arrive after the budget already elapsed flushed
-                    // immediately above, so this only paces a frame whose
-                    // budget is still open.
-                    if !frame.is_empty() {
-                        if let Some(started) = frame_started {
-                            let elapsed = started.elapsed();
-                            if elapsed < FRAME_BUDGET {
-                                thread::sleep(FRAME_BUDGET - elapsed);
-                            }
-                            flush_frame!();
-                        }
-                    }
-                    }
+                }
                 }));
                 if let Err(panic) = result {
                     emit_pane_crashed(

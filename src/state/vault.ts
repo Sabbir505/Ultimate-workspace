@@ -257,8 +257,38 @@ interface VaultStore {
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+/** The note the armed `saveTimer` belongs to. A timer must never write the
+ *  buffer into whatever note is active when it finally fires — the editor
+ *  keeps typing while a note switch flush/read is in flight, so a timer armed
+ *  for note A can come due after `activePath` already moved to B (audit C6). */
+let saveTimerPath: string | null = null;
 /** Pending per-keystroke search (set by setSearchQuery). */
 let searchDebounce: ReturnType<typeof setTimeout> | null = null;
+
+/** Clear an armed save timer without saving. */
+function clearSaveTimer() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  saveTimerPath = null;
+}
+
+/** Flush the CURRENT note's pending edits before its buffer is replaced.
+ *
+ *  A dirty check, not a timer check: keystrokes typed while the previous
+ *  flush/read was in flight were never covered by the old `if (saveTimer)`
+ *  gate (audit H35), and a save that FAILED leaves no timer armed, so edits
+ *  that never reached disk were silently abandoned. `saveNow` pairs the
+ *  still-old `activePath` with the latest `content`, so stragglers land on
+ *  the correct file. */
+async function flushPendingSave(get: () => VaultStore): Promise<void> {
+  clearSaveTimer();
+  const { activePath, content, savedContent } = get();
+  if (activePath && content !== savedContent) {
+    await get().saveNow();
+  }
+}
 
 /** Record the current note/asset/graph trio in the shell's back/forward
  *  timeline (ui store) — vault navigation joins view history, so the
@@ -474,11 +504,10 @@ export const useVaultStore = create<VaultStore>((set, get) => {
       return;
     }
     // Unsaved work first: flush whatever is pending so nothing is lost.
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      saveTimer = null;
-      await get().saveNow();
-    }
+    // Dirty-check based — keystrokes that landed while this await runs are
+    // covered because saveNow pairs the OLD activePath with the latest
+    // content (audit C6/H35).
+    await flushPendingSave(get);
     const gen = ++openGeneration;
     set({ loadingNote: true });
     const resolved = await resolveNotePath(path);
@@ -593,10 +622,17 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     if (!activePath || content === savedContent) return;
     if (saveTimer) clearTimeout(saveTimer);
     const gen = get().saveGeneration;
+    const path = activePath;
+    saveTimerPath = path;
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      // A stale timer (note switched since scheduling) must not fire.
-      if (get().saveGeneration === gen) void get().saveNow();
+      saveTimerPath = null;
+      // A stale timer must not fire: either the buffer changed under it
+      // (saveGeneration moved) or the NOTE it was armed for is no longer the
+      // active one — writing now would land note A's text in note B's file
+      // (audit C6).
+      if (get().saveGeneration !== gen || get().activePath !== path) return;
+      void get().saveNow();
     }, VAULT_SAVE_DEBOUNCE_MS);
   },
 
@@ -607,6 +643,12 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     try {
       await vaultWriteNote(activePath, content);
       set({ savedContent: content });
+      // The editor caches whole-note reads for `#subpath` completion keyed
+      // by path — the just-saved text may have different headings/blocks, so
+      // drop the stale entry (same dynamic-import bridge as bind()).
+      void import("../components/vault/VaultEditor")
+        .then((m) => m.invalidateNoteContent(activePath))
+        .catch(() => {});
       void get().refreshStats();
     } catch (e) {
       useUiStore.getState().pushToast("error", "Vault save failed", String(e));
@@ -630,12 +672,8 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     }
     // Active tab closing: flush pending edits for it first, then activate
     // the neighbor (previous tab preferred, like editors do). No tabs left
-    // → fully clear the note surface.
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      saveTimer = null;
-      void get().saveNow();
-    }
+    // → fully clear the note surface. Dirty-check flush (audit C6/H35).
+    void flushPendingSave(get);
     const neighbor = next[Math.max(0, idx - 1)] ?? null;
     set({ openNotes: next, activePath: neighbor, mode: s.noteModes[neighbor] ?? "preview" });
     if (!neighbor) {
@@ -789,12 +827,9 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     const withExt = to.toLowerCase().endsWith(".md") ? to : `${to}.md`;
     // Flush BEFORE the move: a pending autosave still targets `from`, and
     // firing it after the rename would recreate the old file with the fresh
-    // edits (two divergent copies, silently).
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      saveTimer = null;
-      await get().saveNow();
-    }
+    // edits (two divergent copies, silently). Dirty-check flush (audit
+    // C6/H35) so edits from a FAILED save are not abandoned here.
+    await flushPendingSave(get);
     try {
       await vaultRenameNote(from, withExt);
     } catch (e) {
@@ -948,12 +983,9 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     // a NEWER navigation opened — the next autosave would write the old
     // text into the new file.
     const gen = ++openGeneration;
-    // Flush pending edits first — a restore must not drop them.
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      saveTimer = null;
-      await get().saveNow();
-    }
+    // Flush pending edits first — a restore must not drop them (dirty
+    // check, same reason as openNote; audit C6/H35).
+    await flushPendingSave(get);
     if (gen !== openGeneration) return; // a newer open superseded this restore
     if (get().activePath !== snap.activePath) {
       if (!snap.activePath) {

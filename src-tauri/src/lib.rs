@@ -350,6 +350,13 @@ pub fn run() {
             {
                 let conn = shared_db.lock();
                 crate::db::sweep_stale_subagent_runs(&conn, crate::chat::subagents::STALE_RUNNING_SECS);
+                // Same for AUTOMATION runs: an app close mid-run (runs last
+                // up to 2h) left the row `running` forever — a phantom
+                // in-progress entry in Past Runs (audit H23).
+                crate::db::automations::sweep_stale_automation_runs(
+                    &conn,
+                    crate::automations::STALE_RUNNING_SECS,
+                );
             }
             app.manage(DbState(Arc::clone(&shared_db)));
             app.manage(PtyState(PtyManager::new(app.handle().clone(), Arc::clone(&shared_db))));
@@ -918,6 +925,9 @@ pub fn run() {
             commands::chat_cmds::set_chat_session_permission_mode,
             commands::chat_cmds::set_chat_api_key,
             commands::chat_cmds::delete_chat_api_key,
+            commands::chat_cmds::set_search_api_key,
+            commands::chat_cmds::has_search_api_key,
+            commands::chat_cmds::delete_search_api_key,
             commands::chat_cmds::set_chat_default_model,
             commands::chat_cmds::get_chat_config,
             commands::chat_cmds::list_chat_instances,

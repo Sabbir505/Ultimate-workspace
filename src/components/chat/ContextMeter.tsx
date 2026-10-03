@@ -128,24 +128,28 @@ export function ContextMeter({
     // A pinned window IS the answer — no live refinement can override it.
     if (pinned) return;
     let cancelled = false;
-    void contextWindowForModel(model, provider, { agent, chatSessionId }).then((w) => {
-      if (!cancelled && w && w > 0) {
-        // The user's cap shrinks the live figure too — same min() contract
-        // as the registry path (a cap never RAISES a window).
-        setDynamicMax(
-          contextLimitOverride && contextLimitOverride > 0
-            ? Math.min(w, contextLimitOverride)
-            : w,
-        );
-        setDynamicSource(
-          agent?.startsWith("harness:")
-            ? "harness-catalog"
-            : provider === "openrouter"
-              ? "openrouter-live"
-              : "provider-live",
-        );
-      }
-    });
+    void contextWindowForModel(model, provider, { agent, chatSessionId })
+      .then((w) => {
+        if (!cancelled && w && w > 0) {
+          // The user's cap shrinks the live figure too — same min() contract
+          // as the registry path (a cap never RAISES a window).
+          setDynamicMax(
+            contextLimitOverride && contextLimitOverride > 0
+              ? Math.min(w, contextLimitOverride)
+              : w,
+          );
+          setDynamicSource(
+            agent?.startsWith("harness:")
+              ? "harness-catalog"
+              : provider === "openrouter"
+                ? "openrouter-live"
+                : "provider-live",
+          );
+        }
+      })
+      .catch(() => {
+        /* the probe failing just means the registry fallback stays */
+      });
     return () => {
       cancelled = true;
     };

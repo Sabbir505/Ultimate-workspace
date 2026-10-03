@@ -249,10 +249,10 @@ struct AnthropicWireBody {
 /// "budget_tokens": N}`. `budget_tokens` must be < `max_tokens`.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-struct AnthropicThinking {
+pub(crate) struct AnthropicThinking {
     #[serde(rename = "type")]
-    kind: &'static str,
-    budget_tokens: i64,
+    pub(crate) kind: &'static str,
+    pub(crate) budget_tokens: i64,
 }
 
 #[derive(Serialize)]
@@ -334,7 +334,7 @@ fn openai_wire_max_tokens(req: &ChatRequest) -> Option<u32> {
 /// brain toggle is on, budget = whatever the cap leaves).
 ///
 /// Returns the (max_tokens, thinking) pair for the request body.
-fn anthropic_thinking_for(req: &ChatRequest) -> (i64, Option<AnthropicThinking>) {
+pub(crate) fn anthropic_thinking_for(req: &ChatRequest) -> (i64, Option<AnthropicThinking>) {
     let explicit_off = req.thinking == Some(false);
     let tier_budget = match req.effort.as_deref() {
         Some("low") => Some(4_096i64),

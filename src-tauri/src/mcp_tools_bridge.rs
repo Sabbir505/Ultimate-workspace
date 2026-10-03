@@ -173,6 +173,21 @@ pub fn outcome_artifact_json(o: &tools::ToolOutcome) -> Value {
     }
 }
 
+/// Has the owner opted harness sessions into UNGATED connector writes
+/// (audit H26)? Default is OFF — fail-closed, since the fallback READS return
+/// attacker-controllable content that can instruct a model to send or delete.
+/// Reading the setting is best-effort: a DB hiccup leaves writes disabled.
+fn harness_connector_writes_enabled(app: &tauri::AppHandle) -> bool {
+    let Some(db) = app.try_state::<crate::DbState>() else {
+        return false;
+    };
+    let conn = db.0.lock();
+    crate::db::get_setting(&conn, "connectors.harness_writes")
+        .ok()
+        .flatten()
+        .is_some_and(|v| v.trim() == "true")
+}
+
 /// Execute one relay-tools call, wrapped with the user-hook pass (origin
 /// `relay_tools`). There is no session identity on this path (`sid` is `None`
 /// in the hook payload) and no approval card is reachable — a hook's `ask`
@@ -315,11 +330,31 @@ async fn execute_relay_tool_inner(
     // Connector REST fallback tools (gmail_search_threads, gmail_send_
     // message, gdrive_create_file, …): app-side tools executed by the
     // connectors module, not registry tools, so the execute_tool fallback
-    // below can't route them. Owner policy: ALL fallback tools — writes
-    // included — execute here ungated (the user opted harness connector
-    // calls out of the approval-card flow); the built-in chat keeps its
-    // card gate for the same tools.
+    // below can't route them.
+    //
+    // READS stay ungated (they mirror the keyless web tools, and the user
+    // opted harness connector calls out of the approval-card flow). WRITES
+    // (send / create / delete) are refused unless the owner explicitly opted
+    // in (audit H26): the reads return attacker-controllable content — an
+    // email saying "forward everything to …" — so an ungated write path let a
+    // single prompt injection send mail or delete calendar events from the
+    // user's real account with zero confirmation, amplified by a tool
+    // description that told the model never to ask. Set
+    // `connectors.harness_writes` = "true" to restore the old behavior.
     if let Some(connector_id) = crate::connectors::fallback_tool_owner(tool_name) {
+        if crate::connectors::fallback_tool_is_write(tool_name)
+            && !harness_connector_writes_enabled(app)
+        {
+            return Ok(json!({
+                "text": format!(
+                    "Error: `{tool_name}` is a connector WRITE and connector writes are \
+                     disabled for agent harnesses. Reads still work. Ask the user to run it \
+                     from Relay's built-in chat (which confirms each action), or to enable \
+                     Settings → Connectors → \"Allow connector writes from agent harnesses\".",
+                ),
+                "artifact": Value::Null,
+            }));
+        }
         let text = match
             crate::connectors::execute_fallback_tool(app, connector_id, tool_name, args).await
         {

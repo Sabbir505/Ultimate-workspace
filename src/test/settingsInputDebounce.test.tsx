@@ -10,11 +10,18 @@ const getSettingMock = vi.fn();
 const setSettingMock = vi.fn();
 const memorySetExtractModelMock = vi.fn();
 const listChatModelsMock = vi.fn();
+// Search keys go to the OS keychain, not the settings table (audit C7) —
+// this suite follows the debounce contract onto the new commands.
+const setSearchApiKeyMock = vi.fn();
+const hasSearchApiKeyMock = vi.fn();
 
 vi.mock("../lib/ipc", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   getSetting: (...a: unknown[]) => getSettingMock(...(a as [])),
   setSetting: (...a: unknown[]) => setSettingMock(...(a as [])),
+  setSearchApiKey: (...a: unknown[]) => setSearchApiKeyMock(...(a as [])),
+  hasSearchApiKey: (...a: unknown[]) => hasSearchApiKeyMock(...(a as [])),
+  deleteSearchApiKey: vi.fn(),
   memorySetExtractModel: (...a: unknown[]) => memorySetExtractModelMock(...(a as [])),
   listChatModels: (...a: unknown[]) => listChatModelsMock(...(a as [])),
   memoryStatus: vi.fn(async () => ({
@@ -56,6 +63,8 @@ beforeEach(() => {
   setSettingMock.mockResolvedValue(undefined);
   memorySetExtractModelMock.mockResolvedValue(undefined);
   listChatModelsMock.mockResolvedValue([]);
+  setSearchApiKeyMock.mockResolvedValue(undefined);
+  hasSearchApiKeyMock.mockResolvedValue(false);
 });
 
 afterEach(() => {
@@ -78,6 +87,7 @@ describe("WebSearchPanel key input debounce (C12)", () => {
       fireEvent.change(select, { target: { value: "serper" } });
     });
     setSettingMock.mockClear();
+    setSearchApiKeyMock.mockClear();
 
     // Type a 30-char key, one character at a time.
     const input = screen.getByPlaceholderText("Paste your API key…");
@@ -86,14 +96,19 @@ describe("WebSearchPanel key input debounce (C12)", () => {
     }
     expect((input as HTMLInputElement).value).toBe("k".repeat(30));
     // Nothing persisted while typing.
-    expect(setSettingMock).not.toHaveBeenCalled();
+    expect(setSearchApiKeyMock).not.toHaveBeenCalled();
 
-    // After the debounce window: exactly one write, with the final value.
+    // After the debounce window: exactly one write, with the final value —
+    // to the OS keychain command, never the plaintext settings KV (audit C7).
     await act(async () => {
       vi.advanceTimersByTime(500);
     });
-    expect(setSettingMock).toHaveBeenCalledTimes(1);
-    expect(setSettingMock).toHaveBeenCalledWith("search.serper_key", "k".repeat(30));
+    expect(setSearchApiKeyMock).toHaveBeenCalledTimes(1);
+    expect(setSearchApiKeyMock).toHaveBeenCalledWith("serper", "k".repeat(30));
+    expect(setSettingMock).not.toHaveBeenCalledWith(
+      "search.serper_key",
+      expect.anything(),
+    );
   });
 
   it("unmount before the debounce elapses → flushes the pending value", async () => {
@@ -108,16 +123,17 @@ describe("WebSearchPanel key input debounce (C12)", () => {
       fireEvent.change(select, { target: { value: "tavily" } });
     });
     setSettingMock.mockClear();
+    setSearchApiKeyMock.mockClear();
 
     const input = screen.getByPlaceholderText("Paste your API key…");
     fireEvent.change(input, { target: { value: "pending-key" } });
-    expect(setSettingMock).not.toHaveBeenCalled();
+    expect(setSearchApiKeyMock).not.toHaveBeenCalled();
 
     // Close the panel BEFORE the 400ms debounce fires.
     await act(async () => {
       unmount();
     });
-    expect(setSettingMock).toHaveBeenCalledWith("search.tavily_key", "pending-key");
+    expect(setSearchApiKeyMock).toHaveBeenCalledWith("tavily", "pending-key");
   });
 });
 

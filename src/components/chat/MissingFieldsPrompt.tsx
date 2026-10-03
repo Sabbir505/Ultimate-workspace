@@ -158,7 +158,10 @@ export function MissingFieldsPrompt({
       // ArtifactProposalCard.normalizeMissingFieldPath).
       const value = getValueByPath(proposal.spec, path.replace(/^spec\./, ""));
       if (value !== undefined) {
-        initial[path] = value;
+        // The inputs render `value as string` — seed non-string values (a
+        // nested object/array from the spec) as editable JSON text instead
+        // of "[object Object]".
+        initial[path] = typeof value === "string" ? value : JSON.stringify(value, null, 2);
       }
     }
     setFieldValues(initial);

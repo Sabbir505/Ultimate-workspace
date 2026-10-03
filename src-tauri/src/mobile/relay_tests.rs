@@ -442,6 +442,7 @@ async fn challenge_handshake_both_directions_encrypted() {
                 token: None,
                 proof: Some(proof),
                 v2: Some(true),
+                v3: None,
             },
         )
         .await;
@@ -520,6 +521,7 @@ async fn captured_pair_frame_cannot_be_replayed_on_a_new_connection() {
             token: None,
             proof: Some(proof),
             v2: Some(true),
+            v3: None,
         };
         let text = serde_json::to_string(&pair).unwrap();
         phone_send_raw(&mut client, text.clone()).await;
@@ -578,6 +580,7 @@ async fn v2_client_cannot_fall_back_to_static_proof() {
                 token: None,
                 proof: Some(relay_crypto::compute_pair_proof(token)),
                 v2: Some(true),
+                v3: None,
             },
         )
         .await;
@@ -613,6 +616,7 @@ async fn legacy_static_proof_still_pairs() {
                 token: None,
                 proof: Some(relay_crypto::compute_pair_proof(token)),
                 v2: None,
+                v3: None,
             },
         )
         .await;
@@ -649,6 +653,7 @@ async fn require_challenge_refuses_legacy_proof() {
                 token: None,
                 proof: Some(relay_crypto::compute_pair_proof(token)),
                 v2: None,
+                v3: None,
             },
         )
         .await;
@@ -708,6 +713,7 @@ async fn challenge_proof_with_wrong_token_is_rejected() {
                 token: None,
                 proof: Some(proof),
                 v2: Some(true),
+                v3: None,
             },
         )
         .await;

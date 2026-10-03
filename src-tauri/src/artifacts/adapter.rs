@@ -231,7 +231,9 @@ fn format_loop_markdown(spec: &LoopSpec) -> String {
     if !spec.inputs.is_empty() {
         md.push_str("## Inputs\n\n");
         for input in &spec.inputs {
-            md.push_str(&format!("- **{}", input.name));
+            // Closing `**` — the loop formatter dropped it, so every generated
+            // loop skill's Inputs section bled bold to end-of-line (audit M).
+            md.push_str(&format!("- **{}**", input.name));
             if let Some(desc) = &input.description {
                 md.push_str(&format!(": {}", desc));
             }

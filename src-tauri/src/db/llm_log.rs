@@ -278,9 +278,18 @@ pub fn list(conn: &Connection, f: &LogFilter) -> DbResult<Vec<LlmLogSummary>> {
     if let Some(s) = &f.search {
         let s = s.trim();
         if !s.is_empty() {
-            sql.push_str(" AND (IFNULL(request_body,'') LIKE ? OR IFNULL(response_body,'') LIKE ?)");
-            args.push(Box::new(format!("%{s}%")));
-            args.push(Box::new(format!("%{s}%")));
+            // Escape LIKE wildcards (audit M: llm_log search): a raw `%`/`_`
+            // in the box acted as a wildcard and matched everything. Same
+            // discipline as db/chat.rs / db/session_fabric.rs.
+            let escaped = s
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            sql.push_str(
+                " AND (IFNULL(request_body,'') LIKE ? ESCAPE '\\' OR IFNULL(response_body,'') LIKE ? ESCAPE '\\')",
+            );
+            args.push(Box::new(format!("%{escaped}%")));
+            args.push(Box::new(format!("%{escaped}%")));
         }
     }
     sql.push_str(" ORDER BY created_at DESC, rowid DESC LIMIT ?");

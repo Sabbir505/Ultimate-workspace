@@ -1137,8 +1137,10 @@ pub async fn send_chat_message(
         // agents_md.rs. The same layering happens for harness CLIs in
         // agent_sessions::bundle (their instructions.md), so both surfaces
         // honor the repo standard.
+        // Reuse the guard this block already holds — a nested `db.0.lock()`
+        // here deadlocks the whole app (DbState's parking_lot Mutex is not
+        // reentrant; audit C1). No `.await` between, so one guard suffices.
         let agents_md_section = session_project_id.as_ref().and_then(|pid| {
-            let conn = db.0.lock();
             db::get_project(&conn, pid)
                 .ok()
                 .flatten()
@@ -1152,7 +1154,7 @@ pub async fn send_chat_message(
         // Gated on Settings → Wiki ("layer index"), default on; absent when
         // the project has no wiki, so the prompt prefix stays stable.
         let wiki_section = session_project_id.as_ref().and_then(|pid| {
-            let conn = db.0.lock();
+            // Same single guard as the AGENTS.md section above (audit C1).
             let layer = db::get_setting(&conn, "wiki.layer_index")
                 .ok()
                 .flatten()

@@ -14,9 +14,25 @@
 
 /// Raise an OS toast bearing the app identity. Windows only; other platforms
 /// keep using the notification plugin (see src/lib/notify.ts).
+///
+/// `async` + spawn_blocking (audit M: os_toast on the UI thread): the body
+/// does HKCU registry writes, first-use icon PNG encode + write, and a
+/// synchronous WinRT show — every one of them a visible stall if run inline,
+/// and a non-async command runs on the IPC/UI thread (lib.rs's own rule).
 #[cfg(windows)]
-#[tauri::command]
-pub fn os_toast(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+#[tauri::command(async)]
+pub async fn os_toast(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || os_toast_blocking(app, title, body))
+        .await
+        .map_err(|e| format!("toast task failed: {e}"))?
+}
+
+#[cfg(windows)]
+fn os_toast_blocking(
+    app: tauri::AppHandle,
+    title: String,
+    body: String,
+) -> Result<(), String> {
     let aumid = app.config().identifier.clone();
     let display_name = app
         .config()

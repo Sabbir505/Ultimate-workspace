@@ -1080,8 +1080,13 @@ impl LocalModelRegistry {
             let health_url = format!("http://127.0.0.1:{port}/health");
             // Loopback-only client: never route local GGUF server checks
             // through a system proxy.
+            // Per-probe timeout (audit M: local_models health client): an
+            // UNBOUNDED client let a listening-but-not-answering sidecar park
+            // the health loop forever, defeating this ladder.s whole budget.
+            // 2s matches the reusable-sidecar probe.
             let client = reqwest::Client::builder()
                 .no_proxy()
+                .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .unwrap_or_default();
             let mut ready = false;
@@ -1382,8 +1387,13 @@ impl LocalModelRegistry {
 
             // Health poll: embedding models load in a few seconds.
             let health_url = format!("http://127.0.0.1:{port}/health");
+            // Per-probe timeout (audit M: local_models health client): an
+            // UNBOUNDED client let a listening-but-not-answering sidecar park
+            // the health loop forever, defeating this ladder.s whole budget.
+            // 2s matches the reusable-sidecar probe.
             let client = reqwest::Client::builder()
                 .no_proxy()
+                .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .unwrap_or_default();
             let mut ready = false;

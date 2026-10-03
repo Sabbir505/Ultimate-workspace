@@ -350,8 +350,20 @@ export const cancelChatMessage = (chatSessionId: string) =>
 /** Resolve a pending per-action tool approval card. `approved` lets the paused
  *  tool loop (or the Claude Code control request) run the action; `false`
  *  injects a "user denied" tool result. */
-export const resolveToolAction = (pendingId: string, approved: boolean, selected?: number[]) =>
-  safeInvoke<void>("resolve_tool_action", { pendingId, approved, selected: selected ?? null });
+export const resolveToolAction = (
+  pendingId: string,
+  approved: boolean,
+  selected?: number[],
+  always?: boolean,
+) =>
+  safeInvoke<void>("resolve_tool_action", {
+    pendingId,
+    approved,
+    selected: selected ?? null,
+    // The backend grants the target's directory ONLY for a remembered
+    // approval (audit H6) — a plain "allow once" must not widen fs_roots.
+    always: always ?? null,
+  });
 /** Persist the partial assistant reply of a cancelled stream, so the text the
  *  user already saw survives the cancel instead of vanishing. */
 export const persistPartialChatMessage = (chatSessionId: string, content: string) =>
@@ -374,6 +386,18 @@ export const setChatApiKey = (
   });
 export const deleteChatApiKey = (provider: string) =>
   safeInvoke<void>("delete_chat_api_key", { provider });
+
+/** Search-engine keys live in the OS keychain like every other secret — they
+ *  used to persist through the generic settings KV, i.e. PLAINTEXT in SQLite
+ *  (audit C7). The stored VALUE is never returned: `hasSearchApiKey` exposes a
+ *  boolean, and an empty `key` clears the entry. */
+export const setSearchApiKey = (provider: string, key: string) =>
+  safeInvoke<void>("set_search_api_key", { provider, key });
+export const hasSearchApiKey = (provider: string) =>
+  safeInvoke<boolean>("has_search_api_key", { provider });
+export const deleteSearchApiKey = (provider: string) =>
+  safeInvoke<void>("delete_search_api_key", { provider });
+
 export const getChatConfig = (provider?: string) =>
   safeInvoke<ChatConfigPayload | null>("get_chat_config", provider ? { provider } : {});
 

@@ -46,8 +46,21 @@ const RESYNC_DEBOUNCE: Duration = Duration::from_millis(500);
 /// `project:fs-changed` payload is a canonicalized path and Windows drive
 /// letters and directory casing do not survive that round-trip predictably.
 fn is_native_store_path(changed: &str, dirs: &[PathBuf]) -> bool {
-    let changed = Path::new(changed).to_string_lossy().to_lowercase();
-    dirs.iter().any(|dir| changed.starts_with(&dir.to_string_lossy().to_lowercase()))
+    // Compare through `strip_unc_prefix` on BOTH sides: notify hands us
+    // `canonicalize()` output, which on Windows carries the `\\?\` verbatim
+    // prefix (documented in util.rs:81-83), while the store dirs are
+    // home-dir-joined plain paths — so the prefix test failed
+    // UNCONDITIONALLY on Windows and the OpenCode user store (whose owner
+    // segment has no leading dot) matched neither this check nor the
+    // structural one, so its native agents never re-synced at all (audit
+    // H19).
+    let normalize = |p: &str| -> String {
+        crate::util::strip_unc_prefix(p).to_lowercase()
+    };
+    let changed = normalize(changed);
+    dirs.iter().any(|dir| {
+        changed.starts_with(&normalize(&dir.to_string_lossy()))
+    })
 }
 
 /// Install a watcher for every user-level native store that currently exists.
@@ -68,18 +81,20 @@ pub fn install_store_watchers(app: &AppHandle) {
 /// `listen`).
 pub fn listen(app: &AppHandle) {
     let inner = app.clone();
-    app.listen("project:fs-changed", move |event| {
+    // `fs:file-changed` carries the CHANGED FILE (audit H19); the
+    // `project:fs-changed` event deliberately keeps carrying the watched ROOT
+    // for the frontend, which is why this listener used to never match a
+    // per-file store layout and silently never fired.
+    app.listen("fs:file-changed", move |event| {
         let changed = event.payload();
         install_store_watchers(&inner);
         let dirs = crate::harness_config::existing_native_store_dirs();
-        if dirs.is_empty() {
-            return;
-        }
         // A user-level store is matched against the live directory list; a
         // PROJECT-level store (`<root>/.claude/agents`) sits inside the
         // recursive per-project watcher and so is never in that list, but its
         // shape is fixed by the layout. Either match is enough; neither needs
-        // a registry read.
+        // a registry read. An empty `dirs` is fine now that project-level
+        // stores can match on their own.
         if !is_native_store_path(changed, &dirs) && !is_project_store_path(changed) {
             return;
         }

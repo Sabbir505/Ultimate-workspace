@@ -890,6 +890,10 @@ const MAX_MD_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ZIP_BYTES: usize = 30 * 1024 * 1024;
 /// Per-archive file/size guards.
 const MAX_ARCHIVE_FILES: usize = 60;
+/// Directory listings walked while installing a skill tree (audit H25) —
+/// bounds the recursion so a huge repo can't fan the 60-file budget
+/// across thousands of API calls.
+const MAX_ARCHIVE_DIRS: usize = 24;
 const MAX_ARCHIVE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(crate) fn install_http_client() -> Result<reqwest::Client, String> {
@@ -963,11 +967,17 @@ fn write_skill_tree(
         let dir = root.join(slug);
         fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
         for (rel, bytes) in files {
-            // Zip-slip guard: reject absolute paths and `..` segments before
-            // they touch the filesystem.
+            // Zip-slip guard: reject absolute paths and any `..`/`.`
+            // COMPONENT before they touch the filesystem. Splitting on '/'
+            // alone let `..\..\evil.txt` through on Windows (the app's
+            // primary platform) and the join then resolved ParentDir
+            // components outside the skill root — audit C3.
             let rel_path = std::path::Path::new(rel);
             if rel_path.is_absolute()
-                || rel.split('/').any(|seg| seg == "..")
+                || rel_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                || rel.contains('\\')
             {
                 return Err(format!("unsafe archive path: {rel}"));
             }
@@ -1145,19 +1155,54 @@ async fn install_github_tree(
     }
     let base = git_ref.path.rsplit('/').next().unwrap_or("");
     let mut files: Vec<(String, Vec<u8>)> = vec![("SKILL.md".to_string(), doc_text.into_bytes())];
-    for (path, dl, is_dir) in &entries {
-        if *is_dir || *path == skill_doc.0 {
-            continue;
-        }
-        let rel = path
-            .strip_suffix(base)
-            .map(|p| p.trim_start_matches('/').to_string())
-            .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path).to_string());
-        let bytes = fetch_capped(client, dl, MAX_ARCHIVE_FILE_BYTES as usize).await?;
-        files.push((rel, bytes));
+    // Walk the whole skill tree, recursing into subdirectories. The contents
+    // API returns ONE level, and the old loop just SKIPPED `is_dir` entries —
+    // so `scripts/`, `reference/`, `assets/` next to SKILL.md were never
+    // fetched, contradicting this function's own contract ("the SKILL.md plus
+    // its siblings (one level + subdirectory children)") and leaving gallery
+    // installs silently incomplete with SKILL.md bodies pointing at missing
+    // files (audit H25).
+    let mut queue: Vec<(String, String, bool)> = entries.clone();
+    let mut dir_budget = MAX_ARCHIVE_DIRS;
+    while let Some((path, dl, is_dir)) = queue.pop() {
         if files.len() >= MAX_ARCHIVE_FILES {
             break;
         }
+        if is_dir {
+            if dir_budget == 0 {
+                break;
+            }
+            dir_budget -= 1;
+            // A subdirectory: list it and queue its entries. `git_ref.path` is
+            // the skill root; each nested listing needs its own path.
+            let mut sub = git_ref.clone();
+            sub.path = path.clone();
+            match github_list_dir(client, &sub).await {
+                Ok(children) => queue.extend(children),
+                // A directory we cannot list (rate limit, vanished) must not
+                // fail the whole install — the rest is still useful.
+                Err(_) => continue,
+            }
+            continue;
+        }
+        if path == skill_doc.0 {
+            continue;
+        }
+        // Relative path INSIDE the skill root, preserving subdirectory
+        // structure (the basename fallback flattened `scripts/run.sh` to
+        // `run.sh`).
+        let rel = path
+            .strip_prefix(git_ref.path.as_str())
+            .map(|p| p.trim_start_matches('/').to_string())
+            .unwrap_or_else(|| {
+                path.strip_suffix(base)
+                    .map(|p| p.trim_start_matches('/').to_string())
+                    .unwrap_or_else(|| {
+                        path.rsplit('/').next().unwrap_or(path.as_str()).to_string()
+                    })
+            });
+        let bytes = fetch_capped(client, &dl, MAX_ARCHIVE_FILE_BYTES as usize).await?;
+        files.push((rel, bytes));
     }
     let (claude_dir, _) = write_skill_tree(kind, &slug, &files)?;
     Ok(SkillInstallResult {
@@ -1183,6 +1228,25 @@ async fn install_zip(
     let bytes = fetch_capped(client, zip_url, MAX_ZIP_BYTES).await?;
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("open zip: {e}"))?;
+    // Refuse a traversal attempt ANYWHERE in the archive, before any
+    // prefix filtering: the zip spec mandates forward-slash entry names, so a
+    // backslash — or a `..` component in either form — is never legitimate.
+    // Validating every entry (not just the ones under the skill dir) means a
+    // hostile archive is rejected LOUDLY instead of having its poisoned
+    // entries silently skipped by the prefix filter (audit C3).
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip entry {i}: {e}"))?;
+        let name = entry.name().to_string();
+        if name.contains('\\')
+            || std::path::Path::new(&name)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(format!("unsafe archive path: {name}"));
+        }
+    }
     let mut skill_dirs: Vec<String> = Vec::new();
     for i in 0..archive.len() {
         let entry = archive
@@ -1623,25 +1687,30 @@ mod tests {
     #[tokio::test]
     async fn zip_slip_paths_are_refused() {
         let doc = "---\nname: evil\ndescription: d\n---\nbody";
-        let mut zip_buf = std::io::Cursor::new(Vec::new());
-        {
-            let mut w = zip::ZipWriter::new(&mut zip_buf);
-            let opts =
-                zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-            w.start_file("evil/SKILL.md", opts).unwrap();
-            std::io::Write::write_all(&mut w, doc.as_bytes()).unwrap();
-            w.start_file("evil/../outside.txt", opts).unwrap();
-            std::io::Write::write_all(&mut w, b"pwn").unwrap();
-            w.finish().unwrap();
-        }
-        let url = serve_once("/evil.zip", zip_buf.into_inner(), "application/zip");
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _env = ENV_LOCK.lock();
-        let _restore = use_home(tmp.path());
+        // Both separator forms: the forward-slash one is the classic zip-slip;
+        // the backslash form is the Windows escape the guard used to miss
+        // (audit C3).
+        for evil_entry in ["evil/../outside.txt", r"evil\..\..\outside.txt"] {
+            let mut zip_buf = std::io::Cursor::new(Vec::new());
+            {
+                let mut w = zip::ZipWriter::new(&mut zip_buf);
+                let opts = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated);
+                w.start_file("evil/SKILL.md", opts).unwrap();
+                std::io::Write::write_all(&mut w, doc.as_bytes()).unwrap();
+                w.start_file(evil_entry, opts).unwrap();
+                std::io::Write::write_all(&mut w, b"pwn").unwrap();
+                w.finish().unwrap();
+            }
+            let url = serve_once("/evil.zip", zip_buf.into_inner(), "application/zip");
+            let tmp = tempfile::TempDir::new().unwrap();
+            let _env = ENV_LOCK.lock();
+            let _restore = use_home(tmp.path());
 
-        let err = install_from_url(&url, "skills").await.expect_err("must refuse");
-        assert!(err.contains("unsafe archive path"), "{err}");
-        assert!(!tmp.path().join("outside.txt").exists());
+            let err = install_from_url(&url, "skills").await.expect_err("must refuse");
+            assert!(err.contains("unsafe archive path"), "{err}");
+            assert!(!tmp.path().join("outside.txt").exists());
+        }
     }
 
     /// Non-http URLs are refused up front.

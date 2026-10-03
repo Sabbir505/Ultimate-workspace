@@ -67,13 +67,23 @@ export function BranchDropdown({
   const inputRef = useRef<HTMLInputElement>(null);
   const createInputRef = useRef<HTMLInputElement>(null);
 
+  // Stale-response guard (audit H33): when `path` changes while a fetch is in
+  // flight (session switch rebinding `sessionProjects`, a project pick, the
+  // watcher racing a path change), the OLD repo's promise could resolve last
+  // and paint its branch list under the NEW repo's header — and since
+  // `performCheckout` uses the CURRENT path, clicking one of those entries
+  // executed a checkout in the WRONG repository.
+  const fetchSeqRef = useRef(0);
   const fetchAll = useCallback(async () => {
     if (!path) return;
+    const seq = ++fetchSeqRef.current;
+    const stale = () => seq !== fetchSeqRef.current;
     try {
       const [bl, cf] = await Promise.all([
         listGitBranches(path),
         getChangedFiles(path),
       ]);
+      if (stale()) return;
       setBranches(bl ?? []);
       setDirtyCount(cf?.length ?? 0);
       setError(null);
@@ -81,9 +91,10 @@ export function BranchDropdown({
       // Repo deleted / git binary failure: show the error instead of staying
       // on "Loading branches…" forever (and never let the promise reject —
       // both call sites below `void` it).
+      if (stale()) return;
       setError(String(e));
     } finally {
-      setLoading(false);
+      if (!stale()) setLoading(false);
     }
   }, [path]);
 

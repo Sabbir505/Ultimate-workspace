@@ -89,6 +89,10 @@ export function ApiKeysPanel() {
   const [editingNote, setEditingNote] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
   const [fetchError, setFetchError] = useState<string | null>(null);
+  // Success must not share `fetchError`'s slot: that slot renders the
+  // "Use manual input" action, which made a successful save look like a
+  // failure with a recovery button.
+  const [saveOk, setSaveOk] = useState(false);
   const [addingNew, setAddingNew] = useState(false);
   // User-assigned endpoint name — what the rail shows instead of the kind
   // label. Empty falls back to the kind label (also the field's placeholder).
@@ -248,11 +252,12 @@ export function ApiKeysPanel() {
   const handleSave = async () => {
     setSaving(true);
     setFetchError(null);
+    setSaveOk(false);
     try {
       await saveApiKeyFn(
         provider,
         apiKey.trim() || "",
-        isCompatible ? baseUrl : undefined,
+        isCompatible ? baseUrl.trim() : undefined,
         model || undefined,
         displayName.trim() || selectedProvider.label,
         selectedKind,
@@ -260,8 +265,8 @@ export function ApiKeysPanel() {
       // Clear the API key field after successful save (security)
       setApiKey("");
       setAddingNew(false);
-      setFetchError("Saved successfully!");
-      setTimeout(() => setFetchError(null), 3000);
+      setSaveOk(true);
+      setTimeout(() => setSaveOk(false), 3000);
       await refreshSavedProviders();
     } catch (e: any) {
       setFetchError(e?.message || String(e));
@@ -560,6 +565,16 @@ export function ApiKeysPanel() {
               <div className="api-inline-note">
                 <span>OpenRouter uses its hosted API endpoint.</span>
                 <button type="button" className="api-fetch-button" onClick={handleFetchModels} disabled={fetchingModels || (!apiKey.trim() && !hasExistingKey)}>{fetchingModels ? "Fetching…" : "Fetch models"}</button>
+              </div>
+            )}
+            {saveOk && (
+              <div className="api-form-feedback" role="status">
+                <span>Saved successfully!</span>
+              </div>
+            )}
+            {!saveOk && !fetchError && isCompatible && baseUrl.trim().length > 0 && !/^https?:\/\//i.test(baseUrl.trim()) && (
+              <div className="api-form-feedback" role="alert">
+                <span>Base URL should start with http:// or https://</span>
               </div>
             )}
             {fetchError && (

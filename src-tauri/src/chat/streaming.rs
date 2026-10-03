@@ -1683,15 +1683,16 @@ fn build_anthropic_body(req: &ChatRequest, messages: &[Value], tool_specs: &[Val
     let mut msgs = messages.to_vec();
     cache::mark_last_message(&mut msgs);
 
-    // E-3: with thinking on, Anthropic requires budget_tokens < max_tokens,
-    // so the emitted cap itself is floored to 3072 (same as providers.rs) —
-    // flooring only the budget derivation left max_tokens=1024 requests with
-    // budget_tokens=2048, which the API rejects outright.
-    let max_tokens = if req.thinking == Some(true) {
-        req.max_tokens.unwrap_or(4096).max(3072)
-    } else {
-        req.max_tokens.unwrap_or(4096)
-    };
+    // E-3: with thinking on, Anthropic requires budget_tokens < max_tokens, so
+    // the emitted cap is floored accordingly.
+    //
+    // LOCKSTEP (audit H3): the tool-loop body used to re-derive thinking from
+    // `req.thinking` alone, so with tools on (the default) the effort TIER was
+    // silently dropped — selecting low/medium/high on an Anthropic model sent
+    // no thinking budget at all, and the cap-floor logic diverged from
+    // `anthropic_thinking_for`'s. Call the shared derivation (whose doc
+    // contract says both builders must use it) instead of duplicating it.
+    let (max_tokens, thinking) = crate::chat::providers::anthropic_thinking_for(req);
     let mut body = json!({
         "model": req.model,
         "max_tokens": max_tokens,
@@ -1706,11 +1707,13 @@ fn build_anthropic_body(req: &ChatRequest, messages: &[Value], tool_specs: &[Val
     }
     // Extended thinking on the tool path too — previously only the
     // non-tool request builder (providers.rs) sent this, so the
-    // composer's brain toggle was a no-op with tools on (the default).
-    if req.thinking == Some(true) {
+    // composer's brain toggle was a no-op with tools on (the default). The
+    // block now comes from the shared derivation, so the effort tier and the
+    // brain toggle behave identically on both paths (audit H3).
+    if let Some(t) = thinking {
         body["thinking"] = json!({
-            "type": "enabled",
-            "budget_tokens": crate::chat::providers::anthropic_thinking_budget(max_tokens),
+            "type": t.kind,
+            "budget_tokens": t.budget_tokens,
         });
     }
     body

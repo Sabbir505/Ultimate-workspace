@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { ChatComposer } from "../components/chat/ChatComposer";
+import { useChatStore } from "../state/chat";
 
 vi.mock("../lib/ipc", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -16,10 +17,16 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
   listPromptTemplates: vi.fn(async () => []),
 }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  useChatStore.setState({ activeChatSessionId: null });
+});
 
 function renderComposer() {
   const onSend = vi.fn();
+  // A session must exist: the silent-drop guard (audit H31) keeps the draft
+  // and refuses to send when there is no chat to send into.
+  useChatStore.setState({ activeChatSessionId: "paste-test-session" });
   render(<ChatComposer onSend={onSend} streaming={false} onAgentModelPick={vi.fn()} />);
   return onSend;
 }

@@ -53,8 +53,18 @@ pub(super) fn send_opencode_turn(
     // session id was already dropped by send() above, so the respawned
     // server starts a fresh session and the context primer replays.
     let cwd_changed = entry.spawned_cwd.as_deref() != cwd;
+    // A server is only usable while its EVENT READER is attached. The reader
+    // performs exactly one `GET /event` with no retry, so any stream error —
+    // or the 250 ms "router grace" after the TCP probe not holding — silently
+    // kills it while the port stays alive. Every later send then reuses the
+    // "healthy" server: the model turn runs (tokens billed), ALL streamed text
+    // is lost, and the audit-#87 retry hint promises a restart that never
+    // fires because `alive` stayed true (audit H17). Consult the flag here so
+    // a dead reader triggers the respawn path.
+    let reader_alive = entry.oc_reader_alive.load(Ordering::SeqCst);
     let alive = !stamp_changed
         && !cwd_changed
+        && reader_alive
         && entry
             .oc_base_url
             .as_deref()
@@ -785,14 +795,32 @@ pub(super) fn read_opencode_server_events(
             Ok(c) => c,
             Err(_) => return,
         };
-        let resp = match client
-            .get(format!("{base_url}/event"))
-            .header("accept", "text/event-stream")
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => r,
-            _ => return,
+        // Retry the initial connect with backoff before giving up (audit H17): a
+        // single failed connect (the router-grace race right after spawn, or a
+        // momentary refusal) used to end the reader permanently while the TCP
+        // port stayed alive. The flag set by the caller now also triggers a
+        // respawn, so this is the gentler half of the fix — it usually avoids
+        // the restart entirely.
+        let resp = {
+            let mut attempt: u32 = 0;
+            loop {
+                match client
+                    .get(format!("{base_url}/event"))
+                    .header("accept", "text/event-stream")
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => break r,
+                    _ if attempt < 5 => {
+                        attempt += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            200u64 * (1 << attempt.min(4)),
+                        ))
+                        .await;
+                    }
+                    _ => return,
+                }
+            }
         };
         let mut stream = resp.bytes_stream();
         let mut buf = crate::util::SseLineBuffer::with_cap(4 * 1024 * 1024);

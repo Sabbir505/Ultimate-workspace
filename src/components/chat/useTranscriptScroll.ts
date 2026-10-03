@@ -582,10 +582,15 @@ export function useTranscriptScroll({
     // pass re-patches the cache and re-pins against the reflowed layout.
     const frames = [1, 2, 4, 8, 16, 32];
     let frame = 0;
+    let countdown = frames[0];
     let raf = 0;
     const step = () => {
-      patchTailAndPin();
-      frame++;
+      countdown -= 1;
+      if (countdown <= 0) {
+        patchTailAndPin();
+        frame += 1;
+        countdown = frames[frame] ?? Infinity;
+      }
       if (frame < frames.length) {
         raf = requestAnimationFrame(step);
       }

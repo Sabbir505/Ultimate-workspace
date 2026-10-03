@@ -354,6 +354,23 @@ export const ChatComposer = memo(function ChatComposer({
   // did before. Picking a command CONSUMES the typed token — the pill is the
   // selection, not text the user has to keep editing around.
   const [commandPill, setCommandPill] = useState<{ slug: string; label: string } | null>(null);
+  // Per-session reset of every OTHER send-affecting piece of composer state
+  // (audit H29). The draft is already per-session (see below), but
+  // attachments, the `/research` pill, the attach error and the pending
+  // attachment menu were component-local: this instance SURVIVES session
+  // switches (same tree position), so a screenshot or `/research` pill
+  // prepared in chat A rode into chat B's next send — cross-conversation
+  // content leakage into the wrong request.
+  const lastSessionIdRef = useRef<string | null>(effectiveSessionId);
+  useEffect(() => {
+    if (lastSessionIdRef.current === effectiveSessionId) return;
+    lastSessionIdRef.current = effectiveSessionId;
+    setAttachments([]);
+    setAttachError(null);
+    setForceResearch(false);
+    setAttachMenuOpen(false);
+    setCommandPill(null);
+  }, [effectiveSessionId]);
   // Prompt templates (roadmap #14): loaded alongside skills for the slash menu.
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
   // Variable-fill state: when a template with variables is selected, show a
@@ -1288,6 +1305,20 @@ export const ChatComposer = memo(function ChatComposer({
       return;
     }
 
+    // No session yet → the store's `sendMessage` early-returns and the composed
+    // message would VANISH (we clear right below) with no toast — during the
+    // boot window, or indefinitely if chat creation failed (audit H31). Keep
+    // the draft + attachments so the user can retry; only the send is
+    // deferred.
+    const sessionForSend = effectiveSessionId ?? useChatStore.getState().activeChatSessionId;
+    if (!sessionForSend) {
+      useUiStore.getState().pushToast(
+        "info",
+        "Still opening this chat",
+        "Your message is kept — send again in a moment.",
+      );
+      return;
+    }
     onSend(outgoing, attachments, forceResearch || undefined);
     onClearQuotedSelections?.();
     // Per-message connector semantics: the chip rode THIS message (as the
@@ -1693,9 +1724,7 @@ export const ChatComposer = memo(function ChatComposer({
                     role="menuitem"
                     aria-pressed={thinking === true}
                     onClick={() => {
-                      const next: boolean | null =
-                        thinking === null ? true : thinking === true ? false : null;
-                      onThinkingChange(next);
+                      onThinkingChange(nextThinkingValue(thinking ?? null));
                       setAttachMenuOpen(false);
                       textareaRef.current?.focus();
                     }}
@@ -1908,6 +1937,7 @@ import {
   FolderIcon,
   pathBasename,
   NO_QUEUED_MESSAGES,
+  nextThinkingValue,
   PASTE_TEXT_DOCUMENT_CHARS,
   AttachmentCard,
   ResearchIcon,

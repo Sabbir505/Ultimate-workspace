@@ -28,6 +28,11 @@ export function DocCodeRunner() {
     let disposed = false;
 
     const messageHandler = (event: MessageEvent) => {
+      // The result must come from THIS instance's frame — same rule as
+      // DocDesignRunner: the sandboxed frame has no access to this window
+      // beyond postMessage, and a foreign window must never be able to
+      // settle a run.
+      if (event.source !== frameRef.current?.contentWindow) return;
       const data = event.data as
         | { source?: string; requestId?: string; ok?: boolean; base64?: string; error?: string }
         | null;

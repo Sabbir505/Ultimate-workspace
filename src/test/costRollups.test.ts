@@ -4,7 +4,7 @@ import type {
 } from "../types";
 
 const sample: CostRollups = {
-  totals: { rawTokenCostUsd: 100, providerReportedUsd: 5, estimatedUsd: 95, unpricedUsd: 0 },
+  totals: { rawTokenCostUsd: 100, providerReportedUsd: 5, estimatedUsd: 95 },
   perProvider: [
     { provider: "claude_code", costUsd: 80, tokens: 1_000_000, sharePct: 80 },
     { provider: "kimi_code", costUsd: 20, tokens: 250_000, sharePct: 20 },

@@ -83,7 +83,7 @@ async fn drain_pipe_bounded<R: tokio::io::AsyncRead + Unpin>(mut pipe: R, cap: u
 /// point for Landlock / Job Objects / `sandbox-exec` — none is wired up yet.
 /// Returning `false` here keeps the "no OS-level sandbox" warning honest
 /// instead of advertising confinement that isn't actually enforced.
-fn sandbox_available() -> bool {
+pub(crate) fn sandbox_available() -> bool {
     false
 }
 
@@ -172,11 +172,11 @@ pub async fn run_code(language: &str, code: &str) -> String {
         );
     };
 
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("relay_exec_{nanos}"));
+    // UUID suffix (audit M: temp collisions): a bare nanosecond timestamp
+    // collided when two runs landed in the same tick (multi-pane parallel
+    // sessions) — create_dir_all succeeded silently and one run overwrote
+    // the other's main.py, executing the wrong source.
+    let dir = std::env::temp_dir().join(format!("relay_exec_{}", uuid::Uuid::new_v4()));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return format!("Error: could not create work dir: {e}");
     }
@@ -266,10 +266,17 @@ pub async fn run_code(language: &str, code: &str) -> String {
 }
 
 fn truncate(s: &str) -> String {
-    if s.len() <= MAX_OUTPUT {
+    truncate_to_cap(s, MAX_OUTPUT)
+}
+
+/// Char-boundary-safe truncation with the standard "output truncated" marker
+/// (audit M: DRY — pygen carried a second copy whose only difference was the
+/// cap; shared here so a marker/format fix lands in one place).
+pub(crate) fn truncate_to_cap(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
         return s.to_string();
     }
-    let mut cut = MAX_OUTPUT;
+    let mut cut = cap;
     while !s.is_char_boundary(cut) {
         cut -= 1;
     }

@@ -177,18 +177,13 @@ function cachePutBounded<K, V>(map: Map<K, V>, key: K, value: V, max: number) {
 }
 
 export function ImageGenCard({
-  sessionScopesTo,
   entry,
 }: {
-  /** Only the pane whose session owns the anchored generation renders the
-   *  card (split view: both panes subscribe to the same global events). */
-  sessionScopesTo?: string | null;
   /** Static past render (restart persistence): hydrate from the file on
    *  disk instead of the live store. */
   entry?: ImageGenHistoryEntry;
 }) {
   const update = useImageGenStore((s) => s.update);
-  const anchorSessionId = useImageGenStore((s) => s.anchorSessionId);
   const [startedAt] = useState(() => Date.now());
   const [now, setNow] = useState(() => Date.now());
   const active = update?.phase === "starting" || update?.phase === "rendering";

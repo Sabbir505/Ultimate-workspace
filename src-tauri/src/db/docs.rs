@@ -435,30 +435,12 @@ pub fn search_chunks_in_corpus(
 
 // ---- hybrid (FTS + vector) search ----
 
-/// Build a safe FTS5 MATCH expression from free-form user input. FTS5 has its
-/// own query language (AND/OR/NOT, phrases, column filters), so each term is
-/// stripped to alphanumerics, double-quoted (quoted strings are never parsed
-/// as operators) and ORed together as prefix terms — "stream" also hits
-/// "streaming", and bm25 ranks docs matching more terms higher. Returns None
-/// when nothing searchable remains (the caller skips the FTS leg). Same
-/// escaping discipline as the memories keyword leg (db/memory.rs).
+/// Build a safe FTS5 MATCH expression from free-form user input: terms
+/// stripped to alphanumerics, quoted, ORed as prefix terms. The
+/// implementation lives in db/mod.rs (`fts_prefix_query`) — shared with
+/// wiki/memory/chat, which used to carry drifting private copies.
 fn fts_match_query(query: &str) -> Option<String> {
-    let safe: String = query
-        .split_whitespace()
-        .map(|t| {
-            t.chars()
-                .filter(|c| c.is_alphanumeric())
-                .collect::<String>()
-        })
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\"*"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    if safe.is_empty() {
-        None
-    } else {
-        Some(safe)
-    }
+    super::fts_prefix_query(query, super::FtsTerms::OrAlnum)
 }
 
 /// The FTS (keyword) leg: top `limit` chunk rowids + hits ordered by bm25
@@ -475,7 +457,7 @@ fn fts_leg(
            FROM doc_chunks_fts f
            JOIN doc_chunks c ON c.id = f.rowid
            JOIN doc_corpora co ON co.id = c.corpus_id
-          WHERE doc_chunks_fts MATCH ?1 AND co.enabled != 0
+          WHERE doc_chunks_fts MATCH ?1 AND (?2 IS NOT NULL OR co.enabled != 0)
             AND (?2 IS NULL OR c.corpus_id = ?2)
           ORDER BY bm25(doc_chunks_fts)
           LIMIT ?3",

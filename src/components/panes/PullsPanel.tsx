@@ -702,22 +702,37 @@ function IssueList({
   const [filterOpen, setFilterOpen] = useState(false);
   const filterWrapRef = useRef<HTMLDivElement>(null);
 
+  // Stale-response guard (audit H33): switching the state filter (Open →
+  // Closed/All) re-creates `refresh` and re-arms the interval, but the
+  // PREVIOUS filter's in-flight request had no cancellation — resolving last
+  // it painted open-issues rows under the "Closed" label (and cleared any
+  // error). Self-healed only at the next 30s tick.
+  const refreshSeqRef = useRef(0);
   const refresh = useCallback(async () => {
+    const seq = ++refreshSeqRef.current;
+    const stale = () => seq !== refreshSeqRef.current;
     setLoading(true);
     try {
-      setIssues(await githubListIssues(projectId, stateFilter));
+      const next = await githubListIssues(projectId, stateFilter);
+      if (stale()) return;
+      setIssues(next);
       setError(null);
     } catch (err) {
+      if (stale()) return;
       setError(String(err));
     } finally {
-      setLoading(false);
+      if (!stale()) setLoading(false);
     }
   }, [projectId, stateFilter]);
 
   useEffect(() => {
     void refresh();
     const t = window.setInterval(() => void refresh(), 30_000);
-    return () => window.clearInterval(t);
+    // Invalidate any in-flight response from the PREVIOUS filter.
+    return () => {
+      window.clearInterval(t);
+      refreshSeqRef.current += 1;
+    };
   }, [refresh]);
 
   useEffect(() => {

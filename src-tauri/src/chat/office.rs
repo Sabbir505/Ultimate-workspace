@@ -806,7 +806,7 @@ fn parse_merge_range(cell_ref: &str) -> Option<(usize, usize, usize, usize)> {
     };
     let (c1, r1) = split(a)?;
     let (c2, r2) = split(b)?;
-    Some((c1.min(c2), r1.min(r2), c1.max(c2), r2.max(r2)))
+    Some((c1.min(c2), r1.min(r2), c1.max(c2), r1.max(r2)))
 }
 
 /// Convert an .xlsx workbook to HTML.
@@ -943,6 +943,13 @@ fn render_xlsx_sheet(xml: &str, shared: &[String]) -> Option<String> {
         let open = mc.find('>').map(|i| &mc[..i]).unwrap_or(mc);
         if let Some(r) = attr(open, "ref").and_then(parse_merge_range) {
             let (c1, r1, c2, r2) = r;
+            // Skip merge ranges that exceed the render caps: the `covered`
+            // expansion below is (rows × cols) inserts, so a hostile
+            // `mergeCell ref="A1:ZZ1048576"` performed ~268M HashSet inserts
+            // — OOM/hang from a file-controlled attribute (audit H11).
+            if r2 >= MAX_ROWS || c2 >= MAX_COLS {
+                continue;
+            }
             anchors.insert((r1, c1), (c2 - c1 + 1, r2 - r1 + 1));
             for rr in r1..=r2 {
                 for cc in c1..=c2 {
@@ -963,6 +970,14 @@ fn render_xlsx_sheet(xml: &str, shared: &[String]) -> Option<String> {
             .and_then(|v| v.parse::<usize>().ok())
             .map(|v| v.saturating_sub(1))
             .unwrap_or(n_rows);
+        // The `r` attribute is file-controlled: a single `<row r="1048576">`
+        // inflated `n_rows` to a million and the render loop then emitted a
+        // multi-gigabyte HTML string (OOM / hang of the preview task for ANY
+        // previewed .xlsx — audit H11). The cap on PARSED rows never bounded
+        // the index; clamp the index itself.
+        if row_idx >= MAX_ROWS {
+            continue;
+        }
         for cell in elements(row, "c") {
             let open = cell.find('>').map(|i| &cell[..i]).unwrap_or(cell);
             let col = attr(open, "r")

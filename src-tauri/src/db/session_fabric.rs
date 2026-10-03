@@ -338,16 +338,10 @@ pub fn resolve_session_id(conn: &Connection, input: &str) -> Result<String, Stri
         return Ok(id);
     }
     // Escape LIKE wildcards in the (model-supplied) input so `%` and `_`
-    // match literally — same contract as `search_chat_messages`. Unescaped,
-    // a "%%"-bearing probe would sweep every session into the candidate list
+    // match literally — shared helper (audit M: FTS DRY). Unescaped, a
+    // "%%"-bearing probe would sweep every session into the candidate list
     // instead of resolving a real prefix.
-    let like = format!(
-        "{}%",
-        trimmed
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    );
+    let like = format!("{}%", super::escape_like(trimmed));
     let mut stmt = conn
         .prepare("SELECT id FROM chat_sessions WHERE id LIKE ?1 ESCAPE '\\' ORDER BY last_active_at DESC")
         .map_err(|e| e.to_string())?;

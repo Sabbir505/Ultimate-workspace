@@ -53,6 +53,27 @@ pub fn fallback_tool_owner(name: &str) -> Option<&'static str> {
     })
 }
 
+/// True when `name` MUTATES through the connector (send / create / delete /
+/// modify) rather than just reading. Used to gate the harness bridge: reads
+/// may still run unattended (they mirror the keyless web tools), writes must
+/// not, precisely because a read returns attacker-controllable content that
+/// can instruct a model to send or delete (audit H26).
+pub fn fallback_tool_is_write(name: &str) -> bool {
+    use crate::chat::permission::ConnectorToolKind;
+    if let Some(def) = gmail_api::fallback_tool_defs().iter().find(|d| d.name == name) {
+        return def.kind == ConnectorToolKind::Write;
+    }
+    CONNECTORS
+        .iter()
+        .find_map(|c| {
+            let defs = google_rest::fallback_tool_defs(c.id)?;
+            defs.iter()
+                .find(|d| d.name == name)
+                .map(|d| d.kind == ConnectorToolKind::Write)
+        })
+        .unwrap_or(false)
+}
+
 /// (connector_id, tool name, model-facing description) for EVERY fallback
 /// tool of a CONNECTED connector — reads and writes alike (owner policy:
 /// harness sessions get the full surface, ungated). Pure over the

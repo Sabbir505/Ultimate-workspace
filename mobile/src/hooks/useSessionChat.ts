@@ -586,7 +586,15 @@ export function useSessionChat(sessionId: string | null) {
   }, [state.streaming, state.queued, sessionId, dispatchTurn]);
 
   const cancelQueued = useCallback((text: string) => {
-    setState((s) => ({ ...s, queued: s.queued.filter((q) => q !== text) }));
+    setState((s) => {
+      // Two identical queued texts are two distinct sends — remove exactly
+      // ONE instance (a `filter` used to drop both).
+      const i = s.queued.indexOf(text);
+      if (i === -1) return s;
+      const queued = s.queued.slice();
+      queued.splice(i, 1);
+      return { ...s, queued };
+    });
   }, []);
 
   // PHONE-SIDE LIVE CONVERGENCE. Token/Done events for pane-backed (CLI
@@ -715,7 +723,11 @@ export function useSessionChat(sessionId: string | null) {
       // Park the queue BEFORE cancel: the streaming true→false transition
       // must not trigger the queue-flush effect and race this send
       // (cancel() also arms suppressNextFlush as a second guard).
-      const parked = state.queued.filter((q) => q !== text);
+      // Exactly ONE instance of `text` leaves the queue (indexOf/splice) —
+      // a duplicate queued text is a separate send, not the same one.
+      const idx = state.queued.indexOf(text);
+      const parked = state.queued.slice();
+      if (idx !== -1) parked.splice(idx, 1);
       setState((s) => ({ ...s, queued: [] }));
       cancel();
       const sid = sessionId;

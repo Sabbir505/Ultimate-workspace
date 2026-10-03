@@ -48,6 +48,65 @@ pub fn now_ts() -> i64 {
         .unwrap_or(0)
 }
 
+// ---- Shared FTS5 / LIKE query sanitization ----
+//
+// Five modules used to carry private copies of these helpers with drifting
+// semantics and copy-pasted "same discipline as…" comments (audit M: FTS
+// DRY). One home: a sanitizer bug fixed here now reaches every FTS surface.
+
+/// Term shaping for [`fts_prefix_query`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FtsTerms {
+    /// Alphanumeric-only terms, OR-joined — docs/wiki/memories keyword legs
+    /// (bm25 ranks docs matching more terms higher; AND was too strict for
+    /// the judge's comparison fetch).
+    OrAlnum,
+    /// Alphanumeric + underscore terms, space-joined (FTS5 implicit AND) —
+    /// chat message content, where snake_case identifiers are meaningful.
+    AndWord,
+}
+
+/// Build an FTS5 MATCH expression from a bare user query: terms stripped to
+/// their safe charset, double-quoted (quoted strings are never parsed as
+/// operators) with a trailing `*` prefix marker — "stream" also hits
+/// "streaming". Returns None when nothing searchable remains (the caller
+/// skips the FTS leg).
+pub(crate) fn fts_prefix_query(query: &str, terms: FtsTerms) -> Option<String> {
+    let keep = |c: char| {
+        if matches!(terms, FtsTerms::AndWord) {
+            c.is_alphanumeric() || c == '_'
+        } else {
+            c.is_alphanumeric()
+        }
+    };
+    let joiner = match terms {
+        FtsTerms::OrAlnum => " OR ",
+        FtsTerms::AndWord => " ",
+    };
+    let safe: String = query
+        .split_whitespace()
+        .map(|t| t.chars().filter(|c| keep(*c)).collect::<String>())
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\"*"))
+        .collect::<Vec<_>>()
+        .join(joiner);
+    if safe.is_empty() {
+        None
+    } else {
+        Some(safe)
+    }
+}
+
+/// Escape LIKE wildcards (`\`, `%`, `_`) for a pattern used with
+/// `ESCAPE '\'` — a raw `%`/`_` in user input acted as a wildcard and swept
+/// every row into the result. Wrap with `format!("%{escaped}%")` (contains)
+/// or `format!("{escaped}%")` (prefix) at the call site.
+pub(crate) fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Open (or create) the on-disk database and ensure the schema exists.
 pub fn open(path: &Path) -> DbResult<Connection> {
     let conn = Connection::open(path)?;

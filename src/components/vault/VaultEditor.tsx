@@ -18,7 +18,7 @@
 //     autosave debounce and Mod+S.
 
 import { useEffect, useRef } from "react";
-import { EditorState, Compartment, EditorSelection, StateField } from "@codemirror/state";
+import { EditorState, Compartment, EditorSelection, StateField, Transaction } from "@codemirror/state";
 import { EditorView, keymap, highlightSpecialChars, drawSelection, ViewPlugin, Decoration, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle, foldGutter } from "@codemirror/language";
@@ -60,6 +60,13 @@ const noteContentCache = new Map<string, string>();
  *  must never resolve the previous vault's text. */
 export function clearNoteContentCache() {
   noteContentCache.clear();
+}
+
+/** Drop ONE path's cached subpath-completion read. The store's saveNow calls
+ *  this after a successful write — otherwise `[[Note#` completions keep
+ *  offering the headings/blocks the note had before the edit. */
+export function invalidateNoteContent(path: string) {
+  noteContentCache.delete(path);
 }
 
 /** Wrap the selection (or insert an empty pair at the cursor) — the engine
@@ -811,7 +818,9 @@ export function VaultEditor(props: VaultEditorProps) {
   // External value sync: the parent keys this component per note, so the
   // only value changes arriving here are watcher reloads of a CLEAN buffer
   // — swap the doc wholesale (selection resets, which is correct for an
-  // external change).
+  // external change). The swap stays OUT of the undo history: Ctrl+Z after
+  // a watcher reload must not "revert" the external change into the buffer
+  // (the autosave would then write the stale text back to disk).
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
@@ -820,6 +829,7 @@ export function VaultEditor(props: VaultEditorProps) {
       view.dispatch({
         changes: { from: 0, to: current.length, insert: props.value },
         selection: { anchor: 0 },
+        annotations: Transaction.addToHistory.of(false),
       });
     }
   }, [props.value]);

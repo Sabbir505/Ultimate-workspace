@@ -460,6 +460,16 @@ End your reply with the plan and wait for the user's approval.]"
     let stderr = child.stderr.take().ok_or("failed to capture CLI stderr")?;
     let erx = drain_stderr(stderr);
     entry.turn_in_flight.store(true, Ordering::SeqCst);
+    // Take-and-kill the previous child before overwriting the slot (audit
+    // H21): every other adapter does exactly this (`acp.rs` /
+    // `opencode.rs` call `kill_child_tree` on the old handle). A bare
+    // assignment just DROPS the previous `Child`, which neither kills nor
+    // reaps it — the exited CLI lingers as a zombie, and a still-live old
+    // tree (EOF can arrive while the wrapper lingers) is orphaned beyond the
+    // session's cancel/watchdog reach.
+    if let Some(mut old) = entry.child.take() {
+        kill_child_tree(&mut old);
+    }
     entry.child = Some(child);
 
     // Emit a "starting" status so the UI shows immediate activity. Kimi-only:
@@ -651,19 +661,13 @@ pub(super) fn read_per_turn_stream(
     // CommandCode's plain-text accumulator (deltas only, no think wrappers /
     // tool markers) — the result line's finalText catch-up diffs against it.
     let mut cc_text = String::new();
-    // mi18: read_line into ONE reused String — BufReader::lines() allocated a
-    // fresh String per line on streams that run thousands of lines per turn.
+    // mi18: read into ONE reused buffer (shared lossy+capped reader, audit
+    // H20 — a single non-UTF-8 byte from the cmd.exe wrapper used to abort
+    // the turn mid-stream).
     let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
-            Err(_) => break,
-        }
-        let line = line.trim_end_matches(&[char::from(10), char::from(13)][..]);
-        let line: &str = line;
+    let mut raw: Vec<u8> = Vec::new();
+    while let Some(line) = crate::agent_sessions::next_harness_line(&mut reader, &mut raw) {
+        let line: &str = &line;
         if line.trim().is_empty() {
             continue;
         }

@@ -194,6 +194,11 @@ export function KnowledgePanel() {
     let unlisten: (() => void) | null = null;
     void onModelDownloadProgress((p) => {
       if (stale) return;
+      // Only react to this panel's own embedding downloads (catalog ids are
+      // "<repo>::<filename>" from EMBEDDING_SUGGESTIONS) — the stream is
+      // shared with the market/STT/TTS, and an unrelated download finishing
+      // must not toast "Embedding model installed" here.
+      if (!EMBEDDING_SUGGESTIONS.some((s) => p.id.startsWith(`${s.repo}::`))) return;
       setDownloads((prev) => ({
         ...prev,
         [p.id]: { state: p.state, downloaded: p.downloadedBytes, total: p.totalBytes ?? null },
@@ -333,6 +338,7 @@ export function KnowledgePanel() {
 
   const handleToggleRerank = async (on: boolean) => {
     setError(null);
+    const prev = rerankEnabled;
     setRerankEnabled(on);
     try {
       await setSetting(RERANK_SETTING_KEY, on ? "true" : "false");
@@ -346,7 +352,8 @@ export function KnowledgePanel() {
           .catch(() => undefined);
       }
     } catch (err) {
-      setError(`Failed to save reranker setting: ${String(err)}`);
+      setRerankEnabled(prev); // revert the optimistic checkbox on failure
+      toastError("Couldn't change the reranker setting", err);
     }
   };
 

@@ -10,13 +10,14 @@
 // calls (`origin: "relay"`, captured in-process) and traffic other apps send
 // through the gateway (`origin: "external"`).
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { ScrollText, Search, Trash2, RefreshCw, Copy, Check } from "lucide-react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { ToolbarHeader } from "../common/ToolbarHeader";
 import { GlassSelect, type SelectOption } from "../common/GlassSelect";
 import { useLlmLogs } from "../../hooks/useLlmLogs";
 import { gatewayStatus, llmLogClear, llmLogPrune } from "../../lib/ipc";
-import type { GatewayStatus } from "../../types";
+import type { GatewayStatus, LlmLogSummary } from "../../types";
 import { LogDetail } from "./LogDetail";
 
 const ORIGINS = [
@@ -55,6 +56,42 @@ function relativeTime(ts: number): string {
  *  behind. */
 const SEARCH_DEBOUNCE_MS = 250;
 
+/** One table row, memoized: appends re-render the list body per poll, and
+ *  the full row markup (time/chips/metrics) is unchanged for every existing
+ *  entry when only new rows arrive. */
+const LogsRow = memo(function LogsRow({
+  row,
+  selected,
+  onSelect,
+}: {
+  row: LlmLogSummary;
+  selected: boolean;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`logs-row${selected ? " is-selected" : ""}${row.error ? " is-error" : ""}`}
+      onClick={() => onSelect(row.id)}
+    >
+      <span className="logs-row-time">{relativeTime(row.createdAt)}</span>
+      <span className={`logs-chip logs-chip-origin logs-chip-${row.origin}`}>{row.origin}</span>
+      <span className="logs-chip logs-chip-target">{row.target}</span>
+      <span className="logs-row-path">{row.path}</span>
+      <span className="logs-row-metrics">
+        {row.upstreamStatus != null && (
+          <span className={row.upstreamStatus >= 400 ? "logs-status-bad" : "logs-status-ok"}>
+            {row.upstreamStatus}
+          </span>
+        )}
+        {row.outputTokens != null && <span>{row.outputTokens} out</span>}
+        {row.tokensPerSecond != null && <span>{row.tokensPerSecond.toFixed(1)} tok/s</span>}
+        {row.durationMs != null && <span>{row.durationMs} ms</span>}
+      </span>
+    </button>
+  );
+});
+
 export function LogsView() {
   const [origin, setOrigin] = useState<"relay" | "external" | null>(null);
   const [target, setTarget] = useState<string | null>(null);
@@ -63,6 +100,8 @@ export function LogsView() {
   const [selected, setSelected] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Prune/Clear/gateway-status failures — the banner under the toolbar.
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchRaw), SEARCH_DEBOUNCE_MS);
@@ -72,12 +111,25 @@ export function LogsView() {
   const { rows, stats, loading, loadingMore, error, refresh, loadMore, canLoadMore } =
     useLlmLogs({ origin, target, search });
 
+  // Audit M (logs re-render): appends replace the whole array every debounced
+  // poll, so all mounted rows re-rendered per refresh — LogsRow is memoized
+  // below so unchanged rows skip the re-render, which was the dominant cost.
+  // A @tanstack/react-virtual window was tried here, but virtual-core sizes
+  // its window from the scroll element's offsetWidth/offsetHeight and mounts
+  // with a bogus offset under conditions this list can hit (deferred until it
+  // can be verified in a real webview); the memo keeps the per-poll cost
+  // proportional to changed rows instead.
+
   // The gateway binds an ephemeral port and persists it, so the URL other apps
   // should use is never a constant — it has to come from the backend.
   const [gateway, setGateway] = useState<GatewayStatus | null>(null);
   useEffect(() => {
     let cancelled = false;
-    void gatewayStatus().then((s) => !cancelled && setGateway(s));
+    void gatewayStatus()
+      .then((s) => !cancelled && setGateway(s))
+      .catch((e) => {
+        if (!cancelled) setActionError(`Couldn't read gateway status: ${e instanceof Error ? e.message : String(e)}`);
+      });
     return () => {
       cancelled = true;
     };
@@ -172,10 +224,15 @@ export function LogsView() {
             disabled={busy}
             onClick={() => {
               setBusy(true);
-              void llmLogPrune().finally(() => {
-                refresh();
-                setBusy(false);
-              });
+              setActionError(null);
+              void llmLogPrune()
+                .catch((e) =>
+                  setActionError(`Prune failed: ${e instanceof Error ? e.message : String(e)}`),
+                )
+                .finally(() => {
+                  refresh();
+                  setBusy(false);
+                });
             }}
           >
             <RefreshCw size={14} />
@@ -190,10 +247,15 @@ export function LogsView() {
               if (!confirm("Delete all logged requests? This cannot be undone.")) return;
               setBusy(true);
               setSelected(null);
-              void llmLogClear().finally(() => {
-                refresh();
-                setBusy(false);
-              });
+              setActionError(null);
+              void llmLogClear()
+                .catch((e) =>
+                  setActionError(`Clear failed: ${e instanceof Error ? e.message : String(e)}`),
+                )
+                .finally(() => {
+                  refresh();
+                  setBusy(false);
+                });
             }}
           >
             <Trash2 size={14} />
@@ -203,6 +265,7 @@ export function LogsView() {
       </div>
 
       {error && <div className="logs-error">{error}</div>}
+      {actionError && <div className="logs-error">{actionError}</div>}
 
       <div className="logs-split">
         <div className="logs-list">
@@ -217,27 +280,7 @@ export function LogsView() {
             </div>
           )}
           {rows.map((r) => (
-            <button
-              key={r.id}
-              type="button"
-              className={`logs-row${selected === r.id ? " is-selected" : ""}${r.error ? " is-error" : ""}`}
-              onClick={() => setSelected(r.id)}
-            >
-              <span className="logs-row-time">{relativeTime(r.createdAt)}</span>
-              <span className={`logs-chip logs-chip-origin logs-chip-${r.origin}`}>{r.origin}</span>
-              <span className="logs-chip logs-chip-target">{r.target}</span>
-              <span className="logs-row-path">{r.path}</span>
-              <span className="logs-row-metrics">
-                {r.upstreamStatus != null && (
-                  <span className={r.upstreamStatus >= 400 ? "logs-status-bad" : "logs-status-ok"}>
-                    {r.upstreamStatus}
-                  </span>
-                )}
-                {r.outputTokens != null && <span>{r.outputTokens} out</span>}
-                {r.tokensPerSecond != null && <span>{r.tokensPerSecond.toFixed(1)} tok/s</span>}
-                {r.durationMs != null && <span>{r.durationMs} ms</span>}
-              </span>
-            </button>
+            <LogsRow key={r.id} row={r} selected={selected === r.id} onSelect={setSelected} />
           ))}
           {canLoadMore && (
             <button

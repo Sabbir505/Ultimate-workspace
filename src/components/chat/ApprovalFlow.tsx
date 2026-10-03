@@ -132,7 +132,7 @@ export function ApprovalCard({
   onResolve,
 }: {
   approval: PendingApproval;
-  onResolve: (approved: boolean, selected?: number[]) => void;
+  onResolve: (approved: boolean, selected?: number[], always?: boolean) => void;
 }) {
   const badge = actionBadge(approval.tool);
   const [alwaysAllow, setAlwaysAllow] = useState(false);
@@ -169,7 +169,12 @@ export function ApprovalCard({
         // Best-effort: a failed rule save must not block the allow itself.
       }
     }
-    onResolve(true);
+    // `always` rides along so the backend persists a directory grant ONLY for
+    // a remembered approval — a plain "allow once" must not widen fs_roots for
+    // every future turn (audit H6). Plain Allow = accept EVERYTHING: no
+    // selection payload (the strict-subset path is the dedicated "Apply
+    // selected" button).
+    onResolve(true, undefined, alwaysAllow);
   };
 
   return (
@@ -184,6 +189,13 @@ export function ApprovalCard({
       data-relay-agent-exclude=""
       tabIndex={0}
       onKeyDown={(e) => {
+        // Only the CARD itself handles these shortcuts. A bubbled keydown
+        // from a descendant control used to fire the approve path FIRST
+        // (synchronously, before the button's own activation): pressing Enter
+        // on Deny resolved the pending card as APPROVED, and Enter on an
+        // occurrence checkbox silently became "apply all", discarding the
+        // user's selection (audit H32).
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter") void handleAllow();
         else if (e.key === "Escape") onResolve(false);
       }}

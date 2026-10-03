@@ -808,6 +808,11 @@ async fn download_task<R: tauri::Runtime>(
         .await
         .map(|m| m.len())
         .unwrap_or(0);
+    // The remote's ETag from the first successful response (audit M: download
+    // resume): a resumed request carries `If-Range`, so a remote file that
+    // CHANGED between attempts is served in full (200) instead of resuming
+    // mismatched bytes into a silently corrupt file.
+    let mut etag: Option<String> = None;
     let mut last_error = String::new();
 
     for attempt in 0..=DOWNLOAD_RETRIES {
@@ -832,6 +837,9 @@ async fn download_task<R: tauri::Runtime>(
         let mut req = client.get(url);
         if resume_from > 0 {
             req = req.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+            if let Some(tag) = &etag {
+                req = req.header(reqwest::header::IF_RANGE, tag);
+            }
         }
         let resp = match req.send().await {
             Ok(r) => r,
@@ -864,10 +872,46 @@ async fn download_task<R: tauri::Runtime>(
             last_error = format!("HTTP {status}");
             continue;
         }
+        // A Range request answered with 416 means the kept `.part` is LONGER
+        // than the remote file's current size (the remote changed or shrank
+        // between attempts), and a full 200 to a Range request means the
+        // server ignored the header — a plain restart is the answer for both.
+        // The old code returned a permanent error and kept the poisoned
+        // `.part`, so every future download to this URL failed forever
+        // (audit M: download resume).
+        if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && resume_from > 0 {
+            let _ = tokio::fs::remove_file(&partial_path).await;
+            resume_from = 0;
+            last_error = "HTTP 416 — stale .part (remote file changed); restarting from byte 0".to_string();
+            continue;
+        }
         if !status.is_success() {
-            return Err(format!("HTTP {status}"));
+            // Include a short body snippet — bare "HTTP 403" hides whether
+            // the failure is a gate, a bad token, or a rate limit.
+            let body_hint = resp
+                .text()
+                .await
+                .map(|b| {
+                    let t: String = b.chars().take(200).collect();
+                    format!(" — body: {t}")
+                })
+                .unwrap_or_default();
+            return Err(format!("HTTP {status}{body_hint}"));
         }
 
+        // A 200 to an explicit Range request means the server ignored the
+        // header (or If-Range matched a changed file) — treat it as a fresh
+        // download. Track the response's ETag for the next resume attempt.
+        if resume_from > 0 && status == reqwest::StatusCode::OK {
+            resume_from = 0;
+        }
+        if let Some(tag) = resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+        {
+            etag = Some(tag.to_string());
+        }
         let resuming = status == reqwest::StatusCode::PARTIAL_CONTENT && resume_from > 0;
         let start = if resuming { resume_from } else { 0 };
 
@@ -1071,6 +1115,13 @@ async fn shell_task<R: tauri::Runtime>(
     // mi6: VecDeque — the 40-line cap previously did Vec::remove(0) (O(n)
     // memmove) per line past the cap.
     let mut output: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    // Byte budget alongside the line cap (audit H4): `lines()` has no
+    // line-length limit, so a single newline-free line (minified JSON, a
+    // base64 blob, `type big.bin`) could be retained for the whole lifetime of
+    // a long-running background shell. Long shells live as long as the app,
+    // and the foreground path already bounds this (SHELL_DRAIN_CAP).
+    let mut output_bytes = 0usize;
+    const MAX_LINE_BYTES: usize = 64 * 1024;
     let mut last_emit = Instant::now() - SHELL_EMIT_MIN;
 
     let mut consume_line = |line: String,
@@ -1078,10 +1129,36 @@ async fn shell_task<R: tauri::Runtime>(
                             app: Option<&AppHandle<R>>,
                             sid: &str,
                             entry: &TaskEntry| {
-        if output.len() >= 40 {
-            output.pop_front();
-        }
+        let line = if line.len() > MAX_LINE_BYTES {
+            // Head + tail with an explicit truncation marker: keeping only the
+            // head would hide the panic/error line that usually matters. Cut
+            // points are walked back/forward to char boundaries (a raw byte
+            // slice would panic on multibyte output).
+            let mut head_end = MAX_LINE_BYTES / 2;
+            while head_end > 0 && !line.is_char_boundary(head_end) {
+                head_end -= 1;
+            }
+            let mut tail_start = line.len() - MAX_LINE_BYTES / 2;
+            while tail_start < line.len() && !line.is_char_boundary(tail_start) {
+                tail_start += 1;
+            }
+            let mut s = String::with_capacity(MAX_LINE_BYTES + 64);
+            s.push_str(&line[..head_end]);
+            s.push_str("\n… (line truncated) …\n");
+            s.push_str(&line[tail_start..]);
+            s
+        } else {
+            line
+        };
+        output_bytes += line.len();
         output.push_back(line);
+        while output.len() > 40 || output_bytes > SHELL_OUTPUT_CAP {
+            if let Some(dropped) = output.pop_front() {
+                output_bytes = output_bytes.saturating_sub(dropped.len());
+            } else {
+                break;
+            }
+        }
         if last_emit.elapsed() >= SHELL_EMIT_MIN {
             {
                 let mut snap = entry.snapshot.lock();
@@ -1110,8 +1187,12 @@ async fn shell_task<R: tauri::Runtime>(
             _ = &mut cancel_rx => {
                 // Tree kill first — kill_on_drop/kill only reach the direct
                 // cmd.exe; grandchildren holding the pipe handles would keep
-                // the line readers open after cancellation (audit H-1).
-                kill_process_tree(child.id());
+                // the line readers open after cancellation (audit H-1). The
+                // taskkill subprocess blocks for its whole run (seconds on a
+                // big tree), so it goes through spawn_blocking — the async
+                // worker must not stall mid-cancel (audit M: tasks).
+                let pid = child.id();
+                let _ = tauri::async_runtime::spawn_blocking(move || kill_process_tree(pid)).await;
                 let _ = child.kill().await;
                 {
                     let mut snap = entry.snapshot.lock();
@@ -1123,7 +1204,8 @@ async fn shell_task<R: tauri::Runtime>(
                 return;
             }
             _ = &mut deadline_fut => {
-                kill_process_tree(child.id());
+                let pid = child.id();
+                let _ = tauri::async_runtime::spawn_blocking(move || kill_process_tree(pid)).await;
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 let secs = timeout.map(|t| t.as_secs()).unwrap_or(0);

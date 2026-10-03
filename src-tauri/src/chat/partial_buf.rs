@@ -18,9 +18,11 @@ use std::collections::HashMap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
-/// Front-trim cap (chars) — the tail is what renders; persistence just needs
-/// a bounded copy of what was streamed.
-const MAX_PARTIAL_CHARS: usize = 400_000;
+/// Front-trim cap (BYTES) — the tail is what renders; persistence just needs
+/// a bounded copy of what was streamed. Enforcement is `str::len()` (bytes),
+/// so a CJK/emoji-heavy stream trims at ~130-200k actual chars; the old name
+/// claimed chars, which misled the next editor (audit M: partial_buf).
+const MAX_PARTIAL_BYTES: usize = 400_000;
 
 static PARTIALS: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -34,8 +36,8 @@ pub fn record(chat_session_id: &str, token: &str) {
     let mut map = PARTIALS.lock();
     let entry = map.entry(chat_session_id.to_string()).or_default();
     entry.push_str(token);
-    if entry.len() > MAX_PARTIAL_CHARS {
-        let skip = entry.len() - MAX_PARTIAL_CHARS;
+    if entry.len() > MAX_PARTIAL_BYTES {
+        let skip = entry.len() - MAX_PARTIAL_BYTES;
         // Trim on a char boundary (tokens can split multi-byte chars).
         let boundary = (skip..entry.len())
             .find(|&i| entry.is_char_boundary(i))
@@ -94,7 +96,7 @@ mod tests {
             record(sid, &chunk);
         }
         let buf = take(sid).unwrap();
-        assert!(buf.len() <= MAX_PARTIAL_CHARS + 50_000);
+        assert!(buf.len() <= MAX_PARTIAL_BYTES + 50_000);
         assert!(buf.chars().all(|c| c == 'x'));
     }
 }

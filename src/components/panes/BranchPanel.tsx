@@ -6,7 +6,7 @@
 // watcher event, so a `git checkout` typed in a terminal updates the panel
 // without a manual reload. Branch switching lives in the branch dropdown
 // (git sidebar / composer pill) — this tab is a read-only view.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getGitLog, type GitLogEntry } from "../../lib/ipc";
 import { useTauriEvent } from "../../hooks/useTauriEvent";
 import { pathUnderChanged } from "../../lib/paths";
@@ -67,18 +67,28 @@ export function BranchPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Stale-response guard (audit H33): switching the bound chat from project A
+  // to B re-runs the effect while A's in-flight getGitLog can still resolve —
+  // A's SHAs/authors/HEAD row then rendered under B's branch badge
+  // indefinitely, because refresh only happens on the NEW project's
+  // fs-changed events (no polling here).
+  const fetchSeqRef = useRef(0);
   const fetchLog = useCallback(async () => {
     if (!path) return;
+    const seq = ++fetchSeqRef.current;
+    const stale = () => seq !== fetchSeqRef.current;
     try {
       const lg = await getGitLog(path);
+      if (stale()) return;
       setLog(lg ?? []);
       setError(null);
     } catch (e) {
       // A rejected getGitLog (bad path, git failure) must surface here —
       // otherwise loading stays true forever and the panel stays blank.
+      if (stale()) return;
       setError(String(e));
     } finally {
-      setLoading(false);
+      if (!stale()) setLoading(false);
     }
   }, [path]);
 

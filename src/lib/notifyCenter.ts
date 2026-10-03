@@ -47,7 +47,33 @@ export interface RelayNotifyOptions {
   soundOnlyUnfocused?: boolean;
 }
 
+/**
+ * True in a pop-out chat window (`?popout=chat`), computed once at module
+ * load so it is settled before the event hooks run (audit H37).
+ *
+ * The pop-out's early return sits AFTER all the event-wiring hooks in App, so
+ * `chat:done` / `chat:error` / `chat:approval-request` — broadcast by Tauri to
+ * EVERY webview — are handled in BOTH windows. `isViewingSession` is a
+ * per-window module singleton: when the main window is focused, the blurred
+ * pop-out evaluated its session as "not being viewed" and fired `relayNotify`
+ * a second time for the same event (and vice versa for background chats,
+ * which neither window was "viewing") — every completion landed twice: two
+ * bell rows, a possible double OS toast, and concurrent read-modify-write of
+ * the shared `relay.notifications.v1` localStorage key. The pop-out window
+ * renders NO notification bell, so its copy of the events is noise by
+ * definition: it records nothing and toasts nothing.
+ */
+const IS_POPOUT_WINDOW = (() => {
+  try {
+    return new URLSearchParams(window.location.search).get("popout") === "chat";
+  } catch {
+    return false;
+  }
+})();
+
 export function relayNotify(opts: RelayNotifyOptions): void {
+  if (IS_POPOUT_WINDOW) return;
+
   // Layer 1: durable record — always.
   useNotificationsStore.getState().push({
     kind: opts.kind,

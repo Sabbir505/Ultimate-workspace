@@ -791,10 +791,14 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
     // dispatch resolves the focused one. Cleanup removes only this session's
     // entry — the old unconditional null used to kill the other view's
     // registration when either view unmounted.
+    setQuotedSelections([]);
     setChatSelectionPrefill(activeChatSessionId, (text) =>
       setQuotedSelections((qs) => [...qs, { id: nextQuoteIdRef.current++, text }]),
     );
     return () => setChatSelectionPrefill(activeChatSessionId, null);
+    // The clear-on-session-change above is the point (audit H29): this view
+    // survives session switches, and the whole stack is prepended to the next
+    // message sent — quotes gathered in chat A must not ride into chat B.
   }, [activeChatSessionId]);
   const removeQuotedSelection = useCallback((id: number) => {
     setQuotedSelections((qs) => qs.filter((q) => q.id !== id));
@@ -1721,10 +1725,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
                 >
                   <Suspense fallback={null}>
                     {item.imagegen ? (
-                      <ImageGenCard
-                        sessionScopesTo={activeChatSessionId}
-                        entry={item.genEntry}
-                      />
+                      <ImageGenCard entry={item.genEntry} />
                     ) : item.proposalEntry ? (
                       <ArtifactProposalCard
                         proposalId={item.proposalEntry.id}
@@ -1893,8 +1894,8 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         <div className="composer-approval-wrap">
           <ApprovalCard
             approval={pendingApprovals[activeChatSessionId]}
-            onResolve={(approved, selected) =>
-              void resolveApproval(activeChatSessionId, approved, selected)
+            onResolve={(approved, selected, always) =>
+              void resolveApproval(activeChatSessionId, approved, selected, always)
             }
           />
         </div>

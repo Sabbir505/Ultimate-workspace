@@ -94,7 +94,13 @@ pub fn install(app: &AppHandle, _db_state: &DbState, path: &Path) {
     }
     // Channel from the notify callback (kernel → us) to the debouncer thread.
     // The capacity is small — we never queue a backlog, just signal-and-drain.
-    let (tx, rx) = mpsc::channel::<()>();
+    // The payload is the CHANGED FILE path (audit H19): the debouncer still
+    // emits `project:fs-changed` with the watched ROOT for the frontend, but
+    // consumers that must know WHICH file changed (the native subagent-store
+    // re-sync) were previously handed the root and could never match a
+    // per-file store layout, so their listeners silently never fired.
+    let (tx, rx) = mpsc::channel::<PathBuf>();
+    let canon_for_notify = canon.clone();
     let mut watcher: RecommendedWatcher = match notify::recommended_watcher(
         move |res: notify::Result<notify::Event>| {
             // Only signal on the event kinds that can change git state:
@@ -105,10 +111,15 @@ pub fn install(app: &AppHandle, _db_state: &DbState, path: &Path) {
                     ev.kind,
                     EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
                 ) {
-                    // We only care that *something* changed; the path itself
-                    // is re-resolved when we re-run git status. A burst of N
+                    // The ROOT is what the frontend re-queries; the per-file
+                    // path rides along for the store watcher. A burst of N
                     // events in 1 ms collapses to one tick.
-                    let _ = tx.send(());
+                    let changed = ev
+                        .paths
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| canon_for_notify.clone());
+                    let _ = tx.send(changed);
                 }
             }
         },
@@ -143,24 +154,32 @@ pub fn install(app: &AppHandle, _db_state: &DbState, path: &Path) {
             // the subscription is alive.
             loop {
                 match rx.recv_timeout(HEARTBEAT_INTERVAL) {
-                    Ok(()) => {
+                    Ok(changed) => {
                         // First event in a burst — record the timestamp.
                         *last_event_for_thread.lock() = Instant::now();
                         // Drain any pending events that arrived during the
-                        // burst. The inner recv_timeout of `DEBOUNCE_WINDOW`
-                        // is the actual debounce: we keep draining until
+                        // burst, remembering the LAST changed file (a later
+                        // event in the burst is the more current one). The
+                        // inner recv_timeout of `DEBOUNCE_WINDOW` is the
+                        // actual debounce: we keep draining until
                         // DEBOUNCE_WINDOW of quiet, then emit once. A
                         // MAX_BURST ceiling bounds the drain: sustained
                         // activity (a build loop, a chatty log inside the
                         // project) would otherwise keep resetting the quiet
                         // window and starve the emit indefinitely.
                         let burst_deadline = Instant::now() + MAX_BURST;
-                        while Instant::now() < burst_deadline
-                            && rx.recv_timeout(DEBOUNCE_WINDOW).is_ok()
-                        {
-                            *last_event_for_thread.lock() = Instant::now();
+                        let mut changed = changed;
+                        while Instant::now() < burst_deadline {
+                            match rx.recv_timeout(DEBOUNCE_WINDOW) {
+                                Ok(next) => {
+                                    changed = next;
+                                    *last_event_for_thread.lock() = Instant::now();
+                                }
+                                Err(_) => break,
+                            }
                         }
                         emit_fs_changed(&app_for_thread, &canon_for_thread);
+                        emit_file_changed(&app_for_thread, &changed);
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         // Heartbeat — if it's been a long time since the
@@ -238,4 +257,12 @@ fn emit_fs_changed(app: &AppHandle, canon: &Path) {
     // status derived from their own working directory, so the path-based
     // emit lets the worktree's diff get refreshed too.
     let _ = app.emit("project:fs-changed", canon.to_string_lossy().to_string());
+}
+
+/// The CHANGED FILE behind a burst (audit H19), on its own event so the
+/// frontend's `project:fs-changed` payload contract (the watched root) stays
+/// exactly as it was. Per-file consumers — the native subagent-store re-sync —
+/// listen to this instead and can finally match their store layouts.
+fn emit_file_changed(app: &AppHandle, changed: &Path) {
+    let _ = app.emit("fs:file-changed", changed.to_string_lossy().to_string());
 }

@@ -94,8 +94,10 @@ pub async fn generate(
 
     // Write the program to a private temp file (kept out of the artifacts dir
     // so it is never surfaced as an artifact) and run it with cwd = artifacts
-    // dir so a relative `filename` resolves there.
-    let tmp = std::env::temp_dir().join(format!("relay_pygen_{}", unique_suffix()));
+    // dir so a relative `filename` resolves there. UUID suffix (audit M: temp
+    // collisions — same-tick runs shared a nanos-named dir and overwrote each
+    // other's gen.py).
+    let tmp = std::env::temp_dir().join(format!("relay_pygen_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("could not create work dir: {e}"))?;
     let script = tmp.join("gen.py");
     if let Err(e) = std::fs::write(&script, code) {
@@ -245,23 +247,10 @@ fn newest_new_file(dir: &Path, before: &HashSet<PathBuf>, ext: &str) -> Option<(
     })
 }
 
-fn unique_suffix() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-}
-
 fn truncate(s: &str) -> String {
-    let s = s.trim();
-    if s.len() <= MAX_OUTPUT {
-        return s.to_string();
-    }
-    let mut cut = MAX_OUTPUT;
-    while !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}\n… (output truncated)", &s[..cut])
+    // pygen trims its input before capping (its callers pass leading
+    // whitespace); the cap logic itself is shared with codeexec (audit M: DRY).
+    crate::chat::codeexec::truncate_to_cap(s.trim(), MAX_OUTPUT)
 }
 
 #[cfg(test)]

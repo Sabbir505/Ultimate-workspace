@@ -181,7 +181,7 @@ describe("per-action approval flow", () => {
 
     // User approves → backend resolveToolAction called with the pending id.
     await useChatStore.getState().resolveApproval(SID, true);
-    expect(resolveMock).toHaveBeenCalledWith("p1", true, undefined);
+    expect(resolveMock).toHaveBeenCalledWith("p1", true, undefined, undefined);
     expect(useChatStore.getState().pendingApprovals[SID]).toBeUndefined();
   });
 
@@ -213,6 +213,6 @@ describe("per-action approval flow", () => {
       args: {},
     });
     await useChatStore.getState().resolveApproval(SID, false);
-    expect(resolveMock).toHaveBeenCalledWith("p3", false, undefined);
+    expect(resolveMock).toHaveBeenCalledWith("p3", false, undefined, undefined);
   });
 });

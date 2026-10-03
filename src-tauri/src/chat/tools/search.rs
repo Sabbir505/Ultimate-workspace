@@ -225,11 +225,41 @@ async fn fetch_url_via_jina(client: &reqwest::Client, url: &str) -> Result<Strin
     if !status.is_success() {
         return Err(format!("jina reader returned HTTP {status}"));
     }
-    let body = resp.text().await.map_err(|e| e.to_string())?;
+    // Stream-capped like the direct path (audit M: jina reader): r.jina.ai
+    // returns the full text of whatever target the model picked, and the old
+    // `resp.text().await` buffered all of it before truncating — the exact
+    // OOM the direct fetch's 1 MiB cap exists to prevent.
+    let body = read_body_capped(resp, FETCH_URL_MAX_BODY_BYTES).await?;
     if body.trim().is_empty() {
         return Err("jina reader returned an empty document".to_string());
     }
     Ok(truncate_chars(&body, FETCH_URL_MAX_TEXT_CHARS))
+}
+
+/// Read a response body as lossy UTF-8, stopping at `cap` bytes (audit M:
+/// jina reader). Same +1 discipline as the FS read tool: "exactly at the cap"
+/// stays distinguishable from "over it".
+async fn read_body_capped(
+    resp: reqwest::Response,
+    cap: usize,
+) -> Result<String, String> {
+    use futures_util::StreamExt;
+    let mut stream = resp.bytes_stream();
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| format!("body read failed: {e}"))?;
+        if bytes.len() + chunk.len() > cap + 1 {
+            let room = cap.saturating_sub(bytes.len());
+            bytes.extend_from_slice(&chunk[..room.min(chunk.len())]);
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > cap {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Truncate `s` to at most `max` chars on a char boundary, appending an
@@ -264,10 +294,17 @@ pub(crate) async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<Str
     // Parse out the host and reject blocked address ranges (SSRF guard).
     // This runs BEFORE both the direct fetch and the Jina fallback — the
     // reader must never be handed a private/loopback target it would fetch
-    // on our behalf.
+    // on our behalf. The guard's DNS resolution is a BLOCKING getaddrinfo
+    // (audit M: search DNS) — a slow/broken resolver (VPN, TUN) stalled a
+    // tokio worker for seconds per fetch, so it goes through the blocking
+    // pool; the guard itself stays sync for the tests.
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
     if let Some(host) = parsed.host_str() {
-        if host_blocked(host) {
+        let host_for_probe = host.to_string();
+        let blocked = tokio::task::spawn_blocking(move || host_blocked(&host_for_probe))
+            .await
+            .unwrap_or(true); // probe failure = fail closed
+        if blocked {
             return Err(format!(
                 "fetch_url refused: `{host}` resolves to a loopback, link-local, \
                  private, or otherwise blocked address range (SSRF guard)."
@@ -477,46 +514,71 @@ fn html_to_text(html: &str) -> String {
 
 /// Remove `<tag>…</tag>` regions (case-insensitive) entirely. The opening tag
 /// is matched on a name boundary so `<head>` does not also match `<header>`.
+///
+/// Single pass (audit M: remove_blocks): the old loop re-lowercased the ENTIRE
+/// remaining document on every occurrence of every tag — a 1 MiB page made of
+/// ~60k tiny `<script>` blocks did ~60k full-document lowercase passes
+/// (tens of GB of byte churn, minutes of a pegged worker). Lowercase ONCE,
+/// record every block's [start, end) span against those offsets (byte-stable),
+/// then splice the original string from the END so earlier offsets stay valid.
 fn remove_blocks(html: &str, tags: &[&str]) -> String {
-    let mut s = html.to_string();
+    let lower = html.to_ascii_lowercase();
+    // Collect non-overlapping spans; nested same-tag blocks collapse into the
+    // outer one (same result the loop produced — everything from the outer
+    // open to the FIRST close after it went, which is what spanning to the
+    // next free close reproduces).
+    let mut spans: Vec<(usize, usize)> = Vec::new();
     for tag in tags {
-        loop {
-            // ASCII lowercase preserves byte length so offsets stay valid in `s`.
-            let lower = s.to_ascii_lowercase();
-            let open = format!("<{tag}");
-            let close = format!("</{tag}>");
-
-            // Find `<tag` where the following char ends the tag name (space,
-            // `>`, `/`, or the tag is self-terminated), skipping e.g. `<header`.
-            let mut search_from = 0;
-            let start = loop {
-                match lower[search_from..].find(&open) {
-                    None => break None,
-                    Some(rel) => {
-                        let idx = search_from + rel;
-                        let after = &lower[idx + open.len()..];
-                        let boundary = after
-                            .chars()
-                            .next()
-                            .map(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '>' | '/'))
-                            .unwrap_or(true);
-                        if boundary {
-                            break Some(idx);
-                        }
-                        search_from = idx + open.len();
-                    }
+        let open = format!("<{tag}");
+        let close = format!("</{tag}>");
+        let mut search_from = 0usize;
+        while let Some(rel) = lower[search_from..].find(&open) {
+            let start = search_from + rel;
+            // Name boundary: `<tag` must not match `<tagline`.
+            let after = &lower[start + open.len()..];
+            let boundary = after
+                .chars()
+                .next()
+                .map(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '>' | '/'))
+                .unwrap_or(true);
+            if !boundary {
+                search_from = start + open.len();
+                continue;
+            }
+            // Skip spans already covered by an earlier tag's block.
+            if spans.last().is_some_and(|(s, e)| start < *e) {
+                search_from = spans.last().unwrap().1;
+                continue;
+            }
+            let end = match lower[start..].find(&close) {
+                Some(rel_end) => start + rel_end + close.len(),
+                // Unterminated block: everything to EOF goes (the loop did
+                // `s.truncate(start)`).
+                None => {
+                    spans.push((start, html.len()));
+                    break;
                 }
             };
-            let Some(start) = start else { break };
-            let Some(rel_end) = lower[start..].find(&close) else {
-                s.truncate(start);
-                break;
-            };
-            let end = start + rel_end + close.len();
-            s.replace_range(start..end, " ");
+            spans.push((start, end));
+            search_from = end;
         }
     }
-    s
+    if spans.is_empty() {
+        return html.to_string();
+    }
+    spans.sort_unstable();
+    let mut out = String::with_capacity(html.len());
+    let mut last = 0usize;
+    for (start, end) in spans {
+        if start < last {
+            continue; // already covered by a previous span
+        }
+        out.push_str(&html[last..start]);
+        out.push(' '); // the old replace_range left one space per block
+        last = end;
+    }
+    out.push_str(&html[last..]);
+    out
 }
 
 /// One organic search result. `pub(crate)` so the fallback engines (the
@@ -541,7 +603,37 @@ pub struct SearchProvider {
     pub key: String,
 }
 
-/// Resolve the configured search provider from app_settings, if any.
+/// The API key for a search engine: the OS keychain first, then a one-time
+/// migration of the legacy PLAINTEXT `search.<provider>_key` settings row
+/// (audit C7 — every other secret in this app already lives in the keychain
+/// with values that are never returnable over IPC). The migration writes the
+/// keychain entry and deletes the row, so the plaintext copy does not outlive
+/// the first read. A failed keychain write leaves the legacy row in place and
+/// search keeps working — the key is just not at rest yet.
+pub(crate) fn search_api_key(conn: &rusqlite::Connection, provider: &str) -> Option<String> {
+    if let Some(k) = crate::secrets::generic_load(conn, "search", provider) {
+        let k = k.trim().to_string();
+        if !k.is_empty() {
+            return Some(k);
+        }
+    }
+    let legacy_key = format!("search.{provider}_key");
+    let legacy = crate::db::get_setting(conn, &legacy_key).ok().flatten()?;
+    let legacy = legacy.trim().to_string();
+    if legacy.is_empty() {
+        return None;
+    }
+    if crate::secrets::generic_store(conn, "search", provider, &legacy).is_ok() {
+        let _ = conn.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            rusqlite::params![legacy_key],
+        );
+    }
+    Some(legacy)
+}
+
+/// Resolve the configured search provider (settings choose the engine; its key
+/// comes from the OS keychain).
 pub(crate) fn configured_provider(conn: &rusqlite::Connection) -> Option<SearchProvider> {
     let provider = crate::db::get_setting(conn, "search.provider")
         .ok()
@@ -554,14 +646,7 @@ pub(crate) fn configured_provider(conn: &rusqlite::Connection) -> Option<SearchP
         "brave" => "brave",
         _ => return None,
     };
-    let key = crate::db::get_setting(conn, &format!("search.{known}_key"))
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let key = key.trim().to_string();
-    if key.is_empty() {
-        return None;
-    }
+    let key = search_api_key(conn, known)?;
     Some(SearchProvider { name: known, key })
 }
 
@@ -802,7 +887,8 @@ pub(crate) async fn serp_via_reader(
     if !status.is_success() {
         return Err(format!("jina reader returned HTTP {status}"));
     }
-    let body = resp.text().await.map_err(|e| e.to_string())?;
+    // Stream-capped (audit M: jina reader) — same as fetch_url_via_jina.
+    let body = read_body_capped(resp, FETCH_URL_MAX_BODY_BYTES).await?;
     if body.trim().is_empty() {
         return Err("jina reader returned an empty document".to_string());
     }

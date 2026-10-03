@@ -655,7 +655,7 @@ export function markdownToSpeech(md: string): string {
   out = out.replace(/^[ \t]{0,3}>[ \t]?/gm, "");
   // List markers: the bullet becomes a full stop so items are separated by a
   // sentence break instead of running together.
-  out = out.replace(/^[ \t]*[-*+][ \t]+/gm, "");
+  out = out.replace(/^[ \t]*[-*+][ \t]+/gm, ". ");
   out = out.replace(/^[ \t]*\[[ xX]\][ \t]*/gm, "");
   out = out.replace(/^[ \t]*\d+[.)][ \t]+/gm, "");
   out = out.replace(/^[ \t]*([-*_])[ \t]*\1[ \t]*\1[-*_ \t]*$/gm, "\n\n");
@@ -839,7 +839,8 @@ export interface PlayTextOptions {
 
 type SentenceResult = "ended" | "stopped" | "paused";
 
-function base64ToBytes(b64: string): Uint8Array {
+/** Shared with ttsPreview (voice picker) — keep the one decoder. */
+export function base64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
@@ -1300,6 +1301,9 @@ class TtsPlayer {
   private skipTo(target: number): void {
     if (this.chunks.length === 0) return;
     const clamped = Math.max(0, Math.min(target, this.chunks.length - 1));
+    // Already on the target sentence and no jump pending: next()/prev() at a
+    // boundary must not restart (replay) the current sentence.
+    if (clamped === this.index && this.skipTarget == null) return;
     this.offset = 0;
     const phase = useTtsStore.getState().phase;
     if (phase === "playing" || phase === "buffering") {

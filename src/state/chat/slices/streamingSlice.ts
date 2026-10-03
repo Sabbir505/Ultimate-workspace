@@ -395,15 +395,28 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
       }
     },
 
-    cancelStream: async (sessionIdOverride?: string) => {
+cancelStream: async (sessionIdOverride?: string) => {
       // Cancel the session the calling view is showing (the active one by
       // default, the split pane's session via the override). The legacy scalar
       // names whichever session last emitted a token — with concurrent streams
       // it could point at a background chat, cancelling the wrong turn (or
-      // no-op when it's null before the first token lands).
+      // no-op when it is null before the first token lands).
       const activeChatSessionId = sessionIdOverride ?? get().activeChatSessionId;
       if (activeChatSessionId && activeChatSessionId in get().streaming) {
         const streamingChatSessionId = activeChatSessionId;
+        // Arm the stale-terminal guard (audit H36): a harness/ACP cancel is a
+        // process kill whose death-driven `chat:error`/`chat:done` can land
+        // hundreds of ms LATER — after steerQueuedMessage (or a send-again /
+        // auto-cancel of a silent turn) has already created the replacement
+        // turn's streaming entry. The late event then deleted the NEW entry,
+        // flashed a false error banner for a turn that didn't fail, and every
+        // subsequent token of the live turn was dropped by onToken's
+        // `chatSessionId in streaming` guard. The NEXT terminal event for this
+        // session is therefore consumed silently (see onError/onDone); the
+        // replacement turn's own terminal event clears the state as usual.
+        set((s) => ({
+          staleTerminalFor: { ...s.staleTerminalFor, [streamingChatSessionId]: true },
+        }));
         const session = get().sessions.find((s) => s.id === streamingChatSessionId);
         // Persist the partial reply BEFORE cancelling and clear the live keys:
         // the backend's abort path discards its accumulated buffer, and the
@@ -561,6 +574,12 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // CREATES the turn's entry: sendMessage and broadcastToSessions
       // pre-create it (as "") before the first token can arrive.
       if (!(chatSessionId in get().streaming)) return;
+      // The first REAL token of the replacement turn proves it is alive, so
+      // the armed stale-terminal guard can be disarmed: from here on this
+      // turn's own chat:done/chat:error must be acted on normally (audit H36).
+      if (get().staleTerminalFor[chatSessionId] && token.length > 0) {
+        set((s) => ({ staleTerminalFor: omitKey(s.staleTerminalFor, chatSessionId) }));
+      }
       // No-op flush guard: harnesses close a stream with runs of EMPTY
       // deltas (dozens can land in one IPC sweep on teardown/restart). Each
       // used to clone the whole streaming map and re-render ChatView for
@@ -667,6 +686,13 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
     },
 
     onDone: async (chatSessionId: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null, llmTimeMs?: number | null, toolTimeMs?: number | null, ttftMs?: number | null, tokensPerSecond?: number | null, cacheHitRate?: number | null) => {
+      // Stale terminal event from an already-cancelled turn whose replacement
+      // turn owns the streaming entry now (audit H36) — consume it silently;
+      // see the identical guard in onError.
+      if (get().staleTerminalFor[chatSessionId]) {
+        set((s) => ({ staleTerminalFor: omitKey(s.staleTerminalFor, chatSessionId) }));
+        return;
+      }
       // A reply that lands while the user is viewing a different chat marks the
       // finished one unread, so it surfaces in the sidebar. Best-effort: this
       // handler must ALWAYS reach the streaming-state cleanup below — an
@@ -830,6 +856,16 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
     },
 
     onError: (chatSessionId: string, message: string, code: string | null) => {
+      // Stale terminal event from an already-cancelled turn (audit H36):
+      // consume it without touching the streaming entry — that entry belongs
+      // to the REPLACEMENT turn now (steer/send-again/auto-cancel all create it
+      // before the killed process's chat:error arrives). Acting on it deleted
+      // the live turn's state, showed a false error banner, and made onToken
+      // drop every remaining token until the done-refetch.
+      if (get().staleTerminalFor[chatSessionId]) {
+        set((s) => ({ staleTerminalFor: omitKey(s.staleTerminalFor, chatSessionId) }));
+        return;
+      }
       // Persist the streamed partial the same way the cancel path does (audit
       // B-19): the backend's error path discards its buffer WITHOUT persisting,
       // so this is the only chance to keep the text the user already watched.

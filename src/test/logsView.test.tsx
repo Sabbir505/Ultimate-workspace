@@ -108,6 +108,12 @@ vi.mock("../lib/ipc", async (importOriginal) => {
   };
 });
 
+// NOTE: if the row list is ever virtualized again (@tanstack/react-virtual),
+// jsdom needs two stubs for rows to render: offsetHeight on the scroll
+// element (virtual-core's getRect reads offsetWidth/offsetHeight) AND a
+// non-zero getBoundingClientRect for `measureElement` — zero there collapses
+// every measured item and unmounts the rows.
+
 describe("LogsView", () => {
   it("renders a row per logged request with its telemetry", async () => {
     render(<LogsView />);

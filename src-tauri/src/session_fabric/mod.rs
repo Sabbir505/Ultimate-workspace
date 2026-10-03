@@ -49,6 +49,16 @@ use crate::chat::subagents::MAX_ACTIVE_SUBAGENT;
 /// the release watcher gives up counting it (matches the automation engine's
 /// own MAX_RUN_SECS scale — unattended work is allowed to be long).
 const SUBAGENT_SLOT_RELEASE_CEILING_SECS: u64 = 2 * 60 * 60;
+/// Start grace for the slot-release watchers (audit H18): they are spawned
+/// BEFORE `run_turn` dispatches, and `turn_in_flight` is only set inside
+/// `mgr.send` — after connector resolution, CLI spawn, (for opencode) up to
+/// a 20s server boot. Without a wait-for-busy the first poll saw the flag
+/// still false, the loop body never ran, and the watcher freed the
+/// concurrency slot AND settled the run row "ok" BEFORE the first turn
+/// started: max_concurrent then gated spawn instants only (a fan-out could
+/// exceed every cap), and a first turn that later failed mid-stream was
+/// recorded as a success because the settle is final.
+const SUBAGENT_START_GRACE_MS: u64 = 30_000;
 const QUESTION_TIMEOUT_DEFAULT: u64 = 25;
 const QUESTION_TIMEOUT_MAX: u64 = 120;
 /// Hard watcher ceiling: a question whose answer never arrives stops
@@ -1728,6 +1738,16 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
         let slot_child = child.id.clone();
         tauri::async_runtime::spawn(async move {
             let started = std::time::Instant::now();
+            // Start grace (audit H18): wait for the first turn to actually go busy
+            // before treating "not busy" as "finished" — see the constant.
+            while !session_busy(&app_for_slot, &slot_child) {
+                if started.elapsed().as_millis() as u64 >= SUBAGENT_START_GRACE_MS {
+                    break; // never went busy: the fail-fast spawn path already
+                            // recorded the real "error", and finish_subagent_run
+                            // keeps the FIRST settle final.
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
+            }
             while session_busy(&app_for_slot, &slot_child) {
                 if started.elapsed().as_secs() >= SUBAGENT_SLOT_RELEASE_CEILING_SECS {
                     break;
@@ -2239,6 +2259,16 @@ pub async fn subagent_spawn(
     let slot_child = child.clone();
     tauri::async_runtime::spawn(async move {
         let started = std::time::Instant::now();
+        // Start grace (audit H18): wait for the first turn to actually go busy
+        // before treating "not busy" as "finished" — see the constant.
+        while !session_busy(&app_for_slot, &slot_child) {
+            if started.elapsed().as_millis() as u64 >= SUBAGENT_START_GRACE_MS {
+                break; // never went busy: the fail-fast spawn path already
+                        // recorded the real "error", and finish_subagent_run
+                        // keeps the FIRST settle final.
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
+        }
         while session_busy(&app_for_slot, &slot_child) {
             if started.elapsed().as_secs() >= SUBAGENT_SLOT_RELEASE_CEILING_SECS {
                 break;

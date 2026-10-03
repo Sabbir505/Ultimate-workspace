@@ -97,7 +97,7 @@ describe("ApprovalCard occurrence review", () => {
     // All occurrences ticked → the partial buttons hide; Allow = apply all.
     expect(screen.queryByRole("button", { name: "Apply all" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Allow" }));
-    expect(onResolve).toHaveBeenCalledWith(true);
+    expect(onResolve).toHaveBeenCalledWith(true, undefined, false);
   });
 
   it("unticking one exposes Apply all, which resolves with no selection", () => {
@@ -106,6 +106,7 @@ describe("ApprovalCard occurrence review", () => {
     const row = screen.getByText(/footer/).closest("label")!;
     fireEvent.click(row.querySelector("input")!);
     fireEvent.click(screen.getByRole("button", { name: "Apply all" }));
+    // Apply-all resolves plain (no selection payload, no always flag).
     expect(onResolve).toHaveBeenCalledWith(true);
   });
 
@@ -118,7 +119,7 @@ describe("ApprovalCard occurrence review", () => {
     // No partial button when nothing is selected; plain Allow remains.
     expect(screen.queryByRole("button", { name: /Apply selected/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Allow" }));
-    expect(onResolve).toHaveBeenCalledWith(true);
+    expect(onResolve).toHaveBeenCalledWith(true, undefined, false);
   });
 
   it("a plain (non-preview) card keeps the classic Allow/Deny UI", () => {

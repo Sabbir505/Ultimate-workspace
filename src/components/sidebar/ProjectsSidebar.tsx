@@ -19,7 +19,8 @@ import {
   X,
 } from "lucide-react";
 
-import { toastError, toastSuccess, exportChatZip } from "../../lib/ipc";
+import { toastError, toastSuccess } from "../../lib/ipc";
+import { useChatRowActions } from "./chatRowActions";
 import { useProjectsStore } from "../../state/projects";
 import { useProjectsSidebarStore } from "../../state/projectsSidebar";
 import { useChatStore } from "../../state/chat";
@@ -52,16 +53,24 @@ export function ProjectsSidebar() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const lastSelection = useChatStore((s) => s.lastSelection);
   const chatConfig = useChatStore((s) => s.config);
-  const selectSession = useChatStore((s) => s.selectSession);
   const newChat = useChatStore((s) => s.newChat);
-  const deleteChat = useChatStore((s) => s.deleteChat);
-  const renameChat = useChatStore((s) => s.renameChat);
-  const setStarred = useChatStore((s) => s.setStarred);
-  const setUnread = useChatStore((s) => s.setUnread);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const chatLoaded = useChatStore((s) => s.loaded);
 
   const setActiveView = useUiStore((s) => s.setActiveView);
+
+  // Shared with Sidebar (audit M: DRY) — the eight row actions and their
+  // toasts lived twice and drifted.
+  const {
+    handleSelectChat,
+    handleDeleteChat,
+    handleRenameChat,
+    handleToggleStar,
+    handleSetUnread,
+    handleExportChat,
+    handleOpenSplitChat,
+    handleForkChat,
+  } = useChatRowActions();
 
   // How many chats each project reveals — grows by PAGE_SIZE per "Show more"
   // click. Component state (not the store): the panel stays mounted across
@@ -90,7 +99,8 @@ export function ProjectsSidebar() {
         : gitStatuses[projectId]?.branch ?? null;
       const overridePath = cwdOverrides[s.id] ?? null;
       const folderName = overridePath
-        ? overridePath.split(/[\/]/).filter(Boolean).pop() ?? null
+        // Windows paths use backslashes — split on both separators.
+        ? overridePath.split(/[\\/]/).filter(Boolean).pop() ?? null
         : null;
       const project = projects.find((p) => p.id === projectId) ?? null;
       (byProject[projectId] ??= []).push({
@@ -127,59 +137,6 @@ export function ProjectsSidebar() {
     }
     return { active, stashedProjects };
   }, [projects, stashed]);
-
-  const handleSelectChat = useCallback(
-    (id: string) => {
-      void selectSession(id).catch((err) => toastError("Couldn't open that chat", err));
-      setActiveView("chat");
-    },
-    [selectSession, setActiveView],
-  );
-
-  const handleDeleteChat = useCallback(
-    (id: string) => {
-      deleteChat(id).catch((e) => toastError("Couldn't delete the chat", e));
-    },
-    [deleteChat],
-  );
-
-  const handleRenameChat = useCallback(
-    (id: string, title: string) => {
-      void renameChat(id, title);
-    },
-    [renameChat],
-  );
-
-  const handleToggleStar = useCallback(
-    (id: string, starred: boolean) => {
-      void setStarred(id, starred);
-    },
-    [setStarred],
-  );
-
-  const handleSetUnread = useCallback(
-    (id: string, unread: boolean) => {
-      void setUnread(id, unread);
-    },
-    [setUnread],
-  );
-
-  const handleExportChat = useCallback((id: string) => {
-    exportChatZip(id)
-      .then((saved) => {
-        if (saved) toastSuccess("Chat exported to .zip");
-      })
-      .catch((err) => toastError("Chat export failed", err));
-  }, []);
-
-  const handleOpenSplitChat = useCallback((id: string) => {
-    void useChatStore.getState().openChatSplit(id);
-  }, []);
-
-  // Fork the chat into N side-by-side panes — same dialog as the sidebar's.
-  const handleForkChat = useCallback((id: string) => {
-    useUiStore.getState().openForkChatModal(id);
-  }, []);
 
   // New chat bound to THIS project — same composer seeding as the sidebar's
   // global "+" (last committed pick, falling back to the provider defaults),

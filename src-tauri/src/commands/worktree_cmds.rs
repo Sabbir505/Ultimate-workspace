@@ -128,6 +128,52 @@ pub(crate) async fn ensure_worktree_with_branches(
     Ok(path)
 }
 
+/// Validate a renderer-supplied worktree pointer BEFORE it is persisted.
+///
+/// The `worktree_path` column is not cosmetic: it feeds `allowlisted_roots`
+/// (gating `read_file_text` and every git command), the PTY cwd of agent
+/// sessions, and chat send cwd resolution. Persisting an unvalidated path
+/// therefore turns ONE IPC call into arbitrary file read across the whole
+/// drive — audit C4. A worktree pointer is always an existing directory that
+/// the owning session's project could have produced, so require exactly that.
+///
+/// Takes the project PATH (not the connection) so it can be called with the
+/// DB guard dropped — every step here is filesystem IO, which the codebase's
+/// own rule keeps out from under the shared mutex.
+fn validate_worktree_pointer(project_path: &str, candidate: &str) -> CmdResult<String> {
+    let root = std::fs::canonicalize(project_path)
+        .map_err(|e| format!("project path unreadable: {e}"))?;
+    let canon = std::fs::canonicalize(candidate)
+        .map_err(|e| format!("worktree path does not exist: {e}"))?;
+    if !canon.is_dir() {
+        return Err("A worktree must be a directory.".to_string());
+    }
+    // A linked worktree is a SIBLING of the project root
+    // (`<parent>/<name>-relay-<id8>`), never a directory inside it.
+    let parent = root.parent().ok_or_else(|| {
+        "project path has no parent directory to scope the worktree to.".to_string()
+    })?;
+    if !canon.starts_with(parent) {
+        return Err(format!(
+            "worktree must live under the project's parent directory ({}), refused: {}",
+            parent.display(),
+            canon.display()
+        ));
+    }
+    // Prove it is one of THIS repo's linked worktrees (`git worktree list`).
+    // Containment under the parent is not enough: the pointer feeds the
+    // file-read allowlist, so only git's own registry counts.
+    let listed = git::list_worktrees(&root).unwrap_or_default();
+    let canon_s = canon.to_string_lossy().into_owned();
+    if !listed.iter().any(|p| *p == canon_s) {
+        return Err(format!(
+            "not a linked worktree of this project: {}",
+            canon.display()
+        ));
+    }
+    Ok(canon_s)
+}
+
 /// Point a chat at a worktree path (rare direct-set) or — the common case,
 /// "Join main working tree" — remove the existing worktree and clear the
 /// pointer. When the pointer changes, the previous on-disk worktree is removed
@@ -144,28 +190,67 @@ pub async fn set_chat_session_worktree(
     worktree_path: Option<String>,
     db: State<'_, DbState>,
 ) -> CmdResult<()> {
-    // Phase 1 (locked): decide what needs tearing down; collect the paths only.
-    let teardown = {
+    // Phase 1 (locked): decide what needs tearing down; collect the paths
+    // only — plus the project path a candidate pointer must belong to.
+    let (teardown, project_path_for_candidate) = {
         let conn = db.0.lock();
         let before = db::get_chat_session(&conn, &session_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "chat session not found".to_string())?;
-        if worktree_path.as_deref() != before.worktree_path.as_deref() {
+        let teardown = if worktree_path.as_deref() != before.worktree_path.as_deref() {
             worktree_teardown_target(&conn, &before)
         } else {
             None
-        }
+        };
+        // A candidate pointer is only meaningful for a project-bound chat;
+        // resolve its project path here (SQL only), validate the path itself
+        // below with the guard dropped.
+        let project_path = match worktree_path.as_deref() {
+            Some(_) => match before.project_id.as_deref() {
+                Some(pid) => {
+                    Some(
+                        db::get_project(&conn, pid)
+                            .map_err(|e| e.to_string())?
+                            .ok_or_else(|| "project not found".to_string())?
+                            .path,
+                    )
+                }
+                None => {
+                    return Err(
+                        "This chat is not bound to a project, so it cannot have a worktree."
+                            .to_string(),
+                    )
+                }
+            },
+            None => None,
+        };
+        (teardown, project_path)
     };
-    // Phase 2 (no lock): the slow git removal, off the async runtime.
+    // Phase 2 (no lock): validate a candidate pointer (filesystem IO) and
+    // run the slow git removal off the async runtime. A renderer-supplied path
+    // is UNTRUSTED until proven to be one of this repo's linked worktrees —
+    // the pointer feeds the file-read allowlist (audit C4).
+    let validated = match (worktree_path.clone(), project_path_for_candidate) {
+        (Some(candidate), Some(project_path)) => Some(
+            tokio::task::spawn_blocking(move || validate_worktree_pointer(&project_path, &candidate))
+                .await
+                .map_err(|e| e.to_string())??,
+        ),
+        _ => None,
+    };
     if let Some((root, wt)) = teardown {
         let _ = tokio::task::spawn_blocking(move || remove_worktree_blocking(root, wt)).await;
     }
-    // Phase 3 (locked): commit the pointer. A missing project root skips the
-    // git removal but still lands the same end state — the pointer is written
-    // here either way.
+    // Phase 3 (locked): commit the pointer. A candidate path was validated
+    // (canonical form, parent containment, git's own worktree registry) in
+    // phase 2; persist THAT, not the raw renderer string. A `None` clears.
     let conn = db.0.lock();
-    db::set_chat_session_worktree(&conn, &session_id, worktree_path.as_deref())
-        .map_err(|e| e.to_string())
+    db::set_chat_session_worktree(
+        &conn,
+        &session_id,
+        validated.as_deref().or(worktree_path.as_deref()),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// The teardown TARGET of a chat's worktree: `(project root, worktree path)`,

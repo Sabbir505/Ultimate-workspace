@@ -128,6 +128,31 @@ pub fn parse_sources_section(content: &str) -> Vec<ReportSource> {
     sources
 }
 
+/// Byte offset where the Sources section's HEADING line begins — the cut
+/// point between report body and bibliography (audit H10).
+///
+/// The lint used to compute it as `content.rfind("\n#")`, which only works
+/// for `#`-prefixed headings, while `is_sources_heading` deliberately accepts
+/// `**Source References:**` / `6. Source References:` styles (the module's own
+/// fixture uses one). For such a report the whole Sources section was linted
+/// as body: every `- [1] [Title](url)` entry re-triggered citation
+/// extraction (double-counted) and each entry line was counted as an
+/// uncited/misattributed sentence. Symmetrically, a `#` heading AFTER Sources
+/// (an appendix) pushed the cut past the section. Returns `None` when no
+/// recognizable heading exists; the caller then falls back to the old
+/// last-`#`-heading heuristic.
+fn sources_section_start(content: &str) -> Option<usize> {
+    let mut offset = 0usize;
+    let mut found = None;
+    for line in content.split_inclusive('\n') {
+        if is_sources_heading(line.trim()) {
+            found = Some(offset);
+        }
+        offset += line.len();
+    }
+    found
+}
+
 /// `## Sources`, `**Sources & References**`, `6. Source References:`, … —
 /// same tolerance as the frontend parser.
 fn is_sources_heading(line: &str) -> bool {
@@ -374,8 +399,14 @@ pub fn lint_report(conn: &Connection, chat_session_id: &str, content: &str) -> C
     }
 
     // Sentences of the report body (before the Sources section, which is
-    // naturally citation-free).
-    let body_end = content.rfind("\n#").map(|i| i).unwrap_or(content.len());
+    // naturally citation-free). The cut follows the SAME tolerant heading
+    // detection the entry parser uses, so `**Source References:**`-style
+    // sections are excluded from the body metrics (audit H10); the
+    // last-`#`-heading heuristic stays as the fallback for reports whose
+    // sources section has no recognizable heading at all.
+    let body_end = sources_section_start(content)
+        .or_else(|| content.rfind("\n#"))
+        .unwrap_or(content.len());
     let body = &content[..body_end];
     let sentences = split_sentences(body);
 
@@ -565,24 +596,27 @@ fn split_sentences(text: &str) -> Vec<String> {
         }
         let mut current = String::new();
         let mut prev: Option<char> = None;
-        for c in para.chars() {
+        let mut chars = para.chars().peekable();
+        while let Some(c) = chars.next() {
             current.push(c);
             let ends = matches!(c, '.' | '!' | '?')
                 && prev.is_some_and(|p| !p.is_whitespace())
                 && c != '.';
             let _ = ends;
             if matches!(c, '.' | '!' | '?') {
-                // Boundary unless part of a number/abbreviation-ish pattern:
-                // digit.digit ("3.5"), single letter ("e.g") — heuristic.
+                // Boundary unless part of a number: a decimal point needs a
+                // digit BEFORE *and* a digit AFTER ("3.5"). The old check
+                // compared the two characters BEFORE the period, which is
+                // inverted relative to that intent: "costs 3.5 million" split
+                // mid-number while a real sentence ending in digits
+                // ("…shipped in 2026.") merged with the next one — skewing
+                // the uncited-sentence count and fragmenting the reported
+                // sentence text (audit P2, citation_lint).
                 let trimmed = current.trim_end();
                 let before = trimmed.chars().rev().nth(1);
-                let looks_decimal = matches!(before, Some(d) if d.is_ascii_digit())
-                    && trimmed.len() >= 2
-                    && trimmed
-                        .chars()
-                        .rev()
-                        .nth(2)
-                        .is_some_and(|d| d.is_ascii_digit());
+                let next_is_digit = chars.peek().is_some_and(|n| n.is_ascii_digit());
+                let looks_decimal =
+                    matches!(before, Some(d) if d.is_ascii_digit()) && next_is_digit;
                 if !looks_decimal {
                     let s = current.trim();
                     if !s.is_empty() {

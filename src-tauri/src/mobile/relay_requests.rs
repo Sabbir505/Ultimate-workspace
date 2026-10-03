@@ -187,8 +187,13 @@ where
             return Err(format!("malformed Pair frame: {e}"));
         }
     };
-    let (legacy_token, proof, v2) = match paired {
-        MobileMessage::Pair { token, proof, v2 } => (token, proof, v2),
+    let (legacy_token, proof, v2, v3) = match paired {
+        MobileMessage::Pair {
+            token,
+            proof,
+            v2,
+            v3,
+        } => (token, proof, v2, v3),
         _ => {
             let err = DesktopMessage::ChatError {
                 chat_session_id: "pair".into(),
@@ -230,16 +235,20 @@ where
         let nonce_bound =
             super::relay_crypto::verify_pair_proof_with_nonce(expected_token, &challenge, &p);
         let v2_client = v2 == Some(true);
+        let v3_client = v3 == Some(true);
+        // A v3 client (salt-bound, audit C9) necessarily saw a challenge, so
+        // its proof MUST bind it — the legacy static-proof path is closed to
+        // it exactly like v2, and a non-challenge-bound proof is refused.
+        let challenge_required = require_challenge || v2_client || v3_client;
         // Legacy fallback: pre-v2 clients (no `v2` flag) may present the
-        // static proof. A v2 client never may — its proof must bind the
+        // static proof. A v2/v3 client never may — its proof must bind the
         // challenge — and neither may anyone once
         // `mobile.pairing.require_challenge` is set (post-upgrade fleet).
         let legacy_ok = !nonce_bound
-            && !require_challenge
-            && !v2_client
+            && !challenge_required
             && super::relay_crypto::verify_pair_proof(expected_token, &p);
         if !nonce_bound && !legacy_ok {
-            let reason = if v2_client {
+            let reason = if v2_client || v3_client {
                 "pairing failed: invalid challenge proof"
             } else if require_challenge {
                 "pairing failed: this server requires challenge-response pairing — update the mobile app"
@@ -264,15 +273,26 @@ where
         // plaintext PairOk frame — it is public; secrecy rests on the token.
         // Sent BEFORE enable_e2e so it stays plaintext and WS ordering
         // guarantees the phone derives the key before any encrypted frame.
-        let salt = super::relay_crypto::random_salt();
+        let wire_salt = super::relay_crypto::random_salt();
         {
             use base64::Engine as _;
             let pair_ok = DesktopMessage::PairOk {
-                salt: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(salt),
+                salt: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(wire_salt),
             };
             let _ = send_msg(write, &pair_ok).await;
         }
-        let key = super::relay_crypto::derive_session_key_with_salt(expected_token, &salt);
+        // v3 clients bind the public salt to this connection's challenge
+        // before deriving (audit C9): the raw salt alone is replayable, so a
+        // MITM replaying a recorded PairOk would otherwise make the phone
+        // re-derive a previous connection's key and reuse its nonce space.
+        // Pre-v3 clients derive from the raw salt, unchanged on the wire.
+        let effective_salt: Vec<u8> = if v3_client {
+            super::relay_crypto::bind_salt_to_challenge(&challenge, &wire_salt).to_vec()
+        } else {
+            wire_salt.to_vec()
+        };
+        let key =
+            super::relay_crypto::derive_session_key_with_salt(expected_token, &effective_salt);
         super::relay_ws::enable_e2e(&write, key).await;
         eprintln!("[mobile-relay] paired (E2E encrypted, per-connection key); processing commands");
     }
@@ -323,6 +343,14 @@ where
                     )
                     .await
                 });
+                // The temp-session turn registers NOTHING with ChatManager, so
+                // a mid-turn `chat_mgr.cancel(sid)` used to be a no-op: the
+                // phone's stop button acknowledged the cancel, the SSE loop had
+                // no cancellation check, and the provider request ran to
+                // completion — generation AND billing continued after the phone
+                // believed the turn was over (audit H42). The abort handle lets
+                // the cancel closure kill the turn task directly.
+                let turn_abort = turn.abort_handle();
                 loop {
                     tokio::select! {
                         res = &mut turn => {
@@ -350,7 +378,13 @@ where
                                     handle_mid_turn_frame(
                                         msg,
                                         used_e2e,
-                                        &|sid: &str| chat_mgr.cancel(sid),
+                                        // Kill the temp-session turn task on
+                                        // cancel (audit H42); the chat-manager
+                                        // route stays for parity.
+                                        &|sid: &str| {
+                                            chat_mgr.cancel(sid);
+                                            turn_abort.abort();
+                                        },
                                         &write,
                                     )
                                     .await;

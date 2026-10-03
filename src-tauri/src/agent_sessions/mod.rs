@@ -1634,6 +1634,49 @@ pub(crate) fn emit_error(app: Option<&AppHandle>, sid: &str, message: &str) {
     crate::chat::stream_events::emit_error(app, sid, message);
 }
 
+/// Per-line cap for harness stdout readers. A CLI that prints megabytes
+/// without a newline (a bundled bundle dump, a base64 blob) must not grow
+/// the buffer without bound; the SSE path already caps at 4 MiB.
+pub(crate) const HARNESS_LINE_CAP: usize = 8 * 1024 * 1024;
+
+/// Read one newline-terminated line from a harness stdout pipe.
+///
+/// Replaces `read_line` in every reader loop (audit H20): `read_line` returns
+/// `InvalidData` for a SINGLE non-UTF-8 byte, and the loops treated that
+/// exactly like EOF — so one OEM-codepage byte from the `cmd /C` wrapper (a
+/// localized "… is not recognized" message) ended the reader mid-turn,
+/// discarding the streamed reply and respawning a perfectly healthy CLI.
+/// Here invalid UTF-8 decodes lossily (U+FFFD) and the turn continues. The
+/// buffer is reused across calls (the mi18 allocation win) and hard-capped at
+/// [`HARNESS_LINE_CAP`]. Returns `None` only on real EOF.
+pub(crate) fn next_harness_line<R: std::io::BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> Option<String> {
+    use std::io::BufRead as _;
+    buf.clear();
+    match reader.read_until(b'\n', buf) {
+        Ok(0) => return None,
+        Ok(_) => {}
+        // A genuine IO error (pipe closed, EIO) still ends the stream; an
+        // encoding problem no longer reaches here because we never ask for a
+        // UTF-8 String.
+        Err(_) => return None,
+    }
+    let mut line = String::from_utf8_lossy(buf).into_owned();
+    if line.len() > HARNESS_LINE_CAP {
+        // Truncate on a char boundary and mark it, so a runaway no-newline
+        // dump cannot pin memory but the operator can see it happened.
+        let mut cut = HARNESS_LINE_CAP;
+        while cut > 0 && !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        line.truncate(cut);
+        line.push_str("\n… (line truncated)");
+    }
+    Some(line.trim_end_matches(&[char::from(10), char::from(13)][..]).to_string())
+}
+
 /// Persist a "harness-side auto-compact" boundary row + emit the meter
 /// refresh. Each harness surfaces its own native auto-compact differently:
 /// Claude Code emits `{"type":"system","subtype":"compact_boundary"}` —

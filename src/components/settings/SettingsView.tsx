@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
-import { getSetting, setSetting, type ChatProvider, listChatModels, setChatDefaultModel, type SelectedModelEntry, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload, exportProjectZip, importChatZip, toastError, toastSuccess, getLocalModelOverrides, setLocalModelOverrides, type LlamaOverrides, installHarness, getLlamaServerPath, detectGpuPower } from "../../lib/ipc";
+import { getSetting, setSetting, setSearchApiKey, hasSearchApiKey, deleteSearchApiKey, type ChatProvider, listChatModels, setChatDefaultModel, type SelectedModelEntry, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload, exportProjectZip, importChatZip, toastError, toastSuccess, getLocalModelOverrides, setLocalModelOverrides, type LlamaOverrides, installHarness, getLlamaServerPath, detectGpuPower } from "../../lib/ipc";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import type { HarnessId } from "../../types";
 import { shortModelName } from "../../lib/modelLabel";
@@ -828,9 +828,10 @@ function AssistantPanel() {
 
 /** Web Search panel: which engine powers `web_search` in chat/research mode.
  *  Keyless multi-engine (DuckDuckGo + Mojeek + Wikipedia) is the default and
- *  needs nothing; BYO-key options swap in a paid index. Keys persist via the
- *  generic settings store (the backend reads `search.provider` /
- *  `search.<provider>_key` at call time). */
+ *  needs nothing; BYO-key options swap in a paid index. The ENGINE choice
+ *  persists via the settings store (`search.provider`); the KEYS live in the
+ *  OS keychain (audit C7) and are never readable back — the panel shows
+ *  "saved" state, not the value. */
 const SEARCH_PROVIDERS = [
   { value: "", label: "Keyless (default)" },
   { value: "serper", label: "Serper (Google)" },
@@ -849,7 +850,11 @@ const SEARCH_PROVIDER_HELP: Record<string, string> = {
 
 function WebSearchPanel() {
   const [provider, setProvider] = useState("");
-  const [keys, setKeys] = useState<Record<string, string>>({});
+  // Search keys live in the OS keychain and are NEVER readable back (audit
+  // C7), so the panel tracks "is one stored" plus whatever is being typed
+  // right now. A stored key shows as a saved chip, not as text.
+  const [keyStored, setKeyStored] = useState<Record<string, boolean>>({});
+  const [keyDraft, setKeyDraft] = useState("");
   const [loaded, setLoaded] = useState(false);
   // Native server-side search (§4.3.7): Anthropic runs web_search itself and
   // returns cited results inline — Relay's client scraping tool is swapped
@@ -857,10 +862,10 @@ function WebSearchPanel() {
   // is opt-in. Anthropic-native chats only.
   const [nativeSearch, setNativeSearch] = useState(false);
   const [nativeOpenAiSearch, setNativeOpenAiSearch] = useState(false);
-  // Debounced persists for the key inputs: they fire per keystroke, and
+  // Debounced persists for the key input: it fires per keystroke, and
   // out-of-order backend writes could persist an intermediate (shorter)
-  // value over the final one. The latest typed value is mirrored per id so
-  // the unmount cleanup can FLUSH a still-pending write instead of dropping it.
+  // value over the final one. The latest typed value is mirrored so the
+  // unmount cleanup can FLUSH a still-pending write instead of dropping it.
   const keyPersistTimers = useRef<Record<string, number>>({});
   const keyPersistPending = useRef<Record<string, string>>({});
   useEffect(
@@ -868,7 +873,8 @@ function WebSearchPanel() {
       for (const [id, t] of Object.entries(keyPersistTimers.current)) {
         window.clearTimeout(t);
         const pending = keyPersistPending.current[id];
-        if (pending !== undefined) void setSetting(`search.${id}_key`, pending);
+        // Flush to the OS keychain, not the settings table (audit C7).
+        if (pending !== undefined) void setSearchApiKey(id, pending);
       }
     },
     [],
@@ -878,15 +884,15 @@ function WebSearchPanel() {
     let stale = false;
     void Promise.all([
       getSetting("search.provider"),
-      getSetting("search.serper_key"),
-      getSetting("search.tavily_key"),
-      getSetting("search.brave_key"),
+      hasSearchApiKey("serper"),
+      hasSearchApiKey("tavily"),
+      hasSearchApiKey("brave"),
       getSetting("chat.websearch.native_anthropic"),
       getSetting("chat.websearch.native_openai"),
     ]).then(([p, serper, tavily, brave, native, nativeOai]) => {
       if (stale) return;
       setProvider(p ?? "");
-      setKeys({ serper: serper ?? "", tavily: tavily ?? "", brave: brave ?? "" });
+      setKeyStored({ serper: !!serper, tavily: !!tavily, brave: !!brave });
       setNativeSearch(native === "true");
       setNativeOpenAiSearch(nativeOai === "true");
       setLoaded(true);
@@ -905,15 +911,36 @@ function WebSearchPanel() {
     void setSetting("search.provider", v);
   };
 
+  // Typing is local; the keychain write is debounced. An EMPTY value clears
+  // the stored key (the backend removes the entry), which is also how a user
+  // revokes a key they can no longer see.
   const setKey = (id: string, value: string) => {
-    setKeys((k) => ({ ...k, [id]: value }));
+    setKeyDraft(value);
     keyPersistPending.current[id] = value;
     if (keyPersistTimers.current[id] !== undefined) window.clearTimeout(keyPersistTimers.current[id]);
     keyPersistTimers.current[id] = window.setTimeout(() => {
       delete keyPersistTimers.current[id];
       delete keyPersistPending.current[id];
-      void setSetting(`search.${id}_key`, value);
+      void setSearchApiKey(id, value)
+        .then(() => {
+          if (value.trim()) setKeyStored((s) => ({ ...s, [id]: true }));
+        })
+        .catch((e) => {
+          useUiStore.getState().pushToast("error", "Could not save the API key", String(e));
+        });
     }, 400);
+  };
+
+  const clearKey = (id: string) => {
+    setKeyDraft("");
+    if (keyPersistTimers.current[id] !== undefined) window.clearTimeout(keyPersistTimers.current[id]);
+    delete keyPersistTimers.current[id];
+    delete keyPersistPending.current[id];
+    void deleteSearchApiKey(id)
+      .then(() => setKeyStored((s) => ({ ...s, [id]: false })))
+      .catch((e) => {
+        useUiStore.getState().pushToast("error", "Could not remove the API key", String(e));
+      });
   };
 
   return (
@@ -948,12 +975,28 @@ function WebSearchPanel() {
             <div className="settings-form-control">
               <input
                 type="password"
-                value={keys[provider] ?? ""}
-                placeholder={loaded ? "Paste your API key…" : ""}
+                value={keyDraft}
+                placeholder={
+                  loaded
+                    ? keyStored[provider]
+                      ? "Saved in your OS keychain — paste a new key to replace it"
+                      : "Paste your API key…"
+                    : ""
+                }
                 onChange={(e) => setKey(provider, e.target.value)}
                 autoComplete="off"
                 spellCheck={false}
               />
+              {keyStored[provider] && (
+                <button
+                  type="button"
+                  className="settings-inline-btn"
+                  onClick={() => clearKey(provider)}
+                  title="Remove the stored key from your OS keychain"
+                >
+                  Clear
+                </button>
+              )}
             </div>
           </div>
         </div>

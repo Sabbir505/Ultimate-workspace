@@ -1155,32 +1155,13 @@ pub fn un_mark_branch_superseded(
 
 // ---- full-text search ----
 
-/// Build a safe FTS5 MATCH expression from free-form user input. FTS5 has its
-/// own query language (AND/OR/NOT, phrases, column filters), so each term is
-/// stripped to alphanumeric/underscore, double-quoted (quoted strings are
-/// never parsed as operators), and given a trailing `*` prefix marker —
-/// "stream" also hits "streaming". Returns None when nothing searchable
-/// remains.
+/// Build a safe FTS5 MATCH expression from free-form user input: terms
+/// stripped to alphanumeric/underscore (snake_case identifiers are
+/// meaningful in chat content), quoted with a trailing `*` prefix marker and
+/// space-joined (FTS5 implicit AND). Shared implementation in db/mod.rs
+/// (audit M: FTS DRY).
 fn fts_match_query(query: &str) -> Option<String> {
-    let terms: Vec<String> = query
-        .split_whitespace()
-        .filter_map(|t| {
-            let clean: String = t
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if clean.is_empty() {
-                None
-            } else {
-                Some(format!("\"{clean}\"*"))
-            }
-        })
-        .collect();
-    if terms.is_empty() {
-        None
-    } else {
-        Some(terms.join(" "))
-    }
+    super::fts_prefix_query(query, super::FtsTerms::AndWord)
 }
 
 /// Full-text search across chat message content (FTS5) plus session titles
@@ -1201,13 +1182,7 @@ pub fn search_chat_messages(
 
     // Pass 1: session titles. LIKE with escaped wildcards; no FTS needed for
     // a single short column.
-    let like = format!(
-        "%{}%",
-        trimmed
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    );
+    let like = format!("%{}%", super::escape_like(trimmed));
     {
         let mut stmt = conn.prepare(
             "SELECT id, title, last_active_at FROM chat_sessions

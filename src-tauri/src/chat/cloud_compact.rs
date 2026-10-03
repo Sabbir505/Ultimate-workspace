@@ -100,6 +100,29 @@ pub fn estimate_request_tokens(
     total
 }
 
+/// Char budget for the summarizer's assembled input (audit M: cloud
+/// compaction). ~100k tokens of chars — comfortably inside every supported
+/// cloud model's window, and only reached by the forced-compaction path where
+/// the history already overflowed.
+const SUMMARIZER_INPUT_CHAR_BUDGET: usize = 400_000;
+
+/// Drop the OLDEST entries until the assembled summarizer input fits
+/// [`SUMMARIZER_INPUT_CHAR_BUDGET`]. Pure.
+fn fit_summary_budget<'a>(entries: &[&'a CompactionEntry]) -> Vec<&'a CompactionEntry> {
+    let est = |e: &CompactionEntry| e.message.content.len() + e.message.role.len() + 8;
+    let mut total: usize = entries.iter().map(|e| est(e)).sum();
+    if total <= SUMMARIZER_INPUT_CHAR_BUDGET {
+        return entries.to_vec();
+    }
+    let mut kept = entries.to_vec();
+    while !kept.is_empty() && total > SUMMARIZER_INPUT_CHAR_BUDGET {
+        let dropped = est(kept[0]);
+        kept.remove(0);
+        total = total.saturating_sub(dropped);
+    }
+    kept
+}
+
 /// Run a non-streaming summarization call against the session's own cloud
 /// provider. Returns `(summary_text, input_tokens, output_tokens)`.
 pub(crate) async fn summarize_via_provider(
@@ -275,6 +298,16 @@ pub async fn run_cloud_compaction(
 
     let pre_tokens = estimate_request_tokens(system, entries, 0);
     let prior_text = prior.as_ref().map(|(_, t)| t.as_str());
+    // Input budget (audit M: cloud compaction): the threshold trigger keeps
+    // the head under the window, but the FORCED compaction after a real
+    // context-overflow 400 does not — the history is already over the window,
+    // so the summarizer request itself overflowed, the compaction failed, and
+    // the turn died with the raw error this module exists to prevent. Drop
+    // the OLDEST entries until the assembled input fits a generous fixed
+    // budget (~100k tokens of chars): the newest context matters most for
+    // summary quality, and a truncated-but-successful summary always beats a
+    // failed compaction.
+    let to_compact: Vec<&CompactionEntry> = fit_summary_budget(&to_compact);
     let (summary, in_tok, out_tok) = summarize_via_provider(
         client,
         provider_id,

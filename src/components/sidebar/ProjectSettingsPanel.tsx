@@ -9,6 +9,7 @@ import {
   listQuickActions,
   listSecretKeys,
   setSecret,
+  toastError,
   updateQuickAction,
 } from "../../lib/ipc";
 import { runQuickAction } from "../../lib/sessionLauncher";
@@ -54,39 +55,63 @@ export function ProjectSettingsPanel() {
 
   if (!projectId || !project) return null;
 
+  // Re-sync both lists with what the backend actually has — used after a
+  // failed optimistic delete so the removed row comes back.
+  const reList = async () => {
+    try {
+      const [a, k] = await Promise.all([listQuickActions(projectId), listSecretKeys(projectId)]);
+      setActions(a ?? []);
+      setSecretKeys(k ?? []);
+    } catch {
+      /* the toast already reported the failure; keep the current lists */
+    }
+  };
+
   const addAction = async () => {
     if (!label.trim() || !command.trim()) return;
-    const created = await createQuickAction(
-      projectId,
-      label.trim(),
-      command.trim(),
-      keybinding.trim() || undefined,
-      runOnWorktree,
-    );
-    if (created) setActions((a) => [...a, created]);
-    setLabel("");
-    setCommand("");
-    setKeybinding("");
-    setRunOnWorktree(false);
+    try {
+      const created = await createQuickAction(
+        projectId,
+        label.trim(),
+        command.trim(),
+        keybinding.trim() || undefined,
+        runOnWorktree,
+      );
+      if (created) setActions((a) => [...a, created]);
+      setLabel("");
+      setCommand("");
+      setKeybinding("");
+      setRunOnWorktree(false);
+    } catch (err) {
+      toastError("Couldn't add the quick action", err);
+    }
   };
 
   const toggleRunOnWorktree = async (action: QuickAction) => {
-    await updateQuickAction(
-      action.id,
-      action.label,
-      action.command,
-      action.keybinding ?? undefined,
-      !action.runOnWorktree,
-    );
-    setActions((a) => a.map((x) => (x.id === action.id ? { ...x, runOnWorktree: !x.runOnWorktree } : x)));
+    try {
+      await updateQuickAction(
+        action.id,
+        action.label,
+        action.command,
+        action.keybinding ?? undefined,
+        !action.runOnWorktree,
+      );
+      setActions((a) => a.map((x) => (x.id === action.id ? { ...x, runOnWorktree: !x.runOnWorktree } : x)));
+    } catch (err) {
+      toastError(`Couldn't update "${action.label}"`, err);
+    }
   };
 
   const addSecret = async () => {
     if (!secretKey.trim() || !secretValue) return;
-    await setSecret(projectId, secretKey.trim(), secretValue);
-    setSecretKeys((keys) => (keys.includes(secretKey.trim()) ? keys : [...keys, secretKey.trim()]));
-    setSecretKeyDraft("");
-    setSecretValue("");
+    try {
+      await setSecret(projectId, secretKey.trim(), secretValue);
+      setSecretKeys((keys) => (keys.includes(secretKey.trim()) ? keys : [...keys, secretKey.trim()]));
+      setSecretKeyDraft("");
+      setSecretValue("");
+    } catch (err) {
+      toastError(`Couldn't set the secret "${secretKey.trim()}"`, err);
+    }
   };
 
   return (
@@ -123,14 +148,24 @@ export function ProjectSettingsPanel() {
                         </label>
                       </td>
                       <td>
-                        <button onClick={() => void runQuickAction(projectId, action.label, action.command)}>
+                        <button
+                          onClick={() =>
+                            void runQuickAction(projectId, action.label, action.command).catch((err) =>
+                              toastError(`Couldn't run "${action.label}"`, err),
+                            )
+                          }
+                        >
                           Run
                         </button>{" "}
                         <button
                           className="danger"
                           onClick={() => {
-                            void deleteQuickAction(action.id);
+                            // Optimistic remove; a failed delete re-lists so the row comes back.
                             setActions((a) => a.filter((x) => x.id !== action.id));
+                            void deleteQuickAction(action.id).catch(async (err) => {
+                              toastError(`Couldn't delete "${action.label}"`, err);
+                              await reList();
+                            });
                           }}
                         >
                           ✕
@@ -184,8 +219,12 @@ export function ProjectSettingsPanel() {
                         <button
                           className="danger"
                           onClick={() => {
-                            void deleteSecret(projectId, key);
+                            // Optimistic remove; a failed delete re-lists so the key comes back.
                             setSecretKeys((keys) => keys.filter((k) => k !== key));
+                            void deleteSecret(projectId, key).catch(async (err) => {
+                              toastError(`Couldn't delete the secret "${key}"`, err);
+                              await reList();
+                            });
                           }}
                         >
                           ✕

@@ -124,6 +124,10 @@ function GalleryPanel({ onInstalled }: { onInstalled: () => void }) {
   const [query, setQuery] = useState("");
   const [installing, setInstalling] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // A failed catalog fetch used to leave the panel on "Loading the gallery…"
+  // forever — surface the error with a retry instead.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadTick, setLoadTick] = useState(0);
   // url → "ok" | "stale" | "unknown" — verified against the live GitHub
   // contents API so a stale catalog entry says "unavailable" instead of
   // failing at install time with a raw 404.
@@ -132,17 +136,21 @@ function GalleryPanel({ onInstalled }: { onInstalled: () => void }) {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const list = (await listSkillGallery()) ?? [];
-      if (cancelled) return;
-      setEntries(list);
-      const results = await verifyGalleryOnce(list);
-      if (cancelled) return;
-      setVerified(results);
+      try {
+        const list = (await listSkillGallery()) ?? [];
+        if (cancelled) return;
+        setEntries(list);
+        const results = await verifyGalleryOnce(list);
+        if (cancelled) return;
+        setVerified(results);
+      } catch (err) {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
+      }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadTick]);
 
   const install = async (entry: SkillGalleryEntry) => {
     if (installing) return;
@@ -197,7 +205,14 @@ function GalleryPanel({ onInstalled }: { onInstalled: () => void }) {
       {entries.length === 0 && (
         <div className="empty-reserved small" style={{ margin: "8px 0" }}>
           <span className="empty-icon">⌘</span>
-          <span className="empty-text">Loading the gallery…</span>
+          {loadError ? (
+            <>
+              <span className="empty-text">Couldn't load the gallery: {loadError}</span>
+              <button onClick={() => setLoadTick((t) => t + 1)}>Retry</button>
+            </>
+          ) : (
+            <span className="empty-text">Loading the gallery…</span>
+          )}
         </div>
       )}
       {categories.map((cat) => (
@@ -350,10 +365,23 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
   const openRequestRef = useRef(0);
 
   const openItem = async (item: InstalledSkill) => {
+    const previous = selected;
     setSelected(item);
     setCreating(false);
     const requestId = ++openRequestRef.current;
-    const body = await readInstalledSkill(item.slug, kind);
+    let body: string | null;
+    try {
+      body = await readInstalledSkill(item.slug, kind);
+    } catch (err) {
+      // A failed read must not leave the previous skill's body sitting in the
+      // editor under the new slug — the next Save would cross-write them.
+      if (openRequestRef.current !== requestId) return; // a newer open superseded this one
+      setSelected(previous ?? null);
+      setContent("");
+      setDirty(false);
+      toastError(`Couldn't read "${item.slug}"`, err);
+      return;
+    }
     if (openRequestRef.current !== requestId) return; // a newer open superseded this one
     setContent(body ?? "");
     setDirty(false);
@@ -652,15 +680,28 @@ function TemplatesPanel() {
   const save = async () => {
     const normalizedSlash = slash.trim().startsWith("/") ? slash.trim() : `/${slash.trim()}`;
     if (!name.trim() || normalizedSlash === "/" || !content.trim()) return;
-    if (editing) {
-      await update(editing.id, name.trim(), normalizedSlash, content);
-    } else {
-      await create(name.trim(), normalizedSlash, content, scope);
-      // Also install as a real skill in both harness directories so Claude
-      // Code and Kimi Code can invoke the same slash command natively.
-      await createInstalledSkill(name.trim(), "skill", content);
-      setInstallNote(`Also installed as /${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")} in Claude Code & Kimi Code`);
-      window.setTimeout(() => setInstallNote(null), 3000);
+    try {
+      if (editing) {
+        await update(editing.id, name.trim(), normalizedSlash, content);
+      } else {
+        await create(name.trim(), normalizedSlash, content, scope);
+        // Also install as a real skill in both harness directories so Claude
+        // Code and Kimi Code can invoke the same slash command natively.
+        // Best-effort: the DB row is the source of truth, so a failed
+        // harness install toasts but still resets the form — retrying the
+        // save must not duplicate the template.
+        try {
+          await createInstalledSkill(name.trim(), "skill", content);
+          setInstallNote(`Also installed as /${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")} in Claude Code & Kimi Code`);
+          window.setTimeout(() => setInstallNote(null), 3000);
+        } catch (err) {
+          toastError(`Couldn't install "/${name.trim()}" into the harness dirs`, err);
+        }
+      }
+    } catch (err) {
+      // DB write failed — keep the form filled so the user can retry.
+      toastError(editing ? `Couldn't update "${name.trim()}"` : "Couldn't save the template", err);
+      return;
     }
     reset();
   };
@@ -703,7 +744,7 @@ function TemplatesPanel() {
                   </td>
                   <td style={{ textAlign: "right" }}>
                     <button onClick={() => startEdit(skill)}>Edit</button>{" "}
-                    <button className="danger" onClick={() => void remove(skill.id)}>
+                    <button className="danger" onClick={() => void remove(skill.id).catch((err) => toastError(`Couldn't delete "${skill.name}"`, err))}>
                       ✕
                     </button>
                   </td>

@@ -10,7 +10,7 @@ vi.mock("../lib/ipc", async (importOriginal) => {
   return {
     ...actual,
     getCostRollups: vi.fn().mockResolvedValue({
-    totals: { rawTokenCostUsd: 100, providerReportedUsd: 5, estimatedUsd: 95, unpricedUsd: 0 },
+    totals: { rawTokenCostUsd: 100, providerReportedUsd: 5, estimatedUsd: 95 },
     perProvider: [{ provider: "claude_code", costUsd: 80, tokens: 1_000_000, sharePct: 80 }],
     daily: [{ day: "2026-08-01", costUsd: 10, tokensByProvider: { claude_code: 100_000 }, costByProvider: { claude_code: 8 } }],
     byKind: { processedTokens: 1_100_000, cachedInputTokens: 1_000_000, uncachedInputTokens: 100_000, outputTokens: 50_000, reasoningTokens: 5_000, sessions: 12, responses: 120 },

@@ -29,6 +29,12 @@
 //   --dry-run         Resolve config/repo/key/tag and print them without
 //                     signing or writing anything. Use this to confirm the
 //                     channel before committing to a full bundle build.
+//   --allow-stale-artifact   Sign the newest installer even when none matches
+//                     `version` (a leftover build of ANOTHER version would
+//                     otherwise ship as v<version> — the default is to fail).
+//   --allow-missing-notes    Fall back to the whole changelog file when no
+//                     `## [<version>]` section exists (the default is to
+//                     fail — the banner would show the wrong release's notes).
 //
 // Run AFTER `npm run tauri build` (no signing env vars needed).
 // See RELEASE.md for the full workflow.
@@ -75,6 +81,9 @@ const repo = argValue("--repo") ?? DEFAULT_REPO;
 const tag = argValue("--tag") ?? `v${version}`;
 const keyPath = join(root, argValue("--key") ?? DEFAULT_KEY);
 const dryRun = args.includes("--dry-run");
+// Opt-outs for the two hard failures below (stale artifact / missing notes).
+const allowStaleArtifact = args.includes("--allow-stale-artifact");
+const allowMissingNotes = args.includes("--allow-missing-notes");
 
 const bundleDir = join(root, "src-tauri/target/release/bundle");
 
@@ -102,6 +111,8 @@ if (!dryRun && !existsSync(keyPath)) {
 // The update banner renders this markdown directly, so it must contain ONLY
 // the released version's section — never the whole file (header, naming note,
 // legend and all). Keep a Changelog sections look like `## [0.4.2] — 2026-08-31`.
+// Returns null when the file has no section for `ver` — the caller decides
+// whether that is fatal (it is, unless --allow-missing-notes).
 function extractSection(md, ver) {
   const versionHeading = new RegExp(`^##\\s\\[${ver.replace(/\./g, "\\.")}\\]`);
   const clean = (body) =>
@@ -120,22 +131,48 @@ function extractSection(md, ver) {
     }
   }
 
-  // Prefer this version's section; fall back to the first non-empty one
-  // (e.g. a release cut straight from a still-populated [Unreleased]).
   const wanted = sections.find((s) => versionHeading.test(s.title));
-  return (
-    (wanted && clean(wanted.body)) ||
-    sections.map((s) => clean(s.body)).find(Boolean) ||
-    md.trim()
-  );
+  if (!wanted) return null;
+  return clean(wanted.body) || null;
+}
+
+// Legacy fallback when the caller passes --allow-missing-notes: the first
+// non-empty section (e.g. a release cut straight from [Unreleased]), else
+// the whole file.
+function fallbackNotes(md) {
+  const sections = [];
+  for (const line of md.replace(/\r\n/g, "\n").split("\n")) {
+    if (/^##\s/.test(line)) sections.push({ body: [] });
+    else if (sections.length > 0) sections[sections.length - 1].body.push(line);
+  }
+  const clean = (body) =>
+    body.filter((line) => !/^-{3,}\s*$/.test(line)).join("\n").trim();
+  return sections.map((s) => clean(s.body)).find(Boolean) || md.trim();
 }
 
 let notes = argValue("--notes");
 const notesFile = argValue("--notes-file");
 if (!notes && notesFile) {
   const p = join(root, notesFile);
-  if (existsSync(p)) {
-    notes = extractSection(readFileSync(p, "utf8"), version);
+  if (!existsSync(p)) {
+    console.error(`\nNotes file not found: ${p}`);
+    process.exit(1);
+  }
+  const md = readFileSync(p, "utf8");
+  notes = extractSection(md, version);
+  if (!notes) {
+    // Publishing the whole changelog would make the update banner show the
+    // WRONG release's notes (header, legend and other versions included) —
+    // hard fail so a forgotten changelog entry stops the release.
+    if (!allowMissingNotes) {
+      console.error(
+        `\n${notesFile} has no \`## [${version}]\` section.\n` +
+          `Add the release's changelog entry, or pass --allow-missing-notes to ship the whole file anyway.`,
+      );
+      process.exit(1);
+    }
+    console.log(`(note) --allow-missing-notes: no [${version}] section; using the full changelog file`);
+    notes = fallbackNotes(md);
   }
 }
 if (!notes) {
@@ -166,6 +203,16 @@ for (const [key, spec] of Object.entries(PLATFORMS)) {
       continue;
     }
     fileName = candidates.sort().pop();
+    // A leftover build of a DIFFERENT version must not be signed and
+    // published as v<version> — the updater feed would serve the wrong
+    // binary. Hard fail; --allow-stale-artifact is the explicit opt-out.
+    if (!allowStaleArtifact) {
+      console.error(
+        `\nNo installer matching version ${version} in ${platformDir} (stale: ${fileName}).\n` +
+          `Rebuild (\`npm run tauri build\`), remove the stale artifact, or pass --allow-stale-artifact to ship it anyway.`,
+      );
+      process.exit(1);
+    }
     console.log(`(note) ${key}: no exact-version artifact, using newest: ${fileName}`);
   }
 

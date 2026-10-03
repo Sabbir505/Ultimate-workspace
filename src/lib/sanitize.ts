@@ -151,6 +151,13 @@ export function neutralizeMainDocCss(css: string): string {
     .replace(/@charset[^;]*;?/gi, "/* removed: @charset */")
     // `url(` whose argument is not a `#fragment` → invalid function.
     .replace(/\burl\(\s*(['"]?)\s*(?!#)/gi, "refused-url($1")
-    .replace(/([;{\s"'])position\s*:/gi, "$1refused-position:")
+    // Anchor on string start too: this runs on an EXTRACTED style-attribute
+    // value, so when `position` is the first declaration there is no
+    // preceding `;{ ` or quote and the old anchored pattern let
+    // `style="position:fixed;inset:0"` through — a model-authored mermaid
+    // label could then paint a full-screen clickjack cover over the whole app
+    // window (audit H34). `background-position` is unaffected: `position` is
+    // not preceded by a boundary there.
+    .replace(/(^|[;{\s"'])position\s*:/gi, "$1refused-position:")
     .replace(/\b(behavior|-moz-binding)\s*:/gi, "refused-$1:");
 }

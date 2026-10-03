@@ -365,6 +365,49 @@ fn pick_free_port() -> u16 {
         .unwrap_or(8915)
 }
 
+/// Tail one sidecar pipe into a log file for the child's WHOLE lifetime.
+///
+/// Without a reader, any child that writes more than the OS pipe buffer holds
+/// (~4-64KB) blocks inside `printf` forever: whisper.cpp prints a per-
+/// inference timing table on every `/inference` request and dictation fires
+/// repeated live "partial" requests, so the buffer fills after ~100 clips and
+/// the server stops answering until it is killed and respawned (audit C5).
+/// The child dying closes the pipe and the task exits on EOF.
+fn spawn_pipe_reader<R>(pipe: Option<R>, log_path: PathBuf)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let Some(pipe) = pipe else { return; };
+    tauri::async_runtime::spawn(async move {
+        use std::io::Write as _;
+        use tokio::io::AsyncBufReadExt as _;
+        let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        else {
+            // No log destination (read-only models dir) — drain into the void
+            // rather than leaving the pipe undrained, which is the wedge.
+            let mut pipe = pipe;
+            let mut buf = [0u8; 4096];
+            while let Ok(n) =
+                tokio::io::AsyncReadExt::read(&mut pipe, &mut buf).await
+            {
+                if n == 0 {
+                    break;
+                }
+            }
+            return;
+        };
+        let mut file = std::io::BufWriter::new(file);
+        let mut lines = tokio::io::BufReader::new(pipe).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = writeln!(file, "{line}");
+        }
+        let _ = file.flush();
+    });
+}
+
 /// E5: serializes the whole start sequence (spawn → health-poll → insert).
 /// The old check-then-start spanned several awaits; two concurrent starters
 /// (boot auto-start racing a first mic press) could both pass the "is
@@ -445,6 +488,13 @@ pub async fn start_sidecar_core(db: &DbState, stt: &SttState) -> CmdResult<u16> 
         .spawn()
         .map_err(|e| format!("failed to start whisper-server: {e}"))?;
 
+    // Drain BOTH pipes for the child's whole lifetime — see spawn_pipe_reader.
+    // Without this the whisper server wedges once its stdout pipe fills
+    // (audit C5); the readers exit on EOF when the child is killed.
+    let pipe_log = dir.join("whisper-server.log");
+    spawn_pipe_reader(child.stdout.take(), pipe_log.clone());
+    spawn_pipe_reader(child.stderr.take(), pipe_log);
+
     // Health-poll: any HTTP response from the port means the server is up
     // (whisper.cpp answers 404 on unknown paths — a response is the signal).
     let client = reqwest::Client::builder()
@@ -454,10 +504,20 @@ pub async fn start_sidecar_core(db: &DbState, stt: &SttState) -> CmdResult<u16> 
         .map_err(|e| e.to_string())?;
     let url = format!("http://127.0.0.1:{port}/");
     let mut healthy = false;
-    for _ in 0..40 {
+    // ~90s budget (audit M: stt health budget): the largest catalog model is
+    // 547 MB, and loading it from an HDD/USB models dir (plus AV scanning)
+    // blew past the old 10s ceiling — every start of that model failed with
+    // "never became reachable" even though the server would have come up.
+    // image_gen allows ~120s for the same reason. `try_wait` inside the loop
+    // fails FAST when the child already died instead of polling the full
+    // budget against a corpse.
+    for _ in 0..360 {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         if client.get(&url).send().await.is_ok() {
             healthy = true;
+            break;
+        }
+        if let Ok(Some(_)) = child.try_wait() {
             break;
         }
     }
@@ -546,6 +606,13 @@ pub async fn stt_start(
 /// whisper-server holding a CUDA context (hundreds of MB of VRAM), and with
 /// auto-start on, one leaks per app session.
 pub async fn stop_sidecar(stt: &SttState) {
+    // Serialize with the start sequence (audit M: stop/start race): a stop
+    // issued DURING a start (state still None while the health poll runs,
+    // up to ~90s) used to take() nothing and return — then start_sidecar_core
+    // inserted its handle and the server ran despite the stop. Holding the
+    // sequence lock here means the stop either sees the finished handle or
+    // waits for the start to complete and takes that.
+    let _seq = START_SEQ.lock().await;
     // Take out under the lock, drop the guard, then kill (Send future).
     let mut handle = stt.0.lock().take();
     if let Some(h) = handle.as_mut() {

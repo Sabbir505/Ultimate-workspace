@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { journalNotification } from '../lib/notificationJournal';
-import { Alert } from 'react-native';
+import { Alert, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getSecureRelayUrl, setSecureRelayUrl } from '../lib/secureStore';
-import { b64UrlToBytes, computePairProof, computePairProofWithNonce, deriveSessionKey, decryptFrame, encryptFrame } from '../lib/relayCrypto';
+import { b64UrlToBytes, bindSaltToChallenge, computePairProof, computePairProofWithNonce, deriveSessionKey, decryptFrame, encryptFrame } from '../lib/relayCrypto';
 
 /** The desktop relay binds loopback ONLY (127.0.0.1) on a persisted-but-random
  *  port, so there is no universal default URL: physical devices connect via a
@@ -560,6 +560,18 @@ let _pairChallenge: string | null = null;
 let _pairSent = false;
 let _pairFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 const PAIR_CHALLENGE_TIMEOUT_MS = 2500;
+// v3 pairing (audit C9): the PairOk salt rides an UNAUTHENTICATED plaintext
+// frame, so a relay MITM can record connection N's salt and replay it. We
+// therefore (a) bind the salt to this connection's challenge before deriving
+// (bindSaltToChallenge), (b) refuse a challenge we have already seen (a
+// replayed challenge + a replayed salt would re-derive the old key, whose
+// counters restart at 0 → keystream + Poly1305 one-time-key reuse), and
+// (c) refuse an effective salt equal to the previous connection's. Both
+// memories persist ACROSS connections — that is the whole point.
+let _lastChallengeSeen: string | null = null;
+let _lastEffectiveSalt: string | null = null;
+const bytesToHex = (b: Uint8Array): string =>
+  Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 // Loaded once from AsyncStorage; connect() awaits this so a persisted URL
 // wins over the loopback default on cold start. Pre-rebuild builds stored
 // the token under its own key — when the legacy URL carries no fragment, the
@@ -785,14 +797,29 @@ function _doConnect(target: string) {
             // nonce-bound proof so the pairing is replay-proof. Only the
             // FIRST Pair frame is read, so once a Pair is sent (race with
             // the legacy fallback timer) later challenges are ignored.
+            //
+            // REPLAY REFUSAL (audit C9): a challenge we have already seen is
+            // a MITM replaying a recorded handshake — pairing on it would
+            // re-derive the previous connection's key once the salt is
+            // replayed alongside it.
+            if (_lastChallengeSeen !== null && msg.nonce === _lastChallengeSeen) {
+              console.warn('[relay] refused replayed PairChallenge');
+              break;
+            }
             if (!_pairSent && _pairingToken) {
               _pairSent = true;
               if (_pairFallbackTimer) { clearTimeout(_pairFallbackTimer); _pairFallbackTimer = null; }
               const token = _pairingToken;
+              _pairChallenge = msg.nonce;
+              _lastChallengeSeen = msg.nonce;
               try {
                 _ws?.send(JSON.stringify({
                   type: 'Pair',
                   v2: true,
+                  // v3: bind the PairOk salt to this challenge before deriving
+                  // (the salt itself is unauthenticated — a replayed one must
+                  // not be able to reproduce an old key).
+                  v3: true,
                   proof: computePairProofWithNonce(token, msg.nonce),
                 }));
               } catch {}
@@ -802,8 +829,24 @@ function _doConnect(target: string) {
           case 'PairOk': {
             // Per-connection key (audit C1): derive from the desktop's fresh
             // salt, then flush whatever queued between Pair and PairOk.
+            // v3 (audit C9): the EFFECTIVE salt is SHA256(challenge || salt),
+            // which the desktop derives identically when we paired with v3.
             if (_pairingToken) {
-              _e2eKey = deriveSessionKey(_pairingToken, b64UrlToBytes(msg.salt));
+              const wireSalt = b64UrlToBytes(msg.salt);
+              const effectiveSalt = _pairChallenge
+                ? bindSaltToChallenge(b64UrlToBytes(_pairChallenge), wireSalt)
+                : wireSalt;
+              const saltHex = bytesToHex(effectiveSalt);
+              if (_lastEffectiveSalt !== null && saltHex === _lastEffectiveSalt) {
+                // Same effective salt as the previous connection = the same
+                // session key while both counters restart at 0. Refuse rather
+                // than reuse the key/nonce space (audit C9).
+                console.warn('[relay] refused repeated effective salt (replay)');
+                _ws?.close();
+                break;
+              }
+              _lastEffectiveSalt = saltHex;
+              _e2eKey = deriveSessionKey(_pairingToken, effectiveSalt);
               _pairingToken = null;
               const queued = _pendingFrames;
               _pendingFrames = [];
@@ -812,6 +855,11 @@ function _doConnect(target: string) {
                 sock?.send(encryptFrame(_e2eKey, _outCounter++, new TextEncoder().encode(frame)));
               }
               resetReconnectBackoff();
+              // Pairing CONFIRMED — persist the connect URL now (audit H41):
+              // globalConnect deliberately defers this write until the pair
+              // succeeds, so a malformed/never-pairing URL never replaces the
+              // stored one and un-pairs the phone on every cold start.
+              if (_url) void setSecureRelayUrl(_url).catch(() => {});
               // Pairing CONFIRMED — this, not ws.onopen, is when the app may
               // present itself as connected. ws.onopen used to fire nc(true)
               // immediately, so every reconnect attempt flashed the online
@@ -819,6 +867,28 @@ function _doConnect(target: string) {
               // and the offline layout came back: the cold-open flicker.
               nc(true);
               nconnecting(false);
+              // Wire the push pipeline (audit H40): register the Expo push
+              // token with the desktop right after pairing, so approvals /
+              // turn completions / automation results reach the phone when the
+              // relay socket is down. Every piece of this flow existed but was
+              // never called from anywhere — the desktop side (push.rs) has
+              // always been live. Fire-and-forget: a notification-permission
+              // denial or a missing Expo module must never block pairing.
+              void (async () => {
+                try {
+                  const { getPushTokenAsync } = await import('../lib/notifications');
+                  const pushToken = await getPushTokenAsync();
+                  if (pushToken && _e2eKey) {
+                    _send({
+                      type: 'RegisterPushToken',
+                      token: pushToken,
+                      platform: Platform.OS,
+                    } as SessionChatMessage);
+                  }
+                } catch (e) {
+                  console.warn('[relay] push token registration skipped:', e);
+                }
+              })();
               // Requests in flight on the OLD connection are gone with it;
               // keeping their routing entries would misroute the first
               // replies of the new connection.
@@ -871,7 +941,15 @@ function _doConnect(target: string) {
             journalNotification('turn_error', 'Turn failed', msg.error, msg.session_id);
             break;
           case 'SessionChatStatus': onSessionChatStatus.emit({ sessionId: msg.session_id, reason: msg.reason, message: msg.message }); break;
-          case 'SessionApprovalRequest': onSessionApprovalRequest.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, tool: msg.tool, summary: msg.summary, args: msg.args }); break;
+          case 'SessionApprovalRequest':
+            onSessionApprovalRequest.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, tool: msg.tool, summary: msg.summary, args: msg.args });
+            // Journal like every other relay event (audit H40): an approval
+            // that arrives while the user is on another screen was invisible —
+            // no push (the wiring was dead), no journal entry, no banner. The
+            // NotificationsScreen's empty state explicitly promises approvals
+            // "land here".
+            journalNotification('approval', 'Approval requested', msg.summary || msg.tool, msg.session_id);
+            break;
           case 'SessionApprovalResolved': onSessionApprovalResolved.emit({ sessionId: msg.session_id, pendingId: msg.pending_id }); break;
           case 'SessionPlanProposal': onSessionPlanProposal.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, title: msg.title, plan: msg.plan }); break;
           case 'SessionModelSet': onSessionModelSet.emit({ sessionId: msg.session_id, providerId: msg.provider_id, model: msg.model, effort: msg.effort }); break;
@@ -976,7 +1054,10 @@ function _doConnect(target: string) {
       if (_reconnectTimer === null) {
         const delay = _reconnectDelay;
         _reconnectDelay = Math.min(delay * 2, RECONNECT_MAX_MS);
-        _reconnectTimer = setTimeout(() => { _reconnectTimer = null; if (_url) _doConnect(_url); }, delay);
+        // ±20% jitter: many clients retrying after one desktop restart must
+        // not reconnect in lockstep (thundering herd on the relay port).
+        const jittered = delay * (0.8 + Math.random() * 0.4);
+        _reconnectTimer = setTimeout(() => { _reconnectTimer = null; if (_url) _doConnect(_url); }, jittered);
       }
     };
     ws.onerror = () => { _connecting = false; nc(false); nconnecting(false); };
@@ -984,14 +1065,19 @@ function _doConnect(target: string) {
 }
 function globalConnect(url?: string) {
   if (url) {
-    // Explicit URL from the Settings field, a QR scan, or a deep link: use it
-    // and persist it so the next cold start reconnects without re-entry. The
+    // Explicit URL from the Settings field, a QR scan, or a deep link. The
     // token rides in the URL fragment — that is the ONE stored copy (no
     // separate duplicate key). A fresh URL restarts the reconnect backoff.
     _url = url;
     _token = extractToken(url);
     resetReconnectBackoff();
-    void setSecureRelayUrl(url).catch(() => {});
+    // PERSIST ONLY AFTER A SUCCESSFUL PAIR (audit H41): the old code wrote
+    // the URL to SecureStore BEFORE connecting, so a malformed one (an
+    // `https://` host that `new WebSocket` rejects synchronously, or any
+    // never-pairing target) became the persisted URL — every cold start
+    // reloaded it and failed again, permanently un-pairing the phone until
+    // manual re-entry. The PairOk handler owns the write now; a failed
+    // connect leaves the previous stored URL intact.
     _doConnect(url);
     return;
   }
@@ -1023,6 +1109,14 @@ export function getRelayUrl(): string | null { return _url; }
  *  token is present — legacy/dev connect). Used by the Settings screen to
  *  show the token status. */
 export function getRelayToken(): string | null { return _token; }
+/** True while a connection attempt, a live socket, or a scheduled reconnect
+ *  exists at module level. Every useRelay() mount used to call
+ *  globalConnect() unconditionally — N mounted screens meant N competing
+ *  connect storms that also reset the backoff. Later mounts skip when a
+ *  connection lifecycle is already in flight. */
+export function reconnectPending(): boolean {
+  return _reconnectTimer !== null || _connecting || _ws !== null;
+}
 function globalDisconnect() { stopPolling(); resetReconnectBackoff(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } _e2eKey = null; _outCounter = 0; _inCounter = 0; nc(false); nconnecting(false); }
 
 // Stable sender identities (module-level) so screens can safely put them in
@@ -1074,7 +1168,10 @@ export function useRelay() {
   }, []);
   const sendToSession = useCallback((sid: string, text: string) => { _send({ type: 'SendToSession', session_id: sid, text }); }, []);
   const getTranscript = useCallback((sid: string) => { _send({ type: 'GetTranscript', session_id: sid }); }, []);
-  useEffect(() => { if (!_ws && !_connecting) globalConnect(); }, []);
+  // First mount owns the connect; later-mounted screens (or remounts while a
+  // reconnect is already scheduled) must not fire competing connects or
+  // reset the backoff (audit: reconnect storm).
+  useEffect(() => { if (!reconnectPending()) globalConnect(); }, []);
 
   // Session-scoped chat senders (Task 6). These go on the same WS connection
   // but route through SessionChatManager on the desktop, which manages the

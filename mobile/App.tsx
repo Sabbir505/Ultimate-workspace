@@ -9,7 +9,7 @@ import { navigationRef } from './src/lib/navigation';
 import AppDrawer, { DrawerProvider } from './src/components/AppDrawer';
 import { tapMedium } from './src/lib/haptics';
 import { initDeepLinkHandling } from './src/lib/deepLinks';
-import { authenticate, markBackgrounded, shouldLockOnResume, deviceCanAuthenticate, appLockPlatformName } from './src/lib/appLock';
+import { authenticate, clearAwayStamp, markBackgrounded, shouldLockOnResume, deviceCanAuthenticate, appLockPlatformName } from './src/lib/appLock';
 import { useRelay } from './src/hooks/useRelay';
 import HomeScreen from './src/screens/HomeScreen';
 import SessionChat from './src/screens/SessionChat';
@@ -97,6 +97,15 @@ function AppShell() {
   const [hasBiometrics, setHasBiometrics] = useState(false);
   useEffect(() => {
     void deviceCanAuthenticate().then(setHasBiometrics);
+    // COLD-START LOCK (audit H39): the away-stamp now persists (AsyncStorage),
+    // so a force-quit while backgrounded — or the OS killing the process —
+    // still arms the gate on the next launch. Without this boot check the
+    // lock only fired on a live background→active transition and was
+    // bypassable by killing the app first. `shouldLockOnResume` handles the
+    // `away === null` case (never backgrounded: no lock).
+    void shouldLockOnResume().then((should) => {
+      if (should) setLocked(true);
+    });
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'background' || state === 'inactive') {
         markBackgrounded();
@@ -112,7 +121,10 @@ function AppShell() {
   const unlock = () => {
     tapMedium();
     void authenticate('Unlock Relay').then((ok) => {
-      if (ok) setLocked(false);
+      if (ok) {
+        clearAwayStamp();
+        setLocked(false);
+      }
     });
   };
 

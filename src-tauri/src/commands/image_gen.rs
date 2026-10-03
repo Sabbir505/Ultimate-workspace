@@ -826,12 +826,21 @@ fn resolve_binary(
     // the "binary path override" silently does nothing while one exists.
     // The managed build in turn beats a random sd-server.exe found on PATH.
     let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
+    // An override that is a DIRECTORY only counts when the exe is actually
+    // inside it (audit M: image_gen resolve_binary): `path.join(SD_SERVER_EXE)`
+    // was pushed unchecked and first-match-wins selection then returned a
+    // non-existent binary, shadowing a healthy managed install — every start
+    // failed with "failed to start sd-server" until the stale setting was
+    // cleared. Same guard the PATH walk below applies.
     if let Some(p) = get_setting(conn, SERVER_PATH_KEY).filter(|s| !s.trim().is_empty()) {
         let path = PathBuf::from(p.trim());
         if path.is_file() {
             candidates.push((path, "custom"));
         } else if path.is_dir() {
-            candidates.push((path.join(SD_SERVER_EXE), "custom"));
+            let exe = path.join(SD_SERVER_EXE);
+            if exe.is_file() {
+                candidates.push((exe, "custom"));
+            }
         }
     }
     if let Ok(env_path) = std::env::var("SD_SERVER") {
@@ -839,7 +848,10 @@ fn resolve_binary(
         if path.is_file() {
             candidates.push((path, "custom"));
         } else if path.is_dir() {
-            candidates.push((path.join(SD_SERVER_EXE), "custom"));
+            let exe = path.join(SD_SERVER_EXE);
+            if exe.is_file() {
+                candidates.push((exe, "custom"));
+            }
         }
     }
     match device {
@@ -1471,10 +1483,47 @@ pub async fn ensure_server_alive(
     Ok(())
 }
 
+/// Queue one catalog component for download (audit M: download DRY — three
+/// near-identical dispatch blocks in `image_gen_use_family` folded here):
+/// skip-already-active, resolve the target dir, hand off to the market's
+/// downloader. Returns false when the component was already in flight.
+async fn queue_catalog_download(
+    app: &tauri::AppHandle,
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    registry: &std::sync::Arc<crate::commands::local_model_market::DownloadRegistry>,
+    info: &ImageModelInfo,
+    image_dir: Option<&Path>,
+    root: &Path,
+) -> Result<bool, String> {
+    if registry.active.lock().contains_key(&info.id) {
+        return Ok(false);
+    }
+    let dir = image_dir
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.join(IMAGE_SUBDIR).to_string_lossy().into_owned());
+    crate::commands::local_model_market::start_model_download_inner(
+        app.clone(),
+        DbState(std::sync::Arc::clone(db)),
+        std::sync::Arc::clone(registry),
+        info.id.clone(),
+        info.filename.clone(),
+        info.download_url.clone(),
+        None,
+        Some(dir),
+    )
+    .await?;
+    Ok(true)
+}
+
 /// Kill the running sidecar, if any. Shared by the stop command and the
 /// app-exit cleanup — without the exit kill, every app quit orphans an
 /// sd-server holding a CUDA context and gigabytes of model memory.
 pub async fn stop_sidecar(image: &ImageGenState) {
+    // Serialize with the start sequence (audit M: stop/start race) — same
+    // rationale as stt.rs: a stop during the up-to-120s health poll saw
+    // state == None, killed nothing, and the freshly started server kept
+    // running (holding its port/model) despite the user's stop.
+    let _seq = START_SEQ.lock().await;
     let mut handle = image.0.lock().take();
     if let Some(h) = handle.as_mut() {
         let _ = h.child.kill().await;
@@ -2420,24 +2469,7 @@ pub async fn image_gen_use_family(
             let Some(info) = catalog().into_iter().find(|m| m.id == dep.id) else {
                 continue;
             };
-            if registry.active.lock().contains_key(&info.id) {
-                continue;
-            }
-            let dir = image_dir
-                .as_ref()
-                .map(|d| d.to_string_lossy().into_owned())
-                .unwrap_or_else(|| root.join(IMAGE_SUBDIR).to_string_lossy().into_owned());
-            crate::commands::local_model_market::start_model_download_inner(
-                app.clone(),
-                DbState(std::sync::Arc::clone(&db.0)),
-                std::sync::Arc::clone(&registry),
-                info.id.clone(),
-                info.filename.clone(),
-                info.download_url.clone(),
-                None,
-                Some(dir),
-            )
-            .await?;
+            queue_catalog_download(&app, &db.0, &registry, &info, image_dir.as_deref(), &root).await?;
         }
         return Ok(plan);
     }
@@ -2511,21 +2543,7 @@ pub async fn image_gen_use_family(
                     db::set_setting(&conn, DEFAULT_LAYOUT_KEY, &plan.layout)
                         .map_err(|e| e.to_string())?;
                 }
-                let dir = image_dir
-                    .as_ref()
-                    .map(|d| d.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| root.join(IMAGE_SUBDIR).to_string_lossy().into_owned());
-                crate::commands::local_model_market::start_model_download_inner(
-                    app.clone(),
-                    DbState(std::sync::Arc::clone(&db.0)),
-                    std::sync::Arc::clone(&registry),
-                    info.id.clone(),
-                    info.filename.clone(),
-                    info.download_url.clone(),
-                    None,
-                    Some(dir),
-                )
-                .await?;
+                queue_catalog_download(&app, &db.0, &registry, &info, image_dir.as_deref(), &root).await?;
                 queued += 1;
             }
             (_, "download") => {
@@ -2537,21 +2555,7 @@ pub async fn image_gen_use_family(
                 if registry.active.lock().contains_key(&info.id) {
                     continue;
                 }
-                let dir = image_dir
-                    .as_ref()
-                    .map(|d| d.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| root.join(IMAGE_SUBDIR).to_string_lossy().into_owned());
-                crate::commands::local_model_market::start_model_download_inner(
-                    app.clone(),
-                    DbState(std::sync::Arc::clone(&db.0)),
-                    std::sync::Arc::clone(&registry),
-                    info.id.clone(),
-                    info.filename.clone(),
-                    info.download_url.clone(),
-                    None,
-                    Some(dir),
-                )
-                .await?;
+                queue_catalog_download(&app, &db.0, &registry, &info, image_dir.as_deref(), &root).await?;
                 queued += 1;
             }
             _ => {}
@@ -2684,10 +2688,13 @@ pub async fn image_gen_install(
             || (device != "vulkan" && device != "cpu" && !cudart_dlls_present(&install_dir))
         {
             // A running server holds its image (and DLLs) open — stop it
-            // before the files underneath it are replaced.
-            if force {
-                stop_sidecar(&image).await;
-            }
+            // before the files underneath it are replaced. `force` is not the
+            // only reinstall path: the cudart-repair branch above (install
+            // died between the main zip and the runtime bundle, or AV
+            // quarantined a DLL) reaches here with `force == false` and a
+            // LIVE exe, and re-extracting over it failed opaquely on the
+            // locked file (audit M: image_gen_install).
+            stop_sidecar(&image).await;
             crate::commands::pinned_zip::install_pinned_zip(
                 &app, url, sha, SD_RELEASE_TAG, &install_dir, id,
             )

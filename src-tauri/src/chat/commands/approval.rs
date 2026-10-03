@@ -73,19 +73,30 @@ pub(super) fn grant_directory_for_approved_tool(
 /// the review card — a non-empty list parks a partial acceptance alongside
 /// the approval (the paused edit_file loop applies only those); none/empty
 /// means accept everything.
+///
+/// `always` is the card's "always allow" choice. The directory grant below
+/// fires ONLY for a remembered approval — a plain "allow once" used to
+/// persist the target's parent directory into `permissions.grantedRoots`,
+/// which `send_chat_message` then merges into `fs_roots` for EVERY turn of
+/// EVERY session, silently widening the mutating-tool scope far beyond what
+/// the user approved (audit H6).
 #[tauri::command(async)]
 pub fn resolve_tool_action(
     pending_id: String,
     approved: bool,
     selected: Option<Vec<usize>>,
+    always: Option<bool>,
     chat_state: State<'_, crate::ChatState>,
     db: State<'_, DbState>,
 ) -> CmdResult<()> {
     if let Some(pending) = chat_state.0.take_pending_approval(&pending_id) {
         if approved {
             // "Always allow" on an out-of-scope path can only ever work if the
-            // directory itself becomes granted — persist it now.
-            grant_directory_for_approved_tool(&db.0.lock(), &pending.tool, &pending.args);
+            // directory itself becomes granted — persist it now (and only for
+            // the remembered variant).
+            if always == Some(true) {
+                grant_directory_for_approved_tool(&db.0.lock(), &pending.tool, &pending.args);
+            }
             if let Some(selected) = selected.filter(|s| !s.is_empty()) {
                 chat_state
                     .0

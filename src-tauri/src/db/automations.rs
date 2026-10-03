@@ -371,8 +371,19 @@ fn mirror_run_start(
     let active = super::improve::channel_version(conn, &artifact.id, "active")?.unwrap_or(1);
     if let Some(active_body) = super::improve::version_body(conn, &artifact.id, active)? {
         if active_body != prompt {
-            super::improve::record_version(conn, &artifact.id, active, &prompt, None, "user")?;
-            super::improve::set_channel(conn, &artifact.id, "active", active + 1)?;
+            // Point `active` at the version record_version ACTUALLY created. It
+            // numbers rows `MAX(version) + 1`, NOT `active + 1` — the two
+            // diverge whenever `active` lags MAX (the improve engine records
+            // candidate versions without moving `active`, and `set_channel` is
+            // also the documented rollback primitive). The old form made
+            // `active` point at the ENGINE's candidate body instead of the
+            // user's prompt, attributing every later run's telemetry to the
+            // wrong version and desyncing permanently (audit H15).
+            if let Some(v) =
+                super::improve::record_version(conn, &artifact.id, active, &prompt, None, "user")?
+            {
+                super::improve::set_channel(conn, &artifact.id, "active", v)?;
+            }
         }
     }
     super::improve::start_run(conn, &artifact.id, chat_session_id).map(Some)
@@ -380,6 +391,42 @@ fn mirror_run_start(
 
 /// Finalize a run (set finished_at + status + summary). Returns silently if
 /// the row was already finalized by another path (idempotent finalize).
+/// Boot sweep: settle `automation_runs` rows left `running` by a process that
+/// exited mid-run (audit H23).
+///
+/// The app's exit path kills only PTYs/MCP children, and the boot sweep
+/// covered SUBAGENT runs only — so a routine app close during a run (runs last
+/// up to `MAX_RUN_SECS` = 2h) permanently left the row (and its mirrored
+/// `improve_runs` row) at `finished_at IS NULL, status='running'`: a phantom
+/// in-progress run in Past Runs and skewed improve-registry failure stats. The
+/// cross-process lock file already had PID-based stale detection (B-28); the DB
+/// rows did not. Same age-gate as the subagent sweep so a concurrently running
+/// second instance is never disturbed.
+pub fn sweep_stale_automation_runs(conn: &Connection, max_age_secs: i64) {
+    let now = now_ts();
+    let cutoff = now - max_age_secs;
+    let settled = conn
+        .execute(
+            "UPDATE automation_runs SET finished_at = ?1, status = 'interrupted', \
+             summary = COALESCE(summary, 'interrupted — the app exited mid-run') \
+             WHERE finished_at IS NULL AND started_at <= ?2",
+            params![now, cutoff],
+        )
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    // Close the mirrored improve runs too, so the registry's failure stats
+    // match reality after an unclean exit.
+    if settled > 0 {
+        let _ = conn.execute(
+            "UPDATE improve_runs SET finished_at = ?1, status = 'abandoned' \
+             WHERE finished_at IS NULL AND id IN (SELECT improve_run_id FROM automation_runs \
+             WHERE improve_run_id IS NOT NULL AND finished_at = ?1)",
+            params![now],
+        );
+        eprintln!("[automations] settled {settled} stale running row(s) left by a previous process");
+    }
+}
+
 pub fn finish_run(conn: &Connection, run_id: &str, status: &str, summary: &str) -> DbResult<()> {
     conn.execute(
         "UPDATE automation_runs

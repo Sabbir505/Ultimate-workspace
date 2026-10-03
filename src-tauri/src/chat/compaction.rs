@@ -239,7 +239,18 @@ impl CompactionOutcome {
 /// would produce; passing the assembled conversation (rather than summing
 /// per-message counts) most closely approximates what the model actually sees,
 /// including role/control tokens the chat template injects.
-pub fn assemble_for_tokenization(system: &Option<String>, messages: &[ChatMessage]) -> String {
+/// The shared framing loop behind both tokenization assemblers (audit M:
+/// compaction DRY): `<|role|>\n content \n` per message plus the system
+/// header. The format must stay IDENTICAL across both public wrappers or
+/// /tokenize counts diverge from what the wire request costs — one copy is
+/// exactly how that stays true (the entries variant had already drifted by
+/// omitting the empty-system guard; this fixes that as part of the fold).
+fn assemble_framing<T>(
+    system: &Option<String>,
+    items: &[T],
+    role: impl Fn(&T) -> &str,
+    content: impl Fn(&T) -> &str,
+) -> String {
     let mut s = String::new();
     if let Some(sys) = system {
         if !sys.trim().is_empty() {
@@ -248,16 +259,25 @@ pub fn assemble_for_tokenization(system: &Option<String>, messages: &[ChatMessag
             s.push_str("\n");
         }
     }
-    for m in messages {
+    for item in items {
         // mi15: push_str instead of format!-per-message (format! allocates a
         // temp String for the whole line).
         s.push_str("<|");
-        s.push_str(&m.role);
+        s.push_str(role(item));
         s.push_str("|>\n");
-        s.push_str(&m.content);
+        s.push_str(content(item));
         s.push('\n');
     }
     s
+}
+
+pub fn assemble_for_tokenization(system: &Option<String>, messages: &[ChatMessage]) -> String {
+    assemble_framing(
+        system,
+        messages,
+        |m| &m.role,
+        |m| &m.content,
+    )
 }
 
 /// Shared HTTP body for all /tokenize callers: POST the assembled content,
@@ -299,21 +319,12 @@ fn assemble_entries_for_tokenization<T: std::borrow::Borrow<CompactionEntry>>(
     system: &Option<String>,
     entries: &[T],
 ) -> String {
-    let mut s = String::new();
-    if let Some(sys) = system {
-        s.push_str("<|system|>\n");
-        s.push_str(sys);
-        s.push('\n');
-    }
-    for e in entries {
-        let m = &e.borrow().message;
-        s.push_str("<|");
-        s.push_str(&m.role);
-        s.push_str("|>\n");
-        s.push_str(&m.content);
-        s.push('\n');
-    }
-    s
+    assemble_framing(
+        system,
+        entries,
+        |e| &e.borrow().message.role,
+        |e| &e.borrow().message.content,
+    )
 }
 
 /// Count tokens for the assembled system+entries without cloning any

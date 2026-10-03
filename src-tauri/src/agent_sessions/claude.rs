@@ -640,19 +640,15 @@ pub(super) fn read_claude_stream(
     // `finish_turn` unregistered the previous turn's accumulator; None means
     // no turn has streamed yet.
     let mut perf: Option<crate::chat::turn_perf::TurnPerf> = None;
-    // mi18: read_line into ONE reused String — BufReader::lines() allocated a
+    // mi18: read into ONE reused buffer — BufReader::lines() allocated a
     // fresh String per line on streams that run thousands of lines per turn.
+    // The shared reader is lossy + capped (audit H20): `read_line` aborted
+    // the whole turn on a single non-UTF-8 byte (one localized cmd.exe
+    // message was enough), discarding the streamed reply.
     let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
-            Err(_) => break,
-        }
-        let line = line.trim_end_matches(&[char::from(10), char::from(13)][..]);
-        let line: &str = line;
+    let mut raw: Vec<u8> = Vec::new();
+    while let Some(line) = crate::agent_sessions::next_harness_line(&mut reader, &mut raw) {
+        let line: &str = &line;
         if line.trim().is_empty() {
             continue;
         }

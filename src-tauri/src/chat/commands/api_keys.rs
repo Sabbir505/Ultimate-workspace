@@ -105,13 +105,17 @@ pub fn delete_chat_api_key(provider: String, db: State<'_, DbState>) -> CmdResul
     let conn = db.0.lock();
     secrets::delete_chat_api_key(&conn, &provider)?;
     instance_ids_remove(&conn, &provider);
-    // Clearing a provider removes its whole configuration, not just the key.
+    // Clearing a provider removes its whole configuration, not just the key —
+    // including the curated model list, which otherwise survives and
+    // resurrects itself (with its pinned windows) the moment the provider is
+    // re-added, overriding the live /v1/models fetch (audit M12).
     conn.execute(
-        "DELETE FROM app_settings WHERE key IN (?1, ?2, ?3)",
+        "DELETE FROM app_settings WHERE key IN (?1, ?2, ?3, ?4)",
         rusqlite::params![
             format!("chat.{provider}.base_url"),
             format!("chat.{provider}.model"),
             format!("chat.{provider}.display_name"),
+            format!("chat.{provider}.selected_models"),
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -125,6 +129,76 @@ pub fn delete_chat_api_key(provider: String, db: State<'_, DbState>) -> CmdResul
         )
         .map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+// ---- Search-engine API keys (OS keychain, never the settings table) ----
+//
+// Serper/Tavily/Brave keys are billing-grade secrets. They used to be
+// persisted through the generic `setSetting` KV — i.e. PLAINTEXT in the
+// SQLite `app_settings` table — while every other secret in the app (chat
+// keys, the GitHub PAT, the HF token, connector OAuth) lives in the OS
+// keychain with values that are never returnable over IPC (audit C7).
+//
+// They now use the app-scoped generic keychain namespace ("search"), and the
+// legacy plaintext row is deleted on every write. `configured_provider`
+// (chat/tools/search.rs) performs the same one-time migration on read, so an
+// install that never re-saves a key still migrates on first use.
+
+/// The search engines we hold keys for — the validation whitelist for the
+/// keychain account name (`relay:search:<provider>`).
+const SEARCH_KEY_PROVIDERS: [&str; 3] = ["serper", "tavily", "brave"];
+
+fn validate_search_provider(provider: &str) -> CmdResult<String> {
+    let p = provider.trim().to_ascii_lowercase();
+    if SEARCH_KEY_PROVIDERS.contains(&p.as_str()) {
+        Ok(p)
+    } else {
+        Err(format!("unknown search provider: {provider}"))
+    }
+}
+
+/// Store a search API key in the OS keychain (value never returned over IPC)
+/// and remove any legacy plaintext `search.<provider>_key` row.
+#[tauri::command(async)]
+pub fn set_search_api_key(provider: String, key: String, db: State<'_, DbState>) -> CmdResult<()> {
+    let provider = validate_search_provider(&provider)?;
+    let conn = db.0.lock();
+    let key = key.trim();
+    if key.is_empty() {
+        secrets::generic_remove(&conn, "search", &provider);
+    } else {
+        secrets::generic_store(&conn, "search", &provider, key).map_err(|e| e.to_string())?;
+    }
+    // Purge the plaintext row whether or not a new key was supplied.
+    conn.execute(
+        "DELETE FROM app_settings WHERE key = ?1",
+        rusqlite::params![format!("search.{provider}_key")],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// True when a key is configured for this engine (keychain first; a legacy
+/// plaintext row still counts until it migrates on first use). Exposes a
+/// BOOLEAN only — the key bytes never cross IPC.
+#[tauri::command(async)]
+pub fn has_search_api_key(provider: String, db: State<'_, DbState>) -> CmdResult<bool> {
+    let provider = validate_search_provider(&provider)?;
+    let conn = db.0.lock();
+    Ok(crate::chat::tools::search_api_key(&conn, &provider).is_some())
+}
+
+#[tauri::command(async)]
+pub fn delete_search_api_key(provider: String, db: State<'_, DbState>) -> CmdResult<()> {
+    let provider = validate_search_provider(&provider)?;
+    let conn = db.0.lock();
+    secrets::generic_remove(&conn, "search", &provider);
+    conn.execute(
+        "DELETE FROM app_settings WHERE key = ?1",
+        rusqlite::params![format!("search.{provider}_key")],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

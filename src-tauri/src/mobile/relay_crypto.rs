@@ -69,6 +69,29 @@ pub fn random_salt() -> [u8; 32] {
     salt
 }
 
+/// Bind the public `PairOk` salt to this connection's challenge:
+/// `SHA256(challenge || salt)`.
+///
+/// The `PairOk` frame is unauthenticated plaintext, so a relay MITM can record
+/// connection N's salt and replay it on connection N+1. Deriving the key from
+/// the RAW salt then re-derives connection N's key while both per-direction
+/// counters restart at 0 — XChaCha20 keystream reuse (XOR recovery of the
+/// phone's plaintext) and Poly1305 one-time-key reuse (tag forgery) — which is
+/// exactly what the MITM this relay exists to defeat can do. Folding in the
+/// FRESH per-connection challenge makes a replayed salt produce a different
+/// key; the phone additionally refuses a replayed challenge (audit C9, v3
+/// pairing). Pre-v3 phones keep the raw-salt derivation.
+pub fn bind_salt_to_challenge(challenge: &[u8], salt: &[u8]) -> [u8; 32] {
+    use sha2::Digest as _;
+    let mut h = Sha256::new();
+    h.update(challenge);
+    h.update(salt);
+    let out = h.finalize();
+    let mut bound = [0u8; 32];
+    bound.copy_from_slice(&out);
+    bound
+}
+
 /// Compute the pairing proof: HMAC-SHA256(key=token, data="E2E").
 /// Returns the proof as lowercase-hex (the wire format both sides use).
 pub fn compute_pair_proof(token: &str) -> String {

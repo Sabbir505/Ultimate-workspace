@@ -170,7 +170,11 @@ pub struct CostTotals {
     pub raw_token_cost_usd: f64,
     pub provider_reported_usd: f64,
     pub estimated_usd: f64,
-    pub unpriced_usd: f64,
+    // `unpriced_usd` removed (audit M: dead arithmetic) — both accumulators
+    // only ran on rows where the cost was None and added a guaranteed-zero
+    // value (`reported.unwrap_or(0.0)` / `cost.unwrap_or(0.0)`), so the field
+    // was always exactly $0.00. The COUNT of unpriced rows survives as
+    // `unpricedPct` on CostQuality (that one works).
     /// Internal accumulator used by get_cost_rollups_v2; not part of the
     /// public IPC contract (the real cache-savings figure is on CostQuality).
     #[serde(skip)]

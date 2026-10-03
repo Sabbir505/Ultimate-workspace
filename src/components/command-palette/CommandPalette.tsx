@@ -218,9 +218,11 @@ export function CommandPalette() {
         label: "Add Project",
         run: () => {
           close();
-          void open({ directory: true }).then(async (picked) => {
-            if (typeof picked === "string") await useProjectsStore.getState().addProjectAtPath(picked);
-          });
+          void open({ directory: true })
+            .then(async (picked) => {
+              if (typeof picked === "string") await useProjectsStore.getState().addProjectAtPath(picked);
+            })
+            .catch((e) => toastError("Couldn't add the project", e));
         },
       },
       {

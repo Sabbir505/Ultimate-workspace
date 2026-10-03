@@ -11,10 +11,15 @@ type CmdResult<T> = Result<T, String>;
 /// agent just authored is invisible to the library, and unresolvable by slug
 /// when the user opens it.
 fn project_paths(db: &crate::DbState) -> Vec<PathBuf> {
-    let conn = db.0.lock();
-    crate::db::list_projects(&conn)
-        .unwrap_or_default()
-        .into_iter()
+    // SQL only under the lock (audit M: skills_cmds lock scope): the
+    // `is_dir()` stat used to run INSIDE the guard — a project on an
+    // unmounted volume stalled EVERY DB consumer behind its filesystem
+    // timeout. Collect paths under the lock, stat after it drops.
+    let rows = {
+        let conn = db.0.lock();
+        crate::db::list_projects(&conn).unwrap_or_default()
+    };
+    rows.into_iter()
         // A project on an unmounted volume (ejected USB, offline share) costs
         // a filesystem timeout on every scan, and adding project roots made
         // the scan run on every skill command. `is_dir()` is a cheap stat on

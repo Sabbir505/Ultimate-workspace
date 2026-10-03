@@ -703,6 +703,13 @@ pub fn parse_search_query(q: &str) -> SearchParams {
     p
 }
 
+/// Upper bound on rows any single `search` candidate query may materialize.
+///
+/// `search` post-filters its candidates (exclusions, tag, path, file), so it
+/// needs an over-fetch — but an unbounded one turns a narrow query into a full
+/// index read held under the global DB mutex.
+const MAX_CANDIDATE_ROWS: usize = 2000;
+
 pub fn search(conn: &Connection, query: &str, limit: usize) -> DbResult<Vec<SearchHit>> {
     let params = parse_search_query(query);
     // FTS MATCH string: positive terms only, quoted and AND'd. Exclusions
@@ -718,14 +725,20 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> DbResult<Vec<Sear
         match_q.push_str(&format!("\"{}\"", t.replace('"', "\"\"")));
     }
     // Paths of files whose body matches any excluded term (empty when none).
+    // Each excluded term costs a full FTS scan, and the result is only ever
+    // used as a membership set against `hits` — so cap the set rather than
+    // letting N exclusions each materialize an unbounded path list.
     let mut excluded: Vec<String> = Vec::new();
     if !params.not.is_empty() {
         for t in &params.not {
             let mut stmt = conn.prepare(
-                "SELECT DISTINCT path FROM vault_fts WHERE vault_fts MATCH ?1",
+                "SELECT DISTINCT path FROM vault_fts WHERE vault_fts MATCH ?1 LIMIT ?2",
             )?;
             let rows = stmt.query_map(
-                rusqlite::params![format!("\"{}\"", t.replace('"', "\"\""))],
+                rusqlite::params![
+                    format!("\"{}\"", t.replace('"', "\"\"")),
+                    MAX_CANDIDATE_ROWS as i64
+                ],
                 |r| r.get::<_, String>(0),
             )?;
             for r in rows {
@@ -734,12 +747,20 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> DbResult<Vec<Sear
         }
     }
 
+    // Post-filtering (exclusions, tag, path, file) happens after the rows are
+    // collected, so the candidate set is an over-fetch — but it must stay a
+    // BOUNDED over-fetch. The empty-MATCH branch below has no FTS clause, so
+    // it is the one query in `search` that can otherwise read the entire
+    // vault into memory (under the global DB mutex) to return a handful of
+    // hits: reachable from the UI with a lone `-word`, `tag:work`, or `#`.
+    let scan_cap = limit.saturating_mul(20).clamp(limit, MAX_CANDIDATE_ROWS);
     let mut hits: Vec<(String, Option<String>, String, String, String)> = Vec::new(); // path,title,base,folder,snippet
     if match_q.is_empty() {
         let mut stmt = conn.prepare(
-            "SELECT f.path, f.title, f.basename, f.folder, '' FROM vault_files f ORDER BY f.basename",
+            "SELECT f.path, f.title, f.basename, f.folder, '' FROM vault_files f \
+             ORDER BY f.basename LIMIT ?1",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map(rusqlite::params![scan_cap as i64], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?,

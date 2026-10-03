@@ -176,6 +176,34 @@ pub fn list_versions(conn: &Connection, artifact_id: &str) -> DbResult<Vec<Impro
     rows.collect()
 }
 
+/// Append a new version derived from `parent_version` AND point `channel` at
+/// the version that was ACTUALLY created, in ONE transaction.
+///
+/// `record_version` + `set_channel` are two autocommitted statements, so a
+/// crash or `SQLITE_BUSY` between them left `active` pointing at the old
+/// body while the new version row already existed. The next run then appended
+/// a byte-identical duplicate (the `UNIQUE(artifact_id, version)` guard can't
+/// fire — numbering is `MAX(version) + 1`) and stamped the run with the stale
+/// `channel_version` (audit H15 follow-up). Same shape as `ensure_artifact`'s
+/// registry + v1 + channel triple.
+pub fn record_version_and_activate(
+    conn: &Connection,
+    artifact_id: &str,
+    parent_version: i64,
+    body: &str,
+    meta_json: Option<&str>,
+    origin: &str,
+    channel: &str,
+) -> DbResult<Option<i64>> {
+    let tx = conn.unchecked_transaction()?;
+    let version = record_version(&tx, artifact_id, parent_version, body, meta_json, origin)?;
+    if let Some(version) = version {
+        set_channel(&tx, artifact_id, channel, version)?;
+    }
+    tx.commit()?;
+    Ok(version)
+}
+
 /// Point a channel at a version (promote/rollback are the same operation).
 pub fn set_channel(
     conn: &Connection,

@@ -3,7 +3,7 @@
 // the main window. The policy must strip active content while preserving the
 // diagram markup mermaid actually emits (incl. <foreignObject> htmlLabels).
 import { describe, it, expect } from "vitest";
-import { sanitizeSvg } from "../lib/sanitize";
+import { neutralizeMainDocCss, sanitizeSvg } from "../lib/sanitize";
 
 describe("sanitizeSvg", () => {
   it("strips script elements inside SVG", () => {
@@ -96,6 +96,34 @@ describe("sanitizeSvg", () => {
     expect(out).toContain("url(#glow)");
     expect(out).toContain("url('#clip')");
     expect(out).toContain('marker-end="url(#arrow)"');
+  });
+
+  it("neutralizes position behind a rule close or a CSS comment", () => {
+    // `}` (end of the previous rule) and `/` (end of a `/* … */` comment) are
+    // both boundaries: a declaration can follow either with no space, and the
+    // comment form lets a model hide-and-reopen `position:fixed` with no `;{ `
+    // anywhere near it.
+    const svg =
+      `<svg><style>.a { fill: blue; }position: fixed; inset: 0; ` +
+      `.b { /*c*/position: fixed; inset: 0; }</style><rect width="5" height="5"/></svg>`;
+    const out = sanitizeSvg(svg);
+    expect(out).not.toMatch(/(?<![-\w"'\/])position\s*:\s*fixed/i);
+    expect(out).toMatch(/refused-position/);
+    // The boundary capture is restored and the rewrite is length-preserving.
+    expect(out).toContain("}refused-position:");
+    expect(out).toContain("/*c*/refused-position:");
+    // `background-position` (preceded by `-`) must NOT be mangled. Asserted on
+    // its OWN document: the one above deliberately contains no such
+    // declaration, so a match there could only be satisfied by the
+    // `refused-position` rewrites it just produced.
+    const withBg =
+      `<svg><style>.c { background-position: center; }</style>` +
+      `<rect style="background-position: 0 0" width="5" height="5"/></svg>`;
+    const bgOut = sanitizeSvg(withBg);
+    expect(bgOut).toMatch(/background-position\s*:/i);
+    expect(bgOut).not.toMatch(/refused-position/);
+    const css = `.c { background-position: center; }`;
+    expect(neutralizeMainDocCss(css)).toBe(css);
   });
 
   it("neutralizes dangerous CSS in inline style attributes", () => {

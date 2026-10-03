@@ -1449,14 +1449,105 @@ async fn hf_tree(
         .collect())
 }
 
+/// Resolve one tree-listing entry to its destination, refusing anything that
+/// would escape `dest_root`.
+///
+/// The listing is remote input and its only filter was
+/// `!path.starts_with('.')`, so an entry like `a/../../../target` resolved
+/// outside the model directory. Reject absolute paths, any `ParentDir` /
+/// `Prefix` / `RootDir` component, and the backslash + colon forms that let a
+/// Windows drive or UNC path through — same shape as the zip-slip guard in
+/// `installed_skills.rs` (audit C3).
+fn bundle_dest_path(dest_root: &Path, entry_path: &str) -> CmdResult<PathBuf> {
+    let rel = Path::new(entry_path);
+    if rel.is_absolute()
+        || rel.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+        || entry_path.contains('\\')
+        || entry_path.contains(':')
+    {
+        return Err(format!("unsafe bundle path: {entry_path}"));
+    }
+    Ok(dest_root.join(rel))
+}
+
+/// sha256 of a file already on disk, as lowercase hex.
+fn sha256_file(path: &Path) -> std::io::Result<String> {
+    use sha2::Digest as _;
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Decide whether the file already sitting at `dest` is a COMPLETE copy:
+/// `Some(bytes)` = skip the download, `None` = fetch it. A wrong-but-right-size
+/// file is deleted here so the re-download below replaces it.
+///
+/// `tts_install_model` is explicitly re-runnable over a partially populated
+/// bundle, so every retry re-enters this check on files written by a previous
+/// attempt — which is why an already-present file must still be HASHED when
+/// the listing carries an oid, not merely size-matched.
+fn existing_file_is_complete(
+    dest: &Path,
+    expected_len: u64,
+    expected_sha256: Option<&str>,
+) -> CmdResult<Option<u64>> {
+    let Ok(meta) = std::fs::metadata(dest) else {
+        return Ok(None);
+    };
+    if meta.len() != expected_len {
+        return Ok(None);
+    }
+    let Some(expected_hex) = expected_sha256 else {
+        return Ok(Some(expected_len));
+    };
+    match sha256_file(dest) {
+        Ok(actual) if actual.eq_ignore_ascii_case(expected_hex) => Ok(Some(expected_len)),
+        Ok(actual) => {
+            eprintln!(
+                "[tts] {} is present but its sha256 does not match (expected {expected_hex}, \
+                 got {actual}) — downloading it again",
+                dest.display()
+            );
+            let _ = std::fs::remove_file(dest);
+            Ok(None)
+        }
+        Err(e) => Err(format!("could not verify {}: {e}", dest.display())),
+    }
+}
+
+/// Files at least this large that the listing gave no sha256 for are called out
+/// explicitly: ~370 of the bundle's 377 files (espeak-ng data, dictionaries)
+/// are not LFS-backed, so they can only ever be size-checked. Without the
+/// warning a silent drop to size-only is indistinguishable in the log from a
+/// fully verified install (audit M: TTS bundle hashes). Never fatal — failing
+/// the install over a data file the listing simply has no hash for would break
+/// the bundle.
+const NO_HASH_WARN_BYTES: u64 = 64 * 1024;
+
 /// Fetch one file of a bundle into place. Blocking-free; safe to run
 /// concurrently with its siblings. Returns the bytes pulled so the caller's
 /// progress counter can advance.
 ///
-/// Skipping is by size (an install interrupted halfway resumes by re-listing
-/// the repo and finding the files already complete); VERIFICATION is by the
-/// LFS sha256 the expanded listing carries — a file that downloads to the
-/// wrong bytes fails instead of being finalized into the bundle (audit M:
+/// Skipping an already-present file is size-based (an install interrupted
+/// halfway resumes by re-listing the repo) AND, whenever the expanded listing
+/// carries an LFS sha256, hash-verified — on the resume path too. A file that
+/// does not match fails instead of being finalized into the bundle (audit M:
 /// TTS bundle hashes). Downloads land in a `.part` sibling and are renamed on
 /// success, so a cancelled or failed file is never mistaken for a complete
 /// one on the next attempt.
@@ -1470,11 +1561,21 @@ async fn hf_download_file(
 ) -> CmdResult<()> {
     use futures_util::StreamExt;
 
-    let dest = dest_root.join(&entry.path);
+    let dest = bundle_dest_path(dest_root, &entry.path)?;
     let expected = entry.size.unwrap_or(0);
-    if expected > 0 && std::fs::metadata(&dest).map(|m| m.len() == expected).unwrap_or(false) {
-        progress.fetch_add(expected, std::sync::atomic::Ordering::Relaxed);
-        return Ok(());
+    let expected_sha256 = entry.lfs_sha256();
+    if expected_sha256.is_none() && expected >= NO_HASH_WARN_BYTES {
+        eprintln!(
+            "[tts] {}: the listing carries no sha256 — falling back to a size-only check \
+             ({expected} bytes)",
+            entry.path
+        );
+    }
+    if expected > 0 {
+        if let Some(bytes) = existing_file_is_complete(&dest, expected, expected_sha256)? {
+            progress.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+            return Ok(());
+        }
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("could not create {}: {e}", parent.display()))?;
@@ -1518,7 +1619,7 @@ async fn hf_download_file(
     // Verify when the listing carried an LFS sha256: a mismatch deletes the
     // part and fails the file (the install retries it on the next attempt)
     // instead of finalizing a corrupt asset into the bundle.
-    if let Some(expected_hex) = entry.lfs_sha256() {
+    if let Some(expected_hex) = expected_sha256 {
         use sha2::Digest as _;
         let actual = format!("{:x}", hasher.finalize());
         if !actual.eq_ignore_ascii_case(expected_hex) {
@@ -1981,6 +2082,80 @@ mod tests {
             .await
             .expect("second call");
         assert_eq!(progress2.load(std::sync::atomic::Ordering::Relaxed), written.len() as u64);
+    }
+
+    /// A tree-listing entry is remote input: its only filter was
+    /// `!path.starts_with('.')`, so `a/../../../target` resolved outside the
+    /// model directory. Everything that could escape must be refused.
+    #[test]
+    fn bundle_paths_that_escape_the_model_dir_are_rejected() {
+        let root = Path::new("/models/kokoro");
+        for bad in [
+            "a/../../../target",
+            "../evil",
+            "..\\..\\evil",
+            "nested/../../evil",
+            "/etc/passwd",
+            "C:/Windows/system32/evil",
+            "\\\\server\\share\\evil",
+            "dir\\file.bin",
+        ] {
+            assert!(
+                bundle_dest_path(root, bad).is_err(),
+                "must reject {bad:?}"
+            );
+        }
+        // Legitimate bundle paths still resolve INSIDE the root.
+        for good in ["model.onnx", "espeak-ng-data/phondata", "voices/af_heart.bin"] {
+            let dest = bundle_dest_path(root, good).expect(good);
+            assert!(dest.starts_with(root), "{good} must stay under the model dir");
+        }
+    }
+
+    /// The resume path: a file left by a previous install attempt must still be
+    /// HASHED, not just size-matched. `tts_install_model` is re-runnable over a
+    /// partially populated bundle, so every retry hits this branch — and a
+    /// size-only early return meant a corrupt file was skipped forever.
+    #[test]
+    fn an_existing_file_is_hash_verified_on_the_resume_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("model.onnx");
+
+        // Right SIZE, wrong bytes → not complete; the file is dropped so the
+        // re-download replaces it.
+        std::fs::write(&dest, b"corrupt bytes!").unwrap();
+        assert_eq!(
+            existing_file_is_complete(&dest, 14, Some(&"0".repeat(64))).unwrap(),
+            None,
+            "a size-matching but corrupt file must not count as complete"
+        );
+        assert!(!dest.exists(), "the corrupt file must be removed for re-download");
+
+        // Right SIZE, right hash → complete, so the download is skipped.
+        std::fs::write(&dest, b"good bytes").unwrap();
+        let good = sha256_file(&dest).unwrap();
+        assert_eq!(
+            existing_file_is_complete(&dest, 10, Some(&good)).unwrap(),
+            Some(10),
+            "a verified file must short-circuit the download"
+        );
+        assert!(dest.exists(), "a verified file must NOT be deleted");
+
+        // No hash in the listing → the cheap size check still applies.
+        assert_eq!(
+            existing_file_is_complete(&dest, 10, None).unwrap(),
+            Some(10),
+            "non-LFS files fall back to the size check"
+        );
+
+        // Wrong size → not complete, file left alone for the download path.
+        assert_eq!(existing_file_is_complete(&dest, 11, Some(&good)).unwrap(), None);
+        assert!(dest.exists());
+        // Absent file.
+        assert_eq!(
+            existing_file_is_complete(&dir.path().join("missing"), 10, Some(&good)).unwrap(),
+            None
+        );
     }
 
     #[test]

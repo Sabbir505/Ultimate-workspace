@@ -342,10 +342,18 @@ pub fn start_run(
     // the improve registry so sweeps/evals see automation failures alongside
     // skills/loops/templates. Best-effort — never fail the real run.
     if let Ok(Some(improve_run_id)) = mirror_run_start(conn, automation_id, chat_session_id) {
-        let _ = conn.execute(
+        // NOT swallowed: if this link UPDATE fails the mirrored improve_runs
+        // row stays open with no back-reference. `sweep_stale_automation_runs`
+        // can still reach it via the `chat_session_id` fallback in its WHERE,
+        // but only because of that fallback — the primary subquery needs this
+        // very link. A silent failure here is what left permanently-open
+        // improve_runs rows out of `improve::run_health`'s failure stats.
+        if let Err(e) = conn.execute(
             "UPDATE automation_runs SET improve_run_id = ?2 WHERE id = ?1",
             params![id, improve_run_id],
-        );
+        ) {
+            eprintln!("[automations] could not link run {id} to improve run {improve_run_id}: {e}");
+        }
     }
     Ok(id)
 }
@@ -379,11 +387,22 @@ fn mirror_run_start(
             // `active` point at the ENGINE's candidate body instead of the
             // user's prompt, attributing every later run's telemetry to the
             // wrong version and desyncing permanently (audit H15).
-            if let Some(v) =
-                super::improve::record_version(conn, &artifact.id, active, &prompt, None, "user")?
-            {
-                super::improve::set_channel(conn, &artifact.id, "active", v)?;
-            }
+            //
+            // One transaction, not two autocommitted statements: a crash or
+            // SQLITE_BUSY between the INSERT and the channel UPSERT left
+            // `active` on the old version while the new row existed — the next
+            // run appended a byte-identical duplicate (numbering is
+            // MAX+1, so UNIQUE(artifact_id, version) never fires) and stamped
+            // itself with the stale channel_version.
+            super::improve::record_version_and_activate(
+                conn,
+                &artifact.id,
+                active,
+                &prompt,
+                None,
+                "user",
+                "active",
+            )?;
         }
     }
     super::improve::start_run(conn, &artifact.id, chat_session_id).map(Some)
@@ -416,14 +435,45 @@ pub fn sweep_stale_automation_runs(conn: &Connection, max_age_secs: i64) {
         .unwrap_or(0);
     // Close the mirrored improve runs too, so the registry's failure stats
     // match reality after an unclean exit.
+    //
+    // `outcome` is the column, NOT `status`: `improve_runs` (db/mod.rs) has
+    // `outcome TEXT` and no `status` at all, so the old statement failed at
+    // PREPARE time and `let _ =` discarded it — every mirrored row stayed open
+    // forever and, since `improve::run_health` only counts `finished_at IS
+    // NOT NULL`, silently dropped out of the failure-rate stats.
+    //
+    // Two ways to reach a mirrored row, OR'd:
+    //  - the `improve_run_id` back-reference set by `start_run`;
+    //  - the shared `chat_session_id`, for the case where that back-reference
+    //    UPDATE failed and the row has no link at all (the first subquery needs
+    //    the very link that is missing). The fallback additionally requires the
+    //    artifact to be an automation and the session to hold NO still-running
+    //    automation run, so it can never close another artifact's open run.
     if settled > 0 {
-        let _ = conn.execute(
-            "UPDATE improve_runs SET finished_at = ?1, status = 'abandoned' \
-             WHERE finished_at IS NULL AND id IN (SELECT improve_run_id FROM automation_runs \
-             WHERE improve_run_id IS NOT NULL AND finished_at = ?1)",
+        match conn.execute(
+            "UPDATE improve_runs SET finished_at = ?1, outcome = 'abandoned' \
+             WHERE finished_at IS NULL AND ( \
+                 id IN (SELECT improve_run_id FROM automation_runs \
+                        WHERE improve_run_id IS NOT NULL AND finished_at = ?1) \
+              OR (artifact_id IN (SELECT id FROM improve_artifacts WHERE kind = 'automation') \
+                  AND chat_session_id IN (SELECT chat_session_id FROM automation_runs \
+                                          WHERE chat_session_id IS NOT NULL AND finished_at = ?1) \
+                  AND NOT EXISTS (SELECT 1 FROM automation_runs still_open \
+                                   WHERE still_open.chat_session_id = improve_runs.chat_session_id \
+                                     AND still_open.finished_at IS NULL)) )",
             params![now],
-        );
-        eprintln!("[automations] settled {settled} stale running row(s) left by a previous process");
+        ) {
+            Ok(n) => eprintln!(
+                "[automations] settled {settled} stale running row(s) left by a previous \
+                 process (and {n} mirrored improve run(s))"
+            ),
+            // Not swallowed: a failure here is what left mirrored rows open
+            // and invisible to `improve::run_health`.
+            Err(e) => eprintln!(
+                "[automations] settled {settled} stale running row(s), but closing the \
+                 mirrored improve runs failed: {e}"
+            ),
+        }
     }
 }
 
@@ -580,6 +630,207 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outcome2, "failed");
+    }
+
+    /// A real on-disk DB in a temp dir (`db::open`, so busy_timeout and the
+    /// post-schema migrations match production) rather than `mem()` — the sweep
+    /// is what runs at BOOT against the user's actual file.
+    fn temp_conn() -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = crate::db::open(&dir.path().join("relay.db")).expect("open db");
+        (dir, conn)
+    }
+
+    /// Backdate an automation run so `sweep_stale_automation_runs`'s age gate
+    /// (started_at <= now - max_age) admits it.
+    fn backdate_run(conn: &Connection, run_id: &str, secs: i64) {
+        conn.execute(
+            "UPDATE automation_runs SET started_at = started_at - ?2 WHERE id = ?1",
+            params![run_id, secs],
+        )
+        .unwrap();
+    }
+
+    /// The sweep's `improve_runs` half used to name a `status` column that the
+    /// table does not have (`improve_runs` has `outcome`), so the UPDATE failed
+    /// at PREPARE time and `let _ =` hid it: mirrored rows stayed open forever
+    /// and dropped out of `improve::run_health` (which counts only
+    /// `finished_at IS NOT NULL`). Both halves must close.
+    #[test]
+    fn sweep_closes_the_mirrored_improve_run() {
+        let (_dir, conn) = temp_conn();
+        let a = create_automation(&conn, &input("nightly")).unwrap();
+        let run = start_run(&conn, &a.id, Some("cs-1"), "scheduled").unwrap();
+        let improve_run_id: String = conn
+            .query_row(
+                "SELECT improve_run_id FROM automation_runs WHERE id = ?1",
+                params![run],
+                |r| r.get(0),
+            )
+            .unwrap();
+        backdate_run(&conn, &run, 7200);
+
+        sweep_stale_automation_runs(&conn, 3600);
+
+        let (status, improve_finished, outcome): (String, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT r.status, i.finished_at, i.outcome
+                   FROM automation_runs r JOIN improve_runs i ON i.id = ?1
+                  WHERE r.id = ?2",
+                params![improve_run_id, run],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "interrupted");
+        assert!(
+            improve_finished.is_some(),
+            "the mirrored improve_runs row must be closed, not left open forever"
+        );
+        assert_eq!(outcome.as_deref(), Some("abandoned"));
+    }
+
+    /// The `improve_run_id` back-reference can be missing (its UPDATE failed,
+    /// and `improve_runs.chat_session_id` carries no FK so deleting the
+    /// session never closes the row). The sweep's `chat_session_id` fallback
+    /// must still reach such a row — without it the primary subquery needs the
+    /// very link that is missing.
+    #[test]
+    fn sweep_closes_an_unlinked_mirrored_run_via_the_session() {
+        let (_dir, conn) = temp_conn();
+        let a = create_automation(&conn, &input("nightly")).unwrap();
+        let run = start_run(&conn, &a.id, Some("cs-orphan"), "scheduled").unwrap();
+        let improve_run_id: String = conn
+            .query_row(
+                "SELECT improve_run_id FROM automation_runs WHERE id = ?1",
+                params![run],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // Simulate the swallowed link UPDATE failing.
+        conn.execute(
+            "UPDATE automation_runs SET improve_run_id = NULL WHERE id = ?1",
+            params![run],
+        )
+        .unwrap();
+        backdate_run(&conn, &run, 7200);
+
+        sweep_stale_automation_runs(&conn, 3600);
+
+        let (finished, outcome): (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT finished_at, outcome FROM improve_runs WHERE id = ?1",
+                params![improve_run_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            finished.is_some(),
+            "an unlinked mirrored run must still be swept by chat_session_id"
+        );
+        assert_eq!(outcome.as_deref(), Some("abandoned"));
+    }
+
+    /// The session fallback must not reach across into a session where an
+    /// automation run is STILL running: its mirrored row stays open.
+    #[test]
+    fn sweep_leaves_a_mirrored_run_of_a_live_automation_alone() {
+        let (_dir, conn) = temp_conn();
+        let a = create_automation(&conn, &input("nightly")).unwrap();
+        let stale = start_run(&conn, &a.id, Some("cs-shared"), "scheduled").unwrap();
+        let live = start_run(&conn, &a.id, Some("cs-shared"), "scheduled").unwrap();
+        let live_improve_run: String = conn
+            .query_row(
+                "SELECT improve_run_id FROM automation_runs WHERE id = ?1",
+                params![live],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // Drop only the back-reference on the LIVE row so the primary subquery
+        // cannot find it — the fallback must refuse it on the open-run check.
+        conn.execute(
+            "UPDATE automation_runs SET improve_run_id = NULL WHERE id = ?1",
+            params![live],
+        )
+        .unwrap();
+        backdate_run(&conn, &stale, 7200);
+
+        sweep_stale_automation_runs(&conn, 3600);
+
+        let stale_improve_run: String = conn
+            .query_row(
+                "SELECT improve_run_id FROM automation_runs WHERE id = ?1",
+                params![stale],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let (live_finished, live_status, stale_finished): (Option<i64>, String, Option<i64>) = conn
+            .query_row(
+                "SELECT i.finished_at,
+                        (SELECT r.status FROM automation_runs r WHERE r.id = ?2),
+                        (SELECT j.finished_at FROM improve_runs j WHERE j.id = ?3)
+                   FROM improve_runs i WHERE i.id = ?1",
+                params![live_improve_run, live, stale_improve_run],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(live_status, "running", "the fresh run must not be settled");
+        assert!(
+            live_finished.is_none(),
+            "a mirrored run whose automation is still running must stay open"
+        );
+        assert!(
+            stale_finished.is_some(),
+            "the stale sibling is still swept"
+        );
+    }
+
+    /// `mirror_run_start` writes the version row and moves `active` as ONE
+    /// logical change; if only the first landed, `active` would keep pointing
+    /// at the old body and the next run would append a duplicate.
+    #[test]
+    fn mirror_run_start_moves_active_onto_the_new_version() {
+        let conn = super::super::mem();
+        let a = create_automation(&conn, &input("nightly")).unwrap();
+        start_run(&conn, &a.id, None, "scheduled").unwrap();
+        let artifact_id: String = conn
+            .query_row(
+                "SELECT id FROM improve_artifacts WHERE kind = 'automation' AND ref_key = ?1",
+                params![a.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let mut edited = input("nightly");
+        edited.prompt = "a brand new prompt".into();
+        update_automation(&conn, &a.id, &edited).unwrap();
+        start_run(&conn, &a.id, None, "scheduled").unwrap();
+
+        let active = super::super::improve::channel_version(&conn, &artifact_id, "active")
+            .unwrap()
+            .unwrap();
+        let active_body = super::super::improve::version_body(&conn, &artifact_id, active)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active, 2, "prompt edit recorded as v2");
+        assert_eq!(
+            active_body, "a brand new prompt",
+            "`active` must point at the version the prompt edit created, not v1"
+        );
+
+        // An immediate re-run with an UNCHANGED prompt is idempotent: no
+        // duplicate version row, no channel movement.
+        start_run(&conn, &a.id, None, "scheduled").unwrap();
+        assert_eq!(
+            super::super::improve::list_versions(&conn, &artifact_id).unwrap().len(),
+            2,
+            "an unchanged prompt must not append a duplicate version"
+        );
+        assert_eq!(
+            super::super::improve::channel_version(&conn, &artifact_id, "active")
+                .unwrap()
+                .unwrap(),
+            2
+        );
     }
 
     fn input(name: &str) -> AutomationInput {

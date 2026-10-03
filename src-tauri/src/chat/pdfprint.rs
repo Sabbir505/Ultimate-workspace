@@ -98,11 +98,8 @@ window.addEventListener('load', function () {
 "#;
 
 /// Compose the final print document. If the model authored a full HTML
-/// document our CSS/scripts are spliced into <head> (after its own <style>,
-/// so the model can still override base rules — wait, base CSS first, model
-/// CSS after: we splice ours immediately BEFORE the model's first <style> if
-/// one exists, else at the end of <head>); fragments are wrapped in a
-/// skeleton. Everything is injected once; double injection is impossible
+/// document our CSS/scripts are spliced into <head>; fragments are wrapped in
+/// a skeleton. Everything is injected once; double injection is impossible
 /// because each render uses a fresh temp file.
 pub(crate) fn compose_print_document(model_html: &str, title: &str) -> String {
     let head_inject = format!(
@@ -118,28 +115,61 @@ pub(crate) fn compose_print_document(model_html: &str, title: &str) -> String {
     let lower = trimmed.to_ascii_lowercase();
 
     if lower.contains("<html") {
-        // Full document: splice our block into <head> if present (before the
-        // model's first <style> so its styles win the cascade), else before
-        // </head>, else before <body>.
-        if let Some(style_pos) = lower.find("<style") {
-            return format!(
-                "{}\n{head_inject}{}",
-                &trimmed[..style_pos],
-                &trimmed[style_pos..]
-            );
+        // Full document. Strip MODEL-AUTHORED CSP metas first: a second
+        // policy from the model would otherwise be enforced too (policies
+        // combine, but the model controls its own directives, so it could
+        // simply omit `frame-src 'none'` and re-open the iframe read channel
+        // this policy closes).
+        let body = strip_model_csp(&trimmed);
+        // Injection point is CONTENT-INDEPENDENT: immediately after the
+        // <head ...> open tag. It used to be the model's first <style> (else
+        // </head>, else <body>) — but a meta CSP only governs content parsed
+        // AFTER it, so a model document with a <script> before its first
+        // <style> executed it with NO policy at all. Model styles still win
+        // the cascade: our sheet comes first, theirs later in the head.
+        let body_lower = body.to_ascii_lowercase();
+        if let Some(pos) = body_lower.find("<head") {
+            let open_end = match body_lower[pos..].find('>') {
+                Some(off) => pos + off + 1,
+                // Malformed `<head` with no `>` — append at the very end.
+                None => body.len(),
+            };
+            return format!("{}\n{head_inject}{}", &body[..open_end], &body[open_end..]);
         }
-        if let Some(pos) = lower.find("</head>") {
-            return format!("{}\n{head_inject}{}", &trimmed[..pos], &trimmed[pos..]);
-        }
-        if let Some(pos) = lower.find("<body") {
-            return format!("{}\n{head_inject}{}", &trimmed[..pos], &trimmed[pos..]);
-        }
-        return format!("{trimmed}\n{head_inject}");
+        // No <head> at all: construct one so the policy still precedes
+        // everything the model authored.
+        return format!("<!doctype html>\n<html>\n<head>\n{head_inject}</head>\n{body}\n</html>\n");
     }
     // Fragment: wrap in a standards-mode skeleton.
     format!(
         "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n{head_inject}</head>\n<body>\n{trimmed}\n</body>\n</html>\n"
     )
+}
+
+/// Remove model-authored `<meta http-equiv="Content-Security-Policy" …>`
+/// tags, so a model cannot weaken (or blank) the policy we splice in — CSPs
+/// are additive, but the model controls its own directives and could simply
+/// omit `frame-src 'none'`, re-opening the local-file read channel PRINT_CSP
+/// closes. Case-insensitive, on the same ASCII-lowered-offset convention the
+/// rest of this file uses.
+fn strip_model_csp(body: &str) -> String {
+    let lower = body.to_ascii_lowercase();
+    let mut out = String::with_capacity(body.len());
+    let mut cur = 0usize;
+    while let Some(pos) = lower[cur..].find("<meta") {
+        let start = cur + pos;
+        // Unterminated `<meta` — nothing left to scan safely; keep the rest.
+        let Some(off) = lower[start..].find('>') else { break };
+        let tag_end = start + off + 1;
+        if lower[start..tag_end].contains("content-security-policy") {
+            out.push_str(&body[cur..start]);
+        } else {
+            out.push_str(&body[cur..tag_end]);
+        }
+        cur = tag_end;
+    }
+    out.push_str(&body[cur..]);
+    out
 }
 
 fn html_escape(s: &str) -> String {
@@ -473,5 +503,31 @@ mod tests {
     fn title_is_escaped() {
         let doc = compose_print_document("<p>x</p>", "<b>&</b>");
         assert!(doc.contains("&lt;b&gt;&amp;&lt;/b&gt;"));
+    }
+
+    #[test]
+    fn csp_precedes_any_model_script() {
+        // A meta CSP only governs what is parsed AFTER it, so the injection
+        // point must not be content-derived: a model <script> sitting before
+        // its first <style> used to run with no policy at all.
+        let model = "<html><head><script>fetch('file:///C:/x')</script>\
+                     <style>p{color:red}</style></head><body>hi</body></html>";
+        let doc = compose_print_document(model, "T");
+        let csp = doc.find("Content-Security-Policy").unwrap();
+        let script = doc.find("<script>fetch").unwrap();
+        assert!(csp < script, "policy must precede the model's script: {doc}");
+    }
+
+    #[test]
+    fn model_authored_csp_meta_is_stripped() {
+        let model = "<html><head>\
+                     <meta http-equiv=\"Content-Security-Policy\" content=\"default-src *\">\
+                     </head><body>hi</body></html>";
+        let doc = compose_print_document(model, "T");
+        assert_eq!(doc.matches("Content-Security-Policy").count(), 1);
+        assert!(
+            !doc.contains(r#"content="default-src *""#),
+            "the model's own policy must be gone: {doc}"
+        );
     }
 }

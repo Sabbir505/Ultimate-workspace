@@ -54,6 +54,12 @@ fn phone_frame(
 
 /// Phone-side: read the next Binary frame from the desktop and decrypt it at
 /// the phone's receive `counter`.
+///
+/// The 15s bound on the frame reads (shared with `desktop_recv`) is a ceiling
+/// on an IN-PROCESS server's reply, not a liveness assertion — 5s was tight
+/// enough to flake on a loaded runner (e.g. a test binary starting while
+/// `cargo` still had other crates compiling). Correctness of the handshake is
+/// judged by the decrypted payloads below, never by the clock.
 async fn phone_recv(
     client: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -64,7 +70,7 @@ async fn phone_recv(
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
 
-    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(15), client.next())
         .await
         .expect("desktop reply timed out")
         .expect("socket closed")
@@ -145,8 +151,10 @@ async fn mid_turn_encrypted_cancel_is_honored_and_counter_stays_in_sync() {
     );
 
     // Phone frame #2: a replayed stale frame (encrypted at counter 0) fails
-    // its nonce check → undecryptable error, but the counter STILL advances
-    // (main-loop parity), so...
+    // its nonce check → undecryptable error, and the counter does NOT advance
+    // (the phone never minted a frame at this slot, so its own out_counter
+    // didn't move either). That is what stops one injected junk frame from
+    // desyncing the session forever.
     handle_mid_turn_frame(
         Message::Binary(phone_frame(&key, 0, &cancel)),
         true,
@@ -166,12 +174,12 @@ async fn mid_turn_encrypted_cancel_is_honored_and_counter_stays_in_sync() {
         "a replayed frame must not cancel"
     );
 
-    // ...phone frame #3 at counter 3 still decrypts and cancels.
+    // ...phone frame #3, still at counter 2, decrypts and cancels.
     let cancel2 = MobileMessage::CancelChatTurn {
         chat_session_id: "cs-2".into(),
     };
     handle_mid_turn_frame(
-        Message::Binary(phone_frame(&key, 3, &cancel2)),
+        Message::Binary(phone_frame(&key, 2, &cancel2)),
         true,
         &record,
         &write,
@@ -188,8 +196,9 @@ async fn mid_turn_encrypted_cancel_is_honored_and_counter_stays_in_sync() {
         other => panic!("expected ChatDone, got {other:?}"),
     }
 
-    // The shared crypto state agrees: four inbound Binary frames consumed.
-    assert_eq!(write.lock().await.e2e.in_counter, 4);
+    // The shared crypto state agrees: three inbound Binary frames decrypted
+    // (the replayed one consumed no counter slot).
+    assert_eq!(write.lock().await.e2e.in_counter, 3);
 }
 
 /// Main-loop parity (B-24): a plaintext Text command on an E2E connection is
@@ -371,7 +380,7 @@ async fn phone_recv_text(
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
 
-    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(15), client.next())
         .await
         .expect("desktop frame timed out")
         .expect("socket closed")
@@ -462,7 +471,7 @@ async fn challenge_handshake_both_directions_encrypted() {
             .await
             .unwrap();
         // Desktop → phone encrypted frame at counter 0.
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(15), client.next())
             .await
             .unwrap()
             .expect("socket closed")
@@ -486,7 +495,101 @@ async fn challenge_handshake_both_directions_encrypted() {
     crate::mobile::relay::send_msg(&write, &DesktopMessage::DesktopStatus { connected: true })
         .await
         .unwrap();
-    let next = tokio::time::timeout(std::time::Duration::from_secs(5), server_read.next())
+    let next = tokio::time::timeout(std::time::Duration::from_secs(15), server_read.next())
+        .await
+        .unwrap()
+        .expect("socket closed")
+        .expect("ws read error");
+    assert!(
+        matches!(next, Message::Binary(_)),
+        "phone post-pair frames must be Binary"
+    );
+    phone.await.unwrap();
+}
+
+/// The PRODUCTION pairing path (v3): the phone claims `v3: true`, so the
+/// desktop binds the plaintext `PairOk` salt to this connection's challenge
+/// before deriving — and the phone must perform the identical
+/// `SHA256(challenge || salt)` binding. Every other handshake test here passes
+/// `v3: None` and derives from the RAW salt, so a byte-order or base64url slip
+/// in `bind_salt_to_challenge` used to desync every real pairing with the whole
+/// suite green.
+#[tokio::test]
+async fn v3_challenge_handshake_uses_the_challenge_bound_salt() {
+    use crate::mobile::protocol::{DesktopMessage, MobileMessage};
+    use crate::mobile::relay_crypto;
+    use crate::mobile::relay_requests::pair_handshake;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let token = "pair-v3-token-000000000000000000000000";
+    let (write, mut server_read, client) = pairing_ws_pair().await;
+
+    let phone = tokio::spawn(async move {
+        let mut client = client;
+        let challenge = match phone_recv_text(&mut client).await {
+            DesktopMessage::PairChallenge { nonce } => b64url_decode(&nonce),
+            other => panic!("expected PairChallenge, got {other:?}"),
+        };
+        phone_send_text(
+            &mut client,
+            &MobileMessage::Pair {
+                token: None,
+                proof: Some(relay_crypto::compute_pair_proof_with_nonce(token, &challenge)),
+                v2: Some(true),
+                v3: Some(true),
+            },
+        )
+        .await;
+        let (raw_salt, challenge) = match phone_recv_text(&mut client).await {
+            DesktopMessage::PairOk { salt } => (b64url_decode(&salt), challenge),
+            other => panic!("expected PairOk, got {other:?}"),
+        };
+        // v3: bind the (unauthenticated) wire salt to THIS connection's
+        // challenge before deriving — exactly what useRelay.ts does.
+        let effective_salt = relay_crypto::bind_salt_to_challenge(&challenge, &raw_salt);
+        let key = relay_crypto::derive_session_key_with_salt(token, &effective_salt);
+        // The binding must genuinely change the key, else this test would pass
+        // even if the phone forgot to bind.
+        assert_ne!(
+            key,
+            relay_crypto::derive_session_key_with_salt(token, &raw_salt),
+            "the challenge binding must change the derived key"
+        );
+
+        // Phone → desktop encrypted frame at counter 0.
+        client
+            .send(Message::Binary(relay_crypto::encrypt(
+                &key,
+                0,
+                &serde_json::to_vec(&MobileMessage::ListSessions).unwrap(),
+            )))
+            .await
+            .unwrap();
+        // Desktop → phone encrypted frame at counter 0.
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(15), client.next())
+            .await
+            .unwrap()
+            .expect("socket closed")
+            .expect("ws read error");
+        let Message::Binary(bytes) = frame else {
+            panic!("post-pair desktop frames must be Binary");
+        };
+        let plain = relay_crypto::decrypt(&key, 0, &bytes)
+            .expect("desktop frame decrypts under the challenge-bound key");
+        let msg: DesktopMessage = serde_json::from_slice(&plain).unwrap();
+        assert!(matches!(msg, DesktopMessage::DesktopStatus { connected: true }));
+    });
+
+    let ok = pair_handshake(token, false, &write, &mut server_read)
+        .await
+        .expect("v3 handshake must succeed");
+    assert!(ok);
+
+    crate::mobile::relay::send_msg(&write, &DesktopMessage::DesktopStatus { connected: true })
+        .await
+        .unwrap();
+    let next = tokio::time::timeout(std::time::Duration::from_secs(15), server_read.next())
         .await
         .unwrap()
         .expect("socket closed")

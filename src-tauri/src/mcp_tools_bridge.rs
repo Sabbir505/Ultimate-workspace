@@ -93,20 +93,39 @@ pub const ALLOWED_RELAY_TOOLS: [&str; 34] = [
 /// `gdrive_search_files`, …). These are the working Gmail/Workspace/YouTube
 /// surface for harness CLIs while Google's hosted MCP servers deny every
 /// `tools/call` (Workspace MCP Developer Preview gate).
-pub fn relay_tool_schemas<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Value> {
-    // local_docs: `search_docs` is capability-gated in the registry but is
-    // bridged unconditionally (hybrid search degrades to keyword-only at
-    // runtime when the embedding sidecar is down).
-    // unlocked_registry: the bridge serves HARNESS CLIs, which have no
-    // attach hop — a family the built-in chat locks behind
-    // `attach_connector` (session mesh, automation writes) must stay in the
-    // bridged `tools/list` or it goes missing on the harness side. There is
-    // a test pinning every allowlisted tool to a live registry spec.
-    let caps = ToolCaps {
+/// The capability set every bridged surface must agree on.
+///
+/// `tools/list` and `tools/call` MUST resolve this identically — an earlier
+/// version built the caps twice and the two drifted: the schemas advertised
+/// the unlocked registry while `execute_relay_tool` dispatched with a bare
+/// `ToolCaps::default()`, so a tool the harness could see failed at call time
+/// with a capability error naming nothing. One helper, both sites.
+///
+/// - `unlocked_registry`: the bridge serves HARNESS CLIs, which have no
+///   attach hop — a family the built-in chat locks behind `attach_connector`
+///   (session mesh, automation writes) must stay in the bridged `tools/list`
+///   or it goes missing on the harness side. There is a test pinning every
+///   allowlisted tool to a live registry spec.
+/// - `local_docs`: `search_docs` is capability-gated in the registry but is
+///   bridged unconditionally (hybrid search degrades to keyword-only at
+///   runtime when the embedding sidecar is down).
+/// - `code_exec`: ungated here BY POLICY, like the connector fallback tools
+///   and the vault family above — a harness CLI already holds unrestricted
+///   native file and shell tools, so gating `generate_document` on the
+///   built-in chat's composer toggle adds no security, only a tool the
+///   harness can list but never call. The BUILT-IN chat path still enforces
+///   `caps.code_exec` in both `dispatch.rs` and `generate.rs`.
+pub fn harness_tool_caps() -> ToolCaps {
+    ToolCaps {
+        code_exec: true,
         local_docs: true,
         wiki: true,
         ..ToolCaps::unlocked_registry()
-    };
+    }
+}
+
+pub fn relay_tool_schemas<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Value> {
+    let caps = harness_tool_caps();
     let all = tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite);
     let mut out: Vec<Value> = ALLOWED_RELAY_TOOLS
         .iter()
@@ -375,7 +394,7 @@ async fn execute_relay_tool_inner(
     }
     let client = reqwest::Client::new();
     let artifacts_dir = crate::chat::dispatch::artifacts_dir(app);
-    let caps = ToolCaps::default();
+    let caps = harness_tool_caps();
     let outcome = tools::execute_tool(&client, &artifacts_dir, &caps, tool_name, args, Some(app), None).await;
     Ok(json!({
         "text": outcome_text(&outcome),
@@ -1020,6 +1039,61 @@ mod tests {
                 outcome.text
             );
         }
+    }
+
+    /// The H7 `code_exec` gate on `generate_document` is the one capability a
+    /// harness has no way to satisfy: the composer toggle lives in the built-in
+    /// chat, so `code_exec: false` on the bridge path makes an ADVERTISED tool
+    /// that can only ever answer "code execution is disabled". That is exactly
+    /// how the caps drift shipped — `tools/list` used the unlocked registry
+    /// while `tools/call` dispatched `ToolCaps::default()`.
+    ///
+    /// Pins both halves: the caps the bridge advertises must clear every gate
+    /// its own allowlist relies on, and `generate_document` must survive the
+    /// gate under those caps.
+    #[test]
+    fn harness_caps_advertise_what_they_can_actually_dispatch() {
+        let caps = harness_tool_caps();
+        assert!(
+            caps.code_exec,
+            "code_exec must be on for the bridge: `generate_document` is allowlisted and \
+             its H7 gate would refuse every call, so a harness could list a tool that can \
+             only ever fail"
+        );
+        assert!(caps.local_docs && caps.wiki, "registry families the bridge advertises");
+        for name in [
+            tools::SEARCH_DOCS,
+            tools::SEARCH_WIKI,
+            tools::GENERATE_DOCUMENT,
+        ] {
+            let specs = tools::openai_tool_specs(
+                &caps,
+                crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+            );
+            assert!(
+                specs.iter().any(|s| s.pointer("/function/name").and_then(|n| n.as_str())
+                    == Some(name)),
+                "`{name}` must be advertised under the harness caps"
+            );
+        }
+        // Behavioral half: the gate must actually admit the call. Empty args
+        // must produce an ARGUMENT error, never the capability refusal.
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir().join("relay-bridge-harness-caps");
+        let outcome = tauri::async_runtime::block_on(tools::execute_tool(
+            &client,
+            &dir,
+            &caps,
+            tools::GENERATE_DOCUMENT,
+            &serde_json::json!({}),
+            None,
+            None,
+        ));
+        assert!(
+            !outcome.text.contains("code execution is disabled"),
+            "generate_document is refused by the H7 gate under the bridge caps: {}",
+            outcome.text
+        );
     }
 
     /// The subagent write trio is bridged UNGATED, so the gate is the only

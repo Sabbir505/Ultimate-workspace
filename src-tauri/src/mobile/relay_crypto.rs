@@ -384,4 +384,54 @@ mod tests {
             )
         );
     }
+
+    /// SALTED derivation vectors, same cross-implementation contract as above:
+    /// production pairing never uses the static-salt key above, so a byte-order
+    /// or length slip in the per-connection derivation would desync every real
+    /// pairing with `noble_cross_implementation_vectors` still green.
+    /// Computed live against the mobile node_modules copy of @noble/hashes.
+    #[test]
+    fn noble_cross_implementation_vectors_for_the_salted_derivation() {
+        fn to_hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+        let token = "test-token-000000000000000000000000";
+        // Wire salt as the desktop actually sends it: 32 random bytes; this
+        // vector pins a fixed 16-byte one so the expectation is reproducible.
+        let wire_salt: Vec<u8> = (0..16u8).collect();
+        assert_eq!(to_hex(&wire_salt), "000102030405060708090a0b0c0d0e0f");
+        // Pre-v3 clients derive straight from the raw PairOk salt.
+        assert_eq!(
+            to_hex(&derive_session_key_with_salt(token, &wire_salt)),
+            "0f927b69d4aff8feb7e4366060ab6d4d21cf48a2299ea2c0fab67cdc18f038b6"
+        );
+        // v3 (production): SHA256(challenge || salt), then the same HKDF.
+        let challenge = [7u8; 32];
+        let bound = bind_salt_to_challenge(&challenge, &wire_salt);
+        assert_eq!(
+            to_hex(&bound),
+            "3bc6a5ad434ba7ae7db30cbd1db35adebf891f863dceff7aa3b0df5c3f785354",
+            "challenge must be the FIRST half of the SHA256 input"
+        );
+        assert_eq!(
+            to_hex(&derive_session_key_with_salt(token, &bound)),
+            "eeb5b735dc7aff58786c81f373be928c016facccad6ea99a6f6443c33b2bbf63"
+        );
+        // A frame under the v3 key, so a nonce-layout regression can't hide
+        // behind a matching key derivation.
+        let v3_key = derive_session_key_with_salt(token, &bound);
+        let frame = encrypt(&v3_key, 0, b"conduit v3 vector");
+        assert_eq!(decrypt(&v3_key, 0, &frame).as_deref(), Some(&b"conduit v3 vector"[..]));
+        // The binding must actually bind: the raw salt must NOT produce the v3
+        // key, or a phone that skipped bindSaltToChallenge would still pass.
+        assert_ne!(
+            derive_session_key_with_salt(token, &wire_salt),
+            derive_session_key_with_salt(token, &bound)
+        );
+        assert_ne!(
+            bind_salt_to_challenge(&[8u8; 32], &wire_salt),
+            bound,
+            "a different connection's challenge must produce a different salt"
+        );
+    }
 }

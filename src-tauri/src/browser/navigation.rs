@@ -90,9 +90,10 @@ impl BrowserManager {
         }
     }
 
-    /// Shared first half of `navigate`: validate the URL, mark the pane active
-    /// and resolve the pane handle. Split out so `create` (an async worker)
-    /// can dispatch the controller `navigate` call itself on the main thread.
+    /// Shared first half of `navigate`: validate the URL against the PANE's
+    /// scope, mark the pane active and resolve the pane handle. Split out so
+    /// `create` (an async worker) can dispatch the controller `navigate` call
+    /// itself on the main thread.
     pub(super) fn prepare_navigate(
         &self,
         pane_id: &str,
@@ -100,7 +101,26 @@ impl BrowserManager {
         url: &str,
     ) -> Result<(BrowserPane, tauri::Url), String> {
         ensure_supported()?;
-        let parsed = validate_nav_url(url)?;
+        // Scheme allowlist PLUS `file://` containment in the pane's own scope
+        // (audit H28) — the same check the pane-CREATE path applies. Without it
+        // the check only guarded the first hop: MCP `navigate` and chat
+        // `open_url` create a pane (validated) and then navigate the existing
+        // pane to a different `file://` target, which reached this function
+        // unchecked — an arbitrary local-file READ channel again.
+        //
+        // The project comes from `project_pane_registry` (pane_id -> project_id,
+        // populated by the frontend's pane registration and cleaned up by
+        // `close_pane_tabs` / `unregister_browser_pane_project`). A missing
+        // entry — an unbound pane, or a registry already drained — falls back
+        // to the artifacts-dir-only scope `pane_scope_roots(None)` gives, which
+        // narrows the scope rather than widening it.
+        let project_id = self
+            .project_pane_registry
+            .lock()
+            .get(pane_id)
+            .cloned();
+        let scope_roots = self.pane_scope_roots(project_id.as_deref());
+        let parsed = validate_nav_url_in_scope(url, &scope_roots)?;
         *self.active.lock() = Some((pane_id.to_string(), tab_id.to_string()));
         self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
         let label = browser_label(pane_id, tab_id);

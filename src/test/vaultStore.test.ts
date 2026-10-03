@@ -4,7 +4,12 @@
 import { beforeEach, afterEach, describe, expect, it, vi, type Mock } from "vitest";
 
 const vaultReadNoteMock = vi.fn();
-const vaultWriteNoteMock = vi.fn();
+// `vaultWriteNote` returns `safeInvoke(...)` — a real Promise the store
+// chains on (it publishes the in-flight write so `deleteNote` can drain it).
+// A bare `vi.fn()` returning undefined makes `saveNow` throw synchronously,
+// which aborts every awaited `openNote` mid-flight AND leaks the queued
+// `mockResolvedValueOnce` reads into the following test.
+const vaultWriteNoteMock = vi.fn(async (..._a: unknown[]) => {});
 const vaultNoteMetaMock = vi.fn();
 const vaultGetStateMock = vi.fn();
 const vaultTreeMock = vi.fn();

@@ -530,6 +530,12 @@ export function ArtifactProposalCard({
 
         {showMissingFields && onSubmitMissingFields && proposal.missingFields.length > 0 && (
           <MissingFieldsPrompt
+            // Key by the proposal id: both `proposal` and `missingFields` are
+            // rebuilt on every parent render, so identity churn here would
+            // remount (and re-seed) the form on unrelated updates. The prompt
+            // seeds its fields from a useState initialiser, so a re-render of
+            // the SAME proposal no longer wipes what the user typed.
+            key={proposalId}
             proposal={{ artifactType: proposal.artifactType, spec: proposal.spec }}
             missingFields={proposal.missingFields.map((field) =>
               normalizeMissingFieldPath(field, proposal.artifactType),

@@ -1992,13 +1992,23 @@ async fn run_subagent_loop(
                             return Err(format!("provider error: {msg}"));
                         }
                         Some("content_block_delta") => {
-                            // Clamp the block index like the main round and the OpenAI branch do:
-                            // a hostile endpoint sending one block per distinct index would grow
-                            // `ant_think`/`ant_calls` without limit (audit H5).
-                            let idx = match v.get("index").and_then(|i| i.as_i64()) {
-                                Some(i) if i >= 0 && (i as usize) <= crate::chat::streaming::MAX_STREAM_BLOCK_INDEX => i,
-                                _ => 0,
+                            // Bound the block index like the main round and the OpenAI
+                            // branch do: a hostile endpoint sending one block per
+                            // distinct index would grow `ant_think`/`ant_calls` without
+                            // limit (audit H5). A missing or out-of-range index DROPS
+                            // the frame — same as the sibling `input_json_delta` /
+                            // `content_block_start` arms below. Folding it to 0 instead
+                            // let `{"index": -1, ...thinking_delta}` append onto block
+                            // 0's signature, which `ant_think` then replays verbatim as
+                            // the assistant turn on the next tool round.
+                            let Some(idx) = v.get("index").and_then(|i| i.as_i64()) else {
+                                continue;
                             };
+                            if idx < 0
+                                || idx as usize > crate::chat::streaming::MAX_STREAM_BLOCK_INDEX
+                            {
+                                continue;
+                            }
                             let dtype = v.pointer("/delta/type").and_then(|x| x.as_str());
                             if dtype == Some("thinking_delta") {
                                 // Extended-thinking delta: open the <think>

@@ -24,7 +24,7 @@
 //!    `is_mutating_tool`; if subagents may call it, add it to
 //!    `SUBAGENT_TOOL_ALLOW` (dispatch.rs).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -1127,6 +1127,57 @@ const OPEN_URL_DESC: &str = "Open a page in the app's built-in browser so the \
     start the dev server as a background task first, then open its \
     http://localhost:PORT. PDFs/images meant for the OS handler use open_file.";
 
+/// `file://` containment for `open_url` (audit H28) — the same roots the
+/// browser pane's own navigation is contained to: the artifacts dir plus the
+/// chat session's bound project folder. Returns the refusal text to hand back
+/// to the MODEL when the target is outside them, or `None` when it is inside.
+///
+/// The session's project comes from the `owner` session id. A headless or
+/// bridge caller has none, so it gets the artifacts dir only — the same
+/// narrowing an unbound browser pane gets, never a widening. The pane-side
+/// check in `browser::navigation` remains authoritative either way.
+fn file_open_out_of_scope(
+    app: Option<&tauri::AppHandle>,
+    owner: Option<&str>,
+    artifacts_dir: &Path,
+    url: &str,
+) -> Option<String> {
+    let parsed: tauri::Url = url.parse().ok()?;
+    let path = parsed
+        .to_file_path()
+        .unwrap_or_else(|_| PathBuf::from(parsed.path()));
+    let path_str = path.to_string_lossy().to_string();
+    let mut roots: Vec<String> = vec![artifacts_dir.to_string_lossy().into_owned()];
+    if let (Some(app), Some(sid)) = (app, owner) {
+        // `try_state` lives on the Manager trait; imported locally to keep the
+        // module's deliberately narrow tauri surface unchanged.
+        use tauri::Manager;
+        if let Some(db) = app.try_state::<crate::DbState>() {
+            let conn = db.0.lock();
+            let project_path = crate::db::get_chat_session(&conn, sid)
+                .ok()
+                .flatten()
+                .and_then(|s| s.project_id)
+                .and_then(|pid| crate::db::get_project(&conn, &pid).ok().flatten())
+                .map(|p| p.path);
+            if let Some(p) = project_path {
+                roots.push(p);
+            }
+        }
+    }
+    if crate::chat::permission::path_within_scope(&path_str, &roots) {
+        return None;
+    }
+    Some(format!(
+        "open_url refused: {path_str} is outside this session's preview scope \
+         (the artifacts dir and the bound project's folder). The browser pane \
+         enforces the same containment, so the preview could not have opened. \
+         To preview a file, move or generate it inside the project folder or the \
+         artifacts dir first — or use the relay-browser MCP `navigate` tool in a \
+         harness session, which is bound to that session's project."
+    ))
+}
+
 /// Files the app previews natively in the right-side tool panel — `open_file`
 /// routes these to the in-app preview instead of the OS handler (for a .mmd
 /// diagram the OS just shows an "open with" picker over unusable apps).
@@ -1424,6 +1475,18 @@ pub async fn execute_tool(
             // directly (relative css/js/img load from the same folder), and
             // reqwest can't fetch file:// for the text readback — just show it.
             if normalized.starts_with("file://") {
+                // Containment is checked HERE, at the tool boundary (audit
+                // H28), against the SAME roots the pane's own `file://`
+                // navigation is contained to — so an out-of-scope path comes
+                // back as tool text the model can react to, instead of
+                // surfacing a pane-create/navigate error to the user after the
+                // turn already reported success. A `file://` pane preview is a
+                // local-file READ channel that bypasses the permission-gated
+                // `read_file` tooling entirely.
+                if let Some(refusal) = file_open_out_of_scope(app, owner, artifacts_dir, &normalized)
+                {
+                    return ToolOutcome::text(refusal);
+                }
                 return ToolOutcome {
                     text: format!(
                         "Opened {normalized} in the built-in browser. The page is live \

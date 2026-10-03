@@ -1637,8 +1637,23 @@ export const imageDataUriCache = new Map<string, string>();
 export function ChatImage({ src, alt }: { src: string; alt?: string }) {
   const isRemote = /^(https?:|data:|blob:)/i.test(src);
   const cachedUri = isRemote ? null : imageDataUriCache.get(src) ?? null;
-  const [dataUri, setDataUri] = useState<string | null>(cachedUri);
-  const [failed, setFailed] = useState(false);
+  // The loaded/failed state is stored TOGETHER WITH the src it belongs to and
+  // compared during render, instead of being cleared by an effect. A plain
+  // `useState(cachedUri)` was seeded once and never reset, so when `src`
+  // changed the component kept rendering the PREVIOUS image's bytes under the
+  // NEW alt — and because the render checked `if (isRemote || dataUri)` before
+  // `if (failed)`, the "preview unavailable" branch was unreachable for that
+  // case. An effect-based reset would also leave a one-frame window where the
+  // stale URI still renders; comparing identity at render time has none.
+  const [loaded, setLoaded] = useState<{ src: string; uri: string } | null>(null);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  // The bytes to show for THIS src: the async load that completed for it, or
+  // the module cache when this src was already decoded (a virtualized-row
+  // remount, or a src change to something cached). Falling back to the cache —
+  // rather than only to component state — matters because the effect below
+  // early-returns on a cache hit and would otherwise never publish the URI.
+  const dataUri = loaded && loaded.src === src ? loaded.uri : cachedUri;
+  const failed = failedSrc === src && !dataUri;
 
   useEffect(() => {
     if (isRemote || cachedUri) return;
@@ -1662,13 +1677,13 @@ export function ChatImage({ src, alt }: { src: string; alt?: string }) {
             const oldest = imageDataUriCache.keys().next().value;
             if (oldest !== undefined) imageDataUriCache.delete(oldest);
           }
-          setDataUri(preview.dataUri);
+          setLoaded({ src, uri: preview.dataUri });
         } else {
-          setFailed(true);
+          setFailedSrc(src);
         }
       })
       .catch(() => {
-        if (!stale) setFailed(true);
+        if (!stale) setFailedSrc(src);
       });
     return () => {
       stale = true;

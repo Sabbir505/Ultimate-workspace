@@ -544,6 +544,16 @@ let _token: string | null = null;
 let _e2eKey: Uint8Array | null = null;
 let _outCounter = 0;
 let _inCounter = 0;
+// Consecutive inbound E2E decrypt failures. The receive counter advances ONLY
+// on a successful decrypt (it tracks frames the desktop actually minted), so a
+// single injected garbage frame no longer desyncs the session — but a peer
+// that genuinely increments its send counter anyway (old/buggy build) fails
+// every frame from that point on. That must surface as a reconnect (fresh
+// salt, counters back to 0), never as a silent wedge, so we close the socket
+// after a short run of consecutive failures. Mirrors the desktop's H43
+// eviction, which does the same toward the phone.
+let _decryptFailures = 0;
+const DECRYPT_FAILURE_RECONNECT_THRESHOLD = 5;
 // Pairing handshake: the key is derived only when the desktop's PairOk
 // (carrying the per-connection salt) arrives; sends between Pair and PairOk
 // are queued and flushed on keying. Audit C1 — the key must be unique per
@@ -719,7 +729,7 @@ function _doConnect(target: string) {
   if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; }
   _url = target;
   _token = extractToken(target);
-  _e2eKey = null; _outCounter = 0; _inCounter = 0;
+  _e2eKey = null; _outCounter = 0; _inCounter = 0; _decryptFailures = 0;
   _pairingToken = null; _pendingFrames = [];
   _pairChallenge = null; _pairSent = false;
   if (_pairFallbackTimer) { clearTimeout(_pairFallbackTimer); _pairFallbackTimer = null; }
@@ -770,17 +780,34 @@ function _doConnect(target: string) {
     ws.onmessage = (event) => {
       try {
         // Inbound: Text = plaintext (pre-pair frames, or a legacy
-        // connection). Binary = E2E-encrypted payload — decrypt with the
-        // inbound counter, which advances regardless of success so it stays
-        // in lockstep with the desktop's send counter.
+        // connection). Binary = E2E-encrypted payload.
         let text: string;
         if (typeof event.data === 'string') {
           text = event.data;
         } else if (_e2eKey) {
+          // The counter advances ONLY on a successful decrypt: it must track
+          // frames the desktop actually minted. Advancing regardless meant one
+          // on-path-injected garbage frame desynced us permanently — nothing
+          // on this side re-keys or evicts, so the app stayed `connected: true`
+          // and silently never received anything again.
           const frame = new Uint8Array(event.data as ArrayBuffer);
           const plain = decryptFrame(_e2eKey, _inCounter, frame);
+          if (!plain) {
+            _decryptFailures++;
+            if (_decryptFailures >= DECRYPT_FAILURE_RECONNECT_THRESHOLD) {
+              // A persistently undecryptable stream means the counters are
+              // desynced for good (a buggy/old peer that increments anyway,
+              // or an on-path attacker). Close so onclose reconnects under a
+              // FRESH salt with both counters back at 0, instead of wedging.
+              console.warn(`[relay] closing after ${_decryptFailures} consecutive decrypt failures — reconnecting`);
+              _ws?.close();
+              return;
+            }
+            console.warn('[relay] E2E frame failed to decrypt');
+            return;
+          }
           _inCounter++;
-          if (!plain) { console.warn('[relay] E2E frame failed to decrypt'); return; }
+          _decryptFailures = 0;
           text = new TextDecoder().decode(plain);
           // A frame that decrypts clean proves the desktop verified our
           // proof (it only enables E2E after that) — pairing succeeded, so
@@ -1117,7 +1144,7 @@ export function getRelayToken(): string | null { return _token; }
 export function reconnectPending(): boolean {
   return _reconnectTimer !== null || _connecting || _ws !== null;
 }
-function globalDisconnect() { stopPolling(); resetReconnectBackoff(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } _e2eKey = null; _outCounter = 0; _inCounter = 0; nc(false); nconnecting(false); }
+function globalDisconnect() { stopPolling(); resetReconnectBackoff(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } _e2eKey = null; _outCounter = 0; _inCounter = 0; _decryptFailures = 0; nc(false); nconnecting(false); }
 
 // Stable sender identities (module-level) so screens can safely put them in
 // useEffect dependency arrays — an inline arrow in the return object would

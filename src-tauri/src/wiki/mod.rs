@@ -2158,10 +2158,23 @@ async fn freshness_check<R: Runtime>(app: &AppHandle<R>, root: &str) -> Result<(
 /// prefixes stay stable. Firewalled like every other injected block: the
 /// wiki is GENERATED FROM repo content, which is untrusted input.
 pub fn index_prompt_section(conn: &Connection, root: &str) -> Option<String> {
-    let canonical = std::fs::canonicalize(root)
+    index_prompt_section_canonical(conn, &canonical_project_root(root))
+}
+
+/// Canonical (filesystem-resolved) form of a project root, the key the wiki
+/// tables are stored under. Split out from [`index_prompt_section`] because
+/// it is the only BLOCKING filesystem call in the lookup: a caller that holds
+/// the global DB mutex (an async command) must not run it under the guard.
+pub fn canonical_project_root(root: &str) -> String {
+    std::fs::canonicalize(root)
         .map(|p| normalize_canonical_path(&p.to_string_lossy()))
-        .unwrap_or_else(|_| root.to_string());
-    let project = db::wiki_get_project_by_path(conn, &canonical).ok()??;
+        .unwrap_or_else(|_| root.to_string())
+}
+
+/// [`index_prompt_section`] for a root that has ALREADY been resolved with
+/// [`canonical_project_root`] — pure DB work, safe to call under the DB lock.
+pub fn index_prompt_section_canonical(conn: &Connection, canonical: &str) -> Option<String> {
+    let project = db::wiki_get_project_by_path(conn, canonical).ok()??;
     let pages = db::wiki_list_pages(conn, &project.id).ok()?;
     if pages.is_empty() {
         return None;

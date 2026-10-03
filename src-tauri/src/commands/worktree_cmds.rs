@@ -197,11 +197,17 @@ pub async fn set_chat_session_worktree(
         let before = db::get_chat_session(&conn, &session_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "chat session not found".to_string())?;
-        let teardown = if worktree_path.as_deref() != before.worktree_path.as_deref() {
-            worktree_teardown_target(&conn, &before)
-        } else {
-            None
-        };
+        // Re-affirming the pointer it already holds is a no-op, so short-circuit
+        // BEFORE the project lookup. Otherwise a chat whose project row was
+        // deleted can no longer re-send its own unchanged value and errors with
+        // "project not found" — a behavior change from the pre-validation era,
+        // which matters because the UI echoes the current pointer back.
+        if worktree_path.as_deref() == before.worktree_path.as_deref() {
+            return Ok(());
+        }
+        // Always a real change past the early return above, so the old pointer
+        // is always the teardown target.
+        let teardown = worktree_teardown_target(&conn, &before);
         // A candidate pointer is only meaningful for a project-bound chat;
         // resolve its project path here (SQL only), validate the path itself
         // below with the guard dropped.
@@ -244,13 +250,15 @@ pub async fn set_chat_session_worktree(
     // Phase 3 (locked): commit the pointer. A candidate path was validated
     // (canonical form, parent containment, git's own worktree registry) in
     // phase 2; persist THAT, not the raw renderer string. A `None` clears.
+    //
+    // No `.or(worktree_path)` fallback: phase 1 already errors out whenever a
+    // candidate is supplied without a resolvable project, so the raw renderer
+    // string has no legitimate path to reach this line. Keeping the fallback
+    // would only matter if that guard were ever relaxed — and then it would
+    // silently reopen C4, persisting an unvalidated pointer into the
+    // file-read allowlist.
     let conn = db.0.lock();
-    db::set_chat_session_worktree(
-        &conn,
-        &session_id,
-        validated.as_deref().or(worktree_path.as_deref()),
-    )
-    .map_err(|e| e.to_string())
+    db::set_chat_session_worktree(&conn, &session_id, validated.as_deref()).map_err(|e| e.to_string())
 }
 
 /// The teardown TARGET of a chat's worktree: `(project root, worktree path)`,

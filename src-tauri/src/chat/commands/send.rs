@@ -1090,6 +1090,58 @@ pub async fn send_chat_message(
     } else {
         None
     };
+    // AGENTS.md + project-wiki layering (§4.2.10 / §6.15). Both are built
+    // BEFORE the prompt block below, in their own SHORT guard acquisitions, so
+    // the blocking filesystem work never runs while the global DB mutex is
+    // held: `agents_md::prompt_section` probes `Path::is_file()` and
+    // `read_to_string`s an unbounded file, and the wiki lookup canonicalizes a
+    // path. `send_chat_message` is an async Tauri command, so holding the
+    // guard across either pinned a tokio worker and stalled every other
+    // DB-touching command (audit C1 also forbids a NESTED `db.0.lock()` here,
+    // which is why this is sequential blocks rather than one wide guard).
+    let (agents_md_section, wiki_section) = {
+        let project_path: Option<String> = {
+            let conn = db.0.lock();
+            session_project_id
+                .as_ref()
+                .and_then(|pid| db::get_project(&conn, pid).ok().flatten())
+                .map(|p| p.path)
+        };
+        // AGENTS.md rides the system prompt. It changes only when the file is
+        // edited, so the prompt-prefix caches keep working — and the section
+        // is capped in agents_md.rs. The same layering happens for harness
+        // CLIs in agent_sessions::bundle (their instructions.md), so both
+        // surfaces honor the repo standard.
+        let agents_md_section = project_path
+            .as_deref()
+            .and_then(crate::agents_md::prompt_section);
+        // Wiki layer: the page INDEX rides the system prompt beside AGENTS.md
+        // (capped in wiki/mod.rs, firewalled like every injected block); the
+        // pages themselves stay behind the search_wiki / read_wiki_page tools
+        // — retrieved, never prefixed. Gated on Settings → Wiki ("layer
+        // index"), default on; absent when the project has no wiki, so the
+        // prompt prefix stays stable. `canonical_project_root` is the blocking
+        // half and deliberately runs BEFORE the second guard.
+        let wiki_layer = {
+            let conn = db.0.lock();
+            db::get_setting(&conn, "wiki.layer_index")
+                .ok()
+                .flatten()
+                .map(|v| v.trim() != "false")
+                .unwrap_or(true)
+        };
+        let wiki_canonical = project_path
+            .as_deref()
+            .map(crate::wiki::canonical_project_root);
+        let wiki_section = match (wiki_layer, wiki_canonical) {
+            (true, Some(canonical)) => {
+                let conn = db.0.lock();
+                crate::wiki::index_prompt_section_canonical(&conn, &canonical)
+            }
+            _ => None,
+        };
+        (agents_md_section, wiki_section)
+    };
     let (mut system, prompt_audit) = {
         let conn = db.0.lock();
         let custom = db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
@@ -1131,43 +1183,10 @@ pub async fn send_chat_message(
             manifest.as_deref(),
             None,
         );
-        // AGENTS.md layering (§4.2.10): the bound project's AGENTS.md rides
-        // the system prompt. It changes only when the file is edited, so the
-        // prompt-prefix caches keep working — and the section is capped in
-        // agents_md.rs. The same layering happens for harness CLIs in
-        // agent_sessions::bundle (their instructions.md), so both surfaces
-        // honor the repo standard.
-        // Reuse the guard this block already holds — a nested `db.0.lock()`
-        // here deadlocks the whole app (DbState's parking_lot Mutex is not
-        // reentrant; audit C1). No `.await` between, so one guard suffices.
-        let agents_md_section = session_project_id.as_ref().and_then(|pid| {
-            db::get_project(&conn, pid)
-                .ok()
-                .flatten()
-                .and_then(|p| crate::agents_md::prompt_section(&p.path))
-        });
+        // AGENTS.md (§4.2.10) and project-wiki (§6.15) sections were built
+        // ABOVE, outside this guard — their inputs are blocking filesystem
+        // reads and this is an async command.
         let built = crate::agents_md::append_to_system(built, agents_md_section);
-        // Project-wiki layering (§6.15): the wiki's page INDEX rides the
-        // system prompt beside AGENTS.md (capped in wiki/mod.rs, firewalled
-        // like every injected block); the pages themselves stay behind the
-        // search_wiki / read_wiki_page tools — retrieved, never prefixed.
-        // Gated on Settings → Wiki ("layer index"), default on; absent when
-        // the project has no wiki, so the prompt prefix stays stable.
-        let wiki_section = session_project_id.as_ref().and_then(|pid| {
-            // Same single guard as the AGENTS.md section above (audit C1).
-            let layer = db::get_setting(&conn, "wiki.layer_index")
-                .ok()
-                .flatten()
-                .map(|v| v.trim() != "false")
-                .unwrap_or(true);
-            if !layer {
-                return None;
-            }
-            db::get_project(&conn, pid)
-                .ok()
-                .flatten()
-                .and_then(|p| crate::wiki::index_prompt_section(&conn, &p.path))
-        });
         let built = crate::agents_md::append_to_system(built, wiki_section);
         // Session Mesh (SESSION_MESH_DESIGN_ARCHITECTURE.md §4.3) is ON
         // DEMAND now: the registry block used to ride the system prompt

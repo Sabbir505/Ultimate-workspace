@@ -27,7 +27,7 @@
 // UNCACHED prompt slice by ChatView (the session's last cache report is
 // stripped — the cached share surfaces on the HUD's cache chip instead).
 // 0 until the first turn completes.
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   contextWindowFor,
@@ -224,11 +224,19 @@ export function ContextMeter({
   // float above ALL DOM, so no z-index could lift the tooltip over them.
   // Unmount-clears so a mid-hover unmount can't strand the flag true (which
   // would keep every browser pane hidden forever).
+  //
+  // PER-INSTANCE registration, not one shared boolean: the meter renders once
+  // per chat pane (ChatPaneGrid → ChatView → ChatComposer → ComposerMetrics),
+  // so a global flag meant one pane's hover panel closing ran its cleanup and
+  // cleared it while the OTHER pane's panel was still open — re-exposing the
+  // webviews the flag exists to hide. `useId` is the same registration idiom
+  // Modal uses for `setModalOpen`.
+  const tipOwnerId = useId();
   const setContextTipOpen = useUiStore((s) => s.setContextTipOpen);
   useEffect(() => {
-    if (showPanel) setContextTipOpen(true);
-    return () => setContextTipOpen(false);
-  }, [showPanel, setContextTipOpen]);
+    if (showPanel) setContextTipOpen(tipOwnerId, true);
+    return () => setContextTipOpen(tipOwnerId, false);
+  }, [showPanel, setContextTipOpen, tipOwnerId]);
 
   const onHover = () => {
     const el = circleRef.current;

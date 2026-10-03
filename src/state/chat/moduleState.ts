@@ -523,6 +523,13 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
   delete stoppedPartial[chatSessionId];
   const supersededPartial = { ...s.supersededPartial };
   delete supersededPartial[chatSessionId];
+  // Turn-identity bookkeeping dies with the session: an armed stale-terminal
+  // record would otherwise outlive the chat it was armed for, and
+  // turnGeneration keeps a counter alive for an id nothing can send to.
+  const staleTerminalFor = { ...s.staleTerminalFor };
+  delete staleTerminalFor[chatSessionId];
+  const turnGeneration = { ...s.turnGeneration };
+  delete turnGeneration[chatSessionId];
   // Typed drafts die with the session too — they used to persist for the
   // whole app run after delete (audit L-17).
   const composerDrafts = { ...s.composerDrafts };
@@ -576,6 +583,8 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
     lastTurnPerf,
     stoppedPartial,
     supersededPartial,
+    staleTerminalFor,
+    turnGeneration,
     composerDrafts,
     citationReports,
     meshMail,

@@ -158,6 +158,15 @@ export function neutralizeMainDocCss(css: string): string {
     // label could then paint a full-screen clickjack cover over the whole app
     // window (audit H34). `background-position` is unaffected: `position` is
     // not preceded by a boundary there.
-    .replace(/(^|[;{\s"'])position\s*:/gi, "$1refused-position:")
+    //
+    // `}` and `/` join the boundary class: `}` closes the previous rule, and
+    // `/` closes a comment — `/*c*/position:fixed` puts the property directly
+    // behind a slash, so without it a commented-out declaration could be
+    // re-opened into live CSS and slip past untouched. `-` (as in
+    // `background-position`) stays OUT of the class, which is the whole
+    // reason the boundary exists. The `$1` restore keeps the rewrite
+    // length-preserving, so any caller relying on index alignment is
+    // unaffected.
+    .replace(/(^|[;{}\s"'/])position\s*:/gi, "$1refused-position:")
     .replace(/\b(behavior|-moz-binding)\s*:/gi, "refused-$1:");
 }

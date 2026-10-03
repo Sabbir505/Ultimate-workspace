@@ -8,6 +8,11 @@
 //! itself makes counter reservation + frame write one atomic step, so the
 //! request loop and the owner-channel pump (which send concurrently) can
 //! never mint the same nonce.
+//!
+//! Both counters track frames the peer ACTUALLY minted: the send side advances
+//! only on a real write and the receive side only on a successful decrypt, so
+//! an injected/undecryptable frame can never burn a counter slot and wedge the
+//! rest of the session.
 
 use std::sync::Arc;
 
@@ -90,9 +95,23 @@ pub async fn send_ws_message(
 
 /// Decrypt one inbound Binary frame. Only valid while E2E is enabled; a
 /// plaintext (Text) inbound frame in E2E mode is a protocol violation the
-/// caller reports. The inbound counter advances for every Binary frame —
-/// decrypt success or not — so it stays in lockstep with the phone's send
-/// counter even if a single frame fails its tag check.
+/// caller reports.
+///
+/// The inbound counter advances ONLY on a successful decryption, because it
+/// must track frames the PEER actually minted and no more: the phone mints
+/// frame N at `out_counter = N` and only advances on a real write, so a frame
+/// we fail to decrypt was never a frame the phone sent at this position.
+/// Advancing anyway let an on-path attacker who appended ONE garbage frame
+/// desync the sequence permanently — toward the phone there is no re-key, so
+/// the session stayed `connected: true` and silently received nothing again;
+/// toward the desktop, five injected frames tripped the H43 eviction and
+/// killed the REAL phone's session.
+///
+/// The converse risk — a buggy/old peer that increments anyway — is a
+/// persistent desync by construction (every one of its frames fails from then
+/// on), which surfaces as H43's consecutive-failure eviction and a reconnect
+/// under a fresh salt. A silent wedge is the worse outcome, so holding the
+/// counter wins.
 pub async fn decrypt_binary(
     write: &SharedWsWrite,
     frame: &[u8],
@@ -102,7 +121,9 @@ pub async fn decrypt_binary(
         return None;
     }
     let out = relay_crypto::decrypt(&w.e2e.key, w.e2e.in_counter, frame);
-    w.e2e.in_counter += 1;
+    if out.is_some() {
+        w.e2e.in_counter += 1;
+    }
     out
 }
 
@@ -157,6 +178,44 @@ mod tests {
         e2e.in_counter += 1;  // one inbound frame
         assert_eq!(e2e.out_counter, 1);
         assert_eq!(e2e.in_counter, 1);
+    }
+
+    /// The counter-decision this module owns, without the socket: a frame that
+    /// fails its tag check must NOT consume a counter slot. Advancing anyway
+    /// let one on-path-injected garbage frame desync the session permanently.
+    #[test]
+    fn in_counter_only_advances_on_a_successful_decrypt() {
+        let key = [9u8; 32];
+        let mut e2e = RelayE2E {
+            enabled: true,
+            key,
+            out_counter: 0,
+            in_counter: 0,
+        };
+        // The peer's first genuine frame.
+        let good = relay_crypto::encrypt(&key, 0, b"hello");
+        assert!(relay_crypto::decrypt(&e2e.key, e2e.in_counter, &good).is_some());
+        e2e.in_counter += 1;
+        assert_eq!(e2e.in_counter, 1);
+
+        // An injected garbage frame at the same nonce — a frame the peer never
+        // minted, so its out_counter did not advance either.
+        let mut junk = good.clone();
+        junk[30] ^= 0xFF;
+        assert!(relay_crypto::decrypt(&e2e.key, e2e.in_counter, &junk).is_none());
+        // The invariant `decrypt_binary` now implements: no advance on failure.
+        assert_eq!(
+            e2e.in_counter, 1,
+            "a failed decrypt must not burn the next counter slot"
+        );
+
+        // ...so the peer's NEXT genuine frame still lands.
+        let next = relay_crypto::encrypt(&key, 1, b"still here");
+        assert_eq!(
+            relay_crypto::decrypt(&e2e.key, e2e.in_counter, &next).as_deref(),
+            Some(b"still here".as_slice()),
+            "one injected frame must not wedge the rest of the session"
+        );
     }
 }
 

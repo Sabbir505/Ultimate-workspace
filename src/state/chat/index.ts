@@ -76,8 +76,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   chatStatus: {},
   supersededPartial: {},
   // Stale-terminal guard map (audit H36): sessions whose next chat:done / chat:error
-  // belongs to an already-cancelled turn and must be consumed silently.
+  // belongs to an already-cancelled turn and must be consumed silently. The value is
+  // the KILLED TURN's generation (see turnGeneration), so the guard can never swallow
+  // the terminal event of a turn that started after the cancel.
   staleTerminalFor: {},
+  // Per-session turn counter; bumped whenever a new turn starts for a session.
+  turnGeneration: {},
   config: null,
   lastSelection: null,
   error: null,

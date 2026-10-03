@@ -966,17 +966,29 @@ fn write_skill_tree(
     for (_, root) in roots.iter().take(2) {
         let dir = root.join(slug);
         fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+        // Real (canonicalized) form of the skill root, resolved ONCE before any
+        // write so the post-create containment re-check below compares against
+        // the filesystem's own view of the root, not a lexical guess.
+        let dir_canon = fs::canonicalize(&dir)
+            .map_err(|e| format!("resolve {}: {e}", dir.display()))?;
         for (rel, bytes) in files {
             // Zip-slip guard: reject absolute paths and any `..`/`.`
             // COMPONENT before they touch the filesystem. Splitting on '/'
             // alone let `..\..\evil.txt` through on Windows (the app's
             // primary platform) and the join then resolved ParentDir
-            // components outside the skill root — audit C3.
+            // components outside the skill root — audit C3. `Prefix` is
+            // rejected for the same reason: `Path::new("C:evil.txt")` has a
+            // drive prefix but no RootDir, so it is NOT `is_absolute()`, yet
+            // `PathBuf::push` TRUNCATES on a prefixed path — the join then
+            // landed in the process CWD, outside the skill root.
             let rel_path = std::path::Path::new(rel);
             if rel_path.is_absolute()
-                || rel_path
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                || rel_path.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                    )
+                })
                 || rel.contains('\\')
             {
                 return Err(format!("unsafe archive path: {rel}"));
@@ -985,6 +997,15 @@ fn write_skill_tree(
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+                // Defense in depth: the component guard above is the real
+                // boundary, but re-check the directory we are about to write
+                // into against the canonicalized skill root BEFORE the write —
+                // symlinked or odd roots are only visible once resolved.
+                let parent_canon = fs::canonicalize(parent)
+                    .map_err(|e| format!("resolve {}: {e}", parent.display()))?;
+                if !parent_canon.starts_with(&dir_canon) {
+                    return Err(format!("unsafe archive path: {rel}"));
+                }
             }
             fs::write(&target, bytes)
                 .map_err(|e| format!("write {}: {e}", target.display()))?;

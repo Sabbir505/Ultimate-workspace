@@ -20,7 +20,13 @@ use tauri::Emitter;
 /// which refuses out-of-root writes: the remembered choice turned the write
 /// into an error. Granting the directory makes the choice actually stick
 /// (and gives Full Auto sessions a real root for out-of-project work).
-pub(super) fn grant_directory_for_approved_tool(
+/// `pub(crate)`, not `pub(super)`: the relay's phone-side approval path
+/// (`mobile::session_chat`) must persist the SAME directory grant when it
+/// honors "always allow". It used to write only `permissions.rules`, so a
+/// phone user's remembered choice skipped the card and then failed the hard
+/// fs scope gate — the card's caption was a lie. One helper, both entry
+/// points, so they cannot drift again.
+pub(crate) fn grant_directory_for_approved_tool(
     conn: &rusqlite::Connection,
     tool: &str,
     args: &serde_json::Value,

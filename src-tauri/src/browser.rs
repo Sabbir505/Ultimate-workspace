@@ -2229,6 +2229,17 @@ impl BrowserManager {
         self.pane_visible.lock().insert(pane_id.to_string(), true);
         self.tab_visible.lock().insert(label.clone(), true);
         self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
+        // Keep the pane -> project mapping in step with the pane itself. The
+        // frontend registers it separately (`register_browser_pane_project`),
+        // but `navigate`'s `file://` containment reads this map to resolve the
+        // pane's scope — a create-then-navigate race would otherwise resolve an
+        // empty scope (artifacts only) for a pane that HAS a project.
+        // `close_pane_tabs` / `unregister_browser_pane_project` drop it again.
+        if let Some(pid) = project_id {
+            self.project_pane_registry
+                .lock()
+                .insert(pane_id.to_string(), pid.to_string());
+        }
 
         self.spawn_post_nav_inject(pane_id, tab_id);
 

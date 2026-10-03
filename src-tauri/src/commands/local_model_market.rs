@@ -1028,19 +1028,45 @@ pub async fn start_model_download(
     .await
 }
 
+/// Windows reserved device names. A file called `CON`, `nul.txt`, or `COM1`
+/// is not merely unusual — `CreateFile` binds the DEVICE, not the file, so the
+/// path is unopenable (or worse, resolves to the device) on the app's primary
+/// platform. Matched case-insensitively against the STEM (the part before the
+/// first `.`), which is what Windows itself keys the check on.
+const WINDOWS_RESERVED_STEMS: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
 /// Sanitize an HF-served filename for the local filesystem: path separators
 /// and control chars become `_`. Shared by the model download and the mmproj
 /// download — the mmproj copy used to drift independently of this one
 /// (audit M: DRY).
+///
+/// Two Windows rules the char map alone cannot express: a stem matching a
+/// reserved device name (`CON`, `nul.txt`, `COM1`) is suffixed with `_` so it
+/// names a real file, and trailing dots/spaces are stripped because Win32
+/// silently drops them — a name that differs from what the caller believes it
+/// wrote is its own hazard (audit C: model filename sanitizing).
 fn sanitize_hf_filename(filename: &str) -> String {
-    filename
+    let mapped: String = filename
         .chars()
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
             c if (c as u32) < 0x20 => '_',
             c => c,
         })
-        .collect()
+        .collect();
+    let trimmed = mapped.trim_end_matches(['.', ' ']);
+    let stem = trimmed.split('.').next().unwrap_or("");
+    let reserved = WINDOWS_RESERVED_STEMS
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(stem));
+    if reserved {
+        format!("{trimmed}_")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Owned-state core of `start_model_download` so other commands (the image
@@ -1880,6 +1906,46 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
 
+    // ---- HF filename sanitizing (Windows reserved device names) ----
+    //
+    // A name whose stem is `CON`/`nul`/`COM1` binds the DEVICE on Win32
+    // (CreateFile never reaches the filesystem), and a trailing dot or space is
+    // silently dropped by the same layer — so the caller and the file on disk
+    // disagree about the name. Both were left untouched by the char map.
+
+    #[test]
+    fn sanitize_neutralizes_windows_reserved_device_names() {
+        for name in ["CON", "con", "NUL", "aux", "PRN", "COM1", "lpt9", "com9"] {
+            let safe = sanitize_hf_filename(name);
+            assert!(
+                safe.ends_with('_'),
+                "{name} → {safe} must be suffixed away from the device name"
+            );
+        }
+        // The stem is what Windows keys on, so an extension doesn't launder it.
+        assert_eq!(sanitize_hf_filename("nul.txt"), "nul.txt_");
+        assert_eq!(sanitize_hf_filename("COM1.gguf"), "COM1.gguf_");
+        // A name that merely CONTAINS a reserved word is fine.
+        assert_eq!(sanitize_hf_filename("console.gguf"), "console.gguf");
+        assert_eq!(sanitize_hf_filename("com10.gguf"), "com10.gguf");
+        assert_eq!(sanitize_hf_filename("nulllama.gguf"), "nulllama.gguf");
+    }
+
+    #[test]
+    fn sanitize_strips_trailing_dots_and_spaces() {
+        assert_eq!(sanitize_hf_filename("model.gguf. "), "model.gguf");
+        assert_eq!(sanitize_hf_filename("model.gguf..."), "model.gguf");
+        // Combined with the reserved-name rule, the suffix must survive.
+        assert_eq!(sanitize_hf_filename("CON..."), "CON_");
+    }
+
+    #[test]
+    fn sanitize_still_neutralizes_separators_and_control_chars() {
+        assert_eq!(sanitize_hf_filename("a/b\\c:d.gguf"), "a_b_c_d.gguf");
+        assert_eq!(sanitize_hf_filename("bad\u{1}name.gguf"), "bad_name.gguf");
+        assert_eq!(sanitize_hf_filename("keep-name.gguf"), "keep-name.gguf");
+    }
+
     // ---- catalog URL / sort mapping (the "sorting does nothing" bug) ----
     //
     // Two separate defects lived here and neither had a test, which is why
@@ -2399,19 +2465,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // ---- sanitize_filename via start_model_download's inline mapping ----
+    // ---- sanitize_hf_filename ----
     //
-    // The sanitize function is local to start_model_download; re-derive
-    // it here to lock down the behavior.
+    // This used to re-derive the mapping inline, which let it drift from the
+    // real function it was supposed to lock down (it never saw the Windows
+    // reserved-name or trailing-dot rules). Delegate instead.
 
     fn sanitize_for_test(name: &str) -> String {
-        name.chars()
-            .map(|c| match c {
-                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
-                c if (c as u32) < 0x20 => '_',
-                c => c,
-            })
-            .collect()
+        sanitize_hf_filename(name)
     }
 
     #[test]

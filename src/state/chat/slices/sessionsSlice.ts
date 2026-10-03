@@ -545,6 +545,7 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         composerDrafts: {},
         supersededPartial: {},
         staleTerminalFor: {},
+        turnGeneration: {},
       }));
       return count;
     },

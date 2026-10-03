@@ -172,11 +172,19 @@ export interface UiState {
    *  strip (same UX as the diff panel / browser pane minimize). Tab contents
    *  stay mounted so terminals and browser webviews keep running. */
   toolPanelCollapsed: boolean;
-  /** True while the context meter's hover breakdown panel is showing. Native
-   *  browser webviews float ABOVE all DOM (CSS z-index can't win), so HTML
-   *  popups that must overlay them piggyback on the occlusion system: while
-   *  this is set, browser panes hide their webviews (see browserOcclusion). */
+  /** True while ANY composer hover panel is showing. Native browser webviews
+   *  float ABOVE all DOM (CSS z-index can't win), so HTML popups that must
+   *  overlay them piggyback on the occlusion system: while this is set,
+   *  browser panes hide their webviews (see browserOcclusion). DERIVED from
+   *  `openContextTipIds` — writers register their OWN instance id via
+   *  setContextTipOpen(id, open), mirroring setModalOpen. A single shared
+   *  boolean was wrong in split view: one pane's hover panel closing ran its
+   *  cleanup and cleared the flag while the other pane's panel was still
+   *  open, re-exposing the webviews the flag exists to hide. */
   contextTipOpen: boolean;
+  /** Instance ids of the currently open composer hover panels —
+   *  `contextTipOpen` is true while non-empty. */
+  openContextTipIds: string[];
   /** User-resized width of the tool panel, in pixels (280–640). */
   toolPanelWidth: number;
   /** Files/Changes tab scope: which set of changed files the list shows.
@@ -322,9 +330,13 @@ export interface UiState {
   activeSubagentId: string | null;
   setActiveSubagentId: (id: string | null) => void;
   setToolPanelCollapsed: (collapsed: boolean) => void;
-  /** Toggle the context meter's hover-breakdown occlusion flag (see
-   *  `contextTipOpen`). */
-  setContextTipOpen: (open: boolean) => void;
+  /** Register/unregister one composer hover panel's occlusion id;
+   *  `contextTipOpen` derives from the id set. `id` must be stable per
+   *  mounted instance (React `useId`, or a pane id) so two panes — or two
+   *  chips in one pane — can't clear each other's registration. Idempotent:
+   *  re-passing the current state returns the same store slice so effect
+   *  loops don't churn. */
+  setContextTipOpen: (id: string, open: boolean) => void;
   toggleToolPanel: () => void;
   toggleGitSidebar: () => void;
   toggleGitSectionGit: () => void;
@@ -389,6 +401,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   // Collapsed by default — the header split icon opens it on demand.
   toolPanelCollapsed: true,
   contextTipOpen: false,
+  openContextTipIds: [],
   toolPanelWidth: 532,
   gitChangesFilter: "unstaged",
   // Open by default — it's the primary git surface now.
@@ -797,7 +810,15 @@ export const useUiStore = create<UiState>((set, get) => ({
     }
     set({ toolPanelCollapsed });
   },
-  setContextTipOpen: (contextTipOpen) => set({ contextTipOpen }),
+  setContextTipOpen: (id, open) =>
+    set((s) => {
+      const has = s.openContextTipIds.includes(id);
+      if (open === has) return s; // no-op: don't churn renderers
+      const openContextTipIds = open
+        ? [...s.openContextTipIds, id]
+        : s.openContextTipIds.filter((x) => x !== id);
+      return { openContextTipIds, contextTipOpen: openContextTipIds.length > 0 };
+    }),
   toggleToolPanel: () => {
     if (!get().toolPanelCollapsed && useTtsStore.getState().key?.startsWith("artifact:")) {
       ttsPlayer.stop();

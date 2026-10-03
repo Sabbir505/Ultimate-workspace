@@ -912,8 +912,10 @@ async fn handle_connection(
                     }
                     None => {
                         // E2E not enabled (protocol violation) or tag
-                        // mismatch. The inbound counter already advanced, so
-                        // later frames stay decryptable — report and move on.
+                        // mismatch. The inbound counter does NOT advance, so
+                        // the peer's next GENUINE frame still decrypts at the
+                        // slot it was minted for — one injected junk frame can
+                        // no longer wedge the rest of the session.
                         //
                         // But a connection that KEEPS failing verification is
                         // not a legitimate client having a bad day: a replayed
@@ -2537,8 +2539,8 @@ pub(crate) async fn handle_mid_turn_frame(
         }
         Message::Binary(b) => {
             // E2E frames must be decrypted mid-turn too. The inbound counter
-            // advances for every Binary frame — decrypt success or not — so
-            // it stays in lockstep with the phone's send counter.
+            // advances only on a successful decrypt, so it tracks the frames
+            // the phone actually minted.
             let plain = match super::relay_ws::decrypt_binary(write, &b).await {
                 Some(p) => p,
                 None => {

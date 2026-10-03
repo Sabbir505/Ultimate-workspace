@@ -1,7 +1,7 @@
 // Inline missing fields collection for artifact proposals.
 // Renders when validation returns missing_fields — allows user to fill them
 // before creating the artifact.
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback } from "react";
 import type { ArtifactSpec, ArtifactType, SkillSpec, LoopSpec, PromptTemplateSpec, AutomationSpec } from "../../lib/ipc";
 
 interface MissingFieldsPromptProps {
@@ -145,10 +145,21 @@ export function MissingFieldsPrompt({
   onSubmit,
   onCancel,
 }: MissingFieldsPromptProps) {
-  const [fieldValues, setFieldValues] = useState<Record<string, unknown>>({});
-
-  // Initialize field values from the proposal spec
-  useEffect(() => {
+  // Seed the inputs from the proposal spec ONCE per proposal.
+  //
+  // This used to be an effect keyed on `proposal.spec` + `missingFields`, but
+  // BOTH are freshly allocated by ArtifactProposalCard on every parent render
+  // (an inline `{ artifactType, spec }` object and a fresh `.map(...)`
+  // array), and that card re-renders on every proposal event / transcript
+  // refetch / pane-epoch bump. The effect therefore re-ran on each of those
+  // renders and reset `fieldValues` to the spec defaults — and because the
+  // inputs are CONTROLLED, the user's typing visibly vanished mid-edit.
+  //
+  // A `useState` initialiser runs exactly once per mount, and the call site
+  // keys this component by the proposal id, so a DIFFERENT proposal still
+  // gets freshly seeded values (a fresh mount) while re-renders of the same
+  // proposal leave the typed values alone.
+  const [fieldValues, setFieldValues] = useState<Record<string, unknown>>(() => {
     const initial: Record<string, unknown> = {};
     for (const path of missingFields) {
       // Paths carry a "spec." prefix ("spec.name", "spec.trigger.schedule")
@@ -164,8 +175,8 @@ export function MissingFieldsPrompt({
         initial[path] = typeof value === "string" ? value : JSON.stringify(value, null, 2);
       }
     }
-    setFieldValues(initial);
-  }, [proposal.spec, missingFields]);
+    return initial;
+  });
 
   const handleChange = useCallback((path: string, value: unknown) => {
     setFieldValues((prev) => ({ ...prev, [path]: value }));

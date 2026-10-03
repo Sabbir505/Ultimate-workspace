@@ -216,13 +216,25 @@ export interface ChatState {
    *  prefers the live buffer but falls back here when the restarted attempt
    *  produced nothing (see the `reconnect_restart` branch in onStatus). */
   supersededPartial: Record<string, string>;
+  /** Per-session TURN counter, bumped every time a new turn starts for the
+   *  session (sendMessage / broadcastToSessions / beginRemoteTurn). It is the
+   *  identity a stale-terminal guard is bound to: a cancel arms the generation
+   *  it killed, and a turn that has since started owns a DIFFERENT generation,
+   *  so the armed record can no longer swallow that turn's terminal event. */
+  turnGeneration: Record<string, number>;
   /** Sessions whose NEXT terminal event (`chat:done` / `chat:error`) belongs to
    *  an already-cancelled turn and must be consumed silently (audit H36): a
    *  harness/ACP cancel is a process kill whose terminal event can arrive
    *  after the replacement turn created a fresh streaming entry — acting on it
-   *  deleted the live turn's state and dropped all of its tokens. Cleared by
-   *  the first token of the replacement turn or by the first terminal event. */
-  staleTerminalFor: Record<string, true>;
+   *  deleted the live turn's state and dropped all of its tokens. The value is
+   *  the TURN GENERATION that was killed (see `turnGeneration`), NOT a bare
+   *  boolean: a session-scoped flag made the guard swallow the terminal event
+   *  of whatever turn came next (a replacement that errored before its first
+   *  token wedged the session in "working" forever). A record whose generation
+   *  no longer matches the session's live turn is inert and gets dropped.
+   *  Cleared by the first token of the current turn, by the first terminal
+   *  event, or when a new turn bumps the generation. */
+  staleTerminalFor: Record<string, number>;
   config: ChatConfigPayload | null;
   /** Last committed composer pick (every selection kind — builtin, harness,
    *  ACP, local). Loaded with the config; new chats seed from it so reopening

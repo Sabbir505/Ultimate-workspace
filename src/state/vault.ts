@@ -262,6 +262,15 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
  *  keeps typing while a note switch flush/read is in flight, so a timer armed
  *  for note A can come due after `activePath` already moved to B (audit C6). */
 let saveTimerPath: string | null = null;
+/** The `vaultWriteNote` calls currently on the wire. A write already handed to
+ *  IPC cannot be recalled by bumping `saveGeneration` (that only invalidates
+ *  ARMED timers), so `deleteNote` drains this set before issuing the delete —
+ *  otherwise an in-flight write lands after `vaultDeleteNote` and recreates the
+ *  file with the edits the user just deleted. A SET, not a single slot: the
+ *  debounce timer and a navigation flush can have two saves in flight at once,
+ *  and awaiting only the newest would still let the older one resurrect the
+ *  file. */
+const inFlightNoteWrites = new Set<Promise<void>>();
 /** Pending per-keystroke search (set by setSearchQuery). */
 let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 
@@ -507,8 +516,15 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     // Dirty-check based — keystrokes that landed while this await runs are
     // covered because saveNow pairs the OLD activePath with the latest
     // content (audit C6/H35).
-    await flushPendingSave(get);
+    //
+    // The generation is claimed BEFORE the flush (same order as
+    // restoreSnapshot): claiming it after the await let two in-flight opens
+    // resolve out of order — the LAST click to claim won, so the earlier one
+    // overwrote it — and let a pending open resurrect a tab that
+    // closeNoteTab had already closed (that path bumps synchronously, so a
+    // later claim always beat a claim made after an await).
     const gen = ++openGeneration;
+    await flushPendingSave(get);
     set({ loadingNote: true });
     const resolved = await resolveNotePath(path);
     if (gen !== openGeneration) return; // a newer open superseded this one
@@ -639,10 +655,26 @@ export const useVaultStore = create<VaultStore>((set, get) => {
   saveNow: async () => {
     const { activePath, content, savedContent } = get();
     if (!activePath || content === savedContent) return;
-    set({ saveGeneration: get().saveGeneration + 1 });
+    const gen = get().saveGeneration + 1;
+    set({ saveGeneration: gen });
+    const write = vaultWriteNote(activePath, content).then(() => {});
+    // Publish the in-flight write so deleteNote can drain it before deleting.
+    inFlightNoteWrites.add(write);
     try {
-      await vaultWriteNote(activePath, content);
-      set({ savedContent: content });
+      await write;
+      // Both post-write writes are SCOPED: the buffer can be replaced while
+      // the IPC is in flight, and the stale `savedContent` then marks a note
+      // the user never edited as dirty.
+      //  · saveGeneration moved → a delete superseded this save (deleteNote
+      //    bumps it), so the buffer it would stamp is already gone.
+      //  · activePath moved → the buffer now holds a DIFFERENT note (tab
+      //    close / navigation). The bytes did land on the right file, but
+      //    stamping them here left the freshly-opened neighbour spuriously
+      //    dirty (or, with no neighbour left, `content: ""` against a
+      //    non-empty savedContent with no activePath to reconcile them).
+      if (get().saveGeneration === gen && get().activePath === activePath) {
+        set({ savedContent: content });
+      }
       // The editor caches whole-note reads for `#subpath` completion keyed
       // by path — the just-saved text may have different headings/blocks, so
       // drop the stale entry (same dynamic-import bridge as bind()).
@@ -652,6 +684,8 @@ export const useVaultStore = create<VaultStore>((set, get) => {
       void get().refreshStats();
     } catch (e) {
       useUiStore.getState().pushToast("error", "Vault save failed", String(e));
+    } finally {
+      inFlightNoteWrites.delete(write);
     }
   },
 
@@ -673,6 +707,17 @@ export const useVaultStore = create<VaultStore>((set, get) => {
     // Active tab closing: flush pending edits for it first, then activate
     // the neighbor (previous tab preferred, like editors do). No tabs left
     // → fully clear the note surface. Dirty-check flush (audit C6/H35).
+    //
+    // Deliberately NOT awaited: the switch below must not wait on the write
+    // round-trip (tab closing stays instant). The flush is still correct —
+    // `saveNow` snapshots the OLD activePath with the latest content
+    // synchronously, and its completion is scoped in saveNow (it re-asserts
+    // `savedContent` only while the buffer still holds the note it wrote).
+    // Without that scope the completion landed AFTER the neighbor's
+    // `vaultReadNote(...).then(...)` and stamped the closed note's bytes onto
+    // the freshly-opened note's `savedContent`, marking it dirty for nothing;
+    // with no neighbor left it left `content: ""` against a non-empty
+    // `savedContent` and no `activePath` to reconcile them.
     void flushPendingSave(get);
     const neighbor = next[Math.max(0, idx - 1)] ?? null;
     set({ openNotes: next, activePath: neighbor, mode: s.noteModes[neighbor] ?? "preview" });
@@ -845,16 +890,29 @@ export const useVaultStore = create<VaultStore>((set, get) => {
   deleteNote: async (path) => {
     // A pending autosave must never flush to a deleted path — the write
     // would resurrect the file. BEFORE the backend delete: drop the
-    // debounce timer and clear the buffer (content === savedContent also
-    // makes any racing saveNow a no-op), so neither the close below nor a
-    // stray timer can write to the doomed path again. Deleting discards
-    // the buffer by definition.
+    // debounce timer, bump `saveGeneration` (so any timer/racing saveNow
+    // armed for this note is already void) and clear the buffer (content ===
+    // savedContent also makes a racing saveNow a no-op), so neither the close
+    // below nor a stray timer can write to the doomed path again. Deleting
+    // discards the buffer by definition.
+    //
+    // Clearing the buffer only helps for writes that have not STARTED. A
+    // `vaultWriteNote` already handed to IPC is recalled by neither the
+    // generation bump nor the buffer clear: if it landed after the delete,
+    // the note came back on disk carrying exactly the edits just deleted —
+    // and this commit's awaited flushes in openNote / closeNoteTab /
+    // renameNote / restoreSnapshot widened that window. Await the in-flight
+    // write so it always lands BEFORE the delete.
     if (get().activePath === path) {
       if (saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
+        clearSaveTimer();
       }
-      set({ content: "", savedContent: "" });
+      set({ saveGeneration: get().saveGeneration + 1, content: "", savedContent: "" });
+      // Drain every write already on the wire (not just the newest) so none can
+      // land after the delete.
+      if (inFlightNoteWrites.size > 0) {
+        await Promise.allSettled([...inFlightNoteWrites]);
+      }
     }
     try {
       await vaultDeleteNote(path);

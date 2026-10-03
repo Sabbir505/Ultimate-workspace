@@ -891,6 +891,14 @@ fn handle_resolve_session_approval(
             .filter(|d| !d.trim().is_empty());
         if let Some(dir) = dir {
             let conn = db.lock();
+            // The RULE is not enough on its own: `send_chat_message` only
+            // bypasses the approval card via `permissions.rules`, while the
+            // hard scope gate reads `permissions.grantedRoots`. A remembered
+            // rule with no matching root sends the next out-of-project call
+            // straight past the card and into a refusal — persisting the same
+            // directory grant the desktop path does is what makes the phone's
+            // "always allow" actually stick.
+            crate::chat::commands::grant_directory_for_approved_tool(&conn, &tool, &pending.args);
             let mut rules: Vec<serde_json::Value> = db::get_setting(&conn, "permissions.rules")
                 .ok()
                 .flatten()

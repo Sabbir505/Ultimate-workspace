@@ -16,7 +16,7 @@
 // starts, metrics that the backend hasn't measured yet keep the last turn's
 // value (per-metric carry-over below) instead of collapsing to zero — each
 // chip ticks over to the live number only once the backend reports it.
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useChatStore } from "../../state/chat";
 import type { LastTurnMetrics } from "../../state/chat";
@@ -144,12 +144,15 @@ function MetricChip({ label, value, live, tone = "idle", hint }: MetricChipProps
   // While the portaled tooltip shows, tell native browser webviews to hide:
   // they float above ALL DOM, so no z-index could lift the tooltip over them
   // (same contract as the context-meter panel). Unmount-clears so a mid-hover
-  // unmount can't strand the flag true.
+  // unmount can't strand the flag true. Registered PER CHIP — the row renders
+  // once per chat pane, so a shared boolean let one chip's hover close clear
+  // the flag while another chip's tooltip (or another pane's) was still up.
+  const tipOwnerId = useId();
   useEffect(() => {
     if (!tipPos) return;
-    setContextTipOpen(true);
-    return () => setContextTipOpen(false);
-  }, [tipPos, setContextTipOpen]);
+    setContextTipOpen(tipOwnerId, true);
+    return () => setContextTipOpen(tipOwnerId, false);
+  }, [tipPos, setContextTipOpen, tipOwnerId]);
 
   const onHover = () => {
     const el = chipRef.current;

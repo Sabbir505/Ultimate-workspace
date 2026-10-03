@@ -908,6 +908,30 @@
   padding: 24px 0;
   text-align: center;
 }
+/* The rollups wrapper replaced the fragment that used to hang directly off
+   .view-body, so it has to reproduce that flex column itself — as a plain
+   div it collapsed the inter-section gap entirely, leaving the stats row
+   flush against the grids above and below it. */
+.cost-rollups-body {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+/* Range switch: keep the previous range's panels mounted and dim them
+   rather than swapping the whole body for a spinner. Recomputing a 90-day
+   rollup scans every cost event in the window, so the previous range stays
+   readable (and the layout doesn't jump) until the new one lands. */
+.cost-refreshing {
+  opacity: 0.45;
+  pointer-events: none;
+  transition: opacity 120ms ease-out;
+}
+.cost-refreshing-note {
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
 
 /* T3 Code layout: model breakdown table LEFT, cost quality panel RIGHT. */
 .cost-bottom-grid {
@@ -916,23 +940,44 @@
   gap: 16px;
   align-items: start;
 }
+/* The breakdown card is a locked box: its height is fixed so the page below
+   it stops shifting every time a new model shows up in the window. Rows
+   scroll inside the card instead of growing the card. */
 .cost-bottom-grid .model-breakdown {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface-glass);
   box-shadow: var(--glass-rim);
   padding: 14px;
-  overflow-x: auto;
+  height: 300px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 .cost-bottom-grid .model-breakdown h3 {
   margin: 0 0 10px;
+  flex: none;
+}
+.cost-bottom-grid .model-breakdown-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 .cost-bottom-grid .model-breakdown table.kv {
   margin: 0;
 }
-.cost-bottom-grid .cost-quality {
-  height: 100%;
+/* Header stays put while the rows scroll under it. */
+.cost-bottom-grid .model-breakdown thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-glass);
 }
+/* NB: no `height: 100%` here. The breakdown card is a locked 300px box, and
+   stretching the quality panel to match forced its ~180px of content into
+   the taller box — a void under the savings row that read as the two cards
+   fusing together. Each card now ends where its own content ends. */
 @media (max-width: 1100px) {
   .cost-bottom-grid {
     grid-template-columns: 1fr;

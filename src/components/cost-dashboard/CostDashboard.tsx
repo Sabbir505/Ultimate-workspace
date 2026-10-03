@@ -14,7 +14,7 @@ import { ArtifactCostPanel } from "./ArtifactCostPanel";
 export function CostDashboard() {
   const closeOverlay = useUiStore(s => s.closeOverlay);
   const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
-  const { rollups, loading, error, refresh } = useCostRollups(rangeDays);
+  const { rollups, loading, stale, error, refresh } = useCostRollups(rangeDays);
   // Live price table (LiteLLM): age of the stored blob + a manual re-fetch,
   // so the user can see (and fix) stale rates without leaving the dashboard.
   const [priceFetchedAt, setPriceFetchedAt] = useState<number | null>(null);
@@ -45,6 +45,10 @@ export function CostDashboard() {
         <div className="view-header">
           <h2>Usage</h2>
           <div className="view-header-right">
+            {/* Visible whenever a range switch is in flight, including the
+                window where the previous range's numbers are still on screen
+                — otherwise the dimmed data reads as the new range's. */}
+            {stale && <span className="cost-refreshing-note">Updating…</span>}
             <RangeToggle value={rangeDays} onChange={setRangeDays} />
             <button className="ghost" onClick={closeOverlay}>✕</button>
           </div>
@@ -64,7 +68,11 @@ export function CostDashboard() {
               <span className="empty-text">No usage in this range.</span>
             </div>
           ) : rollups ? (
-            <>
+            <div
+              className={stale ? "cost-rollups-body cost-refreshing" : "cost-rollups-body"}
+              aria-busy={stale || undefined}
+              data-testid="cost-rollups"
+            >
               {/* T3 Code layout: hero + per-tool breakdown LEFT, daily chart
                   RIGHT, side by side; stats row spans below. */}
               <div className="cost-top-grid">
@@ -95,7 +103,7 @@ export function CostDashboard() {
                     : "Live prices not fetched yet — using the built-in rate table"}
                 </span>
               </div>
-            </>
+            </div>
           ) : null}
         </div>
       </div>

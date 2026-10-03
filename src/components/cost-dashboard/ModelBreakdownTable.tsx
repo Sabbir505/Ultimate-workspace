@@ -47,32 +47,34 @@ export function ModelBreakdownTable({ rows }: { rows: ModelCostRollup[] }) {
   return (
     <div className="model-breakdown">
       <h3>Model breakdown</h3>
-      <table className="kv">
-        <thead>
-          <tr>
-            <th>Model</th>
-            <th onClick={() => handleSort("costUsd")} style={{ cursor: "pointer" }}>
-              Cost {sortIcon("costUsd")}
-            </th>
-            <th onClick={() => handleSort("sharePct")} style={{ cursor: "pointer" }}>
-              Share {sortIcon("sharePct")}
-            </th>
-            <th onClick={() => handleSort("tokens")} style={{ cursor: "pointer" }}>
-              Tokens {sortIcon("tokens")}
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {sortedRows.map(r => (
-            <tr key={r.modelKey}>
-              <td>{modelLabel(r.displayName)}</td>
-              <td className="mono">${r.costUsd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 5 })}</td>
-              <td className="mono">{r.sharePct.toFixed(1)}%</td>
-              <td className="mono">{r.tokens.toLocaleString()}</td>
+      <div className="model-breakdown-scroll">
+        <table className="kv">
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th onClick={() => handleSort("costUsd")} style={{ cursor: "pointer" }}>
+                Cost {sortIcon("costUsd")}
+              </th>
+              <th onClick={() => handleSort("sharePct")} style={{ cursor: "pointer" }}>
+                Share {sortIcon("sharePct")}
+              </th>
+              <th onClick={() => handleSort("tokens")} style={{ cursor: "pointer" }}>
+                Tokens {sortIcon("tokens")}
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {sortedRows.map(r => (
+              <tr key={r.modelKey}>
+                <td>{modelLabel(r.displayName)}</td>
+                <td className="mono">${r.costUsd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 5 })}</td>
+                <td className="mono">{r.sharePct.toFixed(1)}%</td>
+                <td className="mono">{r.tokens.toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

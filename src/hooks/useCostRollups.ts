@@ -24,6 +24,11 @@ export function useCostRollups(rangeDays: 7 | 30 | 90) {
     let cancelled = false;
     cancelledRef.current = false;
     hasDataRef.current = false;
+    // NB: the previous range's rollups are deliberately NOT cleared here.
+    // A range switch keeps them on screen, dimmed behind `stale`, so the
+    // dashboard swaps data in place instead of collapsing to a full-page
+    // spinner and re-laying out every panel. The stale flag is what keeps
+    // that from reading as the new range's numbers.
     const load = async (silent: boolean) => {
       if (!silent) setLoading(true);
       try {
@@ -69,5 +74,10 @@ export function useCostRollups(rangeDays: 7 | 30 | 90) {
       .catch(e => { if (!cancelledRef.current) setError(String(e)); });
   };
 
-  return { rollups, loading, error, refresh };
+  // True when `rollups` on screen belongs to a PREVIOUS range and the
+  // current one is still in flight. Consumers dim the data and show an
+  // "Updating…" cue rather than tearing the page down.
+  const stale = loading && rollups !== null;
+
+  return { rollups, loading, stale, error, refresh };
 }
